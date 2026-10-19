@@ -53,7 +53,6 @@ cognitive-complexity src/kernelforge/loop/runner.py::IterationLoop._record_itera
 cognitive-complexity src/kernelforge/loop/task_preparer.py::prepare_task 37
 cognitive-complexity src/kernelforge/orchestrator/agent.py::make_agent_fn 70
 cognitive-complexity src/kernelforge/orchestrator/analysis.py::AnalysisAgentService._write_artifact_catalog 32
-cognitive-complexity src/kernelforge/orchestrator/orchestration.py::OrchestrationAgent._bind_dispatch 39
 cognitive-complexity src/kernelforge/orchestrator/orchestration.py::OrchestrationService.run 33
 cognitive-complexity src/kernelforge/rewrite_by_flydsl/ingest.py::discover_source_entry 31
 cyclomatic-complexity src/hyperloom/orchestrator/kernel/conc_sweep.py::_sweep_one_arm_single_server 33
@@ -756,7 +755,6 @@ function-lines src/kernelforge/orchestrator/analysis.py::AnalysisAgentService.ap
 function-lines src/kernelforge/orchestrator/analysis.py::AnalysisAgentService.ensure_bundle 69
 function-lines src/kernelforge/orchestrator/analysis.py::AnalysisBundle.apply 52
 function-lines src/kernelforge/orchestrator/contracts.py::OrchestrationContext.__post_init__ 75
-function-lines src/kernelforge/orchestrator/orchestration.py::OrchestrationAgent._bind_dispatch 104
 function-lines src/kernelforge/orchestrator/orchestration.py::OrchestrationAgent._parse_cross_cutting_move 61
 function-lines src/kernelforge/orchestrator/orchestration.py::OrchestrationAgent._partition_round 105
 function-lines src/kernelforge/orchestrator/orchestration.py::OrchestrationAgent._synthesize_optimization_plan_result 63

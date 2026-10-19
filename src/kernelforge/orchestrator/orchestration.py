@@ -30,17 +30,16 @@ from kernelforge.orchestrator.agent_response import (
 from kernelforge.orchestrator.contracts import (
     DispatchIntent,
     DispatchPlan,
-    EvidenceRef,
     LaneGround,
     OrchestrationContext,
     OrchestrationRunResult,
     PlanCriticOutcome,
     SynthesizedPlan,
-    SpecialistAssignment,
     SpecialistDefinition,
     SpecialistOutcome,
     SpecialistRound,
 )
+from kernelforge.orchestrator.dispatch_binding import bind_dispatch
 from kernelforge.orchestrator.specialists import (
     SpecialistAgent,
     SpecialistPool,
@@ -492,70 +491,10 @@ class OrchestrationAgent:
             ]
             notes.append(f"added missing cases to {first_role!r}: {', '.join(missing)}")
 
-        global_kinds = {
-            "analysis_artifact_catalog",
-            "analysis_bundle",
-            "analysis_cumulative_diff",
-            "analysis_summary",
-            "analysis_source_map",
-            "analysis_workflow",
-            "latest_lesson",
-            "supervisor_guidance",
-        }
-        global_refs = [reference for reference in context.evidence_refs if reference.kind in global_kinds]
-        source_ref = EvidenceRef(
-            kind="source_map",
-            path=context.source_map_path,
-            summary="Current source map or anchor source.",
-        )
-        case_by_id = {case.case_id: case for case in context.cases}
-        assignments = []
-        for index, (role_id, item) in enumerate(merged.items(), start=1):
-            refs = {reference.path: reference for reference in global_refs}
-            refs[source_ref.path] = source_ref
-            target_cases = tuple(item["case_ids"])
-            for case_id in target_cases:
-                case = case_by_id[case_id]
-                measurement = EvidenceRef(
-                    kind="measurement",
-                    path=f"case:{case_id}",
-                    summary=(f"Canonical timing and Analysis flags for {case_id}."),
-                )
-                refs[measurement.path] = measurement
-                if case.profile_summary_path:
-                    profiled = any(
-                        flag
-                        in {
-                            "analysis_profiled",
-                            "analysis_profile_incremental",
-                            "analysis_checkpoint_profile_interpretation",
-                            "analysis_checkpoint_normalized_only",
-                            "analysis_checkpoint_raw_profile_only",
-                        }
-                        for flag in case.flags
-                    )
-                    reference = EvidenceRef(
-                        kind=("profile" if profiled else "analysis_interpretation"),
-                        path=case.profile_summary_path,
-                        summary=("Measured profile" if profiled else "Analysis interpretation")
-                        + f" for {case_id}. Flags: "
-                        + f"{', '.join(case.flags) or '(none)'}.",
-                    )
-                    refs[reference.path] = reference
-            assignments.append(
-                SpecialistAssignment(
-                    assignment_id=f"{role_id}-{index}",
-                    role_id=role_id,
-                    target_case_ids=target_cases,
-                    evidence_refs=tuple(refs.values()),
-                    reason=str(item["reason"]),
-                )
-            )
-        return DispatchPlan(
-            analysis_commit=context.analysis_commit,
-            assignments=tuple(assignments),
-            normalization_notes=tuple(notes),
-        )
+        resolved = [
+            DispatchIntent(role_id, tuple(item["case_ids"]), str(item["reason"])) for role_id, item in merged.items()
+        ]
+        return bind_dispatch(context, resolved, notes)
 
     async def _synthesize_optimization_plan_result(
         self,
