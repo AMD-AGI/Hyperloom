@@ -218,6 +218,36 @@ def _classify_bootstrap_sdk_error(sdk_error: str) -> OutcomeId | None:
     return None
 
 
+def _classify_must_have_gap(art: CollectedArtifacts) -> OutcomeId | None:
+    """Map a MUST-have file missing from the quantized directory to its outcome."""
+    if not art.quantized_dir_exists or not art.has_weights:
+        return OutcomeId.must_have_weights_missing
+    if not art.has_config_json:
+        return OutcomeId.must_have_config_missing_or_invalid
+    if not art.has_tokenizer:
+        return OutcomeId.must_have_tokenizer_missing
+    return None
+
+
+def _classify_validation_report(art: CollectedArtifacts) -> OutcomeId | None:
+    """Map the validator's report (absent, or a failed or skipped step) to an outcome."""
+    if not art.validation_report_present:
+        return OutcomeId.validation_report_absent
+    steps = art.validation_steps
+    if steps.md5 == "FAIL":
+        return OutcomeId.must_validate_md5_mismatch
+    if steps.config == "FAIL":
+        return OutcomeId.must_validate_config_mismatch
+    if steps.fuzzy == "FAIL":
+        return OutcomeId.fuzzy_check_failed
+    if steps.auxiliary == "FAIL":
+        return OutcomeId.should_have_aux_missing
+    if steps.md5 == "skipped" or steps.config == "skipped":
+        # Tier mapping (strict/lenient) is the retry loop's job.
+        return OutcomeId.must_validate_skipped
+    return None
+
+
 # main entry
 
 
@@ -257,31 +287,15 @@ def classify_attempt(
         if phase_outcome is not None:
             return phase_outcome
 
-    # (4) MUST-have files on the quantized directory.
     if art.manifest_present and not art.manifest_parse_error:
-        if not art.quantized_dir_exists or not art.has_weights:
-            return OutcomeId.must_have_weights_missing
-        if not art.has_config_json:
-            return OutcomeId.must_have_config_missing_or_invalid
-        if not art.has_tokenizer:
-            return OutcomeId.must_have_tokenizer_missing
-
-    # (5) Validator results.
-    if art.manifest_present and not art.manifest_parse_error:
-        if not art.validation_report_present:
-            return OutcomeId.validation_report_absent
-        steps = art.validation_steps
-        if steps.md5 == "FAIL":
-            return OutcomeId.must_validate_md5_mismatch
-        if steps.config == "FAIL":
-            return OutcomeId.must_validate_config_mismatch
-        if steps.fuzzy == "FAIL":
-            return OutcomeId.fuzzy_check_failed
-        if steps.auxiliary == "FAIL":
-            return OutcomeId.should_have_aux_missing
-        if steps.md5 == "skipped" or steps.config == "skipped":
-            # Tier mapping (strict/lenient) is the retry loop's job.
-            return OutcomeId.must_validate_skipped
+        # (4) MUST-have files on the quantized directory.
+        must_have_gap = _classify_must_have_gap(art)
+        if must_have_gap is not None:
+            return must_have_gap
+        # (5) Validator results.
+        validation_outcome = _classify_validation_report(art)
+        if validation_outcome is not None:
+            return validation_outcome
 
     # (6) Eval phase.
     eval_outcome = _classify_eval_outcome(art, acceptable_eval_gap=acceptable_eval_gap)
