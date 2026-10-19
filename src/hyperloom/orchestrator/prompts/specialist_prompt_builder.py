@@ -1007,7 +1007,8 @@ def _authors_patches(inp: SpecialistPromptInputs) -> bool:
 #: something to raise the sights from. ``enablement_specialist`` is absent
 #: because its ladder book says climb only as far as runnability needs;
 #: ``framework_rewrite_specialist`` because it authors source rewrites and
-#: nothing else, and already carries its own "Where the wins are" taxonomy.
+#: nothing else, and already carries its own "Where the wins are" taxonomy;
+#: ``speculative_decoding_specialist`` because its focus names no flags at all.
 _THROUGHPUT_AUTHORING_DOMAINS = frozenset(
     {
         "serving_specialist",
@@ -1015,7 +1016,6 @@ _THROUGHPUT_AUTHORING_DOMAINS = frozenset(
         "comm_specialist",
         "compiler_specialist",
         "system_specialist",
-        "speculative_decoding_specialist",
     }
 )
 

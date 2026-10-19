@@ -98,6 +98,10 @@ def test_focus_names_no_framework_flags_and_sends_the_specialist_to_the_installe
     assert "from the installed\n  framework's source" in text
 
 
+def test_a_patch_mode_prompt_gets_no_coda_about_flags_it_never_listed():
+    assert "Altitude —" not in _system_prompt()
+
+
 def test_focus_carries_the_constraints_the_runner_enforces():
     text = _system_prompt()
     assert "**Never propose\n  these on the synthetic benchmark**" in text
