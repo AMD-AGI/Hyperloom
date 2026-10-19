@@ -275,8 +275,7 @@ cognitive-complexity src/kernelforge/rewrite_by_flydsl/applyback.py::generate_ap
 cognitive-complexity src/kernelforge/rewrite_by_flydsl/flydsl_rewrite_driver_preparation.py::prepare_rewrite_driver 37
 cognitive-complexity src/kernelforge/rewrite_by_flydsl/ingest.py::discover_source_entry 31
 cognitive-complexity src/kernelforge/rewrite_by_flydsl/kb.py::try_flydsl_kb_warmstart 71
-cognitive-complexity src/kernelforge/rewrite_by_flydsl/port_loop.py::check_flydsl_port 35
-cognitive-complexity src/kernelforge/rewrite_by_flydsl/port_loop.py::run_port_loop 52
+cognitive-complexity src/kernelforge/rewrite_by_flydsl/port_loop.py::run_port_loop 34
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_framework_switch_manifest.py::parse_manifest 27
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_grid_runner.py::run_grid 61
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_kv_metrics.py::_read_aiperf_aggregate_json 22
@@ -952,8 +951,8 @@ function-lines src/kernelforge/rewrite_by_flydsl/flydsl_rewrite_driver_preparati
 function-lines src/kernelforge/rewrite_by_flydsl/kb.py::try_flydsl_kb_warmstart 169
 function-lines src/kernelforge/rewrite_by_flydsl/kb.py::write_flydsl_kb_solution 85
 function-lines src/kernelforge/rewrite_by_flydsl/optimize.py::run_optimize 126
-function-lines src/kernelforge/rewrite_by_flydsl/port_loop.py::run_port_loop 166
-function-lines src/kernelforge/rewrite_by_flydsl/runner.py::run_rewrite 303
+function-lines src/kernelforge/rewrite_by_flydsl/port_loop.py::run_port_loop 127
+function-lines src/kernelforge/rewrite_by_flydsl/runner.py::run_rewrite 283
 module-lines src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py 2168
 module-lines src/hyperloom/inference_optimizer/breakdown/schema.py 2681
 module-lines src/hyperloom/inference_optimizer/cli/__init__.py 2569

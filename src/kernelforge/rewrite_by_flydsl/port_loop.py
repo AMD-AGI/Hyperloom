@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import logging
 import time
@@ -57,8 +58,6 @@ _BANNED_PORT_MODULES: frozenset[str] = frozenset({"triton"})
 
 def check_flydsl_port(spec: RewriteSpec) -> str:
     """Reject a port that is not a genuine FlyDSL rewrite. Returns \"\" if OK."""
-    import ast
-
     path = spec.flydsl_kernel
     src_stem = Path(spec.source_kernel).stem  # e.g. "softmax" for softmax.py
     forbidden = _BANNED_PORT_MODULES | {src_stem}  # + the source module (re-call cheat)
@@ -102,6 +101,11 @@ def check_flydsl_port(spec: RewriteSpec) -> str:
         )
 
     # Dynamic imports evade the static import scan above.
+    return _dynamic_import_violation(spec, tree, forbidden)
+
+
+def _dynamic_import_violation(spec: RewriteSpec, tree: ast.AST, forbidden: frozenset[str]) -> str:
+    """Reject a dynamic import of a forbidden module, or one whose target is not a literal."""
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -126,6 +130,72 @@ def check_flydsl_port(spec: RewriteSpec) -> str:
                 "it loads. Remove the dynamic import."
             )
     return ""
+
+
+def _seconds_left(stop_at_unix: float | None) -> float | None:
+    """Seconds left before the PORT cutoff, or None when the campaign has none."""
+    return stop_at_unix - time.time() if stop_at_unix and stop_at_unix > 0 else None
+
+
+async def _await_within(awaitable, remaining: float | None):
+    """Await ``awaitable``, raising ``asyncio.TimeoutError`` once ``remaining`` seconds pass; never when None."""
+    if remaining is None:
+        return await awaitable
+    return await asyncio.wait_for(awaitable, timeout=remaining)
+
+
+def _crash_feedback(error: Exception, integrity_error: str) -> str:
+    """The feedback the attempt after a crashed agent session starts from."""
+    history = f"Previous attempt crashed the session: {error}\n"
+    if integrity_error:
+        history += (
+            "The attempt also violated protected PORT input integrity; "
+            f"the driver/source oracle were restored: {integrity_error}\n"
+        )
+    return history
+
+
+def _rejection_feedback(spec: RewriteSpec, integrity_error: str, attempt: int) -> str:
+    """The feedback rejecting a finished attempt before validation, or "" when it may be validated."""
+    if integrity_error:
+        log.info(
+            "port attempt %d rejected before validation (integrity): %s",
+            attempt,
+            integrity_error,
+        )
+        return (
+            "Your PORT attempt changed protected driver/source-oracle state "
+            "and was REJECTED before validation. The protected files were "
+            f"restored. Modify only {spec.flydsl_kernel_name}.\n"
+            f"{integrity_error}"
+        )
+
+    # FlyDSL-only gate (security/intent): a numerically-correct kernel that cheats by re-calling the source (or
+    # reimplementing in Triton) is NOT a valid rewrite.
+    flydsl_violation = check_flydsl_port(spec)
+    if flydsl_violation:
+        log.info("port attempt %d rejected (not FlyDSL): %s", attempt, flydsl_violation)
+        return (
+            "Your port is NOT a valid FlyDSL rewrite and was REJECTED before "
+            "correctness was even checked:\n" + flydsl_violation + "\n"
+            "Reimplement the operator in FlyDSL (import flydsl...) in "
+            f"{spec.flydsl_kernel_name}; do NOT import/call the source kernel."
+        )
+    return ""
+
+
+def _correction_feedback(report, attempt: int) -> str:
+    """Log an attempt that failed validation and return the feedback the next attempt starts from."""
+    tail = _validation_error_tail(report)
+    log.info(
+        "port attempt %d not yet correct: %s",
+        attempt,
+        report.summary().splitlines()[-1] if report.summary() else "",
+    )
+    return (
+        "The FlyDSL port is NOT correct yet. Fix it to match the source "
+        "kernel's numerics. Latest validation failure:\n" + tail
+    )
 
 
 async def run_port_loop(
@@ -192,7 +262,7 @@ async def run_port_loop(
         return reason
 
     for attempt in range(1, max_attempts + 1):
-        remaining = stop_at_unix - time.time() if stop_at_unix and stop_at_unix > 0 else None
+        remaining = _seconds_left(stop_at_unix)
         if remaining is not None and remaining <= 0:
             return PortResult(
                 ok=False,
@@ -203,10 +273,7 @@ async def run_port_loop(
         sink: dict = {}
         try:
             session = agent_fn(spec.flydsl_kernel, history, session_sink=sink)
-            if remaining is None:
-                await session
-            else:
-                await asyncio.wait_for(session, timeout=remaining)
+            await _await_within(session, remaining)
         except asyncio.TimeoutError:
             log.warning("port attempt %d reached the finalization reserve", attempt)
             integrity_error = restore_integrity(sink)
@@ -224,44 +291,17 @@ async def run_port_loop(
         except Exception as e:  # noqa: BLE001 - a session crash is one failed attempt
             log.warning("port attempt %d: agent session error: %s", attempt, e)
             integrity_error = restore_integrity(sink)
-            history = f"Previous attempt crashed the session: {e}\n"
-            if integrity_error:
-                history += (
-                    "The attempt also violated protected PORT input integrity; "
-                    f"the driver/source oracle were restored: {integrity_error}\n"
-                )
+            history = _crash_feedback(e, integrity_error)
             continue
 
         integrity_error = restore_integrity(sink)
-        if integrity_error:
-            log.info(
-                "port attempt %d rejected before validation (integrity): %s",
-                attempt,
-                integrity_error,
-            )
-            history = (
-                "Your PORT attempt changed protected driver/source-oracle state "
-                "and was REJECTED before validation. The protected files were "
-                f"restored. Modify only {spec.flydsl_kernel_name}.\n"
-                f"{integrity_error}"
-            )
-            continue
-
-        # FlyDSL-only gate (security/intent): a numerically-correct kernel that cheats by re-calling the source (or
-        # reimplementing in Triton) is NOT a valid rewrite.
-        flydsl_violation = check_flydsl_port(spec)
-        if flydsl_violation:
-            log.info("port attempt %d rejected (not FlyDSL): %s", attempt, flydsl_violation)
-            history = (
-                "Your port is NOT a valid FlyDSL rewrite and was REJECTED before "
-                "correctness was even checked:\n" + flydsl_violation + "\n"
-                "Reimplement the operator in FlyDSL (import flydsl...) in "
-                f"{spec.flydsl_kernel_name}; do NOT import/call the source kernel."
-            )
+        rejection = _rejection_feedback(spec, integrity_error, attempt)
+        if rejection:
+            history = rejection
             continue
 
         # Canonical acceptance: the driver's complete correctness suite.
-        remaining = stop_at_unix - time.time() if stop_at_unix and stop_at_unix > 0 else None
+        remaining = _seconds_left(stop_at_unix)
         if remaining is not None and remaining <= 0:
             return PortResult(
                 ok=False,
@@ -279,7 +319,7 @@ async def run_port_loop(
             timeout_per_stage=validation_timeout,
         )
         try:
-            report = await validation if remaining is None else await asyncio.wait_for(validation, timeout=remaining)
+            report = await _await_within(validation, remaining)
         except asyncio.TimeoutError:
             return PortResult(
                 ok=False,
@@ -292,16 +332,7 @@ async def run_port_loop(
             log.info("port succeeded on attempt %d (SNR=%s)", attempt, snr)
             return PortResult(ok=True, attempts=attempt, snr_db=snr)
 
-        tail = _validation_error_tail(report)
-        log.info(
-            "port attempt %d not yet correct: %s",
-            attempt,
-            report.summary().splitlines()[-1] if report.summary() else "",
-        )
-        history = (
-            "The FlyDSL port is NOT correct yet. Fix it to match the source "
-            "kernel's numerics. Latest validation failure:\n" + tail
-        )
+        history = _correction_feedback(report, attempt)
 
     return PortResult(
         ok=False,
