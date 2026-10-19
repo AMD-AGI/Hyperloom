@@ -16,7 +16,7 @@ import os
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping, NamedTuple, Sequence
 
 from hyperloom.common.git_safety import safe_directory_args
 
@@ -307,63 +307,113 @@ def _revert_warm_patch_trees(trees: Iterable[Mapping[str, Any]]) -> dict[str, An
     return {"ok": not errors, "errors": errors, "restored": restored}
 
 
-def _apply_warm_patches(
-    params: dict[str, Any],
-    target_repo: str,
-    output_dir: Path,
-    *,
-    before_mutation: Any = None,
-) -> list[dict[str, str]] | dict[str, Any]:
-    """Apply warm-replay code patches, each into the checkout it was taken from."""
-    patches = params.get("patches") or []
-    required_timeline = bool(params.get("required_patch_timeline"))
-    if not patches:
-        return []
-    # The recorded root is the tree the gain was measured on, so it outranks the locally resolved one rather than
-    # being checked against it.
-    patch_roots = [str((patch or {}).get("framework_root") or "").strip() or target_repo for patch in patches]
-    if not any(patch_roots):
-        if required_timeline:
-            return {
-                "required": True,
-                "status": "failed",
-                "patches": [],
-                "applied": [],
-                "failed_ref": str((patches[0] or {}).get("patch_file") or ""),
-                "failure": "missing_target_repo",
-                "rolled_back": True,
-            }
-        return []
+#: The apply methods that wrote to the tree; the others report an overlay it already carried.
+_MUTATING_APPLY_METHODS = ("applied", "applied_3way", "applied_nogit")
 
-    applied: list[dict[str, str]] = []
-    statuses: list[dict[str, Any]] = []
-    patch_log_dir = output_dir / "warm_patches"
-    patch_log_dir.mkdir(parents=True, exist_ok=True)
-    from ._nogit_patch import _apply_patch_no_git, _is_git_tree
 
-    # Two recorded roots inside one checkout are one tree: a git diff's paths are work-tree-root relative, so both
-    # resolve there and applying them separately would ignore whatever falls outside the narrower one.
-    for idx, root in enumerate(patch_roots):
+class _WarmPatchTrees(NamedTuple):
+    """The checkouts a warm replay writes to, with each overlay's root resolved to its work tree."""
+
+    roots: list[str]
+    order: list[str]
+    trees: dict[str, dict[str, Any]]
+    absent_root: str
+
+
+class _ScreenedPatches(NamedTuple):
+    """The overlay text each patch is applied from, grouped by the tree that receives it."""
+
+    contents: dict[int, str]
+    by_tree: dict[str, list[str]]
+    rejected_ref: str
+    rejection: str
+
+
+class _WarmPatchPreparation(NamedTuple):
+    """What a warm replay knows before it writes: its trees, its screened overlays and the first refusal."""
+
+    roots: list[str]
+    order: list[str]
+    trees: dict[str, dict[str, Any]]
+    contents: dict[int, str]
+    by_tree: dict[str, list[str]]
+    refusal: dict[str, Any] | None
+
+
+class _WarmPatchSite(NamedTuple):
+    """Where one overlay is written from, and how strictly it has to land."""
+
+    index: int
+    log_dir: Path
+    screened: str | None
+    required_timeline: bool
+
+
+class _OverlayText(NamedTuple):
+    """An overlay's diff text, or why it could not be read."""
+
+    content: str
+    reason: str
+
+
+class _PatchApplyOutcome(NamedTuple):
+    """How one overlay ended: the method that landed it, or why it did not."""
+
+    method: str
+    reason: str
+    detail: str | None
+
+
+class _WarmPatchSequence(NamedTuple):
+    """What applying the whole overlay sequence produced."""
+
+    applied: list[dict[str, str]]
+    statuses: list[dict[str, Any]]
+    failed_ref: str
+    failure: str
+
+
+def _refused_warm_replay(patches: list[Any], failure: str) -> dict[str, Any]:
+    """The report a required timeline gets when its replay was refused before anything landed."""
+    return {
+        "required": True,
+        "status": "failed",
+        "patches": [],
+        "applied": [],
+        "failed_ref": str((patches[0] or {}).get("patch_file") or ""),
+        "failure": failure,
+        "rolled_back": True,
+    }
+
+
+def _recorded_patch_roots(patches: list[Any], target_repo: str) -> list[str]:
+    """The checkout each overlay was taken from.
+
+    The recorded root is the tree the gain was measured on, so it outranks the locally resolved one rather
+    than being checked against it.
+    """
+    return [str((patch or {}).get("framework_root") or "").strip() or target_repo for patch in patches]
+
+
+def _warm_patch_trees(patch_roots: list[str]) -> _WarmPatchTrees:
+    """Resolve each recorded root to its work tree and record what a rollback of that tree will need.
+
+    Two recorded roots inside one checkout are one tree: a git diff's paths are work-tree-root relative, so both
+    resolve there and applying them separately would ignore whatever falls outside the narrower one.
+    """
+    from ._nogit_patch import _is_git_tree
+
+    roots = list(patch_roots)
+    for idx, root in enumerate(roots):
         if root and (toplevel := _git_toplevel(root)) and Path(toplevel).is_dir():
-            patch_roots[idx] = toplevel
+            roots[idx] = toplevel
+    absent = ""
+    trees: dict[str, dict[str, Any]] = {}
     # Ordered by first use so the primary tree stays the one ``target_repo`` named, which is what the single-tree
     # result fields report.
-    tree_order: list[str] = list(dict.fromkeys(root for root in patch_roots if root))
-    trees: dict[str, dict[str, Any]] = {}
-    for root in tree_order:
+    for root in dict.fromkeys(root for root in roots if root):
         if not Path(root).is_dir():
-            if required_timeline:
-                return {
-                    "required": True,
-                    "status": "failed",
-                    "patches": [],
-                    "applied": [],
-                    "failed_ref": str((patches[0] or {}).get("patch_file") or ""),
-                    "failure": "apply_root_absent",
-                    "pre_sha": "",
-                    "target_repo": root,
-                    "rolled_back": True,
-                }
+            absent = absent or root
             continue
         git_tree = _is_git_tree(Path(root))
         pre_sha = _git_head_sha(root) if git_tree else ""
@@ -375,346 +425,397 @@ def _apply_warm_patches(
             "nogit_backups": [],
             "mutated": False,
         }
-    tree_order = [root for root in tree_order if root in trees]
-    if not tree_order:
-        return []
+    return _WarmPatchTrees(roots, list(trees), trees, absent)
+
+
+def _warm_patch_text(patch: Mapping[str, Any]) -> str:
+    """The overlay's diff text, read back from its artifact when it was not carried inline."""
+    content = str(patch.get("patch_content") or "")
+    patch_ref = str(patch.get("patch_ref") or "")
+    if content or not patch_ref:
+        return content
+    try:
+        return Path(patch_ref).read_text(
+            encoding="utf-8",
+            errors="replace",
+        )
+    except OSError:
+        return ""
+
+
+def _unusable_patch_reason(content: str) -> str:
+    """Why this overlay cannot be replayed at all, or ``""`` when it can."""
     from ...specialists.patch_safety import is_unified_diff, patch_escapes_tree
 
-    primary = trees[tree_order[0]]
-    resolved_contents: dict[int, str] = {}
-    snapshot_contents: dict[str, list[str]] = {root: [] for root in tree_order}
+    if not content:
+        return "missing_artifact"
+    if not is_unified_diff(content) or "GIT binary patch" in content:
+        return "unsafe_or_non_text_diff"
+    if patch_escapes_tree(content) is not None:
+        return "path_escapes_tree"
+    if not _patch_touched_paths_from_text(content):
+        return "missing_touched_paths"
+    return ""
+
+
+def _screened_patch_contents(
+    patches: list[Any],
+    roots: list[str],
+    trees: Mapping[str, Mapping[str, Any]],
+) -> _ScreenedPatches:
+    """Group every replayable overlay's text under the tree it will be applied to."""
+    contents: dict[int, str] = {}
+    by_tree: dict[str, list[str]] = {root: [] for root in trees}
+    rejected_ref, rejection = "", ""
     for idx, patch in enumerate(patches):
-        patch_file = str(patch.get("patch_file") or "")
-        content = str(patch.get("patch_content") or "")
-        patch_ref = str(patch.get("patch_ref") or "")
-        if not content and patch_ref:
-            try:
-                content = Path(patch_ref).read_text(
-                    encoding="utf-8",
-                    errors="replace",
-                )
-            except OSError:
-                content = ""
-        reason = ""
-        if not content:
-            reason = "missing_artifact"
-        elif not is_unified_diff(content) or "GIT binary patch" in content:
-            reason = "unsafe_or_non_text_diff"
-        elif patch_escapes_tree(content) is not None:
-            reason = "path_escapes_tree"
-        elif not _patch_touched_paths_from_text(content):
-            reason = "missing_touched_paths"
+        content = _warm_patch_text(patch)
+        reason = _unusable_patch_reason(content)
         if reason:
-            if required_timeline:
-                return {
-                    "required": True,
-                    "status": "failed",
-                    "patches": [{"patch_ref": patch_file, "status": "failed", "reason": reason}],
-                    "applied": [],
-                    "failed_ref": patch_file,
-                    "failure": reason,
-                    "pre_sha": primary["pre_sha"],
-                    "target_repo": primary["root"],
-                    "rolled_back": False,
-                }
+            if not rejection:
+                rejected_ref, rejection = str(patch.get("patch_file") or ""), reason
             continue
-        root = patch_roots[idx]
+        root = roots[idx]
         if root not in trees:
             continue
-        resolved_contents[idx] = content
-        snapshot_contents[root].append(content)
+        contents[idx] = content
+        by_tree[root].append(content)
+    return _ScreenedPatches(contents, by_tree, rejected_ref, rejection)
 
-    # Every tree is snapshotted before any of them is written to, so each snapshot holds pristine content.
-    for position, root in enumerate(tree_order):
-        tree = trees[root]
-        if tree["use_nogit"] or not snapshot_contents[root]:
+
+def _prepare_warm_patch_run(patches: list[Any], roots: list[str]) -> _WarmPatchPreparation:
+    """Resolve the trees the overlays belong to and screen each overlay, reporting the first refusal."""
+    resolved = _warm_patch_trees(roots)
+    absent = (
+        {**_refused_warm_replay(patches, "apply_root_absent"), "pre_sha": "", "target_repo": resolved.absent_root}
+        if resolved.absent_root
+        else None
+    )
+    if not resolved.order:
+        return _WarmPatchPreparation(resolved.roots, [], {}, {}, {}, absent)
+    screened = _screened_patch_contents(patches, resolved.roots, resolved.trees)
+    primary = resolved.trees[resolved.order[0]]
+    rejected = {
+        **_refused_warm_replay(patches, screened.rejection),
+        "patches": [{"patch_ref": screened.rejected_ref, "status": "failed", "reason": screened.rejection}],
+        "failed_ref": screened.rejected_ref,
+        "pre_sha": primary["pre_sha"],
+        "target_repo": primary["root"],
+        "rolled_back": False,
+    }
+    return _WarmPatchPreparation(
+        resolved.roots,
+        resolved.order,
+        resolved.trees,
+        screened.contents,
+        screened.by_tree,
+        absent or (rejected if screened.rejection else None),
+    )
+
+
+def _snapshot_warm_patch_trees(prepared: _WarmPatchPreparation, output_dir: Path) -> Exception | None:
+    """Capture every tree's pristine content before any of them is written to, and report what stopped that."""
+    for position, root in enumerate(prepared.order):
+        tree = prepared.trees[root]
+        if tree["use_nogit"] or not prepared.by_tree[root]:
             continue
         try:
             # _create_patch_snapshot owns one fixed sub-directory per output dir and clears it, so trees past the
             # first are given their own.
             tree["snapshot_manifest"] = _create_patch_snapshot(
                 root,
-                snapshot_contents[root],
+                prepared.by_tree[root],
                 output_dir if position == 0 else output_dir / "warm_patch_trees" / f"{position:02d}",
             )
         except (OSError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-            restore = _revert_warm_patch_trees(trees.values())
-            if required_timeline:
-                return {
-                    "required": True,
-                    "status": "failed",
-                    "patches": [],
-                    "applied": [],
-                    "failed_ref": str((patches[0] or {}).get("patch_file") or ""),
-                    "failure": f"snapshot_failed:{type(exc).__name__}",
-                    "pre_sha": primary["pre_sha"],
-                    "target_repo": primary["root"],
-                    "trees": _warm_tree_records(trees, tree_order),
-                    "rolled_back": bool(restore.get("ok")),
-                }
-            log.warning(
-                "baseline_executor: skipping legacy warm patches because the "
-                "rollback snapshot could not be created: %s",
-                exc,
-            )
-            return []
-    snapshot_manifest = primary["snapshot_manifest"]
-    if any(tree["snapshot_manifest"] for tree in trees.values()):
-        params["_warm_patch_trees"] = _warm_tree_records(trees, tree_order, before_mutation=True)
-        if before_mutation is not None and not bool(
-            before_mutation(_warm_tree_records(trees, tree_order, before_mutation=True))
-        ):
-            return {
-                "required": required_timeline,
-                "status": "failed",
-                "patches": [],
-                "applied": [],
-                "failed_ref": str((patches[0] or {}).get("patch_file") or ""),
-                "failure": "pending_state_persist_failed",
-                "pre_sha": primary["pre_sha"],
-                "target_repo": primary["root"],
-                "snapshot_manifest": snapshot_manifest,
-                "trees": _warm_tree_records(trees, tree_order),
-                "rollback": {"ok": True, "errors": []},
-                "rolled_back": True,
-            }
-    failed_ref = ""
-    failure = ""
+            return exc
+    return None
 
+
+def _refuse_after_snapshot_failure(
+    patches: list[Any],
+    prepared: _WarmPatchPreparation,
+    error: Exception,
+    *,
+    required_timeline: bool,
+) -> list[dict[str, str]] | dict[str, Any]:
+    """Undo whatever the snapshot pass wrote and report the replay as refused."""
+    restore = _revert_warm_patch_trees(prepared.trees.values())
+    if not required_timeline:
+        log.warning(
+            "baseline_executor: skipping legacy warm patches because the rollback snapshot could not be created: %s",
+            error,
+        )
+        return []
+    primary = prepared.trees[prepared.order[0]]
+    return {
+        **_refused_warm_replay(patches, f"snapshot_failed:{type(error).__name__}"),
+        "pre_sha": primary["pre_sha"],
+        "target_repo": primary["root"],
+        "trees": _warm_tree_records(prepared.trees, prepared.order),
+        "rolled_back": bool(restore.get("ok")),
+    }
+
+
+def _refuse_unpersisted_warm_patch_state(
+    params: dict[str, Any],
+    patches: list[Any],
+    prepared: _WarmPatchPreparation,
+    before_mutation: Any,
+) -> dict[str, Any] | None:
+    """Record the trees a resume would have to restore, and refuse the replay when that record cannot be kept."""
+    if not any(tree["snapshot_manifest"] for tree in prepared.trees.values()):
+        return None
+    params["_warm_patch_trees"] = _warm_tree_records(prepared.trees, prepared.order, before_mutation=True)
+    if before_mutation is None or bool(
+        before_mutation(_warm_tree_records(prepared.trees, prepared.order, before_mutation=True))
+    ):
+        return None
+    primary = prepared.trees[prepared.order[0]]
+    return {
+        **_refused_warm_replay(patches, "pending_state_persist_failed"),
+        "required": bool(params.get("required_patch_timeline")),
+        "pre_sha": primary["pre_sha"],
+        "target_repo": primary["root"],
+        "snapshot_manifest": primary["snapshot_manifest"],
+        "trees": _warm_tree_records(prepared.trees, prepared.order),
+        "rollback": {"ok": True, "errors": []},
+        "rolled_back": True,
+    }
+
+
+def _overlay_text_for_apply(patch: Mapping[str, Any], screened: str | None) -> _OverlayText:
+    """The overlay's text as the apply will use it: inline when it has one, else read back from its artifact."""
+    patch_content = screened or patch.get("patch_content") or ""
+    patch_ref = patch.get("patch_ref") or ""
+    patch_file = patch.get("patch_file") or ""
+    if patch_content:
+        return _OverlayText(patch_content, "")
+    if not patch_ref:
+        log.warning(
+            "baseline_executor: patch entry has no content/ref, skipping: %s",
+            patch_file,
+        )
+        return _OverlayText("", "missing_artifact")
+    ref_path = Path(patch_ref)
+    if not ref_path.is_file():
+        log.warning(
+            "baseline_executor: patch_ref not found: %s",
+            patch_ref,
+        )
+        return _OverlayText("", "missing_artifact")
+    try:
+        return _OverlayText(ref_path.read_text(encoding="utf-8", errors="replace"), "")
+    except OSError as exc:
+        log.warning(
+            "baseline_executor: cannot read patch_ref %s: %s",
+            patch_ref,
+            exc,
+        )
+        return _OverlayText("", "artifact_read_failed")
+
+
+def _unsafe_overlay_reason(patch_content: str, patch_file: str) -> str:
+    """Why this overlay may not touch the live checkout, or ``""`` when it may.
+
+    Structural safety gate on untrusted KB-sourced patch_content before it is git-applied: reject non-diff
+    blobs and any patch whose header path escapes the tree (absolute / ``..``).
+    """
+    from ...specialists.patch_safety import is_unified_diff, patch_escapes_tree
+
+    if not is_unified_diff(patch_content) or "GIT binary patch" in patch_content:
+        log.warning(
+            "baseline_executor: skipping warm patch %s — not a unified diff",
+            patch_file,
+        )
+        return "unsafe_or_non_text_diff"
+    escape = patch_escapes_tree(patch_content)
+    if escape is not None:
+        log.warning(
+            "baseline_executor: skipping warm patch %s — path escapes tree: %r",
+            patch_file,
+            escape,
+        )
+        return "path_escapes_tree"
+    return ""
+
+
+def _apply_overlay_without_git(tree: dict[str, Any], patch_path: Path) -> str:
+    """Overlay a pip-installed tree from file backups, naming the method that landed it."""
+    from ._nogit_patch import _apply_patch_no_git
+
+    nogit_backups = tree["nogit_backups"]
+    ok, err, backups, _feedback = _apply_patch_no_git(
+        Path(tree["root"]),
+        patch_path,
+        patch_path.parent / "patch_backups",
+        seq_offset=len(nogit_backups),
+    )
+    if not ok:
+        raise RuntimeError(err or "nogit patch apply failed")
+    nogit_backups.extend(backups)
+    # A real apply backs up every file it writes, so an empty set is the
+    # applier reporting an overlay the tree already carried.
+    return "applied_nogit" if backups else "already_present"
+
+
+def _git_apply_overlay(
+    target_repo: str,
+    patch_path: Path,
+    patch_content: str,
+    *,
+    required_timeline: bool,
+) -> str:
+    """Overlay a git checkout, naming the method that landed it.
+
+    A required timeline has to tell an overlay the tree already carries from one that conflicts, so it reads
+    the reverse check back and falls through to a three-way merge; a best-effort one takes the refusal as it comes.
+    """
+    checked = subprocess.run(
+        ["git", "apply", "--check", str(patch_path)],
+        cwd=target_repo,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    if checked.returncode == 0:
+        subprocess.run(
+            ["git", "apply", str(patch_path)],
+            cwd=target_repo,
+            capture_output=True,
+            timeout=30,
+            check=True,
+        )
+        return "applied"
+    if not required_timeline:
+        raise RuntimeError(
+            checked.stderr.decode(errors="replace")[:500] if checked.stderr else "git apply --check failed"
+        )
+    reverse = subprocess.run(
+        ["git", "apply", "-R", "--check", str(patch_path)],
+        cwd=target_repo,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    if reverse.returncode == 0:
+        return (
+            "already_present"
+            if _patch_present_in_committed_head(
+                target_repo,
+                patch_path,
+            )
+            else "present_in_dirty_worktree"
+        )
+    touched = _patch_touched_paths_from_text(patch_content)
+    before_residue = _three_way_residue_snapshot(
+        target_repo,
+        touched,
+    )
+    three_way = subprocess.run(
+        ["git", "apply", "--3way", str(patch_path)],
+        cwd=target_repo,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    if three_way.returncode != 0:
+        raise RuntimeError(
+            three_way.stderr.decode(errors="replace")[:500] if three_way.stderr else "git apply --3way failed"
+        )
+    clean, residue = _verify_three_way_clean(
+        target_repo,
+        touched,
+        before_residue,
+    )
+    if not clean:
+        raise RuntimeError(residue)
+    return "applied_3way"
+
+
+def _land_warm_patch(patch: Mapping[str, Any], tree: dict[str, Any], site: _WarmPatchSite) -> _PatchApplyOutcome:
+    """Write one overlay into its own recorded tree, reporting the method that landed it or why it did not."""
+    patch_file = patch.get("patch_file") or ""
+    overlay = _overlay_text_for_apply(patch, site.screened)
+    if overlay.reason:
+        return _PatchApplyOutcome("", overlay.reason, None)
+    unsafe = _unsafe_overlay_reason(overlay.content, patch_file)
+    if unsafe:
+        return _PatchApplyOutcome("", unsafe, None)
+    patch_path = site.log_dir / f"{site.index:03d}_{Path(patch_file).stem or 'patch'}.diff"
+    patch_path.write_text(overlay.content, encoding="utf-8")
+    try:
+        if tree["use_nogit"]:
+            return _PatchApplyOutcome(_apply_overlay_without_git(tree, patch_path), "", None)
+        method = _git_apply_overlay(
+            tree["root"],
+            patch_path,
+            overlay.content,
+            required_timeline=site.required_timeline,
+        )
+        return _PatchApplyOutcome(method, "", None)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, RuntimeError) as exc:
+        log.warning(
+            "baseline_executor: warm patch apply failed for %s: %s",
+            patch_file,
+            exc,
+        )
+        return _PatchApplyOutcome("", "nogit_apply_failed" if tree["use_nogit"] else "git_apply_failed", str(exc)[:500])
+
+
+def _apply_warm_patch_sequence(
+    patches: list[Any],
+    prepared: _WarmPatchPreparation,
+    patch_log_dir: Path,
+    *,
+    required_timeline: bool,
+) -> _WarmPatchSequence:
+    """Apply every overlay in timeline order, stopping a required timeline at the first that will not land."""
+    applied: list[dict[str, str]] = []
+    statuses: list[dict[str, Any]] = []
+    failed_ref, failure = "", ""
     for idx, patch in enumerate(patches):
         patch_file = patch.get("patch_file") or ""
-        patch_content = resolved_contents.get(idx) or patch.get("patch_content") or ""
-        patch_ref = patch.get("patch_ref") or ""
         status: dict[str, Any] = {
             "patch_ref": patch_file,
             "timeline_index": patch.get("timeline_index", idx),
         }
-        tree = trees.get(patch_roots[idx])
+        statuses.append(status)
+        tree = prepared.trees.get(prepared.roots[idx])
         if tree is None:
             status.update(status="failed", reason="apply_root_absent")
-            statuses.append(status)
             continue
-        # The patch goes into its own recorded tree, so these are per patch rather than fixed for the whole sequence.
-        target_repo = tree["root"]
-        target_path = Path(target_repo)
-        use_nogit = tree["use_nogit"]
-        nogit_backups = tree["nogit_backups"]
-        status["target_repo"] = target_repo
-
-        if not patch_content and not patch_ref:
-            log.warning(
-                "baseline_executor: patch entry has no content/ref, skipping: %s",
-                patch_file,
-            )
-            status.update(status="failed", reason="missing_artifact")
-            statuses.append(status)
+        # The patch goes into its own recorded tree, so this is per patch rather than fixed for the whole sequence.
+        status["target_repo"] = tree["root"]
+        site = _WarmPatchSite(idx, patch_log_dir, prepared.contents.get(idx), required_timeline)
+        outcome = _land_warm_patch(patch, tree, site)
+        if outcome.reason:
+            status.update(status="failed", reason=outcome.reason)
+            if outcome.detail is not None:
+                status["detail"] = outcome.detail
             if required_timeline:
-                failed_ref, failure = patch_file, "missing_artifact"
+                failed_ref, failure = patch_file, outcome.reason
                 break
             continue
-
-        # Resolve patch content: prefer inline content, fallback to patch_ref file.
-        if not patch_content and patch_ref:
-            ref_path = Path(patch_ref)
-            if ref_path.is_file():
-                try:
-                    patch_content = ref_path.read_text(encoding="utf-8", errors="replace")
-                except OSError as exc:
-                    log.warning(
-                        "baseline_executor: cannot read patch_ref %s: %s",
-                        patch_ref,
-                        exc,
-                    )
-                    status.update(status="failed", reason="artifact_read_failed")
-                    statuses.append(status)
-                    if required_timeline:
-                        failed_ref, failure = patch_file, "artifact_read_failed"
-                        break
-                    continue
-            else:
-                log.warning(
-                    "baseline_executor: patch_ref not found: %s",
-                    patch_ref,
-                )
-                status.update(status="failed", reason="missing_artifact")
-                statuses.append(status)
-                if required_timeline:
-                    failed_ref, failure = patch_file, "missing_artifact"
-                    break
-                continue
-
-        # Structural safety gate on untrusted KB-sourced patch_content before it is git-applied to the live checkout:
-        # reject non-diff blobs and any patch whose header path escapes the tree (absolute / ``..``).
-        if not is_unified_diff(patch_content) or "GIT binary patch" in patch_content:
-            log.warning(
-                "baseline_executor: skipping warm patch %s — not a unified diff",
-                patch_file,
-            )
-            status.update(status="failed", reason="unsafe_or_non_text_diff")
-            statuses.append(status)
-            if required_timeline:
-                failed_ref, failure = patch_file, "unsafe_or_non_text_diff"
-                break
-            continue
-        _escape = patch_escapes_tree(patch_content)
-        if _escape is not None:
-            log.warning(
-                "baseline_executor: skipping warm patch %s — path escapes tree: %r",
-                patch_file,
-                _escape,
-            )
-            status.update(status="failed", reason="path_escapes_tree")
-            statuses.append(status)
-            if required_timeline:
-                failed_ref, failure = patch_file, "path_escapes_tree"
-                break
-            continue
-
-        # Write patch to temp file then apply.
-        patch_path = patch_log_dir / f"{idx:03d}_{Path(patch_file).stem or 'patch'}.diff"
-        patch_path.write_text(patch_content, encoding="utf-8")
-
-        method = ""
-        try:
-            if use_nogit:
-                backup_root = patch_log_dir / "patch_backups"
-                ok, err, backups, _feedback = _apply_patch_no_git(
-                    target_path,
-                    patch_path,
-                    backup_root,
-                    seq_offset=len(nogit_backups),
-                )
-                if not ok:
-                    raise RuntimeError(err or "nogit patch apply failed")
-                nogit_backups.extend(backups)
-                # A real apply backs up every file it writes, so an empty set is the
-                # applier reporting an overlay the tree already carried.
-                method = "applied_nogit" if backups else "already_present"
-            else:
-                checked = subprocess.run(
-                    ["git", "apply", "--check", str(patch_path)],
-                    cwd=target_repo,
-                    capture_output=True,
-                    timeout=30,
-                    check=False,
-                )
-                if checked.returncode == 0:
-                    subprocess.run(
-                        ["git", "apply", str(patch_path)],
-                        cwd=target_repo,
-                        capture_output=True,
-                        timeout=30,
-                        check=True,
-                    )
-                    method = "applied"
-                elif required_timeline:
-                    reverse = subprocess.run(
-                        ["git", "apply", "-R", "--check", str(patch_path)],
-                        cwd=target_repo,
-                        capture_output=True,
-                        timeout=30,
-                        check=False,
-                    )
-                    if reverse.returncode == 0:
-                        method = (
-                            "already_present"
-                            if _patch_present_in_committed_head(
-                                target_repo,
-                                patch_path,
-                            )
-                            else "present_in_dirty_worktree"
-                        )
-                    else:
-                        touched = _patch_touched_paths_from_text(patch_content)
-                        before_residue = _three_way_residue_snapshot(
-                            target_repo,
-                            touched,
-                        )
-                        three_way = subprocess.run(
-                            ["git", "apply", "--3way", str(patch_path)],
-                            cwd=target_repo,
-                            capture_output=True,
-                            timeout=30,
-                            check=False,
-                        )
-                        if three_way.returncode == 0:
-                            clean, residue = _verify_three_way_clean(
-                                target_repo,
-                                touched,
-                                before_residue,
-                            )
-                            if not clean:
-                                raise RuntimeError(residue)
-                            method = "applied_3way"
-                        else:
-                            detail = (
-                                three_way.stderr.decode(errors="replace")[:500]
-                                if three_way.stderr
-                                else "git apply --3way failed"
-                            )
-                            raise RuntimeError(detail)
-                else:
-                    detail = (
-                        checked.stderr.decode(errors="replace")[:500] if checked.stderr else "git apply --check failed"
-                    )
-                    raise RuntimeError(detail)
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, RuntimeError) as exc:
-            log.warning(
-                "baseline_executor: warm patch apply failed for %s: %s",
-                patch_file,
-                exc,
-            )
-            reason = "nogit_apply_failed" if use_nogit else "git_apply_failed"
-            status.update(status="failed", reason=reason, detail=str(exc)[:500])
-            statuses.append(status)
-            if required_timeline:
-                failed_ref, failure = patch_file, reason
-                break
-            continue
-
-        if method in ("applied", "applied_3way", "applied_nogit"):
+        if outcome.method in _MUTATING_APPLY_METHODS:
             tree["mutated"] = True
-        item = {
-            "patch_file": patch_file,
-            "idx": str(idx),
-            "status": method,
-        }
-        applied.append(item)
-        status["status"] = method
-        statuses.append(status)
+        applied.append({"patch_file": patch_file, "idx": str(idx), "status": outcome.method})
+        status["status"] = outcome.method
+    return _WarmPatchSequence(applied, statuses, failed_ref, failure)
 
-    records = _warm_tree_records(trees, tree_order)
-    if any(tree["snapshot_manifest"] or tree["nogit_backups"] for tree in trees.values()):
-        params["_warm_patch_trees"] = records
-    # A best-effort timeline reports only the patches that landed, so without
-    # this the per-patch reasons computed above would die with this frame --
-    # and they are the only record of the ones that did not.
-    params["_warm_patch_statuses"] = statuses
 
-    if required_timeline:
-        if failed_ref:
-            # One overlay failing voids the whole replay, and the sequence may already have written to trees before
-            # this one, so every tree is restored rather than just the one that failed.
-            restore = _revert_warm_patch_trees(trees.values())
-            return {
-                "required": True,
-                "status": "failed",
-                "patches": statuses,
-                "applied": applied,
-                "failed_ref": failed_ref,
-                "failure": failure,
-                "pre_sha": primary["pre_sha"],
-                "target_repo": primary["root"],
-                "snapshot_manifest": primary["snapshot_manifest"],
-                "trees": records,
-                "rolled_back": bool(restore.get("ok")),
-                "rollback": restore,
-            }
+def _warm_replay_report(
+    prepared: _WarmPatchPreparation,
+    sequence: _WarmPatchSequence,
+    records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """The report a required timeline gets once its overlays have been through the trees."""
+    primary = prepared.trees[prepared.order[0]]
+    if not sequence.failed_ref:
         return {
             "required": True,
             "status": "prepared",
-            "patches": statuses,
-            "applied": applied,
+            "patches": sequence.statuses,
+            "applied": sequence.applied,
             "failed_ref": "",
             "pre_sha": primary["pre_sha"],
             "target_repo": primary["root"],
@@ -722,7 +823,64 @@ def _apply_warm_patches(
             "trees": records,
             "rolled_back": False,
         }
-    return applied
+    # One overlay failing voids the whole replay, and the sequence may already have written to trees before
+    # this one, so every tree is restored rather than just the one that failed.
+    restore = _revert_warm_patch_trees(prepared.trees.values())
+    return {
+        "required": True,
+        "status": "failed",
+        "patches": sequence.statuses,
+        "applied": sequence.applied,
+        "failed_ref": sequence.failed_ref,
+        "failure": sequence.failure,
+        "pre_sha": primary["pre_sha"],
+        "target_repo": primary["root"],
+        "snapshot_manifest": primary["snapshot_manifest"],
+        "trees": records,
+        "rolled_back": bool(restore.get("ok")),
+        "rollback": restore,
+    }
+
+
+def _apply_warm_patches(
+    params: dict[str, Any],
+    target_repo: str,
+    output_dir: Path,
+    *,
+    before_mutation: Any = None,
+) -> list[dict[str, str]] | dict[str, Any]:
+    """Apply warm-replay code patches, each into the checkout it was taken from."""
+    patches = params.get("patches") or []
+    if not patches:
+        return []
+    required_timeline = bool(params.get("required_patch_timeline"))
+    patch_roots = _recorded_patch_roots(patches, target_repo)
+    if not any(patch_roots):
+        return _refused_warm_replay(patches, "missing_target_repo") if required_timeline else []
+    patch_log_dir = output_dir / "warm_patches"
+    patch_log_dir.mkdir(parents=True, exist_ok=True)
+    prepared = _prepare_warm_patch_run(patches, patch_roots)
+    if required_timeline and prepared.refusal is not None:
+        return prepared.refusal
+    if not prepared.order:
+        return []
+    snapshot_error = _snapshot_warm_patch_trees(prepared, output_dir)
+    if snapshot_error is not None:
+        return _refuse_after_snapshot_failure(patches, prepared, snapshot_error, required_timeline=required_timeline)
+    unpersisted = _refuse_unpersisted_warm_patch_state(params, patches, prepared, before_mutation)
+    if unpersisted is not None:
+        return unpersisted
+    sequence = _apply_warm_patch_sequence(patches, prepared, patch_log_dir, required_timeline=required_timeline)
+    records = _warm_tree_records(prepared.trees, prepared.order)
+    if any(tree["snapshot_manifest"] or tree["nogit_backups"] for tree in prepared.trees.values()):
+        params["_warm_patch_trees"] = records
+    # A best-effort timeline reports only the patches that landed, so without
+    # this the per-patch reasons computed above would die with this frame --
+    # and they are the only record of the ones that did not.
+    params["_warm_patch_statuses"] = sequence.statuses
+    if not required_timeline:
+        return sequence.applied
+    return _warm_replay_report(prepared, sequence, records)
 
 
 def _stamp_warm_patch_trees(
