@@ -14,7 +14,7 @@ from pathlib import Path
 
 from hyperloom.inference_optimizer.breakdown.collectors.v6_critic import collect_v6_critic
 from hyperloom.inference_optimizer.breakdown.recorder.assembler import assemble_parts
-from hyperloom.inference_optimizer.breakdown.recorder.critic_out import record_critic_iteration
+from hyperloom.inference_optimizer.breakdown.recorder.critic_out import CriticIteration, record_critic_iteration
 
 
 def _emit(topic: str, body: str) -> dict:
@@ -49,7 +49,7 @@ def _record(session_dir: Path, *, iter_n: int, **overrides) -> None:
         workdir=session_dir / "critic-workdir" / f"{iter_n:06d}",
     )
     kwargs.update(overrides)
-    record_critic_iteration(session_dir, **kwargs)
+    record_critic_iteration(session_dir, CriticIteration(**kwargs))
 
 
 def test_an_iteration_carries_its_verdict_and_its_artifacts(tmp_path: Path) -> None:

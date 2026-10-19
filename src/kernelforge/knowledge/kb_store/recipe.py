@@ -44,20 +44,14 @@ def candidate_session_id(canonical_id: str, kernel_name: str, content_digest: st
 
 
 @dataclass(frozen=True)
-class CandidateMetadata:
-    """Ranking metadata for one previously recorded port."""
+class CandidateBundle:
+    """One selected port fully materialized in its own local directory."""
 
     session_id: str
     value: dict[str, Any]
     speedup: float | None
     is_champion: bool
     measured_speedup: float | None
-
-
-@dataclass(frozen=True)
-class CandidateBundle(CandidateMetadata):
-    """One selected port fully materialized in its own local directory."""
-
     bundle_dir: Path
     recipe_path: Path
     files_dir: Path
@@ -144,34 +138,6 @@ class KernelRecipeKB:
         return self._store is not None and bool(self.canonical_id)
 
     # -- read ----------------------------------------------------------------
-
-    def read_best(self, destination: str | Path) -> CandidateBundle | None:
-        """Materialize and return this producer's Top1, or ``None`` when cold."""
-        ranked = self.read_top_n(destination, limit=1)
-        return ranked[0] if ranked else None
-
-    def list_candidates(self, limit: int = 3) -> list[CandidateMetadata]:
-        """Return ranking metadata without downloading candidate artifacts."""
-        if not self.active or limit <= 0:
-            return []
-        try:
-            found = self._store.candidates(self.canonical_id, limit=limit)
-        except Exception as error:  # noqa: BLE001 - a KB read must cold-start
-            self.reason = sanitize_read_error(error, secrets=self._config_secrets())
-            return []
-        summaries: list[CandidateMetadata] = []
-        for candidate in found:
-            value = candidate.knowledge.get("value")
-            summaries.append(
-                CandidateMetadata(
-                    session_id=candidate.session_id,
-                    value=dict(value) if isinstance(value, Mapping) else {},
-                    speedup=candidate.speedup,
-                    is_champion=candidate.is_champion,
-                    measured_speedup=candidate.measured_speedup,
-                )
-            )
-        return summaries
 
     def read_top_n(
         self,
@@ -333,7 +299,6 @@ class KernelRecipeKB:
 
 __all__ = [
     "CandidateBundle",
-    "CandidateMetadata",
     "KernelRecipeKB",
     "kb_store_secrets",
 ]

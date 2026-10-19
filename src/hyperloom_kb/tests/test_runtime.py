@@ -6,7 +6,9 @@ import pytest
 
 from hyperloom_kb import (
     PACKAGED_DECLARATION,
+    ExperienceStart,
     NoOpExperienceKB,
+    Provenance,
     ReadStatus,
     RemoteClient,
     RemoteClientError,
@@ -22,7 +24,9 @@ def test_no_configuration_returns_true_noop() -> None:
     assert kb.enabled is False
     assert kb.degraded is False
 
-    session = kb.begin(any_host_argument="is ignored")
+    session = kb.begin(
+        ExperienceStart(run_id="run", seq=0, objective="ignored", provenance=Provenance("noop-test", "1"))
+    )
     assert session.record is None
     assert session.decide(change={"knob": "x"}, rationale={"reasoning": "ignored"}) is None
     assert session.complete(outcome={"decision": "failed"}, reflection={"text": "ignored"}) is None

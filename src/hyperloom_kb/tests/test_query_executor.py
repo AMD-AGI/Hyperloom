@@ -6,32 +6,33 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
+import pytest
+
 from hyperloom_kb import (
     LEXICAL_FUZZY_PROVIDER_REF,
     Experience,
     ExperienceDeclaration,
-    ExperienceService,
     ExperienceStatus,
     FieldDeclaration,
     FieldKind,
     FieldRole,
     InMemoryExperienceStore,
     InMemoryQueryViewStore,
-    InMemorySchemaRegistry,
     LexicalFuzzyProvider,
     LocalRetrievalService,
     ObjectiveDeclaration,
     PlannerProvenance,
     Provenance,
     QueryExecutor,
+    QueryPlanValidationError,
     QuerySignal,
-    QueryViewMaintainer,
     RepresentativePolicy,
     RetrievalCapability,
     RetrievalConfiguration,
     WeightedQueryPlan,
     derive_experience_id,
 )
+from hyperloom_kb.tests.view_fixtures import publish_view, submit_complete
 
 NOW = datetime(2026, 9, 23, tzinfo=timezone.utc)
 FROZEN = PlannerProvenance("frozen-case", "none", "none", "frozen-input")
@@ -89,11 +90,8 @@ def _experience(
 
 def _stack():
     schema = _declaration()
-    schemas = InMemorySchemaRegistry()
     experiences = InMemoryExperienceStore()
     views = InMemoryQueryViewStore()
-    service = ExperienceService(schemas, experiences)
-    service.register_schema(schema)
     target = _experience(
         schema,
         "target",
@@ -108,13 +106,9 @@ def _stack():
         reasoning="FP8 KV cache reduces decode KV bandwidth.",
         knob="fp8_kv_other",
     )
-    for item in (target, distractor):
-        service.submit_complete(item)
+    submit_complete(schema, experiences, target, distractor)
     fuzzy = LexicalFuzzyProvider(experiences, schema)
-    view = QueryViewMaintainer(schemas, experiences, views).rebuild(
-        schema.schema_ref,
-        fuzzy_ready=True,
-    )
+    view = publish_view(schema, experiences, views, fuzzy_ready=True)
     executor = QueryExecutor(
         LocalRetrievalService(experiences, views, providers=(fuzzy,)),
         provider_refs={
@@ -186,6 +180,18 @@ def test_weight_increase_changes_only_matching_group_contribution() -> None:
 
     assert high_scores[target.id] - low_scores[target.id] == 0.9
     assert high_scores[distractor.id] == low_scores[distractor.id]
+
+
+def test_executor_rejects_provider_version_drift() -> None:
+    schema, view, executor, _, _ = _stack()
+    configuration = RetrievalConfiguration.create(
+        schema.schema_ref,
+        "pinned@v1",
+        provider_refs={RetrievalCapability.FUZZY: "different-provider@v1"},
+    )
+
+    with pytest.raises(QueryPlanValidationError, match="provider does not match"):
+        executor.execute(_plan(schema.schema_ref, model_weight=1.0), configuration, view=view)
 
 
 def test_provider_scores_are_normalized_before_weighting() -> None:

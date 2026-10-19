@@ -295,10 +295,8 @@ def build_forge_knowledge(
     INDEX.md convention. Returns "" if the root or all levels are missing.
 
     ``defer_all`` renders EVERY level as a pointer rather than only the carried
-    language -- the ablation behind ``Config.defer_knowledge_maps``. It is off by
-    default: the maps are what tells an agent a card exists at all, and whether it
-    still goes looking without them is a question for an A/B, not for arithmetic
-    on their token cost.
+    language -- what ``Config.defer_knowledge_maps`` (on by default) selects.
+    Called directly, the maps stay inlined unless it is set.
     """
     root_path = Path(root) if root else _DEFAULT_ROOT
     if not root_path.exists():

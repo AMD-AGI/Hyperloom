@@ -12,7 +12,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.io import atomic_write_bytes, atomic_write_json
+from hyperloom.common.io import JsonFormat, WriteOptions, atomic_write_bytes, atomic_write_json
 
 from .remote_recipe._vendor.kb_store_client import (
     FILES_MEMBER_ROOT,
@@ -196,12 +196,12 @@ class _ColumnKB:
                     if destination.read_bytes() != content:
                         raise KBStoreError(f"artifact ref already has different bytes: {ref}")
                     continue
-                atomic_write_bytes(destination, content, make_parents=True)
+                atomic_write_bytes(destination, content, options=WriteOptions(make_parents=True))
                 created.append(destination)
             atomic_write_json(
                 self._sections.root / _SECTIONS_MEMBER / f"{self.SECTION}.json",
                 {"knowledge": dict(document), "files": all_refs},
-                ensure_ascii=False,
+                fmt=JsonFormat(ensure_ascii=False),
             )
         except (KBStoreError, OSError, ValueError) as exc:
             for destination in created:

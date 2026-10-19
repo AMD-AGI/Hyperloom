@@ -86,7 +86,9 @@ def test_the_lane_lands_on_the_timeline_when_it_is_triggered(_bound_session):
 
 def test_every_entry_point_writes_into_one_event(_bound_session):
     _boot_trigger()
-    enablement_event.record_dispatch(task_id="spec-1", attempt=1, failure_kind="import_error")
+    enablement_event.record_dispatch(
+        enablement_event.AuthoringDispatch(task_id="spec-1", attempt=1, failure_kind="import_error")
+    )
     enablement_event.record_build(task_id="build-1", entry={"ok": True, "action": {"component": "aiter"}})
     enablement_event.record_revalidation(generation=1, task_id="base-9")
     enablement_event.record_human_review(digest="d0", failure_kind="UNKNOWN")
@@ -129,7 +131,9 @@ def test_the_origin_survives_the_lane_succeeding(_bound_session):
         mode="all",
         kind="accuracy_below_floor",
     )
-    enablement_event.finish(outcome=enablement_event.OUTCOME_SUCCEEDED, reason="revalidation promoted")
+    enablement_event.finish(
+        enablement_event.LaneTerminal(outcome=enablement_event.OUTCOME_SUCCEEDED, reason="revalidation promoted")
+    )
 
     assert _ext(_bound_session)["origin"] == enablement_event.ORIGIN_EVAL
 
@@ -151,11 +155,13 @@ def test_a_trigger_log_is_kept_by_its_tail(_bound_session):
 def test_a_round_is_recorded_with_what_it_was_pointed_at(_bound_session):
     _boot_trigger()
     enablement_event.record_dispatch(
-        task_id="spec-1",
-        attempt=1,
-        failure_kind="missing_fused_moe",
-        launch_log="ImportError: cannot import name 'fused_moe'",
-        candidate_refs=["v0.4.1", "v0.4.2"],
+        enablement_event.AuthoringDispatch(
+            task_id="spec-1",
+            attempt=1,
+            failure_kind="missing_fused_moe",
+            launch_log="ImportError: cannot import name 'fused_moe'",
+            candidate_refs=["v0.4.1", "v0.4.2"],
+        )
     )
 
     rows = _ext(_bound_session)["attempts"]["rows"]
@@ -167,13 +173,11 @@ def test_a_round_is_recorded_with_what_it_was_pointed_at(_bound_session):
 
 def test_the_dispatch_and_the_verdict_settle_one_row(_bound_session):
     _boot_trigger()
-    enablement_event.record_dispatch(task_id="spec-1", attempt=1, failure_kind="missing_fused_moe")
+    enablement_event.record_dispatch(
+        enablement_event.AuthoringDispatch(task_id="spec-1", attempt=1, failure_kind="missing_fused_moe")
+    )
     enablement_event.record_round(
-        task_id="spec-1",
-        attempt=1,
-        result=_kept(),
-        stall_streak=0,
-        succeeded=True,
+        enablement_event.AuthoringRound(task_id="spec-1", attempt=1, result=_kept(), stall_streak=0, succeeded=True)
     )
 
     rows = _ext(_bound_session)["attempts"]["rows"]
@@ -185,7 +189,9 @@ def test_the_dispatch_and_the_verdict_settle_one_row(_bound_session):
 
 def test_a_round_dispatched_and_never_ruled_says_so(_bound_session):
     _boot_trigger()
-    enablement_event.record_dispatch(task_id="spec-1", attempt=1, failure_kind="missing_fused_moe")
+    enablement_event.record_dispatch(
+        enablement_event.AuthoringDispatch(task_id="spec-1", attempt=1, failure_kind="missing_fused_moe")
+    )
 
     finalize_events(_bound_session)
 
@@ -208,13 +214,17 @@ def test_the_round_that_landed_the_fix_is_identifiable(_bound_session):
         start=1,
     ):
         task = f"spec-{attempt}"
-        enablement_event.record_dispatch(task_id=task, attempt=attempt, failure_kind=f"gap{attempt}")
+        enablement_event.record_dispatch(
+            enablement_event.AuthoringDispatch(task_id=task, attempt=attempt, failure_kind=f"gap{attempt}")
+        )
         enablement_event.record_round(
-            task_id=task,
-            attempt=attempt,
-            result={"enablement": True, "status": status, "patches_applied": [f"/s/p{attempt}.diff"]},
-            stall_streak=1 if status == enablement_event.ROUND_REVERTED else 0,
-            succeeded=status == enablement_event.ROUND_KEPT,
+            enablement_event.AuthoringRound(
+                task_id=task,
+                attempt=attempt,
+                result={"enablement": True, "status": status, "patches_applied": [f"/s/p{attempt}.diff"]},
+                stall_streak=1 if status == enablement_event.ROUND_REVERTED else 0,
+                succeeded=status == enablement_event.ROUND_KEPT,
+            )
         )
 
     attempts = _ext(_bound_session)["attempts"]
@@ -228,17 +238,21 @@ def test_the_round_that_landed_the_fix_is_identifiable(_bound_session):
 
 def test_the_gap_a_round_revealed_is_not_the_gap_it_faced(_bound_session):
     _boot_trigger(evidence="gap 1: ImportError fused_moe")
-    enablement_event.record_dispatch(task_id="spec-1", attempt=1, launch_log="gap 1: ImportError fused_moe")
+    enablement_event.record_dispatch(
+        enablement_event.AuthoringDispatch(task_id="spec-1", attempt=1, launch_log="gap 1: ImportError fused_moe")
+    )
     enablement_event.record_round(
-        task_id="spec-1",
-        attempt=1,
-        result={
-            "enablement": True,
-            "status": enablement_event.ROUND_ADVANCED,
-            "enablement_launch_log": "gap 2: AttributeError rope_scaling",
-        },
-        stall_streak=0,
-        succeeded=False,
+        enablement_event.AuthoringRound(
+            task_id="spec-1",
+            attempt=1,
+            result={
+                "enablement": True,
+                "status": enablement_event.ROUND_ADVANCED,
+                "enablement_launch_log": "gap 2: AttributeError rope_scaling",
+            },
+            stall_streak=0,
+            succeeded=False,
+        )
     )
 
     ext = _ext(_bound_session)
@@ -250,13 +264,17 @@ def test_the_gap_a_round_revealed_is_not_the_gap_it_faced(_bound_session):
 
 def test_a_round_the_lane_synthesised_keeps_its_own_row(_bound_session):
     _boot_trigger()
-    enablement_event.record_dispatch(task_id="spec-1", attempt=1, failure_kind="gap1")
+    enablement_event.record_dispatch(
+        enablement_event.AuthoringDispatch(task_id="spec-1", attempt=1, failure_kind="gap1")
+    )
     enablement_event.record_round(
-        task_id="",
-        attempt=2,
-        result={"enablement": True, "status": "reverted", "reason": "round_finished_without_rearm"},
-        stall_streak=1,
-        succeeded=False,
+        enablement_event.AuthoringRound(
+            task_id="",
+            attempt=2,
+            result={"enablement": True, "status": "reverted", "reason": "round_finished_without_rearm"},
+            stall_streak=1,
+            succeeded=False,
+        )
     )
 
     rows = _ext(_bound_session)["attempts"]["rows"]
@@ -268,23 +286,30 @@ def test_a_round_the_lane_synthesised_keeps_its_own_row(_bound_session):
 def test_a_round_records_the_products_it_contributed(_bound_session):
     _boot_trigger()
     enablement_event.record_round(
-        task_id="spec-1",
-        attempt=1,
-        result=_kept(
-            artifacts_applied=[
-                {"target": "/fw/layers/moe.py", "rel_target": "layers/moe.py", "kind": "replace", "backup": "/tmp/b"}
-            ],
-            enablement_kept_stack_action={
-                "kind": "install",
-                "framework": "sglang",
-                "capability": "fused_moe",
-                "acquisition_method": "wheel",
-            },
-            enablement_active_runtime={"venv_root": "/venv/a", "installed_versions": {"sglang": "0.4.2"}},
-            enablement_localization_manifest={"files": 3},
-        ),
-        stall_streak=0,
-        succeeded=True,
+        enablement_event.AuthoringRound(
+            task_id="spec-1",
+            attempt=1,
+            result=_kept(
+                artifacts_applied=[
+                    {
+                        "target": "/fw/layers/moe.py",
+                        "rel_target": "layers/moe.py",
+                        "kind": "replace",
+                        "backup": "/tmp/b",
+                    }
+                ],
+                enablement_kept_stack_action={
+                    "kind": "install",
+                    "framework": "sglang",
+                    "capability": "fused_moe",
+                    "acquisition_method": "wheel",
+                },
+                enablement_active_runtime={"venv_root": "/venv/a", "installed_versions": {"sglang": "0.4.2"}},
+                enablement_localization_manifest={"files": 3},
+            ),
+            stall_streak=0,
+            succeeded=True,
+        )
     )
 
     row = _ext(_bound_session)["attempts"]["rows"][0]
@@ -303,11 +328,13 @@ def test_the_stall_streak_is_recorded_per_round(_bound_session):
     _boot_trigger()
     for attempt in (1, 2):
         enablement_event.record_round(
-            task_id=f"spec-{attempt}",
-            attempt=attempt,
-            result={"enablement": True, "status": "reverted"},
-            stall_streak=attempt,
-            succeeded=False,
+            enablement_event.AuthoringRound(
+                task_id=f"spec-{attempt}",
+                attempt=attempt,
+                result={"enablement": True, "status": "reverted"},
+                stall_streak=attempt,
+                succeeded=False,
+            )
         )
 
     rows = _ext(_bound_session)["attempts"]["rows"]
@@ -418,16 +445,20 @@ def test_the_same_failure_is_filed_once(_bound_session):
 
 def test_a_lane_that_landed_its_repair_succeeds(_bound_session):
     _boot_trigger()
-    enablement_event.record_round(task_id="spec-1", attempt=1, result=_kept(), stall_streak=0, succeeded=True)
+    enablement_event.record_round(
+        enablement_event.AuthoringRound(task_id="spec-1", attempt=1, result=_kept(), stall_streak=0, succeeded=True)
+    )
     enablement_event.finish(
-        outcome=enablement_event.OUTCOME_SUCCEEDED,
-        reason="kept",
-        kept_patches=["/s/patches/moe.diff"],
-        setup_commands=["pip install -e ."],
-        accepted_config={"extra_server_args": "--tp 8", "extra_envs": {}},
-        setting_script="reports/enablement/enablement_setting.sh",
-        active_runtime={"venv_root": "/venv/a"},
-        attempt_runtimes=[{"venv_root": "/venv/old"}, {"venv_root": "/venv/a"}],
+        enablement_event.LaneTerminal(
+            outcome=enablement_event.OUTCOME_SUCCEEDED,
+            reason="kept",
+            kept_patches=["/s/patches/moe.diff"],
+            setup_commands=["pip install -e ."],
+            accepted_config={"extra_server_args": "--tp 8", "extra_envs": {}},
+            setting_script="reports/enablement/enablement_setting.sh",
+            active_runtime={"venv_root": "/venv/a"},
+            attempt_runtimes=[{"venv_root": "/venv/old"}, {"venv_root": "/venv/a"}],
+        )
     )
 
     event = _event(_bound_session)
@@ -442,9 +473,9 @@ def test_a_lane_that_landed_its_repair_succeeds(_bound_session):
 def test_a_lane_that_hit_the_stall_cap_fails(_bound_session):
     _boot_trigger()
     enablement_event.finish(
-        outcome=enablement_event.OUTCOME_STALLED,
-        reason="enablement_stalled",
-        stall_streak=5,
+        enablement_event.LaneTerminal(
+            outcome=enablement_event.OUTCOME_STALLED, reason="enablement_stalled", stall_streak=5
+        )
     )
 
     event = _event(_bound_session)
@@ -455,13 +486,17 @@ def test_a_lane_that_hit_the_stall_cap_fails(_bound_session):
 
 def test_a_lane_the_session_outlived_is_interrupted_not_judged(_bound_session):
     _boot_trigger()
-    enablement_event.record_dispatch(task_id="spec-1", attempt=1, failure_kind="gap1")
+    enablement_event.record_dispatch(
+        enablement_event.AuthoringDispatch(task_id="spec-1", attempt=1, failure_kind="gap1")
+    )
     enablement_event.record_round(
-        task_id="spec-1",
-        attempt=1,
-        result={"enablement": True, "status": enablement_event.ROUND_ADVANCED},
-        stall_streak=0,
-        succeeded=False,
+        enablement_event.AuthoringRound(
+            task_id="spec-1",
+            attempt=1,
+            result={"enablement": True, "status": enablement_event.ROUND_ADVANCED},
+            stall_streak=0,
+            succeeded=False,
+        )
     )
 
     finalize_events(_bound_session)
@@ -474,7 +509,7 @@ def test_a_lane_the_session_outlived_is_interrupted_not_judged(_bound_session):
 
 def test_the_lane_closes_the_event_it_opened(_bound_session):
     _boot_trigger()
-    enablement_event.finish(outcome=enablement_event.OUTCOME_SUCCEEDED, reason="kept")
+    enablement_event.finish(enablement_event.LaneTerminal(outcome=enablement_event.OUTCOME_SUCCEEDED, reason="kept"))
 
     events = _events(_bound_session)
     assert len(events) == 1
@@ -483,7 +518,7 @@ def test_the_lane_closes_the_event_it_opened(_bound_session):
 
 def test_a_lane_that_closed_having_run_no_round_is_skipped(_bound_session):
     _boot_trigger()
-    enablement_event.finish(outcome="", reason="nothing to author against")
+    enablement_event.finish(enablement_event.LaneTerminal(outcome="", reason="nothing to author against"))
 
     assert _event(_bound_session)["status"] == "skipped"
 
@@ -500,26 +535,30 @@ def test_nothing_recorded_outside_a_session_raises(tmp_path, monkeypatch):
         lambda: None,
     )
     _boot_trigger()
-    enablement_event.record_dispatch(task_id="spec-1", attempt=1)
+    enablement_event.record_dispatch(enablement_event.AuthoringDispatch(task_id="spec-1", attempt=1))
     enablement_event.record_archive(task_id="spec-1", attempt=1, files=[{"path": "p", "role": "patch"}])
-    enablement_event.record_round(task_id="spec-1", attempt=1, result={}, stall_streak=0, succeeded=False)
+    enablement_event.record_round(
+        enablement_event.AuthoringRound(task_id="spec-1", attempt=1, result={}, stall_streak=0, succeeded=False)
+    )
     enablement_event.record_build(task_id="build-1", entry={"ok": True})
     enablement_event.record_revalidation(generation=1)
     enablement_event.record_revalidation_outcome(generation=1, promoted=False)
     enablement_event.record_human_review(digest="d", failure_kind="UNKNOWN")
-    enablement_event.finish(outcome=enablement_event.OUTCOME_SUCCEEDED)
+    enablement_event.finish(enablement_event.LaneTerminal(outcome=enablement_event.OUTCOME_SUCCEEDED))
 
 
 def test_a_malformed_result_does_not_cost_the_round_its_row(_bound_session):
     _boot_trigger()
-    enablement_event.record_round(task_id="spec-1", attempt=1, result=None, stall_streak=0, succeeded=False)
+    enablement_event.record_round(
+        enablement_event.AuthoringRound(task_id="spec-1", attempt=1, result=None, stall_streak=0, succeeded=False)
+    )
 
     assert _ext(_bound_session)["attempts"]["count"] == 1
 
 
 def test_the_archive_merges_onto_the_round_the_dispatch_opened(_bound_session):
     _boot_trigger()
-    enablement_event.record_dispatch(task_id="spec-1", attempt=1)
+    enablement_event.record_dispatch(enablement_event.AuthoringDispatch(task_id="spec-1", attempt=1))
     enablement_event.record_archive(
         task_id="spec-1",
         attempt=1,
@@ -530,11 +569,15 @@ def test_the_archive_merges_onto_the_round_the_dispatch_opened(_bound_session):
         ],
     )
     enablement_event.record_round(
-        task_id="spec-1",
-        attempt=1,
-        result=_kept(enablement_accepted_config_path="/s/runs/integrate_patch/spec-1/integrate_patch.with_envs.yaml"),
-        stall_streak=0,
-        succeeded=True,
+        enablement_event.AuthoringRound(
+            task_id="spec-1",
+            attempt=1,
+            result=_kept(
+                enablement_accepted_config_path="/s/runs/integrate_patch/spec-1/integrate_patch.with_envs.yaml"
+            ),
+            stall_streak=0,
+            succeeded=True,
+        )
     )
 
     rows = _ext(_bound_session)["attempts"]["rows"]
@@ -554,11 +597,15 @@ def test_a_copy_the_archive_refused_is_named_nowhere(_bound_session):
     _boot_trigger()
     enablement_event.record_archive(task_id="spec-1", attempt=1, files=[])
     enablement_event.record_round(
-        task_id="spec-1",
-        attempt=1,
-        result=_kept(enablement_accepted_config_path="/s/runs/integrate_patch/spec-1/integrate_patch.with_envs.yaml"),
-        stall_streak=0,
-        succeeded=True,
+        enablement_event.AuthoringRound(
+            task_id="spec-1",
+            attempt=1,
+            result=_kept(
+                enablement_accepted_config_path="/s/runs/integrate_patch/spec-1/integrate_patch.with_envs.yaml"
+            ),
+            stall_streak=0,
+            succeeded=True,
+        )
     )
 
     row = _ext(_bound_session)["attempts"]["rows"][0]
@@ -578,7 +625,9 @@ def test_an_unreadable_spool_on_finish_does_not_raise(_bound_session, monkeypatc
         "hyperloom.inference_optimizer.breakdown.recorder.assembler.event_parts",
         lambda *_a, **_k: (_ for _ in ()).throw(OSError("spool down")),
     )
-    enablement_event.finish(outcome=enablement_event.OUTCOME_STALLED, reason="enablement_attempts_exhausted")
+    enablement_event.finish(
+        enablement_event.LaneTerminal(outcome=enablement_event.OUTCOME_STALLED, reason="enablement_attempts_exhausted")
+    )
 
 
 def test_a_fault_the_lane_survived_is_named_on_the_event(_bound_session):
@@ -588,7 +637,7 @@ def test_a_fault_the_lane_survived_is_named_on_the_event(_bound_session):
         error_class="RuntimeError",
         message="task store went away",
     )
-    enablement_event.finish(outcome=enablement_event.OUTCOME_SUCCEEDED, reason="kept")
+    enablement_event.finish(enablement_event.LaneTerminal(outcome=enablement_event.OUTCOME_SUCCEEDED, reason="kept"))
 
     event = _event(_bound_session)
     assert event["status"] == "failed"
@@ -604,7 +653,9 @@ def test_only_the_first_fault_is_kept(_bound_session):
     _boot_trigger()
     enablement_event.record_fault(stage="first", error_class="RuntimeError", message="the cause")
     enablement_event.record_fault(stage="second", error_class="KeyError", message="its consequence")
-    enablement_event.finish(outcome=enablement_event.OUTCOME_STALLED, reason="enablement_stalled")
+    enablement_event.finish(
+        enablement_event.LaneTerminal(outcome=enablement_event.OUTCOME_STALLED, reason="enablement_stalled")
+    )
 
     assert _ext(_bound_session)["failure"]["message"] == "the cause"
 
@@ -718,9 +769,11 @@ def test_the_tri_state_scans_survive_into_the_recorded_recipe(_bound_session, ob
     rnd = _closing_round()
     rnd.build_extensions_not_carried = observed
     enablement_event.finish(
-        outcome=enablement_event.OUTCOME_SUCCEEDED,
-        reason="kept",
-        recipe=recipe_for(rnd, session_dir=str(_bound_session), mode="all"),
+        enablement_event.LaneTerminal(
+            outcome=enablement_event.OUTCOME_SUCCEEDED,
+            reason="kept",
+            recipe=recipe_for(rnd, session_dir=str(_bound_session), mode="all"),
+        )
     )
 
     recipe = _ext(_bound_session)["recipe"]
@@ -744,9 +797,11 @@ def test_a_build_linked_only_through_a_kept_round_survives_the_projection(_bound
     rnd.last_specialist_task_id = ""  # consumed, as it is when a build lands
     rnd.kept_rounds = [{"task_id": "spec-1", "patches": ["/p/1.patch"]}]
     enablement_event.finish(
-        outcome=enablement_event.OUTCOME_SUCCEEDED,
-        reason="kept",
-        recipe=recipe_for(rnd, session_dir=str(_bound_session), mode="all"),
+        enablement_event.LaneTerminal(
+            outcome=enablement_event.OUTCOME_SUCCEEDED,
+            reason="kept",
+            recipe=recipe_for(rnd, session_dir=str(_bound_session), mode="all"),
+        )
     )
 
     recipe = _ext(_bound_session)["recipe"]
@@ -779,9 +834,11 @@ def test_the_kept_rounds_carry_no_paths_from_the_authoring_host(_bound_session):
         }
     ]
     enablement_event.finish(
-        outcome=enablement_event.OUTCOME_SUCCEEDED,
-        reason="kept",
-        recipe=recipe_for(rnd, session_dir=str(_bound_session), mode="all"),
+        enablement_event.LaneTerminal(
+            outcome=enablement_event.OUTCOME_SUCCEEDED,
+            reason="kept",
+            recipe=recipe_for(rnd, session_dir=str(_bound_session), mode="all"),
+        )
     )
 
     blob = _json.dumps(_ext(_bound_session)["recipe"]["kept_rounds"])
@@ -793,9 +850,11 @@ def test_a_closed_lane_carries_a_replay_verdict(_bound_session):
     _capture_overlay(_bound_session)
     _boot_trigger()
     enablement_event.finish(
-        outcome=enablement_event.OUTCOME_SUCCEEDED,
-        reason="kept",
-        recipe=recipe_for(_closing_round(), session_dir=str(_bound_session), mode="all"),
+        enablement_event.LaneTerminal(
+            outcome=enablement_event.OUTCOME_SUCCEEDED,
+            reason="kept",
+            recipe=recipe_for(_closing_round(), session_dir=str(_bound_session), mode="all"),
+        )
     )
 
     recipe = _ext(_bound_session)["recipe"]
@@ -825,9 +884,11 @@ def test_an_uncapturable_stack_closes_the_lane_as_insufficient(_bound_session):
 
     _boot_trigger()
     enablement_event.finish(
-        outcome=enablement_event.OUTCOME_SUCCEEDED,
-        reason="kept",
-        recipe=recipe_for(_closing_round(captured=False), session_dir=str(_bound_session), mode="all"),
+        enablement_event.LaneTerminal(
+            outcome=enablement_event.OUTCOME_SUCCEEDED,
+            reason="kept",
+            recipe=recipe_for(_closing_round(captured=False), session_dir=str(_bound_session), mode="all"),
+        )
     )
 
     decision = _ext(_bound_session)["recipe"]["replay_sufficiency"]
@@ -850,7 +911,9 @@ def test_a_lane_closed_without_its_state_records_no_recipe_rather_than_an_empty_
     from hyperloom.orchestrator.enablement.recipe.sufficiency import read_status
 
     _boot_trigger()
-    enablement_event.finish(outcome=enablement_event.OUTCOME_STALLED, reason="cap reached")
+    enablement_event.finish(
+        enablement_event.LaneTerminal(outcome=enablement_event.OUTCOME_STALLED, reason="cap reached")
+    )
 
     recipe = _ext(_bound_session)["recipe"]
     assert recipe is None
@@ -869,9 +932,11 @@ def test_a_recipe_too_large_to_record_is_reported_as_unjudged(_bound_session, mo
 
     _boot_trigger()
     enablement_event.finish(
-        outcome=enablement_event.OUTCOME_SUCCEEDED,
-        reason="kept",
-        recipe=recipe_for(_closing_round(), session_dir=str(_bound_session), mode="all"),
+        enablement_event.LaneTerminal(
+            outcome=enablement_event.OUTCOME_SUCCEEDED,
+            reason="kept",
+            recipe=recipe_for(_closing_round(), session_dir=str(_bound_session), mode="all"),
+        )
     )
 
     recipe = _ext(_bound_session)["recipe"]

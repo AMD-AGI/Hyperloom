@@ -11,6 +11,7 @@ from click.testing import CliRunner
 from hyperloom.common.env import EnvValueError
 from kernelforge.cli import forge_loop
 from kernelforge.cli.pr_references import (
+    PrReferenceQuery,
     _collect_pr_references,
     _git_remote_url,
     _pr_kb_enabled,
@@ -181,13 +182,15 @@ def test_a_failed_lookup_degrades_instead_of_raising(monkeypatch, tmp_path):
 
     assert (
         _collect_pr_references(
-            workspace_dir=str(tmp_path),
-            kernel_backend="aiter",
-            git_remote="",
-            source_files=(),
-            operator_name="moe",
-            target_functions=(),
-            budget_sec=1.0,
+            str(tmp_path),
+            PrReferenceQuery(
+                kernel_backend="aiter",
+                git_remote="",
+                source_files=(),
+                operator_name="moe",
+                target_functions=(),
+            ),
+            1.0,
         )
         is None
     )
@@ -204,13 +207,15 @@ def test_a_service_failure_is_absorbed_like_a_local_one(monkeypatch, tmp_path):
 
     assert (
         _collect_pr_references(
-            workspace_dir=str(tmp_path),
-            kernel_backend="aiter",
-            git_remote="",
-            source_files=(),
-            operator_name="moe",
-            target_functions=(),
-            budget_sec=1.0,
+            str(tmp_path),
+            PrReferenceQuery(
+                kernel_backend="aiter",
+                git_remote="",
+                source_files=(),
+                operator_name="moe",
+                target_functions=(),
+            ),
+            1.0,
         )
         is None
     )
@@ -227,13 +232,15 @@ def test_an_unexpected_failure_is_not_swallowed(monkeypatch, tmp_path):
 
     with pytest.raises(KeyboardInterrupt):
         _collect_pr_references(
-            workspace_dir=str(tmp_path),
-            kernel_backend="aiter",
-            git_remote="",
-            source_files=(),
-            operator_name="moe",
-            target_functions=(),
-            budget_sec=1.0,
+            str(tmp_path),
+            PrReferenceQuery(
+                kernel_backend="aiter",
+                git_remote="",
+                source_files=(),
+                operator_name="moe",
+                target_functions=(),
+            ),
+            1.0,
         )
 
 

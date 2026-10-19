@@ -99,9 +99,11 @@ def _lane_factory(tmp_path: Path):
     return cli_lanes._make_lane_agent_factory(
         make_agent=agent_module.make_agent_fn,
         config=config,
-        workspace_dir=str(workspace),
-        driver=str(workspace / "forge_driver.py"),
-        source_files=[str(workspace / "src" / "kernel.py")],
+        binding=cli_lanes.LaneBinding(
+            workspace_dir=str(workspace),
+            driver=str(workspace / "forge_driver.py"),
+            source_files=[str(workspace / "src" / "kernel.py")],
+        ),
         session_kwargs={
             "program_md": "Optimize VALUE.",
             "agent_backend": "claude",

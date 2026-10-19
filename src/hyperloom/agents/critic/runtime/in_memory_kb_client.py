@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .errors import KBValidationError
+from .kb_client import KBListQuery
 
 
 # ---------------------------------------------------------------------------
@@ -132,34 +133,25 @@ class InMemoryKBClient:
             raise KBValidationError(f"{endpoint}: simulated failure {err!r}")
 
     # list
-    def list(
-        self,
-        *,
-        scope_filter: dict[str, Any],
-        kind: str | None = None,
-        metadata_filter: dict[str, Any] | None = None,
-        limit: int = 10,
-        sort_by: str = "updated_at_desc",
-        include_deleted: bool = False,
-    ) -> dict[str, Any]:
+    def list(self, query: KBListQuery) -> dict[str, Any]:
         """List rows matching a scope filter (and optional metadata filter)."""
         self._maybe_fail("list")
-        if not isinstance(scope_filter, dict):
+        if not isinstance(query.scope_filter, dict):
             raise KBValidationError("list: scope_filter must be an object")
         out: list[_Row] = []
         for row in self._rows.values():
-            if row.deleted and not include_deleted:
+            if row.deleted and not query.include_deleted:
                 continue
-            if kind is not None and row.kind != kind:
+            if query.kind is not None and row.kind != query.kind:
                 continue
-            if not _scope_contains(row.scope, scope_filter):
+            if not _scope_contains(row.scope, query.scope_filter):
                 continue
-            if metadata_filter and not _matches_metadata(row.metadata, metadata_filter):
+            if query.metadata_filter and not _matches_metadata(row.metadata, query.metadata_filter):
                 continue
             out.append(row)
-        out.sort(key=lambda r: r.updated_at, reverse=(sort_by == "updated_at_desc"))
-        if limit:
-            out = out[:limit]
+        out.sort(key=lambda r: r.updated_at, reverse=(query.sort_by == "updated_at_desc"))
+        if query.limit:
+            out = out[: query.limit]
         return {"entries": [r.to_dict() for r in out], "count": len(out)}
 
     # upsert
