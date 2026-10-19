@@ -55,6 +55,25 @@ def test_scope_allows_hook_only(workload, tmp_path):
         check_patch_scope(tmp_path, [patch(hook.name)])
 
 
+def test_launch_scope_check_accepts_the_declared_hook(workload, tmp_path):
+    from hyperloom.orchestrator.actions.executors.bypass_scriptable import enforce_custom_scope
+
+    root, hook, _, _ = workload
+    assert optimization_file() == hook
+    enforce_custom_scope("custom")
+    enforce_custom_scope("sglang")
+
+
+def test_launch_scope_check_refuses_an_out_of_boundary_root(workload, tmp_path, monkeypatch):
+    from hyperloom.orchestrator.actions.executors.bypass_scriptable import enforce_custom_scope
+
+    _, hook, _, _ = workload
+    monkeypatch.setenv("FRAMEWORK_REPO_PATH", str(tmp_path / "elsewhere"))
+    (tmp_path / "elsewhere").mkdir()
+    with pytest.raises(ValueError, match="permits changes only"):
+        enforce_custom_scope("custom")
+
+
 def test_integration_cannot_use_recorded_foreign_root(workload, tmp_path):
     from hyperloom.orchestrator.actions.executors.integrate_patch import _resolve_framework_root
 
