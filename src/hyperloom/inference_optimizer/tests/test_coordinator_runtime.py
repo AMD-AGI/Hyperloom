@@ -512,17 +512,15 @@ class _SelfTracingLLMFailingBackend(_LLMFailingBackend):
         max_turns: int = 1,
     ) -> "BackendTurnResult":  # noqa: F821 — protocol return type, raises before returning
         from hyperloom.orchestrator.roles.base import LLMCallFailed
-        from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, append_llm_call
+        from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, LLMCallSite, append_llm_call
 
         self.calls += 1
         error = LLMCallFailed(f"simulated {self.name} gateway 400 #{self.calls}")
         append_llm_call(
             session_dir=self._session_dir,
             record=LLMCallRecord.for_failure(
-                session_id=self._session_dir.name,
-                component="critic",
-                role="critic",
-                error=error,
+                LLMCallSite(session_id=self._session_dir.name, component="critic", role="critic"),
+                error,
                 model="claude-opus-4-7",
             ),
         )

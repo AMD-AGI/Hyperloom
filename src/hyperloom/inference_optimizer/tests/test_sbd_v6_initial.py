@@ -259,11 +259,13 @@ def test_install_event_stays_pending_until_session_creation(tmp_path):
     preflight._finish_install_event(
         event,
         args=args,
-        benchmark_backend="bypass",
-        benchmark_python="python",
-        magpie_python="python",
-        inferencex_path="/opt/InferenceX",
-        resolved_urls=("", "https://api.openai.com/v1"),
+        runtime=preflight.PreflightRuntime(
+            benchmark_backend="bypass",
+            benchmark_python="python",
+            magpie_python="python",
+            inferencex_path="/opt/InferenceX",
+            resolved_urls=("", "https://api.openai.com/v1"),
+        ),
     )
 
     assert not (tmp_path / "reports" / "sbd_v6" / "timeline").exists()
