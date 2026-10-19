@@ -138,6 +138,7 @@ async def test_a_pass_forged_onto_a_bundle_that_holds_none_is_not_verified(tmp_p
 async def test_an_output_edited_in_the_archived_bundle_is_caught_by_the_signature(tmp_path: Path, rig: Rig) -> None:
     executor, result = await _run(tmp_path, rig)
     (edited,) = (tmp_path / "archive").rglob("outputs.jsonl")
+    edited.chmod(0o644)
     edited.write_text(edited.read_text().replace('"tokens": [1, 2]', '"tokens": [1, 9]'))
 
     with pytest.raises(ResultUnverified, match="rejected"):
