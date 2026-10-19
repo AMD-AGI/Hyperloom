@@ -32,6 +32,11 @@ sources:
 XCD order, scheduling hints or the epilogue → `flydsl_gemm_schedule_and_locality.md`; the arguments of a
 shipped kernel → `../optimize/flydsl_levers/flydsl_knob_space.md`.
 
+FlyDSL's guide starts the tile choice from `preshuffle_gemm`'s constraints and a table by M
+(`../optimize/gemm-optimization.md` §1.3–§1.5), and its checklist asks for enough blocks to fill the GPU (§13).
+This card is the arithmetic behind "enough": dispatch rounds, last-round fill, and what split-K or a different
+tile can return.
+
 ## 1. Count workgroups and dispatch rounds — before any profile
 
 ```

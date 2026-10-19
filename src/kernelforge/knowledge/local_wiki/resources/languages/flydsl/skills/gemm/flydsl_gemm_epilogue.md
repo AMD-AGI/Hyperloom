@@ -16,7 +16,8 @@ sources:
 # The FlyDSL GEMM epilogue
 
 > "GH" is `primus_turbo/flydsl/utils/gemm_helper.py`, and "FP8"/"FP4"/"MX8" are the dense fp8, MXFP4 and
-> MXFP8 kernels under `primus_turbo/flydsl/gemm/`, all at Primus-Turbo main `7615a5a2`. Numbers marked
+> MXFP8 kernels under `primus_turbo/flydsl/gemm/`, all at Primus-Turbo main `7615a5a2`. "PS" and "A16" are
+> FlyDSL's `kernels/gemm/preshuffle_gemm.py` and `kernels/gemm/gemm_a16w16_gfx950.py`. Numbers marked
 > *(field)* are measured values. Use them for direction and order of magnitude, not as targets.
 
 ## Route here when
@@ -61,18 +62,22 @@ dense 8192²×4096 (16 KB rows, `N % 256 == 0`). The same store was 0.7–1.3% s
 
 ## 3. Store classes, from free to expensive
 
-Turbo keeps one store class per technique (GH:778-1525). Prefer the cheapest class that reaches the 64 B
-floor.
+FlyDSL's guide describes the two ends (`../optimize/gemm-optimization.md` §7): a **direct store** from the MFMA
+layout, and **CShuffle**, which writes the accumulators to LDS row-major, re-reads them as `(MLane=8,
+NLane=32)` after a barrier and stores 4-element vectors, for `tile_n ≥ 128`. In FlyDSL v0.3.2, PS stores
+directly and can fuse a per-N bias with ReLU/SiLU/GELU (`epilogue=`); A16 and
+`kernels/common/mma/mfma_epilogues.py` carry the CShuffle store. Turbo keeps one store class per technique
+between those two ends (GH:778-1525). Prefer the cheapest class that reaches the 64 B floor.
 
-| Class | How a lane gets adjacent columns | Cost | Turbo |
+| Class | How a lane gets adjacent columns | Cost | Where |
 |---|---|---|---|
-| Scalar | none: `buffer_store_short` per value, column step in the immediate | baseline, 32 B requests | `StoreCPerTensor`, GH:778 |
+| Scalar | none: `buffer_store_short` per value, column step in the immediate | baseline, 32 B requests | FlyDSL PS direct store; Turbo `StoreCPerTensor`, GH:778 |
 | **Row-permuted feed** | permute the **global rows the B fill fetches** so a lane's two n-fragments become adjacent output columns | **zero instructions**: only the prologue's per-lane global offsets change | `StoreCPerTensorPairCol`, GH:1061; `compute_global_swizzle_pair`, GH:256 |
 | DPP pair | `v_cvt_pk_bf16_f32` + one `quad_perm` DPP swap + `v_perm_b32` | 1 cvt + 1 DPP + 1 perm per pair | `StoreCPerTensorPairN`, GH:1113 |
 | Row merge | one `v_permlane16_swap_b32` per packed fragment pair moves the second fragment into the other 32-lane half, so one store covers a whole 64 B row run | 1 permlane per pair | `StoreCPerTensorRowN`, GH:1004 |
 | Quad/fold | the row permutation folds 4 or 8 columns into one lane: one `dwordx2`/`dwordx4` | offsets only | `StoreCPerTensorQuadN`, GH:1251 |
 | Line via LDS | transpose through LDS with `ds_read_b64_tr_b16` into a whole 128 B line per fragment row; scratch borrowed from an operand buffer | LDS traffic + fence | `StoreCPerTensorLineN`, GH:1180 |
-| CShuffle | per-wave LDS staging, then 128-bit stores | LDS + barriers | `StoreCPerTensorCShuffle`, GH:1335 |
+| CShuffle | LDS staging, then vector stores | LDS + barriers | FlyDSL A16 `write_cshuffle_vec_to_global`, `c_shuffle_epilog`; Turbo `StoreCPerTensorCShuffle`, GH:1335 |
 | Transposed accumulator | swap the MFMA operands so the accumulator holds Cᵀ; two `permlane16_swap`s give 8 contiguous columns, one `dwordx4` | 2 permlanes per 8 columns | FP4 `store_tacc_wide`, FP4:513 |
 
 How to choose:

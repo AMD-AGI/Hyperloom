@@ -30,9 +30,12 @@ sources:
 - Deciding how an operand reaches the MFMA: LDS, direct-to-VGPR, sync copy or DMA.
 - Global loads or C stores look like the cost, or a prefetch did not help.
 
-The general LDS and prefetch cards (`../optimize/lds-optimization.md`,
-`../optimize/prefetch-data-load.md`) cover non-GEMM kernels too; hardware numbers live in
-`../../../../hardware/mi350_lds.md`.
+FlyDSL's GEMM guide shows the baseline data path on `preshuffle_gemm`: A through LDS by sync copy or
+async DMA, B preshuffled straight to VGPRs, the XOR swizzle and its write/read pair
+(`../optimize/gemm-optimization.md` §3, §4, §11, §12). The general LDS and prefetch skills
+(`../optimize/lds-optimization.md`, `../optimize/prefetch-data-load.md`) cover diagnosis from a trace,
+swizzle vs padding, write-to-read distance and the prologue/loop/epilogue prefetch transformation, for any
+kernel. Hardware numbers live in `../../../../hardware/mi350_lds.md`.
 
 ## 1. Allocate LDS the v0.3.2 way
 
@@ -68,12 +71,27 @@ overlays `ab` and `c`). `SmemAllocator` / `SmemPtr` are legacy.
 
 ## 3. Bank conflicts: compute the floor, then measure
 
+**First tell the three LDS failure modes apart; each has a different fix.**
+
+| Mode | How it shows up | Fix |
+|---|---|---|
+| Capacity | LDS per workgroup caps occupancy | smaller tile or fewer stages |
+| Layout | bank conflicts from the stride or the access pattern | swizzle or padding |
+| Timing | a `ds_write` too close to the `ds_read` that depends on it | more write-to-read distance (`../optimize/lds-optimization.md`) |
+
+Treating every LDS symptom as a swizzle problem wastes the most time: check the write-to-read distance before
+the layout.
+
 gfx950 LDS has 64 banks of 4 bytes; bank = `(byte_addr / 4) mod 64`. For a 32-bit access whose lane
 stride is `s` dwords, the lanes of one issue phase touch `64 / gcd(s, 64)` distinct banks. A 128-byte
 row stride (`s = 32`) lands every lane on two banks — a heavy conflict, not the "2-way" an old note
 claimed. Wider accesses (`ds_read_b64`, `b128`) serve fewer lanes per phase; do the same count per
 phase.
 
+- **Swizzle or pad.** XOR swizzle when the access pattern is regular and LDS headroom is tight; padding when
+  a small stride bump removes the conflict and the swizzle arithmetic would clutter the address code.
+  gfx950's 160 KiB makes padding affordable more often than on gfx942. A swizzle or padding derived for
+  gfx942's 32 banks is unverified on gfx950; re-derive it.
 - Padding must keep the 8- or 16-byte alignment a `ds_read_b64/b128` needs. `+1 element` on fp16 breaks
   it; pad by whole 16-byte slots, or swizzle.
 - Compare `SQ_LDS_BANK_CONFLICT` against the floor you computed by hand, not against zero.
@@ -168,6 +186,9 @@ phase.
   persist; a plain `range()` carries every name the body reassigns
   (`../bottleneck/debug-flydsl-kernel.md` § The three loop forms). Carry everything the next
   iteration needs — scale values and addresses, not only the tiles.
+- **Prefetch pays only when independent work can fill the latency it exposes**: next-tile loads, address
+  arithmetic, MFMAs that do not depend on the load in flight, epilogue setup that touches no data in flight.
+  The general transformation (prologue, loop-carried buffers, epilogue) is `../optimize/prefetch-data-load.md`.
 - **Prefetch hides latency, not capacity.** *(field)* When the working set thrashed L2, deeper prefetch
   bought nothing; fix the tile order (`flydsl_gemm_schedule_and_locality.md` §2) or the footprint.
 - **Bypassing LDS for an operand several waves share costs twice.** Each wave reloads it from global,
@@ -212,14 +233,18 @@ at most 4 GiB.
 - *(field)* A transpose-read operand costs more LDS instructions per MAC than a K-contiguous one: 8 B per read
   against 16 B. An NT kernel's steady state ran 11–14% faster per K iteration than the same tile on TN.
 
-## 10. Operand layout: avoid offline shuffles, keep rows on cache lines
+## 10. Operand layout: preshuffle or permute in the fill; keep rows on cache lines
 
-- **Permute rows in the fill instead of pre-shuffling weights offline.** Changing only which global row
-  each G2S load fetches reorders a lane's n-fragments with no runtime cost, and the LDS image, swizzle
-  and reads stay the same (`compute_global_swizzle_pair`, GH:256-267; epilogue use in
-  `flydsl_gemm_epilogue.md` §3). Turbo needs no offline weight preshuffle on its dense paths, which
-  matters in training, where weights change every step. FlyDSL's PS and fp4 kernels require B
-  pre-shuffled on the host.
+There are two ways to get an operand into MFMA order without a runtime shuffle:
+- **Preshuffle it on the host.** FlyDSL's PS takes B as `[N/16, K/kpack, 4, 16, kpack_bytes]`, so each
+  `buffer_load_dwordx4` lands in MFMA register layout and B skips LDS (`../optimize/gemm-optimization.md` §12);
+  the MXFP4 kernels take `shuffle_weight_w4` / `shuffle_scale_w4` layouts. The cost is a host-side pass, paid
+  once for weights that do not change, as in inference.
+- **Permute rows in the fill.** Changing only which global row each G2S load fetches reorders a lane's
+  n-fragments with no runtime cost, and the LDS image, swizzle and reads stay the same
+  (`compute_global_swizzle_pair`, GH:256-267; epilogue use in `flydsl_gemm_epilogue.md` §3). Turbo's dense
+  paths use this and need no offline step, which matters in training, where weights change every step.
+
 - **Keep every operand row on a 128 B line.** Take the row stride from the tensor, not from K, so a
   caller can pad rows (`row_bytes`, FP4). For MXFP4, `K % 256 == 0` is what puts the row stride `K/2` on
   a 128 B line; it is not a kernel constraint. *(field)* With the block count fixed, row phases of 64,

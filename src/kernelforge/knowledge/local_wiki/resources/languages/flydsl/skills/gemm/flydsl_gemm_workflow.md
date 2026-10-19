@@ -5,6 +5,7 @@ lever: flydsl_gemm_workflow
 gens: [gfx950]
 updated: 2026-10-19
 sources:
+  - ROCm/FlyDSL@dd8373349:.claude/skills/gemm-optimization/SKILL.md
   - AMD-AGI/Primus-Turbo@7615a5a2:agent/skills/kernel-optimize/SKILL.md
   - AMD-AGI/Primus-Turbo@7615a5a2:agent/rules/iteration_rules.mdc
 ---
@@ -30,6 +31,7 @@ or how to run the next round.
 | Correctness gates, races, silent-wrong traps | `flydsl_gemm_correctness.md` |
 | M ≤ 256: decode-shape rulers, grid, split-K reduction, aiter tuned rows | `flydsl_gemm_small_m.md` |
 | Rulers, noise floors, A/B design, what to report | `flydsl_gemm_measurement.md` |
+| How a FlyDSL GEMM is put together (FlyDSL's walkthrough on `preshuffle_gemm`) | `../optimize/gemm-optimization.md` |
 | The kernel is wrong, not slow | `../bottleneck/debug-flydsl-kernel.md` |
 | Writing your first FlyDSL kernel | `../../API_docs/flydsl-tile-programming.md` |
 | Not a GEMM, or the bottleneck is still unidentified | `../optimize/flydsl_levers/flydsl_authoring_method.md` |
@@ -39,13 +41,20 @@ or how to run the next round.
 (`../../../../framework/aiter/skills/optimize/aiter_levers/aiter_flydsl_libtype.md`)? Both are cheaper to
 answer than a rewrite.
 
-## Step 0 — start from the reference kernel, not from a blank file
+## Step 0 — start from a reference kernel, not from a blank file
 
-Read the Primus-Turbo FlyDSL GEMM for your dtype and layout before designing your own (kernel map in
-`INDEX.md`). It is built for training shapes; for M ≤ 256 use `flydsl_gemm_small_m.md` instead. Its comments
-record why each choice was made, and it runs on FlyDSL v0.3.2. Copy the structure and the reasoning;
-re-derive the constants (tile tables, wait counts, margins, L2 thresholds) for your shape and machine. Those
-constants were tuned on specific shapes.
+Read FlyDSL's `../optimize/gemm-optimization.md` for how the pieces of a FlyDSL GEMM fit together. Then pick
+the closest reference kernel for your dtype, layout and shape from the two maps in `INDEX.md`:
+- **FlyDSL's `kernels/gemm/`**: fp8/int8/fp16/bf16 with a preshuffled B (`preshuffle_gemm`), bf16/fp16 with
+  async DMA and split-K (`gemm_a16w16_gfx950`, also the small-M kernel), and fp8/MXFP4 NT in 8-wave and
+  4-wave forms. K must be a multiple of the K tile.
+- **Primus-Turbo's FlyDSL GEMMs**: NN and TN as well as NT, any K, a whole-loop inline-asm design, a
+  per-shape race between designs, and fused epilogues. They target training shapes; for M ≤ 256 use
+  `flydsl_gemm_small_m.md`.
+
+Both run on FlyDSL v0.3.2. Copy the structure and the reasoning; re-derive the constants (tile and preload
+tables, wait counts, margins, L2 thresholds) for your shape and machine. Those constants were tuned on specific
+shapes.
 
 ## Step 1 — establish that it really is a GEMM
 
@@ -53,6 +62,7 @@ Read both the device kernel and the host launcher, and answer:
 - What are the logical M, N and K, and which of them change at run time?
 - How do workgroups and waves divide the output tile? Which waves share a SIMD?
 - Which operands come from global memory every iteration, and how (LDS DMA, sync copy, direct to VGPR)?
+- Which data is re-read often enough that staging it through LDS pays for itself?
 - Does the epilogue store straight out, reorder first, or fuse other work?
 
 A kernel with incidental MFMA is not a GEMM, and GEMM advice will not help it.
@@ -70,6 +80,9 @@ First do the arithmetic that needs no profile: tiles, dispatch rounds and last-r
 | Time in `s_barrier` | wave drift or too many rendezvous; check the wave → SIMD mapping first |
 | Few MFMAs per memory instruction | the loop body or its schedule |
 | Dense MFMAs but poor wall time | tile shape and rounds, occupancy, the store path, or the power cap |
+
+FlyDSL's guide has the same symptom table with first actions (`../optimize/gemm-optimization.md` §8.4) and the
+instruction-count method for the hot loop (§9); `../profile/kernel-trace-analysis/SKILL.md` reads the trace.
 
 **Two common misreadings.**
 - TF/s rising with K is not proof that a kernel is memory-bound. A fixed per-tile cost (prologue,

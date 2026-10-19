@@ -19,6 +19,11 @@ updated: 2026-10-19
 - A counter says "LDS-bound" or "latency-bound" and you are about to act on it.
 - A change moved wall time but not the counter you expected, or the other way round.
 
+Start from the trace: `../profile/capture-kernel-trace.md` and `../profile/kernel-trace-analysis/SKILL.md`
+capture and read an ATT trace, and FlyDSL's GEMM guide maps the common GEMM stalls to first actions and counts
+the hot loop (`../optimize/gemm-optimization.md` §8.4, §9). This card is for when those readings are
+ambiguous: probes that remove or repeat a part and read the time.
+
 ## 1. Two probes that classify the regime without a profiler
 
 **Compute additivity.** Add compute with no extra memory traffic and see whether wall time moves. For

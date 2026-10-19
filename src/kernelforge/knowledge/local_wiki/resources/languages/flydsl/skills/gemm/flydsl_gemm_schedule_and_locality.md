@@ -18,7 +18,8 @@ sources:
 
 > Each section here is a place where the obvious move measured in the wrong direction. Read the rule,
 > then check whether your kernel is in the regime it was measured in. "GH" is Primus-Turbo's
-> `primus_turbo/flydsl/utils/gemm_helper.py` at main `7615a5a2`.
+> `primus_turbo/flydsl/utils/gemm_helper.py` at main `7615a5a2`; "PS" and "A16" are FlyDSL's
+> `kernels/gemm/preshuffle_gemm.py` and `kernels/gemm/gemm_a16w16_gfx950.py`.
 >
 > Numbers marked *(field)* are measured values. Use them for direction and order of magnitude, not as
 > targets.
@@ -68,6 +69,11 @@ The GEMM-specific rules:
 
 *(field)* Porting one kernel's winning band/XCD setting to another kernel made it 0.8% to 5.7% slower. Predict the direction from the reuse class, then sweep 3–5 points on every shape class
 you are scored on.
+
+**FlyDSL's kernels expose the order as an argument:** `xcd_swizzle` in PS (`xcd_remap_bx_by`, in
+`kernels/common/mma/mfma_preshuffle_pipeline.py`), `use_xcd_remap` in `fp8_gemm_4wave`, and `group_m`
+(`BlockSwizzle`) in A16. A16's swizzle falls back to the plain order for small grids
+(`flydsl_gemm_small_m.md` §6).
 
 **How Turbo orders tiles** (Primus-Turbo main `7615a5a2`, `primus_turbo/flydsl/utils/gemm_helper.py` = GH):
 - `xcd_remap_pid` (GH:1639) gives each XCD a contiguous slice of logical tiles, for any total. It is a
@@ -125,6 +131,13 @@ FlyDSL's helpers are thin wrappers over `sched_group_barrier`:
 **includes VALU**), `0x002` VALU, `0x004` SALU, `0x008` MFMA, `0x010` all VMEM, `0x020`/`0x040` VMEM
 read/write, `0x080` all DS, `0x100`/`0x200` DS read/write, `0x400` transcendental, `0x800` LDS DMA. A set
 bit means that class **may cross** the fence; `0` pins everything.
+
+**FlyDSL's `hot_loop_scheduler` is the reference use.** `preshuffle_gemm` builds one hint table per tile. In the
+sync-copy pattern FlyDSL's guide describes, a prologue places the first LDS reads, then each step is one VMEM
+load, a group of MFMAs, one LDS read and a second group of MFMAs, with the next tile's LDS writes at the tail so
+they land before the barrier (`../optimize/gemm-optimization.md` §5.3–§5.4). With async copy it spreads the LDS reads and VMEM loads evenly
+over all MFMAs (§5.5); the `preload=(dsrd, dvmem)` argument sets how many go ahead of the first MFMA
+(PS:450-473).
 
 Fences inside a fully unrolled epilogue usually exist to stop the scheduler from hoisting work and
 lengthening live ranges. What must stay pinned is the arithmetic, not only the memory operations:

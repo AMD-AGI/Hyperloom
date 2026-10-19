@@ -28,6 +28,11 @@ sources:
 - A gate passes but you have not shown it runs the code you changed.
 - Outputs differ between runs, or only on some shapes, or only after the first call.
 
+**Static checks first; they cost nothing.** LDS stays within 160 KiB per workgroup on gfx950; tile packing and
+vector widths match the operand layout; the swizzle or padding is applied identically by the writer and the
+reader (`../optimize/gemm-optimization.md` §3.4); accumulator and output conversions cannot overflow; edges hold
+for shapes that do not divide the tile.
+
 ## 1. A gate must execute the path you changed
 
 - **Coverage first, repetition second.** A race shows up as a jittering error. A path the gate
