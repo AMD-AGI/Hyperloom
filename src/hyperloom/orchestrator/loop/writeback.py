@@ -715,6 +715,54 @@ def _variant_source_layer(bv: Mapping[str, Any]) -> dict[str, Any]:
     return fields
 
 
+def _preserves_measured_eval_trigger(state: Any, result_payload: Mapping[str, Any]) -> bool:
+    """Whether the stored enablement trigger outranks this eval failure's own.
+
+    A run that never executed the eval characterizes nothing: it reports
+    ``accuracy_unavailable`` with no task, metric or source. Letting it
+    overwrite a trigger that did measure an accuracy downgrades real
+    ``accuracy_below_floor`` evidence, and the next enablement attempt loses the
+    measurement it is supposed to reproduce. Contract fingerprints cannot gate
+    this: ``RUN_EVAL`` is itself a contract field, so the eval-less run's
+    fingerprint never matches the measured one.
+    """
+    if result_payload.get(BASELINE_EVAL_FAILURE_KIND_KEY) != EVAL_KIND_ACCURACY_UNAVAILABLE:
+        return False
+    if to_float(result_payload.get(BASELINE_EVAL_OBSERVED_ACCURACY_KEY)) is not None:
+        return False
+    stored_kind = str(state.enablement.baseline_eval_kind or "")
+    return bool(stored_kind) and stored_kind != EVAL_KIND_ACCURACY_UNAVAILABLE
+
+
+def _adopt_eval_trigger(state: Any, result_payload: Mapping[str, Any]) -> None:
+    """Make this eval failure the evidence the enablement lane authors against.
+
+    Seeds ``enablement_launch_log`` from the evidence so the FRAMEWORK pump
+    dispatches even when the failure carries no boot log.
+    """
+    enablement = state.enablement
+    cfg = result_payload.get("materialized_config")
+    if isinstance(cfg, str) and cfg:
+        enablement.probe_config_path = cfg
+    fingerprint = result_payload.get(BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY)
+    if isinstance(fingerprint, str) and fingerprint:
+        enablement.eval_contract_fingerprint = fingerprint
+    incoming_kind = result_payload.get(BASELINE_EVAL_FAILURE_KIND_KEY)
+    if isinstance(incoming_kind, str) and incoming_kind:
+        enablement.baseline_eval_kind = incoming_kind
+    observed = to_float(result_payload.get(BASELINE_EVAL_OBSERVED_ACCURACY_KEY))
+    if observed is not None:
+        enablement.observed_accuracy = float(observed)
+    enablement.observed_task = str(result_payload.get("accuracy_task") or "")
+    enablement.observed_metric = str(result_payload.get("accuracy_metric") or "")
+    evidence = str(result_payload.get(BASELINE_EVAL_EVIDENCE_KEY) or "")
+    if evidence:
+        enablement.baseline_eval_evidence = evidence[:4000]
+        enablement.record_launch_observation(
+            log=evidence, observation_path=str(result_payload.get("boot_observation_path") or "")
+        )
+
+
 class _StackKey(NamedTuple):
     """Where a KEEP sits on the optimization stack."""
 
@@ -1424,59 +1472,12 @@ class WritebackCollaborator(GeakRevalidation, GeakHarnessReplay, LaunchIdentity)
                 delta_pct=result.get("delta_pct"),
             )
 
-    def _preserves_measured_eval_trigger(self, result_payload: Mapping[str, Any]) -> bool:
-        """Whether the stored enablement trigger outranks this eval failure's own.
-
-        A run that never executed the eval characterizes nothing: it reports
-        ``accuracy_unavailable`` with no task, metric or source. Letting it
-        overwrite a trigger that did measure an accuracy downgrades real
-        ``accuracy_below_floor`` evidence, and the next enablement attempt loses
-        the measurement it is supposed to reproduce. Contract fingerprints
-        cannot gate this: ``RUN_EVAL`` is itself a contract field, so the
-        eval-less run's fingerprint never matches the measured one.
-        """
-        if result_payload.get(BASELINE_EVAL_FAILURE_KIND_KEY) != EVAL_KIND_ACCURACY_UNAVAILABLE:
-            return False
-        if to_float(result_payload.get(BASELINE_EVAL_OBSERVED_ACCURACY_KEY)) is not None:
-            return False
-        stored_kind = str(self.shared_state.enablement.baseline_eval_kind or "")
-        return bool(stored_kind) and stored_kind != EVAL_KIND_ACCURACY_UNAVAILABLE
-
-    def _adopt_eval_trigger(self, result_payload: dict[str, Any]) -> None:
-        """Make this eval failure the trigger the enablement lane authors against.
-
-        Seeds ``enablement_launch_log`` from the evidence so the FRAMEWORK pump
-        dispatches even when the failure carries no boot log.
-        """
-        state = self.shared_state
-        cfg = result_payload.get("materialized_config")
-        if isinstance(cfg, str) and cfg:
-            state.enablement.probe_config_path = cfg
-        fp = result_payload.get(BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY)
-        if isinstance(fp, str) and fp:
-            state.enablement.eval_contract_fingerprint = fp
-        incoming_kind = result_payload.get(BASELINE_EVAL_FAILURE_KIND_KEY)
-        if isinstance(incoming_kind, str) and incoming_kind:
-            state.enablement.baseline_eval_kind = incoming_kind
-        observed = to_float(result_payload.get(BASELINE_EVAL_OBSERVED_ACCURACY_KEY))
-        if observed is not None:
-            state.enablement.observed_accuracy = float(observed)
-        state.enablement.observed_task = str(result_payload.get("accuracy_task") or "")
-        state.enablement.observed_metric = str(result_payload.get("accuracy_metric") or "")
-        evidence = str(result_payload.get(BASELINE_EVAL_EVIDENCE_KEY) or "")
-        if evidence:
-            state.enablement.baseline_eval_evidence = evidence[:4000]
-            state.enablement.record_launch_observation(
-                log=evidence, observation_path=str(result_payload.get("boot_observation_path") or "")
-            )
-        self._record_enablement_eval_trigger()
-
     def _persist_eval_failure(self, result_payload: dict[str, Any]) -> None:
         """Persist an eval-rooted baseline failure so enablement can re-run it."""
         state = self.shared_state
         was_validation_pending = bool(state.enablement.validation_pending)
         stored_kind = str(state.enablement.baseline_eval_kind or "")
-        preserve_measured_trigger = self._preserves_measured_eval_trigger(result_payload)
+        preserve_measured_trigger = _preserves_measured_eval_trigger(state, result_payload)
         state.enablement.origin = "eval"
         state.enablement.pending = True
         # A failed revalidation reopens the authoring loop; its cost is charged
@@ -1496,7 +1497,6 @@ class WritebackCollaborator(GeakRevalidation, GeakHarnessReplay, LaunchIdentity)
         if floor is not None:
             state.enablement.accuracy_floor = float(floor)
         if preserve_measured_trigger:
-            self._record_enablement_eval_trigger()
             log.info(
                 "enablement: keeping measured trigger kind=%s (accuracy=%s task=%s); "
                 "an eval-less baseline reported accuracy_unavailable and must not "
@@ -1505,8 +1505,9 @@ class WritebackCollaborator(GeakRevalidation, GeakHarnessReplay, LaunchIdentity)
                 state.enablement.observed_accuracy,
                 state.enablement.observed_task,
             )
-            return
-        self._adopt_eval_trigger(result_payload)
+        else:
+            _adopt_eval_trigger(state, result_payload)
+        self._record_enablement_eval_trigger()
 
     def _record_enablement_eval_trigger(self) -> None:
         """Open the enablement lane's event on the eval failure that triggered it.
@@ -3900,31 +3901,26 @@ class WritebackCollaborator(GeakRevalidation, GeakHarnessReplay, LaunchIdentity)
         except Exception:
             log.debug("resume: revalidation pending recovery check failed", exc_info=True)
 
-    async def _surface_orphaned_keep(self, report: dict[str, Any], key: _StackKey, task_id: Any) -> None:
+    async def _surface_orphaned_keep(self, report: dict[str, Any], kind: str, variant: str, task_id: Any) -> None:
         """Alert on an explore or framework KEEP the stack lost, without resurrecting it.
 
         Which stack such a KEEP landed on is known only to the round that ran
         it, so a replay here cannot tell recovery from re-applying an eviction.
         """
         report["warnings"].append(
-            {
-                "kind": "orphaned_keep",
-                "orphan_kind": key.action,
-                "variant": key.variant,
-                "task_id": task_id,
-            }
+            {"kind": "orphaned_keep", "orphan_kind": kind, "variant": variant, "task_id": task_id}
         )
         await self.bus.record_observation(
             "coordinator",
             "observation",
-            {"kind": "orphaned_keep", "severity": "medium", "orphan_kind": key.action, "variant": key.variant},
+            {"kind": "orphaned_keep", "severity": "medium", "orphan_kind": kind, "variant": variant},
         )
 
     async def _recover_orphaned_integrate_keep(
         self,
         result: dict[str, Any],
         report: dict[str, Any],
-        key: _StackKey,
+        variant: str,
         task_id: Any,
     ) -> bool:
         """Replay an integrate_patch KEEP the stack lost; whether the stack now carries it.
@@ -3932,13 +3928,14 @@ class WritebackCollaborator(GeakRevalidation, GeakHarnessReplay, LaunchIdentity)
         A KEEP whose run workspace is gone can no longer be replayed, so it is
         discarded with an operator alert instead.
         """
+        kind = "integrate_patch"
         workspace = str(result.get("workspace") or "").strip()
         if workspace and not Path(workspace).exists():
             report["warnings"].append(
                 {
                     "kind": "orphaned_keep_discarded",
-                    "orphan_kind": key.action,
-                    "variant": key.variant,
+                    "orphan_kind": kind,
+                    "variant": variant,
                     "task_id": task_id,
                     "reason": "workspace_missing",
                 }
@@ -3946,22 +3943,13 @@ class WritebackCollaborator(GeakRevalidation, GeakHarnessReplay, LaunchIdentity)
             await self.bus.record_observation(
                 "coordinator",
                 "observation",
-                {
-                    "kind": "orphaned_keep_discarded",
-                    "severity": "medium",
-                    "orphan_kind": key.action,
-                    "variant": key.variant,
-                },
+                {"kind": "orphaned_keep_discarded", "severity": "medium", "orphan_kind": kind, "variant": variant},
             )
             return False
-        if self._replay_keep_from_result(key.action, result):
-            report["fixes"].append(
-                {"kind": "replayed_orphaned_keep", "orphan_kind": key.action, "variant": key.variant}
-            )
+        if self._replay_keep_from_result(kind, result):
+            report["fixes"].append({"kind": "replayed_orphaned_keep", "orphan_kind": kind, "variant": variant})
             return True
-        report["warnings"].append(
-            {"kind": "orphaned_keep_replay_noop", "orphan_kind": key.action, "variant": key.variant}
-        )
+        report["warnings"].append({"kind": "orphaned_keep_replay_noop", "orphan_kind": kind, "variant": variant})
         return False
 
     async def _resume_recover_orphaned_keeps(self, report: dict[str, Any]) -> None:
@@ -3993,8 +3981,8 @@ class WritebackCollaborator(GeakRevalidation, GeakHarnessReplay, LaunchIdentity)
                     continue
                 seen.add(key)
                 if kind != "integrate_patch":
-                    await self._surface_orphaned_keep(report, key, payload.get("task_id"))
-                elif await self._recover_orphaned_integrate_keep(res, report, key, payload.get("task_id")):
+                    await self._surface_orphaned_keep(report, kind, key.variant, payload.get("task_id"))
+                elif await self._recover_orphaned_integrate_keep(res, report, key.variant, payload.get("task_id")):
                     stack_keys.add(key)
         except Exception:
             log.exception("Coordinator: orphaned KEEP resume recovery failed")
