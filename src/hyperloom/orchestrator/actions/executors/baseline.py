@@ -33,7 +33,7 @@ from hyperloom.common.env import is_truthy
 from hyperloom.common.env_safety import redact_secret_values, scrub_benchmark_process_env
 from hyperloom.common.git_safety import safe_directory_args
 from hyperloom.common.model_paths import resolve_session_model_path
-from hyperloom.common.perf_metric import is_agentx_mode
+from hyperloom.common.perf_metric import is_agentx_mode, stamp_output_per_gpu
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
     ROUND_ACCURACY,
@@ -4140,6 +4140,8 @@ class BaselineExecutor(BenchmarkRunExecutor):
             if recorder is not None:
                 recorder.finish_crashed(exc)
             raise
+        # The event is written once, so the per-GPU axis must be on the result before it is recorded.
+        stamp_output_per_gpu(result, getattr(shared_state, "tp", None))
         if recorder is not None:
             recorder.finish(result)
         return result

@@ -734,7 +734,10 @@ class WritebackCollaborator(CoordinatorCollaborator):
         """
         if self.shared_state.baseline_tput <= 0:
             return False
+        from hyperloom.common.perf_metric import stamp_output_per_gpu
+
         graded_source = _graded_source(measurement, new_tput)
+        stamp_output_per_gpu(graded_source, self.shared_state.tp)
         graded = resolve_graded_comparison(self.shared_state, graded_source, against_baseline=True)
         if not graded.comparable:
             log.info("cumulative gain held: measurement not comparable (%s)", graded.degrade_reason)

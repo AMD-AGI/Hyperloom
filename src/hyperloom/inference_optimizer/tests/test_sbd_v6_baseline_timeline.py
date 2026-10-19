@@ -544,6 +544,27 @@ async def test_the_executor_records_the_rounds_it_actually_ran(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_the_baseline_event_carries_the_per_gpu_output_the_session_anchors_on(tmp_path: Path) -> None:
+    executor = object.__new__(BaselineExecutor)
+    executor.shared_state = None
+
+    async def _run_once(ctx, *, recorder=None, run_index=0, **_kwargs):
+        return _measured(output_throughput=1056.82)
+
+    executor._run_once = _run_once  # type: ignore[method-assign]
+    executor._maybe_stop_on_missing_baseline_accuracy = lambda *_a: None  # type: ignore[method-assign]
+    executor._is_moe_runner_rooted_failure = lambda _r: False  # type: ignore[method-assign]
+    executor._resolve_shared_state = lambda state=None: state  # type: ignore[method-assign]
+    ctx = _executor_ctx(tmp_path, config_path="/cfg.yaml")
+    ctx.extra["shared_state"].tp = 8
+
+    await executor(ctx)
+
+    perf = _actions(tmp_path)[0]["measurement"]["perf"]
+    assert perf["output_tput_per_gpu"] == pytest.approx(132.1025)
+
+
+@pytest.mark.asyncio
 async def test_an_inner_step_measurement_records_into_the_event_that_asked_for_it(tmp_path: Path) -> None:
     """A sub-step leaves no event of its own, and its facts land in its host instead of nowhere."""
     host = kernel_event_id(0)
