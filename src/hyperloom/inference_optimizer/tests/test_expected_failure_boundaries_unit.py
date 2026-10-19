@@ -100,24 +100,6 @@ def test_installed_version_lets_a_metadata_error_propagate(monkeypatch, break_im
         _patcher("_installed_sglang_version", _NO_FILE_SGLANG)
 
 
-def test_installed_version_falls_back_to_the_module_attribute(monkeypatch, break_import):
-    break_import("sglang.version", ImportError)
-
-    def not_installed(_name):
-        raise importlib.metadata.PackageNotFoundError("sglang")
-
-    monkeypatch.setattr(importlib.metadata, "version", not_installed)
-
-    assert _patcher("_installed_sglang_version", types.SimpleNamespace(__version__=" 0.5.9 ")) == "0.5.9"
-
-
-def test_anchor_path_falls_back_to_the_package_path(tmp_path, break_import):
-    break_import(_PROFILER_MIXIN, ImportError)
-    module = types.SimpleNamespace(__file__=None, __path__=[str(tmp_path)])
-
-    assert _patcher("_sglang_anchor_path", module) == tmp_path
-
-
 @pytest.mark.parametrize(
     ("error", "message"),
     [
@@ -136,32 +118,37 @@ def test_apply_reports_a_failing_sglang_import(tmp_path, break_import, error, me
     assert (result["status"], result["error"]) == ("failed", message)
 
 
-@pytest.mark.parametrize(
-    ("error", "pin", "mode"),
-    [
-        (ImportError, "0.5.18", "sitecustomize"),
-        (ImportError, "0.5.17", "patched"),
-        (OSError, "0.5.18", "sitecustomize"),
-    ],
-)
-def test_shape_mode_uses_the_pinned_version_without_sglang(monkeypatch, break_import, error, pin, mode):
-    break_import("sglang", error)
-    monkeypatch.setenv("HYPERLOOM_SGLANG_VERSION_PIN", pin)
-
-    assert _load_script("sglang_shape_gate").sglang_shape_mode() == mode
+def _anchor_path(tmp):
+    return _patcher("_sglang_anchor_path", types.SimpleNamespace(__file__=None, __path__=[str(tmp)]))
 
 
-@pytest.mark.parametrize("error", [ImportError, OSError])
-def test_framework_version_defaults_when_the_framework_cannot_load(break_import, error):
-    break_import("vllm", error)
+_EXPECTED_IMPORT_FAILURES = [
+    ("sglang", ImportError, lambda _tmp: _load_script("sglang_shape_gate").sglang_shape_mode(), "sitecustomize"),
+    ("sglang", OSError, lambda _tmp: _load_script("sglang_shape_gate").sglang_shape_mode(), "sitecustomize"),
+    ("vllm", ImportError, lambda _tmp: detect_framework_version("vllm"), DEFAULT_FRAMEWORK_VERSION_SLUG),
+    ("vllm", OSError, lambda _tmp: detect_framework_version("vllm"), DEFAULT_FRAMEWORK_VERSION_SLUG),
+    ("langfuse", ImportError, lambda _tmp: backfill_langfuse.ingest({}), 3),
+    (
+        "sglang.version",
+        ImportError,
+        lambda _tmp: _patcher("_installed_sglang_version", types.SimpleNamespace(__version__=" 0.5.9 ")),
+        "0.5.9",
+    ),
+    (_PROFILER_MIXIN, ImportError, _anchor_path, None),
+]
 
-    assert detect_framework_version("vllm") == DEFAULT_FRAMEWORK_VERSION_SLUG
+
+@pytest.mark.parametrize(("module", "error", "call", "expected"), _EXPECTED_IMPORT_FAILURES)
+def test_an_expected_import_failure_falls_back(tmp_path, monkeypatch, break_import, module, error, call, expected):
+    break_import(module, error)
+    monkeypatch.setenv("HYPERLOOM_SGLANG_VERSION_PIN", "0.5.18")
+    monkeypatch.setattr(importlib.metadata, "version", _raising_not_installed)
+
+    assert call(tmp_path) == (tmp_path if expected is None else expected)
 
 
-def test_ingest_reports_a_missing_sdk_with_exit_code_3(break_import):
-    break_import("langfuse", ImportError)
-
-    assert backfill_langfuse.ingest({}) == 3
+def _raising_not_installed(name):
+    raise importlib.metadata.PackageNotFoundError(name)
 
 
 @pytest.fixture

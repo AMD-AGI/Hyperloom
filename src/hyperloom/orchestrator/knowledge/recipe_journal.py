@@ -603,9 +603,9 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                 self.kb_amend_recipe(append_pitfall=pitfall, provenance_details=provenance_base)
         except (LocalRecipeStoreError, OSError, ValueError) as error:
             log.warning(
-                "recipe KB write for task %s variant %s failed: %s: %s",
+                "recipe KB write for task %s%s failed: %s: %s",
                 fact.task.task_id,
-                fact.variant_name,
+                f" variant {fact.variant_name}" if fact.variant_name is not None else "",
                 type(error).__name__,
                 error,
             )

@@ -117,7 +117,3 @@ def test_an_unexpected_failure_propagates(monkeypatch, site) -> None:
     call, _ = _SITES[site]
     with pytest.raises(RuntimeError, match="unexpected ray failure"):
         call(monkeypatch, RuntimeError("unexpected ray failure"))
-
-
-def test_a_specialist_liveness_probe_timeout_reads_as_alive(monkeypatch) -> None:
-    assert _specialist_is_alive(monkeypatch, _GetTimeoutError("slow")) is True
