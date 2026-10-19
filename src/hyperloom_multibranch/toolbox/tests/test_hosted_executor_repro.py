@@ -12,13 +12,12 @@ import pytest
 
 from hyperloom.contracts.measurement import Purpose, RoundValue, TestKind, TestResult, Validity
 from hyperloom.measure.points import AcceptedMeasurement
-from hyperloom.measure.socket import TestCall
 from hyperloom.measure.tests.hosted_fixtures import Rig, make_rig, point_yaml
 from hyperloom.measure.tests.repro_fixtures import case_attachment
 from hyperloom_multibranch.contracts.gate import ResultUnverified
 from hyperloom_multibranch.toolbox.attempts import MeasurementRefused, TestJob
 from hyperloom_multibranch.toolbox.hosted_executor import HostedExecutor
-from hyperloom_multibranch.toolbox.tests.helpers import req
+from hyperloom_multibranch.toolbox.tests.helpers import BackendSpy, req
 
 
 @pytest.fixture
@@ -27,18 +26,6 @@ def rig(tmp_path: Path):
     yield made
     made.backend.close()
     made.provider.close()
-
-
-class _Spy:
-    def __init__(self, backend) -> None:  # type: ignore[no-untyped-def]
-        self._backend, self.calls = backend, []
-
-    def run_test(self, call: TestCall):  # type: ignore[no-untyped-def]
-        self.calls.append(call)
-        return self._backend.run_test(call)
-
-    def __getattr__(self, name: str):  # type: ignore[no-untyped-def]
-        return getattr(self._backend, name)
 
 
 def _job(tmp_path: Path, rig: Rig, script: str, *, kind: TestKind = TestKind.REPRO, **fake: object) -> TestJob:
@@ -77,7 +64,7 @@ async def test_the_numbers_a_repro_server_printed_are_not_reported(tmp_path: Pat
 async def test_the_case_reaches_the_sandbox_as_an_attachment_and_runs_there_with_no_warmup(
     tmp_path: Path, rig: Rig
 ) -> None:
-    spy = _Spy(rig.backend)
+    spy = BackendSpy(rig.backend)
     job = _job(tmp_path, rig, "echo from-the-attachment\nexit 1\n", fake_repro="true")
     result = await HostedExecutor(spy, tmp_path / "session").run(job)  # type: ignore[arg-type]
 
@@ -94,7 +81,7 @@ async def test_a_repro_result_that_holds_no_verdict_is_refused(tmp_path: Path, r
 
 
 async def test_a_plain_test_has_no_repro_verdict_and_ships_no_attachment(tmp_path: Path, rig: Rig) -> None:
-    spy = _Spy(rig.backend)
+    spy = BackendSpy(rig.backend)
     result = await HostedExecutor(spy, tmp_path / "session").run(  # type: ignore[arg-type]
         _job(tmp_path, rig, "", kind=TestKind.TEST)
     )

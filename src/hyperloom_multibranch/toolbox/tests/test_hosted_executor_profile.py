@@ -12,12 +12,11 @@ import pytest
 
 from hyperloom.contracts.measurement import Purpose, RoundValue, TestKind, TestResult, Validity
 from hyperloom.measure.points import AcceptedMeasurement
-from hyperloom.measure.socket import TestCall
 from hyperloom.measure.tests.hosted_fixtures import Rig, make_rig, point_yaml
 from hyperloom_multibranch.contracts.gate import ResultUnverified
 from hyperloom_multibranch.toolbox.attempts import MeasurementRefused, TestJob
 from hyperloom_multibranch.toolbox.hosted_executor import HostedExecutor
-from hyperloom_multibranch.toolbox.tests.helpers import req
+from hyperloom_multibranch.toolbox.tests.helpers import BackendSpy, req
 
 
 _ROUND = RoundValue("measure", None, {"output_throughput": 1.0})
@@ -29,20 +28,6 @@ def rig(tmp_path: Path):
     yield made
     made.backend.close()
     made.provider.close()
-
-
-class _Spy:
-    """The real backend, with the calls it was given kept."""
-
-    def __init__(self, backend) -> None:  # type: ignore[no-untyped-def]
-        self._backend, self.calls = backend, []
-
-    def run_test(self, call: TestCall):  # type: ignore[no-untyped-def]
-        self.calls.append(call)
-        return self._backend.run_test(call)
-
-    def __getattr__(self, name: str):  # type: ignore[no-untyped-def]
-        return getattr(self._backend, name)
 
 
 def _job(tmp_path: Path, kind: TestKind, **fake: object) -> TestJob:
@@ -78,7 +63,7 @@ async def test_the_numbers_of_the_profiled_round_are_not_reported_even_when_it_p
 
 
 async def test_a_profile_test_runs_one_round_with_no_warmup(tmp_path: Path, rig: Rig) -> None:
-    spy = _Spy(rig.backend)
+    spy = BackendSpy(rig.backend)
     await HostedExecutor(spy, tmp_path / "session").run(  # type: ignore[arg-type]
         _job(tmp_path, TestKind.PROFILE, fake_trace="true")
     )
@@ -102,7 +87,7 @@ async def test_a_plain_test_without_a_measured_round_is_still_refused(tmp_path: 
 
 
 async def test_a_plain_test_has_no_profile_location_and_the_default_warmup_plan(tmp_path: Path, rig: Rig) -> None:
-    spy = _Spy(rig.backend)
+    spy = BackendSpy(rig.backend)
     result = await HostedExecutor(spy, tmp_path / "session").run(  # type: ignore[arg-type]
         _job(tmp_path, TestKind.TEST, fake_trace="true")
     )

@@ -19,7 +19,7 @@ from hyperloom_multibranch.contracts.gate import ResultUnverified
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.toolbox.attempts import MeasurementRefused, TestJob
 from hyperloom_multibranch.toolbox.hosted_executor import HostedExecutor
-from hyperloom_multibranch.toolbox.tests.helpers import req
+from hyperloom_multibranch.toolbox.tests.helpers import BackendSpy, req
 
 ACCURACY_PURPOSES = (Purpose.BASELINE, Purpose.EXPLORE, Purpose.CONFIRM, Purpose.INTEGRATION, Purpose.FINAL)
 
@@ -30,18 +30,6 @@ def rig(tmp_path: Path):
     yield made
     made.backend.close()
     made.provider.close()
-
-
-class _Spy:
-    def __init__(self, backend) -> None:  # type: ignore[no-untyped-def]
-        self._backend, self.calls = backend, []
-
-    def run_test(self, call: TestCall):  # type: ignore[no-untyped-def]
-        self.calls.append(call)
-        return self._backend.run_test(call)
-
-    def __getattr__(self, name: str):  # type: ignore[no-untyped-def]
-        return getattr(self._backend, name)
 
 
 def _job(tmp_path: Path, *, purpose: Purpose = Purpose.EXPLORE, points: int = 1, **fake: object) -> TestJob:
@@ -60,7 +48,7 @@ async def _run(tmp_path: Path, rig: Rig, **kwargs: object):  # type: ignore[no-u
 async def test_every_purpose_that_carries_accuracy_asks_for_the_pass_and_records_what_the_bundle_holds(
     tmp_path: Path, rig: Rig, purpose: Purpose
 ) -> None:
-    spy = _Spy(rig.backend)
+    spy = BackendSpy(rig.backend)
     result = await HostedExecutor(spy, tmp_path / "session").run(  # type: ignore[arg-type]
         _job(tmp_path, purpose=purpose, fake_accuracy="0.6", fake_decode="true")
     )

@@ -213,3 +213,17 @@ async def settle() -> None:
 
     for _ in range(20):
         await asyncio.sleep(0)
+
+
+class BackendSpy:
+    """The real measurement backend, with the calls it was given kept."""
+
+    def __init__(self, backend) -> None:  # type: ignore[no-untyped-def]
+        self._backend, self.calls = backend, []
+
+    def run_test(self, call):  # type: ignore[no-untyped-def]
+        self.calls.append(call)
+        return self._backend.run_test(call)
+
+    def __getattr__(self, name: str):  # type: ignore[no-untyped-def]
+        return getattr(self._backend, name)
