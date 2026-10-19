@@ -3,7 +3,7 @@ title: Triton on AMD — what changes vs NVIDIA, and where Triton fits
 kind: language
 lever: triton_amd_delta
 gens: [gfx950]
-updated: 2026-08-28
+updated: 2026-10-19
 sources:
   - https://rocm.docs.amd.com/en/latest/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
@@ -43,7 +43,7 @@ skinny split-K decode.**
 | Matrix engine | Tensor Core (`mma`/`wgmma`) | **Matrix Core / MFMA** (`v_mfma_*`) via `tl.dot` |
 | MFMA tile (`matrix_instr_nonkdim`) | n/a | **16** (preferred) or 32 |
 | Shared memory | 228 KB/SM (H100) | **160 KiB LDS/CU**, **64 banks** |
-| Registers | 65536/SM, 256/thread cap | **512/SIMD**, 16-granule |
+| Registers | 65536/SM, 256/thread cap | **512/SIMD**, 8-granule |
 | FP8 matrix dtype | OCP `e4m3fn`/`e5m2` | **OCP** on gfx950 (**FNUZ** on gfx942 — the porting trap) |
 | `num_stages` (single GEMM) | 3–4 | **1–2** (stream pipeliner; 1 for fused FA) |
 | `tf32` | available | **removed on CDNA4** — `input_precision` is `"ieee"` |

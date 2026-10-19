@@ -4,7 +4,7 @@ kind: lever
 lever: occupancy
 gens: [gfx950]
 bottleneck: latency / occupancy-bound
-updated: 2026-08-28
+updated: 2026-10-19
 ---
 
 # Occupancy and the register budget
@@ -23,7 +23,7 @@ register budget the accumulators need. See "the counter-intuitive part" below.
 
 | Resource | Value |
 |---|---|
-| Registers per SIMD | **512 × 32-bit**, allocated in **16-register granules** |
+| Registers per SIMD | **512 × 32-bit**, allocated in **8-register granules** |
 | Split | ≤256 architected VGPR + ≤256 AGPR, **unified pool** (a wave flexes the split) |
 | Wave slots | **8/SIMD → 32/CU** (hard cap) |
 | SIMDs per CU | 4 |
@@ -31,7 +31,7 @@ register budget the accumulators need. See "the counter-intuitive part" below.
 | Wavefront | **64 lanes** |
 
 ```
-occ_vgpr (waves/SIMD)    = min(8, floor(512 / round_up(N,16)))   # N = VGPRs/wave
+occ_vgpr (waves/SIMD)    = min(8, floor(512 / round_up(N,8)))    # N = VGPRs/wave
 occ_lds  (workgroups/CU) = floor(163840 / L)                     # L = LDS bytes/workgroup
 nW                       = ceil(threads_per_block / 64)
 wg_per_CU                = min(floor(occ_vgpr * 4 / nW), occ_lds, floor(32 / nW))
@@ -66,7 +66,7 @@ Read `.vgpr_count` / `.agpr_count` / `.lds_size` from the ISA dump, or
 `-Rpass-analysis=kernel-resource-usage`. Plug into the formula above. Do not guess which term binds.
 
 ### 2. Cut VGPRs (the primary lever on gfx950)
-- **Watch the 16-granule rounding.** 170 used → 176 reserved. Tier boundaries sit at 64/80/96/128/168/256
+- **Watch the 8-register granule.** 170 used → 176 reserved. Tier boundaries sit at 64/72/80/96/128/168/256
   — shaving 2 registers across a boundary can jump a whole occupancy tier, and shaving 2 registers
   *within* a tier does nothing.
 - `__launch_bounds__(threads, waves_per_eu)` (HIP) / `-mllvm -amdgpu-waves-per-eu=N` — hard-caps the
@@ -121,10 +121,10 @@ usually **0%, sometimes negative**. Removing a spill from an inner loop: often *
 | Symptom | Cause | Fix |
 |---|---|---|
 | Raised `waves_per_eu`, got slower | forced spills | check ISA for scratch; back off one tier |
-| Cut registers, occupancy unchanged | shaved within a granule | target the next 16-boundary down |
+| Cut registers, occupancy unchanged | shaved within a tier | target the next tier boundary down |
 | Occupancy fine, still stalled | not occupancy-bound | back to `lever_bottleneck_class.md` |
 | Formula says 4 waves, profiler says 1 | LDS or wave-slot term binding, or the 320-DWORD LDS granule rounded `L` up | re-read `.lds_size`, recompute all three terms |
-| Ported CUDA occupancy math | CDNA granularity is 16 VGPR, 8 slots/SIMD, wave64 | re-derive from the formula above |
+| Ported CUDA occupancy math | gfx950 granularity is 8 VGPRs, 8 slots/SIMD, wave64 | re-derive from the formula above |
 
 ## Deeper
 `hardware/mi350_execution.md` (execution model + worked occupancy examples on the 160 KiB budget) ·

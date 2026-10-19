@@ -3,7 +3,7 @@ title: MI350X — execution model, registers, occupancy
 kind: hardware
 topic: execution
 gens: [gfx950]
-updated: 2026-08-28
+updated: 2026-10-19
 ---
 
 # Execution model, registers and occupancy
@@ -45,9 +45,12 @@ A **workgroup is dispatched to one CU** and never migrates; its waves stripe acr
 | SGPR (scalar) | ~800/CU, ≤102/wave usable | scalar unit |
 
 - The VGPR/AGPR pool is **unified** — a wave flexes the split between them.
-- **Allocation granule is 16 registers.** 170 used → **176 reserved**. Tier boundaries sit at
-  64 / 80 / 96 / 128 / 168 / 256. Shaving registers *within* a tier changes nothing; shaving across one
-  can jump a whole occupancy tier.
+- **Allocation granule is 8 registers.** 170 used → **176 reserved**. Tier boundaries sit at
+  64 / 72 / 80 / 96 / 128 / 168 / 256 (8 down to 2 waves/SIMD). Shaving registers *within* a tier changes
+  nothing; shaving across one can jump a whole occupancy tier.
+- The ROCm workload-tuning guide says "blocks of 16"; gfx950 uses 8. `llc -mcpu=gfx950` reports
+  occupancy 7 at 65 VGPRs, and on an MI355X 65- and 72-VGPR single-wave workgroups run 7 per SIMD
+  concurrently while 73-VGPR ones run 6. A 16-register granule would cap both at 6.
 - **AGPRs are the escape hatch**: park large FP32 matmul accumulators there so they do not consume the
   architected budget that limits occupancy. Cost is a `v_accvgpr_read_b32` per element in the epilogue
   (~5%). Not every C-tile layout is AGPR-placeable — the matrix calculator's `--detail-instruction`
@@ -56,7 +59,7 @@ A **workgroup is dispatched to one CU** and never migrates; its waves stripe acr
 ## Occupancy arithmetic
 
 ```
-occ_vgpr (waves/SIMD)    = min(8, floor(512 / round_up(N,16)))   # N = VGPRs/wave
+occ_vgpr (waves/SIMD)    = min(8, floor(512 / round_up(N,8)))    # N = VGPRs/wave
 occ_lds  (workgroups/CU) = floor(163840 / L)                     # L = LDS bytes/workgroup
 nW                       = ceil(threads_per_block / 64)
 wg_per_CU                = min(floor(occ_vgpr * 4 / nW), occ_lds, floor(32 / nW))
@@ -68,8 +71,11 @@ LDS allocates in **320-DWORD blocks** on gfx950, so a small `L` still rounds up.
 | VGPR reserved | waves/SIMD |
 |---:|---:|
 | ≤ 64 | 8 (slot-capped) |
+| 72 | 7 |
+| 80 | 6 |
 | 96 | 5 |
 | 128 | 4 |
+| 168 | 3 |
 | 176 | **2** |
 | 256 | 2 |
 | 512 (256 VGPR + 256 AGPR) | 1 |
@@ -106,7 +112,7 @@ wg_per_CU = 8  ->  32 waves/CU (maximum)
 
 ## What it means for kernels
 
-1. **Cut VGPRs first** — the primary lever. Watch the 16-granule boundary.
+1. **Cut VGPRs first** — the primary lever. Watch the 8-register granule boundary.
 2. **`__launch_bounds__(threads, waves_per_eu)`** / `-mllvm -amdgpu-waves-per-eu=N` hard-caps the
    allocation. Set below the real block size and you force spills.
 3. **AGPR accumulators**: `-mllvm -amdgpu-mfma-vgpr-form=false -mllvm -amdgpu-agpr-alloc=256`.
@@ -124,7 +130,7 @@ wg_per_CU = 8  ->  32 waves/CU (maximum)
   register file is ~512 KiB across 4 SIMDs. Count vs bytes.
 - **Forgetting AGPRs come out of the same pool** — a fat accumulator silently caps occupancy.
 - **Raising `waves_per_eu` without reading the ISA** — it can force spills and lose more than it gains.
-- **Assuming CUDA blocks/SM math** — granule is 16 VGPR, slots are 8/SIMD, wave is 64.
+- **Assuming CUDA blocks/SM math** — granule is 8 VGPRs, slots are 8/SIMD, wave is 64.
 
 ## Verify
 - ISA `.vgpr_count` / `.agpr_count` / `.sgpr_count` / `.lds_size`, or
