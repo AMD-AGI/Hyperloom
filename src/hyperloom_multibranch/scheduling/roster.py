@@ -43,6 +43,12 @@ class BranchOrigin(str, Enum):
 
         return self is not BranchOrigin.FORK
 
+    @property
+    def reserved_by_gate(self) -> bool:
+        """Whether the rule gate holds a reservation for the branch until it lands or is voided."""
+
+        return self in (BranchOrigin.FORK, BranchOrigin.REPAIR)
+
 
 class BranchStatus(str, Enum):
     """``ADMITTED`` is a fork or repair the scheduler accepted whose specialist has not started yet."""

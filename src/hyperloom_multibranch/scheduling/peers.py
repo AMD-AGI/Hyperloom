@@ -16,13 +16,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from hyperloom.measure.compile import BlobStore
-from hyperloom_multibranch.contracts.fork import ForkAdmissionService
+from hyperloom_multibranch.contracts.fork import ForkAdmissionService, ReservedBranches
 from hyperloom_multibranch.contracts.gate import RegressionCheck, SessionGate
 from hyperloom_multibranch.contracts.lifecycle import SpecialistLifecycle
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.notebook.rsi.briefing import SessionBriefs
 from hyperloom_multibranch.scheduling.layout import SessionLayout
-from hyperloom_multibranch.scheduling.mb_fakes import MbFakeSplitLanding
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.settings import Workload
 
@@ -38,7 +37,8 @@ class Peers:
     ``mcp`` serves the specialist tools; the session stop stops it. ``briefs`` brief every specialist; they are built
     before PRELUDE has read the warm-start leads, which the session binds to them once it has. ``base_image_digest``
     is the image the toolbox measures on, which every recipe must carry: PRELUDE roots the session on it.
-    ``split_landing`` lands each fork the fork desk admits before the scheduler starts it. ``regression`` runs the
+    ``reserved`` is the rule gate that asks for the forks and repairs: it lands each fork the fork desk admits before
+    the scheduler starts it, and records each fork and repair the scheduler voids. ``regression`` runs the
     regression set the integrator asks for before a merge and FINAL for every candidate.
     """
 
@@ -49,7 +49,7 @@ class Peers:
     mcp: McpServer
     briefs: SessionBriefs
     base_image_digest: str
-    split_landing: MbFakeSplitLanding
+    reserved: ReservedBranches
     regression: RegressionCheck
 
 

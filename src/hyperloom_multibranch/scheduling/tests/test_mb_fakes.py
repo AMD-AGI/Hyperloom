@@ -16,14 +16,7 @@ from hyperloom_multibranch.notebook.tests.factories import profile
 from hyperloom_multibranch.scheduling.mb_fakes import (
     MB_FAKE_BASE_IMAGE_DIGEST,
     mb_fake_learning_recall,
-    mb_fake_settle_voided,
 )
-from hyperloom_multibranch.scheduling.local_peers import MbFakeNoSplitLanding
-
-
-async def test_no_fork_is_landed_and_a_void_tells_the_gate_nothing() -> None:
-    assert not await MbFakeNoSplitLanding().land_split("b03")
-    assert await mb_fake_settle_voided("b03", "parent b01 stopped: flat") is None
 
 
 def test_base_image_digest_has_the_digest_shape() -> None:

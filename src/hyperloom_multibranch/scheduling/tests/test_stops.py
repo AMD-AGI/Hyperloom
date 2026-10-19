@@ -48,6 +48,7 @@ from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     SPECIALIST_POLL_SECONDS,
     TOOLBOX_DOWN,
     DownToolbox,
+    RecordedReservations,
     RecordedSessions,
     specialist_runtime,
 )
@@ -101,8 +102,16 @@ class Stage:
         self.runtime = specialist_runtime(tmp_path / "notebook", self.toolbox, self.repo, self.sessions, now=clock.now)
         self.runtime.refusing = refusing
         self.desk = ForkDesk(self.roster, decisions, clock)
+        self.reserved = RecordedReservations()
         context = SchedulerContext(
-            SessionLayout(tmp_path), self.roster, self.notebook, decisions, self.processes, clock, self.desk
+            SessionLayout(tmp_path),
+            self.roster,
+            self.notebook,
+            decisions,
+            self.processes,
+            clock,
+            self.desk,
+            self.reserved,
         )
         self.branches = BranchControl(context, self.runtime, self.toolbox, self.repo, SessionBriefs(self.notebook))
         self.mcp = McpServer(McpServerConfig(host_token="t" * MIN_TOKEN_LENGTH), campaign="stops")
@@ -116,7 +125,8 @@ class Stage:
         await self.branches.open_branches(2, 1, BatchStart(BranchOrigin.FIRST_BATCH, self.root, HARD_STOP))
         await asyncio.sleep(SPECIALIST_POLL_SECONDS)
         await self.branches.stop_branch("b02", JUDGE_STOP)
-        self.roster.open("b03", origin=BranchOrigin.FORK, start_commit="", k=1, from_branch="b01")
+        fork = self.roster.next_branch_id()
+        self.roster.open(fork, origin=BranchOrigin.FORK, start_commit="", k=1, from_branch="b01")
         self.sessions.stopped.clear()
         self.toolbox.cancelled.clear()
         return self
@@ -153,6 +163,7 @@ async def test_end_exploration_stops_open_specialists_and_keeps_integration(tmp_
     ended = _ended(SessionStopReason.TIME_EXHAUSTED)
     fork = _ended_with_b01(SessionStopReason.TIME_EXHAUSTED)
     assert session.stops() == {INTEGRATION_BRANCH: None, "b01": ended, "b02": JUDGE_STOP, "b03": fork}
+    assert session.reserved.voided == [("b03", fork.reason)]
     assert session.sessions.stopped == ["b01"]
     assert dict(session.toolbox.policies[-1].branch_k) == {INTEGRATION_BRANCH: 1}
     assert session.roster.free_slots() == 0
@@ -163,7 +174,8 @@ async def test_end_exploration_stops_open_specialists_and_keeps_integration(tmp_
 @pytest.mark.parametrize("reason", [SessionStopReason.TIME_EXHAUSTED, SessionStopReason.SIGNAL])
 async def test_a_session_stop_voids_every_fork_queued_for_a_slot(tmp_path: Path, reason: SessionStopReason) -> None:
     session = await Stage(tmp_path).opened()
-    for branch in ("b04", "b05"):
+    for _ in range(2):
+        branch = session.roster.next_branch_id()
         session.roster.open(branch, origin=BranchOrigin.FIRST_BATCH, start_commit=session.root, k=1)
     queued = await session.desk.admit(ForkRequest("b01", session.root, "fix f1 regresses"))
 
@@ -172,11 +184,12 @@ async def test_a_session_stop_voids_every_fork_queued_for_a_slot(tmp_path: Path,
     else:
         await session.stopper.stop_everything(reason, HARD_STOP)
 
-    assert (queued.status, queued.branch) == (AdmissionStatus.PENDING, "b03") and session.desk.pending() == ()
+    assert (queued.status, queued.branch) == (AdmissionStatus.PENDING, "b06") and session.desk.pending() == ()
     logged = [json.loads(line) for line in session.decisions_file.read_text(encoding="utf-8").splitlines()]
     assert [row["reason"] for row in logged if row["kind"] == "fork" and row["detail"].get("status") == "voided"] == [
         f"voided: {reason.value}"
     ]
+    assert session.reserved.voided == [("b06", reason.value), ("b03", _ended_with_b01(reason).reason)]
 
 
 async def test_a_failed_branch_stop_does_not_hold_up_the_end_of_exploration(tmp_path: Path) -> None:

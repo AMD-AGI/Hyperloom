@@ -4,7 +4,7 @@
 """EXPLORE: open the opening batch, then let the judge steer the branches until the EXPLORE deadline or a soft stop.
 
 The loop wakes every :data:`EXPLORE_TICK_SECONDS`: it stops the repair branches that used up their time, moves the forks
-and repairs queued on the fork desk onto the free slots, lands each admitted fork through the split landing and starts
+and repairs queued on the fork desk onto the free slots, has the rule gate land each admitted fork and starts
 the admitted forks and repairs, and every judge interval asks the judge, applies what it decided and rebuilds the
 dashboard. A slot the judge's stops free goes to the queued requests first and only then to the branches the judge
 opens. The judge is asked at once, not at its next interval, when the scheduler itself frees a slot: a repair branch
@@ -50,7 +50,6 @@ from hyperloom_multibranch.scheduling.events import SessionEvents, behind_integr
 from hyperloom_multibranch.scheduling.integrator import Integrator
 from hyperloom_multibranch.scheduling.judge import Judge, JudgeDecision, JudgeView
 from hyperloom_multibranch.scheduling.llm import CompletionMeter
-from hyperloom_multibranch.scheduling.mb_fakes import MbFakeSplitLanding
 from hyperloom_multibranch.scheduling.roster import BranchEntry, BranchKind, BranchOrigin, BranchStop, StopCause
 from hyperloom_multibranch.scheduling.settle import failure_text, settled
 from hyperloom_multibranch.scheduling.similarity import BranchSimilarity
@@ -121,7 +120,7 @@ def integration_row(progress: tuple[BranchProgress, ...]) -> BranchProgress | No
 
 class Explorer:
     """Runs EXPLORE once; the scheduler's notebook handle gives the snapshot the judge's digest of the archived
-    sessions compares with them, and ``landing`` lands each fork the fork desk admits."""
+    sessions compares with them, and its rule gate lands each fork the fork desk admits."""
 
     def __init__(
         self,
@@ -129,12 +128,11 @@ class Explorer:
         branches: BranchControl,
         integrator: Integrator,
         steering: Steering,
-        landing: MbFakeSplitLanding,
     ) -> None:
         self._roster = context.roster
         self._branches = branches
         self._desk = context.desk
-        self._landing = landing
+        self._reserved = context.reserved
         self._judge = steering.judge
         self._integrator = integrator
         self._progress = steering.progress
@@ -238,13 +236,13 @@ class Explorer:
         return freed
 
     async def _land(self, branch: str, deadline: float) -> str:
-        """Have the split landing land ``branch`` when it is a live fork; why it did not, or ``""``."""
+        """Have the rule gate land ``branch`` when it is a live fork; why it did not, or ``""``."""
 
         entry = self._roster.entry(branch)
         if entry.origin is not BranchOrigin.FORK or entry.stop is not None:
             return ""
         seconds = min(SPECIALIST_START_SECONDS, deadline - self._clock.now())
-        landed = await settled(self._clock.wait_for(self._landing.land_split(branch), seconds))
+        landed = await settled(self._clock.wait_for(self._reserved.land_split(branch), seconds))
         if isinstance(landed, BaseException):
             logger.error("the fork %s was not landed", branch, exc_info=landed)
             return failure_text(landed)

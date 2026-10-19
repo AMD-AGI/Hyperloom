@@ -169,7 +169,7 @@ async def test_a_queued_repair_of_an_intent_refuses_the_same_intent_until_it_is_
 
     queued = await desk.admit_repair(_repair())
     again = await desk.admit_repair(_repair())
-    await desk.void_all("time_exhausted")
+    assert desk.void_all("time_exhausted") == ("b02",)
     retried = await desk.admit_repair(_repair())
 
     assert [(queued.status, queued.branch), (again.status, again.branch), (retried.status, retried.branch)] == [
@@ -187,10 +187,10 @@ async def test_a_stopped_branch_voids_what_it_queued_and_the_session_stop_voids_
     await desk.admit(FIX)
     await desk.admit(ForkRequest("b02", "c2", "fix f2 regresses"))
 
-    await desk.void_from("b01", "parent b01 stopped: flat")
+    assert desk.void_from("b01", "parent b01 stopped: flat") == ("b03",)
 
     assert [pending.branch for pending in desk.pending()] == ["b04"]
-    await desk.void_all("time_exhausted")
+    assert desk.void_all("time_exhausted") == ("b04",)
     assert desk.pending() == ()
     roster.stop("b02", BranchStop(StopCause.JUDGE, "flat", CLOCK.now()))
     desk.fill_free_slots()

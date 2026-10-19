@@ -155,9 +155,11 @@ class Session:
         self._roster = Roster(settings.caps, layout.roster, clock)
         self._decisions = DecisionLog(layout.decisions, clock)
         desk = ForkDesk(self._roster, self._decisions, clock)
-        context = SchedulerContext(layout, self._roster, self._notebook, self._decisions, processes, clock, desk)
         blobs = LocalBlobStore(layout.blobs)
         peers = peer_factory(PeerSetup(layout, settings.workload, desk, processes, blobs))
+        context = SchedulerContext(
+            layout, self._roster, self._notebook, self._decisions, processes, clock, desk, peers.reserved
+        )
         self._toolbox = peers.toolbox
         self._briefs = peers.briefs
         self._base_image_digest = peers.base_image_digest
@@ -191,7 +193,7 @@ class Session:
             llm_usage,
             peers.lifecycle,
         )
-        self._explorer = Explorer(context, self._branches, integrator, steering, peers.split_landing)
+        self._explorer = Explorer(context, self._branches, integrator, steering)
         self._selector = FinalSelector(checks, settings.workload, clock)
         sources = ExportSources(self._notebook, peers.repo, blobs, dashboard)
         closing = SessionExports(layout, sources, metric, budget, kb_client=services.recipe_kb)

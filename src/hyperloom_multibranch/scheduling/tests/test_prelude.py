@@ -43,6 +43,7 @@ from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     OneChampionKB,
     LAUNCH_FLAG,
     MbFakeChildRegistry,
+    RecordedReservations,
     RecordingToolbox,
     measure_no_throughput,
     session_gate,
@@ -130,8 +131,9 @@ def _prelude(
     clock = clock or _clock()
     roster = Roster(RosterCaps(1, 1, 1), layout.roster, clock)
     decisions = DecisionLog(layout.decisions, clock)
+    desk = ForkDesk(roster, decisions, clock)
     context = SchedulerContext(
-        layout, roster, _notebook(layout), decisions, processes, clock, ForkDesk(roster, decisions, clock)
+        layout, roster, _notebook(layout), decisions, processes, clock, desk, RecordedReservations()
     )
     return Prelude(context, peers.repo, peers.gate, peers.tests, recipe_kb=recipe_kb)
 

@@ -12,7 +12,8 @@ on; its learnings tool recalls this session's learnings only, as MB1 runs on no 
 :class:`MeasurementHost`: this machine's cards, the image it runs and the tool commits Hyperloom pins. The gate's
 session service and the specialist runtime judge on one rule, :func:`workload_rule`; the runtime settles through a
 rule gate that asks the scheduler's fork desk for branches, and the MCP service's ``request_repair`` and
-``decline_repair`` conclude a blocked candidate through the same gate. The runtime's specialist sessions come from
+``decline_repair`` conclude a blocked candidate through the same gate, which the scheduler has land each fork it
+admits and record each fork and repair it voids. The runtime's specialist sessions come from
 a :data:`SpecialistSessions`: :func:`model_backed_sessions` runs each branch's specialist as an agent CLI in a
 worktree of its own, briefed by the session's :class:`SessionBriefs`, whose warm-start leads the session binds once
 PRELUDE has read them. :func:`load_peers` reads the measurement host, checks the image holds the framework package
@@ -75,19 +76,6 @@ AGENTX_ENV = "HYPERLOOM_AGENTX"
 #: Stands in for the reference of the image this machine runs while whoever launches the session names no image;
 #: replaced as :func:`mb_fake_active_image` is.
 MB_FAKE_IMAGE_REF = "local"
-
-
-class MbFakeNoSplitLanding:
-    """The session's :class:`~hyperloom_multibranch.scheduling.mb_fakes.MbFakeSplitLanding`: lands no fork, so the
-    scheduler voids every fork it admits and frees its slot at once.
-
-    Stands in for the rule gate's landing method (board #34, request A); replaced by it once it lands. No specialist
-    asks for a fork in production yet, so nothing is lost meanwhile.
-    """
-
-    async def land_split(self, branch: str) -> bool:
-        del branch
-        return False
 
 
 @dataclass(frozen=True)
@@ -229,8 +217,7 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     gate_service = GateService(gate_notebook, toolbox, rule, toolbox)
     runner = ReproRunner(toolbox, gate_notebook, toolbox)
     regression = RegressionSet(gate_notebook, runner, repo)
-    landing = MbFakeNoSplitLanding()
-    return Peers(runtime, toolbox, repo, gate_service, mcp, briefs, image.digest, landing, regression)
+    return Peers(runtime, toolbox, repo, gate_service, mcp, briefs, image.digest, gate, regression)
 
 
 def machine_cards() -> tuple[int, ...]:
@@ -383,7 +370,6 @@ __all__ = [
     "GATE_WRITER",
     "MB_FAKE_IMAGE_REF",
     "MeasurementHost",
-    "MbFakeNoSplitLanding",
     "SessionWiring",
     "SpecialistSessions",
     "load_peers",

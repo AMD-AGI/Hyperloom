@@ -7,11 +7,12 @@ clock.
 PRELUDE roots the session on a scripted child session in a git repository; the judge opens two branches, whose scripted
 specialists the runtime runs and judges; on ``b01`` the runtime confirms and commits ``c1``, and two fixes of it are
 asked for as forks: the first takes the last slot as ``b03``, the second waits in the fork desk's queue as ``b04`` and
-takes the slot the judge's stop of ``b02`` frees; the stand-in gate lands each fix on its fork and the scheduler starts
-each at its fix; on ``b02`` it commits ``c2``, the best single-branch value, whose specialist holds a claim and a
-process the AI work socket started, and the judge stops ``b02``; the integrator merges ``c1`` and refuses ``c2``; FINAL
-weighs the judge-stopped ``b02`` against the integration head and passes over it, because its head does not reproduce
-its recorded value; CLOSE leaves nothing running.
+takes the slot the judge's stop of ``b02`` frees; the rule gate lands each fix on its fork, with the fix's case as a
+regression case of the fork's first commit, and the scheduler starts each at its fix; on ``b02`` it commits ``c2``, the
+best single-branch value, whose specialist holds a claim and a process the AI work socket started, and the judge stops
+``b02``; the integrator merges ``c1`` and refuses ``c2`` and the fixes; FINAL weighs the judge-stopped ``b02`` against
+the integration head and passes over it, because its head does not reproduce its recorded value; CLOSE leaves nothing
+running.
 """
 
 from __future__ import annotations
@@ -29,7 +30,16 @@ import pytest
 
 from hyperloom.common.perf_metric import GRADED_INTVTY_P50, GRADED_OUTPUT
 from hyperloom.common.proctree import running
-from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
+from hyperloom.contracts.measurement import (
+    NOT_REPRODUCED,
+    REPRODUCED,
+    AttachmentRef,
+    Purpose,
+    TestKind,
+    TestRequest,
+    TestResult,
+    Validity,
+)
 from hyperloom.contracts.recipe import Recipe, RecipeDelta
 from hyperloom.hosted.mcp_server import MIN_TOKEN_LENGTH, McpServer, McpServerConfig
 from hyperloom.measure.versions import socket_versions
@@ -37,20 +47,33 @@ from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission,
 from hyperloom_multibranch.contracts.intent import Intent, IntentLayer
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
-from hyperloom_multibranch.contracts.notebook.records import LlmUsage, QuarantineEvent, ToolResultPointer
-from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, LineageKind, QuarantineAction, UsageSource
+from hyperloom_multibranch.contracts.notebook.records import (
+    LlmUsage,
+    QuarantineEvent,
+    RegressionCase,
+    ToolResultPointer,
+)
+from hyperloom_multibranch.contracts.notebook.vocab import (
+    ClaimStatus,
+    Conclusion,
+    LineageKind,
+    QuarantineAction,
+    UsageSource,
+)
 from hyperloom_multibranch.contracts.toolbox import CancelOutcome, MeasurementCapacity
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.notebook.rsi.briefing import SessionBriefs
-from hyperloom_multibranch.notebook.tests.factories import delta, intent
+from hyperloom_multibranch.notebook.tests.factories import delta, intent, request
+from hyperloom_multibranch.rulegate.fix_case import FIX_CASE_ID
+from hyperloom_multibranch.rulegate.gate import RuleGate
+from hyperloom_multibranch.rulegate.regression import FixProof, ReproRun
 from hyperloom_multibranch.rulegate.service import Polling
 from hyperloom_multibranch.scheduling.budget import MB_SECONDS_PER_HOUR, SessionBudget, explore_gpu_seconds
 from hyperloom_multibranch.scheduling import branches
 from hyperloom_multibranch.scheduling.events import PROFILE_UNAVAILABLE
 from hyperloom_multibranch.scheduling.explore import EXPLORE_TICK_SECONDS, FORK_NOT_LANDED, OPEN_CUT_REASON
 from hyperloom_multibranch.scheduling.final import INTEGRATION_LABEL, PRIMARY_POINT_ONLY
-from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.judge import JUDGE_PROMPT_VERSION
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
 from hyperloom_multibranch.scheduling.lifecycle import (
@@ -85,7 +108,6 @@ from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     RefusingRuntime,
     ScriptedCompletion,
     SessionStep,
-    SplittingDesk,
     StuckToolbox,
     VirtualClock,
     recipe_effect,
@@ -95,6 +117,7 @@ from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     tagged,
 )
 from hyperloom_multibranch.scheduling.tests.child_sessions import child_with_patch
+from hyperloom_multibranch.tests.fakes import RecordingVerifier
 from hyperloom_multibranch.toolbox.tools.base import JobStatus
 from hyperloom_multibranch.specialist.prompts import prompt_versions
 from hyperloom_multibranch.specialist.runtime import MAX_LOSS_RESTARTS, SessionCrashed
@@ -136,9 +159,11 @@ CURVES = {
 EXPLORED = {**CURVES, frozenset({"c2"}): {MAIN_POINT: 1060.0}}
 SCRIPTS = {"b01": (tagged("c1"),), "b02": (tagged("c2"),)}
 FIX_REASON = "fix f1 regresses"
-#: The fork each fix asks for lands on, by the order the forks are asked for.
-FIXES = {"b03": tagged("f1"), "b04": tagged("f2")}
-FIX_REASONS = (FIX_REASON, "fix f2 regresses")
+#: The fix each fork of ``c1`` carries, by the reason it is asked for, in the order the forks are asked for.
+FIXES = {FIX_REASON: tagged("f1"), "fix f2 regresses": tagged("f2")}
+FIX_REASONS = tuple(FIXES)
+#: The case a fix's proof ran: reproduced on ``c1``, clean on the fix.
+FIX_CASE = AttachmentRef(FIX_CASE_ID, "dir", "a" * 64)
 #: An agent CLI as the AI work socket starts one: leading a session of its own.
 AGENT_ARGV = ("sleep", "600")
 
@@ -220,7 +245,6 @@ class Stage:
     refusing: frozenset[str] = frozenset()
     hanging: frozenset[str] = frozenset()
     runtime_type: type[RefusingRuntime] = RefusingRuntime
-    fixes: Mapping[str, RecipeDelta] = field(default_factory=dict)
     recipe_kb: OneChampionKB | None = None
     stuck: frozenset[str] = frozenset()
     toolbox_type: type[RecordingToolbox] = RecordingToolbox
@@ -230,7 +254,7 @@ class Stage:
     sessions: RecordedSessions = field(init=False)
     repo: HeldGitRepo = field(init=False)
     setup: PeerSetup = field(init=False)
-    splits: SplittingDesk = field(init=False)
+    gate: RuleGate = field(init=False)
     regression: FakeRegressionCheck = field(default_factory=FakeRegressionCheck)
     briefs: SessionBriefs = field(init=False)
     forks: list[ForkAdmission] = field(default_factory=list)
@@ -256,15 +280,14 @@ class Stage:
             sleep=self.time.sleep,
             poll_seconds=VIRTUAL_POLL_SECONDS,
         )
-        assert isinstance(setup.desk, ForkDesk)
-        self.splits = SplittingDesk(setup.desk, repo, self.handle(Role.GATE), self.fixes)
+        self.gate = RuleGate(self.handle(Role.GATE), repo, setup.desk, RecordingVerifier())
         runtime = specialist_runtime(
             setup.layout.notebook,
             toolbox,
             repo,
             self.sessions,
             now=self.time.now,
-            desk=self.splits,
+            desk=setup.desk,
             runtime=self.runtime_type,
             rule=rule,
             sleep=self.time.sleep,
@@ -278,10 +301,34 @@ class Stage:
             self.handle(Role.GATE), toolbox, rule, polling=Polling(VIRTUAL_POLL_SECONDS, self.time.sleep)
         )
         digest = toolbox.config.image_digest
-        return Peers(runtime, toolbox, repo, gate, mcp, self.briefs, digest, self.splits, self.regression)
+        return Peers(runtime, toolbox, repo, gate, mcp, self.briefs, digest, self.gate, self.regression)
 
     async def root(self) -> str:
         return (await self.handle(Role.OBSERVER).baseline()).root_commit
+
+    async def ask_fork(self, branch: str, parent: str, reason: str) -> None:
+        """Have the rule gate ask for a fork of ``branch`` at ``parent`` for the fix :data:`FIXES` names by
+        ``reason``, as the runtime asks for one: on a retested candidate that regresses but fixes a correctness defect,
+        with the proof that its case runs clean on it. The candidate is the retest ``fix-<n>`` of a first test the
+        notebook never holds, and its clean case run is ``fix-<n>-case``: the runtime judges neither."""
+
+        fix = request(f"fix-{len(self.forks) + 1}", intent(branch, parent), FIXES[reason])
+        candidate = replace(fix, purpose=Purpose.CONFIRM, retest_of=f"{fix.request_id}-first")
+        case = f"{candidate.request_id}-case"
+        clean = request(
+            case, intent(branch, parent), kind=TestKind.REPRO, purpose=Purpose.REPRO, attachments=(FIX_CASE,)
+        )
+        toolbox = self.handle(Role.TOOLBOX)
+        await toolbox.write_request(candidate)
+        await toolbox.write_result(TestResult(candidate.request_id, Validity.SUCCEEDED))
+        await toolbox.write_request(clean)
+        await toolbox.write_result(TestResult(case, Validity.SUCCEEDED, repro_verdict=NOT_REPRODUCED))
+        regressed = Judgement(
+            Verdict.REGRESSED, -2.0, 2.0, (candidate.request_id,), {GRADED_OUTPUT: 980.0}, True, fixes_correctness=True
+        )
+        on_parent = ReproRun(f"{candidate.request_id}-parent", REPRODUCED)
+        proof = FixProof(on_parent, ReproRun(case, NOT_REPRODUCED), on_parent)
+        self.forks.append(await self.gate.fork(candidate, regressed, reason, fix=proof))
 
     async def start_agent(self, branch: str) -> None:
         """An agent CLI of ``branch``'s specialist, started the way the AI work socket starts one and adopted by the
@@ -331,7 +378,7 @@ def _script(stage: Stage, forks: int = len(FIX_REASONS)) -> None:
 
     async def ask_forks(branch: str, c1: str) -> None:
         for reason in FIX_REASONS[:forks]:
-            stage.forks.append(await stage.splits.admit(ForkRequest(branch, c1, reason)))
+            await stage.ask_fork(branch, c1, reason)
 
     async def holds(branch: str, c2: str) -> None:
         runtime = stage.handle(Role.SPECIALIST_RUNTIME, branch)
@@ -339,7 +386,6 @@ def _script(stage: Stage, forks: int = len(FIX_REASONS)) -> None:
         await stage.start_agent(branch)
 
     stage.scripts = SCRIPTS
-    stage.fixes = FIXES
     stage.steps = {"b01": stage.once_committed(ask_forks), "b02": stage.once_committed(holds)}
 
 
@@ -382,6 +428,10 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
             c1,
             "b01",
         )
+    for candidate, head in (("fix-1", fix), ("fix-2", queued_fix)):
+        record = await observer.record(candidate)
+        assert (record.conclusion, record.commit_id) == (Conclusion.SPLIT_COMMITTED, head)
+        assert await observer.regression_cases_for(head) == (RegressionCase(FIX_CASE_ID, head, f"{candidate}-case"),)
     [dequeued] = [
         row for row in _decisions(stage) if row["kind"] == "fork" and row["detail"].get("status") == "dequeued"
     ]
@@ -420,7 +470,7 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
     assert [claim.status for claim in claims if claim.holder == "b02"] == [ClaimStatus.RELEASED]
 
     merged = {item.commit_id: item.last_merge.outcome.value for item in await observer.committed() if item.last_merge}
-    assert merged == {c1: "merged", c2: "not_stackable"}
+    assert merged == {c1: "merged", c2: "not_stackable", fix: "not_stackable", queued_fix: "not_stackable"}
     head = await stage.repo.head(INTEGRATION_BRANCH)
     assert recipe_tags(await stage.repo.read_recipe(head)) == {"c1"}
 
@@ -1039,7 +1089,7 @@ async def test_a_repair_stopped_at_its_time_limit_has_the_judge_asked_at_the_nex
 
 async def test_a_fork_the_gate_does_not_land_is_voided_and_has_the_judge_asked_at_the_next_tick(tmp_path: Path) -> None:
     stage = _stage(tmp_path, child=child_with_patch(tmp_path))
-    stage.runtime_type = _admit_on_start(stage, lambda b, c: stage.splits.admit(ForkRequest(b, c, FIX_REASON)))
+    stage.runtime_type = _admit_on_start(stage, lambda b, c: stage.setup.desk.admit(ForkRequest(b, c, FIX_REASON)))
 
     await stage.run()
 
@@ -1048,6 +1098,28 @@ async def test_a_fork_the_gate_does_not_land_is_voided_and_has_the_judge_asked_a
     [stop] = [row for row in _decisions(stage) if row["kind"] == "stop" and row["branch"] == fork]
     assert stop["reason"] == f"{StopCause.START_FAILED.value}: {FORK_NOT_LANDED}"
     _judged_within_a_tick_of(stage, float(str(stop["at"])))
+
+
+async def test_a_fork_voided_in_the_queue_is_recorded_only_and_never_lands(tmp_path: Path) -> None:
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    _script(stage)
+    stop_b01 = _reply({"open": 0, "branches": [], "stop": [{"branch": "b01", "reason": STOP_REASON}]})
+    stage.judge = ScriptedCompletion([OPENING, stop_b01])
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error) == (SessionStopReason.TIME_EXHAUSTED, "")
+    assert [(admission.status, admission.branch) for admission in stage.forks] == [
+        (AdmissionStatus.ACCEPTED, "b03"),
+        (AdmissionStatus.PENDING, "b04"),
+    ]
+    observer = stage.handle(Role.OBSERVER)
+    assert (await observer.record("fix-1")).conclusion is Conclusion.SPLIT_COMMITTED
+    assert (await observer.record("fix-2")).conclusion is Conclusion.RECORDED_ONLY
+    assert "b04" not in _origins(stage) and "b04" not in stage.sessions.started
+    assert not await stage.gate.land_split("b04")
+    [voided] = [row for row in _decisions(stage) if row["kind"] == "fork" and row["detail"].get("status") == "voided"]
+    assert (voided["branch"], voided["reason"]) == ("b04", f"voided: parent b01 stopped: {STOP_REASON}")
 
 
 def _queueing(stage: Stage, failing: str = "") -> type[RefusingRuntime]:

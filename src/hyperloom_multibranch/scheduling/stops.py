@@ -141,7 +141,6 @@ class SessionStopper:
         self._processes = context.processes
         self._decisions = context.decisions
         self._clock = context.clock
-        self._desk = context.desk
 
     async def end_exploration(self, reason: SessionStopReason) -> None:
         """Close the roster, void the queued forks and repairs and stop every specialist branch; the integration branch
@@ -152,9 +151,8 @@ class SessionStopper:
         """
 
         self._roster.close()
-        voided = await settled(self._desk.void_all(reason.value))
-        if isinstance(voided, BaseException):
-            logger.error("the queued forks and repairs were not voided cleanly", exc_info=voided)
+        for failure in await self._branches.void_queued(reason.value):
+            logger.error("a queued fork or repair was not voided cleanly", exc_info=failure)
         for failure in await self._stop_open(reason, frozenset({BranchKind.SPECIALIST})):
             logger.error("a specialist branch did not stop cleanly at the end of EXPLORE", exc_info=failure)
 
@@ -216,9 +214,10 @@ class SessionStopper:
         failure of the session stop.
         """
 
-        voided = await settled(self._desk.void_all(reason.value))
+        failures = await self._branches.void_queued(reason.value)
         withdrawn = await settled(self._toolbox.withdraw_all(reason.value))
-        failures = [step for step in (voided, withdrawn) if isinstance(step, BaseException)]
+        if isinstance(withdrawn, BaseException):
+            failures.append(withdrawn)
         failures += await self._stop_open(reason, frozenset(BranchKind))
         unconfirmed = await self._branches.stop_unconfirmed_specialists()
         status = await settled(self._toolbox.queue_state())

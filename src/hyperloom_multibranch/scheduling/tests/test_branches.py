@@ -35,6 +35,7 @@ from hyperloom_multibranch.scheduling.roster import BranchOrigin, BranchStop, Ro
 from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     SPECIALIST_POLL_SECONDS,
     DownToolbox,
+    RecordedReservations,
     RecordedSessions,
     RecordingToolbox,
     RefusingRuntime,
@@ -114,6 +115,7 @@ class Bench:
         self.gate_notebook = LocalNotebook(tmp_path / "nb", Writer(Role.GATE, "rule-gate"), clock=clock.now)
         self.roster = Roster(RosterCaps(3, 2, 8), tmp_path / "MB-roster.json", clock)
         self.desk = ForkDesk(self.roster, DecisionLog(tmp_path / "MB-decisions.jsonl", clock), clock)
+        self.reserved = RecordedReservations()
         self.toolbox = RecordingToolbox(
             LocalNotebook(tmp_path / "nb", Writer(Role.TOOLBOX, "toolbox"), clock=clock.now)
         )
@@ -137,6 +139,7 @@ class Bench:
             ProcessRegistry(tmp_path / "MB-pids.jsonl", self.clock),
             self.clock,
             self.desk,
+            self.reserved,
         )
 
     def controlling(self, toolbox: RecordingToolbox, tmp_path: Path) -> BranchControl:
@@ -287,7 +290,9 @@ async def test_a_fork_the_gate_landed_opens_at_its_fix(tmp_path: Path) -> None:
     assert (logged["kind"], logged["branch"], logged["detail"]["from_branch"]) == ("fork", "b02", "b01")
 
 
-async def test_a_fork_the_gate_did_not_land_is_voided_as_not_started_and_frees_its_slot(tmp_path: Path) -> None:
+async def test_a_fork_the_gate_did_not_land_is_stopped_as_not_started_frees_its_slot_and_is_handed_back(
+    tmp_path: Path,
+) -> None:
     bench = await Bench(tmp_path).rooted()
     bench.roster.open("b01", origin=BranchOrigin.FIRST_BATCH, start_commit=bench.root, k=1)
     bench.roster.open("b02", origin=BranchOrigin.FORK, start_commit="", k=1, from_branch="b01")
@@ -298,6 +303,7 @@ async def test_a_fork_the_gate_did_not_land_is_voided_as_not_started_and_frees_i
         StopCause.START_FAILED, "the rule gate did not land the fork", NOW
     )
     assert bench.roster.free_slots() == 2
+    assert bench.reserved.voided == [("b02", "the rule gate did not land the fork")]
     await _runs_started()
     assert "b02" not in bench.sessions.started and bench.toolbox.cancelled == ["b02"]
 
@@ -315,6 +321,44 @@ async def test_stopping_a_branch_voids_the_forks_and_repairs_it_queued(tmp_path:
     logged = [json.loads(line) for line in (tmp_path / "MB-decisions.jsonl").read_text().splitlines()]
     [voided] = [row for row in logged if row["kind"] == "repair" and row["detail"].get("status") == "voided"]
     assert (voided["branch"], voided["reason"]) == ("b04", "voided: parent b01 stopped: flat")
+    assert bench.reserved.voided == [("b04", "parent b01 stopped: flat")]
+
+
+async def test_stopping_a_branch_hands_its_admitted_fork_or_repair_back_to_the_gate(tmp_path: Path) -> None:
+    bench = await Bench(tmp_path).rooted()
+    await bench.control.open_branches(2, 1, BatchStart(BranchOrigin.FIRST_BATCH, bench.root, OPEN_BY))
+    admitted = await bench.desk.admit_repair(_repair_of(bench.root))
+
+    await bench.control.stop_branch("b01", BranchStop(StopCause.JUDGE, "flat", NOW))
+
+    assert (admitted.status, admitted.branch) == (AdmissionStatus.ACCEPTED, "b03")
+    assert bench.roster.entry("b03").stop == BranchStop(StopCause.JUDGE, "parent b01 stopped: flat", NOW)
+    assert bench.reserved.voided == [("b03", "parent b01 stopped: flat")]
+
+
+async def test_a_branch_that_started_is_not_handed_back_to_the_gate_when_it_stops(tmp_path: Path) -> None:
+    bench = await Bench(tmp_path).rooted()
+    await bench.control.open_branches(1, 1, BatchStart(BranchOrigin.FIRST_BATCH, bench.root, OPEN_BY))
+
+    await bench.control.stop_branch("b01", BranchStop(StopCause.JUDGE, "flat", NOW))
+
+    assert bench.reserved.voided == []
+
+
+async def test_a_repair_whose_specialist_does_not_start_is_handed_back_to_the_gate(tmp_path: Path) -> None:
+    bench = await Bench(tmp_path).rooted()
+    await bench.control.open_branches(1, 1, BatchStart(BranchOrigin.FIRST_BATCH, bench.root, OPEN_BY))
+    fix = await bench.repo.commit("b01", bench.root, BASELINE, "a fix")
+    toolbox = DownToolbox(LocalNotebook(tmp_path / "nb", Writer(Role.TOOLBOX, "toolbox"), clock=CLOCK.now))
+    toolbox.down = True
+    bench.control = bench.controlling(toolbox, tmp_path)
+    bench.roster.open("b02", origin=BranchOrigin.REPAIR, start_commit="", k=2, from_branch="b01")
+
+    await bench.control.start_admitted(AdmittedBranch("b02", fix, _repair_of(fix)), OPEN_BY)
+
+    stop = bench.roster.entry("b02").stop
+    assert stop is not None and stop.cause is StopCause.START_FAILED
+    assert bench.reserved.voided == [("b02", "ConnectionError: toolbox service down")]
 
 
 async def test_a_failing_specialist_stop_is_returned_and_still_withdraws_and_records_the_branch(tmp_path: Path) -> None:

@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
-from typing import Protocol
 
 from hyperloom_kb import NoOpExperienceKB
 from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot
@@ -32,29 +31,6 @@ MB_FAKE_BASE_IMAGE_DIGEST = "sha256:" + "0" * 64
 #: Why CLOSE wrote nothing to the Experience KB and the specialists recall no past session's learnings: MB1 runs on no
 #: Experience KB, by @zgong's decision (board #22). The online Experience KB service replaces it in a later milestone.
 MB_FAKE_EXPERIENCE_KB = "mb_fake_experience_kb"
-
-
-class MbFakeSplitLanding(Protocol):
-    """Lands an admitted fork the scheduler names by its branch: cuts the branch at the fork's parent commit, commits
-    the fix on it and records its ``SPLIT``; true once it has, false when it will not.
-
-    Stands in for the rule gate's landing method proposed on board #34 (request A), which keys the fork by the branch
-    the scheduler reserved for it; replaced by that method, and the stand-ins implementing this, once it lands.
-    """
-
-    async def land_split(self, branch: str) -> bool: ...
-
-
-async def mb_fake_settle_voided(branch: str, reason: str) -> None:
-    """Tell the rule gate that the fork or repair reserved as ``branch`` was voided for ``reason``: nothing is told.
-
-    Stands in for the gate's void callback proposed on board #59 (request B), which turns the request's
-    ``SPLIT_PENDING`` or ``REPAIR_REQUESTED`` conclusion into a record-only one; replaced by that callback once it
-    lands. Until then only the scheduler's decision records the void, and a voided repair stays requested in the
-    notebook.
-    """
-
-    del branch, reason
 
 
 def mb_fake_learning_recall(log: RetrievalLog) -> LearningRecall:
@@ -91,8 +67,6 @@ def _faked(step: CloseStep) -> CloseStep:
 __all__ = [
     "MB_FAKE_BASE_IMAGE_DIGEST",
     "MB_FAKE_EXPERIENCE_KB",
-    "MbFakeSplitLanding",
     "mb_fake_close_knowledge",
     "mb_fake_learning_recall",
-    "mb_fake_settle_voided",
 ]

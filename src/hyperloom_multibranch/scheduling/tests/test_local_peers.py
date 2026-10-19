@@ -32,6 +32,7 @@ from hyperloom_multibranch.notebook import STALL_TESTS, LocalNotebook
 from hyperloom_multibranch.notebook.tests.factories import intent, judgement, request, result
 from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST, SpecialistGrant
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
+from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.regression import RegressionSet
 from hyperloom_multibranch.rulegate.rules import AgentXRule, InferenceXRule
 from hyperloom_multibranch.rulegate.service import BASELINE_TESTS, GateService
@@ -299,6 +300,7 @@ async def test_the_real_peers_live_inside_the_session_directory(built: _Built) -
     await peers.toolbox.set_policy(QueuePolicy(per_branch_k=1, global_concurrency=2))
     state = await peers.toolbox.queue_state()
     assert (state.queued, state.running) == (0, 0)
+    assert isinstance(peers.reserved, RuleGate) and not await peers.reserved.land_split("b09")
     assert isinstance(peers.regression, RegressionSet)
     scheduler = LocalNotebook(layout.notebook, Writer(Role.SCHEDULER, "test-scheduler"))
     await scheduler.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id=root))

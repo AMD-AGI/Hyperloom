@@ -30,7 +30,6 @@ from dataclasses import dataclass, replace
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission, ForkRequest, RepairRequest
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
-from hyperloom_multibranch.scheduling.mb_fakes import mb_fake_settle_voided
 from hyperloom_multibranch.scheduling.roster import BranchOrigin, Roster
 
 DECISION_KINDS = {BranchOrigin.FORK: DecisionKind.FORK, BranchOrigin.REPAIR: DecisionKind.REPAIR}
@@ -146,26 +145,24 @@ class ForkDesk:
             self._enter(pending)
             self._record(pending, f"dequeued after {self._clock.now() - pending.queued_at:.0f}s", "dequeued")
 
-    async def void_from(self, parent: str, reason: str) -> None:
-        """Void every queued request ``parent`` asked for, as ``parent`` has stopped for ``reason``."""
+    def void_from(self, parent: str, reason: str) -> tuple[str, ...]:
+        """Void every queued request ``parent`` asked for, as ``parent`` has stopped for ``reason``; their reserved
+        branch ids, oldest first."""
 
-        await self._void(tuple(pending for pending in self._queue if pending.from_branch == parent), reason)
+        return self._void(tuple(pending for pending in self._queue if pending.from_branch == parent), reason)
 
-    async def void_all(self, reason: str) -> None:
-        """Void the whole queue, as the session stops for ``reason``."""
+    def void_all(self, reason: str) -> tuple[str, ...]:
+        """Void the whole queue, as the session stops for ``reason``; the reserved branch ids, oldest first."""
 
-        await self._void(tuple(self._queue), reason)
+        return self._void(tuple(self._queue), reason)
 
-    async def _void(self, voided: tuple[PendingBranch, ...], reason: str) -> None:
-        """Take ``voided`` off the queue before the first await, so no fill moves one onto the roster meanwhile."""
-
+    def _void(self, voided: tuple[PendingBranch, ...], reason: str) -> tuple[str, ...]:
         self._queue = deque(pending for pending in self._queue if pending not in voided)
         for pending in voided:
             if pending.repair is not None:
                 self._repairs.discard(_repair_key(pending.repair))
             self._record(pending, f"voided: {reason}", "voided")
-        for pending in voided:
-            await mb_fake_settle_voided(pending.branch, reason)
+        return tuple(pending.branch for pending in voided)
 
     def pending(self) -> tuple[PendingBranch, ...]:
         """The requests waiting for a slot, oldest first."""

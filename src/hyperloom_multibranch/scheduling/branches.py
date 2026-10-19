@@ -9,11 +9,13 @@ specialist there and gives it its K; the session's briefs keep the focus a branc
 opened with. A repair the fork desk admitted is opened the same way at the commit its blocked
 candidate was measured against; a fork is cut by the rule gate, which lands the fix on it first and records its
 ``SPLIT`` lineage, so it gets no ``OPEN``: it is opened at its head once the gate has landed it, and a fork the gate
-does not land is voided and stopped as not started. A repair's specialist starts on the request it was admitted for,
+does not land is stopped as not started. A repair's specialist starts on the request it was admitted for,
 and a repair branch is stopped :data:`REPAIR_BRANCH_SECONDS` after its entry into the roster. Stopping a branch
 withdraws everything of it: its specialist, its queued and running tests and tool jobs, the processes the scheduler
 registered for it, its claims, and the forks and repairs of it that are queued, or admitted but not started yet, as
-the fork desk admits nothing for a stopped branch; the notebook
+the fork desk admits nothing for a stopped branch. Every fork and repair voided that way, stopped before it started,
+or whose start failed is handed to the rule gate, which records its candidate as only recorded unless it already
+landed the fork; the notebook
 gets the ``STOP`` lineage of a branch that started, the integration branch included, which only the end of the session
 stops. A specialist counts as possibly running from the moment its start is asked for until the runtime confirms its
 stop; only a start the runtime itself failed leaves nothing to stop. A call to a specialist gets
@@ -44,7 +46,6 @@ from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.scheduling.context import SchedulerContext
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind
 from hyperloom_multibranch.scheduling.forks import DECISION_KINDS, AdmittedBranch
-from hyperloom_multibranch.scheduling.mb_fakes import mb_fake_settle_voided
 from hyperloom_multibranch.scheduling.settle import failure_text, settled
 from hyperloom_multibranch.scheduling.roster import (
     BranchEntry,
@@ -103,6 +104,7 @@ class BranchControl:
         self._decisions = context.decisions
         self._clock = context.clock
         self._desk = context.desk
+        self._reserved = context.reserved
         self._specialists: set[str] = set()
 
     async def integration_head(self) -> str:
@@ -144,10 +146,9 @@ class BranchControl:
         )
 
     async def void_admitted(self, branch: str, reason: str) -> None:
-        """Void a fork the rule gate did not land, for ``reason``: the gate is told and the branch is stopped as not
-        started, freeing its slot."""
+        """Void a fork the rule gate did not land, for ``reason``: it is stopped as not started, freeing its slot, and
+        handed back to the gate like every admitted branch that stops."""
 
-        await mb_fake_settle_voided(branch, reason)
         await self._fail_start(self._roster.entry(branch), reason)
 
     async def _admitted_start(self, entry: BranchEntry, parent_commit: str) -> str:
@@ -232,7 +233,12 @@ class BranchControl:
             return ()
         self._roster.stop(branch, stop)
         forks = await self._stop_admitted_forks(branch, stop)
-        steps = [await settled(self._desk.void_from(branch, f"parent {branch} stopped: {stop.reason}"))]
+        orphaned = f"parent {branch} stopped: {stop.reason}"
+        steps = await self._settle_voided(self._desk.void_from(branch, orphaned), orphaned)
+        if entry.origin.reserved_by_gate and (
+            entry.status is BranchStatus.ADMITTED or stop.cause is StopCause.START_FAILED
+        ):
+            steps += await self._settle_voided((branch,), stop.reason)
         steps.append(await settled(self.push_quota()))
         if branch in self._specialists:
             steps.append(await self._stop_specialist(branch))
@@ -250,6 +256,16 @@ class BranchControl:
         }
         self._decisions.record(Decision(DecisionKind.STOP, stop.summary, branch, detail))
         return (*raised, *forks)
+
+    async def void_queued(self, reason: str) -> list[BaseException]:
+        """Void every fork and repair still queued, as the session stops for ``reason``, and have the gate record
+        each; the records that failed."""
+
+        settled_voids = await self._settle_voided(self._desk.void_all(reason), reason)
+        return [outcome for outcome in settled_voids if isinstance(outcome, BaseException)]
+
+    async def _settle_voided(self, branches: tuple[str, ...], reason: str) -> list[None | BaseException]:
+        return [await settled(self._reserved.settle_voided(branch, reason)) for branch in branches]
 
     async def stop_unconfirmed_specialists(self) -> tuple[str, ...]:
         """Ask again, concurrently, for every specialist stop the runtime has not confirmed; returns the branches whose
