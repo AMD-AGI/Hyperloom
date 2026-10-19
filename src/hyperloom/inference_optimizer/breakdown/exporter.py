@@ -92,7 +92,7 @@ def build(session_dir: Path | str) -> dict[str, Any]:
 
     # Author-time recorder fragments (write-side spool).
     assembled = _load_assembled(sd, warnings)
-    # V6 is the hard-cutover wire shape regardless of whether recorder fragments or collector fallbacks supplied the
+    # The current wire shape is stamped regardless of whether recorder fragments or collector fallbacks supplied the
     # underlying evidence.
     schema_version = SCHEMA_VERSION_V6
 
