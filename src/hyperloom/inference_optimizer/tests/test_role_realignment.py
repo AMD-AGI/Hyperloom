@@ -19,6 +19,8 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.prompts.prompt_builder import (
     build_orchestration_prompt,
     default_enabled_actions,
+    PromptAssets,
+    SessionContext,
 )
 from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir, make_session_dir
 
@@ -40,10 +42,7 @@ def test_orchestration_prompt_includes_phase_contract(registry):
     text = build_orchestration_prompt(
         action_registry=registry,
         enabled_actions=default_enabled_actions(no_kernel=False),
-        framework="sglang",
-        objective_kind="gain_pct",
-        objective_value=10.0,
-        max_minutes=120,
+        session=SessionContext(framework="sglang", objective_kind="gain_pct", objective_value=10.0, max_minutes=120),
     )
     assert "PHASE CONTRACT" in text
     # Driven off the phase table: a hand-written list keeps naming a phase the build dropped, and passes on any other
@@ -58,11 +57,8 @@ def test_orchestration_prompt_defers_rescue_moves_to_reference(registry):
     text = build_orchestration_prompt(
         action_registry=registry,
         enabled_actions=default_enabled_actions(no_kernel=False),
-        framework="sglang",
-        objective_kind="gain_pct",
-        objective_value=10.0,
-        max_minutes=120,
-        rules_fragment_path=asset_system_prompts_dir() / "orchestration.md",
+        session=SessionContext(framework="sglang", objective_kind="gain_pct", objective_value=10.0, max_minutes=120),
+        assets=PromptAssets(rules_fragment_path=asset_system_prompts_dir() / "orchestration.md"),
     )
 
     assert "kill_task" not in text
@@ -73,8 +69,7 @@ def test_orchestration_prompt_no_kernel_marks_kernel_skipped(registry):
     text = build_orchestration_prompt(
         action_registry=registry,
         enabled_actions=default_enabled_actions(no_kernel=True),
-        framework="sglang",
-        max_minutes=120,
+        session=SessionContext(framework="sglang", max_minutes=120),
     )
     assert "(DISABLED: --no-kernel — phase skipped)" in text
 
@@ -83,10 +78,9 @@ def test_orchestration_prompt_no_framework_agent_marks_skipped_and_context(regis
     text = build_orchestration_prompt(
         action_registry=registry,
         enabled_actions=default_enabled_actions(no_kernel=False),
-        framework="sglang",
-        kernel_enabled=True,
-        framework_agent_phase_enabled=False,
-        max_minutes=120,
+        session=SessionContext(
+            framework="sglang", kernel_enabled=True, framework_agent_phase_enabled=False, max_minutes=120
+        ),
     )
     assert "(DISABLED: --no-framework-agent — phase skipped)" in text
     assert "optimize_enabled : false" in text
@@ -96,10 +90,9 @@ def test_orchestration_prompt_all_enabled_session_context_true(registry):
     text = build_orchestration_prompt(
         action_registry=registry,
         enabled_actions=default_enabled_actions(no_kernel=False),
-        framework="sglang",
-        kernel_enabled=True,
-        framework_agent_phase_enabled=True,
-        max_minutes=120,
+        session=SessionContext(
+            framework="sglang", kernel_enabled=True, framework_agent_phase_enabled=True, max_minutes=120
+        ),
     )
     assert "optimize_enabled : true" in text
     assert "kernel_enabled   : true" in text

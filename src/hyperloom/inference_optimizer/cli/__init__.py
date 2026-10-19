@@ -113,6 +113,9 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
     TRANSPORT_TOOLS,
     build_orchestration_prompt,
     default_enabled_actions,
+    PromptAssets,
+    PromptCycle,
+    SessionContext,
 )
 from hyperloom.inference_optimizer.breakdown.stop_reasons import SUPERVISOR_RESTART_REASON
 
@@ -366,24 +369,25 @@ def _build_orchestration_prompt(
     return build_orchestration_prompt(
         action_registry=ACTION_CATALOGUE,
         enabled_actions=enabled,
-        framework=framework,
-        kernel_enabled=not no_kernel,
-        framework_agent_phase_enabled=not no_framework_agent,
-        objective_kind=kind,
-        objective_value=value,
-        max_minutes=int(context.max_minutes),
-        macro_cycle=int(macro_cycle),
-        cycle_directive=cycle_directive,
-        cycle_strategy=cycle_strategy,
-        phase=phase,
-        transport=context.transport,
-        benchmark_mode=context.benchmark_mode,
-        agentx_corpus_shape=context.agentx_corpus_shape,
-        agentx_grading=context.agentx_grading,
-        agentx_backend=context.agentx_backend,
-        rules_fragment_path=_orchestration_rules_fragment_path(),
-        framework_source_roots=resolve_kernel_search_roots(),
-        session_framework_tree=resolve_framework_tree(framework),
+        session=SessionContext(
+            framework=framework,
+            kernel_enabled=not no_kernel,
+            framework_agent_phase_enabled=not no_framework_agent,
+            objective_kind=kind,
+            objective_value=value,
+            max_minutes=int(context.max_minutes),
+            framework_source_roots=resolve_kernel_search_roots(),
+            session_framework_tree=resolve_framework_tree(framework),
+            transport=context.transport,
+            benchmark_mode=context.benchmark_mode,
+            agentx_corpus_shape=context.agentx_corpus_shape,
+            agentx_grading=context.agentx_grading,
+            agentx_backend=context.agentx_backend,
+        ),
+        cycle=PromptCycle(
+            macro_cycle=int(macro_cycle), cycle_directive=cycle_directive, cycle_strategy=cycle_strategy, phase=phase
+        ),
+        assets=PromptAssets(rules_fragment_path=_orchestration_rules_fragment_path()),
     )
 
 
