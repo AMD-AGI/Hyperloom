@@ -66,7 +66,6 @@ cognitive-complexity src/hyperloom/orchestrator/actions/executors/benchmark_resu
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/benchmark_result.py::extract_benchmark_measurement 35
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/benchmark_result.py::harvest_leaked_artifacts 51
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/benchmark_result.py::harvest_mn_gpu_metrics 75
-cognitive-complexity src/hyperloom/orchestrator/actions/executors/bypass_runner.py::run_benchmark 33
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/explore.py::ExploreExecutor.__call__ 369
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._bench_patch 33
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._enablement_keep_records 38
@@ -628,7 +627,7 @@ function-lines src/hyperloom/orchestrator/actions/executors/benchmark_result.py:
 function-lines src/hyperloom/orchestrator/actions/executors/benchmark_result.py::harvest_leaked_artifacts 85
 function-lines src/hyperloom/orchestrator/actions/executors/benchmark_result.py::harvest_mn_gpu_metrics 122
 function-lines src/hyperloom/orchestrator/actions/executors/bypass_engine.py::build_server_command 96
-function-lines src/hyperloom/orchestrator/actions/executors/bypass_runner.py::run_benchmark 128
+function-lines src/hyperloom/orchestrator/actions/executors/bypass_runner.py::run_benchmark 117
 function-lines src/hyperloom/orchestrator/actions/executors/explore.py::ExploreExecutor.__call__ 1124
 function-lines src/hyperloom/orchestrator/actions/executors/explore.py::filter_baseline_noop_variants 99
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._bench_patch 259
