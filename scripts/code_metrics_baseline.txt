@@ -952,7 +952,7 @@ module-lines src/hyperloom/orchestrator/actions/executors/_kv_metrics.py 1606
 module-lines src/hyperloom/orchestrator/actions/executors/_workload_envs.py 2161
 module-lines src/hyperloom/orchestrator/actions/executors/baseline.py 4253
 module-lines src/hyperloom/orchestrator/actions/executors/explore.py 1880
-module-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py 4663
+module-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py 4660
 module-lines src/hyperloom/orchestrator/actions/executors/profile.py 1395
 module-lines src/hyperloom/orchestrator/actions/executors/report.py 1373
 module-lines src/hyperloom/orchestrator/actions/executors/roofline.py 1303

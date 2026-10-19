@@ -3499,11 +3499,8 @@ class IntegratePatchExecutor:
         could not be stashed, and ``None`` once the tree is safe to mutate.
         """
         shared_state = attempt.shared_state
-        output_root = Path(
-            params.get("output_dir")
-            or extra.get("workspace")
-            or runs_dir(self.session_dir, "integrate_patch", attempt.task_id)
-        )
+        task_runs = runs_dir(self.session_dir, "integrate_patch", attempt.task_id)
+        output_root = Path(params.get("output_dir") or extra.get("workspace") or task_runs)
         output_root.mkdir(parents=True, exist_ok=True)
         attempt.output_root = output_root
         git_head = ""
@@ -3512,9 +3509,8 @@ class IntegratePatchExecutor:
             if deliverable.patch_paths and not git_head:
                 # Patches on a git tree keep no per-file backups, so the recorded HEAD is their only way back.
                 raise OSError(f"cannot read the HEAD of {framework_root} to restore to")
-        recovery_parent = runs_dir(self.session_dir, "integrate_patch", attempt.task_id)
-        recovery_parent.mkdir(parents=True, exist_ok=True)
-        recovery_root = Path(tempfile.mkdtemp(prefix="recovery-", dir=recovery_parent)).resolve()
+        task_runs.mkdir(parents=True, exist_ok=True)
+        recovery_root = Path(tempfile.mkdtemp(prefix="recovery-", dir=task_runs)).resolve()
         recovery = new_recovery_record(framework_root, git_head=git_head, recovery_root=recovery_root)
         attempt.pending = _pending_sentinel(attempt, deliverable, framework_root=framework_root, recovery=recovery)
         if shared_state is not None:
