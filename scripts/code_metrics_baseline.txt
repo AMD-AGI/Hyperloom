@@ -35,7 +35,6 @@ cognitive-complexity src/hyperloom/inference_optimizer/roofline_ceiling.py::comp
 cognitive-complexity src/hyperloom/inference_optimizer/roofline_snapshot.py::build_profiler_digest 36
 cognitive-complexity src/hyperloom/inference_optimizer/session/manifest.py::build_manifest 45
 cognitive-complexity src/hyperloom/inference_optimizer/tools/backfill_langfuse.py::ingest 44
-cognitive-complexity src/hyperloom/inference_optimizer/trace/decision_trace.py::write_decision_trace 53
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_accuracy_gate.py::parse_eval_results 34
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_aiter_jit.py::_any_live_compiler 37
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_benchmark_runtime.py::apply_runtime_benchmark_overrides 32
@@ -588,7 +587,6 @@ function-lines src/hyperloom/inference_optimizer/roofline_ceiling.py::compute_ro
 function-lines src/hyperloom/inference_optimizer/roofline_snapshot.py::format_roofline_metrics_table 93
 function-lines src/hyperloom/inference_optimizer/session/manifest.py::build_manifest 105
 function-lines src/hyperloom/inference_optimizer/tools/backfill_langfuse.py::ingest 148
-function-lines src/hyperloom/inference_optimizer/trace/decision_trace.py::write_decision_trace 151
 function-lines src/hyperloom/orchestrator/actions/executors/_accuracy_gate.py::parse_eval_results 108
 function-lines src/hyperloom/orchestrator/actions/executors/_framework_rewrite_evidence.py::build_evidence 104
 function-lines src/hyperloom/orchestrator/actions/executors/_framework_switch_manifest.py::parse_manifest 95

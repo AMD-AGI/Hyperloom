@@ -18,6 +18,20 @@ from .tool_events import TIMING_NONE
 from .trajectory_trace import EVENT_LLM_REQUEST, STATUS_COMPLETED, record_event
 
 
+def _reported_usage(message: dict[str, Any]) -> dict[str, int]:
+    """The usage counters one assistant row reports, without the ones it leaves unset."""
+    usage = normalize_usage(message.get("usage") if isinstance(message.get("usage"), dict) else None)
+    if usage is None:
+        return {}
+    return {key: value for key, value in usage.items() if value is not None}
+
+
+def _outputs_add_up(rows: list[dict[str, Any]], session_output: int | None) -> bool:
+    """Whether the per-request outputs sum to the ``result`` row's total; never when there was no ``result`` row."""
+    observed = sum(int(row.get("output_tokens") or 0) for row in rows)
+    return session_output is not None and observed == session_output
+
+
 def stream_json_requests(log_path: str | Path) -> list[dict[str, Any]]:
     """One dict per distinct model request of a stream-json log, in first-seen order."""
     requests: dict[str, dict[str, Any]] = {}
@@ -45,15 +59,12 @@ def stream_json_requests(log_path: str | Path) -> list[dict[str, Any]]:
             message_id,
             {"message_id": message_id, "model": model, "parent_tool_use_id": obj.get("parent_tool_use_id")},
         )
-        usage = normalize_usage(message.get("usage") if isinstance(message.get("usage"), dict) else None)
-        if usage is not None:
-            request.update({key: value for key, value in usage.items() if value is not None})
+        request.update(_reported_usage(message))
         stop_reason = message.get("stop_reason")
         if isinstance(stop_reason, str) and stop_reason:
             request["stop_reason"] = stop_reason
     rows = list(requests.values())
-    observed = sum(int(row.get("output_tokens") or 0) for row in rows)
-    exact = session_output is not None and observed == session_output
+    exact = _outputs_add_up(rows, session_output)
     for index, row in enumerate(rows):
         row["request_index"] = index
         row["output_tokens_exact"] = exact
