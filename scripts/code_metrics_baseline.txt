@@ -105,12 +105,7 @@ cognitive-complexity src/hyperloom/orchestrator/kernel/controller_patch_integrat
 cognitive-complexity src/hyperloom/orchestrator/kernel/forge_fusion.py::_normalize_manifest 44
 cognitive-complexity src/hyperloom/orchestrator/kernel/forge_fusion.py::salvage_forge_fusion_from_workspace 41
 cognitive-complexity src/hyperloom/orchestrator/kernel/gemm_shape_coverage.py::align_shapes_to_aiter_keys 33
-cognitive-complexity src/hyperloom/orchestrator/kernel/request_handlers.py::_capture_vllm_tunableop_shapes 75
-cognitive-complexity src/hyperloom/orchestrator/kernel/request_handlers.py::_fill_integrate_defaults_from_state 92
 cognitive-complexity src/hyperloom/orchestrator/kernel/request_handlers.py::_resolve_forge_server_log 49
-cognitive-complexity src/hyperloom/orchestrator/kernel/request_handlers.py::_resolve_integrate_payload 83
-cognitive-complexity src/hyperloom/orchestrator/kernel/request_handlers.py::_run_forge_gemm_tuning 88
-cognitive-complexity src/hyperloom/orchestrator/kernel/request_handlers.py::integrate_handler 84
 cognitive-complexity src/hyperloom/orchestrator/knowledge/recipe_journal.py::RecipeJournalCollaborator._build_kernel_optimizations_from_state 53
 cognitive-complexity src/hyperloom/orchestrator/knowledge/recipe_journal.py::RecipeJournalCollaborator._build_recipe_attrs_from_state 41
 cognitive-complexity src/hyperloom/orchestrator/knowledge/recipe_journal.py::RecipeJournalCollaborator._collect_attempt_provenance 34
@@ -306,11 +301,6 @@ cyclomatic-complexity src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::r
 cyclomatic-complexity src/hyperloom/orchestrator/kernel/attempt_summary.py::build_kernel_optimization_summary 21
 cyclomatic-complexity src/hyperloom/orchestrator/kernel/conc_sweep.py::_sweep_one_arm_single_server 34
 cyclomatic-complexity src/hyperloom/orchestrator/kernel/conc_sweep.py::run_conc_sweep 26
-cyclomatic-complexity src/hyperloom/orchestrator/kernel/request_handlers.py::_capture_vllm_tunableop_shapes 26
-cyclomatic-complexity src/hyperloom/orchestrator/kernel/request_handlers.py::_fill_integrate_defaults_from_state 26
-cyclomatic-complexity src/hyperloom/orchestrator/kernel/request_handlers.py::_resolve_integrate_payload 24
-cyclomatic-complexity src/hyperloom/orchestrator/kernel/request_handlers.py::_run_forge_gemm_tuning 44
-cyclomatic-complexity src/hyperloom/orchestrator/kernel/request_handlers.py::integrate_handler 39
 cyclomatic-complexity src/hyperloom/orchestrator/knowledge/recipe_journal.py::RecipeJournalCollaborator.finalize_recipe_and_journal 21
 cyclomatic-complexity src/hyperloom/orchestrator/knowledge/recipe_kb_t0.py::run_t0_anchor 33
 cyclomatic-complexity src/hyperloom/orchestrator/knowledge/remote_recipe/values.py::_adopt_replayed_prior 28
@@ -516,6 +506,7 @@ function-args src/hyperloom/orchestrator/enablement/recipe/keep_probe.py::probe_
 function-args src/hyperloom/orchestrator/enablement/recipe/setup_ledger.py::build_execution_row 8
 function-args src/hyperloom/orchestrator/enablement/revalidation.py::EnablementRevalidation._open_round_past_spent_generations 6
 function-args src/hyperloom/orchestrator/enablement/revalidation.py::EnablementRevalidation.open_row_past_spent_generations 6
+function-args src/hyperloom/orchestrator/kernel/_vllm_shape_capture.py::_vllm_block_fp8_profile_capture_required 6
 function-args src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::_apply_kernel_patch_snapshot 12
 function-args src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::_dispatch_multinode_apply 6
 function-args src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::apply_kernel_patch 12
@@ -537,7 +528,6 @@ function-args src/hyperloom/orchestrator/kernel/patch_conflict_merge.py::_resolv
 function-args src/hyperloom/orchestrator/kernel/patch_conflict_merge.py::apply_patch_resolving_conflicts 7
 function-args src/hyperloom/orchestrator/kernel/request_handlers.py::_forge_framework_for_vllm 6
 function-args src/hyperloom/orchestrator/kernel/request_handlers.py::_gemm_router_targets 9
-function-args src/hyperloom/orchestrator/kernel/request_handlers.py::_vllm_block_fp8_profile_capture_required 6
 function-args src/hyperloom/orchestrator/knowledge/agent_kb.py::PatchKB.stage_provenance 6
 function-args src/hyperloom/orchestrator/knowledge/kb_writeback.py::_record 18
 function-args src/hyperloom/orchestrator/knowledge/kb_writeback.py::write_framework_record 19
@@ -741,6 +731,7 @@ function-lines src/hyperloom/orchestrator/enablement/recipe/sufficiency.py::_pat
 function-lines src/hyperloom/orchestrator/enablement/runtime/targeted_build.py::run_aiter_build 218
 function-lines src/hyperloom/orchestrator/enablement/runtime/targeted_build.py::run_sgl_kernel_build 172
 function-lines src/hyperloom/orchestrator/enablement/runtime/targeted_build.py::run_vllm_source_build 220
+function-lines src/hyperloom/orchestrator/kernel/_integrate_accuracy.py::_grade_integrate_accuracy 109
 function-lines src/hyperloom/orchestrator/kernel/_kernel_decisions.py::_queue_kernel_keep 99
 function-lines src/hyperloom/orchestrator/kernel/_kernel_decisions.py::enqueue_nominated_patch 105
 function-lines src/hyperloom/orchestrator/kernel/_kernel_decisions.py::record_kernel_integrate_result 171
@@ -763,15 +754,11 @@ function-lines src/hyperloom/orchestrator/kernel/controller_patch_integration.py
 function-lines src/hyperloom/orchestrator/kernel/forge_fusion.py::_normalize_manifest 147
 function-lines src/hyperloom/orchestrator/kernel/forge_fusion.py::salvage_forge_fusion_from_workspace 82
 function-lines src/hyperloom/orchestrator/kernel/forge_handoff.py::build_serving_context_md 84
-function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::_capture_vllm_tunableop_shapes 257
-function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::_fill_integrate_defaults_from_state 169
-function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::_grade_integrate_accuracy 121
 function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::_persist_forge_gemm_csv_durably 95
-function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::_resolve_integrate_payload 140
 function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::_run_forge_fusion 144
-function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::_run_forge_gemm_tuning 419
+function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::_run_forge_gemm_tuning 103
 function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::_run_integrate_rebaseline_with_lock_retry 111
-function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::integrate_handler 474
+function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::integrate_handler 128
 function-lines src/hyperloom/orchestrator/knowledge/recipe_journal.py::RecipeJournalCollaborator._build_recipe_attrs_from_state 102
 function-lines src/hyperloom/orchestrator/knowledge/recipe_journal.py::RecipeJournalCollaborator._record_fact_impl 97
 function-lines src/hyperloom/orchestrator/knowledge/recipe_journal.py::RecipeJournalCollaborator._record_fact_per_variant 114
@@ -1045,7 +1032,7 @@ module-lines src/hyperloom/orchestrator/actions/executors/report.py 1380
 module-lines src/hyperloom/orchestrator/actions/executors/roofline.py 1303
 module-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py 2659
 module-lines src/hyperloom/orchestrator/kernel/conc_sweep.py 1429
-module-lines src/hyperloom/orchestrator/kernel/request_handlers.py 4888
+module-lines src/hyperloom/orchestrator/kernel/request_handlers.py 4720
 module-lines src/hyperloom/orchestrator/knowledge/recipe_journal.py 1785
 module-lines src/hyperloom/orchestrator/knowledge/recipe_kb_t0.py 1318
 module-lines src/hyperloom/orchestrator/knowledge/remote_recipe/values.py 1284

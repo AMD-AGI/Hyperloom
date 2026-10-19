@@ -13,6 +13,7 @@ Dispatch table is exposed via :data:`KERNEL_REQUEST_HANDLERS` for test monkey-pa
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import functools
 import importlib
 import importlib.util
@@ -25,7 +26,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Mapping, NamedTuple
+from typing import Any, Awaitable, Callable, Iterator, Mapping, NamedTuple
 
 from hyperloom.common import codex_session, llm_config
 from hyperloom.common.checkpoint_quant import checkpoint_format
@@ -57,6 +58,7 @@ from .lane_budget import (
 from .patch_landing import bundle_belongs_to
 from .patch_lifecycle import cleanup_verdict as _cleanup_verdict
 
+from ._integrate_accuracy import _grade_integrate_accuracy
 from ._kernel_decisions import _entry_by_kernel_id, _honest_flag
 from ._vllm_shape_capture import (
     _capture_vllm_tunableop_shapes,
@@ -75,10 +77,6 @@ KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT = 1.0
 # serving accuracy is what settles it.
 _FRAMEWORK_APPLYBACK_ARTIFACT_KIND = "framework_applyback"
 _INTEGRATE_ACCURACY_VALIDATION_TIER = "integrate_e2e_accuracy"
-
-# Mirrors the completion ceiling the inferencex eval shim installs; kept in sync
-# so the feasibility check reasons about the budget the eval will really ask for.
-_EVAL_DEFAULT_MAX_TOKENS = 4096
 
 
 def _vram_guarded_server_args(extra_args: str) -> str:
@@ -296,6 +294,20 @@ class AmbiguousIntegrationTarget(Exception):
     """
 
 
+def _is_paired_gemm_measurement(payload: Mapping[str, Any]) -> bool:
+    """Whether this integrate measures a GEMM candidate against an explicit paired reference.
+
+    It applies no artifact and earns no KEEP of its own: the pair of runs is the
+    measurement, and the caller compares them.
+    """
+    return payload.get("source") == "forge_gemm_paired"
+
+
+def _integrate_mode(payload: Mapping[str, Any]) -> str:
+    """What an integrate measures: the patch it applies, or ``env_only`` for configuration alone."""
+    return str(payload.get("mode") or "patch").strip().lower()
+
+
 def _fill_integrate_defaults_from_state(
     payload: dict,
     *,
@@ -322,7 +334,7 @@ def _fill_integrate_defaults_from_state(
     from ..state.shared_state import SharedState
 
     resolved = dict(payload)
-    if resolved.get("source") == "forge_gemm_paired":
+    if _is_paired_gemm_measurement(resolved):
         _anchor_on_paired_reference(resolved)
         return resolved
     state = SharedState.load_or_init(session_dir)
@@ -759,6 +771,11 @@ def _normalize_precision(value: Any) -> str:
     return str(value or "").strip().lower()
 
 
+def _requested_framework(payload: dict, state: Any, fallback: str = "") -> str:
+    """The serving framework this request targets, else the session's, as a lower-case name."""
+    return _requested_setting(payload, state, "framework", fallback).lower()
+
+
 def _requested_setting(payload: dict, state: Any, key: str, fallback: str = "") -> str:
     """What this request names for ``key``, else what the session carries, else ``fallback``.
 
@@ -1181,7 +1198,7 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
 
     model_path = _requested_setting(payload, state, "model_path")
     gpu_type = _requested_setting(payload, state, "gpu_type")
-    framework = _requested_setting(payload, state, "framework").lower()
+    framework = _requested_framework(payload, state)
     requested_quant_type = str(payload.get("quant_type") or "auto").strip()
 
     if payload.get("precision"):
@@ -2585,7 +2602,7 @@ def _forge_gemm_run(state: Any, payload: dict, session_dir: Path) -> _ForgeGemmR
     return _ForgeGemmRun(
         session_dir=session_dir,
         workspace=workspace,
-        framework=_requested_setting(payload, state, "framework", "sglang").lower(),
+        framework=_requested_framework(payload, state, "sglang"),
         tuning_framework="",
         precision=precision,
         quant_type=quant_type,
@@ -3430,7 +3447,7 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
             "kept": False,
         }
 
-    framework = _requested_setting(payload, state, "framework", "sglang").lower()
+    framework = _requested_framework(payload, state, "sglang")
     gpu = str(payload.get("gpu") or "0").strip()
     try:
         agent_backend, llm_model = _resolve_forge_agent(payload)
@@ -3871,181 +3888,6 @@ async def _run_integrate_rebaseline_with_lock_retry(
     return retry_result
 
 
-def _eval_generation_budget() -> int:
-    """Completion tokens the eval harness reserves per sample.
-
-    Mirrors the clamp installed by the inferencex shim: ``HYPERLOOM_EVAL_MAX_TOKENS``
-    when it parses as a positive integer, else the shim's own default. ``0``
-    means the operator disabled the clamp, so no budget can be assumed.
-    """
-    raw = (os.environ.get("HYPERLOOM_EVAL_MAX_TOKENS") or "").strip()
-    if not raw:
-        return _EVAL_DEFAULT_MAX_TOKENS
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return _EVAL_DEFAULT_MAX_TOKENS
-    return value if value >= 0 else _EVAL_DEFAULT_MAX_TOKENS
-
-
-class _EvalScore(NamedTuple):
-    """One serving-eval score and the task, metric and file it was read from."""
-
-    accuracy: float | None
-    task: str
-    metric: str
-    source_file: str
-
-
-def _integrate_eval_score(bench_result: dict[str, Any], workspace: Path) -> _EvalScore:
-    """Read back the serving-eval score of a re-baseline.
-
-    The staged accuracy round attaches its score to the result. Older runs ran
-    eval in the warmup slot and left it only in the workspace, so a result
-    without a score is looked up there.
-
-    Args:
-        bench_result: The re-baseline result dict from ``BaselineExecutor``.
-        workspace: The integrate task workspace holding both round slots.
-
-    Returns:
-        The score and its provenance; ``accuracy`` is ``None`` when neither
-        source recorded one.
-    """
-    from ..actions.executors._accuracy_gate import parse_eval_results
-
-    measured = bench_result.get("accuracy")
-    attached = _EvalScore(
-        float(measured) if isinstance(measured, (int, float)) else None,
-        str(bench_result.get("accuracy_task") or ""),
-        str(bench_result.get("accuracy_metric") or ""),
-        str(bench_result.get("accuracy_source") or ""),
-    )
-    if attached.accuracy is not None:
-        return attached
-    eval_out = parse_eval_results(workspace, framework=os.environ.get("FRAMEWORK") or None)
-    parsed = eval_out.get("accuracy")
-    if not isinstance(parsed, (int, float)):
-        return attached
-    return _EvalScore(
-        float(parsed),
-        str(eval_out.get("task") or ""),
-        str(eval_out.get("metric") or ""),
-        str(eval_out.get("source_file") or ""),
-    )
-
-
-def _grade_integrate_accuracy(
-    bench_result: dict[str, Any],
-    *,
-    session_dir: Path,
-    workspace: Path,
-    strict: bool = False,
-    server_args: str = "",
-) -> dict[str, Any]:
-    """Grade a kernel re-baseline's accuracy against the session baseline.
-
-    The staged re-baseline already ran the serving eval after hot throughput
-    passed, so the score is read back rather than re-measured. A measured drop
-    beyond ``ACCURACY_THRESHOLD`` blocks the KEEP. A missing verdict blocks only
-    when a positive baseline accuracy proves eval works in this environment;
-    otherwise the gate degrades to throughput-only so eval-less setups are not
-    universally blocked.
-
-    The preferred path is the accuracy attached by BaselineExecutor's staged
-    accuracy round. Workspace parsing remains as a compatibility fallback for
-    older runs where eval lived in the warmup slot.
-
-    Args:
-        bench_result: The re-baseline result dict from ``BaselineExecutor``.
-        session_dir: Session directory used to resolve ``baseline_accuracy``.
-        workspace: The integrate task workspace holding both round slots.
-        strict: Grade an artifact whose correctness has only ever been proven
-            against a reference. This serving run is its first and only
-            end-to-end evidence, so the operator opt-out does not apply and a
-            gate that produced no verdict blocks instead of degrading.
-
-    Returns:
-        ``{"blocked": bool, "accuracy_pass": bool | None, "reason": str,
-        "degraded": bool, "accuracy": float | None, "baseline_accuracy": float,
-        "task": str, "metric": str, "source_file": str}``.
-    """
-    from ..actions.executors._accuracy_gate import (
-        accuracy_keep_block,
-        accuracy_passed,
-        require_kernel_accuracy_default,
-        resolve_served_context,
-        served_context_hosts_eval,
-    )
-
-    baseline_accuracy = 0.0
-    try:
-        from ..state.shared_state import SharedState
-
-        baseline_accuracy = float(SharedState.load_or_init(session_dir).baseline_accuracy or 0.0)
-    except Exception:
-        log.debug("integrate_handler: could not resolve baseline_accuracy", exc_info=True)
-
-    scored = _integrate_eval_score(bench_result, workspace)
-    new_accuracy = scored.accuracy
-
-    accuracy_pass: bool | None = None
-    if new_accuracy is not None and baseline_accuracy > 0:
-        accuracy_pass = accuracy_passed(baseline_accuracy, new_accuracy)
-
-    blocked, reason, degraded = accuracy_keep_block(
-        accuracy_pass,
-        required=True if strict else require_kernel_accuracy_default(),
-        baseline_accuracy=baseline_accuracy,
-    )
-    if strict and degraded:
-        blocked = True
-        reason = "accuracy gate produced no eval result and this artifact has no other end-to-end correctness evidence"
-    # A verdict can be missing because the eval broke, or because the serving
-    # configuration cannot answer an eval request at all. Only the first says
-    # anything about the patch. The second reproduces on every retry, so
-    # charging it to the patch discards a kernel over a configuration choice.
-    infeasible = False
-    if accuracy_pass is None:
-        fits, why = served_context_hosts_eval(
-            served_max_model_len=resolve_served_context(
-                server_args=server_args,
-                env_max_model_len=os.environ.get("MAX_MODEL_LEN", 0),
-            ),
-            eval_max_tokens=_eval_generation_budget(),
-        )
-        if not fits:
-            infeasible = True
-            reason = why
-            log.warning(
-                "integrate_handler: the accuracy gate cannot run under this "
-                "serving configuration, so no kernel can clear it until the "
-                "configuration changes: %s",
-                why,
-            )
-    log.info(
-        "integrate_handler: accuracy gate pass=%s blocked=%s degraded=%s new=%s baseline=%.4f source=%s",
-        accuracy_pass,
-        blocked,
-        degraded,
-        "n/a" if new_accuracy is None else f"{new_accuracy:.4f}",
-        baseline_accuracy,
-        scored.source_file or "none",
-    )
-    return {
-        "blocked": blocked,
-        "accuracy_pass": accuracy_pass,
-        "reason": reason,
-        "degraded": degraded,
-        "infeasible": infeasible,
-        "accuracy": new_accuracy,
-        "baseline_accuracy": baseline_accuracy,
-        "task": scored.task,
-        "metric": scored.metric,
-        "source_file": scored.source_file,
-    }
-
-
 class _SourceImport(NamedTuple):
     """Whether the served process imported the patched source, and what it cost."""
 
@@ -4191,6 +4033,550 @@ def _confirm_source_import(
     )
 
 
+class _IntegrateRebaseline(NamedTuple):
+    """The re-baseline run that measures one patched build end to end."""
+
+    session_dir: Path
+    workspace: Path
+    server_args: str
+    executor: Any
+    ctx: Any
+
+
+class _IntegrateMeasurement(NamedTuple):
+    """The re-baseline's measurement, or the failure that stands in for it."""
+
+    bench_result: dict[str, Any]
+    failure: HandlerResult | None
+
+
+class _AccuracyVerdict(NamedTuple):
+    """What the accuracy gate said about a candidate that cleared the throughput bar."""
+
+    gate: dict[str, Any] | None
+    decision: str
+    infeasible_failure: HandlerResult | None
+
+
+class _PatchCleanup(NamedTuple):
+    """What became of the applied patch once the verdict was known."""
+
+    decision: str
+    status: str
+    apply_result: dict
+    revert_result: HandlerResult
+    finalize_result: HandlerResult
+    patch_cleanup_status: str
+    patch_cleanup_action: str
+
+
+class _IntegrateVerdict(NamedTuple):
+    """Everything an integrate reports about the candidate it measured."""
+
+    payload: dict
+    bench_result: dict[str, Any]
+    performance: Any
+    cleanup: _PatchCleanup
+    accuracy: _AccuracyVerdict
+    source_import: _SourceImport
+    rebuild_check: HandlerResult
+    server_args: str
+
+
+def _request_overrides_serving_controls(payload: Mapping[str, Any]) -> bool:
+    """Whether the request itself asks to remove args, unset envs or replace the recipe.
+
+    Read before the SharedState defaults land: once the current best's own
+    removals are folded in, an inherited one is indistinguishable from one this
+    request asked for.
+    """
+    return (
+        bool(to_str_list(payload.get("remove_args")))
+        or bool(to_str_list(payload.get("unset_envs")))
+        or str(payload.get("args_mode") or "append").strip().lower() == "replace"
+    )
+
+
+def _integrate_request_refusal(payload: dict, *, requested_controls: bool) -> HandlerResult | None:
+    """The failure that refuses an integrate before anything is applied, else ``None``.
+
+    Raises:
+        ValueError: a GEMM paired measurement also names a kernel artifact, so
+            it would measure a patch rather than the recipe it is paired with.
+    """
+    if payload.get("_vendor_playbook_deploy_blocked"):
+        # A vendor-playbook KEEP (e.g. mori dispatch/combine launch-config
+        # tuning) has no deployable artifact: best_artifact_path is a copy of
+        # a KernelForge task-bundle config file, not a rewrite of the real
+        # installed operator, and apply_kernel_patch's legacy full-file
+        # replace would happily overwrite the real site-packages module with
+        # it (PR #1191 review finding #1). Refuse before touching the
+        # filesystem rather than letting a config-file copy silently
+        # corrupt a live install.
+        return {
+            "status": "failed",
+            "error_class": "vendor_playbook_not_deployable",
+            "error": (
+                "integrate refused: kernel_id="
+                f"{payload.get('kernel_id')!r} is a vendor-playbook result "
+                "(closed-source operator launch-config tuning); it has no "
+                "deployable artifact and must not be applied as a source patch"
+            ),
+            "decision": "NEEDS_REVIEW",
+            "kernel_id": payload.get("kernel_id"),
+        }
+    if float(payload.get("base_tput", 0.0)) <= 0:
+        return {
+            "status": "failed",
+            "error": "integrate_handler requires base_tput > 0 to compute KEEP/REVERT",
+        }
+    paired_measurement = _is_paired_gemm_measurement(payload)
+    if paired_measurement and any(
+        payload.get(key)
+        for key in ("patch_path", "target_file", "source_file", "snapshot_dir", "preapplied_apply_result")
+    ):
+        raise ValueError("GEMM paired measurement cannot apply a kernel artifact")
+    if _integrate_mode(payload) != "env_only":
+        return None
+    if (
+        payload.get("extra_envs")
+        or str(payload.get("extra_server_args") or "").strip()
+        or requested_controls
+        or paired_measurement
+    ):
+        return None
+    return {
+        "status": "failed",
+        "error_class": "env_only_missing_envs",
+        "error": "env_only integrate requires runtime configuration or an explicit paired reference",
+    }
+
+
+def _unapplied_patch_failure(payload: dict, apply_result: dict) -> HandlerResult | None:
+    """Why the re-baseline must not run when the patch did not land, else ``None``.
+
+    An apply crash carries a top-level fault ``error_class`` so SharedState
+    routes it through the fault retry budget rather than the patch's own.
+    """
+    status = apply_result.get("status")
+    if status == "ok":
+        return None
+    if status == "failed":
+        apply_reason = str(apply_result.get("error") or apply_result.get("reason") or "").strip()
+        error_class = "apply_failed"
+        error = f"kernel patch apply failed: {apply_reason}" if apply_reason else "kernel patch apply failed"
+    else:
+        error_class = "patch_not_applied"
+        error = "kernel patch was not applied; refusing to run E2E benchmark"
+    return {
+        "status": "failed",
+        "error_class": error_class,
+        "error": error,
+        "decision": "REVERT",
+        "apply_result": apply_result,
+        "kernel_id": payload.get("kernel_id"),
+        "patch_path": payload.get("patch_path"),
+        "target_file": payload.get("target_file") or payload.get("source_file"),
+    }
+
+
+def _integrate_rebaseline(
+    payload: dict,
+    state: Any,
+    *,
+    session_dir: Path,
+    performance_policy: dict[str, float],
+) -> _IntegrateRebaseline:
+    """Stage the re-baseline that measures the patched build under the candidate's own recipe."""
+    from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
+    from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import kernel_event_id
+    from hyperloom.inference_optimizer.session.session_paths import fs_safe_id, unique_runs_dir
+    from ..actions.executors.baseline import BaselineExecutor
+    from ..loop.sub_agent_runner import RunnerContext
+    from ..state.task_registry import Task
+
+    # VRAM barrier (HL_HONEST_E2E umbrella, default ON; opt out with
+    # HL_HONEST_E2E=0 or HL_INTEGRATE_VRAM_GUARD=0): cap re-baseline util on
+    # vLLM so the integrate server cannot OOM on a tighter node.
+    extra_args = _vram_guarded_server_args(str(payload.get("extra_server_args") or "").strip())
+    # A fusion sibling's kernel_id is its operator name (``llm:<recipe>``), which
+    # only reaches this handler now that fusion lands through the generic queue.
+    # It is a legal id but not a legal directory name everywhere -- fold it.
+    task_id = f"integrate-{fs_safe_id(payload.get('kernel_id'))}"
+    workspace = unique_runs_dir(session_dir, "integrate", task_id)
+    keep_policy = (
+        {} if _is_paired_gemm_measurement(payload) else {"post_measure_accuracy_keep_policy": performance_policy}
+    )
+    task = Task(
+        task_id=task_id,
+        kind="baseline",
+        state="running",
+        params={
+            "config_path": payload.get("config_path"),
+            "output_dir": str(workspace),
+            "extra_server_args": extra_args,
+            "extra_envs": dict(payload.get("extra_envs") or {}),
+            "remove_args": to_str_list(payload.get("remove_args")),
+            "unset_envs": to_str_list(payload.get("unset_envs")),
+            "args_mode": str(payload.get("args_mode") or "append"),
+            # The only artifact that patches FlyDSL sources, so the only run that
+            # needs the JIT cache key widened.
+            "flydsl_source_dirs": (str(payload.get("artifact_kind") or "") == _FRAMEWORK_APPLYBACK_ARTIFACT_KIND),
+            "defer_accuracy_until_after_measure": True,
+            "post_measure_accuracy_min_tput": performance_policy["base_tput"]
+            * (1.0 + performance_policy["keep_threshold_pct"] / 100.0),
+            **keep_policy,
+            # Synthetic kind="baseline": candidate A/B validation against the
+            # already-anchored reference. It runs eval for the kernel accuracy
+            # gate but never establishes a replacement quality reference.
+            "quality_ref_exempt": True,
+            # A sub-step of the KERNEL phase's own event, not a dispatched
+            # measurement, so it records into that event rather than leaving a
+            # baseline event of its own.
+            INLINE_EVENT_PARAM: kernel_event_id(int(getattr(state, "macro_cycle", 0) or 0)),
+        },
+        idempotency_key=f"{task_id}-rebaseline",
+    )
+    return _IntegrateRebaseline(
+        session_dir=session_dir,
+        workspace=workspace,
+        server_args=extra_args,
+        executor=BaselineExecutor(session_dir=session_dir, shared_state=state),
+        ctx=RunnerContext(task=task, lease=None),
+    )
+
+
+@contextlib.contextmanager
+def _forced_cpp_itfs_rebuild(apply_result: dict) -> Iterator[None]:
+    """Make the re-baseline server rebuild a patched cpp_itfs kernel, then restore ``AITER_REBUILD``.
+
+    aiter cpp_itfs kernels recompile at runtime and its cache hashes params, not
+    source, so a warm cache would serve the pre-patch kernel. Off the cpp_itfs
+    path this changes nothing.
+    """
+    if not (apply_result.get("cpp_itfs_cache_backup") or {}).get("is_cpp_itfs"):
+        yield
+        return
+    previous = os.environ.get("AITER_REBUILD")
+    os.environ["AITER_REBUILD"] = "1"
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("AITER_REBUILD", None)
+        else:
+            os.environ["AITER_REBUILD"] = previous
+
+
+async def _multi_node_restart_failure(
+    rebaseline: _IntegrateRebaseline,
+    payload: dict,
+    apply_result: dict,
+) -> HandlerResult | None:
+    """Restart a multi-node server so it re-imports the patched modules, or report why it could not.
+
+    A resume would measure the pre-patch process. ``mn_round_restarted`` stops a
+    double restart; ``force_full_restart`` scopes the resume override to here.
+    """
+    from ..actions.executors._multi_node_env import is_multi_node
+
+    if not is_multi_node():
+        return None
+    from ..actions.executors._multi_node_server_lifecycle import (
+        ServerRestartFailed,
+        restart_server_for_round,
+    )
+
+    try:
+        await restart_server_for_round(
+            extra_server_args=rebaseline.server_args,
+            framework=os.environ.get("FRAMEWORK") or None,
+            model_path=(str(payload.get("model_path") or "").strip() or os.environ.get("MODEL_PATH") or None),
+            tp=int(os.environ.get("TP") or 0) or None,
+            ep=int(os.environ.get("EP") or 0) or None,
+            force_full_restart=True,
+        )
+    except ServerRestartFailed as exc:
+        return {
+            "status": "failed",
+            "error_class": "mn_server_restart_failed_post_patch",
+            "error": str(exc),
+            "kernel_id": payload.get("kernel_id"),
+            "patch_path": payload.get("patch_path"),
+            "apply_result": apply_result,
+            "revert_result": _maybe_revert_kernel_patch(apply_result),
+            "decision": "REVERT",
+        }
+    ctx = rebaseline.ctx
+    ctx.extra = {**(getattr(ctx, "extra", None) or {}), "mn_round_restarted": True}
+    return None
+
+
+async def _measured_patched_build(
+    rebaseline: _IntegrateRebaseline,
+    payload: dict,
+    apply_result: dict,
+) -> _IntegrateMeasurement:
+    """Serve the patched build once and measure it end to end.
+
+    The lock sweep runs even when the regular JIT cache is warm: cpp_itfs
+    attention uses the separate AITER_ROOT_DIR/build tree and can carry a stale
+    baton from a timed-out Forge driver.
+    """
+    from ..actions.executors.benchmark_result import is_valid_measurement
+
+    with _forced_cpp_itfs_rebuild(apply_result):
+        _sweep_integrate_aiter_locks(reason="integrate server startup")
+        restart_failure = await _multi_node_restart_failure(rebaseline, payload, apply_result)
+        if restart_failure is not None:
+            return _IntegrateMeasurement({}, restart_failure)
+        try:
+            bench_result = await _run_integrate_rebaseline_with_lock_retry(
+                rebaseline.executor,
+                rebaseline.ctx,
+                workspace=rebaseline.workspace,
+                reason=f"integrate {payload.get('kernel_id') or 'anonymous'} rebaseline",
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _IntegrateMeasurement(
+                {},
+                {
+                    "status": "failed",
+                    "error_class": "rebaseline_exception",
+                    "error": repr(exc),
+                    "kernel_id": payload.get("kernel_id"),
+                    "patch_path": payload.get("patch_path"),
+                    "target_file": payload.get("target_file") or payload.get("source_file"),
+                    "apply_result": apply_result,
+                    "revert_result": _maybe_revert_kernel_patch(apply_result),
+                },
+            )
+    if not is_valid_measurement(bench_result):
+        return _IntegrateMeasurement(
+            {},
+            _unmeasured_integration_failure(payload, apply_result=apply_result, bench_result=bench_result),
+        )
+    return _IntegrateMeasurement(bench_result, None)
+
+
+def _cpp_itfs_rebuild_check(apply_result: dict) -> HandlerResult:
+    """Whether the re-baseline really rebuilt the runtime-compiled kernel it measured.
+
+    A reused params-hashed lib.so would measure the PRE-patch kernel, so
+    ``gain_pct`` cannot be trusted until a fresh one is on disk. Single-node
+    only: in multi-node the served cache lives on the serving pod, where
+    ``AITER_REBUILD`` on the pod restart is the mechanism instead.
+    """
+    from ..actions.executors._multi_node_env import is_multi_node
+
+    cpp_itfs_backup = apply_result.get("cpp_itfs_cache_backup") or {}
+    if not cpp_itfs_backup.get("is_cpp_itfs") or is_multi_node():
+        return {"verified": True, "status": "skipped"}
+    return apply_kernel_patch.verify_cpp_itfs_rebuilt(cpp_itfs_backup)
+
+
+def _stale_cpp_itfs_binary_failure(
+    payload: dict,
+    apply_result: dict,
+    rebuild_check: HandlerResult,
+) -> HandlerResult:
+    """Refuse to score a candidate whose runtime-compiled kernel may still be the pre-patch binary."""
+    return {
+        "status": "failed",
+        "error_class": "cpp_itfs_rebuild_not_verified",
+        "error": (
+            "re-baseline did not produce a freshly-built cpp_itfs lib.so; refusing to score a possibly-stale binary"
+        ),
+        "decision": "NEEDS_REVIEW",
+        "kernel_id": payload.get("kernel_id"),
+        "patch_path": payload.get("patch_path"),
+        "target_file": payload.get("target_file") or payload.get("source_file"),
+        "apply_result": apply_result,
+        "revert_result": _maybe_revert_kernel_patch(apply_result),
+        "rebuild_check": rebuild_check,
+    }
+
+
+def _applyback_verdict_pending(payload: Mapping[str, Any]) -> bool:
+    """Whether a framework apply-back still owes an end-to-end correctness verdict.
+
+    An apply-back carries only reference correctness, so this serving run is the
+    sole end-to-end evidence it will ever get. Anything other than a recorded
+    pass still owes the verdict, so an absent or unrecognised status keeps the
+    gate armed rather than disarming it.
+    """
+    return (
+        str(payload.get("artifact_kind") or "") == _FRAMEWORK_APPLYBACK_ARTIFACT_KIND
+        and str(payload.get("integration_validation_status") or "") != "passed"
+    )
+
+
+def _integrate_accuracy_verdict(
+    payload: dict,
+    bench_result: dict[str, Any],
+    rebaseline: _IntegrateRebaseline,
+    performance: Any,
+    apply_result: dict,
+) -> _AccuracyVerdict:
+    """Grade the accuracy of a candidate that already cleared the throughput bar.
+
+    A kernel patch only KEEPs if it also holds accuracy. Grading only a
+    candidate that cleared the bar keeps a regressing patch from spending a
+    verdict on itself, and reading the re-baseline's own eval output costs no
+    extra GPU time. It runs ahead of the optional source-import pass so a patch
+    that loses accuracy short-circuits before that.
+    """
+    if performance.decision != "KEEP":
+        return _AccuracyVerdict(None, performance.decision, None)
+    gate = _grade_integrate_accuracy(
+        bench_result,
+        session_dir=rebaseline.session_dir,
+        workspace=rebaseline.workspace,
+        strict=_applyback_verdict_pending(payload),
+        server_args=rebaseline.server_args,
+    )
+    if not gate["blocked"]:
+        return _AccuracyVerdict(gate, "KEEP", None)
+    if gate.get("infeasible"):
+        # The gate cannot run under this configuration, so this round measured
+        # nothing about the patch. Report it as an integration fault: faults
+        # carry their own budget and never consume one of the three attempts a
+        # patch gets to prove itself.
+        from ..actions.executors._accuracy_gate import EVAL_KIND_CONTEXT_TOO_SMALL
+
+        return _AccuracyVerdict(
+            gate,
+            "KEEP",
+            {
+                "status": "failed",
+                "error_class": EVAL_KIND_CONTEXT_TOO_SMALL,
+                "error": gate["reason"],
+                "decision": "NEEDS_REVIEW",
+                "gain_pct": performance.gain_pct,
+                "accuracy_gate": gate,
+                "revert_result": _maybe_revert_kernel_patch(apply_result),
+            },
+        )
+    # A measured regression is hard negative evidence -> REVERT. A missing
+    # verdict is only an evidence gap -> NEEDS_REVIEW.
+    return _AccuracyVerdict(gate, "REVERT" if gate["accuracy_pass"] is False else "NEEDS_REVIEW", None)
+
+
+def _settled_patch(decision: str, apply_result: dict, finalize_result: HandlerResult) -> _PatchCleanup:
+    """Revert or keep the applied patch now the verdict is known, and say how that went."""
+    revert_result = (
+        {"status": "skipped", "reason": "KEEP decision"}
+        if decision == "KEEP"
+        else _maybe_revert_kernel_patch(apply_result)
+    )
+    top_status, patch_cleanup_status, patch_cleanup_action = _cleanup_verdict(
+        decision=decision,
+        revert_result=revert_result,
+        finalize_result=finalize_result,
+        revert_required=decision != "KEEP" and bool(apply_result.get("manifest_path")),
+    )
+    return _PatchCleanup(
+        decision=decision,
+        status=top_status,
+        apply_result=apply_result,
+        revert_result=revert_result,
+        finalize_result=finalize_result,
+        patch_cleanup_status=patch_cleanup_status,
+        patch_cleanup_action=patch_cleanup_action,
+    )
+
+
+def _integrate_result(verdict: _IntegrateVerdict) -> HandlerResult:
+    """The integrate's own report: what it measured, what it decided, and what became of the patch."""
+    payload = verdict.payload
+    bench_result = verdict.bench_result
+    cleanup = verdict.cleanup
+    result: dict[str, Any] = {
+        "status": cleanup.status,
+        "decision": cleanup.decision,
+        "patch_cleanup_status": cleanup.patch_cleanup_status,
+        "patch_cleanup_action": cleanup.patch_cleanup_action,
+        "kernel_id": payload.get("kernel_id"),
+        "patch_path": payload.get("patch_path"),
+        "target_file": payload.get("target_file") or payload.get("source_file"),
+        "base_tput": float(payload.get("base_tput", 0.0)),
+        "new_tput": float(bench_result.get("output_throughput") or 0.0),
+        "gain_pct": verdict.performance.gain_pct,
+        "graded_objective": verdict.performance.graded.objective,
+        "bench_result": bench_result,
+        "report_path": bench_result.get("report_path"),
+        "workspace": bench_result.get("workspace"),
+        "extra_server_args": verdict.server_args,
+        "extra_envs": dict(payload.get("extra_envs") or {}),
+        "apply_result": cleanup.apply_result,
+        "revert_result": cleanup.revert_result,
+        "finalize_result": cleanup.finalize_result,
+        "rebuild_check": verdict.rebuild_check,
+        "task_group_key": str(payload.get("task_group_key") or ""),
+        "identity_route": str(payload.get("identity_route") or ""),
+        "integration_id": str(payload.get("integration_id") or ""),
+    }
+    # Fusion provenance rides through so the KEEP writeback lifts the stack row as
+    # ``fusion`` (not ``integrate``) and sets ``last_fusion_integrate`` -- both are
+    # read by the idempotency short-circuit and the remote-recipe fusion export.
+    if str(payload.get("source") or "") == "forge_fusion":
+        result["source"] = "forge_fusion"
+        result["action_label"] = str(payload.get("action_label") or "fusion")
+    if _integrate_mode(payload) == "env_only":
+        result["advisory"] = (
+            "env_only mode: the E2E benchmark measured the configuration change only, not a code patch."
+        )
+    if cleanup.status == "failed":
+        result["error_class"] = "patch_revert_incomplete"
+        result["error"] = str(cleanup.revert_result.get("error") or "Kernel patch revert did not complete")
+    _explain_integrate_decision(result, verdict)
+    return result
+
+
+def _explain_integrate_decision(result: HandlerResult, verdict: _IntegrateVerdict) -> None:
+    """Record why this candidate got the verdict it did.
+
+    A blocking accuracy verdict is recorded last and owns ``decision_reason``:
+    it is the reason the candidate lost its KEEP, which outranks the
+    throughput-side annotations.
+    """
+    performance = verdict.performance
+    graded = performance.graded
+    source_import = verdict.source_import
+    if graded.graded_on_intvty and graded.verdict == "REVERT":
+        result["decision_reason"] = "intvty_regression"
+    keep_threshold_pct = float(verdict.payload.get("keep_threshold_pct", 1.0))
+    if performance.stack_positive_keep and performance.gain_pct <= keep_threshold_pct:
+        result["decision_reason"] = "stack_positive_increment"
+        result["stack_incremental_gain_pct"] = performance.stack_incremental_gain_pct
+        result["stack_incremental_keep_threshold_pct"] = STACK_INCREMENTAL_KEEP_THRESHOLD_PCT
+    if source_import.confirmed is not None:
+        result["source_import_confirmed"] = source_import.confirmed
+    if len(source_import.evidence) > 1:
+        result["source_import_evidence"] = source_import.evidence
+    if source_import.downgraded:
+        result["decision_reason"] = "source_not_confirmed_imported"
+    gate = verdict.accuracy.gate
+    if gate is not None:
+        result["accuracy"] = gate["accuracy"]
+        result["baseline_accuracy"] = gate["baseline_accuracy"]
+        result["accuracy_pass"] = gate["accuracy_pass"]
+        result["accuracy_gate"] = gate
+        if gate["blocked"]:
+            result["decision_reason"] = (
+                "accuracy_regression" if gate["accuracy_pass"] is False else "accuracy_evidence_missing"
+            )
+    if not _applyback_verdict_pending(verdict.payload):
+        return
+    result["artifact_kind"] = _FRAMEWORK_APPLYBACK_ARTIFACT_KIND
+    # Only a KEEP settles the outstanding verdict. A non-KEEP is left unstamped:
+    # the attempt ledger already distinguishes a rejection from a retryable
+    # fault, and this field must not blur the two.
+    if verdict.cleanup.decision == "KEEP":
+        result["integration_validation_status"] = "passed"
+        result["validation_tier"] = _INTEGRATE_ACCURACY_VALIDATION_TIER
+
+
 async def integrate_handler(
     payload: dict,
     *,
@@ -4227,369 +4613,79 @@ async def integrate_handler(
         ``base_tput`` / ``new_tput`` remain output throughput; ``gain_pct``
         follows ``graded_objective`` and ``bench_result`` retains the E2E measurement.
     """
-    from ..actions.executors.baseline import BaselineExecutor
-    from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
-    from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import kernel_event_id
-    from ..actions.executors.benchmark_result import is_valid_measurement
-    from ..loop.sub_agent_runner import RunnerContext
     from ..measurement.integrate_performance import assess_integrate_performance
     from ..state.shared_state import SharedState
-    from ..state.task_registry import Task
 
-    requested_controls = (
-        bool(to_str_list(payload.get("remove_args")))
-        or bool(to_str_list(payload.get("unset_envs")))
-        or str(payload.get("args_mode") or "append").strip().lower() == "replace"
-    )
+    requested_controls = _request_overrides_serving_controls(payload)
     # Fill defaults from SharedState before the ``base_tput > 0`` check so a bare
     # {kernel_id} payload isn't failed with a phantom "missing base_tput".
     payload = _fill_integrate_defaults_from_state(payload, session_dir=session_dir)
-
-    if payload.get("_vendor_playbook_deploy_blocked"):
-        # A vendor-playbook KEEP (e.g. mori dispatch/combine launch-config
-        # tuning) has no deployable artifact: best_artifact_path is a copy of
-        # a KernelForge task-bundle config file, not a rewrite of the real
-        # installed operator, and apply_kernel_patch's legacy full-file
-        # replace would happily overwrite the real site-packages module with
-        # it (PR #1191 review finding #1). Refuse before touching the
-        # filesystem rather than letting a config-file copy silently
-        # corrupt a live install.
-        return {
-            "status": "failed",
-            "error_class": "vendor_playbook_not_deployable",
-            "error": (
-                "integrate refused: kernel_id="
-                f"{payload.get('kernel_id')!r} is a vendor-playbook result "
-                "(closed-source operator launch-config tuning); it has no "
-                "deployable artifact and must not be applied as a source patch"
-            ),
-            "decision": "NEEDS_REVIEW",
-            "kernel_id": payload.get("kernel_id"),
-        }
-
-    base_tput = float(payload.get("base_tput", 0.0))
-    if base_tput <= 0:
-        return {
-            "status": "failed",
-            "error": "integrate_handler requires base_tput > 0 to compute KEEP/REVERT",
-        }
+    refusal = _integrate_request_refusal(payload, requested_controls=requested_controls)
+    if refusal is not None:
+        return refusal
 
     # Coordinator-internal: config-only measurements opt in explicitly; agent
     # integrate requests retain main's patch-resolution contract.
-    mode = str(payload.get("mode") or "patch").strip().lower()
-    paired_measurement = payload.get("source") == "forge_gemm_paired"
-    if paired_measurement and any(
-        payload.get(key)
-        for key in ("patch_path", "target_file", "source_file", "snapshot_dir", "preapplied_apply_result")
-    ):
-        raise ValueError("GEMM paired measurement cannot apply a kernel artifact")
-    if mode == "env_only":
-        if not (
-            payload.get("extra_envs")
-            or str(payload.get("extra_server_args") or "").strip()
-            or requested_controls
-            or paired_measurement
-        ):
-            return {
-                "status": "failed",
-                "error_class": "env_only_missing_envs",
-                "error": "env_only integrate requires runtime configuration or an explicit paired reference",
-            }
-    else:
-        payload, missing_inputs = _resolve_integrate_payload(
-            payload,
-            session_dir=session_dir,
-        )
+    mode = _integrate_mode(payload)
+    paired_measurement = _is_paired_gemm_measurement(payload)
+    if mode != "env_only":
+        payload, missing_inputs = _resolve_integrate_payload(payload, session_dir=session_dir)
         if missing_inputs is not None:
             return missing_inputs
 
     state = SharedState.load_or_init(session_dir)
-    patch_path = payload.get("patch_path")
-    kernel_id = payload.get("kernel_id")
     apply_result = _applied_patch_result(payload, session_dir=session_dir, preapplied_git_patch=preapplied_git_patch)
     if mode == "env_only" and apply_result.get("status") == "skipped":
         apply_result = {
             "status": "ok",
             "reason": "env_only_no_patch_applied",
-            "kernel_id": kernel_id,
+            "kernel_id": payload.get("kernel_id"),
         }
     log.info("integrate_handler: apply_result=%s", apply_result)
-    if apply_result.get("status") == "failed":
-        # Apply crash: the patch was never measured. Stamp a top-level fault
-        # error_class so SharedState routes this through the fault retry budget.
-        apply_reason = str(apply_result.get("error") or apply_result.get("reason") or "").strip()
-        return {
-            "status": "failed",
-            "error_class": "apply_failed",
-            "error": (f"kernel patch apply failed: {apply_reason}" if apply_reason else "kernel patch apply failed"),
-            "decision": "REVERT",
-            "apply_result": apply_result,
-            "kernel_id": kernel_id,
-            "patch_path": patch_path,
-            "target_file": payload.get("target_file") or payload.get("source_file"),
-        }
-    if apply_result.get("status") != "ok":
-        return {
-            "status": "failed",
-            "error_class": "patch_not_applied",
-            "error": "kernel patch was not applied; refusing to run E2E benchmark",
-            "decision": "REVERT",
-            "apply_result": apply_result,
-            "kernel_id": kernel_id,
-            "patch_path": patch_path,
-            "target_file": payload.get("target_file") or payload.get("source_file"),
-        }
+    unapplied = _unapplied_patch_failure(payload, apply_result)
+    if unapplied is not None:
+        return unapplied
 
-    keep_threshold_pct = float(payload.get("keep_threshold_pct", 1.0))
+    base_tput = float(payload.get("base_tput", 0.0))
     performance_policy = {
         "base_tput": base_tput,
-        "keep_threshold_pct": keep_threshold_pct,
+        "keep_threshold_pct": float(payload.get("keep_threshold_pct", 1.0)),
         "stack_incremental_keep_threshold_pct": STACK_INCREMENTAL_KEEP_THRESHOLD_PCT,
     }
-    extra_args = str(payload.get("extra_server_args") or "").strip()
-    # VRAM barrier (HL_HONEST_E2E umbrella, default ON; opt out with
-    # HL_HONEST_E2E=0 or HL_INTEGRATE_VRAM_GUARD=0): cap re-baseline util on
-    # vLLM so the integrate server cannot OOM on a tighter node.
-    extra_args = _vram_guarded_server_args(extra_args)
+    rebaseline = _integrate_rebaseline(payload, state, session_dir=session_dir, performance_policy=performance_policy)
+    measurement = await _measured_patched_build(rebaseline, payload, apply_result)
+    if measurement.failure is not None:
+        return measurement.failure
+    bench_result = measurement.bench_result
 
-    # Wrap BaselineExecutor in a Task/RunnerContext.
-    from hyperloom.inference_optimizer.session.session_paths import fs_safe_id, unique_runs_dir
+    rebuild_check = _cpp_itfs_rebuild_check(apply_result)
+    if not rebuild_check.get("verified", True):
+        return _stale_cpp_itfs_binary_failure(payload, apply_result, rebuild_check)
 
-    # A fusion sibling's kernel_id is its operator name (``llm:<recipe>``), which
-    # only reaches this handler now that fusion lands through the generic queue.
-    # It is a legal id but not a legal directory name everywhere -- fold it.
-    fake_task_id = f"integrate-{fs_safe_id(kernel_id)}"
-    workspace = unique_runs_dir(session_dir, "integrate", fake_task_id)
-    baseline_executor = BaselineExecutor(session_dir=session_dir, shared_state=state)
-    fake_task = Task(
-        task_id=fake_task_id,
-        kind="baseline",
-        state="running",
-        params={
-            "config_path": payload.get("config_path"),
-            "output_dir": str(workspace),
-            "extra_server_args": extra_args,
-            "extra_envs": dict(payload.get("extra_envs") or {}),
-            "remove_args": to_str_list(payload.get("remove_args")),
-            "unset_envs": to_str_list(payload.get("unset_envs")),
-            "args_mode": str(payload.get("args_mode") or "append"),
-            # The only artifact that patches FlyDSL sources, so the only run that
-            # needs the JIT cache key widened.
-            "flydsl_source_dirs": (str(payload.get("artifact_kind") or "") == _FRAMEWORK_APPLYBACK_ARTIFACT_KIND),
-            "defer_accuracy_until_after_measure": True,
-            "post_measure_accuracy_min_tput": base_tput * (1.0 + keep_threshold_pct / 100.0),
-            **({"post_measure_accuracy_keep_policy": performance_policy} if not paired_measurement else {}),
-            # Synthetic kind="baseline": candidate A/B validation against the
-            # already-anchored reference. It runs eval for the kernel accuracy
-            # gate but never establishes a replacement quality reference.
-            "quality_ref_exempt": True,
-            # A sub-step of the KERNEL phase's own event, not a dispatched
-            # measurement, so it records into that event rather than leaving a
-            # baseline event of its own.
-            INLINE_EVENT_PARAM: kernel_event_id(int(getattr(state, "macro_cycle", 0) or 0)),
-        },
-        idempotency_key=f"{fake_task_id}-rebaseline",
-    )
-    ctx = RunnerContext(task=fake_task, lease=None)
-
-    # aiter cpp_itfs kernels recompile at runtime and its cache hashes params not
-    # source, so set AITER_REBUILD=1 for the re-baseline server to force a rebuild
-    # of the patched kernel. Scoped to cpp_itfs applies and always restored.
-    cpp_itfs_backup = apply_result.get("cpp_itfs_cache_backup") or {}
-    force_aiter_rebuild = bool(cpp_itfs_backup.get("is_cpp_itfs"))
-    _prev_aiter_rebuild = os.environ.get("AITER_REBUILD")
-    if force_aiter_rebuild:
-        os.environ["AITER_REBUILD"] = "1"
-
-    def _restore_aiter_rebuild_env() -> None:
-        """Restore the ``AITER_REBUILD`` env var to its prior value.
-
-        No-op unless a forced rebuild was applied for this re-baseline.
-        """
-        if not force_aiter_rebuild:
-            return
-        if _prev_aiter_rebuild is None:
-            os.environ.pop("AITER_REBUILD", None)
-        else:
-            os.environ["AITER_REBUILD"] = _prev_aiter_rebuild
-
-    # Multi-node: force a FULL sglang restart so it re-imports the patched
-    # modules (a resume would measure the pre-patch process). mn_round_restarted
-    # stops a double restart; force_full_restart scopes the resume override here.
-    from ..actions.executors._multi_node_env import is_multi_node
-
-    # This must run even when the regular JIT cache is warm: cpp_itfs attention
-    # uses the separate AITER_ROOT_DIR/build tree and can carry a stale baton
-    # from a timed-out Forge driver.
-    _sweep_integrate_aiter_locks(reason="integrate server startup")
-
-    if is_multi_node():
-        from ..actions.executors._multi_node_server_lifecycle import (
-            ServerRestartFailed,
-            restart_server_for_round,
-        )
-
-        try:
-            await restart_server_for_round(
-                extra_server_args=extra_args,
-                framework=os.environ.get("FRAMEWORK") or None,
-                model_path=(str(payload.get("model_path") or "").strip() or os.environ.get("MODEL_PATH") or None),
-                tp=int(os.environ.get("TP") or 0) or None,
-                ep=int(os.environ.get("EP") or 0) or None,
-                force_full_restart=True,
-            )
-            ctx.extra = {**(getattr(ctx, "extra", None) or {}), "mn_round_restarted": True}
-        except ServerRestartFailed as exc:
-            _restore_aiter_rebuild_env()
-            revert_result = _maybe_revert_kernel_patch(apply_result)
-            return {
-                "status": "failed",
-                "error_class": "mn_server_restart_failed_post_patch",
-                "error": str(exc),
-                "kernel_id": kernel_id,
-                "patch_path": patch_path,
-                "apply_result": apply_result,
-                "revert_result": revert_result,
-                "decision": "REVERT",
-            }
-
-    try:
-        bench_result = await _run_integrate_rebaseline_with_lock_retry(
-            baseline_executor,
-            ctx,
-            workspace=workspace,
-            reason=f"integrate {kernel_id or 'anonymous'} rebaseline",
-        )
-    except Exception as exc:  # noqa: BLE001
-        revert_result = _maybe_revert_kernel_patch(apply_result)
-        return {
-            "status": "failed",
-            "error_class": "rebaseline_exception",
-            "error": repr(exc),
-            "kernel_id": kernel_id,
-            "patch_path": patch_path,
-            "target_file": payload.get("target_file") or payload.get("source_file"),
-            "apply_result": apply_result,
-            "revert_result": revert_result,
-        }
-    finally:
-        # Restore AITER_REBUILD on every path so the override never leaks past
-        # this integrate.
-        _restore_aiter_rebuild_env()
-
-    if not is_valid_measurement(bench_result):
-        return _unmeasured_integration_failure(payload, apply_result=apply_result, bench_result=bench_result)
-
-    # Don't score a stale binary: for cpp_itfs targets the served kernel is
-    # runtime-compiled, so a reused params-hashed lib.so would measure the
-    # PRE-patch kernel. Assert a fresh lib.so (newer than the invalidation) landed
-    # before trusting gain_pct; otherwise flag for review.
-    #
-    # Single-node only: in multi-node the served cache lives on the serving pod,
-    # so AITER_REBUILD=1 on the pod restart is the mechanism and this local check
-    # is skipped. verify_cpp_itfs_rebuilt() returns verified=True off the
-    # cpp_itfs path, so this gate is a strict no-op there.
-    rebuild_check: HandlerResult = {"verified": True, "status": "skipped"}
-    if force_aiter_rebuild and not is_multi_node():
-        rebuild_check = apply_kernel_patch.verify_cpp_itfs_rebuilt(cpp_itfs_backup)
-        if not rebuild_check.get("verified", True):
-            revert_result = _maybe_revert_kernel_patch(apply_result)
-            return {
-                "status": "failed",
-                "error_class": "cpp_itfs_rebuild_not_verified",
-                "error": (
-                    "re-baseline did not produce a freshly-built cpp_itfs "
-                    "lib.so; refusing to score a possibly-stale binary"
-                ),
-                "decision": "NEEDS_REVIEW",
-                "kernel_id": kernel_id,
-                "patch_path": patch_path,
-                "target_file": payload.get("target_file") or payload.get("source_file"),
-                "apply_result": apply_result,
-                "revert_result": revert_result,
-                "rebuild_check": rebuild_check,
-            }
-
-    new_tput = float(bench_result.get("output_throughput") or 0.0)
     if paired_measurement:
         return {
             "status": "ok",
             "decision": "NEEDS_REVIEW",
             "base_tput": base_tput,
-            "new_tput": new_tput,
+            "new_tput": float(bench_result.get("output_throughput") or 0.0),
             "bench_result": bench_result,
             "workspace": bench_result.get("workspace"),
         }
     performance = assess_integrate_performance(state, bench_result, **performance_policy)
-    graded = performance.graded
-    if graded.degrade_reason:
-        log.info("integrate_handler: grading unavailable (%s)", graded.degrade_reason)
-    gain_pct = performance.gain_pct
-    stack_incremental_gain_pct = performance.stack_incremental_gain_pct
-    stack_positive_keep = performance.stack_positive_keep
-    decision = performance.decision
-
-    # Accuracy gate: a kernel patch only KEEPs if it also holds accuracy. Graded
-    # ONLY for a candidate that already cleared the throughput bar, so a
-    # regressing patch never spends a verdict on itself, and graded from the
-    # re-baseline's own eval output, so the verdict costs no extra GPU time.
-    # Placed ahead of the optional source-import pass so a patch that loses
-    # accuracy short-circuits before it runs.
-    # An apply-back carries only reference correctness, so this run is the sole
-    # end-to-end evidence it will ever get.
-    # Anything other than a recorded pass still owes the verdict, so an absent or
-    # unrecognised status keeps the gate armed rather than disarming it.
-    applyback_pending = (
-        str(payload.get("artifact_kind") or "") == _FRAMEWORK_APPLYBACK_ARTIFACT_KIND
-        and str(payload.get("integration_validation_status") or "") != "passed"
-    )
-    accuracy_gate: dict[str, Any] | None = None
-    if decision == "KEEP":
-        accuracy_gate = _grade_integrate_accuracy(
-            bench_result,
-            session_dir=session_dir,
-            workspace=workspace,
-            strict=applyback_pending,
-            server_args=extra_args,
-        )
-        if accuracy_gate["blocked"]:
-            if accuracy_gate.get("infeasible"):
-                # The gate cannot run under this configuration, so this round
-                # measured nothing about the patch. Report it as an integration
-                # fault: faults carry their own budget and never consume one of
-                # the three attempts a patch gets to prove itself.
-                from ..actions.executors._accuracy_gate import (
-                    EVAL_KIND_CONTEXT_TOO_SMALL,
-                )
-
-                revert_result = _maybe_revert_kernel_patch(apply_result)
-                return {
-                    "status": "failed",
-                    "error_class": EVAL_KIND_CONTEXT_TOO_SMALL,
-                    "error": accuracy_gate["reason"],
-                    "decision": "NEEDS_REVIEW",
-                    "gain_pct": gain_pct,
-                    "accuracy_gate": accuracy_gate,
-                    "revert_result": revert_result,
-                }
-            # A measured regression is hard negative evidence -> REVERT. A
-            # missing verdict is only an evidence gap -> NEEDS_REVIEW.
-            decision = "REVERT" if accuracy_gate["accuracy_pass"] is False else "NEEDS_REVIEW"
+    if performance.graded.degrade_reason:
+        log.info("integrate_handler: grading unavailable (%s)", performance.graded.degrade_reason)
+    accuracy = _integrate_accuracy_verdict(payload, bench_result, rebaseline, performance, apply_result)
+    if accuracy.infeasible_failure is not None:
+        return accuracy.infeasible_failure
 
     # Only the strict sub-flag enforces the confirmation; an unknown never penalizes.
-    confirmation = _confirm_source_import(payload, workspace=bench_result.get("workspace"), decision=decision)
-    source_import_confirmed = confirmation.confirmed
-    source_import_evidence = confirmation.evidence
-    decision = confirmation.decision
-    source_not_imported_downgrade = confirmation.downgraded
-
-    revert_result = (
-        {"status": "skipped", "reason": "KEEP decision"}
-        if decision == "KEEP"
-        else _maybe_revert_kernel_patch(apply_result)
+    confirmation = _confirm_source_import(
+        payload,
+        workspace=bench_result.get("workspace"),
+        decision=accuracy.decision,
     )
-    if decision != "KEEP":
-        finalize_result = {"status": "skipped", "reason": "non-KEEP decision"}
+    if confirmation.decision != "KEEP":
+        finalize_result: HandlerResult = {"status": "skipped", "reason": "non-KEEP decision"}
     elif preapplied_git_patch:
         # Only the caller's own commit makes a pre-applied KEEP durable, so the
         # caller owns finalize. Dropping the backups here would strand the
@@ -4597,85 +4693,18 @@ async def integrate_handler(
         finalize_result = {"status": "skipped", "reason": "caller owns the KEEP's durability"}
     else:
         finalize_result = _maybe_finalize_kernel_patch(apply_result)
-    revert_required = decision != "KEEP" and bool(apply_result.get("manifest_path"))
-    top_status, patch_cleanup_status, patch_cleanup_action = _cleanup_verdict(
-        decision=decision,
-        revert_result=revert_result,
-        finalize_result=finalize_result,
-        revert_required=revert_required,
-    )
-
-    result: dict[str, Any] = {
-        "status": top_status,
-        "decision": decision,
-        "patch_cleanup_status": patch_cleanup_status,
-        "patch_cleanup_action": patch_cleanup_action,
-        "kernel_id": kernel_id,
-        "patch_path": patch_path,
-        "target_file": payload.get("target_file") or payload.get("source_file"),
-        "base_tput": base_tput,
-        "new_tput": new_tput,
-        "gain_pct": gain_pct,
-        "graded_objective": graded.objective,
-        "bench_result": bench_result,
-        "report_path": bench_result.get("report_path"),
-        "workspace": bench_result.get("workspace"),
-        "extra_server_args": extra_args,
-        "extra_envs": dict(payload.get("extra_envs") or {}),
-        "apply_result": apply_result,
-        "revert_result": revert_result,
-        "finalize_result": finalize_result,
-        "rebuild_check": rebuild_check,
-        "task_group_key": str(payload.get("task_group_key") or ""),
-        "identity_route": str(payload.get("identity_route") or ""),
-        "integration_id": str(payload.get("integration_id") or ""),
-    }
-    # Fusion provenance rides through so the KEEP writeback lifts the stack row as
-    # ``fusion`` (not ``integrate``) and sets ``last_fusion_integrate`` -- both are
-    # read by the idempotency short-circuit and the remote-recipe fusion export.
-    if str(payload.get("source") or "") == "forge_fusion":
-        result["source"] = "forge_fusion"
-        result["action_label"] = str(payload.get("action_label") or "fusion")
-    if mode == "env_only":
-        result["advisory"] = (
-            "env_only mode: the E2E benchmark measured the configuration change only, not a code patch."
+    return _integrate_result(
+        _IntegrateVerdict(
+            payload=payload,
+            bench_result=bench_result,
+            performance=performance,
+            cleanup=_settled_patch(confirmation.decision, apply_result, finalize_result),
+            accuracy=accuracy,
+            source_import=confirmation,
+            rebuild_check=rebuild_check,
+            server_args=rebaseline.server_args,
         )
-    if top_status == "failed":
-        result["error_class"] = "patch_revert_incomplete"
-        result["error"] = str(revert_result.get("error") or "Kernel patch revert did not complete")
-    if graded.graded_on_intvty and graded.verdict == "REVERT":
-        result["decision_reason"] = "intvty_regression"
-    if stack_positive_keep and gain_pct <= keep_threshold_pct:
-        result["decision_reason"] = "stack_positive_increment"
-        result["stack_incremental_gain_pct"] = stack_incremental_gain_pct
-        result["stack_incremental_keep_threshold_pct"] = STACK_INCREMENTAL_KEEP_THRESHOLD_PCT
-    if source_import_confirmed is not None:
-        result["source_import_confirmed"] = source_import_confirmed
-    if len(source_import_evidence) > 1:
-        result["source_import_evidence"] = source_import_evidence
-    if source_not_imported_downgrade:
-        result["decision_reason"] = "source_not_confirmed_imported"
-    # Recorded last so a blocking accuracy verdict owns ``decision_reason``: it
-    # is the reason this candidate lost its KEEP, outranking the throughput-side
-    # annotations above.
-    if accuracy_gate is not None:
-        result["accuracy"] = accuracy_gate["accuracy"]
-        result["baseline_accuracy"] = accuracy_gate["baseline_accuracy"]
-        result["accuracy_pass"] = accuracy_gate["accuracy_pass"]
-        result["accuracy_gate"] = accuracy_gate
-        if accuracy_gate["blocked"]:
-            result["decision_reason"] = (
-                "accuracy_regression" if accuracy_gate["accuracy_pass"] is False else "accuracy_evidence_missing"
-            )
-    if applyback_pending:
-        result["artifact_kind"] = _FRAMEWORK_APPLYBACK_ARTIFACT_KIND
-        # Only a KEEP settles the outstanding verdict. A non-KEEP is left
-        # unstamped: the attempt ledger already distinguishes a rejection from a
-        # retryable fault, and this field must not blur the two.
-        if decision == "KEEP":
-            result["integration_validation_status"] = "passed"
-            result["validation_tier"] = _INTEGRATE_ACCURACY_VALIDATION_TIER
-    return result
+    )
 
 
 # Kernel-agent programmatic dispatch table.
