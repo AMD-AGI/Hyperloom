@@ -408,35 +408,32 @@ class PlanCriticAgent:
         specialists: SpecialistRound,
         usage=None,
     ) -> PlanCriticOutcome:
-        """Review one round; every backend/output failure accepts fail-open."""
+        """Review one round; backend failures propagate, unusable critic output accepts fail-open."""
         system_prompt, user_prompt = build_plan_critic_prompts(context=context, drafts=drafts, specialists=specialists)
         budget_sec = self._budget_for(len(drafts))
         started_at = time.monotonic()
-        try:
-            result = await asyncio.wait_for(
-                self.backend.run(
-                    AgentRunSpec(
-                        system_prompt=system_prompt,
-                        user_prompt=user_prompt,
-                        role="plan critic",
-                        cwd=context.workspace,
-                        writable=False,
-                        timeout_sec=budget_sec,
-                        tool_policy=AgentToolPolicy(
-                            read=True,
-                            search=True,
-                            write=False,
-                            shell=False,
-                            max_turns=self.max_turns,
-                        ),
-                        protected_globs=["*"],
+        result = await asyncio.wait_for(
+            self.backend.run(
+                AgentRunSpec(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    role="plan critic",
+                    cwd=context.workspace,
+                    writable=False,
+                    timeout_sec=budget_sec,
+                    tool_policy=AgentToolPolicy(
+                        read=True,
+                        search=True,
+                        write=False,
+                        shell=False,
+                        max_turns=self.max_turns,
                     ),
-                    usage=usage,
+                    protected_globs=["*"],
                 ),
-                timeout=watchdog_timeout_sec(budget_sec),
-            )
-        except Exception as error:  # noqa: BLE001 - provider boundary
-            return self._fail_open(error, started_at=started_at)
+                usage=usage,
+            ),
+            timeout=watchdog_timeout_sec(budget_sec),
+        )
 
         try:
             review = validated_agent_text(result, role="plan critic")

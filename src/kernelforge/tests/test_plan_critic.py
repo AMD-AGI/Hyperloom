@@ -214,7 +214,6 @@ async def test_critic_infers_revision_and_records_missing_verdict(
             text=("I will inspect the evidence.\n[session ended with SDK error: Reached maximum number of turns]"),
             end_reason="turn_cap",
         ),
-        RuntimeError("provider crashed"),
     ],
 )
 async def test_critic_failure_records_no_verdict_and_still_publishes(
@@ -329,7 +328,13 @@ def test_a_review_needs_something_to_review(tmp_path):
 @pytest.mark.asyncio
 async def test_critic_error_detail_is_single_line_and_bounded(tmp_path):
     critic = PlanCriticAgent(
-        backend=_Backend(RuntimeError("first line\n" + ("x" * 3000))),
+        backend=_Backend(
+            AgentRunResult(
+                text="first line\n" + ("x" * 3000),
+                end_reason="api_error",
+                stderr_tail="first line\n" + ("x" * 3000),
+            )
+        ),
         timeout_sec=2,
     )
 
@@ -783,7 +788,7 @@ async def test_a_one_plan_review_is_never_asked_for_a_width_block(tmp_path):
 async def test_a_review_that_failed_narrows_nothing(tmp_path):
     """A round the critic never reviewed keeps every lane it planned."""
     critic = PlanCriticAgent(
-        backend=_Backend(RuntimeError("provider crashed")),
+        backend=_Backend(AgentRunResult(text="")),
         timeout_sec=2,
     )
 
@@ -796,6 +801,22 @@ async def test_a_review_that_failed_narrows_nothing(tmp_path):
     assert outcome.fail_open is True
     assert outcome.lane_drops == ()
     assert outcome.narrowing_notes == ()
+
+
+@pytest.mark.asyncio
+async def test_a_backend_error_fails_the_review_closed(tmp_path):
+    """A critic that could not run must not wave the plan through."""
+    backend = _Backend(RuntimeError("provider crashed"))
+    critic = PlanCriticAgent(backend=backend, timeout_sec=2)
+
+    with pytest.raises(RuntimeError, match="^provider crashed$"):
+        await critic.review(
+            context=_context(tmp_path),
+            drafts=[SynthesizedPlan(text="# Draft")],
+            specialists=SpecialistRound(DispatchPlan(analysis_commit="abc123", assignments=()), (), {}),
+        )
+
+    assert len(backend.specs) == 1
 
 
 def test_a_one_plan_review_keeps_the_budget_it_always_had():
