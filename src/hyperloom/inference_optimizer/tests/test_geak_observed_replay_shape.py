@@ -16,6 +16,8 @@ derived from the canonical result rather than hardcoded corpus percentiles.
 
 import json
 
+from hyperloom.orchestrator.phases import _geak_handoff
+
 from .conftest import make_coordinator
 
 
@@ -34,8 +36,8 @@ def _result(dirpath, *, tput, completed, tin, tout):
     )
 
 
-def _coord(tmp_path):
-    return make_coordinator(tmp_path).phase_kernel
+def _session_dir(tmp_path):
+    return make_coordinator(tmp_path).phase_kernel.session_dir
 
 
 def test_shape_is_derived_from_the_measured_baseline(tmp_path):
@@ -47,7 +49,7 @@ def test_shape_is_derived_from_the_measured_baseline(tmp_path):
         tin=86_590_710,
         tout=615_152,
     )
-    got = _coord(tmp_path)._observed_replay_shape(168.99)
+    got = _geak_handoff.observed_replay_shape(_session_dir(tmp_path), 168.99)
     assert got["observed_isl"] == 112_019
     assert got["observed_osl"] == 796
     assert got["observed_requests"] == 773
@@ -70,7 +72,7 @@ def test_the_result_matching_the_handed_over_baseline_wins(tmp_path):
         tin=86_590_710,
         tout=615_152,
     )
-    got = _coord(tmp_path)._observed_replay_shape(169.0)
+    got = _geak_handoff.observed_replay_shape(_session_dir(tmp_path), 169.0)
     assert got["observed_isl"] == 112_019
 
 
@@ -90,7 +92,7 @@ def test_geak_and_overlay_results_are_never_the_orchestrator_baseline(tmp_path):
         tin=10_240,
         tout=10_240,
     )
-    assert _coord(tmp_path)._observed_replay_shape(169.0) == {}
+    assert _geak_handoff.observed_replay_shape(_session_dir(tmp_path), 169.0) == {}
 
 
 def test_an_ancestor_named_like_geak_does_not_exclude_a_real_baseline(tmp_path):
@@ -110,13 +112,13 @@ def test_an_ancestor_named_like_geak_does_not_exclude_a_real_baseline(tmp_path):
         tin=86_590_710,
         tout=615_152,
     )
-    got = _coord(session)._observed_replay_shape(168.99)
+    got = _geak_handoff.observed_replay_shape(_session_dir(session), 168.99)
     assert got["observed_isl"] == 112_019
     assert got["observed_requests"] == 773
 
 
 def test_absent_results_degrade_to_no_claim(tmp_path):
-    assert _coord(tmp_path)._observed_replay_shape(169.0) == {}
+    assert _geak_handoff.observed_replay_shape(_session_dir(tmp_path), 169.0) == {}
 
 
 def test_a_zero_request_result_is_not_a_shape(tmp_path):
@@ -127,14 +129,14 @@ def test_a_zero_request_result_is_not_a_shape(tmp_path):
         tin=0,
         tout=0,
     )
-    assert _coord(tmp_path)._observed_replay_shape(169.0) == {}
+    assert _geak_handoff.observed_replay_shape(_session_dir(tmp_path), 169.0) == {}
 
 
 def test_malformed_result_is_skipped_without_raising(tmp_path):
     bench = tmp_path / "runs" / "baseline" / "a" / "bench"
     bench.mkdir(parents=True)
     (bench / "inferencex_result.json").write_text("{not json", encoding="utf-8")
-    assert _coord(tmp_path)._observed_replay_shape(169.0) == {}
+    assert _geak_handoff.observed_replay_shape(_session_dir(tmp_path), 169.0) == {}
 
 
 def test_without_a_baseline_tput_the_best_available_replay_is_used(tmp_path):
@@ -146,7 +148,7 @@ def test_without_a_baseline_tput_the_best_available_replay_is_used(tmp_path):
         tin=86_590_710,
         tout=615_152,
     )
-    got = _coord(tmp_path)._observed_replay_shape(0.0)
+    got = _geak_handoff.observed_replay_shape(_session_dir(tmp_path), 0.0)
     assert got["observed_isl"] == 112_019
     # Flagged as unconfirmed rather than presented as a matched measurement.
     assert got["observed_tput_match_err"] == 1.0
@@ -161,6 +163,6 @@ def test_the_repro_run_agrees_with_the_campaign_within_a_fraction_of_a_percent(t
         tin=85_385_881,
         tout=604_881,
     )
-    got = _coord(tmp_path)._observed_replay_shape(166.71)
+    got = _geak_handoff.observed_replay_shape(_session_dir(tmp_path), 166.71)
     assert got["observed_isl"] == 112_350
     assert abs(got["observed_isl"] - 112_019) / 112_019 < 0.005

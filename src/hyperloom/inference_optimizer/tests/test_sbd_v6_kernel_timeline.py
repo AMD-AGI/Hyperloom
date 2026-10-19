@@ -32,6 +32,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import KernelRewriteRun, LaneRunFields
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
+from hyperloom.orchestrator.phases._kernel_timeline import RunnerRun
 from hyperloom.orchestrator.phases.kernel import KernelPhase
 
 
@@ -1690,10 +1691,9 @@ def test_geak_absent_backends_land_on_the_result(tmp_path):
     phase._record_geak_delegation_timeline(
         result,
         handoff={"exp_root": str(tmp_path)},
-        started_at="2026-09-02T00:00:00+00:00",
-        duration_sec=1.0,
-        runner_timeout_sec=300,
-        kill_timeout_sec=360,
+        run=RunnerRun(
+            started_at="2026-09-02T00:00:00+00:00", duration_sec=1.0, runner_timeout_sec=300, kill_timeout_sec=360
+        ),
     )
 
     assert result["absent_backends"] == {"ck": "which ckProfiler"}
@@ -1711,10 +1711,9 @@ def test_geak_runner_outcome_is_wired_to_geak_delegation(tmp_path):
             "stages_reached": ["discover", "optimize"],
         },
         handoff={"exp_root": "/tmp/geak"},
-        started_at="2026-09-02T00:00:00+00:00",
-        duration_sec=12.5,
-        runner_timeout_sec=300,
-        kill_timeout_sec=360,
+        run=RunnerRun(
+            started_at="2026-09-02T00:00:00+00:00", duration_sec=12.5, runner_timeout_sec=300, kill_timeout_sec=360
+        ),
     )
     recorder.finish(tput_after=900.0)
 

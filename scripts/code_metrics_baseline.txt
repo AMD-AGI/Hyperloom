@@ -155,11 +155,6 @@ cognitive-complexity src/hyperloom/orchestrator/phases/framework.py::FrameworkPh
 cognitive-complexity src/hyperloom/orchestrator/phases/framework.py::FrameworkPhase.maybe_reauthor_from_critic_feedback 47
 cognitive-complexity src/hyperloom/orchestrator/phases/framework.py::_framework_config_levers_from_done 81
 cognitive-complexity src/hyperloom/orchestrator/phases/internal.py::InternalTasksPhase._enqueue_internal_research_scout_task 46
-cognitive-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._gemm_e2e_candidates 34
-cognitive-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._merge_gemm_candidate_with_runtime 83
-cognitive-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._run_geak_kernel_phase 115
-cognitive-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._validate_gemm_tuning_e2e 106
-cognitive-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase.promote_geak_from_candidate 56
 cognitive-complexity src/hyperloom/orchestrator/phases/kernel_stack.py::KernelStackPhase._run_kernel_stack_validation_e2e 62
 cognitive-complexity src/hyperloom/orchestrator/phases/kernel_stack.py::KernelStackPhase.drain_pending_keep_integrates 32
 cognitive-complexity src/hyperloom/orchestrator/phases/machine_state.py::kernel_work_pending 38
@@ -327,9 +322,6 @@ cyclomatic-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCol
 cyclomatic-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_integrate_patch 22
 cyclomatic-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator.handle_unpromotable_result 24
 cyclomatic-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator.lift_to_current_best 43
-cyclomatic-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._merge_gemm_candidate_with_runtime 42
-cyclomatic-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._run_geak_kernel_phase 48
-cyclomatic-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._validate_gemm_tuning_e2e 36
 cyclomatic-complexity src/hyperloom/orchestrator/phases/machine_state.py::replay_next_phase 30
 cyclomatic-complexity src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._prepare_warm_kernel_kb 33
 cyclomatic-complexity src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._settle_warm_replay 43
@@ -523,10 +515,6 @@ function-args src/hyperloom/orchestrator/loop/intent_router.py::_record_critic_r
 function-args src/hyperloom/orchestrator/loop/intent_router.py::_record_phase_proposal_review 7
 function-args src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._record_geak_rebench_timeline 8
 function-args src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._stage_agent_keep 6
-function-args src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._record_geak_delegation_timeline 7
-function-args src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._record_one_gemm_tuner_run 16
-function-args src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._run_geak_kernel_phase._finish_skip 6
-function-args src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._run_geak_kernel_phase._promote_recovered_result 6
 function-args src/hyperloom/orchestrator/phases/machine_state.py::record_lifecycle_event 9
 function-args src/hyperloom/orchestrator/rehearsal/launch.py::ScriptedLaunchBackend.run 6
 function-args src/hyperloom/orchestrator/source_snapshot.py::snapshot_source_layer 8
@@ -761,14 +749,6 @@ function-lines src/hyperloom/orchestrator/phases/framework.py::_framework_config
 function-lines src/hyperloom/orchestrator/phases/framework.py::_record_source_attempt 150
 function-lines src/hyperloom/orchestrator/phases/internal.py::InternalTasksPhase._enqueue_internal_research_scout_task 81
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._fmoe_apply_verdict 131
-function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._maybe_reprofile_for_kernel 98
-function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._merge_gemm_candidate_with_runtime 151
-function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._record_geak_candidate 99
-function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._record_gemm_tuning_timeline 88
-function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._run_geak_kernel_phase 467
-function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._run_kernel_rewrite_controller 128
-function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._validate_gemm_tuning_e2e 425
-function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase.promote_geak_from_candidate 165
 function-lines src/hyperloom/orchestrator/phases/kernel_stack.py::KernelStackPhase._run_kernel_stack_validation_e2e 220
 function-lines src/hyperloom/orchestrator/phases/machine.py::MachinePhase.advance_phase_if_needed 149
 function-lines src/hyperloom/orchestrator/phases/machine_state.py::record_phase_transition 87
@@ -981,7 +961,7 @@ module-lines src/hyperloom/orchestrator/loop/dispatcher.py 1503
 module-lines src/hyperloom/orchestrator/loop/intent_router.py 1548
 module-lines src/hyperloom/orchestrator/loop/writeback.py 4748
 module-lines src/hyperloom/orchestrator/phases/framework.py 3139
-module-lines src/hyperloom/orchestrator/phases/kernel.py 4227
+module-lines src/hyperloom/orchestrator/phases/kernel.py 4013
 module-lines src/hyperloom/orchestrator/phases/machine_state.py 2189
 module-lines src/hyperloom/orchestrator/phases/prelude.py 2640
 module-lines src/hyperloom/orchestrator/policy/gate.py 1608
