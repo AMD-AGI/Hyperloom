@@ -293,8 +293,10 @@ def make_supervisor_fn(
 
         try:
             if selected_backend is None:
-                selected_backend = create_registered_backend(runtime)
-                require_mcp_backend(knowledge_wiki, selected_backend, "supervisor")
+                candidate = create_registered_backend(runtime)
+                # Checked before it is kept: a kept backend is never checked again.
+                require_mcp_backend(knowledge_wiki, candidate, "supervisor")
+                selected_backend = candidate
                 setattr(supervisor_fn, "backend_name", selected_backend.name)
                 setattr(
                     supervisor_fn,

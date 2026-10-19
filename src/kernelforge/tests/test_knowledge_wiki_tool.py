@@ -451,6 +451,33 @@ def test_the_supervisor_gets_the_tools(tmp_path, wiki, log, monkeypatch):
     _assert_offered(backend.specs[0], KnowledgeWikiTool.from_config(config), "supervisor")
 
 
+def test_a_supervisor_backend_without_mcp_is_refused_on_every_pass(tmp_path, wiki, log, monkeypatch, capsys):
+    backend = _RecordingBackend("RULING: keep going")
+    backend.capabilities = AgentCapabilities(mcp=False)
+
+    def factory(runtime, **_kwargs):
+        backend.runtime = runtime
+        return backend
+
+    monkeypatch.setattr("kernelforge.agent_backends.registry.create_registered_backend", factory)
+    config = Config(
+        workspace=str(tmp_path),
+        agent_backend="codex",
+        agent_model="gpt-codex-test",
+        agent_precheck=False,
+        knowledge_wiki_root=str(wiki),
+        knowledge_wiki_log=str(log),
+    )
+    supervisor = make_supervisor_fn(config=config)
+
+    for _ in range(2):
+        asyncio.run(supervisor(digest="stalled", reason="plateau", workspace=str(tmp_path)))
+
+    # That backend would drop the knowledge base, so no pass may run on it, the first or any later one.
+    assert backend.specs == []
+    assert capsys.readouterr().err.count("needs an MCP-capable backend") == 2
+
+
 async def test_the_analysis_agent_gets_the_tools(tmp_path, wiki, log):
     class Backend(analysis_tests._BundleBackend):
         capabilities = AgentCapabilities(mcp=True)
