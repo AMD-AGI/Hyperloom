@@ -11,7 +11,6 @@ import json
 import time
 import uuid
 from collections.abc import Mapping
-from contextlib import asynccontextmanager, suppress
 from typing import Any
 
 from hyperloom.common.framework_arm import is_upstream_pr_prescreen, review_row_id, verdict_subject
@@ -19,7 +18,6 @@ from hyperloom.orchestrator.lever import (
     patch_lever_kind,
     patch_owner_phase,
 )
-from hyperloom.inference_optimizer.protocol.action_surfaces import REQUEST_KIND_TO_OWNED_ACTION
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.common.timeutil import parse_iso_unix_or_zero, format_exc_brief
 from .verdicts import (
@@ -58,48 +56,13 @@ from hyperloom.inference_optimizer.trace.trajectory_trace import (
     trajectory_span,
 )
 from ..kernel.request_handlers import KERNEL_REQUEST_HANDLERS, get_handler
-from ..phases.machine_state import KERNEL_HEARTBEAT_SEC as _KERNEL_HEARTBEAT_SEC
 from ..collaborator import CoordinatorCollaborator
-
-# Path-like keys surfaced from a kernel handler payload/result so operators can see where a step's artifacts went.
-_LIFECYCLE_PATH_KEYS: tuple[str, ...] = (
-    "trace_input",
-    "trace_dir",
-    "candidates_path",
-    "analysis_md_path",
-    "kernel_candidates",
-    "best_artifact_path",
-    "patch_path",
-    "target_file",
-    "workspace",
-    "workspace_path",
-    "out_dir",
-    "output_dir",
-    "run_dir",
-    "report_path",
-    "json_path",
-    "md_path",
-    "tracelens_agent_report",
-    # TraceLens analysis outputs surfaced by trace_analyze_handler.
-    "trace_report_path",
-    "analysis_report_path",
-    "tracelens_summary_path",
-    "kernel_roofline_path",
-    "cli_log_path",
+from .kernel_request import (
+    KernelRequest,
+    KernelRequestOutcome,
+    remembered_outcome,
+    run_kernel_handler,
 )
-
-
-def _lifecycle_paths(payload: Any) -> dict[str, str]:
-    """Extract present, non-empty path-like fields from a kernel handler payload or result dict."""
-    if not isinstance(payload, dict):
-        return {}
-    out: dict[str, str] = {}
-    for key in _LIFECYCLE_PATH_KEYS:
-        val = payload.get(key)
-        if isinstance(val, str) and val.strip():
-            out[key] = val
-    return out
-
 
 # ``Coordinator`` is intentionally NOT imported (avoids a module-level import cycle with coordinator.py); it is held
 # as a back-reference and the annotation below is a deferred string.
@@ -1040,42 +1003,6 @@ class IntentRouter(CoordinatorCollaborator):
             )
         )
 
-    @asynccontextmanager
-    async def _kernel_step_heartbeat(self, kind: str, started: float):
-        """Keep orchestration's bus timestamp moving through an inline step."""
-
-        # Re-stamped per beat rather than once at the start, so a stamp that outlives its process expires instead of
-        # muting the KERNEL idle guard.
-        def _mark_running() -> None:
-            self.shared_state.kernel_inline_step_seen_unix = time.time()
-
-        async def _beat() -> None:
-            while True:
-                await asyncio.sleep(_KERNEL_HEARTBEAT_SEC)
-                _mark_running()
-                await self.bus.append_and_seq(
-                    Message.new(
-                        "orchestration",
-                        "*",
-                        "observation",
-                        {
-                            "kind": "kernel_step_running",
-                            "step": kind,
-                            "elapsed_sec": round(time.monotonic() - started, 1),
-                        },
-                    )
-                )
-
-        _mark_running()
-        task = asyncio.create_task(_beat())
-        try:
-            yield
-        finally:
-            task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
-            self.shared_state.kernel_inline_step_seen_unix = 0.0
-
     def _record_request_failure(self, *, kind: str, request_msg_id: str, result: dict[str, Any]) -> None:
         """Append a failed kernel request to the log the FAILURE RECOVERY prompt block reads."""
         self.shared_state.record_action_failure(action=kind, task_id=request_msg_id, result=result)
@@ -1160,171 +1087,7 @@ class IntentRouter(CoordinatorCollaborator):
         )
         await self.bus.append_and_seq(request_msg)
 
-        if target_agent == "kernel_agent":
-            if not bool(self.shared_state.kernel_enabled):
-                await self._reply(
-                    request_msg,
-                    {
-                        "status": "failed",
-                        "error_class": "agent_disabled",
-                        "error": "kernel_agent is disabled for this session (--no-kernel)",
-                    },
-                    source=_AUTO_REJECT,
-                )
-                return
-            handler = get_handler(kind)
-            if handler is None:
-                await self._reply(
-                    request_msg,
-                    {
-                        "status": "failed",
-                        "error_class": "unknown_kernel_kind",
-                        "error": f"no programmatic handler for kind={kind!r}",
-                        "valid_kinds": sorted(KERNEL_REQUEST_HANDLERS),
-                    },
-                    source=_AUTO_REJECT,
-                )
-                return
-            params = intent.payload.get("params") or {}
-            merged_payload = {**intent.payload, **params}
-            # Roofline data is read from the last_trace_analyze cache rather than auto-injected here.
-            cache_hit_source = None
-            cached_result = self._coord.phase_kernel.cached_kernel_request(kind, merged_payload)
-            if cached_result is not None:
-                result = cached_result
-                cache_hit_source = "shared_state_cache"
-                # A cache hit never runs the handler; emit a single END (detail=cache_hit) so the lifecycle log
-                # records the step.
-                self._coord.writeback.emit_lifecycle(
-                    step=kind,
-                    status="END",
-                    artifacts=_lifecycle_paths(result),
-                    detail="cache_hit",
-                )
-            else:
-                rejected = self.shared_state.find_rejected_kernel_patch(merged_payload) if kind == "integrate" else None
-                if rejected is not None:
-                    result = {
-                        "status": "skipped",
-                        "decision": "REVERT",
-                        "error_class": "kernel_patch_rejected",
-                        "error": "same kernel patch already exhausted E2E attempts",
-                        "kernel_id": rejected.get("kernel_id"),
-                        "patch_path": rejected.get("patch_path"),
-                        "target_file": rejected.get("target_file"),
-                        "extra_server_args": rejected.get("extra_server_args", ""),
-                        "attempt_count": rejected.get("attempt_count"),
-                        "best_gain_pct": rejected.get("best_gain_pct"),
-                        "reason": rejected.get("reason"),
-                    }
-                    cache_hit_source = "shared_state_kernel_rejection"
-                    # A short-circuited integrate never runs the handler; emit a lone END recording the rejection.
-                    self._coord.writeback.emit_lifecycle(
-                        step=kind,
-                        status="END",
-                        artifacts=_lifecycle_paths(result),
-                        detail="rejected",
-                    )
-                else:
-                    # Inject base_tput from current_best.tput when an integrate request omits it; operator value wins.
-                    if kind == "integrate" and not merged_payload.get("base_tput"):
-                        cb_tput = (self.shared_state.current_best or {}).get("tput")
-                        if isinstance(cb_tput, (int, float)) and cb_tput > 0:
-                            merged_payload["base_tput"] = float(cb_tput)
-
-                    # A handler that benchmarks runs under its action's catalogue lanes, so it waits out the
-                    # kernel_agent task instead of sharing the GPUs with it.
-                    action = REQUEST_KIND_TO_OWNED_ACTION.get(kind, kind)
-                    lanes, ttl = self._coord.dispatcher.registry_lanes_ttl(action)
-                    handler_lease = None
-                    if lanes:
-                        handler_lease = await self.locks.try_acquire_many(
-                            lanes,
-                            holder_id=request_msg.msg_id,
-                            task_id=request_msg.msg_id,
-                            action=action,
-                            ttl_sec=ttl or 60,
-                        )
-                        if handler_lease is None:
-                            await self._reply(
-                                request_msg,
-                                {"status": "deferred", "reason": "lanes_busy", "lanes": lanes},
-                                source="lanes_busy",
-                            )
-                            return
-
-                    handler_kwargs: dict[str, Any] = {
-                        "session_dir": self.session_dir,
-                    }
-                    # Bracket the programmatic kernel step with START / END lifecycle events.
-                    _lc_t0 = time.monotonic()
-                    self._coord.writeback.emit_lifecycle(
-                        step=kind,
-                        status="START",
-                        artifacts=_lifecycle_paths(merged_payload),
-                    )
-                    try:
-                        async with self._kernel_step_heartbeat(kind, _lc_t0):
-                            result = await handler(
-                                merged_payload,
-                                **handler_kwargs,
-                            )
-                    except Exception as exc:
-                        log.exception(
-                            "kernel_request_handler[%s] crashed for source=%s",
-                            kind,
-                            source,
-                        )
-                        result = {
-                            "status": "failed",
-                            "error_class": "handler_exception",
-                            "error": repr(exc),
-                        }
-                    finally:
-                        if handler_lease is not None:
-                            await self.locks.release(handler_lease)
-                    _lc_status = "ERROR" if str(result.get("status", "")).lower() in ("failed", "error") else "END"
-                    _lc_detail = " ".join(
-                        str(p)
-                        for p in (
-                            result.get("decision"),
-                            result.get("status"),
-                            f"kernel={result.get('kernel_id')}" if result.get("kernel_id") else "",
-                        )
-                        if p
-                    )
-                    self._coord.writeback.emit_lifecycle(
-                        step=kind,
-                        status=_lc_status,
-                        artifacts=_lifecycle_paths(result),
-                        detail=_lc_detail,
-                        duration_s=time.monotonic() - _lc_t0,
-                    )
-            await self._reply(request_msg, result, source=cache_hit_source or "programmatic_handler")
-            # Cache a successful trace_analyze, or remember a failure the same trace reproduces.
-            if kind == "trace_analyze" and cache_hit_source is None:
-                self._record_trace_analyze_outcome(merged_payload, result)
-                self.shared_state.save(self.session_dir)
-            if kind == "trace_analyze":
-                self._record_trace_analyze_on_timeline(
-                    request_msg=request_msg,
-                    source=source,
-                    payload=merged_payload,
-                    result=result,
-                    cache_hit=cache_hit_source is not None,
-                )
-            if kind == "integrate":
-                if result.get("status") != "skipped":
-                    self.shared_state.record_kernel_integrate_result(result)
-                decision = str(result.get("decision", "")).upper()
-                if decision == "KEEP":
-                    if isinstance(result, dict) and not result.get("gap_canonical_id"):
-                        payload_gap = str(merged_payload.get("gap_canonical_id") or "").strip()
-                        if payload_gap:
-                            result["gap_canonical_id"] = payload_gap
-                    await self._coord.writeback.record_integrate_keep(result)
-                self.shared_state.save(self.session_dir)
-        else:
+        if target_agent != "kernel_agent":
             await self._reply(
                 request_msg,
                 {
@@ -1334,6 +1097,68 @@ class IntentRouter(CoordinatorCollaborator):
                 },
                 source=_AUTO_REJECT,
             )
+            return
+        if not bool(self.shared_state.kernel_enabled):
+            await self._reply(
+                request_msg,
+                {
+                    "status": "failed",
+                    "error_class": "agent_disabled",
+                    "error": "kernel_agent is disabled for this session (--no-kernel)",
+                },
+                source=_AUTO_REJECT,
+            )
+            return
+        handler = get_handler(kind)
+        if handler is None:
+            await self._reply(
+                request_msg,
+                {
+                    "status": "failed",
+                    "error_class": "unknown_kernel_kind",
+                    "error": f"no programmatic handler for kind={kind!r}",
+                    "valid_kinds": sorted(KERNEL_REQUEST_HANDLERS),
+                },
+                source=_AUTO_REJECT,
+            )
+            return
+        params = intent.payload.get("params") or {}
+        request = KernelRequest(request_msg, kind, {**intent.payload, **params})
+        outcome = remembered_outcome(self, request)
+        if outcome is None:
+            outcome = await run_kernel_handler(self, request, handler)
+            if outcome is None:
+                return
+        await self._reply(request_msg, outcome.result, source=outcome.reply_source)
+        await self._record_kernel_outcome(request, outcome, requested_by=source)
+
+    async def _record_kernel_outcome(
+        self, request: KernelRequest, outcome: KernelRequestOutcome, *, requested_by: str
+    ) -> None:
+        """Fold what a kernel request produced back into shared state and onto the trajectory timeline."""
+        result = outcome.result
+        if request.kind == "trace_analyze":
+            if not outcome.from_cache:
+                self._record_trace_analyze_outcome(request.payload, result)
+                self.shared_state.save(self.session_dir)
+            self._record_trace_analyze_on_timeline(
+                request_msg=request.message,
+                source=requested_by,
+                payload=request.payload,
+                result=result,
+                cache_hit=outcome.from_cache,
+            )
+        if request.kind != "integrate":
+            return
+        if result.get("status") != "skipped":
+            self.shared_state.record_kernel_integrate_result(result)
+        if str(result.get("decision", "")).upper() == "KEEP":
+            if isinstance(result, dict) and not result.get("gap_canonical_id"):
+                payload_gap = str(request.payload.get("gap_canonical_id") or "").strip()
+                if payload_gap:
+                    result["gap_canonical_id"] = payload_gap
+            await self._coord.writeback.record_integrate_keep(result)
+        self.shared_state.save(self.session_dir)
 
     async def _handle_extend_lease(self, source: str, intent: Intent) -> None:
         """Grant a running task more lease time."""
