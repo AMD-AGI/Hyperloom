@@ -12,8 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .candidates import failed_tuner_records, is_candidate, per_tuner_candidates
-from .model_analyzer import ModelProfile
-from .tuners.base import TuneResult
+from .tuners.base import TuneContext, TuneResult
 
 
 @dataclass
@@ -88,19 +87,11 @@ class TuneReport:
 def build_report(
     results: list[TuneResult],
     skipped: list[tuple[str, str]],  # (tuner_name, skip_reason)
-    *,
-    profile: ModelProfile,
-    framework: str,
-    precision: str,
-    quant_type: str,
-    gpu_type: str,
-    tp: int,
-    conc: int,
-    tokens: list[int],
+    ctx: TuneContext,
     started_at: str,
     total_elapsed_s: float,
 ) -> TuneReport:
-    """Build a TuneReport from individual tuner results."""
+    """Build a TuneReport from individual tuner results, recording the context they were tuned in."""
     finished_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
     tuners_run = [r.to_dict() for r in results]
@@ -171,14 +162,14 @@ def build_report(
         status=status,
         micro_decision=micro_decision,
         requires_e2e_validation=has_candidate,
-        model_path=profile.model_path,
-        framework=framework,
-        precision=precision,
-        quant_type=quant_type,
-        gpu_type=gpu_type,
-        tp=tp,
-        conc=conc,
-        tokens=tokens,
+        model_path=ctx.profile.model_path,
+        framework=ctx.framework,
+        precision=ctx.precision,
+        quant_type=ctx.quant_type,
+        gpu_type=ctx.gpu_type,
+        tp=ctx.tp,
+        conc=ctx.conc,
+        tokens=ctx.tokens,
         tuners_run=tuners_run,
         tuners_skipped=tuners_skipped_list,
         failed_tuners=failed_tuners,

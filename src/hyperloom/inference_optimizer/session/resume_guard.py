@@ -19,6 +19,7 @@ from hyperloom.common.timeutil import now_iso
 
 from . import lock as session_lock
 from . import session_paths
+from .coordinator_db import OlderCoordinatorDB, refuse_older_schema
 from .paths import db_path_for
 
 
@@ -212,9 +213,12 @@ def ensure_resume_safe(session_dir: Path, *, owner_scope: str) -> None:
         with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as db:
             db.row_factory = sqlite3.Row
             db.execute("BEGIN")
+            refuse_older_schema(db)
             diagnostics = _inspect(db, owner_scope)
             if diagnostics:
                 diagnostics += _other_scopes(db, owner_scope)
+    except OlderCoordinatorDB as exc:
+        raise ResumeBlocked(str(exc)) from exc
     except (OSError, sqlite3.Error, ValueError, TypeError) as exc:
         raise ResumeBlocked(
             "cannot inspect persisted execution ownership read-only; resume is blocked. "

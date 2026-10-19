@@ -68,7 +68,16 @@ from .event_fields import (
 from .event_ids import event_id
 from .event_rows import group_rows, rows_for_event, sort_rows, wire_rows
 from .event_sink import make_sink
-from .event_timeline import finish_event, open_event
+from .event_timeline import EventHeader, finish_event, open_event
+from .kernel_records import (
+    LEDGER_GEAK,
+    SOURCE_FUSION,
+    SOURCE_GEAK_AUTHORED_KERNEL,
+    SOURCE_GEMM_TUNING,
+    SOURCE_KERNEL_REWRITE,
+    KernelRewriteRun,
+    LaneRunFields,
+)
 from .baseline_event import assemble_baseline_actions
 from .roofline_event import assemble_roofline_action
 
@@ -133,17 +142,7 @@ ROW_INTEGRATE = "integrate"
 ROUTE_GEAK = "geak"
 ROUTE_FORGE = "forge"
 
-# The five candidate producers a KERNEL entry can adopt from.
-SOURCE_KERNEL_REWRITE = "kernel_rewrite"
-SOURCE_FUSION = "fusion"
-SOURCE_GEMM_TUNING = "gemm_tuning"
-SOURCE_GEAK_AUTHORED_KERNEL = "geak_authored_kernel"
 SOURCE_GEAK_ENV_SELECTION = "geak_env_selection"
-
-#: Which route asked for a rebench. Only GEAK runs one: it re-measures a whole
-#: delegated config against a per-cycle attempt ceiling. Forge has no rebench
-#: step at all -- its candidates are settled by the integrate gate.
-LEDGER_GEAK = "geak"
 
 #: What became of one candidate. ``failed`` is distinct from ``rejected``: the
 #: first never produced a candidate to judge, the second produced one that was
@@ -637,10 +636,8 @@ def _republish_closed_event(event: str) -> None:
     from .construct import republish_closed_event
 
     republish_closed_event(
-        event,
+        EventHeader(EVENT_TYPE, event, EVENT_KIND),
         section=SECTION_EVENT,
-        event_type=EVENT_TYPE,
-        kind=EVENT_KIND,
         load_parts=lambda: event_parts(EVENT_SECTIONS, event=event),
         assemble=assemble_kernel_ext,
         end_time=lambda _parts, header: _text(header.get("end_time")),
@@ -955,44 +952,6 @@ def _discovered_kernel_row(
     }
 
 
-def _lane_row(
-    *,
-    source_kind: str,
-    run_id: str,
-    status: str,
-    started_at: str | None,
-    ended_at: str | None,
-    duration_sec: float | None,
-    micro_decision: str | None,
-    integrate_ref: str | None,
-    failure_reason: str | None,
-    error_class: str | None = None,
-) -> dict[str, Any]:
-    """Build the fields every candidate lane row carries.
-
-    The row states what the lane did, not what became of it. A forge candidate
-    is settled by the integrate gate, whose verdict is a different row written
-    later, so the outcome is resolved at assembly once both halves are on disk.
-
-    ``integrate_ref`` names the queued integration when the lane has one. A
-    rewrite is joined to its verdict by ``kernel_id``, but fusion and GEMM
-    tuning produce no kernel of their own, so without the integration id the
-    gate that ruled on them could never be found.
-    """
-    return {
-        "source_kind": str(source_kind),
-        "run_id": str(run_id or ""),
-        "status": str(status or ""),
-        "started_at": _text(started_at),
-        "ended_at": _text(ended_at),
-        "duration_sec": _float_or_none(duration_sec),
-        "micro_decision": _text(micro_decision),
-        "integrate_ref": _text(integrate_ref),
-        "error_class": _text(error_class),
-        "failure_reason": _text(failure_reason),
-    }
-
-
 def _rebench_row(
     *,
     attempt_id: str,
@@ -1185,12 +1144,9 @@ class KernelEventRecorder:
             },
         )
         self._sequence = open_event(
-            event_type=EVENT_TYPE,
-            event=self._event_id,
+            EventHeader(EVENT_TYPE, self._event_id, EVENT_KIND, self._start_time),
             event_section=SECTION_EVENT,
             producer=PRODUCER,
-            kind=EVENT_KIND,
-            start_time=self._start_time,
             ext={"route": self._route, "in_flight_stage": self._stage},
         )
 
@@ -1258,55 +1214,6 @@ class KernelEventRecorder:
             },
         )
 
-    def record_trace_analyze_run(
-        self,
-        *,
-        run_id: str,
-        trigger: str,
-        status: str,
-        result: Any,
-        requested_by: str = "",
-        request_msg_id: str = "",
-        trace_input: str = "",
-        top_k: Any = None,
-        snapshot: dict[str, Any] | None = None,
-        cache_hit: bool = False,
-    ) -> None:
-        """Record an analysis the phase requested for itself.
-
-        This section is normally empty. The entry re-profile dispatches a
-        ``roofline`` task by default, which analyses the trace it just captured,
-        so the phase's own request is skipped as cached. A non-empty section
-        therefore marks the case where the analysis behind a rewrite has no
-        roofline event of its own; it is what explains that request's snapshot
-        counter bump and cache replacement on the timeline.
-
-        ``reusable_native_kernel_ids`` is recorded because it is the only legal
-        source of a ``kernel_id``: the hot-kernel ranking includes vendor
-        binaries that dispatch rejects as ``non_reusable_kernel``, so without
-        the admitted set there is no way to check afterwards whether the kernel
-        the phase went on to rewrite was ever a legitimate target.
-
-        Args:
-            run_id: Entry-stable identifier for this analysis.
-            trigger: ``pre_run_optimization`` or ``llm_explicit``.
-            status: ``ok`` or ``failed``.
-            snapshot: The ``last_trace_analyze`` cache the run produced.
-        """
-        _write_trace_analyze_run(
-            self._sink,
-            run_id=run_id,
-            trigger=trigger,
-            status=status,
-            result=result,
-            requested_by=requested_by,
-            request_msg_id=request_msg_id,
-            trace_input=trace_input,
-            top_k=top_k,
-            snapshot=snapshot,
-            cache_hit=cache_hit,
-        )
-
     def _record_lane_run(self, row: Mapping[str, Any]) -> None:
         """Write one lane row, keyed by the run it describes."""
         self._sink.record(
@@ -1316,70 +1223,9 @@ class KernelEventRecorder:
             natural_ids=(str(row.get("source_kind") or ""), str(row.get("run_id") or "")),
         )
 
-    def record_kernel_rewrite(
-        self,
-        *,
-        run_id: str,
-        kernel_id: str,
-        status: str,
-        kernel_name: str = "",
-        dispatched: bool = True,
-        backends_tried: Any = None,
-        adopted_backend: str = "",
-        skip_reason: str = "",
-        task_group: str = "",
-        speedup: Any = None,
-        baseline_us: Any = None,
-        candidate_us: Any = None,
-        compile_status: str = "",
-        correctness: Any = None,
-        artifact_path: str = "",
-        micro_decision: str = "",
-        integrate_ref: str = "",
-        trace_analyze_ref: str = "",
-        started_at: str = "",
-        ended_at: str = "",
-        duration_sec: Any = None,
-        failure_reason: str = "",
-        error_class: str = "",
-    ) -> None:
-        """Record one forge source-level kernel rewrite.
-
-        ``adopted_backend`` and ``run_id`` are stated rather than derived. The
-        projection had to guess the backend from a speedup plus an artifact path
-        and to synthesize an identifier from ``kernel_id:backend:sequence``
-        whenever the real attempt id had been lost.
-        """
-        self._record_lane_run(
-            {
-                **_lane_row(
-                    source_kind=SOURCE_KERNEL_REWRITE,
-                    run_id=run_id,
-                    status=status,
-                    started_at=started_at,
-                    ended_at=ended_at,
-                    duration_sec=duration_sec,
-                    micro_decision=micro_decision,
-                    integrate_ref=integrate_ref,
-                    failure_reason=failure_reason,
-                    error_class=error_class,
-                ),
-                "kernel_id": str(kernel_id or ""),
-                "kernel_name": _text(kernel_name),
-                "dispatched": bool(dispatched),
-                "backends_tried": [str(item) for item in _as_list(backends_tried)],
-                "adopted_backend": _text(adopted_backend),
-                "skip_reason": _text(skip_reason),
-                "task_group": _text(task_group),
-                "speedup": _float_or_none(speedup),
-                "baseline_us": _float_or_none(baseline_us),
-                "candidate_us": _float_or_none(candidate_us),
-                "compile_status": _text(compile_status),
-                "correctness": correctness if isinstance(correctness, bool) else None,
-                "artifact_path": _text(artifact_path),
-                "trace_analyze_ref": _text(trace_analyze_ref),
-            }
-        )
+    def record_kernel_rewrite(self, run: KernelRewriteRun) -> None:
+        """Record one forge source-level kernel rewrite."""
+        self._record_lane_run(run.row())
 
     def record_fusion_run(
         self,
@@ -1402,8 +1248,7 @@ class KernelEventRecorder:
         """Record one forge-fusion run."""
         self._record_lane_run(
             {
-                **_lane_row(
-                    source_kind=SOURCE_FUSION,
+                **LaneRunFields(
                     run_id=run_id,
                     status=status,
                     started_at=started_at,
@@ -1413,7 +1258,7 @@ class KernelEventRecorder:
                     integrate_ref=integrate_ref,
                     failure_reason=failure_reason,
                     error_class=error_class,
-                ),
+                ).row(SOURCE_FUSION),
                 "pattern": _text(pattern),
                 "target_module": _text(target_module),
                 "applied": bool(applied),
@@ -1450,8 +1295,7 @@ class KernelEventRecorder:
         """
         self._record_lane_run(
             {
-                **_lane_row(
-                    source_kind=SOURCE_GEMM_TUNING,
+                **LaneRunFields(
                     run_id=run_id,
                     status=status,
                     started_at=started_at,
@@ -1461,7 +1305,7 @@ class KernelEventRecorder:
                     integrate_ref=integrate_ref,
                     failure_reason=failure_reason,
                     error_class=error_class,
-                ),
+                ).row(SOURCE_GEMM_TUNING),
                 "shapes_total": _int_or_none(shapes_total),
                 "shapes_tuned": _int_or_none(shapes_tuned),
                 "config_path": _text(config_path),
@@ -1755,13 +1599,10 @@ class KernelEventRecorder:
                 event=self._event_id,
             )
             finish_event(
-                event_type=EVENT_TYPE,
-                event=self._event_id,
+                EventHeader(EVENT_TYPE, self._event_id, EVENT_KIND, self._start_time),
                 sequence=self._sequence,
                 status=derived,
                 ext=ext,
-                kind=EVENT_KIND,
-                start_time=self._start_time,
                 end_time=end_time,
             )
         except RECORDING_ERRORS as exc:

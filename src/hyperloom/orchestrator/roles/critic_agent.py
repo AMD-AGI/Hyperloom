@@ -18,6 +18,7 @@ from typing import Any, Callable, Literal
 from hyperloom.common.framework_arm import review_row_id
 from hyperloom.common.llm_config import (
     DEFAULT_CODEX_MODEL,
+    AnthropicCompletionRequest,
     LLMConfigError,
     aanthropic_completion,
     achat_completion,
@@ -689,13 +690,15 @@ class CriticAgentBackend:
 
             critic_out.record_critic_iteration(
                 self.session_dir,
-                iter_n=turn_idx,
-                request=request,
-                judge_bundle=judge_bundle,
-                review=review,
-                emit=emit,
-                workdir=workdir,
-                kb_priors=kb_priors_trace,
+                critic_out.CriticIteration(
+                    iter_n=turn_idx,
+                    request=request,
+                    judge_bundle=judge_bundle,
+                    review=review,
+                    emit=emit,
+                    workdir=workdir,
+                    kb_priors=kb_priors_trace,
+                ),
             )
         except Exception:  # noqa: BLE001
             pass
@@ -789,12 +792,6 @@ class CriticAgentBackend:
         memory_dir.mkdir(parents=True, exist_ok=True)
         env.setdefault("CRITIC_SESSION_MEMORY_DIR", str(memory_dir))
         env["CRITIC_KB_CLIENT_MODE"] = self.kb_mode
-
-        # Point the runtime at the sibling robustness findings JSONL.
-        env.setdefault(
-            "ROBUSTNESS_AGENT_SESSION_DIR",
-            str(self.session_dir),
-        )
 
         # Dead-letter dir under the session so cron replays don't cross sessions.
         dlq_dir = self.session_dir / "critic-kb-dead-letter"
@@ -1101,16 +1098,15 @@ class CriticAgentBackend:
         connect_timeout_s, rw_timeout_s = self._resolve_llm_timeouts()
         _t0 = time.perf_counter()
         try:
-            result = await aanthropic_completion(
-                component="critic",
-                operation="review",
+            request = AnthropicCompletionRequest(
                 model=self._review_model,
-                system=system_prompt,
                 messages=[{"role": "user", "content": user_prompt}],
                 max_tokens=max_tokens,
+                system=system_prompt,
                 timeout=build_http_timeout(connect=connect_timeout_s, read=rw_timeout_s),
                 timeout_s=rw_timeout_s,
             )
+            result = await aanthropic_completion(request=request, component="critic", operation="review")
         except Exception as exc:
             raise self._llm_call_failed(
                 f"Anthropic completion failed (critic-agent reasoning): {exc!r}",

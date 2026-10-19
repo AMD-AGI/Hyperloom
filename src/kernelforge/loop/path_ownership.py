@@ -48,13 +48,6 @@ RUNTIME_DIRECTORY_GLOBS: tuple[str, ...] = ("*.egg-info",)
 #: Suffixes worth neither copying nor hashing.
 RUNTIME_FILE_SUFFIXES: frozenset[str] = frozenset({".pyc", ".pyo"})
 
-#: Suffixes a copy must carry and an index must not hash.
-#:
-#: A scratch copy shadows the installed package outright, so dropping the
-#: extension modules leaves nothing to import and nothing to fall back to.
-#: Hashing them instead costs the loop a binary in every diff it takes.
-COMPILED_FILE_SUFFIXES: frozenset[str] = frozenset({".so"})
-
 
 def is_producer_owned_path(path: str) -> bool:
     """True when a repository-relative path holds forge bookkeeping."""

@@ -82,9 +82,9 @@ class Harness:
             for f in flags
         }
 
-    def serving(self, model_path, env_flags, **kw):
+    def serving(self, server, **kw):
         idx = len(self.arm_calls)
-        self.arm_calls.append({"env_flags": dict(env_flags or {}), "kw": kw})
+        self.arm_calls.append({"env_flags": dict(server.env_flags or {}), "server": server, "kw": kw})
         ok, tok_s = self.arms[min(idx, len(self.arms) - 1)]
         metrics = kw.get("metrics")
         if metrics is not None and ok:
@@ -189,8 +189,8 @@ class TestKeepPath:
         assert hz.arm_calls[0]["env_flags"] == {}
         assert hz.arm_calls[1]["env_flags"].get("VLLM_LOGGING_LEVEL") == "DEBUG"
         # Both arms must hit the SAME pinned launcher and request shape.
-        assert {c["kw"]["launcher_exe"] for c in hz.arm_calls} == {"/fake/vllm"}
-        assert {(c["kw"]["isl"], c["kw"]["osl"]) for c in hz.arm_calls} == {(512, 128)}
+        assert {c["server"].launcher_exe for c in hz.arm_calls} == {"/fake/vllm"}
+        assert {(c["kw"]["load"].isl, c["kw"]["load"].osl) for c in hz.arm_calls} == {(512, 128)}
 
 
 class TestRejectPaths:

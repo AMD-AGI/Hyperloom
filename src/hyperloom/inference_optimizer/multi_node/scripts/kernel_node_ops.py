@@ -7,11 +7,9 @@ import argparse
 import base64
 import hashlib
 import json
-import os
 import py_compile
 import shutil
 import socket
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -31,10 +29,6 @@ def _pod_backup_stem(kernel_id: str, target: Path, host: str) -> str:
     """Name a pod-side backup uniquely per target and per apply."""
     path_hash = hashlib.sha256(str(target).encode("utf-8")).hexdigest()[:16]
     return f"{_safe_name(kernel_id or target.stem)}_{path_hash}_{host}_{time.time_ns()}"
-
-
-_MAX_ARTIFACT_BYTES = 1 * 1024 * 1024
-_STREAM_TAIL_BYTES = 32 * 1024
 
 
 def _safe_name(value: str) -> str:
@@ -192,85 +186,8 @@ def _do_finalize(a: argparse.Namespace) -> int:
     return _emit({"host": host, **result})
 
 
-def _do_bench(a: argparse.Namespace) -> int:
-    """Stage files into the workspace, run the bench command, read back artifacts."""
-    host = socket.gethostname()
-    ws = Path(a.workspace)
-    ws.mkdir(parents=True, exist_ok=True)
-    try:
-        files_b64 = json.loads(a.files_b64_json or "{}")
-    except json.JSONDecodeError as exc:
-        return _emit({"status": "failed", "host": host, "error": f"files_b64_json not valid JSON: {exc}"})
-    staged: list[str] = []
-    for rel, b64 in (files_b64 or {}).items():
-        if rel.startswith("/") or ".." in Path(rel).parts:
-            return _emit(
-                {"status": "failed", "host": host, "error": f"staging path must be relative + no '..': {rel!r}"}
-            )
-        dst = ws / rel
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        dst.write_bytes(base64.b64decode(b64.encode("ascii")))
-        staged.append(str(dst))
-
-    started = time.time()
-    try:
-        proc = subprocess.run(
-            ["bash", "-lc", a.bench_command],
-            cwd=str(ws),
-            capture_output=True,
-            text=True,
-            timeout=a.timeout_sec,
-            env={**os.environ, "WORKSPACE_PATH": str(ws)},
-        )
-        rc = proc.returncode
-        out, err = proc.stdout or "", proc.stderr or ""
-    except subprocess.TimeoutExpired as exc:
-        rc, out = 124, (exc.stdout if isinstance(exc.stdout, str) else "") or ""
-        err = f"TimeoutExpired after {a.timeout_sec}s"
-    elapsed = time.time() - started
-
-    artifacts: list[dict[str, Any]] = []
-    for path in sorted(ws.glob(a.result_glob)):
-        if not path.is_file():
-            continue
-        try:
-            size = path.stat().st_size
-        except OSError:
-            continue
-        if size > _MAX_ARTIFACT_BYTES:
-            artifacts.append({"path": str(path), "size_bytes": size, "content": None, "skipped_reason": "too large"})
-            continue
-        try:
-            content = path.read_text(encoding="utf-8", errors="replace")
-        except OSError as exc:
-            artifacts.append(
-                {"path": str(path), "size_bytes": size, "content": None, "skipped_reason": f"read failed: {exc!r}"}
-            )
-            continue
-        try:
-            parsed: Any = json.loads(content)
-        except json.JSONDecodeError:
-            parsed = content
-        artifacts.append({"path": str(path), "size_bytes": size, "content": parsed})
-
-    return _emit(
-        {
-            "status": "ok" if rc == 0 else "failed",
-            "host": host,
-            "workspace": str(ws),
-            "staged_files": staged,
-            "bench_command": a.bench_command,
-            "returncode": rc,
-            "elapsed_sec": round(elapsed, 3),
-            "stdout_tail": (out or "")[-_STREAM_TAIL_BYTES:],
-            "stderr_tail": (err or "")[-_STREAM_TAIL_BYTES:],
-            "artifacts": artifacts,
-        }
-    )
-
-
 def main() -> int:
-    """Parse the subcommand and dispatch to apply / revert / bench."""
+    """Parse the subcommand and dispatch to apply / revert / finalize."""
     p = argparse.ArgumentParser(prog="kernel_node_ops.py")
     sub = p.add_subparsers(dest="command", required=True)
 
@@ -289,13 +206,6 @@ def main() -> int:
     fp = sub.add_parser("finalize")
     fp.add_argument("--records-json", required=True)
 
-    bp = sub.add_parser("bench")
-    bp.add_argument("--workspace", required=True)
-    bp.add_argument("--bench-command", required=True)
-    bp.add_argument("--files-b64-json", default="{}")
-    bp.add_argument("--result-glob", default="*.json")
-    bp.add_argument("--timeout-sec", type=int, default=600)
-
     a = p.parse_args()
     if a.command == "apply":
         return _do_apply(a)
@@ -303,8 +213,6 @@ def main() -> int:
         return _do_revert(a)
     if a.command == "finalize":
         return _do_finalize(a)
-    if a.command == "bench":
-        return _do_bench(a)
     p.print_help(sys.stderr)
     return 2
 

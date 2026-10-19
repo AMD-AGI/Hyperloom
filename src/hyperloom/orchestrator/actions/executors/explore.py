@@ -128,9 +128,6 @@ _CARRIED_VARIANT_ATTRS: tuple[str, ...] = (
     "scope",
     "overlay_pythonpath",
     "accepted_kernels",
-    "kb_evidence",
-    "pr_evidence",
-    "source_evidence",
     "experience_citations",
 )
 
@@ -238,7 +235,7 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
             unset_envs=fields["unset_envs"],
             args_mode=fields["args_mode"],
         )
-        # Stash extra metadata on the GridVariant so the ledger writer can pull provenance/evidence.
+        # Stash extra metadata on the GridVariant so the ledger writer can pull provenance.
         gv.provenance = str(raw.get("provenance") or "default_grid")  # type: ignore[attr-defined]
         gv.reasoning_origin = reasoning_origin  # type: ignore[attr-defined]
         gv.scope = str(raw.get("scope") or "")  # type: ignore[attr-defined]
@@ -248,9 +245,6 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
         gv.accepted_kernels = [  # type: ignore[attr-defined]
             str(k).strip() for k in (raw.get("accepted_kernels") or []) if str(k).strip()
         ]
-        gv.kb_evidence = list(raw.get("kb_evidence") or [])  # type: ignore[attr-defined]
-        gv.pr_evidence = list(raw.get("pr_evidence") or [])  # type: ignore[attr-defined]
-        gv.source_evidence = list(raw.get("source_evidence") or [])  # type: ignore[attr-defined]
         # Validated against what the proposing agent was shown before the grid reached this executor.
         gv.experience_citations = [  # type: ignore[attr-defined]
             dict(item) for item in (raw.get("experience_citations") or []) if isinstance(item, dict)

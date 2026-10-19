@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Parser for GPU compiler output (hipcc/clang register info, errors, warnings)."""
+"""Parser for GPU compiler output (hipcc/clang register info)."""
 
 from __future__ import annotations
 
@@ -107,21 +107,3 @@ def parse_register_info(text: str) -> RegisterInfo:
         info.occupancy = int(m.group(1))
 
     return info
-
-
-def parse_compiler_errors(text: str) -> list[str]:
-    """Extract error lines from compiler output."""
-    errors = []
-    for line in text.splitlines():
-        if re.search(r"\berror\b", line, re.IGNORECASE):
-            errors.append(line.strip())
-    return errors
-
-
-def parse_compiler_warnings(text: str) -> list[str]:
-    """Extract warning lines from compiler output."""
-    warnings = []
-    for line in text.splitlines():
-        if re.search(r"\bwarning\b", line, re.IGNORECASE):
-            warnings.append(line.strip())
-    return warnings

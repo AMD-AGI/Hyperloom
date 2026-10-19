@@ -323,25 +323,3 @@ def server_health_ok(base_url: str, *, probe: Callable[[str], int] | None = None
         return do_probe(health_url) == 200
     except Exception:  # noqa: BLE001
         return False
-
-
-def _json_post(url: str, payload: dict[str, Any], timeout_s: float) -> Any:
-    """POST ``payload`` as JSON and return the decoded body."""
-    import json as _json
-
-    request = urllib.request.Request(  # nosec B310 - fixed local serving endpoint
-        url,
-        data=_json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(request, timeout=timeout_s) as resp:  # nosec B310
-        return _json.loads(resp.read().decode("utf-8", "replace"))
-
-
-def _json_get(url: str, timeout_s: float) -> Any:
-    """GET ``url`` and return the decoded JSON body."""
-    import json as _json
-
-    with urllib.request.urlopen(url, timeout=timeout_s) as resp:  # nosec B310
-        return _json.loads(resp.read().decode("utf-8", "replace"))

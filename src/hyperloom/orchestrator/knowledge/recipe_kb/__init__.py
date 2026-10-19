@@ -23,19 +23,16 @@ from .canonical_id import (
 )
 from .dispatcher import RecipeKB
 from .local_store import (
-    ATTEMPTS_FILENAME,
     HISTORY_DIRNAME,
     LOCK_FILENAME,
     LocalRecipeStore,
     LocalRecipeStoreError,
     RECIPE_FILENAME,
 )
-from .schema import Attempt, Recipe
+from .schema import Recipe
 
 
 __all__ = [
-    "ATTEMPTS_FILENAME",
-    "Attempt",
     "CANONICAL_ID_DIMENSIONS",
     "CANONICAL_ID_PREFIX",
     "DEFAULT_FRAMEWORK_SLUG",

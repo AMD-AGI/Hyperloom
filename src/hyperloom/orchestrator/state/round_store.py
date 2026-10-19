@@ -123,17 +123,6 @@ class Round:
             settled_unix=None if settled is None else float(settled),
         )
 
-    def excludes_at(self, now_unix: float) -> bool:
-        """Report whether this round denies an acquire at ``now_unix``.
-
-        Args:
-            now_unix: The instant to test.
-
-        Returns:
-            bool: ``True`` when an acquire must be denied.
-        """
-        return self.state == OPEN
-
 
 @dataclass(frozen=True)
 class RoundEvent:

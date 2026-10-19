@@ -20,7 +20,6 @@ from hyperloom.orchestrator.trace_analysis._vendor_operator_playbooks import (
     load_vendor_operator_playbooks,
     match_vendor_operator_playbook,
     resolve_kernel_anchor_path,
-    _reset_vendor_operator_playbooks_cache,
     _role_haystack,
 )
 
@@ -29,9 +28,9 @@ _MORI_SITE_PACKAGES_FILE = "/opt/venv/lib/python3.12/site-packages/mori/ops/disp
 
 @pytest.fixture(autouse=True)
 def _fresh_registry_cache():
-    _reset_vendor_operator_playbooks_cache()
+    load_vendor_operator_playbooks.cache_clear()
     yield
-    _reset_vendor_operator_playbooks_cache()
+    load_vendor_operator_playbooks.cache_clear()
 
 
 def _mori_dispatch_candidate(**overrides) -> dict:
@@ -302,10 +301,10 @@ def test_the_registry_refuses_an_entry_with_no_kernel_anchor(monkeypatch, caplog
     # Redirect the registry rather than patching ``Path.read_text``, which is ``pathlib.Path``'s and would answer for
     # every read in the process.
     monkeypatch.setattr("hyperloom.orchestrator.trace_analysis._vendor_operator_playbooks._REGISTRY_PATH", registry)
-    _reset_vendor_operator_playbooks_cache()
+    load_vendor_operator_playbooks.cache_clear()
     with caplog.at_level(logging.WARNING, logger="hyperloom.orchestrator.trace_analysis._vendor_operator_playbooks"):
         loaded = load_vendor_operator_playbooks()
-    _reset_vendor_operator_playbooks_cache()
+    load_vendor_operator_playbooks.cache_clear()
 
     assert [entry["id"] for entry in loaded] == ["with-anchor"]
     assert "no-anchor" in caplog.text

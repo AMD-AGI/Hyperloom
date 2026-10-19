@@ -831,52 +831,6 @@ def served_complete_protocol(result: dict[str, Any]) -> bool:
     return completed is not None and completed >= requested
 
 
-# ── Approximate throughput for killed-overtime variants ──
-_SGLANG_GEN_TPUT_RE = re.compile(
-    r"gen throughput \(token/s\):\s*([0-9]+(?:\.[0-9]+)?)",
-    re.IGNORECASE,
-)
-_VLLM_GEN_TPUT_RE = re.compile(
-    r"Avg generation throughput:\s*([0-9]+(?:\.[0-9]+)?)\s*tokens?/s",
-    re.IGNORECASE,
-)
-
-# Fraction of the leading warmup samples dropped before averaging so the estimate reflects sustained decode rather
-# than the cold-start climb.
-_DEFAULT_WARMUP_SKIP_FRAC: float = 0.25
-
-
-def _parse_server_log_gen_throughput(log_path: Path) -> list[float]:
-    """Return every positive decode-throughput sample logged in ``server.log``."""
-    samples: list[float] = []
-    try:
-        with log_path.open(encoding="utf-8", errors="replace") as f:
-            for line in f:
-                match = _SGLANG_GEN_TPUT_RE.search(line) or _VLLM_GEN_TPUT_RE.search(line)
-                if match is None:
-                    continue
-                value = to_float(match.group(1))
-                if value is not None:
-                    samples.append(value)
-    except OSError:
-        return []
-    return samples
-
-
-def _steady_state_mean(
-    samples: list[float],
-    *,
-    warmup_skip_frac: float = _DEFAULT_WARMUP_SKIP_FRAC,
-) -> float | None:
-    """Average the steady-state portion of throughput ``samples``."""
-    positive = [s for s in samples if s > 0]
-    if not positive:
-        return None
-    skip = int(len(positive) * max(0.0, min(1.0, warmup_skip_frac)))
-    steady = positive[skip:] or positive
-    return sum(steady) / len(steady)
-
-
 def _find_server_logs(slot: Path) -> list[Path]:
     """Return ``server.log`` files under ``slot``, largest first."""
     try:
@@ -892,39 +846,6 @@ def _find_server_logs(slot: Path) -> list[Path]:
             return 0
 
     return sorted(logs, key=_size, reverse=True)
-
-
-def estimate_output_throughput_from_server_log(
-    log_path: Path,
-    *,
-    warmup_skip_frac: float = _DEFAULT_WARMUP_SKIP_FRAC,
-) -> dict[str, Any] | None:
-    """Estimate sustained output throughput from one engine ``server.log``."""
-    samples = _parse_server_log_gen_throughput(log_path)
-    mean = _steady_state_mean(samples, warmup_skip_frac=warmup_skip_frac)
-    if mean is None:
-        return None
-    return {
-        "output_throughput": mean,
-        "num_samples": sum(1 for s in samples if s > 0),
-        "source_path": str(log_path),
-    }
-
-
-def estimate_killed_variant_throughput(
-    slot: Path,
-    *,
-    warmup_skip_frac: float = _DEFAULT_WARMUP_SKIP_FRAC,
-) -> dict[str, Any] | None:
-    """Estimate output throughput for a killed-overtime variant from its logs."""
-    for log_path in _find_server_logs(slot):
-        estimate = estimate_output_throughput_from_server_log(
-            log_path,
-            warmup_skip_frac=warmup_skip_frac,
-        )
-        if estimate is not None:
-            return estimate
-    return None
 
 
 def double_run_requested(params: dict | None) -> bool:
@@ -943,8 +864,6 @@ __all__ = [
     "LATENCY_FROM_RESCUED_RAW",
     "LATENCY_UNAVAILABLE",
     "harvest_mn_gpu_metrics",
-    "estimate_killed_variant_throughput",
-    "estimate_output_throughput_from_server_log",
     "extract_benchmark_measurement",
     "harvest_leaked_artifacts",
     "double_run_requested",

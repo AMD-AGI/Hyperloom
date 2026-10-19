@@ -5,17 +5,24 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from kernelforge.gemm_tune.report import build_report
-from kernelforge.gemm_tune.tuners.base import TuneResult
+from kernelforge.gemm_tune.tuners.base import TuneContext, TuneResult
 from kernelforge.gemm_tune.tuners._aiter_dense_common import (
     _parse_candidate_csv,
     _parse_tuner_stdout,
     _summarize_shape_results,
 )
+
+
+def _tune_ctx(**fields) -> TuneContext:
+    """A tuning context carrying the run fields a report records; the tuner knobs are placeholders."""
+    return TuneContext(mp=1, output_dir=Path("."), iters=1, warmup=1, min_improvement_pct=0.0, timeout_s=1, **fields)
+
 
 # Real candidate CSV header (best config per shape; `us` at index 8).
 _CANDIDATE_HEADER = "gfx,cu_num,M,N,K,libtype,kernelId,splitK,us,kernelName,tflops,bw,errRatio"
@@ -198,14 +205,16 @@ def _report(results):
     return build_report(
         results,
         [],
-        profile=SimpleNamespace(model_path="/m/x"),
-        framework="vllm-aiter",
-        precision="fp8",
-        quant_type="blockscale",
-        gpu_type="mi355x",
-        tp=1,
-        conc=64,
-        tokens=[1, 8],
+        ctx=_tune_ctx(
+            profile=SimpleNamespace(model_path="/m/x"),
+            framework="vllm-aiter",
+            precision="fp8",
+            quant_type="blockscale",
+            gpu_type="mi355x",
+            tp=1,
+            conc=64,
+            tokens=[1, 8],
+        ),
         started_at="t",
         total_elapsed_s=1.0,
     )

@@ -17,7 +17,6 @@ class SupervisionMonitor:
 
     no_improve_streak: int = 0
     intervention_count: int = 0
-    last_intervention_iter: int = -10_000
     last_attempt_iter: int = -10_000
 
     def record(self, *, kept: bool) -> None:
@@ -39,6 +38,5 @@ class SupervisionMonitor:
     def mark_intervened(self, iteration: int) -> None:
         """Record that an intervention just happened (resets the streak so the new directions get a fair chance before the next trigger)."""
         self.intervention_count += 1
-        self.last_intervention_iter = iteration
         self.last_attempt_iter = iteration
         self.no_improve_streak = 0

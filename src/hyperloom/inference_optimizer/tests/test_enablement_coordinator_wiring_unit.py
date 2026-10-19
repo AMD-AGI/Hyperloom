@@ -483,8 +483,6 @@ async def test_the_repair_pass_ends_a_round_whose_holder_finished_silently(monke
     settled = await fake.rounds.get("enablement-spec-stuck")
     assert settled.state == "settled"
     assert settled.outcome == "expired_reaped", "the holder's own row records the end of its work"
-    # And the machine comes back with the settle: a settled round holds nothing.
-    assert settled.excludes_at(time.time() + 3600.0) is False
 
 
 @pytest.mark.asyncio
