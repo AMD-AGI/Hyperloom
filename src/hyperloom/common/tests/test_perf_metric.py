@@ -322,6 +322,18 @@ def test_output_per_gpu_is_left_unstamped_without_a_chip_count():
         assert GRADED_OUTPUT_PER_GPU not in measurement, f"chips={chips!r} should leave the axis unstamped"
 
 
+def test_a_stamped_copy_carries_the_per_gpu_output_and_leaves_its_source_alone():
+    from hyperloom.common.perf_metric import with_output_per_gpu
+
+    source = {"output_throughput": 1120.0, "ttft_mean_ms": 100.0}
+    assert with_output_per_gpu(source, 8) == {
+        "output_throughput": 1120.0,
+        "ttft_mean_ms": 100.0,
+        "output_tput_per_gpu": 140.0,
+    }
+    assert source == {"output_throughput": 1120.0, "ttft_mean_ms": 100.0}
+
+
 def test_graded_axes_publish_the_display_figures():
     """SBD reads these through graded_axes_of, so they have to survive the projection."""
     from hyperloom.common.perf_metric import GRADED_AXIS_KEYS, GRADED_OUTPUT_PER_GPU, graded_axes_of
