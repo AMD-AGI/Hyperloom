@@ -20,7 +20,8 @@ sources:
 > A GEMM that is fast and wrong usually passed its gate. Each case marked *(field)* below went through
 > a gate that reported clean. Use them to design the gate before trusting it. Numbers marked *(field)*
 > are measured values. Use them for direction and order of magnitude, not as targets. Debugging a
-> kernel that is already known wrong starts in `../bottleneck/debug-flydsl-kernel.md`.
+> kernel that is already known wrong starts in `../bottleneck/debug-flydsl-kernel.md`. "PS" is FlyDSL's
+> `kernels/gemm/preshuffle_gemm.py` and "A16" is `kernels/gemm/gemm_a16w16_gfx950.py`.
 
 ## Route here when
 - You changed the pipeline, a wait, a barrier, the LDS layout, register classes or inline asm.
@@ -49,9 +50,10 @@ sources:
    waves; it does not drain DMA. Turbo's dense fp8 8-wave kernel special-cases exactly this
    (`gemm_fp8_kernel.py:257-262`).
 2. **More tiles than CUs.** Only the second tile on a CU can read what the first one left in LDS; the
-   first tile finds an empty slot and computes the right answer. Turbo's MXFP4 kernel needed an opt-in
-   watermark for a caller that did not provide one, and the flag is part of the cache key
-   (`gemm_mxfp4_kernel.py:1510-1525`).
+   first tile finds an empty slot and computes the right answer. Turbo's MXFP4 kernel leaves the k=1 prologue
+   fill in flight only for a caller whose loop wait was computed with that fill outstanding; a caller
+   written against a drained prologue reads k=1 before it lands. Skipping the drain is an explicit opt-in
+   flag (`k1_watermark`), and the flag is part of the cache key (`gemm_mxfp4_kernel.py:1510-1525`, 765).
 3. **The deepest branch of every runtime choice** (the largest split factor, the widest tile, the
    persistent path). Pick a shape large enough to force it.
 4. **Ragged M, N and K, and K that is not a multiple of the K tile**, for every layout the kernel
@@ -65,7 +67,7 @@ reference built from the dequantized operands, and compare repeated outputs bitw
 ## 2. Call twice; compare from the second call
 
 *(field)* A kernel was clean on its first call after compilation (55.54 dB) and 33 dB from the
-second call on, with the error moving each time. The harness scored the first call, so the race
+second call on, with different elements wrong on each call. The harness scored the first call, so the race
 stayed hidden. Every gate calls the kernel at least twice and checks the second and
 later results. Work that depends on a first call (atomic counters, semaphores, lazily initialized
 workspaces) must be warmed before a probe starts counting.
@@ -93,14 +95,16 @@ workspaces) must be warmed before a probe starts counting.
   below one iteration's issue count minus its first group, and prove a longer one by repetition.
 - **`spill ≠ 0` voids every hand-written partial `vmcnt`.** Scratch loads and stores share `vmcnt`
   with your DMA, so `vmcnt(1)` no longer means "one DMA left". Read `.private_segment_fixed_size`
-  and the spill counts first. When spills are zero and it still races, say so with the reg notes —
-  there are other channels, and more `vmcnt(0)` will not fix them.
+  and the spill counts first. When spills are zero and it still races, show those numbers
+  (`llvm-readelf --notes`) as the evidence: the race has another channel, and more `vmcnt(0)` will not fix
+  it.
 - **Waits written as instruction counts break when the wave count changes.** Recompute them per tile,
   not per instruction, after changing the CTA's waves; the failure signature is "all outputs right,
   determinism passes, every shape passes" until it is not.
-- **An inline-asm `s_waitcnt vmcnt(0)` does not stop LLVM from sinking later loads below it.**
-  *(field)* Two drains before an epilogue that reused the operand LDS still let the next tile's
-  global→LDS load land on staged data, only on the deepest-K shape. `rocdl.sched_barrier(0)` after the
+- **An inline-asm `s_waitcnt vmcnt(0)` does not stop LLVM from moving an earlier load below it,** where
+  the wait no longer covers it. *(field)* Two drains before an epilogue that reused the operand LDS still
+  let the next tile's global→LDS prefetch sink past them and land on staged data, only on the deepest-K
+  shape. `rocdl.sched_barrier(0)` after the
   drains fixed it (0/10 bad reads vs 3/30) at about 0.7% of time. A mask that let ALU/MFMA cross
   (`0x40F`) made it worse (6/11 bad).
 - `s_barrier` does not drain `vmcnt`; `lgkmcnt` is 4 bits (max 15), `vmcnt` 6 bits (max 63).

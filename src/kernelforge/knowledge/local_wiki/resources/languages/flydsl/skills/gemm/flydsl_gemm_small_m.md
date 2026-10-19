@@ -45,8 +45,8 @@ sources:
   against kernels of 4.6–8 µs. One graph node cost 1.75–1.95 µs even for a 1-element op, so at
   M ≤ 16 on a small weight more than half the measured time is the node.
 - **Price candidates through the deployed entry** (`aiter.tuned_gemm.gemm_a16w16`), not a direct kernel call.
-  *(field)* A row that a direct call measured 0.76 µs faster was 0.34 µs slower through the entry, and worth
-  −4.2 points of the step score.
+  *(field)* A row that a direct call measured 0.76 µs faster was 0.34 µs slower through the entry, and in deployment
+  that row alone cost about 4.2 percentage points of the step score.
 - **A cold micro-benchmark shortlists; the step decides.** *(field)* Kernel time converted to step time about
   1:1 (ratio 1.04), but 1.2% of the step score landed in other kernels, and a +10% uniformly-weighted gain was
   −1% when weighted by call counts.
@@ -131,8 +131,8 @@ an idle-device tuner (§1).
   split-K on the rows compared; it needs a predicated C-store tail. *(field)* On another shape, `tile_n` 64 was
   faster than 16 and 32, so race the width.
 - **Splitting the K dimension across warps needs an LDS reduction; splitting N across warps does not.** The
-  number of K-warps is per shape and tracks `block_k` (it cannot exceed `block_k / 32`, the MFMA atom).
-  *(field)* Moving warps from K to N was −1.0% and raised SNR from 50.8 to 94.8 dB.
+  number of K-warps is per shape and tracks `block_k` (at most `block_k / 32`, where 32 is the K of the bf16 MFMA atom).
+  *(field)* Moving warps from K to N cut kernel time 1.0% and raised SNR from 50.8 to 94.8 dB.
 - **For a row-major (N, K) B, `block_k` is the DRAM burst length of each row segment.** *(field)* 256 was best
   by 9–40% cold on long-K rows and 512 was worse; at K=2048, 128 won because 8 iterations of 256 made the
   pipeline fill too large a share.
@@ -169,7 +169,7 @@ an idle-device tuner (§1).
     workgroups or a count not divisible by 8 (`use_simple`, `_utils.py:82`), which is exactly the small-M case.
 - **Preload the leading kernel arguments into SGPRs** (`llvm.inreg` argument attributes).
   - This removes the `s_load` → `lgkmcnt(0)` round trip in front of the first B load.
-  - *(field)* −0.5 to −1.0% per shape, about +0.45% on the step.
+  - *(field)* Kernel time −0.5 to −1.0% per shape; the decode step got about 0.45% faster.
   - **Not in the current kernel.**
 - **Fetch only the real A rows when M < 16**, but only where A is a large share of the bytes. *(field)* −1.5% on
   one row, +11% on another where it made the A load wave-predicated and shortened the pipeline. Never predicate

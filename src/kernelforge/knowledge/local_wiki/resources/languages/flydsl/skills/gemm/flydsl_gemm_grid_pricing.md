@@ -56,8 +56,8 @@ How to read it:
 Narrowing pays even when it does not remove a round — filling a partial last round is enough.
 *(field)* On related MXFP6/MXFP4 GEMM kernels, widening `tile_n` 256→384 on
 forward shapes whose last round was already full gained +16.9%; narrowing 256→192 gained on exactly the 6
-of 12 backward shapes whose last round was partial and on none of the others, and the gain tracked the
-idle fraction (last round 144/256 → +16%, 128/256 → +4–6%).
+of 12 backward shapes whose last round was partial and on none of the others (+16% where the last round
+filled 144 of 256 CUs, +4–6% where it filled 128).
 
 *(field)* Small-M example: bf16 NT, N=6016, K=7168, tile 128×128, `split_k=1` gives
 `ceil(6016/128) = 47` workgroups for every M ≤ 128. The kernel ran ~112 µs flat from M=8 to M=112,
@@ -89,7 +89,7 @@ time it recovers, no split wins.
 - The gate above is Turbo's MXFP4 gate. `_mxfp4_wave_eff = tiles / (ncu · ceil(tiles/ncu))`; no split
   when `eff > 0.95` or `K < 2048`; a split must raise `eff` by more than 0.05; the race gets `s = 1`
   plus the two best splits (`_ksplit_candidates`, `gemm_mxfp4_kernel.py:3488-3512`).
-- **Reduce on the host with pairwise `torch.add(out=)`.** It "runs at the pure write floor where
+- **Reduce with pairwise `torch.add(out=)` launched after the GEMM**, not inside it. It "runs at the pure write floor where
   `sum(dim=0)` reaches half of it, and the reduce is a sixth of a split launch -- the fold's form decides
   whether a split pays at all" (`_fold_mxfp4_partials`, `gemm_mxfp4_kernel.py:3540-3546`).
 - **A bandwidth reduce beats an atomic-fused one** here, "since same-address HBM atomics serialise"
@@ -98,7 +98,7 @@ time it recovers, no split wins.
   at least 16 K iterations per slice; head and tail must both be whole rounds (`_mx_ksplit`,
   `gemm_mxfp8_kernel.py:654-672`). *(field)* A uniform split netted out at zero.
 - **Dense fp8 TN splits one window.** Only the last partial round's `rem` tiles are sliced s ways
-  (s ∈ {2, 3, 4}), choosing the shortest s that keeps the window inside one round (`_dense_tn_split`,
+  (s ∈ {2, 3, 4}), choosing the s with the shortest window time (rounds × K/s; the smaller s on a tie) (`_dense_tn_split`,
   `gemm_fp8_kernel.py:1857-1872`). At s=2 the two slices hand off through a device-scope flag inside the
   GEMM, so no reduce kernel is launched (`_tn4_handoff_wait`, `gemm_fp8_kernel.py:1325`).
 
@@ -261,7 +261,7 @@ A second tile shape trades arithmetic intensity for CU fill. Price both sides be
 - Leftover work ids may repeat the last tile. That is harmless for an overwriting store and wrong for
   beta=1, which needs one tile per workgroup (`flydsl_gemm_epilogue.md` §7).
 - Turbo's MXFP4 kernel walks up to 4 tiles per workgroup, and only when `tiles % (ncu · tpw) == 0` and
-  K/256 ≤ 56; above that, the per-tile launch is already amortized (`_MXFP4_TPW_*`,
+  K/256 ≤ 56; at longer K the per-tile launch is already amortized (`_MXFP4_TPW_*`,
   `gemm_mxfp4_kernel.py:3467-3485`). Stride the persistent loop by the grid
   (`flydsl_gemm_schedule_and_locality.md` §2).
 

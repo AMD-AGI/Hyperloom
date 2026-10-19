@@ -87,8 +87,9 @@ worth very different wall time.
 - **Build an all-removed arm and sample the clock under sustained load.** *(field)* With every load, LDS
   read, barrier and scale operand removed, wall time fell 25.7%, but cycles fell only 12.6%: the clock rose
   from 1702 to 2034 MHz. The kernel was energy-bound, not issue-bound.
-- **Energy-bound pools add up.** *(field)* Removing the A DMA, the B loads and the A LDS reads separately
-  saved 8.09 + 5.50 + 6.16 = 19.75%; together, 20.98%. In an issue-bound kernel the pools would overlap.
+- **In an energy-bound kernel, the savings of separate instruction groups add up.** *(field)* Removing the A
+  DMA, the B loads and the A LDS reads separately saved 8.09 + 5.50 + 6.16 = 19.75%; together, 20.98%. In an
+  issue-bound kernel the savings would overlap.
 - **Rank candidates by what an instruction moves, not by how many you delete.** *(field)* Deleting 7.4% of the
   hot loop's instructions, all SALU and `s_nop`, gained 0%; cutting global bytes per MAC by 20% gained
   5.4%. One `ds_read_b128` was worth an order of magnitude more than one SALU.
@@ -121,8 +122,8 @@ wanting to issue but blocked by a busy pipe, and waiting on `s_waitcnt` or `s_ba
 ## 6. LDS: latency, bandwidth, or neither
 
 `SQ_WAIT_INST_LDS` counts dependent waits. Co-resident waves can hide them, so a high value is not proof that
-LDS bounds the kernel. *(field)* A kernel with 81% of its cycle budget in LDS waits gained 0.0% when each of
-three LDS read streams was halved. Decide with a halve-the-reads probe and ISA counts. Compare
+LDS bounds the kernel. *(field)* A kernel with 81% of its cycle budget in LDS waits gained 0.0% in each of three
+probes that cut one LDS read stream by 17–33%. Decide with a halve-the-reads probe and ISA counts. Compare
 `SQ_LDS_IDX_ACTIVE` with `SQ_VALU_MFMA_BUSY_CYCLES` to see whether the LDS port is anywhere near busy.
 
 ## 7. Per-tile fixed cost
@@ -143,8 +144,10 @@ three LDS read streams was halved. Decide with a halve-the-reads probe and ISA c
 
 ## 8. Upper bounds for "hide it under the MFMAs"
 
-- **Each MFMA offers 12 cycles of shadow on gfx950.** `SQ_VALU_MFMA_BUSY_CYCLES / SQ_INSTS_MFMA` reads 16
-  cycles per 16x16 MFMA, and issue takes 4. *(field)* The same 12 was read on three different kernels. The
+- **A `v_mfma_f32_16x16x32_bf16` offers 12 cycles of shadow on gfx950.** `SQ_VALU_MFMA_BUSY_CYCLES /
+  SQ_INSTS_MFMA` reads 16 cycles for it, and issue takes 4. *(field)* The same 16 was read on three
+  different kernels. Read the ratio for the MFMA your kernel issues: `v_mfma_f32_16x16x128_f8f6f4` reads 32
+  (`flydsl_gemm_grid_pricing.md` §5). The
   ceiling for interleaving work is `12 × MFMAs in the phase`.
 - **The register allocator is the constraint.** *(field)* An epilogue interleaved into the last chunk's MFMAs
   did interleave (one MFMA per 29 instructions), but spills went 0 → 16 and wall time lost 2–4%. Dump the

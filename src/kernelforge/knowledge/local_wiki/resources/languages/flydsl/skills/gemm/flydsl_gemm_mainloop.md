@@ -41,7 +41,7 @@ are in `flydsl_gemm_schedule_and_locality.md`. LDS layout, global→LDS DMA and 
 | Occupancy | 2 waves per SIMD | 1 wave per SIMD (the whole 512-register file is one wave's) |
 | K loop | FlyDSL code, `range_constexpr(K_ITERS-2)` | one inline-asm region with a hardware loop |
 | LDS | 8 buffers: A/B × cur/next × two halves | operand pools of mixed depth (A 2-deep, B 3-deep) |
-| Where it wins | short K, where an epilogue nothing overlaps would dominate a one-wave tile | long K, where the steady state amortizes that epilogue |
+| Where it wins | short K, where the epilogue is a large share of the time and the second wave per SIMD overlaps it | long K, where the steady state amortizes an epilogue that nothing overlaps |
 | Turbo source | FP8 `_compile_dense_nt` (:85) | FP8 `_dense_nt_wave4_asm` (:2187), `_dense_tn_wave4_asm` (:1401); FP4 `MfmaScaleFp4` |
 
 **Why the 4-wave tile wins on long K.** A 2×2-wave split of a 256×256 tile gives each wave a 128×128
@@ -105,8 +105,9 @@ What this buys:
 How Turbo structures it (FP8:1133-1230, 2187-2412):
 - **Operand pools.** A macro tile is described as `(side, width, nbuf)` pools. The NT square tile is
   `((A,128,2),(A,128,2),(B,128,3),(B,128,3))` (FP8:2049). The B pools are 3 deep so their loads stay in
-  flight across a phase drain. Deep pools are issued last, so the graded drain has outstanding loads it
-  is allowed to skip (assert, FP8:2323).
+  flight across a phase drain. Deep pools are issued last, so their loads are the youngest in flight: a
+  partial `vmcnt(N)` drain waits for the shallow pools and leaves the deep pools' loads outstanding
+  (assert, FP8:2323).
 - **Passes and phases.** One pass is `lcm(nbuf)` phases, here 6 K-blocks, so every pass ends with every
   pool back on buffer 0 and the loop body is identical each pass (`_tn4_phases`, FP8:1187; assert
   FP8:2324).
@@ -167,9 +168,9 @@ at `v8` (FP8:1122). The loop counter and the per-pool soffsets are early-clobber
 
 **AGPR or VGPR accumulators.** Judge by the shuttle traffic (`v_accvgpr_read/write/mov` counts in the
 hot loop) and by wall time, not by `accum_offset` or register totals.
-- A scaled MFMA needs `dst` and `src2` in the same file but takes srcA/srcB from either. FP4 can
-  therefore trade accumulator slices with operand fragments, so the C store packs straight out of arch
-  VGPRs with no shuttle (`_MXFP4_ARCH_ACC`, FP4:578-582).
+- A scaled MFMA needs `dst` and `src2` in the same file but takes srcA/srcB from either. FP4 therefore
+  swaps register files: the accumulator slices live in arch VGPRs and the A/B fragments in AGPRs, so the
+  C store packs straight out of arch VGPRs with no shuttle (`_MXFP4_ARCH_ACC`, FP4:578-582).
 - The same trade on the fp8 NT whole loop "measured a wash" (FP8:2045-2047): an MFMA writing an arch
   VGPR that a VALU then reads needs wait states that the single wave per SIMD has nothing to fill.
 - *(field)* At unchanged occupancy, freed registers buy nothing on their own. Releasing 72
@@ -198,10 +199,10 @@ read `.agpr_count`, `.vgpr_count` and the waves-per-eu fields from the ISA (`FLY
 Turbo accepts any K without a padding copy. FlyDSL's shipped kernels assert `K % BLOCK_K == 0`.
 An over-read past K is legal only when every term it contributes has a factor that is exactly zero by
 construction. The three ways to get that zero:
-- **K-contiguous operands (NT).** Run `ceil(K/128)` iterations. A partial last block over-reads into the
+- **K-contiguous operands** (stored `[·, K]`, as in NT). Run `ceil(K/128)` iterations. A partial last block over-reads into the
   next row, not past the descriptor, so zero A's out-of-range K bytes in registers (`mask_a_tail`,
   GH:1551-1577; FP8:362, 384, 2712-2717). This relies on quantized operands containing no NaN encodings.
-- **K-major operands.** The buffer descriptor's `num_records` bound makes out-of-range loads return
+- **K-row operands** (stored `[K, ·]`: B in NN, A and B in TN). The buffer descriptor's `num_records` bound makes out-of-range loads return
   zero.
 - **MX formats.** The packed E8M0 scale is zero past K, so the tail terms are scaled by 2⁻¹²⁷ twice and
   underflow to exactly zero. Drop a 128-K sub-step that is entirely padding rather than computing it.
