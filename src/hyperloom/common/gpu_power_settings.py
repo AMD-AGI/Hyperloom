@@ -3,9 +3,10 @@
 
 """Read-only view of the GPU power settings a session is measured under.
 
-The power cap and the DPM performance level decide how much of a card's throughput is available and at what power,
-so they are part of the measurement contract. Nothing here changes them: setting either is privileged and card-wide,
-and belongs to the operator before launch (``amd-smi set --power-cap`` / ``--perf-level``), the same way
+The power cap and the DPM performance level decide how much of a card's throughput is available and at what power, so
+they are part of the measurement contract. Nothing here changes them: setting either is privileged and card-wide, and
+belongs to the operator before launch (``amd-smi set --power-cap`` / ``--perf-level``) or to
+``--apply-gpu-power-settings``, the same way
 ``--compute-partition-mode`` asserts a mode rather than setting one. This module reads what the cards are at, so a
 session can record it and refuse to start when an operator's declared value did not take effect.
 """
@@ -16,6 +17,7 @@ import json
 import os
 import shutil
 import subprocess  # nosec B404 - fixed read-only amd-smi invocations.
+from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
 from hyperloom.common.env import env_flag
@@ -23,6 +25,8 @@ from hyperloom.common.env import env_flag
 __all__ = [
     "GPU_POWER_SAMPLING_ENV",
     "GpuPowerSettingsError",
+    "DeclaredPowerSettings",
+    "PERF_LEVEL_MANUAL",
     "declared_setting_problems",
     "gpu_power_sampling_unavailable",
     "normalize_perf_level",
@@ -31,6 +35,9 @@ __all__ = [
 ]
 
 _PERF_LEVEL_PREFIX = "AMDSMI_DEV_PERF_LEVEL_"
+#: The perf level an operator sets to tune a card's clocks by hand.
+PERF_LEVEL_MANUAL = "manual"
+_UNREADABLE = "unreadable"
 
 #: Escape hatch for a host where running ``amd-smi`` every couple of seconds is not acceptable.
 GPU_POWER_SAMPLING_ENV = "HYPERLOOM_GPU_POWER_SAMPLING"
@@ -96,6 +103,21 @@ def _power_cap_w(limit: Any) -> float | None:
     return None
 
 
+@dataclass(frozen=True)
+class DeclaredPowerSettings:
+    """The GPU power settings a launch declares; ``None`` (or ``""`` for the level) for one it leaves alone."""
+
+    power_cap_w: float | None = None
+    perf_level: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "perf_level", normalize_perf_level(self.perf_level) if self.perf_level else "")
+
+    def as_row(self) -> dict[str, Any]:
+        """The settings keyed as a card's reading is."""
+        return {"power_cap_w": self.power_cap_w, "perf_level": self.perf_level}
+
+
 def read_gpu_power_settings(
     *,
     run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
@@ -155,10 +177,10 @@ def declared_setting_problems(
             cap = row.get("power_cap_w")
             if not isinstance(cap, (int, float)) or abs(float(cap) - float(power_cap_w)) > 0.5:
                 problems.append(
-                    f"GPU {gpu} power cap is {cap if cap is not None else 'unreadable'} W, declared {power_cap_w:g} W"
+                    f"GPU {gpu} power cap is {cap if cap is not None else _UNREADABLE} W, declared {power_cap_w:g} W"
                 )
         if wanted_level and row.get("perf_level") != wanted_level:
             problems.append(
-                f"GPU {gpu} perf level is {row.get('perf_level') or 'unreadable'!r}, declared {wanted_level!r}"
+                f"GPU {gpu} perf level is {row.get('perf_level') or _UNREADABLE!r}, declared {wanted_level!r}"
             )
     return problems

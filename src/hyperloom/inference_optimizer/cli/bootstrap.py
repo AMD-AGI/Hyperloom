@@ -276,6 +276,9 @@ _MAX_LATENCY_MS = "max_latency_ms"
 _MAX_POWER_W = "max_power_w"
 _MAX_PER_GPU_POWER_W = "max_per_gpu_power_w"
 _NODES = "nodes"
+_GPU_POWER_CAP_W = "gpu_power_cap_w"
+_GPU_PERF_LEVEL = "gpu_perf_level"
+_DECLARED = "declared"
 
 
 def constraint_budgets_from_args(args: Any) -> dict[str, Any]:
@@ -302,35 +305,100 @@ def constraint_budget_resume_conflict(args: Any, state: Any) -> str:
     )
 
 
-def resolve_launch_gpu_power(args: Any, *, nodes: int) -> dict[str, Any]:
-    """The launch's GPU power settings record; exits 2 before anything runs when the declared settings cannot be
-    applied or a requested power budget cannot be measured or checked."""
-    from hyperloom.common.gpu_power_settings import visible_gpu_indices
+def _established_gpu_power_settings(
+    declared: Any, *, nodes: int, apply: bool, owner: str
+) -> tuple[dict[str, Any], str]:
+    """Apply the declared settings when permitted, then check and record them; ``(record, error)``.
 
-    gpu_power, error = resolve_gpu_power_settings(
-        power_cap_w=getattr(args, "gpu_power_cap_w", None),
-        perf_level=getattr(args, "gpu_perf_level", None),
+    The check after applying is the one an operator-set value gets, so a set that did not take is caught the same way.
+    """
+    from hyperloom.common.gpu_power_settings import GpuPowerSettingsError
+
+    from . import gpu_power_apply
+
+    applied: dict[str, Any] = {}
+    try:
+        if apply:
+            applied = gpu_power_apply.apply_for_session(declared, nodes=nodes, owner=owner)
+        else:
+            gpu_power_apply.warn_about_orphaned_cards()
+    except GpuPowerSettingsError as exc:
+        return {}, f"cannot apply the declared GPU power settings: {exc}"
+    record, error = resolve_gpu_power_settings(
+        power_cap_w=declared.power_cap_w,
+        perf_level=declared.perf_level or None,
         nodes=nodes,
     )
-    observed = {int(gpu) for gpu in (gpu_power.get("observed") or {})} or None
-    error = (
-        error
-        or power_budget_unmeasurable_error(
-            total_w=getattr(args, _MAX_POWER_W, None),
-            per_gpu_w=getattr(args, _MAX_PER_GPU_POWER_W, None),
-            nodes=nodes,
-            framework=_requested_framework(args),
-        )
-        or per_gpu_power_budget_error(
-            getattr(args, _MAX_PER_GPU_POWER_W, None),
-            total_w=getattr(args, _MAX_POWER_W, None),
-            available_gpus=visible_gpu_indices() or observed,
-        )
+    if applied:
+        record["applied"] = applied
+    return record, error
+
+
+def _per_gpu_launch_error(args: Any, available_gpus: set[int] | None) -> str:
+    return per_gpu_power_budget_error(
+        getattr(args, _MAX_PER_GPU_POWER_W, None),
+        total_w=getattr(args, _MAX_POWER_W, None),
+        available_gpus=available_gpus,
     )
+
+
+def resolve_launch_gpu_power(args: Any, *, nodes: int, owner: str) -> dict[str, Any]:
+    """The launch's GPU power settings record; exits 2 before anything runs when the declared settings cannot be
+    applied or a requested power budget cannot be measured or checked. Nothing is applied when a budget is refused."""
+    from hyperloom.common.gpu_power_settings import DeclaredPowerSettings, visible_gpu_indices
+
+    mask = visible_gpu_indices()
+    gpu_power: dict[str, Any] = {}
+    error = power_budget_unmeasurable_error(
+        total_w=getattr(args, _MAX_POWER_W, None),
+        per_gpu_w=getattr(args, _MAX_PER_GPU_POWER_W, None),
+        nodes=nodes,
+        framework=_requested_framework(args),
+    ) or (_per_gpu_launch_error(args, mask) if mask is not None else "")
+    if not error:
+        gpu_power, error = _established_gpu_power_settings(
+            DeclaredPowerSettings(
+                power_cap_w=getattr(args, _GPU_POWER_CAP_W, None),
+                perf_level=getattr(args, _GPU_PERF_LEVEL, None) or "",
+            ),
+            nodes=nodes,
+            apply=bool(getattr(args, "apply_gpu_power_settings", False)),
+            owner=owner,
+        )
+    if not error and mask is None:
+        # No mask, so the cards amd-smi reported are the ones the session may use; only known after reading them.
+        error = _per_gpu_launch_error(args, {int(gpu) for gpu in (gpu_power.get("observed") or {})} or None)
     if error:
         print(f"ERROR: {error}.", file=sys.stderr)
         sys.exit(2)
     return gpu_power
+
+
+def resume_gpu_power_settings(args: Any, state: Any) -> tuple[dict[str, Any], str]:
+    """The resumed session's power settings: an omitted flag re-asserts the archived value; ``(record, error)``.
+
+    A session that applied its settings restored them when it exited, so its resume must apply them again.
+    """
+    from hyperloom.common.gpu_power_settings import DeclaredPowerSettings
+
+    archived = dict(getattr(state, "gpu_power_settings", None) or {})
+    declared = dict(archived.get(_DECLARED) or {})
+    apply = bool(getattr(args, "apply_gpu_power_settings", False))
+    record, error = _established_gpu_power_settings(
+        DeclaredPowerSettings(
+            power_cap_w=getattr(args, _GPU_POWER_CAP_W, None) or declared.get("power_cap_w"),
+            perf_level=getattr(args, _GPU_PERF_LEVEL, None) or declared.get("perf_level") or "",
+        ),
+        nodes=max(int(getattr(args, _NODES, 1) or 1), int(getattr(state, _NODES, 1) or 1)),
+        apply=apply,
+        owner=str(getattr(state, "session_id", "") or ""),
+    )
+    if error and archived.get("applied") and not apply:
+        error += (
+            "; this session applied its power settings itself and restored them when it exited, so pass "
+            "--apply-gpu-power-settings to apply them again"
+        )
+    return record, error
 
 
 def resolve_gpu_power_settings(
@@ -344,7 +412,8 @@ def resolve_gpu_power_settings(
 
     ``record`` is what the session stores and the platform fingerprint shows: the declared values and what each card
     reported. ``error`` is non-empty when a declared value does not hold, or cannot be checked, and the launch must stop.
-    Nothing is set here; the operator sets power cap and perf level with ``amd-smi set`` before launch.
+    Nothing is set here: the operator sets the cap and perf level with ``amd-smi set`` before launch, or
+    ``--apply-gpu-power-settings`` set them just before this check.
     """
     from hyperloom.common.gpu_power_settings import (
         GpuPowerSettingsError,
@@ -371,11 +440,11 @@ def resolve_gpu_power_settings(
         observed = (read or read_gpu_power_settings)()
     except GpuPowerSettingsError as exc:
         if declared:
-            return {"declared": declared}, f"the declared GPU power settings cannot be checked: {exc}"
+            return {_DECLARED: declared}, f"the declared GPU power settings cannot be checked: {exc}"
         return {}, ""
     gpus = visible_gpu_indices()
     record = {
-        "declared": declared,
+        _DECLARED: declared,
         "observed": {str(gpu): row for gpu, row in sorted(observed.items()) if gpus is None or gpu in gpus},
     }
     problems = declared_setting_problems(

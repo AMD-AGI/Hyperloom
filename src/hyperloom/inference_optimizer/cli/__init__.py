@@ -69,7 +69,7 @@ from .bootstrap import (
     _seed_shared_state,
     _snapshot_system_prompts,
     agentx_state_is_stale,
-    resolve_gpu_power_settings,
+    resume_gpu_power_settings,
     latency_budget_scope_error,
     parse_operator_extra_env,
     resolve_framework_version,
@@ -137,6 +137,7 @@ from hyperloom.common.workload_defaults import (
     DEFAULT_EP,
     DEFAULT_PRECISION,
 )
+from .gpu_power_apply import gpu_power_restore_guard
 from .custom_specialist import (
     CUSTOM_SPECIALIST_ONLY_ENV,
     _apply_custom_specialist_resume as _apply_custom_specialist_resume,
@@ -1701,12 +1702,7 @@ def _restore_platform_state(args: argparse.Namespace, state: SharedState, sessio
     # path as the paths above.
     _restore_partition_shape_from_state(args, state)
     # The power settings resume on the same assert / record path: an omitted flag re-asserts the archived value.
-    _declared_power = dict((getattr(state, "gpu_power_settings", None) or {}).get("declared") or {})
-    gpu_power, _gpu_power_error = resolve_gpu_power_settings(
-        power_cap_w=getattr(args, "gpu_power_cap_w", None) or _declared_power.get("power_cap_w"),
-        perf_level=getattr(args, "gpu_perf_level", None) or _declared_power.get("perf_level"),
-        nodes=max(int(getattr(args, "nodes", 1) or 1), int(getattr(state, "nodes", 1) or 1)),
-    )
+    gpu_power, _gpu_power_error = resume_gpu_power_settings(args, state)
     if _gpu_power_error:
         session_lock.release()
         print(f"ERROR: cannot resume this session -- {_gpu_power_error}.", file=sys.stderr)
@@ -2221,7 +2217,7 @@ async def _seed_fresh_session(args: argparse.Namespace, *, nodes_resolved: int) 
         nodes=nodes_resolved,
         model=PartitionModel(str(args.model or os.environ.get("MODEL_PATH") or ""), getattr(args, "precision", None)),
     )
-    gpu_power = resolve_launch_gpu_power(args, nodes=nodes_resolved)
+    gpu_power = resolve_launch_gpu_power(args, nodes=nodes_resolved, owner=str(manifest["session_id"]))
     _publish_gpu_power_settings(gpu_power)
     _seed_shared_state(
         session_dir,
@@ -2784,7 +2780,8 @@ def main(argv: list[str] | None = None) -> int:
             _load_custom_specialist_args(args)
         except (ValueError, OSError) as exc:
             parser.error(str(exc))
-        return asyncio.run(_run_optimize(args))
+        with gpu_power_restore_guard():
+            return asyncio.run(_run_optimize(args))
     if args.command == "recover":
         return _run_recover_session(args)
     parser.print_help()
