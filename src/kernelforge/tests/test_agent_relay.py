@@ -357,3 +357,30 @@ def test_iteration_boundary_uses_supervisor_when_no_alternate_is_available(tmp_p
     assert bundle.profile.profile_id == "claude_opus"
     assert force_supervisor is True
     assert loop.run_state.agent_relay.intervention_kind == INTERVENTION_SUPERVISOR
+
+
+def test_keep_after_a_switch_keeps_the_intervention_in_its_provenance(tmp_path):
+    loop = _loop_for_boundary(tmp_path, streak=3)
+    loop._prepare_search_actor(2, _search_actor_pool())
+    session_sink: dict = {}
+    loop._bind_session_producer(session_sink, loop.run_state.agent_relay.active_profile_id)
+
+    apply_relay_iteration_outcome(
+        loop.run_state.agent_relay,
+        decision="KEEP",
+        kept=True,
+        producer_profile_id="codex_gpt",
+    )
+    result = SimpleNamespace(agent_profile_id="", blockage_epoch=0, agent_provider="", agent_model="")
+    loop._stamp_result_profile(result, session_sink)
+    provenance = loop._handoff_agent_provenance(session_sink)
+
+    assert loop.run_state.agent_relay.intervention_kind == ""
+    assert provenance == {
+        "agent_profile_id": "codex_gpt",
+        "agent_provider": "codex",
+        "agent_model": "gpt-6-astra",
+        "blockage_epoch": 1,
+        "intervention_kind": INTERVENTION_CROSS_HARNESS,
+    }
+    assert (result.agent_profile_id, result.agent_model, result.blockage_epoch) == ("codex_gpt", "gpt-6-astra", 1)

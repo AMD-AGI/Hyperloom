@@ -3797,8 +3797,8 @@ class IterationLoop(AnalysisRuntimeMixin):
             "agent_profile_id": profile_id,
             "agent_provider": profile.provider if profile is not None else "",
             "agent_model": profile.model if profile is not None else "",
-            "blockage_epoch": self.run_state.agent_relay.blockage_epoch,
-            "intervention_kind": self.run_state.agent_relay.intervention_kind,
+            "blockage_epoch": int(session_sink.get("blockage_epoch") or 0),
+            "intervention_kind": str(session_sink.get("intervention_kind") or ""),
         }
 
     def _record_iteration_handoff(
@@ -5707,7 +5707,7 @@ class IterationLoop(AnalysisRuntimeMixin):
             attempt_diff = self._working_tree_diff()
             reusable_benchmark = None
             session_sink["plan"] = queued_lane.plan
-            session_sink["agent_profile_id"] = queued_lane.agent_profile_id
+            self._bind_session_producer(session_sink, queued_lane.agent_profile_id)
             print(f"  [lane {queued_lane.lane_id}] measuring queued candidate")
         elif merge_diff and merge_pair is not None:
             unmeasured_result = None
@@ -5733,7 +5733,7 @@ class IterationLoop(AnalysisRuntimeMixin):
             )
         elif agent_fn is not None:
             print("  [agent] Querying agent for kernel modification...")
-            session_sink["agent_profile_id"] = self.run_state.agent_relay.active_profile_id
+            self._bind_session_producer(session_sink, self.run_state.agent_relay.active_profile_id)
             if orchestration_service is not None:
                 if fan_out_plan is not None:
                     plan_path, orchestration_error = fan_out_plan
@@ -6027,10 +6027,17 @@ class IterationLoop(AnalysisRuntimeMixin):
             optimization_plan_executable=optimization_plan_executable,
         )
 
+    def _bind_session_producer(self, session_sink: dict, profile_id: str) -> None:
+        """Record the producer and the relay window it ran in, before the outcome can reset that window."""
+        relay = self.run_state.agent_relay
+        session_sink["agent_profile_id"] = profile_id
+        session_sink["blockage_epoch"] = relay.blockage_epoch
+        session_sink["intervention_kind"] = relay.intervention_kind
+
     def _stamp_result_profile(self, result: IterationResult, session_sink: dict) -> None:
         """Attach immutable producer provenance before the outcome is persisted."""
         result.agent_profile_id = str(session_sink.get("agent_profile_id") or "")
-        result.blockage_epoch = self.run_state.agent_relay.blockage_epoch
+        result.blockage_epoch = int(session_sink.get("blockage_epoch") or 0)
         profile = self.run_state.agent_availability_snapshot.profiles.get(result.agent_profile_id)
         if profile is not None:
             result.agent_provider = profile.provider
