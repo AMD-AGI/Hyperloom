@@ -417,7 +417,13 @@ compute(acc_final, tile_final)
 
 **Three critical pitfalls (all verified by debugging):**
 
-1. **Loop bounds must be a typed DSL integer such as `fx.Int64(...)`, NOT a plain Python int.** A plain int makes the AST rewriter unroll the loop and silently ignore `init=`. If you write `range(0, 15, 1, init=...)`, the AST rewriter treats the constant bounds as a Python `range` and unrolls; only plain Python-int bounds are unrolled, so a typed bound still produces a runtime `scf.for`. Use `fx.Int64(0)`, `fx.Int64(15)`, `fx.Int64(1)` instead.
+1. **Bounds: Python ints are fine with `init=`; a plain `range()` needs `i32`.** *(KernelForge
+   correction — upstream v0.3.2 still says Python-int bounds unroll the loop and drop `init=`; tracing
+   `range(0, 15, 1, init=[acc])` on 0.3.2 emits `scf.for %arg2 = %c0 to %c15 step %c1 iter_args(...)`.)*
+   With `init=`, Python ints, `fx.Int32` and `fx.Int64` all work. Without `init=`, the loop is still a
+   runtime `scf.for`, its carried state is inferred from the names the body reassigns, and its bounds
+   must be Python ints or `fx.Int32` — `fx.Int64` raises `TypeError: for-loop start must be i32`.
+   Only `range_constexpr` unrolls. See `../skills/bottleneck/debug-flydsl-kernel.md` § The three loop forms.
 
 2. **Prefer internal types, but unwrap at hard boundaries.** Most `range(..., init=...)` uses accept DSL numeric/vector values. If a lower-level helper explicitly expects raw `ir.Value`, unwrap with `v.ir_value()` / `_raw(v)` at that boundary only.
 
