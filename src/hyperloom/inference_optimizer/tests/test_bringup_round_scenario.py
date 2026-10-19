@@ -42,6 +42,7 @@ from hyperloom.orchestrator.state._shared_state.enablement_round import Enableme
 from hyperloom.orchestrator.state.round_store import (
     FAILED,
     SETTLED,
+    RoundRequest,
     RoundStore,
 )
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
@@ -442,8 +443,10 @@ async def _seed_failed_rounds(rounds: RoundStore, n: int) -> None:
         rid = f"seed-failed-{i:03d}"
         holder = f"holder-{i:03d}"
         now = float(i)
-        await rounds.open(rid, holder_task_id=holder, lease_sec=3600.0, now_unix=now, request_id=rid)
-        await rounds.settle(await rounds.get(rid), outcome=FAILED, now_unix=now + 1.0, request_id=f"settle-{rid}")
+        await rounds.open(rid, RoundRequest(now_unix=now, request_id=rid), holder_task_id=holder, lease_sec=3600.0)
+        await rounds.settle(
+            await rounds.get(rid), RoundRequest(now_unix=now + 1.0, request_id=f"settle-{rid}"), outcome=FAILED
+        )
 
 
 @pytest.mark.asyncio

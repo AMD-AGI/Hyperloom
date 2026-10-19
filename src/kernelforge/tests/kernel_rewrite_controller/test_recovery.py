@@ -21,7 +21,7 @@ from kernelforge.knowledge.kb_store.identity.kernel_recipe import (
     KernelRecipeIdentity,
     kernel_recipe_canonical_id,
 )
-from kernelforge.loop.reporting import BestResultPublisher
+from kernelforge.loop.reporting import BestResultPublisher, KeepBundle, KeepIdentity, KeepScore
 from kernelforge.tests.kernel_rewrite_controller.conftest import _git
 
 
@@ -77,6 +77,15 @@ def _prepared_workspace(tmp_path: Path):
     return layout, task_dir, worktree, best_commit
 
 
+def _publish_best(worktree, best_commit, patch):
+    """Publish iteration 1 of the test campaign as its best result."""
+    BestResultPublisher(str(worktree.workspace)).publish(
+        KeepIdentity("campaign", 0, "experiment", 1, best_commit, "optimize"),
+        KeepScore(2.0, 1.0, 2.0, 1.0, snr_db=100.0, search_start_ms=2.0),
+        KeepBundle("PASS\n", {"success": True}, ["kernel.py"], patch),
+    )
+
+
 def test_recovery_publishes_a_validated_result_sidecar(tmp_path: Path) -> None:
     layout, task_dir, _worktree, best_commit = _prepared_workspace(tmp_path)
     (task_dir / "forge-result.json").write_text(
@@ -121,24 +130,7 @@ def test_recovery_is_idempotent_for_an_already_published_best(tmp_path: Path) ->
 def test_recovery_publishes_a_complete_forge_best_manifest(tmp_path: Path) -> None:
     layout, task_dir, worktree, best_commit = _prepared_workspace(tmp_path)
     forge_patch = export_patch_from_base(worktree, best_commit=best_commit)
-    BestResultPublisher(str(worktree.workspace)).publish(
-        campaign_id="campaign",
-        session_index=0,
-        experiment_id="experiment",
-        iteration=1,
-        commit_hash=best_commit,
-        plan="optimize",
-        baseline_wall_ms=2.0,
-        search_start_ms=2.0,
-        best_wall_ms=1.0,
-        mean_case_speedup=2.0,
-        search_start_mean_case_speedup=1.0,
-        snr_db=100.0,
-        validation_text="PASS\n",
-        benchmark={"success": True},
-        changed_files=["kernel.py"],
-        patch=forge_patch,
-    )
+    _publish_best(worktree, best_commit, forge_patch)
 
     recovered = recover_task_result(layout, task_dir)
 
@@ -169,22 +161,28 @@ def test_a_stale_sidecar_does_not_pull_the_published_patch_backwards(tmp_path: P
     newer_commit = _git(worktree.workspace, "rev-parse", "HEAD")
 
     BestResultPublisher(str(worktree.workspace)).publish(
-        campaign_id="campaign",
-        session_index=0,
-        experiment_id="experiment",
-        iteration=5,
-        commit_hash=newer_commit,
-        plan="optimize",
-        baseline_wall_ms=2.0,
-        search_start_ms=2.0,
-        best_wall_ms=0.5,
-        mean_case_speedup=4.0,
-        search_start_mean_case_speedup=1.0,
-        snr_db=100.0,
-        validation_text="PASS\n",
-        benchmark={"success": True},
-        changed_files=["kernel.py"],
-        patch=export_patch_from_base(worktree, best_commit=newer_commit),
+        KeepIdentity(
+            campaign_id="campaign",
+            session_index=0,
+            experiment_id="experiment",
+            iteration=5,
+            commit_hash=newer_commit,
+            plan="optimize",
+        ),
+        KeepScore(
+            baseline_wall_ms=2.0,
+            best_wall_ms=0.5,
+            mean_case_speedup=4.0,
+            search_start_mean_case_speedup=1.0,
+            snr_db=100.0,
+            search_start_ms=2.0,
+        ),
+        KeepBundle(
+            validation_text="PASS\n",
+            benchmark={"success": True},
+            changed_files=["kernel.py"],
+            patch=export_patch_from_base(worktree, best_commit=newer_commit),
+        ),
     )
     (task_dir / "forge-result.json").write_text(
         json.dumps({"improved": True, "best_commit": older_commit, "best_iteration": 3}),
@@ -207,22 +205,28 @@ def test_a_newer_sidecar_still_wins_over_an_older_manifest(tmp_path: Path) -> No
     newer_commit = _git(worktree.workspace, "rev-parse", "HEAD")
 
     BestResultPublisher(str(worktree.workspace)).publish(
-        campaign_id="campaign",
-        session_index=0,
-        experiment_id="experiment",
-        iteration=3,
-        commit_hash=older_commit,
-        plan="optimize",
-        baseline_wall_ms=2.0,
-        search_start_ms=2.0,
-        best_wall_ms=1.0,
-        mean_case_speedup=2.0,
-        search_start_mean_case_speedup=1.0,
-        snr_db=100.0,
-        validation_text="PASS\n",
-        benchmark={"success": True},
-        changed_files=["kernel.py"],
-        patch=export_patch_from_base(worktree, best_commit=older_commit),
+        KeepIdentity(
+            campaign_id="campaign",
+            session_index=0,
+            experiment_id="experiment",
+            iteration=3,
+            commit_hash=older_commit,
+            plan="optimize",
+        ),
+        KeepScore(
+            baseline_wall_ms=2.0,
+            best_wall_ms=1.0,
+            mean_case_speedup=2.0,
+            search_start_mean_case_speedup=1.0,
+            snr_db=100.0,
+            search_start_ms=2.0,
+        ),
+        KeepBundle(
+            validation_text="PASS\n",
+            benchmark={"success": True},
+            changed_files=["kernel.py"],
+            patch=export_patch_from_base(worktree, best_commit=older_commit),
+        ),
     )
     (task_dir / "forge-result.json").write_text(
         json.dumps({"improved": True, "best_commit": newer_commit, "best_iteration": 5}),
@@ -323,24 +327,7 @@ def test_a_leftover_campaign_manifest_is_not_taken_for_this_task(tmp_path: Path)
     """
     layout, task_dir, worktree, best_commit = _prepared_workspace(tmp_path)
     forge_patch = export_patch_from_base(worktree, best_commit=best_commit)
-    BestResultPublisher(str(worktree.workspace)).publish(
-        campaign_id="campaign",
-        session_index=0,
-        experiment_id="experiment",
-        iteration=1,
-        commit_hash=best_commit,
-        plan="optimize",
-        baseline_wall_ms=2.0,
-        search_start_ms=2.0,
-        best_wall_ms=1.0,
-        mean_case_speedup=2.0,
-        search_start_mean_case_speedup=1.0,
-        snr_db=100.0,
-        validation_text="PASS\n",
-        benchmark={"success": True},
-        changed_files=["kernel.py"],
-        patch=forge_patch,
-    )
+    _publish_best(worktree, best_commit, forge_patch)
     # The commit a released campaign leaves behind: recorded in the manifest, gone
     # from the repository.
     manifest_path = BestResultPublisher(str(worktree.workspace)).manifest_path

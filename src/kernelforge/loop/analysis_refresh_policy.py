@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from kernelforge.loop.run_state import AnalysisRefreshState
 from kernelforge.orchestrator.contracts import calculate_evidence_gain
 
 
@@ -24,22 +25,21 @@ class AnalysisRefreshDecision:
 
 
 def decide_analysis_refresh(
+    state: AnalysisRefreshState,
     *,
     canonical_commit: str,
-    evidence_commit: str,
-    evidence_mean_case_speedup: float | None,
-    evidence_status: str,
     current_mean_case_speedup: float | None,
     supervisor_due: bool,
-    last_attempt_commit: str = "",
-    last_attempt_status: str = "",
-    last_attempt_iteration: int = -1,
     current_iteration: int = 0,
 ) -> AnalysisRefreshDecision:
     """Decide whether the current canonical commit needs fresh Analysis."""
 
+    evidence_mean_case_speedup = state.evidence_mean_case_speedup
+    last_attempt_commit = state.last_attempt_commit
+    last_attempt_status = state.last_attempt_status
+    last_attempt_iteration = state.last_attempt_iteration
     canonical = str(canonical_commit or "").strip()
-    evidence = str(evidence_commit or "").strip()
+    evidence = str(state.evidence_commit or "").strip()
     stale = bool(canonical and evidence and canonical != evidence)
     gain = calculate_evidence_gain(
         evidence_mean_case_speedup,
@@ -73,7 +73,7 @@ def decide_analysis_refresh(
             gain_since_evidence=gain,
         )
 
-    status = str(evidence_status or "").strip().lower()
+    status = str(state.evidence_status or "").strip().lower()
     if canonical and evidence == canonical and status == "partial" and last_attempt_iteration < current_iteration:
         return AnalysisRefreshDecision(
             refresh=True,

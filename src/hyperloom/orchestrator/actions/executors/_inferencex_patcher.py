@@ -633,16 +633,24 @@ def _apply_line_replacement_atomic(
     return True
 
 
-def _ensure_patched(
-    sources: list[Path],
-    is_patched: Callable[[Path], bool],
-    apply_patch: Callable[[Path], bool],
-    lock_path: str,
-    *,
-    empty_msg: str,
-    failure_msg: str,
-) -> bool:
+@dataclass(frozen=True)
+class _SourcePatch:
+    """One idempotent source patch: how to detect and apply it, the lock serializing it, and its log messages."""
+
+    is_patched: Callable[[Path], bool]
+    apply_patch: Callable[[Path], bool]
+    lock_path: str
+    empty_msg: str
+    failure_msg: str
+
+
+def _ensure_patched(sources: list[Path], patch: _SourcePatch) -> bool:
     """Drive a set of discovered files to patched state."""
+    is_patched = patch.is_patched
+    apply_patch = patch.apply_patch
+    lock_path = patch.lock_path
+    empty_msg = patch.empty_msg
+    failure_msg = patch.failure_msg
     if not sources:
         log.info(empty_msg)
         return False
@@ -671,28 +679,29 @@ def ensure_benchmark_lib_patched(
     """Ensure InferenceX ``benchmark_lib.sh`` honours ``$NUM_PROMPTS``."""
     return _ensure_patched(
         _resolve_benchmark_lib_paths(inferencex_path),
-        _is_patched,
-        # Preserve perms so the patched file stays runnable as a sourced lib.
-        partial(
-            _apply_line_replacement_atomic,
-            legacy=_LEGACY_LINE,
-            patched_line=_PATCHED_LINE,
-            missing_msg=(
-                "_inferencex_patcher: expected legacy line not found in %s; "
-                "the file may already have been hand-patched to a "
-                "different shape, or the upstream layout has changed. "
-                "Manual review needed."
+        _SourcePatch(
+            _is_patched,
+            partial(
+                _apply_line_replacement_atomic,
+                legacy=_LEGACY_LINE,
+                patched_line=_PATCHED_LINE,
+                missing_msg=(
+                    "_inferencex_patcher: expected legacy line not found in %s; "
+                    "the file may already have been hand-patched to a "
+                    "different shape, or the upstream layout has changed. "
+                    "Manual review needed."
+                ),
+                success_msg=(
+                    "_inferencex_patcher: applied NUM_PROMPTS-respecting patch to %s (Hyperloom issue #194 §2)"
+                ),
             ),
-            success_msg=("_inferencex_patcher: applied NUM_PROMPTS-respecting patch to %s (Hyperloom issue #194 §2)"),
-        ),
-        _LOCK_PATH,
-        empty_msg=(
-            "_inferencex_patcher: no InferenceX root discovered "
+            _LOCK_PATH,
+            empty_msg="_inferencex_patcher: no InferenceX root discovered "
             "(checked $INFERENCEX_PATH, $MAGPIE_PATH/InferenceX) or "
             "benchmark_lib.sh missing — skipping patch (this is fine "
-            "for tests and dry-runs without a real InferenceX tree)"
+            "for tests and dry-runs without a real InferenceX tree)",
+            failure_msg="_inferencex_patcher: failed to patch %s; other discovered roots will still be attempted",
         ),
-        failure_msg=("_inferencex_patcher: failed to patch %s; other discovered roots will still be attempted"),
     )
 
 
@@ -756,36 +765,34 @@ def ensure_benchmark_serving_patched(
     """Ensure InferenceX ``benchmark_serving.py`` reads ``PROFILE_EXTRA_BODY`` on ``/start_profile``."""
     return _ensure_patched(
         _resolve_benchmark_serving_paths(inferencex_path),
-        _is_benchmark_serving_patched,
-        partial(
-            _apply_line_replacement_atomic,
-            legacy=_BENCH_SERVING_LEGACY,
-            patched_line=_BENCH_SERVING_PATCHED,
-            missing_msg=(
-                "_inferencex_patcher: expected legacy `extra_body=` line not "
-                "found in %s; InferenceX layout may have changed and Hyperloom "
-                "needs an updated patch. PROFILE_EXTRA_BODY env var will be "
-                "ignored — TraceLens shape_discovery / detailed_annotations / "
-                "steady-state start_step won't reach the server. Manual review "
-                "needed."
+        _SourcePatch(
+            _is_benchmark_serving_patched,
+            partial(
+                _apply_line_replacement_atomic,
+                legacy=_BENCH_SERVING_LEGACY,
+                patched_line=_BENCH_SERVING_PATCHED,
+                missing_msg=(
+                    "_inferencex_patcher: expected legacy `extra_body=` line not "
+                    "found in %s; InferenceX layout may have changed and Hyperloom "
+                    "needs an updated patch. PROFILE_EXTRA_BODY env var will be "
+                    "ignored — TraceLens shape_discovery / detailed_annotations / "
+                    "steady-state start_step won't reach the server. Manual review "
+                    "needed."
+                ),
+                success_msg=(
+                    "_inferencex_patcher: patched %s to consume PROFILE_EXTRA_BODY env "
+                    "var (PR-D §2: fixes silently-ignored shape_discovery / "
+                    "detailed_annotations / steady-state start_step from "
+                    "_workload_envs.py)"
+                ),
             ),
-            success_msg=(
-                "_inferencex_patcher: patched %s to consume PROFILE_EXTRA_BODY env "
-                "var (PR-D §2: fixes silently-ignored shape_discovery / "
-                "detailed_annotations / steady-state start_step from "
-                "_workload_envs.py)"
-            ),
-        ),
-        _BENCH_SERVING_LOCK_PATH,
-        empty_msg=(
-            "_inferencex_patcher: no InferenceX root discovered "
+            _BENCH_SERVING_LOCK_PATH,
+            empty_msg="_inferencex_patcher: no InferenceX root discovered "
             "(checked $INFERENCEX_PATH, $MAGPIE_PATH/InferenceX) or "
             "benchmark_serving.py missing — skipping PROFILE_EXTRA_BODY "
             "patch (this is fine for tests and dry-runs without a real "
-            "InferenceX tree)"
-        ),
-        failure_msg=(
-            "_inferencex_patcher: failed to PROFILE_EXTRA_BODY-patch %s; other discovered roots will still be attempted"
+            "InferenceX tree)",
+            failure_msg="_inferencex_patcher: failed to PROFILE_EXTRA_BODY-patch %s; other discovered roots will still be attempted",
         ),
     )
 
@@ -801,28 +808,26 @@ def ensure_benchmark_lib_eval_dest_patched(
     """Ensure ``append_lm_eval_summary`` moves eval artifacts to ``$RESULT_DIR`` instead of the process cwd (the InferenceX checkout)."""
     return _ensure_patched(
         _resolve_benchmark_lib_paths(inferencex_path),
-        _is_eval_dest_patched,
-        partial(
-            _apply_line_replacement_atomic,
-            legacy=_EVAL_DEST_LEGACY,
-            patched_line=_EVAL_DEST_PATCHED,
-            missing_msg=(
-                "_inferencex_patcher: expected eval-artifact ``mv ./`` line not "
-                "found in %s; upstream layout may have changed. Eval artifacts "
-                "will land in the process cwd (InferenceX checkout) and be "
-                "recovered by the benchmark_result scan-side salvage instead."
+        _SourcePatch(
+            _is_eval_dest_patched,
+            partial(
+                _apply_line_replacement_atomic,
+                legacy=_EVAL_DEST_LEGACY,
+                patched_line=_EVAL_DEST_PATCHED,
+                missing_msg=(
+                    "_inferencex_patcher: expected eval-artifact ``mv ./`` line not "
+                    "found in %s; upstream layout may have changed. Eval artifacts "
+                    "will land in the process cwd (InferenceX checkout) and be "
+                    "recovered by the benchmark_result scan-side salvage instead."
+                ),
+                success_msg=("_inferencex_patcher: redirected eval artifacts to $RESULT_DIR in %s"),
             ),
-            success_msg=("_inferencex_patcher: redirected eval artifacts to $RESULT_DIR in %s"),
-        ),
-        _EVAL_DEST_LOCK_PATH,
-        empty_msg=(
-            "_inferencex_patcher: no InferenceX root discovered "
+            _EVAL_DEST_LOCK_PATH,
+            empty_msg="_inferencex_patcher: no InferenceX root discovered "
             "(checked $INFERENCEX_PATH, $MAGPIE_PATH/InferenceX) or "
             "benchmark_lib.sh missing — skipping eval-dest patch (fine for "
-            "tests and dry-runs without a real InferenceX tree)"
-        ),
-        failure_msg=(
-            "_inferencex_patcher: failed to eval-dest-patch %s; other discovered roots will still be attempted"
+            "tests and dry-runs without a real InferenceX tree)",
+            failure_msg="_inferencex_patcher: failed to eval-dest-patch %s; other discovered roots will still be attempted",
         ),
     )
 
@@ -838,27 +843,25 @@ def ensure_benchmark_lib_eval_start_patched(
     """Ensure ``run_eval`` announces the benchmark→eval boundary on stderr."""
     return _ensure_patched(
         _resolve_benchmark_lib_paths(inferencex_path),
-        _is_eval_start_patched,
-        partial(
-            _apply_line_replacement_atomic,
-            legacy=_EVAL_START_LEGACY,
-            patched_line=_EVAL_START_PATCHED,
-            missing_msg=(
-                "_inferencex_patcher: expected EVAL_RESULT_DIR export not found "
-                "in %s; upstream layout may have changed. The overtime kill will "
-                "keep charging accuracy-eval time against the throughput anchor."
+        _SourcePatch(
+            _is_eval_start_patched,
+            partial(
+                _apply_line_replacement_atomic,
+                legacy=_EVAL_START_LEGACY,
+                patched_line=_EVAL_START_PATCHED,
+                missing_msg=(
+                    "_inferencex_patcher: expected EVAL_RESULT_DIR export not found "
+                    "in %s; upstream layout may have changed. The overtime kill will "
+                    "keep charging accuracy-eval time against the throughput anchor."
+                ),
+                success_msg=("_inferencex_patcher: added eval-start marker to %s"),
             ),
-            success_msg=("_inferencex_patcher: added eval-start marker to %s"),
-        ),
-        _EVAL_START_LOCK_PATH,
-        empty_msg=(
-            "_inferencex_patcher: no InferenceX root discovered "
+            _EVAL_START_LOCK_PATH,
+            empty_msg="_inferencex_patcher: no InferenceX root discovered "
             "(checked $INFERENCEX_PATH, $MAGPIE_PATH/InferenceX) or "
             "benchmark_lib.sh missing — skipping eval-start patch (fine for "
-            "tests and dry-runs without a real InferenceX tree)"
-        ),
-        failure_msg=(
-            "_inferencex_patcher: failed to eval-start-patch %s; other discovered roots will still be attempted"
+            "tests and dry-runs without a real InferenceX tree)",
+            failure_msg="_inferencex_patcher: failed to eval-start-patch %s; other discovered roots will still be attempted",
         ),
     )
 
@@ -969,18 +972,16 @@ def ensure_eval_unbound_outputs_patched(
             _upgrade_eval_unbound_outputs_block(src)
     return _ensure_patched(
         sources,
-        _is_eval_unbound_outputs_patched,
-        _apply_eval_unbound_outputs_atomic,
-        _EVAL_UNBOUND_OUTPUTS_LOCK_PATH,
-        empty_msg=(
-            "_inferencex_patcher: no InferenceX root discovered "
+        _SourcePatch(
+            _is_eval_unbound_outputs_patched,
+            _apply_eval_unbound_outputs_atomic,
+            _EVAL_UNBOUND_OUTPUTS_LOCK_PATH,
+            empty_msg="_inferencex_patcher: no InferenceX root discovered "
             "(checked $INFERENCEX_PATH, $MAGPIE_PATH/InferenceX) or "
             "utils/evals/patches/lm_eval_sitecustomize.py missing — "
-            "skipping eval refused-connection guard"
-        ),
-        failure_msg=(
-            "_inferencex_patcher: failed to append the eval refused-connection guard to %s; "
-            "other discovered roots will still be attempted"
+            "skipping eval refused-connection guard",
+            failure_msg="_inferencex_patcher: failed to append the eval refused-connection guard to %s; "
+            "other discovered roots will still be attempted",
         ),
     )
 
@@ -991,17 +992,15 @@ def ensure_eval_probe_patched(
     """Ensure the early-exit probe is appended to ``lm_eval_sitecustomize.py``."""
     return _ensure_patched(
         _resolve_eval_sitecustomize_paths(inferencex_path),
-        _is_eval_probe_patched,
-        _apply_eval_probe_atomic,
-        _EVAL_PROBE_LOCK_PATH,
-        empty_msg=(
-            "_inferencex_patcher: no InferenceX root discovered "
+        _SourcePatch(
+            _is_eval_probe_patched,
+            _apply_eval_probe_atomic,
+            _EVAL_PROBE_LOCK_PATH,
+            empty_msg="_inferencex_patcher: no InferenceX root discovered "
             "(checked $INFERENCEX_PATH, $MAGPIE_PATH/InferenceX) or "
             "utils/evals/patches/lm_eval_sitecustomize.py missing — "
-            "skipping eval-probe patch"
-        ),
-        failure_msg=(
-            "_inferencex_patcher: failed to append eval-probe to %s; other discovered roots will still be attempted"
+            "skipping eval-probe patch",
+            failure_msg="_inferencex_patcher: failed to append eval-probe to %s; other discovered roots will still be attempted",
         ),
     )
 

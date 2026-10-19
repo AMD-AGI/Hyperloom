@@ -34,7 +34,6 @@ from kernelforge.cli.options import (
 from kernelforge.option_groups import option_group
 from kernelforge.cli.pr_references import (
     PR_KB_BUDGET_SEC,
-    PrReferenceQuery,
     _collect_pr_references,
     _git_remote_url,
     _pr_kb_enabled,
@@ -50,7 +49,11 @@ from kernelforge.cli.publication import (
 from kernelforge.cli.session_budget import _forge_session_timeout_sec, _is_long_horizon
 from kernelforge.config import Config
 from kernelforge.knowledge.kb_store.config import KnowledgeConfig
+from kernelforge.knowledge.kb_store.identity.run import LoopKernel
+from kernelforge.knowledge.pr_knowledge.context import PrReferenceQuery
 from kernelforge.loop.knowledge_integration import (
+    ExperiencePublication,
+    WarmStartHarness,
     WarmStartRollbackError,
     git_head,
     kb_reference_program_md,
@@ -60,12 +63,14 @@ from kernelforge.loop.knowledge_integration import (
     write_experience_to_kb,
 )
 from kernelforge.loop.recovery import (
+    CallerRecovery,
     atomic_write_json,
     load_published_best,
     publish_warm_start_recovery,
     rollback_unpublished_warm_start,
 )
 from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB, aggregate_regression_detail
+from kernelforge.tracker.schema import ExperimentSubject
 
 if TYPE_CHECKING:
     from kernelforge.loop.campaign_config import CampaignConfig, CampaignConfigStore
@@ -119,7 +124,7 @@ def _make_ceiling_estimator(
     """
 
     async def estimate(*, case_ids: Sequence[str], case_ms: dict[str, float]):
-        from kernelforge.mcp_server.tools.bench import bench_command
+        from kernelforge.mcp_server.tools.bench import BenchRun, bench_command
         from kernelforge.roofline_ceiling.analyst import AnalystSession, CeilingTask
         from kernelforge.roofline_ceiling.command import resolve_analyst_backend
         from kernelforge.roofline_ceiling.estimate import estimate_ceiling
@@ -128,7 +133,7 @@ def _make_ceiling_estimator(
         return await estimate_ceiling(
             resolve_analyst_backend(analyst),
             CeilingTask(
-                run=PerformanceRun(bench_command(driver_script), workspace_dir),
+                run=PerformanceRun(bench_command(BenchRun(driver_script)), workspace_dir),
                 kernel_files=[str(path) for path in source_files],
                 driver_script=driver_script,
                 known=KnownCases(list(case_ids), dict(case_ms)),
@@ -369,21 +374,25 @@ class _RunReporter:
             status = write_experience_to_kb(
                 config=self.run.config,
                 loop_runner=self.loop_runner,
-                workspace_dir=self.run.iter_config.workspace_dir,
-                kernel=self.run.iter_config.kernel_file,
-                kernel_backend=self.run.campaign.kernel_backend,
-                gpu_target=self.run.config.gpu_target,
-                base_sha=self.run.campaign.base_commit,
-                pristine_baseline_ms=self.warm_start.kb_pristine_baseline_ms,
-                reused_speedup=self.warm_start.kb_reused_speedup,
-                source_files=self.run.iter_config.source_files,
-                target_functions=self.run.iter_config.target_functions,
-                framework=self.run.campaign.framework,
-                experience_id=self.run.request.artifacts.experience_id,
-                operator_name=self.run.campaign.operator_name,
-                llm_summary=llm_summary,
-                incremental_summary=incremental_summary,
-                snr_db_override=snr_db_override,
+                kernel=LoopKernel(
+                    kernel_path=self.run.iter_config.kernel_file,
+                    kernel_backend=self.run.campaign.kernel_backend,
+                    target_functions=self.run.iter_config.target_functions,
+                    source_files=self.run.iter_config.source_files,
+                    framework=self.run.campaign.framework,
+                    operator_name=self.run.campaign.operator_name,
+                    workspace=self.run.iter_config.workspace_dir,
+                ),
+                publication=ExperiencePublication(
+                    base_sha=self.run.campaign.base_commit,
+                    gpu_target=self.run.config.gpu_target,
+                    experience_id=self.run.request.artifacts.experience_id,
+                    pristine_baseline_ms=self.warm_start.kb_pristine_baseline_ms,
+                    reused_speedup=self.warm_start.kb_reused_speedup,
+                    snr_db_override=snr_db_override,
+                    llm_summary=llm_summary,
+                    incremental_summary=incremental_summary,
+                ),
                 usage=self.run.usage,
             )
         except Exception as e:  # noqa: BLE001 - checkpoint publish must never break the loop
@@ -503,13 +512,7 @@ def _prepare_measurement_driver(run: _ForgeRun, program_md: str) -> None:
     to the prep agent, and a preparation that fails ends the run rather than
     measuring against a driver nobody vouched for.
     """
-    config = run.config
-    workspace_dir = run.iter_config.workspace_dir
-    kernel = run.iter_config.kernel_file
     driver = run.iter_config.driver_script
-    target_functions_list = run.iter_config.target_functions
-    source_files_list = run.iter_config.source_files
-    kernel_backend = run.iter_config.kernel_backend
     snr_threshold = run.iter_config.snr_threshold
     nproc_per_node = run.iter_config.nproc_per_node
     program_md_file = run.request.task_context.program_md_file
@@ -518,7 +521,10 @@ def _prepare_measurement_driver(run: _ForgeRun, program_md: str) -> None:
     deadline_unix = run.deadline.deadline_unix
     finalize_reserve_sec = run.deadline.finalize_reserve_sec
     usage = run.usage
+    from kernelforge.loop.task_preflight import DriverContract
     from kernelforge.loop.task_preparer import (
+        PreparationBudget,
+        PreparationTask,
         declared_case_ids,
         preflight_task,
         prepare_task_sync,
@@ -542,12 +548,14 @@ def _prepare_measurement_driver(run: _ForgeRun, program_md: str) -> None:
         raise click.ClickException(str(exc)) from exc
     pf = preflight_task(
         driver=driver,
-        snr_threshold=snr_threshold,
-        require_graph=True,
-        require_profile=True,
-        require_ranks=max(1, int(nproc_per_node or 1)),
+        contract=DriverContract(
+            snr_threshold=snr_threshold,
+            require_graph=True,
+            require_profile=True,
+            require_ranks=max(1, int(nproc_per_node or 1)),
+            expected_case_ids=expected_case_ids,
+        ),
         deadline_unix=deadline_unix - finalize_reserve_sec,
-        expected_case_ids=expected_case_ids,
     )
     if pf.ok:
         print("  [prepare] task already conforms to the driver contract; skipping")
@@ -568,25 +576,26 @@ def _prepare_measurement_driver(run: _ForgeRun, program_md: str) -> None:
             f"max_attempts={_tp.PREPARE_MAX_ATTEMPTS}"
         )
         prep = prepare_task_sync(
-            config=config,
-            workspace_dir=workspace_dir,
-            kernel=kernel,
-            driver=driver,
-            program_md=program_md,
-            target_functions=target_functions_list,
-            source_files=source_files_list,
-            kernel_backend=kernel_backend,
-            snr_threshold=snr_threshold,
-            preflight=pf,
-            invocation_spec_file=invocation_spec_file or "",
-            expected_case_ids=expected_case_ids,
+            config=run.config,
+            task=PreparationTask(
+                workspace_dir=run.iter_config.workspace_dir,
+                kernel=run.iter_config.kernel_file,
+                driver=driver,
+                program_md=program_md,
+                target_functions=run.iter_config.target_functions,
+                source_files=run.iter_config.source_files,
+                snr_threshold=snr_threshold,
+                invocation_spec_file=invocation_spec_file or "",
+                expected_case_ids=expected_case_ids,
+                read_only_files=[path for path in (program_md_file, invocation_spec_file) if path],
+                # A collective task needs a driver that launches its own ranks; the preparer cannot infer that from
+                # the kernel source.
+                nproc_per_node=nproc_per_node,
+            ),
             # Let the default PREPARE_MAX_WALL_SEC (3000s, sized for a cold-JIT preflight) apply; prepare_task
             # clamps it to the per-kernel deadline_unix below.
-            deadline_unix=deadline_unix - finalize_reserve_sec,
-            # A collective task needs a driver that launches its own ranks; the preparer cannot infer that from
-            # the kernel source.
-            nproc_per_node=nproc_per_node,
-            read_only_files=[path for path in (program_md_file, invocation_spec_file) if path],
+            budget=PreparationBudget(deadline_unix=deadline_unix - finalize_reserve_sec),
+            preflight=pf,
             usage=usage,
         )
         if prep.ok:
@@ -749,16 +758,16 @@ def _read_kb_warm_start(run: _ForgeRun, program_md: str, kb_warmstart_enabled: b
         try:
             warm = kb_warmstart(
                 config=config,
-                kernel=kernel,
-                driver=driver,
-                workspace_dir=workspace_dir,
-                kernel_backend=kernel_backend,
-                target_functions=target_functions_list,
-                framework=framework,
-                snr_threshold=snr_threshold,
-                source_files=source_files_list,
-                operator_name=operator_name,
-                bench_repeat=bench_repeat,
+                kernel=LoopKernel(
+                    kernel_path=kernel,
+                    kernel_backend=kernel_backend,
+                    target_functions=target_functions_list,
+                    source_files=source_files_list,
+                    framework=framework,
+                    operator_name=operator_name,
+                    workspace=workspace_dir,
+                ),
+                harness=WarmStartHarness(driver, snr_threshold=snr_threshold, bench_repeat=bench_repeat),
             )
         except WarmStartRollbackError as error:
             failure = click.ClickException(f"warm-start rollback failed; workspace may be inconsistent: {error}")
@@ -782,13 +791,11 @@ def _read_kb_warm_start(run: _ForgeRun, program_md: str, kb_warmstart_enabled: b
             iter_config.publication_baseline_wall_ms = warm.get("pristine_ms")
             try:
                 published = publish_warm_start_recovery(
-                    workspace_dir=workspace_dir,
+                    workspace_dir,
                     base_commit=base_sha,
                     warm=warm,
-                    caller_experiment_id=caller_experiment_id,
-                    experience_id=experience_id,
+                    caller=CallerRecovery(caller_experiment_id, experience_id, result_json),
                     tracker=tracker,
-                    result_json=result_json,
                 )
                 if published:
                     iter_config.warm_start_publication = dict(published)
@@ -909,17 +916,14 @@ def _prepare_assembly_task(run: _ForgeRun, program_md: str) -> _AssemblyPreparat
     unchanged = _AssemblyPreparation(None, source_files_list, run.request.knowledge.kb_warmstart_enabled, program_md)
     if kernel_backend != "assembly":
         return unchanged
-    from kernelforge.assembly.prepare import prepare_assembly, seed_source_baseline
+    from kernelforge.assembly.prepare import AssemblyTask, prepare_assembly, seed_source_baseline
 
     try:
         assembly_preparation = asyncio.run(
             prepare_assembly(
-                config=config,
-                kernel=kernel,
-                driver=driver,
-                sources=source_files_list,
+                config,
+                AssemblyTask(kernel=kernel, driver=driver, sources=source_files_list, threshold=snr_threshold),
                 base_commit=campaign.base_commit,
-                threshold=snr_threshold,
                 deadline=deadline_unix - finalize_reserve_sec,
                 resume=resume,
             )
@@ -1030,8 +1034,7 @@ def _ensure_recovery_experiment(tracker, caller_experiment_id: str, *, kernel: s
         tracker.get(caller_experiment_id)
     except FileNotFoundError:
         tracker.create(
-            task_id=Path(kernel).stem,
-            description=f"External recovery channel for {caller_experiment_id}",
+            ExperimentSubject(Path(kernel).stem, description=f"External recovery channel for {caller_experiment_id}"),
             experiment_id=caller_experiment_id,
         )
 
@@ -1548,6 +1551,7 @@ def forge_loop(request: ForgeLoopRequest):
 
     from kernelforge.loop.campaign_config import (
         CampaignConfigStore,
+        CampaignInputs,
         derive_campaign_implementation_contract,
     )
     from kernelforge.loop.run_state import WorkspaceLock, WorkspaceLockError
@@ -1594,25 +1598,27 @@ def forge_loop(request: ForgeLoopRequest):
     try:
         resolution = resolve_campaign(
             str(workspace),
+            CampaignInputs(
+                kernel=request.campaign.kernel,
+                driver=request.campaign.driver,
+                snr_threshold=request.campaign.snr_threshold,
+                source_files=request.identity.source_files or "",
+                program_md_file=request.task_context.program_md_file,
+                target_functions=request.identity.target_functions or "",
+                operator_name=request.identity.operator_name or "",
+                producer=request.knowledge.producer or "",
+                kernel_backend=request.task_context.kernel_backend or "",
+                git_branch=request.git_branch or "",
+                gpu_target=request.gpu.gpu_target or "",
+                gpu_type=request.gpu.gpu_type,
+                task_type=request.identity.task_type or "",
+                framework=request.identity.framework or "",
+                nproc_per_node=request.loop_shape.nproc_per_node,
+                bench_repeat=request.loop_shape.bench_repeat,
+                commit_new_paths=tuple(request.loop_shape.commit_new_paths),
+            ),
             resume=resume,
             prepare_task=request.prepare_task,
-            kernel=request.campaign.kernel,
-            driver=request.campaign.driver,
-            source_files=request.identity.source_files or "",
-            program_md_file=request.task_context.program_md_file,
-            target_functions=request.identity.target_functions or "",
-            operator_name=request.identity.operator_name or "",
-            producer=request.knowledge.producer or "",
-            kernel_backend=request.task_context.kernel_backend or "",
-            git_branch=request.git_branch or "",
-            gpu_target=request.gpu.gpu_target or "",
-            gpu_type=request.gpu.gpu_type,
-            task_type=request.identity.task_type or "",
-            framework=request.identity.framework or "",
-            snr_threshold=request.campaign.snr_threshold,
-            nproc_per_node=request.loop_shape.nproc_per_node,
-            bench_repeat=request.loop_shape.bench_repeat,
-            commit_new_paths=list(request.loop_shape.commit_new_paths),
         )
     except (OSError, ValueError) as error:
         raise click.ClickException(str(error)) from error
@@ -1701,10 +1707,11 @@ def forge_loop(request: ForgeLoopRequest):
             f" from {seed_stats['src'] or 'n/a'}"
         )
 
-    from kernelforge.loop.runner import IterationLoop
+    from kernelforge.loop.runner import IterationLoop, LoopAgents, LoopCallbacks
     from kernelforge.loop.runner import IterationConfig
     from kernelforge.tracker import ExperimentTracker, UsageAccumulator, UsageLedgerFile
-    from kernelforge.orchestrator.agent import make_agent_fn
+    from kernelforge.loop.gate_settings import GateMeasurement
+    from kernelforge.orchestrator.agent import ImplementerSetup, ImplementerTask, SessionOptions, make_agent_fn
     from kernelforge.roofline_ceiling.command import AnalystAgent
 
     iter_config = IterationConfig(
@@ -1876,29 +1883,35 @@ def forge_loop(request: ForgeLoopRequest):
     pr_task_context, pr_kb_repo = _collect_pr_kb_context(run)
 
     selected_runtime = config.agent_runtime()
-    agent_fn = make_agent_fn(
-        config=config,
-        program_md=program_md,
-        pre_task_context=pr_task_context,
-        pr_kb_repo=pr_kb_repo,
-        kernel_backend_name=kernel_backend,
-        insession_gate=gate_on,
-        driver_script=driver,
-        snr_threshold=snr_threshold,
-        max_blocks=max_blocks,
-        session_timeout_sec=session_timeout_sec,
-        validation_timeout_sec=iter_config.validate_stage_timeout_sec,
-        bench_timeout_sec=iter_config.bench_timeout_sec,
-        bench_repeat=bench_repeat,
-        permission_mode=request.roles.permission_mode,
-        task_type=task_type,
-        source_files=source_files_list,
-        target_functions=target_functions_list,
-        profiling_enabled=profiling_enabled,
-        agent_backend=selected_runtime.provider,
-        commit_new_paths=iter_config.commit_new_paths,
-        usage=usage,
+    implementer_setup = ImplementerSetup(
+        ImplementerTask(
+            program_md=program_md,
+            kernel_backend_name=kernel_backend,
+            pre_task_context=pr_task_context,
+            pr_kb_repo=pr_kb_repo,
+            task_type=task_type,
+            source_files=source_files_list,
+            # Function names, not paths: nothing to rebind onto a lane.
+            target_functions=target_functions_list,
+            profiling_enabled=profiling_enabled,
+            commit_new_paths=iter_config.commit_new_paths,
+        ),
+        GateMeasurement(
+            driver_script=driver,
+            snr_threshold=snr_threshold,
+            max_blocks=max_blocks,
+            stage_timeout_sec=iter_config.validate_stage_timeout_sec,
+            bench_timeout_sec=iter_config.bench_timeout_sec,
+            bench_repeat=bench_repeat,
+        ),
+        SessionOptions(
+            session_timeout_sec=session_timeout_sec,
+            permission_mode=request.roles.permission_mode,
+            agent_backend=selected_runtime.provider,
+            insession_gate=gate_on,
+        ),
     )
+    agent_fn = make_agent_fn(config, implementer_setup, usage=usage)
     effective_implementer = getattr(
         agent_fn,
         "backend_name",
@@ -1920,25 +1933,8 @@ def forge_loop(request: ForgeLoopRequest):
         make_agent=make_agent_fn,
         config=config,
         binding=LaneBinding(iter_config.workspace_dir, driver, source_files_list),
-        session_kwargs={
-            "program_md": program_md,
-            "pre_task_context": pr_task_context,
-            "pr_kb_repo": pr_kb_repo,
-            "kernel_backend_name": kernel_backend,
-            "snr_threshold": snr_threshold,
-            "max_blocks": max_blocks,
-            "session_timeout_sec": session_timeout_sec,
-            "validation_timeout_sec": iter_config.validate_stage_timeout_sec,
-            "bench_timeout_sec": iter_config.bench_timeout_sec,
-            "bench_repeat": bench_repeat,
-            "permission_mode": request.roles.permission_mode,
-            "task_type": task_type,
-            "commit_new_paths": iter_config.commit_new_paths,
-            # Function names, not paths: nothing to rebind onto a lane.
-            "target_functions": target_functions_list,
-            "agent_backend": selected_runtime.provider,
-            "usage": usage,
-        },
+        setup=implementer_setup,
+        usage=usage,
     )
 
     from kernelforge.orchestrator.analysis import make_analysis_agent_service
@@ -2006,13 +2002,17 @@ def forge_loop(request: ForgeLoopRequest):
 
     asyncio.run(
         loop_runner.run(
-            agent_fn=agent_fn,
-            agent_factory=_lane_agent_factory if request.loop_shape.lanes > 1 else None,
-            analysis_service=analysis_service,
-            orchestration_service=orchestration_service,
-            supervisor_fn=supervisor_fn,
-            on_best_committed=_checkpoint_on_best_committed,
-            on_best_ready=_publish_remote_best,
+            LoopAgents(
+                agent_fn=agent_fn,
+                agent_factory=_lane_agent_factory if request.loop_shape.lanes > 1 else None,
+                analysis_service=analysis_service,
+                orchestration_service=orchestration_service,
+                supervisor_fn=supervisor_fn,
+            ),
+            callbacks=LoopCallbacks(
+                on_best_committed=_checkpoint_on_best_committed,
+                on_best_ready=_publish_remote_best,
+            ),
             usage=usage,
             workspace_lock_held=True,
         )

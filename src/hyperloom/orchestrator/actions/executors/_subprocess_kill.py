@@ -18,6 +18,7 @@ import sys
 import threading
 import time
 from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
 
@@ -918,14 +919,16 @@ def run_with_session_kill(
             try:
                 stdout, stderr = _communicate_with_watchdog(
                     proc,
-                    hard_timeout=timeout,
-                    server_log_path=server_log_path,
-                    silence_timeout_sec=silence_timeout_sec,
-                    started_at=started_at,
-                    scan_offsets=scan_offsets,
+                    _WatchedRound(
+                        hard_timeout=timeout,
+                        server_log_path=server_log_path,
+                        silence_timeout_sec=silence_timeout_sec,
+                        server_already_ready=server_already_ready,
+                        session_deadline_sec=session_deadline_sec,
+                        started_at=started_at,
+                        scan_offsets=scan_offsets,
+                    ),
                     capture=capture,
-                    server_already_ready=server_already_ready,
-                    session_deadline_sec=session_deadline_sec,
                     cancel_scope=cancel_scope,
                     recorders=_build_round_recorders(server_log_path, child_env),
                 )
@@ -1026,23 +1029,38 @@ class _ServerStalledDetected(_ReapedByWatchdog):
         self.elapsed_sec = float(elapsed_sec)
 
 
+@dataclass(frozen=True)
+class _WatchedRound:
+    """The stop gates the watchdog enforces on one round and the log baseline it scans from.
+
+    ``started_at`` defaults to the moment the watch begins and ``scan_offsets`` to reading every log from its start.
+    """
+
+    hard_timeout: int | float | None
+    server_log_path: str | None = None
+    silence_timeout_sec: float | None = None
+    server_already_ready: bool = False
+    session_deadline_sec: float | None = None
+    started_at: float | None = None
+    scan_offsets: dict[str, int] | None = None
+
+
 def _communicate_with_watchdog(
     proc: subprocess.Popen,
+    watched: _WatchedRound,
     *,
-    hard_timeout: int | float | None,
-    server_log_path: str | None = None,
-    silence_timeout_sec: float | None = None,
-    capture: _StreamCapture | None = None,
-    server_already_ready: bool = False,
-    session_deadline_sec: float | None = None,
-    cancel_scope: CancelScope | None = None,
     recorders: _RecorderFanout,
-    started_at: float | None = None,
-    scan_offsets: dict[str, int] | None = None,
+    capture: _StreamCapture | None = None,
+    cancel_scope: CancelScope | None = None,
 ) -> tuple[str | bytes, str | bytes]:
     """Wait for exit, enforcing cancellation, session budget and explicit round caps."""
-    start = time.monotonic() if started_at is None else started_at
-    offsets = {} if scan_offsets is None else scan_offsets
+    hard_timeout = watched.hard_timeout
+    server_log_path = watched.server_log_path
+    silence_timeout_sec = watched.silence_timeout_sec
+    server_already_ready = watched.server_already_ready
+    session_deadline_sec = watched.session_deadline_sec
+    start = time.monotonic() if watched.started_at is None else watched.started_at
+    offsets = {} if watched.scan_offsets is None else watched.scan_offsets
     residuals: dict[str, str] = {}
     identities: dict[str, tuple[int, int]] = {}
     for path in offsets:

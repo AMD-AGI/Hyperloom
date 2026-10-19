@@ -13,6 +13,7 @@ from hyperloom.orchestrator.actions.executors._framework_gap_composer import (
     _extract_bottleneck_from_breakdown,
     _model_class_to_search_token,
     _normalize_model_class,
+    GapEvidence,
     compose_gap,
 )
 
@@ -128,7 +129,7 @@ class TestComposeGap:
             gpu_type="MI300X",
             model_class="moe_mla",
             precision="BF16",
-            profile_kernel_breakdown_path=breakdown,
+            evidence=GapEvidence(profile_kernel_breakdown_path=breakdown),
         )
         assert gap == "improve sglang bf16 moe attention throughput on mi300x"
         assert kw == sorted({"sglang", "mi300x", "moe", "bf16", "attention"})
@@ -151,7 +152,7 @@ class TestComposeGap:
             gpu_type="",
             model_class="moe_mla",
             precision="",
-            profile_kernel_breakdown_path=breakdown,
+            evidence=GapEvidence(profile_kernel_breakdown_path=breakdown),
         )
         assert gap == "improve vllm moe throughput"
         assert kw.count("moe") == 1
