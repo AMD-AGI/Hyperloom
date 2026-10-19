@@ -4,7 +4,7 @@ kind: language
 lever: flydsl_gemm_schedule_and_locality
 gens: [gfx950]
 dtypes: [bf16, fp8, mxfp4]
-regimes: [compute-bound, register-saturated, grouped]
+regimes: [compute-bound, register-saturated]
 updated: 2026-10-19
 sources:
   - ROCm/FlyDSL@dd8373349:python/flydsl/expr/rocdl/__init__.py:99
@@ -30,7 +30,7 @@ sources:
 - Accumulators no longer fit, or buffer loads sit inside a `v_readfirstlane` loop.
 
 **Somewhere else if:** the grid, tile size, split-K or a boundary variant is the question →
-`flydsl_gemm_grid_pricing.md`; the general order of operations → `flydsl_gemm_authoring.md`.
+`flydsl_gemm_grid_pricing.md`; the general order of operations → `flydsl_gemm_workflow.md`.
 
 ## 1. Co-resident waves must not read the same heavy fragment
 
@@ -56,37 +56,40 @@ index algebra that can cost a quarter of the kernel, and ordinary counters will 
 
 ## 2. Tile order across XCDs
 
-Topology and the basic swizzle are in `../../../../../common_methodology/optimization/lever_xcd_locality.md`.
+Topology and the basic swizzle are in `../../../../common_methodology/optimization/lever_xcd_locality.md`.
 What FlyDSL GEMM work added:
 
 **Decide by what co-resident workgroups reuse.**
-- Each tile streams a **private slab** larger than one XCD's L2 (e.g. a per-expert weight in a grouped
-  GEMM): keep the workgroups that share a slab on the same XCD at the same time — cluster across all 8
+- Each tile streams a **private slab** larger than one XCD's L2: keep the workgroups that share a slab on the same XCD at the same time — cluster across all 8
   XCDs.
-- All tiles read a **shared slice** (e.g. wgrad over token rows): clustering by XCD only fragments the
+- All tiles read a **shared slice**: clustering by XCD only fragments the
   sharing; the hardware round-robin (`block_id % 8`) with a narrow group-major band wins.
 
 *(field)* Porting one kernel's winning band/XCD setting to another kernel of the same campaign measured
 −0.8% to −5.7%. Predict the direction from the reuse class, then sweep 3–5 points on every shape class
 you are scored on.
 
-**Over-launched grids** (grouped/MoE kernels launch an upper bound and discover the live tile count on
-chip): test the exit on the raw block id first, then remap over the live range.
-
-```python
-if block_id >= live_tiles: exit          # raw id: dead workgroups spread over all 8 XCDs
-pid = remap(block_id, live_tiles)        # a bijection on [0, live_tiles)
-```
-
-Remapping over the grid bound and exiting on the remapped id puts every dead id at the end of the last
-XCD's range; that XCD runs short while the others carry the rest. *(field)* 5.9% dead ids → one XCD did
-432 tiles, the other seven 816 each, wall +6.25%. Remapping over `live_tiles` while still exiting on the
-remapped id is worse: ids collide, some tiles run twice and some never.
-
-**Grouped GEMM under skew:** first ask where the skew lives. Skew in the *number of tiles* per group →
-band-cyclic XCD runs aligned to group boundaries keep reuse and balance. Skew in *per-tile K length*
-(variable-K wgrad) → any partition coarser than one tile imports the imbalance; stay on the hardware
-round-robin.
+**How Turbo orders tiles** (Primus-Turbo main `7615a5a2`, `primus_turbo/flydsl/utils/gemm_helper.py` = GH):
+- `xcd_remap_pid` (GH:1639) gives each XCD a contiguous slice of logical tiles, for any total. It is a
+  bijection, so it cannot change results.
+- `block_mn` (GH:1967) is a `GROUP_M` (1D) or `group_n` (2D) super-tile decode, also a bijection.
+- `xcd_band_remap_pid` (GH:2694) gives each XCD every `num_xcd`-th run of `band` tiles. That keeps reuse
+  inside a run while every XCD samples the whole tile range, which balances tiles of unequal cost.
+- **Gate the band on L2 bytes.** Once one band's operand slice outgrows an XCD's L2 slice (4 MiB on
+  MI355X), clustering buys no reuse and only costs balance. Turbo's dense fp8 table then switches to the
+  plain round-robin (`_NT_BAND_L2_BYTES`, `gemm/gemm_fp8_kernel.py:3186-3192`). The MXFP4 kernel picks
+  the widest power-of-two N band whose B slice fits one XCD's L2, and no band once a single N tile fills
+  it (`_mxfp4_l2_band`, `gemm/gemm_mxfp4_kernel.py:3131-3139`).
+- **Make each XCD's resident set a rectangle.** The dense fp8 TN whole loop sizes `(group_m, group_n)`
+  so the tiles one XCD holds pull the fewest operand bytes through its L2. It snaps the group height to a
+  divisor of 8 "so its resident set [is] a rectangle instead of a staircase" (`_tn_wave4_band`,
+  `gemm_fp8_kernel.py:3280-3297`).
+- **A persistent loop strides by the grid, not by 1.** Then one dispatch round's tiles stay inside one
+  band and the workgroups co-resident on an XCD share a B tile from L2. A consecutive walk per workgroup
+  widened the live band and cost 2.7–4.0% (`gemm_mxfp4_kernel.py:2961-2965`).
+- **Keep the tile decode cheap.** It sits in front of the first load at occupancy 1. Use unsigned
+  division and modulo, make N a compile-time constant so divisions become multiplies, and when dividing
+  by a runtime value, use a fixed-point reciprocal that is proven exact over the reachable range.
 
 **2D bands:** compare `GM · GN` with the per-XCD concurrent window (resident workgroups per XCD: 32 at one
 workgroup per CU). `GM · GN` near the window makes the footprint depend on where the window starts inside
@@ -131,7 +134,19 @@ lengthening live ranges. What must stay pinned is the arithmetic, not only the m
   VGPR, `s_nop` 79 → 53, faster on every affected shape.
 
 Gate any mask change on the ISA's `vgpr_spill_count` before benchmarking. Hint counts must come from the
-loop in front of you (`flydsl_gemm_authoring.md` § Prefetch and scheduling).
+loop in front of you; constants copied from another kernel are worse than none.
+
+**A count mismatch is never reported.** `sched_group_barrier` groups are filled greedily in program
+order. Checked with `llc -mcpu=gfx950` on 4 MFMAs and 4 global loads:
+- with no hints the order was `L L L M M M L M`;
+- `(mfma 1, vmem 1) × 4` gave `M L M L M L M L`;
+- `(mfma 1, vmem 3) × 4` front-loaded the loads: `M L L L M L M M`;
+- only two groups pinned the head of the body and left the tail free.
+Read the scheduled ISA after changing a hint table.
+
+**Kernels with hand-placed waits use none of this.** Turbo's dense kernels contain no
+`sched_group_barrier`. They use `rocdl.sched_barrier(0)` around hand-written waits, `s_setprio` at two
+waves per SIMD, and `s_nop` issue pads inside whole-loop asm (`flydsl_gemm_mainloop.md` §2–§3).
 
 ## 4. gfx950 has one memory counter for loads and stores
 
@@ -142,6 +157,17 @@ load also waits for every earlier store. Consequences:
 - Dripping C stores into the main loop serializes them against the next operand wait.
 - MFMA is the only work that occupies neither `vmcnt` nor `lgkmcnt` — it is the medium to hide a wait
   under.
+
+**Write a wait as "what may still be in flight", not as a formula of the block shape.** At a phase
+barrier, leave outstanding only the fills that nothing reads before a later phase, and only the
+`ds_read`s whose consumers come after the barrier. Then race the pair:
+- *(field)* On the MXFP4 whole loop, `(vmcnt, lgkmcnt)` of `(10, 9)` and `(16, 15)` were both raced, the
+  deeper one only for K ≥ 8192, with a 2% adoption margin. At `lgkmcnt` ≥ 15 or `vmcnt` ≥ 20 that kernel
+  raced.
+- `lgkmcnt` 15 is the encoding limit of the 4-bit field, not a tuning boundary. The race threshold is
+  per kernel: a TN fp8 whole loop was fastest at 12 and still repeatable at 15.
+- *(field)* The lgkm-side partial drain carried over between kernels and precisions (+0.8%). A one-`s_nop`
+  pad after the barrier helped MXFP4 and was worth 0.00% on fp8. Port the lgkm side first.
 
 ## 5. Hiding an LDS write when registers are nearly full
 
@@ -181,16 +207,13 @@ element-wise dependency chain by latency, and compare against a separate kernel.
   compiler through `fx.gemm` produced 613 `v_accvgpr_*` moves and 18 scratch loads in the hot loop;
   explicit placement of a 256×384 tile ran at 500/512 registers with no spill. Check: count
   `v_accvgpr_read/write` and `scratch_` in the hot loop.
-- **Descriptor fields must be wave-uniform.** If a buffer descriptor's base or `num_records` is computed
-  from per-lane values, it lives in VGPRs and the compiler wraps every buffer op in a `readfirstlane`
-  waterfall loop. Pin the fields with `rocdl.readfirstlane` (both halves of a 64-bit base). Signature:
-  `v_readfirstlane_b32` plus an `s_and_saveexec_b64` loop around the hot loop's `buffer_load`s.
-- **Operands beyond 4 GiB.** `num_records` and per-lane buffer offsets are 32-bit. Fold each tile's large
-  base offset into the descriptor's 64-bit base and keep in-tile offsets 32-bit.
+- **Descriptor fields must be wave-uniform, and operands past 4 GiB need an i64 rebase.** See
+  `flydsl_gemm_datapath.md` §8. Signature of a non-uniform descriptor: `v_readfirstlane_b32` plus an
+  `s_and_saveexec_b64` loop around the hot loop's `buffer_load`s.
 - **Ragged edges.** `fx.rocdl.make_buffer_tensor(t)` defaults to `max_size=True`, which sets
   `num_records = 0xFFFFFFFF` — no out-of-range masking. To have out-of-range loads return zero and
   out-of-range stores dropped, pass `max_size=False` or `num_records_bytes`, and derive the bound from
-  traced values (`../../bottleneck/debug-flydsl-kernel.md` § What the cache key sees).
+  traced values (`../bottleneck/debug-flydsl-kernel.md` § What the cache key sees).
 
 ## Verify
 - The `wave_id → (wave_m, wave_n)` mapping and its co-resident pairs are written down for the kernel.
@@ -199,7 +222,7 @@ element-wise dependency chain by latency, and compare against a separate kernel.
 - An XCD/order change is judged on wall time and stall counters across all shape classes.
 
 ## Related
-`flydsl_gemm_grid_pricing.md` · `flydsl_gemm_authoring.md` ·
-`../../../../../common_methodology/optimization/lever_xcd_locality.md` ·
-`../../../../../hardware/mi350_execution.md` · `../../../../../hardware/mi350_chiplet.md` ·
-`../../bottleneck/debug-flydsl-kernel.md`
+`flydsl_gemm_grid_pricing.md` · `flydsl_gemm_workflow.md` ·
+`../../../../common_methodology/optimization/lever_xcd_locality.md` ·
+`../../../../hardware/mi350_execution.md` · `../../../../hardware/mi350_chiplet.md` ·
+`../bottleneck/debug-flydsl-kernel.md`

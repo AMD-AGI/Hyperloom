@@ -28,19 +28,20 @@ documented in `framework/aiter/` (the `aiter_flydsl_libtype` lever). Backend-neu
 
 **Two ways you engage FlyDSL — pick your path first, it changes which files you read:**
 - **Path A — *use* the aiter-shipped FlyDSL kernel library.** Tune `flydsl_hgemm`-style knobs, pick a
-  kernel family, handle preshuffle/dispatch. Entry: `skills/optimize/flydsl_levers/{kernel_families,knobs}.md`.
+  kernel family, handle preshuffle/dispatch. Entry: `skills/optimize/flydsl_levers/{flydsl_kernel_library,flydsl_knob_space}.md`.
 - **Path B — *author* a new `@flyc.kernel` from scratch.** Entry: `API_docs/` (language) +
-  `API_docs/conventions.md` (style) → `skills/optimize/flydsl_levers/{authoring_optimization,authoring_gemm_levers}.md`.
+  `API_docs/conventions.md` (style) → `skills/optimize/flydsl_levers/flydsl_authoring_method.md`; for a dense GEMM,
+  `skills/gemm/INDEX.md`.
 
 ## Reading order (three layers)
 1. **`API_docs/`** — the language itself: `kernel_authoring_guide.md` (`@flyc.kernel`/`@flyc.jit`, launch,
    LDS, tiled copy/MMA) → `layout_system_guide.md` (layout algebra) → `architecture_guide.md` (compile
    stack). Read alongside **`API_docs/conventions.md`** (the authoring style guide) before writing any kernel.
 2. **`skills/optimize/flydsl_levers/`** — the levers: `flydsl_kernel_library.md` + `flydsl_knob_space.md` (Path A, using the
-   library) or `flydsl_authoring_method.md` + `flydsl_gemm_authoring.md` (Path B, structure-first authoring),
-   then `flydsl_gemm_grid_pricing.md` + `flydsl_gemm_schedule_and_locality.md` for a GEMM.
+   library) or `flydsl_authoring_method.md` (Path B, structure-first authoring). **A dense GEMM has its own package,
+   `skills/gemm/` — open its `INDEX.md`.**
 3. **`skills/`** *when you hit a problem*: `profile/` (trace, benchmark), `bottleneck/` (debug),
-   `optimize/{gemm,lds,prefetch}-*.md` for the targeted levers.
+   `optimize/{lds,prefetch}-*.md` for the targeted levers.
 
 > **Per-operator cards are not in this folder — and largely not in this repo.** General operator theory
 > (math contract, shape regimes, Amdahl weight, parity bands) is not maintained here; read the source.
@@ -71,10 +72,8 @@ Substitute `<op>` with the operator (catalog below). Paths are relative to this 
 | "Write my first FlyDSL kernel" | `API_docs/kernel_authoring_guide.md` → `API_docs/conventions.md` → `API_docs/examples/` (01→04) |
 | "Understand the layout algebra (Shape/Stride/tiled copy/MMA)" | `API_docs/layout_system_guide.md` → `API_docs/cute_layout_algebra_guide.md` → `API_docs/flydsl-tile-programming.md` |
 | "Use the aiter FlyDSL GEMM library — which knobs?" | `skills/optimize/flydsl_levers/flydsl_kernel_library.md` → `.../flydsl_knob_space.md` |
-| "Author & optimize a new kernel (structure-first)" | `skills/optimize/flydsl_levers/flydsl_authoring_method.md` → (GEMM) `.../flydsl_gemm_authoring.md` |
-| "Optimize a GEMM specifically" | `skills/optimize/gemm-optimization.md` → `skills/optimize/flydsl_levers/flydsl_gemm_authoring.md` |
-| "GEMM: pick the tile / split-K / boundary body; price an idea before building it" | `skills/optimize/flydsl_levers/flydsl_gemm_grid_pricing.md` → `.../flydsl_gemm_authoring.md` |
-| "GEMM: a 'neutral' change moved wall time (wave mapping, XCD order, sched fence, epilogue fusion)" | `skills/optimize/flydsl_levers/flydsl_gemm_schedule_and_locality.md` |
+| "Author & optimize a new kernel (structure-first)" | `skills/optimize/flydsl_levers/flydsl_authoring_method.md` |
+| "Write or optimize a dense GEMM (fp8 / MXFP4 / MXFP8 / bf16)" | `skills/gemm/INDEX.md` → the card it routes to |
 | "LDS bank conflicts / double-buffer / swizzle" | `skills/optimize/lds-optimization.md` → `API_docs/conventions.md` (SharedAllocator) |
 | "Overlap loads / prefetch / pipeline" | `skills/optimize/prefetch-data-load.md` |
 | "Wrong output / NaN / won't compile / fix didn't take" | `skills/bottleneck/debug-flydsl-kernel.md` (clear cache first) → `API_docs/conventions.md` |
@@ -99,15 +98,15 @@ languages/flydsl/
 │   ├── flydsl-tile-programming.md        # the PROCEDURE: classify pattern → skeleton → compute → sync/LDS → verify
 │   └── examples/                         # runnable skeletons: 01 vectorAdd · 02 tiledCopy · 03 tiledMma · 04 preshuffle_gemm
 ├── skills/                               ← techniques by phase
+│   ├── gemm/                             # dense GEMM package (exemplar: Primus-Turbo main) — open its INDEX.md
+│   │   ├── INDEX.md                      # task → card routing, Turbo kernel map, FlyDSL 0.2.4/0.3.2/0.3.4.1 deltas
+│   │   └── flydsl_gemm_*.md              # workflow · grid_pricing · mainloop · datapath · schedule_and_locality ·
+│   │                                     #   epilogue · autotune · attribution · correctness · measurement
 │   ├── optimize/
 │   │   ├── flydsl_levers/
 │   │   │   ├── flydsl_kernel_library.md  # Path A: the shipped aiter families (HGEMM, small-M, fp8-A8, MoE, GDR, silu_fq)
 │   │   │   ├── flydsl_knob_space.md      # Path A: the knob set + which 3 knobs are arch-pinned, not tunable
-│   │   │   ├── flydsl_authoring_method.md# Path B: structure-before-parameters workflow, with the stop conditions
-│   │   │   ├── flydsl_gemm_authoring.md  # Path B: GEMM levers (tiling / LDS / MFMA loop / epilogue)
-│   │   │   ├── flydsl_gemm_grid_pricing.md # Path B: rounds & last-round fill, split-K gate, tile ratio, K granule, fixed cost
-│   │   │   └── flydsl_gemm_schedule_and_locality.md # Path B: co-resident waves, XCD order, sched masks, vmcnt, epilogue cost
-│   │   ├── gemm-optimization.md          # GEMM optimization walkthrough
+│   │   │   └── flydsl_authoring_method.md# Path B: structure-before-parameters workflow, with the stop conditions
 │   │   ├── lds-optimization.md           # LDS sizing / bank-conflict / buffering
 │   │   ├── prefetch-data-load.md         # prefetch & load-overlap / pipelining
 │   │   └── bisect-perf-regression.md     # locate the commit that regressed perf
@@ -151,8 +150,8 @@ to an entry point that no longer exists, confidently. Where to get those facts i
 
 For Path A (using the shipped library), `skills/optimize/flydsl_levers/flydsl_kernel_library.md` +
 `flydsl_knob_space.md` and `API_docs/prebuilt_kernels_guide.md` carry the entry points and knob tables the
-per-operator `flydsl.md` cards duplicated. For Path B (authoring), the
-`flydsl_authoring_method.md` / `flydsl_gemm_authoring.md` pair is the structure-first path.
+per-operator `flydsl.md` cards duplicated. For Path B (authoring), `flydsl_authoring_method.md` is the
+structure-first path, and `skills/gemm/` is its dense-GEMM package.
 
 **Coverage note:** none of the operators this folder used to cover (`gemm_epilogue_fused`,
 `layout_shuffle`, `linear_attention_gated_delta`, `reduction`, `splitk_streamk_gemm`, the GEMM and MoE

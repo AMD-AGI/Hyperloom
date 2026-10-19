@@ -23,7 +23,7 @@ just find the best member of a bad family.
 ## Route here when
 Optimizing an authored FlyDSL kernel and the bottleneck is still broad. If the discussion has already
 narrowed to `tile_m`/`tile_n`/`tile_k`, MFMA-loop ISA counts, or epilogue strategy on a clearly
-GEMM-like kernel, go to `flydsl_gemm_authoring.md`.
+GEMM-like kernel, go to `../../gemm/INDEX.md`.
 
 ## Step 1 — read before you optimize
 
@@ -224,7 +224,7 @@ codegen-affecting refactor. When varying `Constexpr` values across recompiles, p
 - Autotune: `flydsl.autotune.autotune`, `Config`, `do_bench`
 
 ## Related
-`flydsl_gemm_authoring.md` (GEMM-specific follow-on) ·
+`../../gemm/INDEX.md` (dense-GEMM package) ·
 `../../../API_docs/flydsl-tile-programming.md` (first-time authoring) ·
 `../../bottleneck/debug-flydsl-kernel.md` (correctness bugs) ·
 `hardware/mi350_lds.md` · `hardware/mi350_execution.md`

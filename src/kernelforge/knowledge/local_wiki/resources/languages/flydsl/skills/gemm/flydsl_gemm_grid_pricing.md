@@ -8,6 +8,9 @@ regimes: [small-M, ragged-last-round, large-K, padded-K]
 updated: 2026-10-19
 sources:
   - ROCm/FlyDSL@dd8373349:kernels/gemm/gemm_a16w16_gfx950.py:71
+  - AMD-AGI/Primus-Turbo@7615a5a2:primus_turbo/flydsl/gemm/gemm_mxfp4_kernel.py
+  - AMD-AGI/Primus-Turbo@7615a5a2:primus_turbo/flydsl/gemm/gemm_mxfp8_kernel.py
+  - AMD-AGI/Primus-Turbo@7615a5a2:primus_turbo/flydsl/gemm/gemm_fp8_kernel.py
 ---
 
 # Pricing a FlyDSL GEMM's grid and tile
@@ -25,9 +28,9 @@ sources:
 - You are considering split-K, stream-K, a tail/boundary body, or a K-padding change.
 - You are about to build a structural change and want its ceiling first.
 
-**Somewhere else if:** the loop structure is the question → `flydsl_gemm_authoring.md`; wave placement,
+**Somewhere else if:** the loop structure is the question → `flydsl_gemm_mainloop.md`; wave placement,
 XCD order, scheduling hints or the epilogue → `flydsl_gemm_schedule_and_locality.md`; the arguments of a
-shipped kernel → `flydsl_knob_space.md`.
+shipped kernel → `../optimize/flydsl_levers/flydsl_knob_space.md`.
 
 ## 1. Count workgroups and dispatch rounds — before any profile
 
@@ -39,7 +42,7 @@ last_round = tiles - (rounds - 1) * slots
 eff        = tiles / (rounds * slots)             # fraction of CU slots busy over the launch
 ```
 
-`wg_per_cu` comes from the occupancy arithmetic in `../../../../../hardware/mi350_execution.md`; a
+`wg_per_cu` comes from the occupancy arithmetic in `../../../../hardware/mi350_execution.md`; a
 register-heavy GEMM is usually 1, which makes `slots = 256`.
 
 How to read it:
@@ -61,7 +64,7 @@ idle fraction (last round 144/256 → +16%, 128/256 → +4–6%).
 while a split-K library kernel ran ~32 µs at M=8. The grid alone explains it — read the launched grid
 from a trace before reading any counter.
 
-`../../../../../common_methodology/optimization/lever_grid_sizing.md`'s "≥1024 workgroups and a
+`../../../../common_methodology/optimization/lever_grid_sizing.md`'s "≥1024 workgroups and a
 multiple of 8" is not sufficient: 1152 tiles at one
 workgroup per CU is 4.5 rounds with the last round half idle.
 
@@ -82,6 +85,23 @@ time it recovers, no split wins.
 *(field)* M=4096, N=2880, K=32768 on 256×256 tiles (192 tiles, one round): ideal-occupancy time saves
 27.9 µs, an `s=4` bf16 reduce costs ~42 µs ⇒ `s=1` is correct; the autotuner that picked it was right.
 
+**How Primus-Turbo implements it** (main `7615a5a2`, files under `primus_turbo/flydsl/gemm/`):
+- The gate above is Turbo's MXFP4 gate. `_mxfp4_wave_eff = tiles / (ncu · ceil(tiles/ncu))`; no split
+  when `eff > 0.95` or `K < 2048`; a split must raise `eff` by more than 0.05; the race gets `s = 1`
+  plus the two best splits (`_ksplit_candidates`, `gemm_mxfp4_kernel.py:3488-3512`).
+- **Reduce on the host with pairwise `torch.add(out=)`.** It "runs at the pure write floor where
+  `sum(dim=0)` reaches half of it, and the reduce is a sixth of a split launch -- the fold's form decides
+  whether a split pays at all" (`_fold_mxfp4_partials`, `gemm_mxfp4_kernel.py:3540-3546`).
+- **A bandwidth reduce beats an atomic-fused one** here, "since same-address HBM atomics serialise"
+  (`gemm_mxfp4_kernel.py:4536-4538`). Atomic split-K is also not bitwise reproducible.
+- **MXFP8 splits only the tail round.** `k_split = NCU / tail` when the tail divides the CU count, with
+  at least 16 K iterations per slice; head and tail must both be whole rounds (`_mx_ksplit`,
+  `gemm_mxfp8_kernel.py:654-672`). "A uniform split netted out at zero" (commit `d522ee0ae`).
+- **Dense fp8 TN splits one window.** Only the last partial round's `rem` tiles are sliced s ways
+  (s ∈ {2, 3, 4}), choosing the shortest s that keeps the window inside one round (`_dense_tn_split`,
+  `gemm_fp8_kernel.py:1857-1872`). At s=2 the two slices hand off through a device-scope flag inside the
+  GEMM, so no reduce kernel is launched (`_tn4_handoff_wait`, `gemm_fp8_kernel.py:1325`).
+
 Refinements, in the order they usually pay:
 - **Tail split.** Split only the tiles of the ragged last round. Makespan matches a uniform split, but
   partial bytes cover only the tail. If the whole-wave part and the tail are two launches on one stream
@@ -89,7 +109,7 @@ Refinements, in the order they usually pay:
   moved (e.g. 3.5 rounds → 3 + 1 = 4).
 - **Stream-K** when you want the idle slots without a full reduce: only boundary tiles need a fixup.
 - The split must cut K into whole K-blocks the kernel accepts; shipped kernels assert their own
-  constraints (`flydsl_knob_space.md` covers aiter's `flydsl_hgemm`).
+  constraints (`../optimize/flydsl_levers/flydsl_knob_space.md` covers aiter's `flydsl_hgemm`).
 - If the scoring harness rejects GPU work from kernels you did not write, the reduce has to be your own
   kernel in the same language, not a framework op.
 
@@ -130,7 +150,7 @@ another term dominated there. The ratio tells you where to look, not what will w
 
 ## 4. Occupancy moves in workgroup-sized steps
 
-The register tier gives waves per SIMD (`../../../../../hardware/mi350_execution.md`). A workgroup's waves
+The register tier gives waves per SIMD (`../../../../hardware/mi350_execution.md`). A workgroup's waves
 must all be resident on one CU, so the reachable occupancy is quantized by workgroup size:
 
 ```
@@ -214,6 +234,38 @@ whole waves pinned to an empty region, and re-tiling the waves (e.g. 2×2 → 4�
 the same body rotated 90° serves the M tail. Write the gate as geometry (`m_tail <= rows_per_wave`), not
 as shape constants.
 
+## 9. Pricing an alternative tile shape
+
+A second tile shape trades arithmetic intensity for CU fill. Price both sides before adding it to the race.
+- **Operand bytes per output cell are `(bm + bn) / (bm · bn)`.** Turbo's dense fp8 whole loop lets its
+  narrower 256×192 tile join the race only when its gain in resident workgroups exceeds its loss in
+  intensity: `coverage(rect) / coverage(square) > intensity(rect) / intensity(square)` (`_nt4_geoms`,
+  `gemm_fp8_kernel.py:2102-2119`).
+- **A narrow tile only wins where it removes a whole ragged round.** Turbo's MXFP4 picks BLOCK_N=192 over
+  256 only when that changes the round count, pricing a k-block at the pessimistic feed ratio
+  `(BM + BN) / (2·BM)` plus the C store the narrow tile can no longer fold (`_mxfp4_pick_block_n`,
+  `gemm_mxfp4_kernel.py:3427-3445`). The store penalty was solved from one measured shape; re-derive it
+  for your kernel.
+- **Dead quadrants still issue their MFMAs.** The descriptor bound drops only their loads and stores. An
+  exact tile (e.g. 192 rows when M divides by 192) therefore shortens every workgroup's own path. Turbo
+  adds exact tiles only when they fit in one CU pass and cut the per-workgroup MFMAs per K block
+  (`gemm_fp8_kernel.py:2066-2070, 2134-2144`).
+- **Work freed on only some workgroups returns less than it looks.** On a power-capped part, idle CUs
+  come back as clock for the others, not as wall time (`_nt4_wg_path` docstring, `gemm_fp8_kernel.py:2134`).
+- **The race decides, not the plan.** An analytic ranking only orders the builds.
+
+## 10. Persistent tiles per workgroup
+
+- With `tiles_per_wg = ceil(tiles / ncu)`, a tile count between two whole CU passes rounds the resident
+  workgroup count down, and the rest of the device never gets a wave. "This, not the tile count, is the
+  signal" (`_nt4_resident`, `gemm_fp8_kernel.py:2089-2095`).
+- Leftover work ids may repeat the last tile. That is harmless for an overwriting store and wrong for
+  beta=1, which needs one tile per workgroup (`flydsl_gemm_epilogue.md` §7).
+- Turbo's MXFP4 kernel walks up to 4 tiles per workgroup, and only when `tiles % (ncu · tpw) == 0` and
+  K/256 ≤ 56; above that, the per-tile launch is already amortized (`_MXFP4_TPW_*`,
+  `gemm_mxfp4_kernel.py:3467-3485`). Stride the persistent loop by the grid
+  (`flydsl_gemm_schedule_and_locality.md` §2).
+
 ## Verify
 - The tile/round table for every scored shape exists before the first build.
 - A split or tile change is judged per shape, with `s = 1` / the old tile still in the race.
@@ -221,7 +273,8 @@ as shape constants.
 - The win does not come from one shape while its neighbours regress.
 
 ## Related
-`flydsl_gemm_authoring.md` (order of operations) · `flydsl_gemm_schedule_and_locality.md` (wave
-placement, XCD order, scheduling, epilogue) · `flydsl_knob_space.md` (shipped kernels' split-K and tile
-arguments) · `../../../../../common_methodology/optimization/lever_grid_sizing.md` ·
-`../../../../../hardware/mi350_execution.md` · `../../../../../hardware/mi350_matrix_core.md`
+`flydsl_gemm_workflow.md` (order of operations) · `flydsl_gemm_schedule_and_locality.md` (wave
+placement, XCD order, scheduling) · `flydsl_gemm_autotune.md` (racing the candidates) ·
+`../optimize/flydsl_levers/flydsl_knob_space.md` (shipped kernels' split-K and tile arguments) ·
+`../../../../common_methodology/optimization/lever_grid_sizing.md` ·
+`../../../../hardware/mi350_execution.md` · `../../../../hardware/mi350_matrix_core.md`
