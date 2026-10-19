@@ -1654,28 +1654,6 @@ async def test_promote_baseline_revalidation_finalizes_when_accuracy_meets_floor
 
 
 @pytest.mark.asyncio
-async def test_promote_baseline_revalidation_promotes_without_accuracy_when_eval_disabled(session_dir):
-    """When the session has eval disabled, a revalidation baseline promotes on throughput alone."""
-    c = Coordinator(session_dir, backends=_silent_backends())
-    _mute_action_scoring(c)
-    try:
-        c.shared_state.eval_disabled = True
-        c.shared_state.enablement.validation_pending = True
-        c.shared_state.enablement.accuracy_floor = 0.3
-        c.shared_state.enablement.revalidation_task_id = "t-reval-noeval"
-        await c.writeback.promote_to_shared_state(
-            "baseline",
-            {"output_throughput": 900.0, "completed_requests": 8},
-            task=_mk_task("baseline", "t-reval-noeval"),
-        )
-        assert c.shared_state.baseline_tput == 900.0
-        assert c.shared_state.enablement.succeeded is True
-        assert c.shared_state.enablement.validation_pending is False
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
 async def test_promote_baseline_unrelated_baseline_does_not_consume_pending(session_dir):
     """A baseline that is NOT the tracked revalidation task must not consume pending state."""
     c = Coordinator(session_dir, backends=_silent_backends())
@@ -2222,7 +2200,6 @@ def test_fingerprint_keys_covers_recovery_surface():
         "model_path",
         "gpu_type",
         "config_path",
-        "disable_run_eval",
     }
     assert set(_BASELINE_FINGERPRINT_KEYS) == expected
 
@@ -2763,3 +2740,16 @@ async def test_target_reached_close_still_runs_the_post_opt_roofline(session_dir
         assert ran == ["False"], f"post-opt roofline saw closing_phase={ran}"
     finally:
         await c.stop()
+
+
+def test_a_failing_proposal_outcome_record_propagates(monkeypatch) -> None:
+    from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+    from hyperloom.orchestrator.loop import proposals
+
+    def _boom(**_kwargs) -> None:
+        raise RuntimeError("proposal outcome bug")
+
+    monkeypatch.setattr(phase_event, "record_proposal_outcome", _boom)
+
+    with pytest.raises(RuntimeError, match="proposal outcome bug"):
+        proposals._record_proposal_materialized("m-1", "t-1")

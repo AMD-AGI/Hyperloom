@@ -25,7 +25,7 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
 # Marker text identifying each phase-scoped prompt module.
 KERNEL_REQUEST_REF = "## 6. KERNEL-OPT REQUEST REFERENCE"
 IDEA_GENERATION = "### IDEA GENERATION"
-BASELINE_FINGERPRINT = "eight params fields"  # now in the reference doc, not in the prompt
+BASELINE_FINGERPRINT = "seven params fields"  # now in the reference doc, not in the prompt
 SPECIALIST_DIALS = "### One specialist, three dials"
 SPECIALIST_WATCH = "### Watching a running specialist"
 SPECIALIST_DOMAIN = "### Choosing specialist domain"
