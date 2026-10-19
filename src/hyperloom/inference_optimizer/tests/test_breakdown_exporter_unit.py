@@ -494,10 +494,12 @@ def test_a_resumed_session_is_not_reported_as_stopped_by_the_previous_legs_close
         state,
         to_phase="CLOSE",
         reason="time_exhausted",
-        ts=(now - timedelta(days=6)).isoformat(timespec="seconds"),
+        at=machine_state.PhaseClock(ts=(now - timedelta(days=6)).isoformat(timespec="seconds")),
     )
     state.start_ts = (now - timedelta(minutes=30)).isoformat(timespec="microseconds")
-    machine_state.record_phase_transition(state, to_phase="PRELUDE", reason="resumed", ts=state.start_ts)
+    machine_state.record_phase_transition(
+        state, to_phase="PRELUDE", reason="resumed", at=machine_state.PhaseClock(ts=state.start_ts)
+    )
     state.save(tmp_path)
 
     bd = ex.build(tmp_path)

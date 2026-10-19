@@ -82,6 +82,14 @@ class DelegateRequest(NamedTuple):
     params: dict[str, Any]
 
 
+def _is_specialist_wave(action_name: str, params: Mapping[str, Any]) -> bool:
+    """A specialist delegate carrying ``params.tasks`` fans out into one freeform specialist task per entry.
+
+    Each goes out through the normal SpecialistRunner + TaskRegistry + lease + reap path.
+    """
+    return action_name == "specialist" and isinstance(params.get("tasks"), list) and bool(params["tasks"])
+
+
 def _relayed_specialist_citations(state: Any) -> dict[str, list[dict[str, str]]]:
     """This cycle's specialist proposal citations, keyed by the change each proposal asks for."""
     from ..actions.executors._proposal_identity import content_fingerprint
@@ -934,6 +942,35 @@ class IntentRouter(CoordinatorCollaborator):
         )
         return None
 
+    async def _explore_grid_covered(
+        self, action_name: str, source: str, intent: Intent, params: dict[str, Any], idempotency_key: str
+    ) -> bool:
+        """Refuse an explore grid that adds nothing new, recording the denial; report whether it was refused.
+
+        A task already queued or running under ``idempotency_key`` is not counted against the grid: re-sending the key
+        is answered as a duplicate by the enqueue below, not as coverage.
+        """
+        if action_name != "explore":
+            return False
+        from ..actions.executors.explore import framework_lever_grid
+        from ..actions.executors.measured_variants import explore_grid_already_covered
+
+        if framework_lever_grid(self.shared_state):
+            # The executor adds its pending rewrite levers to this grid, so the grid is not all there is to measure.
+            return False
+
+        retry_prefix = f"{idempotency_key}-retry"
+        active = [
+            task
+            for task in (*await self.tasks.queued(), *await self.tasks.running())
+            if task.idempotency_key != idempotency_key and not task.idempotency_key.startswith(retry_prefix)
+        ]
+        covered = explore_grid_already_covered(params, active, self.shared_state.explore_search)
+        if covered is None:
+            return False
+        await self.record_policy_denied(source, intent, covered, action_name="explore")
+        return True
+
     async def handle_delegate(self, source: str, intent: Intent) -> None:
         """Validate and enqueue a delegated action as a TaskRegistry task."""
         action_name = intent.payload["action_name"]
@@ -986,16 +1023,7 @@ class IntentRouter(CoordinatorCollaborator):
         # idempotency_key is top-level per schema; strip a nested compat alias.
         nested_idempotency_key = params.pop("idempotency_key", None)
         self._seed_grid_params(request)
-        # Wave sugar: a specialist delegate carrying params.tasks=[...] fans out into N standard freeform specialist
-        # tasks, each dispatched through the normal SpecialistRunner + TaskRegistry + lease + reap path.
-        if (
-            action_name == "specialist"
-            and isinstance(
-                params.get("tasks"),
-                list,
-            )
-            and params["tasks"]
-        ):
+        if _is_specialist_wave(action_name, params):
             await self._coord.specialist_dispatch.fan_out_specialist_wave(source, intent, params)
             return
         if not await self._prepare_specialist_dispatch(request, nested_idempotency_key):
@@ -1008,6 +1036,9 @@ class IntentRouter(CoordinatorCollaborator):
                 usedforsecurity=False,
             ).hexdigest()[:10]
             raw_key = f"{source}:{action_name}:t{int(self.shared_state.tick or 0)}:{content_fp}"
+        idempotency_key = str(raw_key)
+        if await self._explore_grid_covered(action_name, source, intent, params, idempotency_key):
+            return
         # The grid's attempts join its proposal row through this id, as an approved proposal's do. Added after the
         # key is derived, so an identical re-emit still lands on the task already running.
         proposal_id = uuid.uuid4().hex if action_name == "explore" else ""

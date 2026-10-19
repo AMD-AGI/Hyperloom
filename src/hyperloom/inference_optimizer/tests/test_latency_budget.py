@@ -174,7 +174,11 @@ class TestLaneResultShapes:
 
         monkeypatch.setattr(rebench, "run_grid", _fake_run_grid)
         result = asyncio.run(
-            rebench.run_specialist_rebench(config_path=None, output_dir=tmp_path, port=8000),
+            rebench.run_specialist_rebench(
+                output_dir=tmp_path,
+                benchmark=rebench.RebenchBenchmark(config_path=None),
+                server=rebench.RebenchServer(port=8000),
+            ),
         )
         assert result["e2el_mean_ms"] == 1211.0
 

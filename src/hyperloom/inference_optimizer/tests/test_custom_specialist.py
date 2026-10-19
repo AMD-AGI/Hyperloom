@@ -184,7 +184,7 @@ async def test_runner_prepare_reads_the_custom_definition_from_shared_state(tmp_
 
 
 def _coordinator(session_dir: Path, state: SharedState):
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
     from hyperloom.orchestrator.roles.mock_backend import MockBackend, MockTurn, ScriptedPlan
 
     state.save(session_dir)
@@ -193,7 +193,7 @@ def _coordinator(session_dir: Path, state: SharedState):
         session_dir=session_dir,
         backends={name: MockBackend(idle) for name in ("orchestration", "critic")},
         role_registry=default_role_registry(),
-        knowledge_plane=None,
+        advisory=AdvisoryServices(knowledge_plane=None),
     )
     coord.shared_state.phase = "FRAMEWORK_AGENT"
     return coord
