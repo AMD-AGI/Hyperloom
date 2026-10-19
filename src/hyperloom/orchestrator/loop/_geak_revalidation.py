@@ -723,6 +723,23 @@ class GeakRevalidation(CoordinatorCollaborator):
             },
         )
 
+    def _close_failed_geak_revalidation(self, result_payload: Mapping[str, Any]) -> None:
+        """Settle a GEAK revalidation whose rebench task came back unpromotable."""
+        geak_result = {
+            **(self.shared_state.geak_result or {}),
+            "revalidation_status": "failed",
+            "revalidation_error_class": str(result_payload.get("error_class") or ""),
+            "revalidation_error": str(result_payload.get("error") or result_payload.get("reason") or "")[:500],
+        }
+        self.shared_state.geak_result = geak_result
+        self._record_geak_rebench_conclusion(
+            final_status="failed",
+            final_error_class=geak_result["revalidation_error_class"],
+            final_error=geak_result["revalidation_error"],
+        )
+        # The settled verdict and its diagnostics live on ``geak_result``; ``geak_pending`` only holds live work.
+        self.shared_state.geak_pending = {}
+
     def _record_geak_rebench_conclusion(
         self,
         *,
