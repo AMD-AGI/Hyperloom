@@ -171,6 +171,12 @@ def test_lookup_skips_absent_and_not_available_keys() -> None:
     assert lookup("N/A", "edge") is None
 
 
+def test_lookup_skips_a_non_string_key_rather_than_raising() -> None:
+    """An unhashable name is skipped: subscripting with one would raise TypeError, not simply fail to match."""
+    assert lookup({"edge": 45}, {"unhashable": 1}, "edge") == 45
+    assert lookup({"edge": 45}, ["unhashable"]) is None
+
+
 # -- gpu_vram_usage ---------------------------------------------------------
 
 
