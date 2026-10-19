@@ -413,8 +413,8 @@ duplicated-lines src/hyperloom/inference_optimizer/tests/test_specialist_subproc
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_specialist_subprocess_helpers_coverage_unit.py 171
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_sweep_phase_auto.py 66
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_warm_replay.py 34
-duplicated-lines src/hyperloom/inference_optimizer/tests/test_workload_envs.py 399
-duplicated-lines src/hyperloom/inference_optimizer/tests/test_workload_envs_branches_unit.py 400
+duplicated-lines src/hyperloom/inference_optimizer/tests/test_workload_envs.py 394
+duplicated-lines src/hyperloom/inference_optimizer/tests/test_workload_envs_branches_unit.py 395
 duplicated-lines src/hyperloom/orchestrator/actions/executors/tests/test_baseline_eval_fallback.py 98
 duplicated-lines src/hyperloom/orchestrator/actions/executors/tests/test_integrate_patch_artifacts_unit.py 40
 duplicated-lines src/hyperloom/orchestrator/actions/executors/tests/test_integrate_patch_coverage_unit.py 80
