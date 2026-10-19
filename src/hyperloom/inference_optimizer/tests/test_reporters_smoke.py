@@ -62,6 +62,8 @@ def _framework_event(outcome: str = "KEEP") -> dict[str, Any]:
                     "round_id": "r1",
                     "variant_name": "vllm_kv_fp8",
                     "outcome": outcome,
+                    "benched": True,
+                    "adopted": outcome == "KEEP",
                     "measurement": {"after_tput": 2447.5, "gain_pct": 10.99},
                 }
             ]

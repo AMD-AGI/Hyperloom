@@ -705,16 +705,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "quick-win parameter path. Default: kernel enabled.",
     )
     opt.add_argument(
-        "--no-eval",
-        action="store_true",
-        default=False,
-        help="Skip the accuracy eval everywhere. The baseline anchors on "
-        "throughput alone instead of halting on a missing accuracy "
-        "reference, and every candidate is graded on throughput only. "
-        "Useful for CI/CD tuning runs that care about performance and not "
-        "accuracy; the run is not accuracy-validated. Default: eval enabled.",
-    )
-    opt.add_argument(
         "--launch-info-file",
         type=str,
         default=None,
