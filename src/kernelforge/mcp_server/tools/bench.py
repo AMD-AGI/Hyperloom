@@ -154,6 +154,65 @@ def parse_case_timings(text: str) -> tuple[dict[str, float], list[str], set[str]
     return case_times, unscored, duplicates
 
 
+def _measurement_failure(measurement: Any, index: int, measurements: list[dict]) -> dict | None:
+    """The aggregate's failure for a run that is no result, an exploratory sweep or a failed run, else None."""
+    if not isinstance(measurement, dict):
+        return {
+            "success": False,
+            "message": (f"MEASUREMENT {index}/{len(measurements)} DID NOT RETURN A RESULT"),
+            "measurements": measurements,
+        }
+    if measurement.get("kind") == EXPLORATORY_KIND:
+        return {
+            "success": False,
+            "message": (f"MEASUREMENT {index}/{len(measurements)} IS AN EXPLORATORY SWEEP, WHICH CANNOT BE SCORED"),
+            "measurements": measurements,
+        }
+    if not measurement.get("success"):
+        return {
+            "success": False,
+            "message": (
+                f"MEASUREMENT {index}/{len(measurements)} FAILED: {measurement.get('message', 'benchmark failed')}"
+            ),
+            "output": measurement.get("output", ""),
+            "measurements": measurements,
+        }
+    return None
+
+
+def _append_case_samples(case_samples: dict[str, list[float]], case_times: dict) -> None:
+    """Add one run's case timings to their samples; a timing that is not a finite positive number raises."""
+    for case_id, value in case_times.items():
+        numeric = float(value)
+        if not math.isfinite(numeric) or numeric <= 0:
+            raise ValueError(case_id)
+        case_samples[case_id].append(numeric)
+
+
+def _median_aggregate(
+    measurements: list[dict],
+    case_samples: dict[str, list[float]],
+    wall_samples: list[float],
+    unscored: set[str] | None,
+) -> dict:
+    """The aggregate of runs that all passed: per-case medians, and the median wall time if every run had one."""
+    case_times = {case_id: statistics.median(values) for case_id, values in case_samples.items()}
+    # Reported, never scored, so the last measurement stands rather than a median that would have to be taken field by
+    # field.
+    case_bandwidth: dict[str, dict[str, float | int]] = dict(measurements[-1].get("case_bandwidth") or {})
+    representative_wall = statistics.median(wall_samples) if len(wall_samples) == len(measurements) else None
+    return {
+        "success": True,
+        "median_ms": representative_wall,
+        "case_times": case_times,
+        "unscored_cases": sorted(unscored or set()),
+        "case_bandwidth": case_bandwidth,
+        "measurement_count": len(measurements),
+        "measurements": measurements,
+        "message": (f"BENCH: {len(measurements)} independent measurements, per-case median"),
+    }
+
+
 def aggregate_benchmark_measurements(measurements: list[dict]) -> dict:
     """Aggregate complete independent benchmark runs by per-case median."""
     if not measurements:
@@ -165,27 +224,9 @@ def aggregate_benchmark_measurements(measurements: list[dict]) -> dict:
     wall_samples: list[float] = []
 
     for index, measurement in enumerate(measurements, start=1):
-        if not isinstance(measurement, dict):
-            return {
-                "success": False,
-                "message": (f"MEASUREMENT {index}/{len(measurements)} DID NOT RETURN A RESULT"),
-                "measurements": measurements,
-            }
-        if measurement.get("kind") == EXPLORATORY_KIND:
-            return {
-                "success": False,
-                "message": (f"MEASUREMENT {index}/{len(measurements)} IS AN EXPLORATORY SWEEP, WHICH CANNOT BE SCORED"),
-                "measurements": measurements,
-            }
-        if not measurement.get("success"):
-            return {
-                "success": False,
-                "message": (
-                    f"MEASUREMENT {index}/{len(measurements)} FAILED: {measurement.get('message', 'benchmark failed')}"
-                ),
-                "output": measurement.get("output", ""),
-                "measurements": measurements,
-            }
+        failure = _measurement_failure(measurement, index, measurements)
+        if failure is not None:
+            return failure
 
         case_times = dict(measurement.get("case_times") or {})
         case_ids = set(case_times)
@@ -220,11 +261,7 @@ def aggregate_benchmark_measurements(measurements: list[dict]) -> dict:
             }
 
         try:
-            for case_id, value in case_times.items():
-                numeric = float(value)
-                if not math.isfinite(numeric) or numeric <= 0:
-                    raise ValueError(case_id)
-                case_samples[case_id].append(numeric)
+            _append_case_samples(case_samples, case_times)
         except (TypeError, ValueError) as error:
             return {
                 "success": False,
@@ -236,21 +273,7 @@ def aggregate_benchmark_measurements(measurements: list[dict]) -> dict:
         if isinstance(wall, (int, float)) and math.isfinite(float(wall)):
             wall_samples.append(float(wall))
 
-    case_times = {case_id: statistics.median(values) for case_id, values in case_samples.items()}
-    # Reported, never scored, so the last measurement stands rather than a median that would have to be taken field by
-    # field.
-    case_bandwidth: dict[str, dict[str, float | int]] = dict(measurements[-1].get("case_bandwidth") or {})
-    representative_wall = statistics.median(wall_samples) if len(wall_samples) == len(measurements) else None
-    return {
-        "success": True,
-        "median_ms": representative_wall,
-        "case_times": case_times,
-        "unscored_cases": sorted(expected_unscored or set()),
-        "case_bandwidth": case_bandwidth,
-        "measurement_count": len(measurements),
-        "measurements": measurements,
-        "message": (f"BENCH: {len(measurements)} independent measurements, per-case median"),
-    }
+    return _median_aggregate(measurements, case_samples, wall_samples, expected_unscored)
 
 
 async def measure_wallclock(run: BenchRun, *, measurements: int, timeout_sec: int = 300) -> dict:
@@ -511,6 +534,147 @@ async def _sweep_run(cmd: list[str], env: dict[str, str], timeout_sec: int) -> t
     return proc.returncode, output
 
 
+@dataclass(frozen=True)
+class _SweepPoint:
+    """One point as the driver ran it: the case and constants asked for, its output, and how the case flag fared."""
+
+    case: str
+    exported: dict[str, str]
+    described: str
+    output: str
+    rejected_before: bool
+    flag_exit: int | None
+
+    def failure(self, message: str, **extra: Any) -> dict:
+        """A sweep failure naming this point's case and constants, with the tail of what the driver printed."""
+        return _sweep_failure(message, case_id=self.case, constants=self.exported, **extra, output=self.output[-1500:])
+
+
+@dataclass(frozen=True)
+class _OverrideEcho:
+    """What the driver's ``sweep_const`` lines say about the constants one point exported."""
+
+    unread: list[str]
+    consumption: dict[str, str]
+    diverged: list[str]
+
+
+def _override_echo(exported: dict[str, str], output: str) -> _OverrideEcho:
+    """Read which exported constants the driver echoed back, and which it read at another value."""
+    echoed = dict(_SWEEP_ECHO_RE.findall(output))
+    unread = sorted(name for name in exported if name not in echoed)
+    consumption = {name: ("consumed" if name in echoed else "unread") for name in exported}
+    diverged = sorted(
+        f"{name}: asked {exported[name]}, read {echoed[name]}"
+        for name in exported
+        if name in echoed and echoed[name] != exported[name]
+    )
+    return _OverrideEcho(unread, consumption, diverged)
+
+
+def _override_failure(point: _SweepPoint, echo: _OverrideEcho, prefix_constants: bool) -> dict | None:
+    """The failure for a point whose driver left a prefixed constant unread or read one at another value, else None."""
+    if echo.unread and prefix_constants:
+        return point.failure(
+            f"{point.described}: NOTHING READ {', '.join(echo.unread)} -- no "
+            f"'{SWEEP_ECHO}: NAME VALUE' line came back, so this point ran the "
+            f"default configuration and is not a measurement of the constant",
+            override_consumption=echo.consumption,
+        )
+    if echo.diverged:
+        return point.failure(
+            f"{point.described}: DRIVER READ A DIFFERENT CONFIGURATION ({'; '.join(echo.diverged)})",
+            override_consumption=echo.consumption,
+        )
+    return None
+
+
+def _case_timing_failure(point: _SweepPoint, seen: dict[str, float], duplicates: set[str]) -> dict | None:
+    """The failure for a point whose case came back with no time, more than one or an unusable one, else None."""
+    case = point.case
+    if case not in seen:
+        # The retry ran the driver's WHOLE suite, so what came back is the set of cases this driver knows.
+        misnamed = (
+            f" -- {SWEEP_CASE_FLAG} was rejected (exit {point.flag_exit}) for a case "
+            "this driver does not declare, which is the case id and not the flag"
+            if point.flag_exit is not None
+            else ""
+        )
+        return point.failure(
+            f"{point.described}: DRIVER REPORTED NO TIMING FOR CASE {case!r} "
+            f"(reported: {sorted(seen) or 'nothing'}){misnamed}"
+        )
+    if case in duplicates:
+        return point.failure(f"{point.described}: DRIVER REPORTED CASE {case!r} MORE THAN ONCE")
+    case_ms = seen[case]
+    if not math.isfinite(case_ms) or case_ms <= 0.0:
+        return point.failure(f"{point.described}: DRIVER REPORTED AN UNUSABLE TIME FOR CASE {case!r}: {case_ms}")
+    return None
+
+
+def _sweep_result(point: _SweepPoint, bench: BenchRun, seen: dict[str, float], echo: _OverrideEcho) -> dict:
+    """The exploratory result of a point whose case came back with one usable time."""
+    case = point.case
+    case_ms = seen[case]
+    # Two different facts, and only the first is safe to infer from the output: ``narrowed`` says nothing but this
+    # case came back, which is what makes the wall_ms lines this case's spread.
+    selected_by_flag = not point.rejected_before and point.flag_exit is None
+    narrowed = set(seen) == {case}
+    selection = SELECTION_NARROWED if (selected_by_flag and narrowed) else SELECTION_WHOLE_SUITE
+    result = {
+        "success": True,
+        "kind": EXPLORATORY_KIND,
+        "case_id": case,
+        "case_ms": round(case_ms, 6),
+        "constants": point.exported,
+        "narrowed": narrowed,
+        "case_selection": selection,
+        "override_consumption": echo.consumption,
+        "warmup_iters": bench.warmup_iters,
+        "bench_iters": bench.bench_iters,
+    }
+    samples = [float(m) for m in re.findall(r"wall_ms:\s*([\d.]+)", point.output)]
+    if narrowed and samples:
+        result["n_samples"] = len(samples)
+        result["wall_min_ms"] = round(min(samples), 6)
+        result["wall_max_ms"] = round(max(samples), 6)
+    notes = []
+    if selection == SELECTION_WHOLE_SUITE:
+        how = (
+            f"rejected {SWEEP_CASE_FLAG} (exit {point.flag_exit}), so it was re-run without it and"
+            if point.flag_exit is not None
+            else (
+                f"is known to reject {SWEEP_CASE_FLAG}, so it was not asked again and"
+                if point.rejected_before
+                else f"ignored {SWEEP_CASE_FLAG} and"
+            )
+        )
+        notes.append(f"driver {how} ran its whole suite: {', '.join(sorted(seen))}")
+    if echo.unread:
+        notes.append(
+            f"UNCONFIRMED: no '{SWEEP_ECHO}: NAME VALUE' line came back for "
+            f"{', '.join(echo.unread)}, so nothing proves the source read the "
+            "override; this number means something only against a no-override "
+            "reference measured in the same round"
+        )
+    if "wall_min_ms" not in result:
+        notes.append(
+            # Lines came back, but they timed every case the driver ran, so their spread is not this case's and "none
+            # came back" would be a lie about what the driver printed.
+            "the wall_ms lines time the driver's whole suite rather than this "
+            "case, so this point has no measured spread of its own and a small "
+            "difference against it means nothing"
+            if samples
+            else "no per-iteration wall_ms lines came back: this point has no "
+            "measured spread, so a small difference against it means nothing"
+        )
+    suffix = "".join(f" [{note}]" for note in notes)
+    result["message"] = (
+        f"SWEEP (EXPLORATORY, NOT AN ACCEPTANCE RESULT): {case} = {case_ms:.6f} ms at {point.described}{suffix}"
+    )
+    return result
+
+
 async def sweep_case(
     *,
     driver_script: str,
@@ -531,7 +695,8 @@ async def sweep_case(
         return _sweep_failure(str(error).upper())
     described = ", ".join(f"{k}={v}" for k, v in exported.items()) or "no overrides"
 
-    base_cmd = bench_command(BenchRun(driver_script, warmup_iters=warmup_iters, bench_iters=bench_iters))
+    bench = BenchRun(driver_script, warmup_iters=warmup_iters, bench_iters=bench_iters)
+    base_cmd = bench_command(bench)
     memo_key = _case_flag_memo_key(base_cmd)
     rejected_before = _CASE_FLAG_REJECTED.get(memo_key, False)
     carried_flag = not rejected_before
@@ -550,145 +715,27 @@ async def sweep_case(
             case_id=case,
             constants=exported,
         )
+    point = _SweepPoint(case, exported, described, full_output, rejected_before, flag_exit)
     if returncode != 0:
         retried = f" (also exit {flag_exit} with {SWEEP_CASE_FLAG})" if flag_exit is not None else ""
-        return _sweep_failure(
+        return point.failure(
             f"{described}: CONFIGURATION DID NOT RUN (exit {returncode}){retried}",
-            case_id=case,
-            constants=exported,
             case_selection=SELECTION_REJECTED,
-            output=full_output[-1500:],
         )
 
-    echoed = dict(_SWEEP_ECHO_RE.findall(full_output))
-    unread = sorted(name for name in exported if name not in echoed)
-    consumption = {name: ("consumed" if name in echoed else "unread") for name in exported}
-    if unread and prefix_constants:
-        return _sweep_failure(
-            f"{described}: NOTHING READ {', '.join(unread)} -- no "
-            f"'{SWEEP_ECHO}: NAME VALUE' line came back, so this point ran the "
-            f"default configuration and is not a measurement of the constant",
-            case_id=case,
-            constants=exported,
-            override_consumption=consumption,
-            output=full_output[-1500:],
-        )
-    diverged = sorted(
-        f"{name}: asked {exported[name]}, read {echoed[name]}"
-        for name in exported
-        if name in echoed and echoed[name] != exported[name]
-    )
-    if diverged:
-        return _sweep_failure(
-            f"{described}: DRIVER READ A DIFFERENT CONFIGURATION ({'; '.join(diverged)})",
-            case_id=case,
-            constants=exported,
-            override_consumption=consumption,
-            output=full_output[-1500:],
-        )
-
-    seen: dict[str, float] = {}
-    duplicated = False
-    for cid, cms, _tag in _CASE_MS_RE.findall(full_output):
-        try:
-            value = float(cms)
-        except ValueError:
-            continue
-        duplicated = duplicated or (cid == case and cid in seen)
-        seen[cid] = value
-
-    if case not in seen:
-        # The retry ran the driver's WHOLE suite, so what came back is the set of cases this driver knows.
-        misnamed = (
-            f" -- {SWEEP_CASE_FLAG} was rejected (exit {flag_exit}) for a case "
-            "this driver does not declare, which is the case id and not the flag"
-            if flag_exit is not None
-            else ""
-        )
-        return _sweep_failure(
-            f"{described}: DRIVER REPORTED NO TIMING FOR CASE {case!r} "
-            f"(reported: {sorted(seen) or 'nothing'}){misnamed}",
-            case_id=case,
-            constants=exported,
-            output=full_output[-1500:],
-        )
+    echo = _override_echo(exported, full_output)
+    failure = _override_failure(point, echo, prefix_constants)
+    if failure is not None:
+        return failure
+    seen, _unscored, duplicates = parse_case_timings(full_output)
     # The requested case exists and the flagged invocation still failed, which leaves the flag itself as what the
     # driver would not take.
-    if flag_exit is not None:
+    if flag_exit is not None and case in seen:
         _CASE_FLAG_REJECTED[memo_key] = True
-    if duplicated:
-        return _sweep_failure(
-            f"{described}: DRIVER REPORTED CASE {case!r} MORE THAN ONCE",
-            case_id=case,
-            constants=exported,
-            output=full_output[-1500:],
-        )
-    case_ms = seen[case]
-    if not math.isfinite(case_ms) or case_ms <= 0.0:
-        return _sweep_failure(
-            f"{described}: DRIVER REPORTED AN UNUSABLE TIME FOR CASE {case!r}: {case_ms}",
-            case_id=case,
-            constants=exported,
-            output=full_output[-1500:],
-        )
-
-    # Two different facts, and only the first is safe to infer from the output: ``narrowed`` says nothing but this
-    # case came back, which is what makes the wall_ms lines this case's spread.
-    selected_by_flag = carried_flag and flag_exit is None
-    narrowed = set(seen) == {case}
-    selection = SELECTION_NARROWED if (selected_by_flag and narrowed) else SELECTION_WHOLE_SUITE
-    result = {
-        "success": True,
-        "kind": EXPLORATORY_KIND,
-        "case_id": case,
-        "case_ms": round(case_ms, 6),
-        "constants": exported,
-        "narrowed": narrowed,
-        "case_selection": selection,
-        "override_consumption": consumption,
-        "warmup_iters": warmup_iters,
-        "bench_iters": bench_iters,
-    }
-    samples = [float(m) for m in re.findall(r"wall_ms:\s*([\d.]+)", full_output)]
-    if narrowed and samples:
-        result["n_samples"] = len(samples)
-        result["wall_min_ms"] = round(min(samples), 6)
-        result["wall_max_ms"] = round(max(samples), 6)
-    notes = []
-    if selection == SELECTION_WHOLE_SUITE:
-        how = (
-            f"rejected {SWEEP_CASE_FLAG} (exit {flag_exit}), so it was re-run without it and"
-            if flag_exit is not None
-            else (
-                f"is known to reject {SWEEP_CASE_FLAG}, so it was not asked again and"
-                if rejected_before
-                else f"ignored {SWEEP_CASE_FLAG} and"
-            )
-        )
-        notes.append(f"driver {how} ran its whole suite: {', '.join(sorted(seen))}")
-    if unread:
-        notes.append(
-            f"UNCONFIRMED: no '{SWEEP_ECHO}: NAME VALUE' line came back for "
-            f"{', '.join(unread)}, so nothing proves the source read the "
-            "override; this number means something only against a no-override "
-            "reference measured in the same round"
-        )
-    if "wall_min_ms" not in result:
-        notes.append(
-            # Lines came back, but they timed every case the driver ran, so their spread is not this case's and "none
-            # came back" would be a lie about what the driver printed.
-            "the wall_ms lines time the driver's whole suite rather than this "
-            "case, so this point has no measured spread of its own and a small "
-            "difference against it means nothing"
-            if samples
-            else "no per-iteration wall_ms lines came back: this point has no "
-            "measured spread, so a small difference against it means nothing"
-        )
-    suffix = "".join(f" [{note}]" for note in notes)
-    result["message"] = (
-        f"SWEEP (EXPLORATORY, NOT AN ACCEPTANCE RESULT): {case} = {case_ms:.6f} ms at {described}{suffix}"
-    )
-    return result
+    failure = _case_timing_failure(point, seen, duplicates)
+    if failure is not None:
+        return failure
+    return _sweep_result(point, bench, seen, echo)
 
 
 def _sweep_cli(argv: list[str] | None = None) -> int:
