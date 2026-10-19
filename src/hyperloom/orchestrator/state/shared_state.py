@@ -884,11 +884,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             "benchmark_mode": str(getattr(self, "benchmark_mode", "") or "").strip().lower(),
             **_profile_workload.identity_fields(params, self),
             **_profile_workload.shape_fields(params, self),
-            "server_args": _profile_workload.normalized_server_args(params),
-            "extra_envs": _profile_workload.profile_env_map(params),
-            "remove_args": _profile_workload.normalized_control_list(params, "remove_args", "base_remove_args"),
-            "unset_envs": _profile_workload.normalized_control_list(params, "unset_envs", "base_unset_envs"),
-            "args_mode": _profile_workload.normalized_args_mode(params),
+            **_profile_workload.runtime_fields(params),
         }
         serving_config = _profile_workload.serving_config_of(self.current_best)
         if serving_config:

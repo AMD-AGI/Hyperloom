@@ -980,7 +980,7 @@ module-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py 257
 module-lines src/hyperloom/orchestrator/roles/critic_agent.py 1276
 module-lines src/hyperloom/orchestrator/specialists/runner.py 1520
 module-lines src/hyperloom/orchestrator/specialists/subprocess_.py 1747
-module-lines src/hyperloom/orchestrator/state/shared_state.py 2270
+module-lines src/hyperloom/orchestrator/state/shared_state.py 2266
 module-lines src/hyperloom/orchestrator/trace_analysis/_bypass_report.py 1231
 module-lines src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py 5347
 module-lines src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py 1366

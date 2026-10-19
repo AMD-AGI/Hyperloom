@@ -19,11 +19,8 @@ __all__ = [
     "PROFILE_OVERRIDABLE_KEYS",
     "identity_fields",
     "merged_runtime_envs",
-    "normalized_args_mode",
-    "normalized_control_list",
-    "normalized_server_args",
-    "profile_env_map",
     "reusable_recorded_runtime",
+    "runtime_fields",
     "runtime_overrides",
     "serving_config_of",
     "shape_fields",
@@ -35,29 +32,34 @@ _SHAPE_KEYS: tuple[str, ...] = ("tp", "conc", "isl", "osl", "max_model_len")
 # Workload identity a caller may override; ``benchmark_mode`` is stamped from the session instead.
 PROFILE_OVERRIDABLE_KEYS: tuple[str, ...] = (*_TEXT_KEYS, "model_path", *_SHAPE_KEYS)
 
-# Runtime fields whose presence means the caller already knows what the server ran with.
-_RUNTIME_KEYS: frozenset[str] = frozenset(
-    {
-        "extra_server_args",
-        "extra_envs",
-        "remove_args",
-        "unset_envs",
-        "args_mode",
-        "base_extra_args",
-        "base_extra_envs",
-        "base_remove_args",
-        "base_unset_envs",
-        "base_args_mode",
-    }
+_EXTRA_SERVER_ARGS = "extra_server_args"
+_EXTRA_ENVS = "extra_envs"
+_REMOVE_ARGS = "remove_args"
+_UNSET_ENVS = "unset_envs"
+_ARGS_MODE = "args_mode"
+_BASE_EXTRA_ARGS = "base_extra_args"
+_BASE_EXTRA_ENVS = "base_extra_envs"
+_BASE_REMOVE_ARGS = "base_remove_args"
+_BASE_UNSET_ENVS = "base_unset_envs"
+_BASE_ARGS_MODE = "base_args_mode"
+
+# Each runtime param as a caller and ``current_best`` name it, paired with the baseline-relative name it feeds.
+_ENV_SOURCE: tuple[str, str] = (_EXTRA_ENVS, _BASE_EXTRA_ENVS)
+_SERVER_ARGS_SOURCE: tuple[str, str] = (_EXTRA_SERVER_ARGS, _BASE_EXTRA_ARGS)
+_REMOVE_ARGS_SOURCE: tuple[str, str] = (_REMOVE_ARGS, _BASE_REMOVE_ARGS)
+_UNSET_ENVS_SOURCE: tuple[str, str] = (_UNSET_ENVS, _BASE_UNSET_ENVS)
+_ARGS_MODE_SOURCE: tuple[str, str] = (_ARGS_MODE, _BASE_ARGS_MODE)
+
+# Runtime params carried across verbatim; env vars are merged instead, so they travel on their own.
+_COPIED_SOURCES: tuple[tuple[str, str], ...] = (
+    _SERVER_ARGS_SOURCE,
+    _REMOVE_ARGS_SOURCE,
+    _UNSET_ENVS_SOURCE,
+    _ARGS_MODE_SOURCE,
 )
 
-# Runtime params as ``current_best`` names them, paired with the profile param they feed.
-_RUNTIME_SOURCES: tuple[tuple[str, str], ...] = (
-    ("extra_server_args", "base_extra_args"),
-    ("remove_args", "base_remove_args"),
-    ("unset_envs", "base_unset_envs"),
-    ("args_mode", "base_args_mode"),
-)
+# Runtime fields whose presence means the caller already knows what the server ran with.
+_RUNTIME_KEYS: frozenset[str] = frozenset(name for pair in (*_COPIED_SOURCES, _ENV_SOURCE) for name in pair)
 
 # Arms whose ``current_best`` carries no runtime fields of its own.
 _BARE_RUNTIME_ACTIONS: frozenset[str] = frozenset({"baseline", "profile"})
@@ -105,14 +107,15 @@ def shape_fields(params: Mapping[str, Any], state: Any) -> dict[str, int]:
     return fields
 
 
-def _override_or_base(params: Mapping[str, Any], direct_name: str, base_name: str) -> Any:
-    """Read a runtime param under its direct name, falling back to the baseline-relative one."""
+def _override_or_base(params: Mapping[str, Any], source: tuple[str, str]) -> Any:
+    """Read a runtime param under the name a caller uses, falling back to the baseline-relative one."""
+    direct_name, base_name = source
     return params[direct_name] if direct_name in params else params.get(base_name)
 
 
-def normalized_server_args(params: Mapping[str, Any]) -> str:
+def _normalized_server_args(params: Mapping[str, Any]) -> str:
     """Canonicalize the profile's extra server args: sanitized and re-quoted, whitespace-collapsed when unparseable."""
-    raw = _override_or_base(params, "extra_server_args", "base_extra_args")
+    raw = _override_or_base(params, _SERVER_ARGS_SOURCE)
     args = sanitize_profile_server_args(str(raw or "").strip())
     try:
         return shlex.join(shlex.split(args)) if args else ""
@@ -127,30 +130,31 @@ def _sorted_env_map(raw: Any) -> dict[str, str]:
     return {str(key): str(value) for key, value in sorted(raw.items(), key=lambda item: str(item[0]))}
 
 
-def profile_env_map(params: Mapping[str, Any]) -> dict[str, str]:
-    """Normalize the env vars the profile runs with, under either the direct or the baseline-relative name."""
-    return _sorted_env_map(_override_or_base(params, "extra_envs", "base_extra_envs"))
-
-
-def normalized_control_list(params: Mapping[str, Any], direct_name: str, base_name: str) -> list[str]:
+def _normalized_control_list(params: Mapping[str, Any], source: tuple[str, str]) -> list[str]:
     """Normalize one arg/env removal list to a sorted set of non-blank entries."""
-    raw = _override_or_base(params, direct_name, base_name)
+    raw = _override_or_base(params, source)
     values = [raw] if isinstance(raw, str) else list(raw or [])
     return sorted({str(value).strip() for value in values if str(value).strip()})
 
 
-def normalized_args_mode(params: Mapping[str, Any]) -> str:
-    """Normalize how the profile's extra args combine with the server's own."""
-    return str(_override_or_base(params, "args_mode", "base_args_mode") or "append").strip().lower()
+def runtime_fields(params: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize the runtime a profile ran under: server args, env vars, the controls that drop them, and the args mode."""
+    return {
+        "server_args": _normalized_server_args(params),
+        _EXTRA_ENVS: _sorted_env_map(_override_or_base(params, _ENV_SOURCE)),
+        _REMOVE_ARGS: _normalized_control_list(params, _REMOVE_ARGS_SOURCE),
+        _UNSET_ENVS: _normalized_control_list(params, _UNSET_ENVS_SOURCE),
+        _ARGS_MODE: str(_override_or_base(params, _ARGS_MODE_SOURCE) or "append").strip().lower(),
+    }
 
 
 def serving_config_of(current_best: Mapping[str, Any]) -> dict[str, Any]:
     """Describe the runtime the current best was measured with; empty when it names none."""
-    envs = {key: value for key, value in _sorted_env_map(current_best.get("extra_envs")).items() if key.strip()}
-    args = str(current_best.get("extra_server_args") or "").strip()
+    envs = {key: value for key, value in _sorted_env_map(current_best.get(_EXTRA_ENVS)).items() if key.strip()}
+    args = str(current_best.get(_EXTRA_SERVER_ARGS) or "").strip()
     if not (args or envs):
         return {}
-    return {"extra_server_args": args, "extra_envs": envs}
+    return {_EXTRA_SERVER_ARGS: args, _EXTRA_ENVS: envs}
 
 
 def reusable_recorded_runtime(
@@ -177,18 +181,18 @@ def reusable_recorded_runtime(
     if not recorded or recorded_action not in {"", *_BARE_RUNTIME_ACTIONS}:
         return {}
     return {
-        "base_extra_args": recorded.get("server_args", ""),
-        "base_extra_envs": dict(recorded.get("extra_envs") or {}),
-        "base_remove_args": list(recorded.get("remove_args") or []),
-        "base_unset_envs": list(recorded.get("unset_envs") or []),
-        "base_args_mode": recorded.get("args_mode", "append"),
+        _BASE_EXTRA_ARGS: recorded.get("server_args", ""),
+        _BASE_EXTRA_ENVS: dict(recorded.get(_EXTRA_ENVS) or {}),
+        _BASE_REMOVE_ARGS: list(recorded.get(_REMOVE_ARGS) or []),
+        _BASE_UNSET_ENVS: list(recorded.get(_UNSET_ENVS) or []),
+        _BASE_ARGS_MODE: recorded.get(_ARGS_MODE, "append"),
     }
 
 
 def runtime_overrides(current_best: Mapping[str, Any], incoming: Mapping[str, Any]) -> dict[str, Any]:
     """Collect the runtime params the current best and the caller's overrides name, the caller winning."""
     params: dict[str, Any] = {}
-    for source, target in _RUNTIME_SOURCES:
+    for source, target in _COPIED_SOURCES:
         for holder, key in ((current_best, source), (incoming, source), (incoming, target)):
             if key in holder:
                 params[target] = holder[key]
@@ -197,9 +201,9 @@ def runtime_overrides(current_best: Mapping[str, Any], incoming: Mapping[str, An
 
 def merged_runtime_envs(current_best: Mapping[str, Any], incoming: Mapping[str, Any]) -> dict[str, Any]:
     """Overlay the caller's env overrides onto the env vars the current best was measured with."""
-    raw = current_best.get("extra_envs")
+    raw = current_best.get(_EXTRA_ENVS)
     merged = dict(raw) if isinstance(raw, dict) else {}
-    for key in ("base_extra_envs", "extra_envs"):
+    for key in (_BASE_EXTRA_ENVS, _EXTRA_ENVS):
         override = incoming.get(key)
         if isinstance(override, dict):
             merged.update(override)
