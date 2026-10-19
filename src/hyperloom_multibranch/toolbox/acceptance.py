@@ -4,7 +4,7 @@
 """Acceptance of a test request: the checks of design 4.17 that refuse a request before it queues.
 
 Steps: the request validates (3.7, done by its constructor, plus the toolbox's own: no preset ``request_id``, a
-``retest_of`` that names an accepted request); the parent recipe is read from the experiment repository; the delta
+``retest_of`` that names an accepted request, a PROFILE that no live profile already covers); the parent recipe is read from the experiment repository; the delta
 applies and the environment compiles; the measurement surface matches the canonical one. Compile, points and surface come from
 hosted measurement (``hyperloom.measure``) through the one :class:`MeasurementPlanner` seam.
 """
@@ -54,6 +54,10 @@ def _check_unmeasured(request: TestRequest) -> None:
         raise RequestRejected(f"a {request.kind.value} test does not evaluate accuracy")
 
 
+def _no_live_profile(request: TestRequest) -> str | None:
+    return None
+
+
 class MeasurementPlanner(Protocol):
     """Compiles the test environment, generates the measurement points and checks the surface (acceptance steps 2 to 4).
 
@@ -81,11 +85,15 @@ class Acceptance:
         active_image_digest: str | None,
         is_accepted: Callable[[str], bool],
         workload_kind: WorkloadKind = WorkloadKind.INFERENCEX,
+        live_profile: Callable[[TestRequest], str | None] = _no_live_profile,
     ) -> None:
+        """``live_profile`` answers, for a PROFILE request, the id of the profile of the same commit and recipe that
+        is queued, running or measured, or ``None``; the toolbox reads it from its submit log."""
         self._repo = repo
         self._planner = planner
         self._image = active_image_digest
         self._is_accepted = is_accepted
+        self._live_profile = live_profile
         self._workload = workload_kind
 
     def with_required_accuracy(self, request: TestRequest) -> TestRequest:
@@ -108,11 +116,33 @@ class Acceptance:
         _check_unmeasured(request)
         if not replay and request.retest_of is not None and not self._is_accepted(request.retest_of):
             raise RequestRejected(f"retest_of {request.retest_of!r} names no accepted request", "unknown_retest")
+        if not replay:
+            self._check_profile_exists(request)
         recipe = await self._read_parent(request)
         self._check_image(recipe)
         candidate = self._check_delta(recipe, request)
         self._check_fake_gain(recipe, candidate)
         return Prepared(self._plan(recipe, request))
+
+    def _check_profile_exists(self, request: TestRequest) -> None:
+        """Refuse a PROFILE of a commit and recipe that already has a live one, and name that one.
+
+        A profile is not a claimed test, so nothing else keeps branches from profiling one commit over and over; each
+        repeat holds a card for a trace the session already has or is about to have. The point is always the
+        canonical one (a profile ignores ``concurrency``) and the image is the commit's own, so the commit and the
+        recipe change say whether it is the same measurement. The caller waits for the existing request instead.
+        """
+
+        if request.kind is not TestKind.PROFILE:
+            return
+        existing = self._live_profile(request)
+        if existing is not None:
+            raise RequestRejected(
+                f"commit {request.parent_commit} already has a profile of this recipe, request {existing}, queued, "
+                "running or measured; wait_test on it, or read the commit's op shares from the notebook",
+                "profile_exists",
+                existing_request_id=existing,
+            )
 
     async def _read_parent(self, request: TestRequest) -> Recipe:
         try:

@@ -19,7 +19,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
 
-from hyperloom.contracts.measurement import AttachmentRef, FailureClass, TestRequest, TestResult, Validity
+from hyperloom.contracts.measurement import AttachmentRef, FailureClass, TestKind, TestRequest, TestResult, Validity
 from hyperloom_multibranch.contracts.notebook.interfaces import (
     ClaimLost,
     ClaimService,
@@ -136,6 +136,7 @@ class RealToolbox:
             active_image_digest=acceptance.active_image_digest,
             is_accepted=self._is_accepted,
             workload_kind=acceptance.workload_kind,
+            live_profile=self._live_profile,
         )
         self._runner = AttemptRunner(
             executor,
@@ -410,6 +411,34 @@ class RealToolbox:
     def _is_accepted(self, request_id: str) -> bool:
         entry = self._log.get(request_id)
         return entry is not None and not entry.aborted
+
+    def _live_profile(self, request: TestRequest) -> str | None:
+        """The id of the earliest PROFILE of ``request``'s commit and recipe that the submit log holds as queued,
+        running or measured successfully; ``None`` when there is none.
+
+        Read from the log, never from a set of its own, so a restarted toolbox answers as the one before it did. A
+        profile that failed, was withdrawn or was aborted covers nothing, and so does one the log knows only as
+        settled in the notebook with no outcome of its own. :meth:`submit_test` calls this under the lock that also
+        logs the accepted request, so two submits of one profile cannot both pass.
+        """
+
+        recipe = request.delta.fingerprint()
+        for entry in self._log.entries():
+            if entry.aborted or entry.request.get("kind") != TestKind.PROFILE.value:
+                continue
+            if entry.request.get("parent_commit") != request.parent_commit:
+                continue
+            if not self._holds_profile(entry) or TestRequest.from_document(entry.request).delta.fingerprint() != recipe:
+                continue
+            return entry.request_id
+        return None
+
+    @staticmethod
+    def _holds_profile(entry: LogEntry) -> bool:
+        if entry.outcome is None:
+            return not entry.settled
+        result = entry.outcome.get("result")
+        return isinstance(result, Mapping) and result.get("validity") == Validity.SUCCEEDED.value
 
     @staticmethod
     def _key(request: TestRequest) -> ClaimKey:

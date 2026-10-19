@@ -196,13 +196,21 @@ async def _on(home: asyncio.AbstractEventLoop | None, call: Awaitable[Any]) -> A
     return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(call, home))  # type: ignore[arg-type]
 
 
-async def _own_record(notebooks: NotebookFor, ctx: CallContext, request_id: str) -> Any:
-    """The notebook's record of ``request_id``, when the caller's branch asked for it."""
+async def _own_record(
+    notebooks: NotebookFor, ctx: CallContext, request_id: str, *, profiles_shared: bool = False
+) -> Any:
+    """The notebook's record of ``request_id``, when the caller's branch asked for it.
+
+    With ``profiles_shared`` a PROFILE test of any branch is also readable: ``submit_test`` refuses a second profile
+    of a commit with the id of the first (``profile_exists``), which may be another branch's, and the caller waits on
+    it. Taking a test back stays with its own branch.
+    """
     try:
         record = await notebooks(ctx.principal.branch).record(request_id)
     except NotebookError as exc:
         raise ToolError(f"{type(exc).__name__}: {exc}") from exc
-    if record.request.branch != ctx.principal.branch:
+    shared = profiles_shared and record.request.kind is TestKind.PROFILE
+    if record.request.branch != ctx.principal.branch and not shared:
         raise ToolForbidden("a specialist reads the tests of its own branch only")
     return record
 
@@ -266,7 +274,7 @@ def _result_document(request_id: str, record: Any) -> dict[str, Any]:
 def _test_result(notebooks: NotebookFor) -> Callable[[dict[str, Any], CallContext], Any]:
     async def handle(arguments: dict[str, Any], ctx: CallContext) -> dict[str, Any]:
         request_id = arguments["request_id"]
-        return _result_document(request_id, await _own_record(notebooks, ctx, request_id))
+        return _result_document(request_id, await _own_record(notebooks, ctx, request_id, profiles_shared=True))
 
     return handle
 
@@ -308,10 +316,10 @@ def _wait_test(
     async def handle(arguments: dict[str, Any], ctx: CallContext) -> dict[str, Any]:
         request_id = arguments["request_id"]
         budget, started = wait_budget(arguments.get("wait_seconds")), time.monotonic()
-        record = await _own_record(notebooks, ctx, request_id)
+        record = await _own_record(notebooks, ctx, request_id, profiles_shared=True)
         while not _is_over(record) and (left := budget - (time.monotonic() - started)) > 0:
             await asyncio.sleep(min(poll_seconds, left))
-            record = await _own_record(notebooks, ctx, request_id)
+            record = await _own_record(notebooks, ctx, request_id, profiles_shared=True)
         if _is_over(record):
             return _result_document(request_id, record)
         progress = await _on(home, toolbox.progress(request_id))
@@ -409,14 +417,18 @@ def register_specialist_tools(
     own = {"scopes": _SPECIALIST_SCOPES}
     server.register(
         "submit_test",
-        description="Submit a test of a recipe change for this branch; returns the request id once accepted.",
+        description=(
+            "Submit a test of a recipe change for this branch; returns the request id once accepted. A profile of a "
+            "commit that already has one queued, running or measured is refused as profile_exists and names that "
+            "request: wait_test on it, or read the commit's op shares from the notebook."
+        ),
         schema=_SUBMIT_TEST,
         handler=_submit_test(toolbox, toolbox_loop),
         **own,
     )
     server.register(
         "test_result",
-        description="The state and result of one test this branch submitted.",
+        description="The state and result of one test this branch submitted, or of any branch's profile test.",
         schema=_REQUEST_ID,
         handler=_test_result(notebooks),
         **own,
@@ -424,8 +436,8 @@ def register_specialist_tools(
     server.register(
         "wait_test",
         description=(
-            "How to wait for a test of this branch: returns as soon as its result lands, else after wait_seconds "
-            "with the test's progress; call it again to keep waiting."
+            "How to wait for a test of this branch, or for any branch's profile test: returns as soon as its result "
+            "lands, else after wait_seconds with the test's progress; call it again to keep waiting."
         ),
         schema=_WAIT_TEST,
         handler=_wait_test(toolbox, notebooks, toolbox_loop, options.wait_poll_seconds),

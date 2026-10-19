@@ -63,8 +63,11 @@ ANALYSIS_POLL_SECONDS = 5.0
 PROFILE_UNAVAILABLE = "profile not available on this backend"
 HEAD_MOVED_DURING_PROFILE = "integration head moved during profiling"
 PROFILED = "integration head profiled"
+PROFILE_EXISTS = "integration head already profiled"
 #: The toolbox's refusal of a test kind its backend does not run, a PROFILE on a backend that cannot profile.
 UNSUPPORTED_KIND = "unsupported_kind"
+#: The toolbox's refusal of a second profile of a commit and recipe that already has a live one.
+PROFILE_EXISTS_CODE = "profile_exists"
 
 
 class EventKind(str, Enum):
@@ -259,6 +262,8 @@ class IntegrationProfiler:
             detail = {"commit": head, "code": rejected.code, "rejection": rejected.reason}
             if rejected.code == CODE_PROFILE_UNVERIFIED:
                 return ProfileOutcome(HEAD_MOVED_DURING_PROFILE, detail)
+            if rejected.code == PROFILE_EXISTS_CODE:  # the head was profiled already, maybe by a specialist's branch
+                return ProfileOutcome(PROFILE_EXISTS, {**detail, "request_id": rejected.existing_request_id})
             unable = (UNSUPPORTED_KIND, CODE_PROFILE_WITHOUT_TRACE, CODE_NO_EXECUTOR, CODE_TOOL_UNAVAILABLE)
             if rejected.code in unable:
                 return ProfileOutcome(PROFILE_UNAVAILABLE, detail, available=False)
@@ -401,6 +406,7 @@ __all__ = [
     "MB_BIG_GAIN_BARS",
     "MB_BOTTLENECK_SHIFT_PP",
     "PROFILED",
+    "PROFILE_EXISTS",
     "PROFILE_UNAVAILABLE",
     "UNSUPPORTED_KIND",
     "EventKind",

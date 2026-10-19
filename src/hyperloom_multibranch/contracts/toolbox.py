@@ -35,13 +35,15 @@ class RequestRejected(ToolboxError):
     """The toolbox refused the request; it was not queued and nothing was written. ``reason`` says why.
 
     ``code`` is a short stable name of the refused check, for a caller that reacts to one of them
-    (:data:`REJECTION_CODES`); ``reason`` is the text for a person or a log.
+    (:data:`REJECTION_CODES`); ``reason`` is the text for a person or a log. ``existing_request_id`` is set by the
+    refusals that point at a request already accepted (``profile_exists``): the one the caller waits for instead.
     """
 
-    def __init__(self, reason: str, code: str = "invalid_request") -> None:
+    def __init__(self, reason: str, code: str = "invalid_request", *, existing_request_id: str | None = None) -> None:
         super().__init__(f"{code}: {reason}")
         self.reason = reason
         self.code = code
+        self.existing_request_id = existing_request_id
 
 
 class Backpressure(ToolboxError):
@@ -81,6 +83,7 @@ REJECTION_CODES = (
     "speculative_context_copy_on_synthetic",  # an InferenceX candidate introduces or changes a context-copy draft
     "speculative_decoding_pinned",  # an AgentX candidate changes the draft or simulated acceptance its parent pins
     "unsupported_kind",  # the toolbox's backend does not run this kind of test (a local backend: profile, repro)
+    "profile_exists",  # a PROFILE of this commit and recipe is already queued, running or measured: ``existing_request_id``
     "attachment_too_large",  # ``put_attachment``: the data, or what a directory archive expands to, passes the cap
     "attachment_unreadable",  # ``put_attachment``: a ``dir`` attachment is not a tar archive
     "attachment_unsafe",  # ``put_attachment``: a ``dir`` archive has a path that escapes, a link, or too many entries

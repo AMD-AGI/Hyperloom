@@ -31,6 +31,7 @@ from hyperloom_multibranch.scheduling.events import (
     HEAD_MOVED_DURING_PROFILE,
     MB_BIG_GAIN_BARS,
     MB_BOTTLENECK_SHIFT_PP,
+    PROFILE_EXISTS,
     PROFILE_UNAVAILABLE,
     PROFILED,
     EventKind,
@@ -42,7 +43,7 @@ from hyperloom_multibranch.scheduling.events import (
     no_measurement_cards,
 )
 from hyperloom_multibranch.scheduling.integrator import MergeReport
-from hyperloom_multibranch.scheduling.requests import SessionTests
+from hyperloom_multibranch.scheduling.requests import SessionTests, integration_test_request
 from hyperloom_multibranch.toolbox.analysis import CODE_NO_EXECUTOR, CODE_PROFILE_UNVERIFIED
 from hyperloom_multibranch.toolbox.fake import FakeToolbox
 from hyperloom_multibranch.toolbox.fake_model import Fate
@@ -385,6 +386,30 @@ async def test_a_large_merge_profiles_the_integration_head_and_a_moved_bottlenec
     rows = _logged(log)
     assert [(row["kind"], row["reason"]) for row in rows[1:]] == [("profile", PROFILED), ("event", shifted.reason)]
     assert rows[1]["detail"]["request_id"] == request_id and rows[1]["detail"]["analysis"] == "succeeded"
+
+
+async def test_a_head_a_branch_already_profiled_is_not_profiled_again_and_is_not_an_error(log: Path) -> None:
+    shares = _Shares()
+    toolbox = _AnalysingToolbox(shares, autorun=False)
+    branch_profile = await toolbox.submit_test(
+        replace(integration_test_request(TestKind.PROFILE, Purpose.PROFILE, "c-merged"), branch_id="b01")
+    )
+    events = _events(_Health(), log, toolbox, shares)
+    events.note_merges((_moved_onto("c-merged"),))
+
+    await events.detect()
+    await _until(lambda: not events.profiling)
+    assert not await events.detect()
+
+    assert list(toolbox.requests) == [branch_profile] and toolbox.analyses == []
+    [profile] = [row for row in _logged(log) if row["kind"] == "profile"]
+    assert profile["reason"] == PROFILE_EXISTS
+    assert profile["detail"]["commit"] == "c-merged" and profile["detail"]["request_id"] == branch_profile
+    assert profile["detail"]["code"] == "profile_exists"
+    events.note_merges((_moved_onto("c-next"),))
+    await events.detect()
+    assert events.profiling, "a head that has no profile yet is profiled as before"
+    await events.stop_profiling()
 
 
 async def test_one_profile_runs_at_a_time_and_does_not_hold_up_the_tick(log: Path) -> None:
