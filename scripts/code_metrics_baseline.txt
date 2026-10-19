@@ -165,14 +165,6 @@ cognitive-complexity src/hyperloom/orchestrator/phases/kernel_stack.py::KernelSt
 cognitive-complexity src/hyperloom/orchestrator/phases/machine_state.py::kernel_work_pending 38
 cognitive-complexity src/hyperloom/orchestrator/phases/machine_state.py::replay_next_phase 83
 cognitive-complexity src/hyperloom/orchestrator/phases/macro_cycle.py::MacroCycleCollaborator.plan_cycle_focus 41
-cognitive-complexity src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._collect_warm_kernel_plan 42
-cognitive-complexity src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._judge_warm_replay_accuracy 33
-cognitive-complexity src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._prepare_warm_kernel_kb 88
-cognitive-complexity src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._settle_warm_replay 43
-cognitive-complexity src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._warm_kernel_extra_envs 42
-cognitive-complexity src/hyperloom/orchestrator/phases/prelude.py::PreludePhase.inject_warm_recipe_history_into_ledger 31
-cognitive-complexity src/hyperloom/orchestrator/phases/prelude.py::PreludePhase.maybe_enqueue_warm_replay 190
-cognitive-complexity src/hyperloom/orchestrator/phases/prelude.py::_merge_named_current_recipe_configs 39
 cognitive-complexity src/hyperloom/orchestrator/policy/gate.py::PolicyGate._validate_payload_paths 39
 cognitive-complexity src/hyperloom/orchestrator/policy/gate.py::PolicyGate._validate_warm_replay_targets 39
 cognitive-complexity src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py::_section_mandate 49
@@ -331,9 +323,6 @@ cyclomatic-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._
 cyclomatic-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._run_geak_kernel_phase 49
 cyclomatic-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._validate_gemm_tuning_e2e 36
 cyclomatic-complexity src/hyperloom/orchestrator/phases/machine_state.py::replay_next_phase 30
-cyclomatic-complexity src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._prepare_warm_kernel_kb 33
-cyclomatic-complexity src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._settle_warm_replay 25
-cyclomatic-complexity src/hyperloom/orchestrator/phases/prelude.py::PreludePhase.maybe_enqueue_warm_replay 48
 cyclomatic-complexity src/hyperloom/orchestrator/roles/claude.py::ClaudeBackend._invoke_and_collect 26
 cyclomatic-complexity src/hyperloom/orchestrator/specialists/dispatch.py::SpecialistDispatchCollaborator.warm_specialist_params 41
 cyclomatic-complexity src/hyperloom/orchestrator/specialists/patch_safety.py::resolve_patch_apply_root 21
@@ -773,10 +762,6 @@ function-lines src/hyperloom/orchestrator/phases/kernel_stack.py::KernelStackPha
 function-lines src/hyperloom/orchestrator/phases/machine.py::MachinePhase.advance_phase_if_needed 149
 function-lines src/hyperloom/orchestrator/phases/machine_state.py::record_phase_transition 87
 function-lines src/hyperloom/orchestrator/phases/machine_state.py::replay_next_phase 167
-function-lines src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._judge_warm_replay_accuracy 123
-function-lines src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._prepare_warm_kernel_kb 269
-function-lines src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._settle_warm_replay 197
-function-lines src/hyperloom/orchestrator/phases/prelude.py::PreludePhase.maybe_enqueue_warm_replay 490
 function-lines src/hyperloom/orchestrator/phases/sweep.py::SweepPhase._start_conc_sweep 81
 function-lines src/hyperloom/orchestrator/policy/gate.py::PolicyGate._validate_specialist_dispatch 91
 function-lines src/hyperloom/orchestrator/policy/gate.py::PolicyGate._validate_specialist_gpu_request 82
@@ -983,7 +968,7 @@ module-lines src/hyperloom/orchestrator/loop/writeback.py 4748
 module-lines src/hyperloom/orchestrator/phases/framework.py 3139
 module-lines src/hyperloom/orchestrator/phases/kernel.py 4227
 module-lines src/hyperloom/orchestrator/phases/machine_state.py 2189
-module-lines src/hyperloom/orchestrator/phases/prelude.py 2640
+module-lines src/hyperloom/orchestrator/phases/prelude.py 2633
 module-lines src/hyperloom/orchestrator/policy/gate.py 1608
 module-lines src/hyperloom/orchestrator/prompts/prompt_builder.py 1205
 module-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py 2571
