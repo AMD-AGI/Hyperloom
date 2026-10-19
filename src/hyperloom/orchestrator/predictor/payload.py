@@ -13,15 +13,25 @@ completely is omitted rather than half-filled. See
 from __future__ import annotations
 
 import datetime as _dt
-from typing import TYPE_CHECKING, Any, Mapping
+from dataclasses import dataclass
+from typing import Any, Mapping
 
 from hyperloom.common.coerce import to_float
 from hyperloom.orchestrator.predictor import evidence
 from hyperloom.common.predictor_config import PHASE_LABEL
 from hyperloom.orchestrator.predictor.view import SessionView
 
-if TYPE_CHECKING:
-    from hyperloom.orchestrator.predictor.pump import PhaseBudget
+
+@dataclass(frozen=True)
+class PhaseBudget:
+    """The FRAMEWORK clock a request is conditioned on, as the phase reads it when the predictor asks."""
+
+    #: Seconds the phase can still spend: the tighter of this entry's budget and the cap across entries.
+    headroom_sec: float | None
+    #: Seconds since this FRAMEWORK entry began.
+    elapsed_sec: float
+    #: Gain a variant needs to KEEP in this macro-cycle.
+    keep_threshold_pct: float
 
 
 REQUEST_SCHEMA = "hyperloom.predictor_request.v1"

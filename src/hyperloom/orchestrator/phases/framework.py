@@ -24,7 +24,7 @@ from ..state.task_registry import TaskNotFound
 from ..state.shared_state import resolve_grading_anchor_tput, inject_stack_base_params
 
 if TYPE_CHECKING:
-    from ..predictor.pump import PhaseBudget
+    from ..predictor.payload import PhaseBudget
     from ..predictor.view import SessionView
     from ..state.task_registry import Task
     from .machine import Transition
@@ -300,7 +300,7 @@ def _recorder(coord: Any):
 
 def predictor_budget(state: SessionView) -> PhaseBudget:
     """The FRAMEWORK clock a predictor request is conditioned on, read when the request goes out."""
-    from ..predictor.pump import PhaseBudget
+    from ..predictor.payload import PhaseBudget
 
     limits: list[float] = []
     remaining = _phase_state.phase_budget_remaining_seconds(state)
