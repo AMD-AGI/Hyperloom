@@ -553,3 +553,100 @@ async def test_force_stalled_domain_noop_outside_explore(force_coord):
     )
     await force_coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
     force_coord.router.handle_intent.assert_not_awaited()
+
+
+# 8. SharedState.save failures around the specialist bookkeeping
+def _save_raising(exc: Exception):
+    def _save(_session_dir) -> None:
+        raise exc
+
+    return _save
+
+
+def _error_messages(caplog) -> list[str]:
+    return [record.getMessage() for record in caplog.records if record.levelname == "ERROR"]
+
+
+def _stall_serving_domain(state) -> None:
+    for _ in range(10):
+        state.bump_domain_round_counters()
+    state.upsert_gap(
+        {"canonical_id": "gap.framework.scheduler.s1", "domain_hint": "serving_specialist", "severity": "high"}
+    )
+
+
+@pytest.mark.asyncio
+async def test_record_specialist_result_logs_a_save_os_error_and_keeps_the_round(coord, caplog):
+    task = _StubTask(task_id="task-1", params={})
+    coord.tasks.register(task)
+    coord.shared_state.save = _save_raising(OSError("no space left on device"))
+
+    with caplog.at_level("ERROR"):
+        await coord.specialist_dispatch.record_specialist_result(
+            task=task, done_payload=_done_payload(), source=f"{SPECIALIST_FROM_AGENT_PREFIX}task-1"
+        )
+
+    assert [row["round_id"] for row in coord.shared_state.specialist_rounds] == ["task-1"]
+    assert _error_messages(caplog) == ["specialist bookkeeping: SharedState.save failed for task=task-1"]
+
+
+@pytest.mark.asyncio
+async def test_record_specialist_result_propagates_a_save_serialization_defect(coord):
+    task = _StubTask(task_id="task-1", params={})
+    coord.tasks.register(task)
+    coord.shared_state.save = _save_raising(TypeError("Object of type set is not JSON serializable"))
+
+    with pytest.raises(TypeError, match="not JSON serializable"):
+        await coord.specialist_dispatch.record_specialist_result(
+            task=task, done_payload=_done_payload(), source=f"{SPECIALIST_FROM_AGENT_PREFIX}task-1"
+        )
+
+
+@pytest.mark.asyncio
+async def test_force_stalled_dispatch_logs_a_save_os_error_after_the_dispatch(force_coord, caplog):
+    _stall_serving_domain(force_coord.shared_state)
+    force_coord.shared_state.save = _save_raising(OSError("no space left on device"))
+
+    with caplog.at_level("ERROR"):
+        await force_coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
+
+    force_coord.router.handle_intent.assert_awaited_once()
+    assert _error_messages(caplog) == ["stalled-domain force: state save failed"]
+
+
+@pytest.mark.asyncio
+async def test_force_stalled_dispatch_propagates_a_save_serialization_defect(force_coord):
+    _stall_serving_domain(force_coord.shared_state)
+    force_coord.shared_state.save = _save_raising(TypeError("Object of type set is not JSON serializable"))
+
+    with pytest.raises(TypeError, match="not JSON serializable"):
+        await force_coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
+
+
+@pytest.mark.asyncio
+async def test_force_stalled_prune_logs_a_save_os_error_and_skips_the_dispatch(force_coord, caplog):
+    state = force_coord.shared_state
+    state.framework_repo_path = ""
+    _stall_serving_domain(state)
+    state.save = _save_raising(OSError("no space left on device"))
+
+    with caplog.at_level("ERROR"):
+        await force_coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
+
+    force_coord.router.handle_intent.assert_not_awaited()
+    assert state.pruned_families == ["source_patch"]
+    assert _error_messages(caplog) == [
+        "stalled-domain force: source-patch prune save failed",
+        "stalled-domain force: pruned source_patch after deterministic failure: no_git_framework_source_root",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_force_stalled_prune_propagates_a_save_serialization_defect(force_coord):
+    state = force_coord.shared_state
+    state.framework_repo_path = ""
+    _stall_serving_domain(state)
+    state.save = _save_raising(TypeError("Object of type set is not JSON serializable"))
+
+    with pytest.raises(TypeError, match="not JSON serializable"):
+        await force_coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
