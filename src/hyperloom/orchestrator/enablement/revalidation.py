@@ -8,8 +8,6 @@ from __future__ import annotations
 import sqlite3
 import time
 import uuid
-from collections.abc import Callable
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
@@ -18,6 +16,7 @@ from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
 from ..collaborator import CoordinatorCollaborator
 from ..state.round_store import RoundRequest
 from ..state.task_registry import TaskSpec, TerminalTaskReuse, create_in_cursor, task_dispatch_origin
+from .generation_scan import GenerationScan
 from .params import _enablement_carrier_params
 
 if TYPE_CHECKING:
@@ -26,21 +25,6 @@ if TYPE_CHECKING:
 import logging as _logging
 
 log = _logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class GenerationScan:
-    """Which idempotency-key generations a row opening tries.
-
-    Attributes:
-        key_for: Builds the idempotency key for a generation number.
-        generation: The generation to try first.
-        attempts: How many generations to try before giving up this pass.
-    """
-
-    key_for: Callable[[int], str]
-    generation: int
-    attempts: int = 2
 
 
 class _RowAlreadyLive(Exception):

@@ -13,7 +13,7 @@ from hyperloom.orchestrator.lever import LEVER_ENABLEMENT
 from ..collaborator import CoordinatorCollaborator
 from ..bringup import recorded_verdict, session_root
 from .params import _enablement_carrier_params
-from .revalidation import GenerationScan
+from .generation_scan import GenerationScan
 
 if TYPE_CHECKING:
     from ..state.task_registry import Task
