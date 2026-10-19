@@ -16,9 +16,8 @@ def test_llm_call_record_from_metadata_coerces_and_appends(tmp_path: Path, monke
     monkeypatch.setattr(llm_trace, "get_emitter", lambda _session_dir: None, raising=False)
 
     record = llm_trace.LLMCallRecord.from_metadata(
-        session_id="s1",
-        component="forge",
-        metadata={
+        llm_trace.LLMCallSite(session_id="s1", component="forge", task_id="k1"),
+        {
             "model": "m",
             "input_tokens": "12",
             "output_tokens": 3.0,
@@ -26,7 +25,6 @@ def test_llm_call_record_from_metadata_coerces_and_appends(tmp_path: Path, monke
             "cache_read_input_tokens": "4",
             "latency_ms": "99",
         },
-        task_id="k1",
     )
     record.reviewed_msg_ids = [" a ", "", 7]
 
@@ -46,9 +44,8 @@ def test_from_metadata_carries_call_id_and_reasoning_tokens(tmp_path: Path, monk
     monkeypatch.setattr(_row_utils, "now_iso", lambda **_: "2026-01-01T00:00:00Z")
 
     record = llm_trace.LLMCallRecord.from_metadata(
-        session_id="s1",
-        component="specialist",
-        metadata={
+        llm_trace.LLMCallSite(session_id="s1", component="specialist"),
+        {
             "model": "gpt-5-codex",
             "call_id": "abc123",
             "input_tokens": 10,
@@ -110,13 +107,11 @@ def test_for_failure_records_error_without_token_counters(tmp_path: Path, monkey
     monkeypatch.setattr(llm_trace, "get_emitter", lambda _session_dir: None, raising=False)
 
     record = llm_trace.LLMCallRecord.for_failure(
-        session_id="s1",
-        component="orchestration",
-        role="orchestration",
-        error=RuntimeError("litellm.BadRequestError: AnthropicException"),
+        llm_trace.LLMCallSite(
+            session_id="s1", component="orchestration", role="orchestration", tick=4, phase="EXPLORE"
+        ),
+        RuntimeError("litellm.BadRequestError: AnthropicException"),
         model="claude-opus-5",
-        tick=4,
-        phase="EXPLORE",
         latency_ms=1200,
     )
     llm_trace.append_llm_call(session_dir=tmp_path, record=record)
@@ -142,11 +137,7 @@ def test_for_failure_records_error_without_token_counters(tmp_path: Path, monkey
 
 def test_for_failure_accepts_plain_message_and_truncates(tmp_path: Path):
     """A gateway body can be huge; the ledger keeps a bounded slice of it."""
-    record = llm_trace.LLMCallRecord.for_failure(
-        session_id="s1",
-        component="forge",
-        error="x" * 5000,
-    )
+    record = llm_trace.LLMCallRecord.for_failure(llm_trace.LLMCallSite(session_id="s1", component="forge"), "x" * 5000)
     row = record.to_row()
     assert row["error_type"] is None
     assert len(row["error_message"]) == llm_trace._ERROR_MESSAGE_MAX

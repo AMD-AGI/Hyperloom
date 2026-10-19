@@ -27,6 +27,7 @@ from kernelforge.orchestrator.contracts import (
     LaneDrop,
     OrchestrationContext,
     PlanCriticOutcome,
+    SpecialistRound,
     SpecialistAssignment,
     SpecialistDefinition,
     SynthesizedPlan,
@@ -692,14 +693,16 @@ async def test_synthesis_fuses_analyses_without_schema() -> None:
 
     result = await agent._synthesize_optimization_plan_result(
         _context(),
-        (outcome,),
-        dispatch,
-        {
-            "successful_roles": ["memory"],
-            "covered_cases": ["case-a"],
-            "missing_cases": ["case-b"],
-            "failed_roles": [],
-        },
+        SpecialistRound(
+            dispatch,
+            (outcome,),
+            {
+                "successful_roles": ["memory"],
+                "covered_cases": ["case-a"],
+                "missing_cases": ["case-b"],
+                "failed_roles": [],
+            },
+        ),
     )
 
     assert result.text == plan_markdown
@@ -744,6 +747,16 @@ def _coverage(roles: list[str]) -> dict:
     }
 
 
+async def _compute_and_memory_round() -> SpecialistRound:
+    """The round most lane tests divide: one compute and one memory analysis of one dispatch."""
+    outcomes = (
+        await _outcome("compute", "Instruction issue is the limit."),
+        await _outcome("memory", "The scale stream is re-read."),
+    )
+    dispatch = DispatchPlan(analysis_commit="abc123", assignments=(_assignment(),))
+    return SpecialistRound(dispatch, outcomes, _coverage(["compute", "memory"]))
+
+
 def _partition(*grounds: str) -> str:
     """The round partition a lane round now buys before it synthesizes."""
     return json.dumps({"lanes": [{"ground": ground, "reason": "one session's worth"} for ground in grounds]})
@@ -764,19 +777,9 @@ async def test_each_lane_is_given_its_ground_and_every_other_lane_s() -> None:
         ]
     )
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
-    outcomes = (
-        await _outcome("compute", "Instruction issue is the limit."),
-        await _outcome("memory", "The scale stream is re-read."),
-    )
-    dispatch = DispatchPlan(analysis_commit="abc123", assignments=(_assignment(),))
+    specialists = await _compute_and_memory_round()
 
-    results = await agent.synthesize_lane_plan_results(
-        _context(),
-        outcomes,
-        dispatch,
-        _coverage(["compute", "memory"]),
-        lanes=2,
-    )
+    results = await agent.synthesize_lane_plan_results(_context(), specialists, lanes=2)
 
     assert [result.text for result in results] == ["# Lane A\nRetime the MFMA.", "# Lane B\nStage via LDS."]
     owned = [json.loads(spec.user_prompt)["lane"] for spec in backend.specs[1:]]
@@ -791,19 +794,9 @@ async def test_every_lane_receives_the_whole_round_s_evidence() -> None:
     """A lane's ground is a slice of the code, not a slice of the reading."""
     backend = _PerCallBackend([_partition(_GROUND_A, _GROUND_B), "# Lane A", "# Lane B"])
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
-    outcomes = (
-        await _outcome("compute", "Instruction issue is the limit."),
-        await _outcome("memory", "The scale stream is re-read."),
-    )
-    dispatch = DispatchPlan(analysis_commit="abc123", assignments=(_assignment(),))
+    specialists = await _compute_and_memory_round()
 
-    await agent.synthesize_lane_plan_results(
-        _context(),
-        outcomes,
-        dispatch,
-        _coverage(["compute", "memory"]),
-        lanes=2,
-    )
+    await agent.synthesize_lane_plan_results(_context(), specialists, lanes=2)
 
     for spec in backend.specs[1:]:
         analyses = json.loads(spec.user_prompt)["specialist_analyses"]
@@ -816,19 +809,9 @@ async def test_the_partition_reads_every_analysis_before_it_divides() -> None:
     """Where the boundaries fall cannot be answered from a slice."""
     backend = _PerCallBackend([_partition(_GROUND_A, _GROUND_B), "# Lane A", "# Lane B"])
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
-    outcomes = (
-        await _outcome("compute", "Instruction issue is the limit."),
-        await _outcome("memory", "The scale stream is re-read."),
-    )
-    dispatch = DispatchPlan(analysis_commit="abc123", assignments=(_assignment(),))
+    specialists = await _compute_and_memory_round()
 
-    await agent.synthesize_lane_plan_results(
-        _context(),
-        outcomes,
-        dispatch,
-        _coverage(["compute", "memory"]),
-        lanes=2,
-    )
+    await agent.synthesize_lane_plan_results(_context(), specialists, lanes=2)
 
     partition = json.loads(backend.specs[0].user_prompt)
     assert [item["role_id"] for item in partition["specialist_analyses"]] == ["compute", "memory"]
@@ -840,24 +823,14 @@ async def test_a_replace_verdict_spends_one_lane_on_the_challenge() -> None:
     """A critic rules on a plan that exists, so REPLACE lands on the next round."""
     backend = _PerCallBackend([_partition("validate the CK GEMM path", _GROUND_B), "# Lane A", "# Lane B"])
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
-    outcomes = (
-        await _outcome("compute", "Instruction issue is the limit."),
-        await _outcome("memory", "The scale stream is re-read."),
-    )
-    dispatch = DispatchPlan(analysis_commit="abc123", assignments=(_assignment(),))
+    specialists = await _compute_and_memory_round()
     context = replace(
         _context(),
         last_critic_verdict="REPLACE",
         last_critic_review="A CK GEMM already exists for this shape.",
     )
 
-    await agent.synthesize_lane_plan_results(
-        context,
-        outcomes,
-        dispatch,
-        _coverage(["compute", "memory"]),
-        lanes=2,
-    )
+    await agent.synthesize_lane_plan_results(context, specialists, lanes=2)
 
     partition = backend.specs[0]
     assert "Give exactly one lane to that challenge" in partition.system_prompt
@@ -870,19 +843,9 @@ async def test_a_round_nobody_challenged_is_divided_as_usual() -> None:
     """Guards the challenger block from reaching every ordinary round."""
     backend = _PerCallBackend([_partition(_GROUND_A, _GROUND_B), "# Lane A", "# Lane B"])
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
-    outcomes = (
-        await _outcome("compute", "Instruction issue is the limit."),
-        await _outcome("memory", "The scale stream is re-read."),
-    )
-    dispatch = DispatchPlan(analysis_commit="abc123", assignments=(_assignment(),))
+    specialists = await _compute_and_memory_round()
 
-    await agent.synthesize_lane_plan_results(
-        _context(),
-        outcomes,
-        dispatch,
-        _coverage(["compute", "memory"]),
-        lanes=2,
-    )
+    await agent.synthesize_lane_plan_results(_context(), specialists, lanes=2)
 
     assert "Give exactly one lane" not in backend.specs[0].system_prompt
     assert agent.structured_output_diagnostics["partition"]["challenger_requested"] is False
@@ -893,24 +856,14 @@ async def test_an_accepted_round_raises_no_challenger() -> None:
     """Only REPLACE says the route is wrong; REVISE corrected it in place."""
     backend = _PerCallBackend([_partition(_GROUND_A, _GROUND_B), "# Lane A", "# Lane B"])
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
-    outcomes = (
-        await _outcome("compute", "Instruction issue is the limit."),
-        await _outcome("memory", "The scale stream is re-read."),
-    )
-    dispatch = DispatchPlan(analysis_commit="abc123", assignments=(_assignment(),))
+    specialists = await _compute_and_memory_round()
     context = replace(
         _context(),
         last_critic_verdict="REVISE",
         last_critic_review="Add a stop condition.",
     )
 
-    await agent.synthesize_lane_plan_results(
-        context,
-        outcomes,
-        dispatch,
-        _coverage(["compute", "memory"]),
-        lanes=2,
-    )
+    await agent.synthesize_lane_plan_results(context, specialists, lanes=2)
 
     assert "Give exactly one lane" not in backend.specs[0].system_prompt
 
@@ -920,19 +873,9 @@ async def test_the_partition_is_told_a_cross_cutting_move_is_one_lane() -> None:
     """The width follows the directions, not the other way around."""
     backend = _PerCallBackend([_partition(_GROUND_A, _GROUND_B), "# Lane A", "# Lane B"])
     agent = OrchestrationAgent(backend=backend, timeout_sec=1800, max_turns=500)
-    outcomes = (
-        await _outcome("compute", "Instruction issue is the limit."),
-        await _outcome("memory", "The scale stream is re-read."),
-    )
-    dispatch = DispatchPlan(analysis_commit="abc123", assignments=(_assignment(),))
+    specialists = await _compute_and_memory_round()
 
-    await agent.synthesize_lane_plan_results(
-        _context(),
-        outcomes,
-        dispatch,
-        _coverage(["compute", "memory"]),
-        lanes=3,
-    )
+    await agent.synthesize_lane_plan_results(_context(), specialists, lanes=3)
 
     partition = backend.specs[0].system_prompt
     assert "A change is one ground however many places it lands" in partition
@@ -961,19 +904,9 @@ async def test_the_partition_keeps_a_launch_config_with_the_body_it_serves() -> 
     """A body lane measured at the old body's config closes an untested axis."""
     backend = _PerCallBackend([_partition(_GROUND_A, _GROUND_B), "# Lane A", "# Lane B"])
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
-    outcomes = (
-        await _outcome("compute", "Instruction issue is the limit."),
-        await _outcome("memory", "The scale stream is re-read."),
-    )
-    dispatch = DispatchPlan(analysis_commit="abc123", assignments=(_assignment(),))
+    specialists = await _compute_and_memory_round()
 
-    await agent.synthesize_lane_plan_results(
-        _context(),
-        outcomes,
-        dispatch,
-        _coverage(["compute", "memory"]),
-        lanes=2,
-    )
+    await agent.synthesize_lane_plan_results(_context(), specialists, lanes=2)
 
     partition = backend.specs[0].system_prompt
     assert "The launch configuration is not ground of its own" in partition
@@ -1001,19 +934,9 @@ async def test_a_joint_lane_reaches_its_implementer_time_boxed() -> None:
         ]
     )
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
-    outcomes = (
-        await _outcome("compute", "Instruction issue is the limit."),
-        await _outcome("memory", "The scale stream is re-read."),
-    )
-    dispatch = DispatchPlan(analysis_commit="abc123", assignments=(_assignment(),))
+    specialists = await _compute_and_memory_round()
 
-    await agent.synthesize_lane_plan_results(
-        _context(),
-        outcomes,
-        dispatch,
-        _coverage(["compute", "memory"]),
-        lanes=2,
-    )
+    await agent.synthesize_lane_plan_results(_context(), specialists, lanes=2)
 
     joint_lane = json.loads(backend.specs[1].user_prompt)["lane"]
     assert joint_lane["joint"] is True
@@ -1037,20 +960,10 @@ async def test_a_joint_lane_with_no_fallback_is_said_out_loud(caplog) -> None:
         ]
     )
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
-    outcomes = (
-        await _outcome("compute", "Instruction issue is the limit."),
-        await _outcome("memory", "The scale stream is re-read."),
-    )
-    dispatch = DispatchPlan(analysis_commit="abc123", assignments=(_assignment(),))
+    specialists = await _compute_and_memory_round()
 
     with caplog.at_level("WARNING", logger=orchestration_module.log.name):
-        results = await agent.synthesize_lane_plan_results(
-            _context(),
-            outcomes,
-            dispatch,
-            _coverage(["compute", "memory"]),
-            lanes=2,
-        )
+        results = await agent.synthesize_lane_plan_results(_context(), specialists, lanes=2)
 
     assert [result.text for result in results] == ["# Lane A", "# Lane B"]
     diagnostics = agent.structured_output_diagnostics["partition"]
@@ -1073,19 +986,9 @@ async def test_the_round_records_which_lane_owns_its_widest_move() -> None:
         ]
     )
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
-    outcomes = (
-        await _outcome("compute", "Instruction issue is the limit."),
-        await _outcome("memory", "The scale stream is re-read."),
-    )
-    dispatch = DispatchPlan(analysis_commit="abc123", assignments=(_assignment(),))
+    specialists = await _compute_and_memory_round()
 
-    await agent.synthesize_lane_plan_results(
-        _context(),
-        outcomes,
-        dispatch,
-        _coverage(["compute", "memory"]),
-        lanes=2,
-    )
+    await agent.synthesize_lane_plan_results(_context(), specialists, lanes=2)
 
     assert "Name the largest move" in backend.specs[0].system_prompt
     assert "largest cross-cutting move" in json.loads(backend.specs[0].user_prompt)["task"]
@@ -1112,20 +1015,10 @@ async def test_an_unowned_widest_move_is_in_the_round_s_output(caplog) -> None:
         ]
     )
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
-    outcomes = (
-        await _outcome("compute", "Instruction issue is the limit."),
-        await _outcome("memory", "The scale stream is re-read."),
-    )
-    dispatch = DispatchPlan(analysis_commit="abc123", assignments=(_assignment(),))
+    specialists = await _compute_and_memory_round()
 
     with caplog.at_level("WARNING", logger=orchestration_module.log.name):
-        results = await agent.synthesize_lane_plan_results(
-            _context(),
-            outcomes,
-            dispatch,
-            _coverage(["compute", "memory"]),
-            lanes=2,
-        )
+        results = await agent.synthesize_lane_plan_results(_context(), specialists, lanes=2)
 
     assert [result.text for result in results] == ["# Lane A", "# Lane B"]
     diagnostics = agent.structured_output_diagnostics["partition"]
@@ -1155,20 +1048,10 @@ async def test_a_widest_move_naming_a_lane_the_round_lacks_is_unowned(
         ]
     )
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
-    outcomes = (
-        await _outcome("compute", "Instruction issue is the limit."),
-        await _outcome("memory", "The scale stream is re-read."),
-    )
-    dispatch = DispatchPlan(analysis_commit="abc123", assignments=(_assignment(),))
+    specialists = await _compute_and_memory_round()
 
     with caplog.at_level("WARNING", logger=orchestration_module.log.name):
-        await agent.synthesize_lane_plan_results(
-            _context(),
-            outcomes,
-            dispatch,
-            _coverage(["compute", "memory"]),
-            lanes=2,
-        )
+        await agent.synthesize_lane_plan_results(_context(), specialists, lanes=2)
 
     diagnostics = agent.structured_output_diagnostics["partition"]
     assert diagnostics["planned"] == 2
@@ -1182,20 +1065,10 @@ async def test_a_partition_that_named_no_widest_move_reports_that(caplog) -> Non
     """Named none and left one unowned are different answers."""
     backend = _PerCallBackend([_partition(_GROUND_A, _GROUND_B), "# Lane A", "# Lane B"])
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
-    outcomes = (
-        await _outcome("compute", "Instruction issue is the limit."),
-        await _outcome("memory", "The scale stream is re-read."),
-    )
-    dispatch = DispatchPlan(analysis_commit="abc123", assignments=(_assignment(),))
+    specialists = await _compute_and_memory_round()
 
     with caplog.at_level("WARNING", logger=orchestration_module.log.name):
-        await agent.synthesize_lane_plan_results(
-            _context(),
-            outcomes,
-            dispatch,
-            _coverage(["compute", "memory"]),
-            lanes=2,
-        )
+        await agent.synthesize_lane_plan_results(_context(), specialists, lanes=2)
 
     diagnostics = agent.structured_output_diagnostics["partition"]
     assert diagnostics["cross_cutting_move"] == {"status": "missing"}
@@ -1216,20 +1089,10 @@ async def test_a_move_named_as_a_plain_string_is_still_a_named_move(
         ]
     )
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
-    outcomes = (
-        await _outcome("compute", "Instruction issue is the limit."),
-        await _outcome("memory", "The scale stream is re-read."),
-    )
-    dispatch = DispatchPlan(analysis_commit="abc123", assignments=(_assignment(),))
+    specialists = await _compute_and_memory_round()
 
     with caplog.at_level("WARNING", logger=orchestration_module.log.name):
-        await agent.synthesize_lane_plan_results(
-            _context(),
-            outcomes,
-            dispatch,
-            _coverage(["compute", "memory"]),
-            lanes=2,
-        )
+        await agent.synthesize_lane_plan_results(_context(), specialists, lanes=2)
 
     diagnostics = agent.structured_output_diagnostics["partition"]
     assert diagnostics["cross_cutting_move"] == {
@@ -1258,20 +1121,10 @@ async def test_a_move_field_of_the_wrong_shape_is_not_reported_as_no_move(
         ]
     )
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
-    outcomes = (
-        await _outcome("compute", "Instruction issue is the limit."),
-        await _outcome("memory", "The scale stream is re-read."),
-    )
-    dispatch = DispatchPlan(analysis_commit="abc123", assignments=(_assignment(),))
+    specialists = await _compute_and_memory_round()
 
     with caplog.at_level("WARNING", logger=orchestration_module.log.name):
-        await agent.synthesize_lane_plan_results(
-            _context(),
-            outcomes,
-            dispatch,
-            _coverage(["compute", "memory"]),
-            lanes=2,
-        )
+        await agent.synthesize_lane_plan_results(_context(), specialists, lanes=2)
 
     move = agent.structured_output_diagnostics["partition"]["cross_cutting_move"]
     assert move["status"] == "unreadable"
@@ -1294,19 +1147,9 @@ async def test_an_owned_move_records_the_ground_that_owns_it() -> None:
         ]
     )
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
-    outcomes = (
-        await _outcome("compute", "Instruction issue is the limit."),
-        await _outcome("memory", "The scale stream is re-read."),
-    )
-    dispatch = DispatchPlan(analysis_commit="abc123", assignments=(_assignment(),))
+    specialists = await _compute_and_memory_round()
 
-    await agent.synthesize_lane_plan_results(
-        _context(),
-        outcomes,
-        dispatch,
-        _coverage(["compute", "memory"]),
-        lanes=2,
-    )
+    await agent.synthesize_lane_plan_results(_context(), specialists, lanes=2)
 
     move = agent.structured_output_diagnostics["partition"]["cross_cutting_move"]
     assert move["lane_id"] == 1
@@ -1327,19 +1170,9 @@ async def test_a_move_naming_a_lane_that_is_not_a_number_is_unowned() -> None:
         ]
     )
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
-    outcomes = (
-        await _outcome("compute", "Instruction issue is the limit."),
-        await _outcome("memory", "The scale stream is re-read."),
-    )
-    dispatch = DispatchPlan(analysis_commit="abc123", assignments=(_assignment(),))
+    specialists = await _compute_and_memory_round()
 
-    await agent.synthesize_lane_plan_results(
-        _context(),
-        outcomes,
-        dispatch,
-        _coverage(["compute", "memory"]),
-        lanes=2,
-    )
+    await agent.synthesize_lane_plan_results(_context(), specialists, lanes=2)
 
     diagnostics = agent.structured_output_diagnostics["partition"]
     assert diagnostics["cross_cutting_move"]["status"] == "unassigned"
@@ -1357,19 +1190,9 @@ async def test_an_unreadable_joint_answer_is_recorded_not_just_narrowed() -> Non
         ]
     )
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
-    outcomes = (
-        await _outcome("compute", "Instruction issue is the limit."),
-        await _outcome("memory", "The scale stream is re-read."),
-    )
-    dispatch = DispatchPlan(analysis_commit="abc123", assignments=(_assignment(),))
+    specialists = await _compute_and_memory_round()
 
-    await agent.synthesize_lane_plan_results(
-        _context(),
-        outcomes,
-        dispatch,
-        _coverage(["compute", "memory"]),
-        lanes=2,
-    )
+    await agent.synthesize_lane_plan_results(_context(), specialists, lanes=2)
 
     diagnostics = agent.structured_output_diagnostics["partition"]
     assert diagnostics["joint"] == []
@@ -1392,19 +1215,9 @@ async def test_a_lane_that_declined_joint_ground_does_not_get_it() -> None:
         ]
     )
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
-    outcomes = (
-        await _outcome("compute", "Instruction issue is the limit."),
-        await _outcome("memory", "The scale stream is re-read."),
-    )
-    dispatch = DispatchPlan(analysis_commit="abc123", assignments=(_assignment(),))
+    specialists = await _compute_and_memory_round()
 
-    await agent.synthesize_lane_plan_results(
-        _context(),
-        outcomes,
-        dispatch,
-        _coverage(["compute", "memory"]),
-        lanes=2,
-    )
+    await agent.synthesize_lane_plan_results(_context(), specialists, lanes=2)
 
     assert agent.structured_output_diagnostics["partition"]["joint"] == [2]
 
@@ -1434,19 +1247,9 @@ async def test_a_lane_that_answered_joint_with_a_number_keeps_narrow_ground() ->
         ]
     )
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
-    outcomes = (
-        await _outcome("compute", "Instruction issue is the limit."),
-        await _outcome("memory", "The scale stream is re-read."),
-    )
-    dispatch = DispatchPlan(analysis_commit="abc123", assignments=(_assignment(),))
+    specialists = await _compute_and_memory_round()
 
-    await agent.synthesize_lane_plan_results(
-        _context(),
-        outcomes,
-        dispatch,
-        _coverage(["compute", "memory"]),
-        lanes=2,
-    )
+    await agent.synthesize_lane_plan_results(_context(), specialists, lanes=2)
 
     diagnostics = agent.structured_output_diagnostics["partition"]
     assert diagnostics["joint"] == []
@@ -1460,19 +1263,9 @@ async def test_a_launch_site_two_bodies_share_is_owned_by_one_lane() -> None:
     """The exception that widens a lane cannot be handed to every lane."""
     backend = _PerCallBackend([_partition(_GROUND_A, _GROUND_B), "# Lane A", "# Lane B"])
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
-    outcomes = (
-        await _outcome("compute", "Instruction issue is the limit."),
-        await _outcome("memory", "The scale stream is re-read."),
-    )
-    dispatch = DispatchPlan(analysis_commit="abc123", assignments=(_assignment(),))
+    specialists = await _compute_and_memory_round()
 
-    await agent.synthesize_lane_plan_results(
-        _context(),
-        outcomes,
-        dispatch,
-        _coverage(["compute", "memory"]),
-        lanes=2,
-    )
+    await agent.synthesize_lane_plan_results(_context(), specialists, lanes=2)
 
     partition = backend.specs[0].system_prompt
     assert "One launch site belongs to exactly one lane" in partition
@@ -1488,19 +1281,9 @@ async def test_a_partition_that_could_not_be_bought_claims_no_move() -> None:
     """A collapsed round found nothing, so it must not report having looked."""
     backend = _PerCallBackend(["not json at all", "# One plan"])
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
-    outcomes = (
-        await _outcome("compute", "Instruction issue is the limit."),
-        await _outcome("memory", "The scale stream is re-read."),
-    )
-    dispatch = DispatchPlan(analysis_commit="abc123", assignments=(_assignment(),))
+    specialists = await _compute_and_memory_round()
 
-    await agent.synthesize_lane_plan_results(
-        _context(),
-        outcomes,
-        dispatch,
-        _coverage(["compute", "memory"]),
-        lanes=2,
-    )
+    await agent.synthesize_lane_plan_results(_context(), specialists, lanes=2)
 
     diagnostics = agent.structured_output_diagnostics["partition"]
     assert diagnostics["collapsed"] is True
@@ -1513,19 +1296,9 @@ async def test_the_partition_divides_what_it_was_given_without_reading_more() ->
     """The analyses already name the files and functions they are about."""
     backend = _PerCallBackend([_partition(_GROUND_A, _GROUND_B), "# Lane A", "# Lane B"])
     agent = OrchestrationAgent(backend=backend, timeout_sec=1800, max_turns=500)
-    outcomes = (
-        await _outcome("compute", "Instruction issue is the limit."),
-        await _outcome("memory", "The scale stream is re-read."),
-    )
-    dispatch = DispatchPlan(analysis_commit="abc123", assignments=(_assignment(),))
+    specialists = await _compute_and_memory_round()
 
-    await agent.synthesize_lane_plan_results(
-        _context(),
-        outcomes,
-        dispatch,
-        _coverage(["compute", "memory"]),
-        lanes=2,
-    )
+    await agent.synthesize_lane_plan_results(_context(), specialists, lanes=2)
 
     partition, lane = backend.specs[0], backend.specs[1]
     assert partition.tool_policy.read is False
@@ -1545,19 +1318,9 @@ async def test_a_partition_that_cannot_be_bought_still_leaves_a_round() -> None:
     """A round that cannot be divided by code runs as one lane, not a wide one."""
     backend = _PerCallBackend(["not json at all", "# One plan", "# Lane B"])
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
-    outcomes = (
-        await _outcome("compute", "Instruction issue is the limit."),
-        await _outcome("memory", "The scale stream is re-read."),
-    )
-    dispatch = DispatchPlan(analysis_commit="abc123", assignments=(_assignment(),))
+    specialists = await _compute_and_memory_round()
 
-    results = await agent.synthesize_lane_plan_results(
-        _context(),
-        outcomes,
-        dispatch,
-        _coverage(["compute", "memory"]),
-        lanes=2,
-    )
+    results = await agent.synthesize_lane_plan_results(_context(), specialists, lanes=2)
 
     assert [result.text for result in results] == ["# One plan"]
     diagnostics = agent.structured_output_diagnostics["partition"]
@@ -1574,24 +1337,14 @@ async def test_a_challenge_survives_a_partition_that_could_not_be_bought() -> No
     """A REPLACE is not asked for again, and the round it judged is this one."""
     backend = _PerCallBackend(["not json at all", "# Challenger plan", "# Lane B"])
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
-    outcomes = (
-        await _outcome("compute", "Instruction issue is the limit."),
-        await _outcome("memory", "The scale stream is re-read."),
-    )
-    dispatch = DispatchPlan(analysis_commit="abc123", assignments=(_assignment(),))
+    specialists = await _compute_and_memory_round()
     context = replace(
         _context(),
         last_critic_verdict="REPLACE",
         last_critic_review="A CK GEMM already exists for this shape.",
     )
 
-    results = await agent.synthesize_lane_plan_results(
-        context,
-        outcomes,
-        dispatch,
-        _coverage(["compute", "memory"]),
-        lanes=2,
-    )
+    results = await agent.synthesize_lane_plan_results(context, specialists, lanes=2)
 
     assert [result.text for result in results] == ["# Challenger plan"]
     diagnostics = agent.structured_output_diagnostics["partition"]
@@ -1612,19 +1365,9 @@ async def test_one_real_direction_is_planned_as_a_single_lane_round() -> None:
     """A slot filled to reach the requested width still costs a whole session."""
     backend = _PerCallBackend([_partition(_GROUND_A), "# One plan"])
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
-    outcomes = (
-        await _outcome("compute", "Instruction issue is the limit."),
-        await _outcome("memory", "The scale stream is re-read."),
-    )
-    dispatch = DispatchPlan(analysis_commit="abc123", assignments=(_assignment(),))
+    specialists = await _compute_and_memory_round()
 
-    results = await agent.synthesize_lane_plan_results(
-        _context(),
-        outcomes,
-        dispatch,
-        _coverage(["compute", "memory"]),
-        lanes=2,
-    )
+    results = await agent.synthesize_lane_plan_results(_context(), specialists, lanes=2)
 
     assert [result.text for result in results] == ["# One plan"]
     assert "lane" not in json.loads(backend.specs[1].user_prompt)
@@ -1661,19 +1404,9 @@ async def test_one_lost_lane_does_not_cost_the_round_its_healthy_plans() -> None
     """Each lane is its own call, so one failure is one lane, not the round."""
     backend = _OneLaneFailsBackend(failing_ground=_GROUND_A, answer="# Lane B\nStage via LDS.")
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
-    outcomes = (
-        await _outcome("compute", "Instruction issue is the limit."),
-        await _outcome("memory", "The scale stream is re-read."),
-    )
-    dispatch = DispatchPlan(analysis_commit="abc123", assignments=(_assignment(),))
+    specialists = await _compute_and_memory_round()
 
-    results = await agent.synthesize_lane_plan_results(
-        _context(),
-        outcomes,
-        dispatch,
-        _coverage(["compute", "memory"]),
-        lanes=2,
-    )
+    results = await agent.synthesize_lane_plan_results(_context(), specialists, lanes=2)
 
     assert [result.text for result in results] == ["# Lane B\nStage via LDS."]
 
@@ -1683,20 +1416,10 @@ async def test_a_round_that_loses_every_lane_is_still_a_planning_outage() -> Non
     """Tolerating one loss must not turn a total outage into a silent success."""
     backend = _OneLaneFailsBackend(failing_ground=_GROUND_B, answer="")
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
-    outcomes = (
-        await _outcome("compute", "Instruction issue is the limit."),
-        await _outcome("memory", "The scale stream is re-read."),
-    )
-    dispatch = DispatchPlan(analysis_commit="abc123", assignments=(_assignment(),))
+    specialists = await _compute_and_memory_round()
 
     with pytest.raises(Exception) as outage:
-        await agent.synthesize_lane_plan_results(
-            _context(),
-            outcomes,
-            dispatch,
-            _coverage(["compute", "memory"]),
-            lanes=2,
-        )
+        await agent.synthesize_lane_plan_results(_context(), specialists, lanes=2)
 
     assert "lane plan" in str(outage.value)
 
@@ -1706,20 +1429,10 @@ async def test_a_lane_that_answered_with_nothing_is_reported(caplog) -> None:
     """A round narrowed by an empty answer must not look like a narrower round."""
     backend = _PerCallBackend([_partition(_GROUND_A, _GROUND_B), "   ", "# Lane B\nStage via LDS."])
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
-    outcomes = (
-        await _outcome("compute", "Instruction issue is the limit."),
-        await _outcome("memory", "The scale stream is re-read."),
-    )
-    dispatch = DispatchPlan(analysis_commit="abc123", assignments=(_assignment(),))
+    specialists = await _compute_and_memory_round()
 
     with caplog.at_level("WARNING"):
-        results = await agent.synthesize_lane_plan_results(
-            _context(),
-            outcomes,
-            dispatch,
-            _coverage(["compute", "memory"]),
-            lanes=2,
-        )
+        results = await agent.synthesize_lane_plan_results(_context(), specialists, lanes=2)
 
     assert [result.text for result in results] == ["# Lane B\nStage via LDS."]
     assert "empty plan" in caplog.text
@@ -1734,11 +1447,7 @@ async def test_one_usable_analysis_is_one_lane() -> None:
     dispatch = DispatchPlan(analysis_commit="abc123", assignments=(_assignment(),))
 
     results = await agent.synthesize_lane_plan_results(
-        _context(),
-        (outcome,),
-        dispatch,
-        _coverage(["memory"]),
-        lanes=2,
+        _context(), SpecialistRound(dispatch, (outcome,), _coverage(["memory"])), lanes=2
     )
 
     assert [result.text for result in results] == ["# The only plan"]
@@ -1770,17 +1479,19 @@ async def test_synthesis_api_outage_is_not_returned_as_a_plan() -> None:
     ):
         await agent._synthesize_optimization_plan_result(
             _context(),
-            (outcome,),
-            DispatchPlan(
-                analysis_commit="abc123",
-                assignments=(_assignment(),),
+            SpecialistRound(
+                DispatchPlan(
+                    analysis_commit="abc123",
+                    assignments=(_assignment(),),
+                ),
+                (outcome,),
+                {
+                    "successful_roles": ["memory"],
+                    "covered_cases": ["case-a"],
+                    "missing_cases": ["case-b"],
+                    "failed_roles": [],
+                },
             ),
-            {
-                "successful_roles": ["memory"],
-                "covered_cases": ["case-a"],
-                "missing_cases": ["case-b"],
-                "failed_roles": [],
-            },
         )
 
 
@@ -2784,21 +2495,13 @@ async def test_a_resumed_revision_carries_only_what_the_session_lacks() -> None:
     """The synthesis session already holds the whole planning bundle."""
     backend = _ResumableQueuedBackend(["# Revised plan"])
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
-    outcomes = (
-        await _outcome("compute", "Instruction issue is the limit."),
-        await _outcome("memory", "The scale stream is re-read."),
-    )
-    dispatch = DispatchPlan(analysis_commit="abc123", assignments=(_assignment(),))
+    specialists = await _compute_and_memory_round()
 
     revised = await agent.revise_optimization_plan(
         _context(),
-        synthesis_session_id="synthesis-session",
-        draft_plan="# Draft plan",
-        critic_review="Compare the existing GEMM path.",
-        critic_verdict="REVISE",
-        specialist_outcomes=outcomes,
-        dispatch_plan=dispatch,
-        coverage=_coverage(["compute", "memory"]),
+        specialists,
+        draft=SynthesizedPlan(text="# Draft plan", session_id="synthesis-session"),
+        critic=PlanCriticOutcome(verdict="REVISE", review="Compare the existing GEMM path."),
     )
 
     assert revised.mode == "resumed"
@@ -2826,21 +2529,13 @@ async def test_a_fresh_revision_carries_the_whole_bundle() -> None:
     """A fresh session holds no prior context, so it needs the full bundle."""
     backend = _QueuedBackend(["# Revised plan"])
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
-    outcomes = (
-        await _outcome("compute", "Instruction issue is the limit."),
-        await _outcome("memory", "The scale stream is re-read."),
-    )
-    dispatch = DispatchPlan(analysis_commit="abc123", assignments=(_assignment(),))
+    specialists = await _compute_and_memory_round()
 
     revised = await agent.revise_optimization_plan(
         _context(),
-        synthesis_session_id="",
-        draft_plan="# Draft plan",
-        critic_review="Compare the existing GEMM path.",
-        critic_verdict="REVISE",
-        specialist_outcomes=outcomes,
-        dispatch_plan=dispatch,
-        coverage=_coverage(["compute", "memory"]),
+        specialists,
+        draft=SynthesizedPlan(text="# Draft plan", session_id=""),
+        critic=PlanCriticOutcome(verdict="REVISE", review="Compare the existing GEMM path."),
     )
 
     assert revised.mode == "fresh"
