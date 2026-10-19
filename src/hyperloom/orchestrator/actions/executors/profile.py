@@ -765,6 +765,8 @@ def _default_profile_config() -> Path:
 class ProfileExecutor(BenchmarkRunExecutor):
     """Benchmark round with the torch profiler on; extracts and certifies the trace_dir."""
 
+    runs_accuracy_eval = False
+
     def __init__(
         self,
         *,

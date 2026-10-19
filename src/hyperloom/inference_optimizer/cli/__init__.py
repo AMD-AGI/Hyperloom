@@ -1081,11 +1081,6 @@ def _resolve_run_max_model_len(args: argparse.Namespace) -> tuple[int, str]:
     )
 
 
-def _resume_can_disable_eval(baseline_accuracy: float) -> bool:
-    """Whether ``--no-eval`` may still disable the accuracy eval for a resumed session."""
-    return float(baseline_accuracy or 0.0) <= 0.0
-
-
 def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
     """Map ``--*-pct`` CLI flags to a ``phase -> pct`` override dict.
 
@@ -1784,22 +1779,6 @@ def _restore_phase_toggles(args: argparse.Namespace, state, session_dir: Path) -
                 f"  framework phase       : WARN --no-framework-agent ignored; "
                 f"session is already in phase={cur_phase!r} "
                 f"(cannot retroactively skip)"
-            )
-    # Same persistence contract for the eval toggle.
-    if state.eval_disabled:
-        args.no_eval = True
-        print("  accuracy eval         : DISABLED (persisted from original run)")
-    elif bool(getattr(args, "no_eval", False)):
-        anchored = float(state.baseline_accuracy or 0.0)
-        if _resume_can_disable_eval(anchored):
-            state.eval_disabled = True
-            state.save(session_dir)
-            print("  accuracy eval         : DISABLING for resume (--no-eval + no anchored accuracy)")
-        else:
-            print(
-                f"  accuracy eval         : WARN --no-eval ignored; "
-                f"session already anchored accuracy={anchored:.4f} "
-                f"(cannot retroactively ungrade prior KEEPs)"
             )
 
 

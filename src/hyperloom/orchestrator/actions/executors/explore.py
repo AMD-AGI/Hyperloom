@@ -17,7 +17,6 @@ from typing import Any
 import yaml
 
 from hyperloom.common.coerce import to_str_list
-from hyperloom.common.env import is_truthy
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.launch_log_evidence import settings_the_engine_rewrote
 from hyperloom.common.model_paths import resolve_session_model_path
@@ -141,23 +140,11 @@ def _decision_fields(gv: Any) -> dict[str, Any]:
     }
 
 
-def _explore_eval_disabled(shared_state: Any, params: dict[str, Any]) -> bool:
-    """Whether Magpie lm_eval is opted out for this explore run.
-
-    ``--no-eval`` persists on ``SharedState.eval_disabled``. Task param
-    ``disable_run_eval`` is the same opt-out for internally queued explores.
-    """
-    if is_truthy(params.get("disable_run_eval")):
-        return True
-    return bool(getattr(shared_state, "eval_disabled", False))
-
-
 def _variant_with_eval_off(gv: Any) -> Any:
     """Return a copy of ``gv`` with ``RUN_EVAL`` forced off.
 
     The variant layer is the last one :func:`run_grid` applies over the
-    accumulated stack, so forcing the key here is what makes a session-level
-    ``--no-eval`` hold whatever the stack carries.
+    accumulated stack, so forcing the key here holds whatever the stack carries.
     """
     envs = dict(gv.extra_envs)
     envs["RUN_EVAL"] = "false"
@@ -774,7 +761,6 @@ class ExploreExecutor:
             }
         extra = getattr(ctx, "extra", None) or {}
         shared_state = extra.get("shared_state") or extra.get("state")
-        eval_disabled = _explore_eval_disabled(shared_state, params)
         output_root = Path(
             params.get("output_dir")
             or extra.get("workspace")
@@ -808,7 +794,6 @@ class ExploreExecutor:
                 model_path=resolved_model or None,
                 gpu_type=resolved_gpu or None,
                 benchmark_script=override_script,
-                extra_envs={"RUN_EVAL": "false"} if eval_disabled else None,
                 out_name="explore_base.with_envs.yaml",
                 grading=getattr(shared_state, "grading", None),
             )
@@ -1247,14 +1232,12 @@ class ExploreExecutor:
                     args_mode=str(getattr(gv, "args_mode", "append") or "append"),
                 )
                 _carry_variant_metadata(gv, run_gv)
-                # ``--no-eval`` opted the session out of accuracy entirely, so it
-                # holds for every round. The decision round additionally skips
-                # eval when a warmup preceded it: it is timed against a
+                # The decision round skips eval when a warmup preceded it: it is timed against a
                 # throughput-only anchor, and ``parse_eval_results`` falls back
                 # to the score the warmup took. Without a warmup there is nothing
                 # to fall back to, so the decision round keeps its own eval.
-                warmup_gv = _variant_with_eval_off(run_gv) if eval_disabled else run_gv
-                decision_gv = _variant_with_eval_off(run_gv) if (use_warm_decision or eval_disabled) else run_gv
+                warmup_gv = run_gv
+                decision_gv = _variant_with_eval_off(run_gv) if use_warm_decision else run_gv
                 slot = output_root / f"v{idx:02d}_{_safe(gv.name)}"
                 slot.mkdir(parents=True, exist_ok=True)
                 # The warmup and decision rounds share this slot as the lifecycle pid_dir so the decision round

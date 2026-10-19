@@ -40,7 +40,6 @@ from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
     ROUND_MEASURE,
     ROUND_SINGLE,
     ROUND_WARMUP,
-    RUN_AFTER_EVAL_FAILURE,
     RUN_AFTER_MOE_RUNNER_FAILURE,
     RUN_INITIAL,
     make_baseline_recorder,
@@ -1658,6 +1657,7 @@ class BenchmarkRunExecutor:
     """One benchmark action: materialize the config, launch the backend, retry, parse the report."""
 
     benchmark_watchdog = False
+    runs_accuracy_eval = True
     session_dir = SessionDirField()
 
     def __init__(
@@ -1925,19 +1925,13 @@ class BenchmarkRunExecutor:
     async def _run_retrying(self, ctx: RunnerContext, *, recorder: Any = None) -> dict[str, Any]:
         """Run the Magpie baseline, with a one-shot eval-failure fallback."""
         result = await self._run_pass(ctx, recorder=recorder, attempt_reason=RUN_INITIAL)
-        params = ctx.task.params or {}
-        # A failed required patch timeline means the donor is incompatible with the current tree.
-        _extra_envs = params.get("extra_envs") or {}
-        _explicit_run_eval = not is_truthy(_extra_envs.get("RUN_EVAL"), default=True)
-        eval_already_off = is_truthy(params.get("disable_run_eval")) or _explicit_run_eval or self._eval_disabled(ctx)
-        eval_disabled_by_fallback = False
         # An eval that never reached a verdict because the server was gone is a broken measurement, not a statement
         # about accuracy or about a missing framework capability. Leaving it in the eval-rooted branch stamps it as an
         # eval-failure contract and hands it to the enablement lane, which then spends rounds looking for a capability
         # gap that the evidence does not support. It stays a failed baseline either way -- nothing is salvaged and the
         # accuracy gate is untouched -- but it is counted as an ordinary baseline failure, so the existing
         # ``_BASELINE_MAX_TOTAL_FAILURES`` backstop ends the run with the cause it actually had.
-        if result.get("status") != "succeeded" and not eval_already_off and self._is_eval_rooted_failure(result):
+        if result.get("status") != "succeeded" and self._is_eval_rooted_failure(result):
             if self._is_server_unreachable_eval_failure(result):
                 log.warning(
                     "baseline_executor: the accuracy eval failed because the server was unreachable, not because "
@@ -1959,41 +1953,22 @@ class BenchmarkRunExecutor:
                         ctx, result, kind=EVAL_KIND_RUNTIME_FAILURE, observed_accuracy=None, evidence=evidence
                     )
                     return result
+                result.setdefault("nonfatal_warnings", [])
+                result["accuracy_source"] = "eval_unavailable"
                 if _should_establish_quality_ref(getattr(ctx.task, "kind", ""), ctx.task.params or {}):
                     log.error(
-                        "baseline_executor: failure is eval-rooted (InferenceX "
-                        "run_eval aborted the benchmark) on a genuine baseline, "
-                        "whose whole purpose is to establish the accuracy "
-                        "reference. NOT retrying with RUN_EVAL=false: a "
-                        "throughput-only baseline cannot satisfy the accuracy gate, "
-                        "so the retry would burn a second full benchmark and the "
-                        "run would stop anyway. Stopping now — fix the accuracy "
-                        "eval (see the benchmark stdout/stderr for the run_eval "
-                        "error) rather than disabling RUN_EVAL."
+                        "baseline_executor: failure is eval-rooted (InferenceX run_eval aborted the benchmark) on a "
+                        "genuine baseline, whose whole purpose is to establish the accuracy reference. Stopping now "
+                        "-- fix the accuracy eval (see the benchmark stdout/stderr for the run_eval error)."
                     )
-                    result.setdefault("nonfatal_warnings", [])
                     result["nonfatal_warnings"].append("eval_failed_no_fallback_baseline_requires_accuracy")
-                    result["accuracy_source"] = "eval_unavailable"
                     self._request_eval_rooted_baseline_stop(ctx, result)
-                    return result
-                log.warning(
-                    "baseline_executor: failure looks eval-rooted (InferenceX "
-                    "run_eval aborted the benchmark); retrying once with "
-                    "RUN_EVAL=false to salvage the throughput baseline without "
-                    "the accuracy gate."
-                )
-                retry = await self._run_pass(
-                    ctx,
-                    recorder=recorder,
-                    attempt_reason=RUN_AFTER_EVAL_FAILURE,
-                    force_disable_eval=True,
-                )
-                retry.setdefault("nonfatal_warnings", [])
-                retry["nonfatal_warnings"].append("eval_failed_fallback_no_accuracy")
-                if retry.get("status") == "succeeded":
-                    retry["accuracy_source"] = "eval_unavailable"
-                eval_disabled_by_fallback = True
-                result = retry
+                else:
+                    log.error(
+                        "baseline_executor: failure is eval-rooted (InferenceX run_eval aborted the benchmark); "
+                        "the round fails with no throughput-only retry."
+                    )
+                return result
         if result.get("status") != "succeeded" and self._is_moe_runner_rooted_failure(result):
             log.warning(
                 "baseline_executor: the server died on a MoE runner backend "
@@ -2001,30 +1976,17 @@ class BenchmarkRunExecutor:
                 "scheme; retrying once without --moe-runner-backend so the "
                 "framework picks the backend itself."
             )
-            # Carry the eval fallback forward: the eval that broke above must stay off, and its bookkeeping must
-            # survive onto this result.
             retry = await self._run_pass(
                 ctx,
                 recorder=recorder,
                 attempt_reason=RUN_AFTER_MOE_RUNNER_FAILURE,
-                force_disable_eval=eval_disabled_by_fallback,
                 force_drop_moe_runner_backend=True,
             )
             retry.setdefault("nonfatal_warnings", [])
-            if eval_disabled_by_fallback:
-                retry["nonfatal_warnings"].append("eval_failed_fallback_no_accuracy")
-                if retry.get("status") == "succeeded":
-                    retry["accuracy_source"] = "eval_unavailable"
             retry["nonfatal_warnings"].append("moe_runner_backend_fallback_dropped_flag")
             result = retry
         self._maybe_stop_on_missing_baseline_accuracy(ctx, result)
         return result
-
-    def _eval_disabled(self, ctx: RunnerContext) -> bool:
-        """Whether ``--no-eval`` turned the accuracy eval off for this session."""
-        extra = getattr(ctx, "extra", None) or {}
-        state = self._resolve_shared_state(extra.get("shared_state"))
-        return bool(getattr(state, "eval_disabled", False))
 
     @staticmethod
     def _accuracy_stop_death_evidence(result: dict[str, Any]) -> str:
@@ -2146,8 +2108,6 @@ class BenchmarkRunExecutor:
     ) -> None:
         """Halt the run when a genuine baseline produced no accuracy result."""
         if not _should_establish_quality_ref(getattr(ctx.task, "kind", ""), ctx.task.params or {}):
-            return
-        if self._eval_disabled(ctx):
             return
         # A failed status must NOT skip straight past the salvage below.
         if result.get("status") != "succeeded" and not self._is_eval_rooted_failure(result):
@@ -2318,7 +2278,6 @@ class BenchmarkRunExecutor:
         self,
         ctx: RunnerContext,
         *,
-        force_disable_eval: bool = False,
         force_drop_moe_runner_backend: bool = False,
         recorder: Any = None,
         run_index: int = 0,
@@ -2392,16 +2351,10 @@ class BenchmarkRunExecutor:
                 "error": str(exc),
                 "output_dir": str(output_dir),
             }
-        # Accuracy eval (GSM8K) opt-out: ``--no-eval``, the ``disable_run_eval`` param and the eval-failure fallback
-        # force ``RUN_EVAL=false``.
         base_extra_envs = dict(params.get("extra_envs") or {})
-        eval_disabled = self._eval_disabled(ctx)
-        # The staged accuracy round is itself an eval, so ``--no-eval`` cancels it.
-        defer_accuracy_until_after_measure = not eval_disabled and is_truthy(
-            params.get("defer_accuracy_until_after_measure")
-        )
-        if force_disable_eval or is_truthy(params.get("disable_run_eval")) or eval_disabled:
+        if not self.runs_accuracy_eval:
             base_extra_envs["RUN_EVAL"] = "false"
+        defer_accuracy_until_after_measure = is_truthy(params.get("defer_accuracy_until_after_measure"))
         await _prepare_aiter_serving_so(base_extra_envs)
         try:
             config_path = materialize_benchmark_config(
@@ -2738,8 +2691,6 @@ class BenchmarkRunExecutor:
             force_warmup_eval = (
                 str(getattr(ctx.task, "kind", "") or "") == "replay_warm_recipe"
                 and not defer_accuracy_until_after_measure
-                and not force_disable_eval
-                and not eval_disabled
             )
             warmup_cfg = self._write_lifecycle_config(
                 materialized_config_path,
@@ -3911,7 +3862,7 @@ class BenchmarkRunExecutor:
         shared_state = (getattr(ctx, "extra", None) or {}).get("shared_state") or self.shared_state
         benchmark_mode = str(getattr(shared_state, "benchmark_mode", "") or "")
         if run_eval_disabled and not eval_scriptable and not is_agentx_mode(benchmark_mode):
-            # Serving RUN_EVAL was off this run (eval-failure fallback or ``disable_run_eval``), so lm-eval did not
+            # Serving RUN_EVAL was off this run (a profile round or a staged warmup round), so lm-eval did not
             # execute and there is no fresh accuracy to read.
             log.info(
                 "baseline_executor: RUN_EVAL disabled this run (serving); skipping accuracy parse (no lm-eval executed)"

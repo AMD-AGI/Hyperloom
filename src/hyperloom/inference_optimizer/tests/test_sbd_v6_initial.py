@@ -759,7 +759,6 @@ def test_preflight_records_install_steps_in_execution_order(tmp_path, monkeypatc
         resume_from=None,
         degraded_kb=True,
         framework="sglang",
-        no_eval=True,
         no_kernel=True,
         enable_roofline=False,
     )

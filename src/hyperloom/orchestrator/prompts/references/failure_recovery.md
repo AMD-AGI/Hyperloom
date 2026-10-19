@@ -40,10 +40,10 @@ Consult these SharedState surfaces in order before re-proposing:
 
 ## Baseline fingerprint (PRELUDE)
 
-The `baseline` fingerprint is exactly eight params fields:
+The `baseline` fingerprint is exactly seven params fields:
 `benchmark_script` / `result_dir` / `extra_server_args` /
-`extra_envs` / `model_path` / `gpu_type` / `config_path` /
-`disable_run_eval`. Those eight are the WHOLE fingerprint. A baseline
+`extra_envs` / `model_path` / `gpu_type` / `config_path`.
+Those seven are the WHOLE fingerprint. A baseline
 may also come back `status='succeeded'` with `decision='no_promote'`
 and `extras.anchor_kept_tput`: it ran fine but measured below the
 established anchor, so the anchor was kept. That is a completed

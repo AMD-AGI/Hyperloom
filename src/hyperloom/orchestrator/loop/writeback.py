@@ -328,7 +328,6 @@ _BASELINE_FINGERPRINT_KEYS: tuple[str, ...] = (
     "model_path",
     "gpu_type",
     "config_path",
-    "disable_run_eval",
 )
 
 
@@ -1885,8 +1884,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     acc = result.get("accuracy")
                     floor = float(getattr(self.shared_state.enablement, "accuracy_floor", 0.0) or 0.0)
                     generation = int(getattr(self.shared_state.enablement, "revalidation_generation", 0) or 0)
-                    eval_off = bool(self.shared_state.eval_disabled)
-                    if accuracy_meets_floor(acc, floor) or eval_off:
+                    if accuracy_meets_floor(acc, floor):
                         self.shared_state.enablement.succeeded = True
                         self.shared_state.enablement.validation_pending = False
                         self.shared_state.enablement.revalidation_task_id = ""

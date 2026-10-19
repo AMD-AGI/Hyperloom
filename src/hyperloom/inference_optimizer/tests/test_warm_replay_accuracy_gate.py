@@ -245,7 +245,7 @@ class TestAbsentEvidenceDoesNotBlock:
         assert coord.shared_state.warm_replay_outcome["baseline_accuracy"] is None
 
     def test_no_baseline_collapsed_score_rejected_by_absolute_floor(self, tmp_path):
-        """``--no-eval`` sessions carry no baseline reference; a collapsed replay must still be caught by the enablement absolute floor."""
+        """``no-reference`` sessions carry no baseline reference; a collapsed replay must still be caught by the enablement absolute floor."""
         coord = _coord_with_baseline(tmp_path, 0.0)
         coord.phase_prelude.promote_warm_replay(
             {"status": "succeeded", "output_throughput": 738.0, "accuracy": 0.20},

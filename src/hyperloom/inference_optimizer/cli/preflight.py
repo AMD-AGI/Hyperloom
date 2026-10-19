@@ -24,7 +24,6 @@ from pathlib import Path
 from typing import Any, NamedTuple, NoReturn
 
 from hyperloom.common import provenance
-from hyperloom.common.env import is_truthy
 from hyperloom.common.env_safety import (
     filter_untrusted_env_mapping,
     is_allowed_dotenv_key,
@@ -1257,14 +1256,6 @@ def _resumed_session_state(args: argparse.Namespace | None) -> dict[str, Any] | 
     return state if isinstance(state, dict) else None
 
 
-def _resolved_eval_disabled(args: argparse.Namespace) -> bool:
-    """Effective ``--no-eval`` for this launch, flag or persisted."""
-    if bool(getattr(args, "no_eval", False)):
-        return True
-    state = _resumed_session_state(args)
-    return bool(state and state.get("eval_disabled"))
-
-
 def _supported_framework_names() -> tuple[str, ...]:
     """The framework names ``--framework`` accepts (the framework registry)."""
     from hyperloom.inference_optimizer import framework_registry
@@ -1356,8 +1347,6 @@ def _pin_resumed_session_args(args: argparse.Namespace | None) -> None:
 def _ensure_lm_eval_dep(
     python_exe: str,
     pip_extra: list[str],
-    *,
-    eval_disabled: bool = False,
 ) -> dict[str, Any]:
     """Probe-then-install ``lm_eval`` in python_exe when the accuracy gate is on."""
     from hyperloom.orchestrator.actions.executors._multi_node_env import is_multi_node
@@ -1369,23 +1358,6 @@ def _ensure_lm_eval_dep(
             "target": "lm_eval[api]",
             "interpreter": python_exe,
             "message": "single-node InferenceX installs lm_eval on first use",
-        }
-    if eval_disabled:
-        return {
-            "status": "skipped",
-            "skip_reason": "eval_disabled",
-            "target": "lm_eval[api]",
-            "interpreter": python_exe,
-            "message": "accuracy evaluation is disabled",
-        }
-    run_eval = os.environ.get("RUN_EVAL")
-    if not is_truthy(run_eval, default=True):
-        return {
-            "status": "skipped",
-            "skip_reason": "eval_disabled",
-            "target": "lm_eval[api]",
-            "interpreter": python_exe,
-            "message": f"RUN_EVAL={run_eval}",
         }
     missing = _probe_missing_lm_eval_deps(python_exe)
     if missing is None:
@@ -2542,7 +2514,6 @@ def _preflight(
         action=lambda: _ensure_lm_eval_dep(
             benchmark_python,
             pip_extra,
-            eval_disabled=_resolved_eval_disabled(args),
         ),
     )
 

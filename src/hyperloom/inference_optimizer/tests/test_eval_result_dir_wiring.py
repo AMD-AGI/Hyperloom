@@ -435,7 +435,6 @@ def test_agentx_baseline_grades_requests_with_run_eval_off(tmp_path, rate, expec
     state = SharedState()
     state.benchmark_mode = "agentx"
     state.enablement_mode = "eval"
-    state.eval_disabled = False
     output_dir = tmp_path / "ws"
 
     def fake_run(cmd, *args, **kwargs):
@@ -493,7 +492,7 @@ def test_baseline_skips_accuracy_when_run_eval_disabled(tmp_path):
         default_config_path=base,
         session_dir=tmp_path,
     )
-    ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10, "disable_run_eval": True})
+    ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10, "extra_envs": {"RUN_EVAL": "false"}})
 
     with patch(
         "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
@@ -694,7 +693,7 @@ def test_baseline_reads_scriptable_quality_gate_when_run_eval_disabled(tmp_path)
         default_config_path=base,
         session_dir=tmp_path,
     )
-    ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10, "disable_run_eval": True})
+    ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10, "extra_envs": {"RUN_EVAL": "false"}})
 
     with patch(
         "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
