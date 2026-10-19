@@ -1995,22 +1995,11 @@ def materialize_config_with_envs(
 ) -> Path:
     """Render a per-run Magpie YAML with caller-provided overrides.
 
-    Process env wins over YAML defaults: ``MODEL_PATH`` → ``benchmark.model``;
-    ``GPU_TYPE`` → ``runner_type`` + pinned generic ``{framework}_{gpu_type}.sh``
-    (so Magpie doesn't fall through to a native script hardcoding
-    ``--result-dir /workspace/``); ``benchmark_script`` (pre-sanitized) re-pins
-    after that; ``PRECISION`` → ``precision``; ``CONC/ISL/OSL/MAX_MODEL_LEN/TP/
-    RANDOM_RANGE_RATIO`` → ``benchmark.envs``; ``ROCR_VISIBLE_DEVICES``
-    reconciled against TP; ``RUN_EVAL`` defaulted; ``NUM_PROMPTS`` /
-    ``NUM_WARMUPS`` computed adaptively. ``inferencex_path`` explicitly pins
-    ``benchmark.inferencex_path`` for one task (falling back to
-    ``$INFERENCEX_PATH`` for existing callers). ``extra_server_args`` routes
-    into the framework env; ``--extra-env`` is copied into ``benchmark.envs``
-    so Magpie forwards it to vLLM/sglang workers; ``extra_envs`` overrides any
-    of the above.
-    The session's ``--reference-script`` recipe is read from SharedState here
-    rather than passed in, so it seeds a lowest-priority base (below the YAML
-    base and ``extra_server_args``) for every caller.
+    The process env wins over the YAML defaults, and the body is the order the
+    phases run in: what the run launches, the request shape it serves, the
+    profile shaping, the server arguments composed from every source that feeds
+    them, the per-framework and per-model envs, and the caller's own removals --
+    after which the argument string is sealed and nothing writes it again.
 
     Args:
         config_path: Path to the source Magpie YAML to render.
@@ -2030,8 +2019,7 @@ def materialize_config_with_envs(
         out_name: File name for the materialized YAML.
         establish_quality_ref: When True (baseline only) the scriptable
             image-quality reference is ESTABLISHED (written) by this run;
-            otherwise the run only COMPARES against it. See the quality-
-            reference wiring block below.
+            otherwise the run only COMPARES against it.
         drop_moe_runner_backend: When True, skip the AMD MoE
             ``--moe-runner-backend`` injection and strip the flag from the
             merged args whatever source it came from (the one-shot fallback
