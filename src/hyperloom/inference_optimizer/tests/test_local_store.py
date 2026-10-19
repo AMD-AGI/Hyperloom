@@ -9,12 +9,12 @@ import threading
 
 import pytest
 
+from hyperloom.inference_optimizer.recipe_snapshot_constants import recipe_canonical_id
 from hyperloom.orchestrator.knowledge.recipe_kb import local_store as ls
-from hyperloom.orchestrator.knowledge.recipe_kb.canonical_id import canonical_id_from_components
 
 
 def _cid(model="m", hardware="mi300", framework_name="sglang", framework_version="v1", precision="fp8") -> str:
-    return canonical_id_from_components(
+    return recipe_canonical_id(
         model=model,
         hardware=hardware,
         framework_name=framework_name,
@@ -182,14 +182,14 @@ def test_search_filters(tmp_path):
     res = store.search(label_match={"model": "a"})
     assert len(res) == 1
     # metric filter shorthand alias 'throughput'
-    res = store.search(metric_filters={"throughput": {"min": 200.0}})
+    res = store.search(filters=ls.RecipeFilters(metric_filters={"throughput": {"min": 200.0}}))
     assert len(res) == 1
     assert res[0]["model"] == "b"
     # metric scalar shorthand
-    res = store.search(metric_filters={"best_throughput": {"max": 150.0}})
+    res = store.search(filters=ls.RecipeFilters(metric_filters={"best_throughput": {"max": 150.0}}))
     assert len(res) == 1
     # updated_since far future -> none
-    assert store.search(updated_since="9999-01-01T00:00:00") == []
+    assert store.search(filters=ls.RecipeFilters(updated_since="9999-01-01T00:00:00")) == []
     assert len(store.search(limit=10)) == 2
 
 
