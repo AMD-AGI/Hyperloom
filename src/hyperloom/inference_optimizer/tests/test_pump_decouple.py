@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from hyperloom.orchestrator.loop.coordinator import RunOptions
 
 
 class _Gated:
@@ -238,7 +239,9 @@ async def test_the_closing_grace_waits_on_a_report_that_outlived_the_close_seque
     coord.phase_close.enter_closing_phase = _enter
     coord.phase_close.ensure_close_sequence = _close_sequence
 
-    await asyncio.wait_for(coord.run(max_minutes=0.001, closing_grace_sec=30.0, tick_interval_sec=0.0), timeout=20)
+    await asyncio.wait_for(
+        coord.run(options=RunOptions(max_minutes=0.001, tick_interval_sec=0.0, closing_grace_sec=30.0)), timeout=20
+    )
 
     assert report.calls
     assert int(coord.shared_state.tick) - closing_tick[0] < 20

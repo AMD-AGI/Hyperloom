@@ -30,7 +30,7 @@ from hyperloom.orchestrator.roles.mock_backend import (
     MockTurn,
     ScriptedPlan,
 )
-from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
+from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator, RunOptions
 from hyperloom.orchestrator.phases import machine_state
 from hyperloom.orchestrator.phases.machine import Transition
 from hyperloom.orchestrator.phases.close import (
@@ -920,7 +920,7 @@ class TestEveryTerminalReachesAWrittenReport:
 
         monkeypatch.setattr(coord.phase_machine, "advance_phase_if_needed", _cannot_advance)
         try:
-            reason = await coord.run(max_ticks=1, max_minutes=60, closing_grace_sec=0.0)
+            reason = await coord.run(options=RunOptions(max_minutes=60, max_ticks=1, closing_grace_sec=0.0))
         finally:
             await coord.stop()
 
@@ -1091,7 +1091,7 @@ class TestEveryTerminalReachesAWrittenReport:
         coord.shared_state.elapsed_charged_sec = 120 * 60.0
 
         try:
-            reason = await coord.run(max_minutes=60, closing_grace_sec=0.0, max_ticks=4)
+            reason = await coord.run(options=RunOptions(max_minutes=60, max_ticks=4, closing_grace_sec=0.0))
         finally:
             await coord.stop()
 

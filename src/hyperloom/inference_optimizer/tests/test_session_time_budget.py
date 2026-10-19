@@ -33,7 +33,7 @@ from hyperloom.orchestrator.actions.executors._subprocess_kill import (
 )
 from hyperloom.orchestrator.bus.gpu_pool import GPU_LEASE_TTL_GRACE
 from hyperloom.orchestrator.loop import time_budget
-from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.coordinator import Coordinator, RunOptions
 from hyperloom.orchestrator.loop.dispatcher import (
     _CANCEL_NOTICE_SEC,
     _COOPERATIVE_CANCEL_GRACE_SEC,
@@ -245,7 +245,7 @@ class TestTheReserveIsTheClosingGraceWindow:
     async def test_the_coordinator_hands_the_operators_window_to_the_state(self, coord: Coordinator):
         """The reserve lives on SharedState, but the flag arrives at the Coordinator."""
         try:
-            await coord.run(max_ticks=1, max_minutes=60, closing_grace_sec=0.0)
+            await coord.run(options=RunOptions(max_minutes=60, max_ticks=1, closing_grace_sec=0.0))
         finally:
             await coord.stop()
         assert coord.shared_state.closing_grace_sec == 0.0
@@ -1445,7 +1445,7 @@ class TestATickCannotOutliveTheSessionBound:
         started = time.monotonic()
         try:
             reason = await asyncio.wait_for(
-                coord.run(max_minutes=0.05, closing_grace_sec=0.0, tick_interval_sec=0.0),
+                coord.run(options=RunOptions(max_minutes=0.05, tick_interval_sec=0.0, closing_grace_sec=0.0)),
                 timeout=15.0,
             )
         finally:
@@ -1465,7 +1465,7 @@ class TestATickCannotOutliveTheSessionBound:
         started = time.monotonic()
         try:
             reason = await asyncio.wait_for(
-                coord.run(max_minutes=0.05, closing_grace_sec=0.0, tick_interval_sec=0.0),
+                coord.run(options=RunOptions(max_minutes=0.05, tick_interval_sec=0.0, closing_grace_sec=0.0)),
                 timeout=15.0,
             )
         finally:
@@ -1641,7 +1641,7 @@ class TestTheSessionBudgetIsSummedForwardOverLegs:
     @pytest.mark.asyncio
     async def test_a_leg_charges_its_time_to_the_session(self, coord: Coordinator):
         try:
-            await coord.run(max_ticks=1, max_minutes=60, closing_grace_sec=0.0)
+            await coord.run(options=RunOptions(max_minutes=60, max_ticks=1, closing_grace_sec=0.0))
         finally:
             await coord.stop()
         assert coord.shared_state.leg_anchor_unix > 0.0
@@ -1653,7 +1653,7 @@ class TestTheSessionBudgetIsSummedForwardOverLegs:
         coord.shared_state.max_minutes = 180
         coord.shared_state.elapsed_charged_sec = 120 * 60.0
         try:
-            await coord.run(max_ticks=1, max_minutes=180, closing_grace_sec=0.0)
+            await coord.run(options=RunOptions(max_minutes=180, max_ticks=1, closing_grace_sec=0.0))
         finally:
             await coord.stop()
         assert coord.shared_state.elapsed_charged_sec >= 120 * 60.0
@@ -1665,11 +1665,7 @@ class TestTheSessionBudgetIsSummedForwardOverLegs:
         coord.shared_state.elapsed_charged_sec = 180 * 60.0
         started = time.monotonic()
         try:
-            reason = await coord.run(
-                max_minutes=180,
-                closing_grace_sec=0.0,
-                max_ticks=8,
-            )
+            reason = await coord.run(options=RunOptions(max_minutes=180, max_ticks=8, closing_grace_sec=0.0))
         finally:
             await coord.stop()
         assert reason == "time_exhausted"
@@ -1721,7 +1717,7 @@ class TestTheSessionBudgetIsSummedForwardOverLegs:
         coord.shared_state.max_minutes = 180
         coord.shared_state.deadline_unix = start.timestamp() + 180 * 60.0
         try:
-            await coord.run(max_minutes=180, closing_grace_sec=0.0, max_ticks=8)
+            await coord.run(options=RunOptions(max_minutes=180, max_ticks=8, closing_grace_sec=0.0))
             # Read liveness before the safety kill below, or the assertion is
             # satisfied by this test rather than by the teardown.
             reaped = proc.poll() is not None or proc.wait(timeout=10) is not None

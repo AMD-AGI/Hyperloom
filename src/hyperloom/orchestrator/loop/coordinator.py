@@ -243,6 +243,29 @@ class AdvisoryServices:
     proposal_scorer: Any = None
 
 
+@dataclass(frozen=True)
+class RunOptions:
+    """How long and how a Coordinator run ticks, and what stops it early.
+
+    Attributes:
+        max_minutes: Session wall-clock bound; unbounded when ``None``.
+        tick_interval_sec: Pause between ticks.
+        max_ticks: Stop after this many ticks, when set.
+        stop_when: Custom stop predicate, asked after every tick.
+        install_signal_handlers: Whether to arm the stop-signal drain.
+        crash_emergency_threshold: Consecutive tick crashes that end the run.
+        closing_grace_sec: Bound on the closing phase; the default when ``None``.
+    """
+
+    max_minutes: float | None = None
+    tick_interval_sec: float = 0.0
+    max_ticks: int | None = None
+    stop_when: Callable[["Coordinator"], Awaitable[bool] | bool] | None = None
+    install_signal_handlers: bool = False
+    crash_emergency_threshold: int = 25
+    closing_grace_sec: float | None = None
+
+
 class Coordinator:
     """The single Coordinator instance per session."""
 
@@ -933,18 +956,7 @@ class Coordinator:
                 self.record_exception(stage=stage, exc=exc, agent=stage.removeprefix("reactor:"))
 
     # Long-run interface
-    async def run(
-        self,
-        *,
-        objective: Objective | None = None,
-        max_minutes: float | None = None,
-        tick_interval_sec: float = 0.0,
-        max_ticks: int | None = None,
-        stop_when: Callable[["Coordinator"], Awaitable[bool] | bool] | None = None,
-        install_signal_handlers: bool = False,
-        crash_emergency_threshold: int = 25,
-        closing_grace_sec: float | None = None,
-    ) -> str:
+    async def run(self, *, objective: Objective | None = None, options: RunOptions = RunOptions()) -> str:
         """Run reactor + dispatcher until a stop condition fires (priority order): signal, a stop_reason the phase machine recorded (a met target closes through SWEEP as one), time_exhausted (via closing phase), emergency, custom, max_ticks. Sets + saves + returns shared_state.stop_reason.
 
         The whole run is one ``session`` trajectory span, and every trajectory event recorded beneath it inherits this
@@ -958,16 +970,7 @@ class Coordinator:
             ),
             trajectory_span(EVENT_SESSION, attributes={"name": self.session_dir.name}) as span,
         ):
-            stop_reason = await self._run_ticks(
-                objective=objective,
-                max_minutes=max_minutes,
-                tick_interval_sec=tick_interval_sec,
-                max_ticks=max_ticks,
-                stop_when=stop_when,
-                install_signal_handlers=install_signal_handlers,
-                crash_emergency_threshold=crash_emergency_threshold,
-                closing_grace_sec=closing_grace_sec,
-            )
+            stop_reason = await self._run_ticks(objective=objective, options=options)
             self._close_undecided_proposals(stop_reason)
             span.finish(stop_reason=stop_reason)
             return stop_reason
@@ -1014,24 +1017,13 @@ class Coordinator:
         """Live ``(phase, tick)`` for trajectory events recorded inside :meth:`run`."""
         return (self.shared_state.phase or None), int(self.shared_state.tick or 0)
 
-    async def _run_ticks(
-        self,
-        *,
-        objective: Objective | None,
-        max_minutes: float | None,
-        tick_interval_sec: float,
-        max_ticks: int | None,
-        stop_when: Callable[["Coordinator"], Awaitable[bool] | bool] | None,
-        install_signal_handlers: bool,
-        crash_emergency_threshold: int,
-        closing_grace_sec: float | None,
-    ) -> str:
+    async def _run_ticks(self, *, objective: Objective | None, options: RunOptions) -> str:
         """Tick loop and shutdown sequence behind :meth:`run`."""
         objective = objective or TimeOnlyObjective()
         self._current_objective = objective
         # A dedicated thread reading the interpreter's wakeup pipe, not a loop
         # callback: a TERM has to be recorded while the loop is busy.
-        if install_signal_handlers:
+        if options.install_signal_handlers:
             self._signals = SignalDrain(
                 loop=asyncio.get_running_loop(),
                 stop_event=self._stop,
@@ -1040,8 +1032,8 @@ class Coordinator:
 
         await self.writeback.replay_resume_if_needed()
         grace_sec, deadline, max_minutes_value = self._bind_session_deadline(
-            max_minutes=max_minutes,
-            closing_grace_sec=closing_grace_sec,
+            max_minutes=options.max_minutes,
+            closing_grace_sec=options.closing_grace_sec,
         )
 
         tick_n = 0
@@ -1101,15 +1093,15 @@ class Coordinator:
                     self.shared_state.recent_crash_count(
                         window_sec=_CRASH_EMERGENCY_WINDOW_SEC,
                     )
-                    >= crash_emergency_threshold
+                    >= options.crash_emergency_threshold
                 ):
                     stop_reason = "emergency"
                     break
-                if max_ticks is not None and tick_n >= max_ticks:
+                if options.max_ticks is not None and tick_n >= options.max_ticks:
                     stop_reason = "max_ticks"
                     break
-                if stop_when is not None:
-                    triggered = stop_when(self)
+                if options.stop_when is not None:
+                    triggered = options.stop_when(self)
                     if asyncio.iscoroutine(triggered):
                         triggered = await triggered
                     if bool(triggered):
@@ -1117,7 +1109,11 @@ class Coordinator:
                         break
 
                 # Brief wait between ticks to avoid CPU spin while staying signal-responsive; 0.0 keeps tests fast.
-                wait_sec = tick_interval_sec if in_closing else max(tick_interval_sec, self._backend_retry_wait_sec())
+                wait_sec = (
+                    options.tick_interval_sec
+                    if in_closing
+                    else max(options.tick_interval_sec, self._backend_retry_wait_sec())
+                )
                 if wait_sec > 0:
                     try:
                         await asyncio.wait_for(self._stop.wait(), timeout=wait_sec)

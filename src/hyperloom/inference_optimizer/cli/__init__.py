@@ -104,7 +104,7 @@ __all__ = ["main"]
 from .. import framework_registry
 from ..session.manifest import load_manifest, write_manifest
 from ..protocol.action_surfaces import ACTION_CATALOGUE
-from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator, CoordinatorSettings
+from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator, CoordinatorSettings, RunOptions
 from hyperloom.orchestrator.collaborator import OrchestrationPrompt as _OrchestrationPrompt
 from hyperloom.inference_optimizer.framework_paths import resolve_framework_tree, resolve_kernel_search_roots
 from hyperloom.orchestrator.state.objective import AnyObjective, Objective, build_objective
@@ -2736,11 +2736,13 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     try:
         stop_reason = await coordinator.run(
             objective=objective,
-            max_minutes=args.max_hours * 60.0,
-            tick_interval_sec=args.tick_interval_sec,
-            max_ticks=args.max_ticks,
-            install_signal_handlers=True,
-            closing_grace_sec=args.closing_grace_sec,
+            options=RunOptions(
+                max_minutes=args.max_hours * 60.0,
+                tick_interval_sec=args.tick_interval_sec,
+                max_ticks=args.max_ticks,
+                install_signal_handlers=True,
+                closing_grace_sec=args.closing_grace_sec,
+            ),
         )
     finally:
         state = coordinator.shared_state
