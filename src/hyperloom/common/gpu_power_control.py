@@ -188,7 +188,7 @@ def _ensure_ledger_dir(directory: Path) -> None:
 
 def _open_record(path: Path, flags: int) -> int:
     """Open a record without following a symlink, and refuse one another account could have written."""
-    fd = os.open(path, flags | os.O_NOFOLLOW, 0o600)
+    fd = os.open(path, flags | os.O_NOFOLLOW, 0o644)
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
@@ -196,8 +196,9 @@ def _open_record(path: Path, flags: int) -> int:
             raise GpuPowerSettingsError(f"{path} is not a plain file of its own; remove it")
         _check_trusted(path, st)
         if flags & os.O_CREAT and st.st_uid == os.geteuid():
-            # Owner-only read/write to avoid exposing record contents to other accounts.
-            os.fchmod(fd, 0o600)
+            # Readable by every account so a launch without the flag can warn about a card left changed;
+            # writable only by its owner.
+            os.fchmod(fd, 0o644)
     except (GpuPowerSettingsError, OSError):
         os.close(fd)
         raise
