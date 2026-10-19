@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 import yaml
@@ -333,6 +333,80 @@ async def test_gpus_that_cannot_be_checked_are_still_handed_to_geak(
     assert len(launches) == 1
     assert coord.shared_state.geak_result["error_class"] == "no_result_json"
     assert "cannot confirm GPUs [6, 7] are free" in caplog.text
+
+
+def _geak_returns_a_win(coord: Coordinator, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[tuple[str, int]]:
+    """Let the runner leave an ``ok`` result.json; return each rebench reason with how many GPU checks preceded it."""
+    coord.phase_kernel._geak_timeouts = lambda: (60, 90, False)
+
+    def _start_runner(_cmd, **_kwargs):
+        (tmp_path / "geak" / "result.json").write_text(
+            json.dumps({"status": "ok", "throughput_speedup": 1.39, "accepted_config": {"flags": "", "env": ""}}),
+            encoding="utf-8",
+        )
+        process = Mock(returncode=0)
+        process.communicate.return_value = ("", "")
+        return process
+
+    monkeypatch.setattr("hyperloom.orchestrator.phases.kernel.subprocess.Popen", _start_runner)
+    coord.phase_kernel._record_geak_candidate = lambda _result: True
+    coord.bus = Mock(append_and_seq=AsyncMock())
+    return []
+
+
+def _gpu_checks(monkeypatch: pytest.MonkeyPatch, answers: list[GpuHandoff]) -> list[list[int] | None]:
+    """Answer successive GPU checks from ``answers``; return the cards each one was asked about."""
+    asked: list[list[int] | None] = []
+
+    def _check(_session_dir: Path, cards: list[int] | None, *, timeout_sec: float) -> GpuHandoff:
+        asked.append(cards)
+        return answers[min(len(asked), len(answers)) - 1]
+
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._server_lifecycle.free_gpus_for_handoff", _check)
+    return asked
+
+
+@pytest.mark.asyncio
+async def test_the_rebench_waits_for_the_gpus_geak_hands_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    coord = _coord(tmp_path, agentx=False)
+    rebenches = _geak_returns_a_win(coord, monkeypatch, tmp_path)
+    asked = _gpu_checks(monkeypatch, [_GPUS_FREE])
+
+    async def _rebench(*, reason: str) -> None:
+        rebenches.append((reason, len(asked)))
+
+    coord.phase_kernel._revalidate_geak_candidate = _rebench
+
+    await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
+
+    # Once before the hand-off, once more on the same cards before the rebench boots its server.
+    assert asked == [[6, 7], [6, 7]]
+    assert rebenches == [("geak_e2e_win", 2)]
+
+
+@pytest.mark.asyncio
+async def test_gpus_still_busy_after_geak_do_not_stop_the_rebench(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    coord = _coord(tmp_path, agentx=False)
+    rebenches = _geak_returns_a_win(coord, monkeypatch, tmp_path)
+    holder = "pgid=8812 python3 -m sglang.launch_server"
+    _gpu_checks(
+        monkeypatch,
+        [_GPUS_FREE, GpuHandoff(reaped=[], busy=[(6, 120000.0, 288000.0)], holders=[holder], unverified="")],
+    )
+
+    async def _rebench(*, reason: str) -> None:
+        rebenches.append((reason, 0))
+
+    coord.phase_kernel._revalidate_geak_candidate = _rebench
+
+    with caplog.at_level("ERROR", logger="hyperloom.orchestrator.phases.kernel"):
+        await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
+
+    assert rebenches == [("geak_e2e_win", 0)]
+    assert "geak rebench: GPUs still hold VRAM after GEAK returned: GPU6 120000/288000 MiB" in caplog.text
+    assert holder in caplog.text
 
 
 @pytest.mark.asyncio
