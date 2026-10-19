@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -214,56 +213,6 @@ def test_single_node_is_left_to_inferencex(monkeypatch):
 
     monkeypatch.setattr(preflight.subprocess, "run", _boom)
     preflight._ensure_lm_eval_dep("py", [])
-
-
-def test_lm_eval_skipped_when_run_eval_disabled(monkeypatch):
-    monkeypatch.setenv("RUN_EVAL", "false")
-
-    def _boom(*_a, **_k):
-        raise AssertionError("must not probe/install when RUN_EVAL is disabled")
-
-    monkeypatch.setattr(preflight.subprocess, "run", _boom)
-    preflight._ensure_lm_eval_dep("py", [])
-
-
-def test_lm_eval_skipped_under_no_eval(monkeypatch):
-    monkeypatch.delenv("RUN_EVAL", raising=False)
-
-    def _boom(*_a, **_k):
-        raise AssertionError("must not probe/install under --no-eval")
-
-    monkeypatch.setattr(preflight.subprocess, "run", _boom)
-    preflight._ensure_lm_eval_dep("py", [], eval_disabled=True)
-
-
-# --- _resolved_eval_disabled: preflight runs before the resume block --------
-def _args(**kw):
-    return SimpleNamespace(**{"no_eval": False, "resume_from": "", **kw})
-
-
-def test_resolved_eval_disabled_reads_the_flag():
-    assert preflight._resolved_eval_disabled(_args(no_eval=True)) is True
-    assert preflight._resolved_eval_disabled(_args()) is False
-
-
-def test_resolved_eval_disabled_reads_the_resumed_session(tmp_path):
-    (tmp_path / "state.json").write_text('{"eval_disabled": true}', encoding="utf-8")
-    assert preflight._resolved_eval_disabled(_args(resume_from=str(tmp_path))) is True
-
-
-def test_resolved_eval_disabled_without_a_readable_state(tmp_path):
-    assert preflight._resolved_eval_disabled(_args(resume_from=str(tmp_path))) is False
-
-
-def test_resolved_eval_disabled_reads_nothing_without_a_named_session(tmp_path, monkeypatch):
-    """No session dir named means no session state is consulted, whatever sits in the workspace."""
-    from hyperloom.inference_optimizer.session import paths
-
-    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
-    foreign = tmp_path / "SomeOtherModel" / "29990101T000000Z"
-    foreign.mkdir(parents=True)
-    (foreign / "state.json").write_text('{"eval_disabled": true}', encoding="utf-8")
-    assert preflight._resolved_eval_disabled(_args()) is False
 
 
 def test_unprobeable_interpreter_is_left_untouched(monkeypatch, capsys):

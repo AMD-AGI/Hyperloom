@@ -327,7 +327,6 @@ def integrate_recipe_case(session_dir, tmp_path, monkeypatch):
     state = SharedState.load_or_init(session_dir)
     state.framework = "sglang"
     state.benchmark_mode = "synthetic"
-    state.eval_disabled = True
     state.baseline_tput = 100.0
     state.baseline_config_path = str(base_yaml)
     state.baseline_perf = {
