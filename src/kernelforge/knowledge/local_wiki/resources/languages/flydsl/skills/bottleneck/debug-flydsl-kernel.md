@@ -59,6 +59,12 @@ raw-tensor kernel launched at 8, 16 and 24 rows produced one cache entry. Edits 
 helper directory, `FLYDSL_RUNTIME_ENABLE_CACHE=0` (disables the disk cache; the in-memory cache stays),
 or a clean cache.
 
+Re-checked on 0.3.2 and 0.3.4.1 (MI355X, 2026-10-19). A captured `dict` is not in the key on either version:
+in one process, through a second call of the factory, or across processes sharing the cache directory.
+A captured scalar enters the key when the `@flyc.jit` object is created: changing it on an existing jit
+object reuses the old binary on both versions, while a new jit object or a new process recompiles.
+0.3.4.1 also adds captured *types* to the key (FlyDSL `d6221d19`, #1130).
+
 Two checks that settle "did my change run?":
 - **Break it on purpose.** Make the kernel compute something wrong (scale by 2) without clearing the
   cache. If the old correct result comes back, every earlier measurement of that edit was stale.
@@ -246,7 +252,8 @@ checked by tracing a probe kernel and reading `00_origin.mlir`):
 | `range(a, b, s, init=[...])` | `scf.for` on `index` with explicit `iter_args` | only what you `yield`; rebinding a Python name in the body is not carried | Python `int` is fine (becomes an index constant), as is `fx.Int32` / `fx.Int64` |
 
 Older guidance — that Python-int bounds unroll the loop and silently drop `init=`, or that a Python
-rebinding is never a phi — described FlyDSL before 0.3; a probe with `range(0, 15, 1, init=[acc])`
+rebinding is never a phi — is wrong for v0.2.4, v0.3.2 and v0.3.4.1 alike (it comes from text bundled with
+FlyDSL's own skills, not from its source); a probe with `range(0, 15, 1, init=[acc])`
 emits `scf.for %arg2 = %c0 to %c15 step %c1 iter_args(...)`. A name that is `None` before a runtime
 loop and assigned inside it raises `TypeError`: give it a typed initial value.
 

@@ -187,7 +187,7 @@ Signs:
 When multiple threads access LDS with a stride that is a multiple of the bank count, every access hits the same bank:
 
 - **gfx942 (32 banks)**: stride multiple of 128 bytes causes full conflict
-- **gfx950 (64 banks)**: stride multiple of 256 bytes causes full conflict; stride of 128 bytes causes 2-way conflict (threads alternate between 2 banks)
+- **gfx950 (64 banks)**: stride multiple of 256 bytes causes full conflict; a stride of 128 bytes puts every lane on one of only two banks (0 and 32), which is still a heavy conflict
 
 ```
 # gfx942 (32 banks): stride=128 -> full conflict
@@ -195,10 +195,10 @@ Thread 0: addr = base + 0*128  -> bank (0*128/4)%32 = 0
 Thread 1: addr = base + 1*128  -> bank (1*128/4)%32 = 0  <- CONFLICT
 Thread 2: addr = base + 2*128  -> bank (2*128/4)%32 = 0  <- CONFLICT
 
-# gfx950 (64 banks): stride=128 -> only 2-way conflict (NOT full conflict)
+# gfx950 (64 banks): stride=128 -> every lane on bank 0 or bank 32 (64 / gcd(32, 64) = 2 banks in use)
 Thread 0: addr = base + 0*128  -> bank (0*128/4)%64 = 0
-Thread 1: addr = base + 1*128  -> bank (1*128/4)%64 = 32  <- different bank!
-Thread 2: addr = base + 2*128  -> bank (2*128/4)%64 = 0   <- conflict with thread 0
+Thread 1: addr = base + 1*128  -> bank (1*128/4)%64 = 32
+Thread 2: addr = base + 2*128  -> bank (2*128/4)%64 = 0   <- conflict with thread 0, and so on
 
 # gfx950 (64 banks): stride=256 -> full conflict
 Thread 0: addr = base + 0*256  -> bank (0*256/4)%64 = 0

@@ -211,10 +211,12 @@ K loads needed).
 
 ### Three Critical Pitfalls
 
-1. **Loop bounds must be `fx.Index(...)`, NOT Python ints.** If you write
-   `range(0, 15, 1, init=...)`, the AST rewriter treats constant bounds as a
-   Python `range` and unrolls the loop — silently ignoring `init=`. Use
-   `fx.Index(0)`, `fx.Index(15)`, `fx.Index(1)` instead.
+1. **Know which loop form you wrote.** `range(..., init=...)` lowers to `scf.for` and carries only
+   the values you `yield`; Python-int bounds are fine (they become index constants). A plain
+   `range(...)` without `init=` also lowers to `scf.for` and carries every name the body reassigns.
+   Only `range_constexpr` unrolls. The old advice that Python-int bounds unroll and drop `init=` is
+   wrong for v0.2.4, v0.3.2 and v0.3.4.1 (`../bottleneck/debug-flydsl-kernel.md` § The three loop
+   forms).
 
 2. **Prefer internal types; unwrap only at hard boundaries.** Most loop-carried
    values can remain `fx.Int32`, `fx.Float32`, `ArithValue`, or `Vector`. If a
@@ -345,7 +347,7 @@ This works because:
 ### Do
 - **Prefetch ALL data** needed for the next iteration: keys, values, scales, block table entries
 - **Place prefetch loads** immediately after the swap, BEFORE any compute that consumes current data
-- **Use `range(..., init=...)`** to carry prefetched data across iterations (Python variable swap is invisible to MLIR)
+- **Use `range(..., init=...)`** to carry prefetched data across iterations (in this form a Python rebinding is not carried; only yielded values are)
 - **Minimize work between load and consume**: the more compute between prefetch issue and data use, the better the overlap
 - **Keep the swap simple**: just unpack from `state`, no computation
 - **Check VGPR budget**: calculate `current_arch_vgpr + prefetch_vgprs <= 256` to avoid spills

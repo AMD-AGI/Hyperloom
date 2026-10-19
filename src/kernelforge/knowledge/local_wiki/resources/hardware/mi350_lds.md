@@ -20,7 +20,7 @@ drive kernel design here: **160 KiB**, **64 banks**, **128 b/lane direct-to-LDS*
 | **Bank index** | **`(byte_address / 4) mod 64`** |
 | Read bandwidth | **256 B/clk** |
 | Allocation granule | **320 DWORD** |
-| Direct global→LDS | **1 / 2 / 4 / 12 / 16 DWORD** → up to **128 b/lane** |
+| Direct global→LDS | **1 / 2 / 4 / 12 / 16 bytes per lane** (`ubyte`, `ushort`, `dword`, `dwordx3`, `dwordx4`; no `dwordx2`) → up to **128 b/lane** |
 | Read-with-transpose `ds` | **yes** |
 
 Versus earlier CDNA parts: 64 KiB → 160 KiB, 32 → 64 banks, 128 → 256 B/clk, 32 → 128 b/lane
@@ -78,8 +78,9 @@ buffer_load_dwordx4 ... lds        ; descriptor form
 ```
 
 Two wins at once: it **frees staging registers** (the bigger effect on tiled GEMM — see
-`mi350_execution.md`) and **overlaps with compute**. gfx950 accepts 1/2/4/**12/16** DWORD; the 96- and
-128-bit forms are new. If you are emitting the 4-DWORD form you are leaving 4× on the table.
+`mi350_execution.md`) and **overlaps with compute**. gfx950 accepts 1, 2, 4, **12 and 16** bytes per lane
+(`llvm-mc -mcpu=gfx950` rejects `buffer_load_dwordx2 … lds`); the 96- and 128-bit forms are new. If you are
+emitting the 4-byte (`dword`) form you are leaving 4× on the table.
 
 ## Occupancy budget
 
@@ -117,7 +118,7 @@ constraint to fight: 3–4 double-buffer stages are affordable at typical GEMM t
 - `rocprof-compute` LDS panel: **bank-conflict rate over 64 banks**, LDS BW utilization against the
   **256 B/clk** ceiling, % stalls on LDS.
 - ISA dump: confirm `ds_read_b128`/`ds_write_b128` (not `b32`), the swizzle math, and that
-  `global_load_lds` emits the 12/16-DWORD form.
+  `global_load_lds` emits the `dwordx3`/`dwordx4` form.
 - `.lds_size` / `-Rpass-analysis=kernel-resource-usage` for the per-kernel footprint after rounding.
 - A/B the same kernel with and without the pad/swizzle — the conflict counter should collapse.
 
