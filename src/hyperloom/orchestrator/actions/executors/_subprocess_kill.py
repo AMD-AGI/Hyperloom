@@ -212,6 +212,9 @@ AGENTX_PREFLIGHT_ERROR_CLASS: str = "agentx_preflight"
 # installed even though the target file is present and this variant runs eval.
 EVAL_PROBE_UNPATCHABLE_RETURNCODE: int = -914
 
+# Sentinel ``returncode`` when the InferenceX checkout a round would run from is not one, so no server could start.
+INFERENCEX_CHECKOUT_INVALID_RETURNCODE: int = -918
+
 # Sentinel ``returncode`` when the session wall-clock budget ran out mid-round and the tree was reaped.
 SESSION_TIME_EXHAUSTED_RETURNCODE: int = -915
 
@@ -1122,6 +1125,7 @@ __all__ = [
     "COOPERATIVE_REAP_BUDGET_SEC",
     "DETOKENIZER_STALL_RETURNCODE",
     "EVAL_PROBE_UNPATCHABLE_RETURNCODE",
+    "INFERENCEX_CHECKOUT_INVALID_RETURNCODE",
     "ORCHESTRATOR_CANCELLED_RETURNCODE",
     "SERVER_DEAD_RETURNCODE",
     "SESSION_TIME_EXHAUSTED_RETURNCODE",

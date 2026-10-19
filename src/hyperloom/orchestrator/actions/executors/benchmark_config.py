@@ -23,7 +23,13 @@ class PreparationFailure:
 
 def prepare_benchmark_runtime(config_path: Path, env: dict[str, str]) -> PreparationFailure | None:
     """Prepare synthetic or MLPerf dependencies; native AgentX is owned by Magpie."""
-    from ._subprocess_kill import AGENTX_PREFLIGHT_RETURNCODE, EVAL_PROBE_UNPATCHABLE_RETURNCODE
+    from hyperloom.inference_optimizer import inferencex_checkout
+
+    from ._subprocess_kill import (
+        AGENTX_PREFLIGHT_RETURNCODE,
+        EVAL_PROBE_UNPATCHABLE_RETURNCODE,
+        INFERENCEX_CHECKOUT_INVALID_RETURNCODE,
+    )
     from ._inferencex_patcher import (
         ensure_benchmark_lib_eval_start_patched,
         ensure_eval_probe_patched,
@@ -40,6 +46,10 @@ def prepare_benchmark_runtime(config_path: Path, env: dict[str, str]) -> Prepara
     # checkout, not a stale copy.
     inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
     if inferencex_path:
+        invalid = inferencex_checkout.unusable_reason(inferencex_path)
+        if invalid:
+            log.error("grid_runner: %s; failing this benchmark", invalid)
+            return PreparationFailure(INFERENCEX_CHECKOUT_INVALID_RETURNCODE, invalid)
         env["MAGPIE_INFERENCEX_PATH"] = inferencex_path
         # Baseline patches its own checkout, but explore / sweep never pass through that hook: re-assert here so a
         # resumed session or a re-cloned checkout still emits the eval-start marker.
