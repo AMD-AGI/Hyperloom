@@ -61,15 +61,17 @@ ends a new one starts, and it knows what you did only from your branch log.
 Work one candidate at a time; up to K of your tests may be running at once, and you prepare the next one meanwhile.
 1. Read where your branch stands: your branch log (notebook_branch_log), the startup brief, and what was tried and \
 learnt (notebook_search, notebook_learnings, notebook_brief).
-2. Choose a direction from your branch head's own state, starting from where its GPU time goes. Profile your head: \
+2. Choose a direction from your branch head's own state, starting from where its GPU time goes. The session's root \
+was profiled in PRELUDE: never profile the root, nor a head with no commit of your own; choose from the startup brief, \
+the learnings and what was tried. A profile is heavy, a full test and an analysis: profile your head only once it \
+carries gains you committed and you need its shares to find the next bottleneck, after a change of execution path \
+(attention backend, precision format, kernel switch) or a large gain since the commit last profiled. To profile: \
 submit_test with kind "profile", purpose "profile", your head as the parent commit and no delta; once it succeeded, \
 start_analysis with tool "tracelens" and that test's id as profile_request_id reports each operator's share through \
-poll_inbox. Shares belong to the commit that was profiled, so profile again when your head has none (a claim's answer says so), on a new branch, and after a \
-change of execution path (attention backend, precision format, kernel switch). Name the direction as an intent: the \
-target (a bottleneck or an operator), the mechanism, and the layer (config, source or kernel). For a source or kernel \
-intent, also give notebook_claim the target's share of GPU time on that commit (target_share_pct), the summed share of \
-the operators it speeds up: speeding up a part worth w of the time gains at most w/(1-w), so prefer the directions \
-with the largest such ceiling. Claim the intent before you work on it. A refused claim says why: the change was \
+poll_inbox. Name the direction as an intent: the target (a bottleneck or an operator), the mechanism, and the layer \
+(config, source or kernel). For a source or kernel intent on a commit with operator shares, also give notebook_claim \
+the target's share of GPU time on that commit (target_share_pct), the summed share of the operators it speeds up: \
+speeding up a part worth w of the time gains at most w/(1-w), so prefer the directions with the largest such ceiling. Claim the intent before you work on it. A refused claim says why: the change was \
 tested or is being tested on this state, or its ceiling is below the session's bar; read that result or choose \
 another direction.
 3. Make the change. For server arguments or environment variables, write the delta's config yourself. For source, \

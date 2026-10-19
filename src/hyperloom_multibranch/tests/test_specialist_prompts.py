@@ -76,6 +76,13 @@ def test_the_role_profiles_through_a_profile_test_and_tracelens_never_roofline()
     assert "roofline" not in prompt
 
 
+def test_the_role_profiles_on_demand_never_the_root_prelude_profiled():
+    prompt = role_prompt(WORKLOAD)
+
+    assert "The session's root was profiled in PRELUDE: never profile the root" in prompt
+    assert "profile your head only once it carries gains you committed" in prompt
+
+
 def test_the_role_waits_for_a_test_only_through_wait_test():
     prompt = role_prompt(WORKLOAD)
 
