@@ -46,7 +46,7 @@ def _unpack_dir(data: bytes, destination: Path, attachment_id: str) -> None:
     try:
         with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as archive:
             members = _safe_members(archive, attachment_id)
-            archive.extractall(destination, members=members)
+            archive.extractall(destination, members=members, filter="data")
     except tarfile.TarError as exc:
         raise AttachmentError(f"attachment {attachment_id}: not a tar archive ({exc})") from exc
 
