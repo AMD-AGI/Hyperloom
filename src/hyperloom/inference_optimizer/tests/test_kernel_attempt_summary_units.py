@@ -8,49 +8,50 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from hyperloom.orchestrator.kernel import _kernel_agent_results as kar
 from hyperloom.orchestrator.kernel import attempt_summary as kas
 from hyperloom.orchestrator.state import kernel_decision_settings as kds
 
 
 def test_is_real_artifact_path_variants():
-    assert kas._is_real_artifact_path("") is False
-    assert kas._is_real_artifact_path("   ") is False
-    assert kas._is_real_artifact_path("runs/k/out_stdout.log") is False
-    assert kas._is_real_artifact_path("runs/k/build.txt") is False
-    assert kas._is_real_artifact_path("runs/k/foo_stderr.json") is False
-    assert kas._is_real_artifact_path("runs/k/optimized.py") is True
+    assert kar._is_real_artifact_path("") is False
+    assert kar._is_real_artifact_path("   ") is False
+    assert kar._is_real_artifact_path("runs/k/out_stdout.log") is False
+    assert kar._is_real_artifact_path("runs/k/build.txt") is False
+    assert kar._is_real_artifact_path("runs/k/foo_stderr.json") is False
+    assert kar._is_real_artifact_path("runs/k/optimized.py") is True
 
 
 def test_classify_attempt_failure_priority():
-    assert kas._classify_attempt_failure({"status": "succeeded"}) == ("", "")
+    assert kar._classify_attempt_failure({"status": "succeeded"}) == ("", "")
 
-    cls, msg = kas._classify_attempt_failure(
+    cls, msg = kar._classify_attempt_failure(
         {"status": "failed", "error_message": "Timed out after 42s"},
     )
-    assert cls == kas.ERROR_CLASS_TIMEOUT and "42s" in msg
+    assert cls == kar.ERROR_CLASS_TIMEOUT and "42s" in msg
 
-    cls, _ = kas._classify_attempt_failure(
+    cls, _ = kar._classify_attempt_failure(
         {"status": "failed", "stdout_tail": "preprocess success=False errors=3"},
     )
-    assert cls == kas.ERROR_CLASS_PREPROCESS_FAILED
+    assert cls == kar.ERROR_CLASS_PREPROCESS_FAILED
 
-    cls, _ = kas._classify_attempt_failure(
+    cls, _ = kar._classify_attempt_failure(
         {"status": "failed", "stdout_tail": "build failed: undefined reference"},
     )
-    assert cls == kas.ERROR_CLASS_COMPILE_FAILED
+    assert cls == kar.ERROR_CLASS_COMPILE_FAILED
 
-    cls, _ = kas._classify_attempt_failure(
+    cls, _ = kar._classify_attempt_failure(
         {"status": "failed", "stdout_tail": "correctness mismatch detected"},
     )
-    assert cls == kas.ERROR_CLASS_CORRECTNESS_FAILED
+    assert cls == kar.ERROR_CLASS_CORRECTNESS_FAILED
 
-    cls, msg = kas._classify_attempt_failure(
+    cls, msg = kar._classify_attempt_failure(
         {"status": "failed", "returncode": 2},
     )
-    assert cls == kas.ERROR_CLASS_AGENT_ERROR and "2" in msg
+    assert cls == kar.ERROR_CLASS_AGENT_ERROR and "2" in msg
 
-    assert kas._classify_attempt_failure({"status": "failed"}) == (
-        kas.ERROR_CLASS_UNKNOWN,
+    assert kar._classify_attempt_failure({"status": "failed"}) == (
+        kar.ERROR_CLASS_UNKNOWN,
         "",
     )
 
@@ -113,7 +114,7 @@ def test_load_backend_ladder(tmp_path: Path):
     assert row["backend"] == "forge"
     assert row["produced_artifact"] is False
     assert row["elapsed_sec"] == 1.5
-    assert row["error_class"] == kas.ERROR_CLASS_TIMEOUT
+    assert row["error_class"] == kar.ERROR_CLASS_TIMEOUT
 
 
 def test_relative_to_session(tmp_path: Path):
@@ -230,19 +231,19 @@ def test_kernel_outcome_class_mapping():
     assert kas._kernel_outcome_class(kas.CATEGORY_INTEGRATED, []) == kas.OUTCOME_SUCCESS
     assert kas._kernel_outcome_class(kas.CATEGORY_KEEP_PENDING, []) == kas.OUTCOME_SUCCESS
 
-    all_skipped = [{"skipped": True, "error_class": kas.ERROR_CLASS_AGENT_ERROR}]
+    all_skipped = [{"skipped": True, "error_class": kar.ERROR_CLASS_AGENT_ERROR}]
     assert kas._kernel_outcome_class(kas.CATEGORY_ATTEMPTED_REJECTED, all_skipped) == kas.OUTCOME_SKIP
 
     mixed = [
         {"skipped": True},
-        {"error_class": kas.ERROR_CLASS_COMPILE_FAILED},
+        {"error_class": kar.ERROR_CLASS_COMPILE_FAILED},
     ]
     assert kas._kernel_outcome_class(kas.CATEGORY_ATTEMPTED_REJECTED, mixed) == kas.OUTCOME_FAIL
 
-    to = [{"error_class": kas.ERROR_CLASS_TIMEOUT}]
+    to = [{"error_class": kar.ERROR_CLASS_TIMEOUT}]
     assert kas._kernel_outcome_class(kas.CATEGORY_ATTEMPTED_REJECTED, to) == kas.OUTCOME_TIMEOUT
 
-    fail = [{"error_class": kas.ERROR_CLASS_AGENT_ERROR}]
+    fail = [{"error_class": kar.ERROR_CLASS_AGENT_ERROR}]
     assert kas._kernel_outcome_class(kas.CATEGORY_ATTEMPTED_REJECTED, fail) == kas.OUTCOME_FAIL
 
     assert kas._kernel_outcome_class(kas.CATEGORY_IN_FLIGHT, []) == kas.OUTCOME_FAIL
