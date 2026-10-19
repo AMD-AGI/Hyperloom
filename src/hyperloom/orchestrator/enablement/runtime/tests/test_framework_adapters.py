@@ -274,3 +274,58 @@ def test_verify_torch_is_rocm_true_false():
 def test_verify_vllm_rocm_true_false():
     assert ad.verify_vllm_rocm("/py", run=_FakeRun(default_rc=0)) is True
     assert ad.verify_vllm_rocm("/py", run=_FakeRun(default_rc=1)) is False
+
+
+def _raising_run(exc: BaseException):
+    def run(argv, env, cwd):
+        raise exc
+
+    return run
+
+
+_PROBE_FAILURES = (
+    OSError("no such interpreter"),
+    subprocess.TimeoutExpired(cmd="probe", timeout=1),
+)
+
+
+@pytest.mark.parametrize("verify", [ad.verify_torch_is_rocm, ad.verify_vllm_rocm])
+@pytest.mark.parametrize("failure", _PROBE_FAILURES, ids=["oserror", "timeout"])
+def test_a_probe_that_cannot_run_is_not_verified(verify, failure):
+    assert verify("/py", run=_raising_run(failure)) is False
+
+
+@pytest.mark.parametrize("verify", [ad.verify_torch_is_rocm, ad.verify_vllm_rocm])
+def test_an_unexpected_probe_failure_propagates(verify):
+    with pytest.raises(TypeError, match="bad shim"):
+        verify("/py", run=_raising_run(TypeError("bad shim")))
+
+
+@pytest.mark.parametrize("adapter_cls", [VllmRocmAdapter, SglangAdapter])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        OSError("disk full"),
+        subprocess.CalledProcessError(1, ["python", "-m", "venv"]),
+        subprocess.TimeoutExpired(cmd="venv", timeout=600),
+    ],
+    ids=["oserror", "called-process", "timeout"],
+)
+def test_a_venv_that_cannot_be_created_fails_the_provision(tmp_path, monkeypatch, adapter_cls, failure):
+    def failing_create_venv(venv_dir):
+        raise failure
+
+    monkeypatch.setattr(ad, "create_venv", failing_create_venv)
+    result = adapter_cls(run=_FakeRun()).provision(_wheel_action(), tmp_path / "attempt")
+    assert result.ok is False
+    assert result.error == f"venv setup failed: {failure!r}"
+
+
+@pytest.mark.parametrize("adapter_cls", [VllmRocmAdapter, SglangAdapter])
+def test_an_unexpected_venv_failure_propagates_from_provision(tmp_path, monkeypatch, adapter_cls):
+    def broken_create_venv(venv_dir):
+        raise TypeError("bad venv path")
+
+    monkeypatch.setattr(ad, "create_venv", broken_create_venv)
+    with pytest.raises(TypeError, match="bad venv path"):
+        adapter_cls(run=_FakeRun()).provision(_wheel_action(), tmp_path / "attempt")
