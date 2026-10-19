@@ -4,6 +4,8 @@ kind: hardware
 topic: execution
 gens: [gfx950]
 updated: 2026-10-19
+sources:
+  - https://rocm.blogs.amd.com/software-tools-optimization/occupancy-math-mi355x/README.html
 ---
 
 # Execution model, registers and occupancy
@@ -48,9 +50,9 @@ A **workgroup is dispatched to one CU** and never migrates; its waves stripe acr
 - **Allocation granule is 8 registers.** 170 used → **176 reserved**. Tier boundaries sit at
   64 / 72 / 80 / 96 / 128 / 168 / 256 (8 down to 2 waves/SIMD). Shaving registers *within* a tier changes
   nothing; shaving across one can jump a whole occupancy tier.
-- The ROCm workload-tuning guide says "blocks of 16"; gfx950 uses 8. `llc -mcpu=gfx950` reports
-  occupancy 7 at 65 VGPRs, and on the hardware 65- and 72-VGPR single-wave workgroups run 7 per SIMD
-  concurrently while 73-VGPR ones run 6. A 16-register granule would cap both at 6.
+- The kernel descriptor encodes the VGPR count in 8-register blocks (`GRANULATED_WORKITEM_VGPR_COUNT`
+  = ceil(N/8) − 1), and AMD's CDNA4 occupancy guide gives the same granule ("VGPRs round up to groups of
+  8", citing CDNA4 ISA §3.6.4). Guides that say "blocks of 16" do not apply to gfx950.
 - **AGPRs are the escape hatch**: park large FP32 matmul accumulators there so they do not consume the
   architected budget that limits occupancy. Cost is a `v_accvgpr_read_b32` per element in the epilogue
   (~5%). Not every C-tile layout is AGPR-placeable — the matrix calculator's `--detail-instruction`

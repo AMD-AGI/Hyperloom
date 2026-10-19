@@ -1,11 +1,11 @@
 <!-- Vendored from ROCm/FlyDSL@dd8373349:docs/prebuilt_kernels_guide.md -->
-# Pre-built kernel library guide
+# Pre-built Kernel Library Guide
 
 This guide covers the available FlyDSL kernels — normalization, softmax, GEMM, and attention — along with their configuration options, supported data types, pipeline designs, and shared utilities.
 
-## Quick reference
+## Quick Reference
 
-| Kernel | Builder function | API style | Dtypes | Key feature |
+| Kernel | Builder Function | API Style | Dtypes | Key Feature |
 |---|---|---|---|---|
 | **LayerNorm** | `build_layernorm_module(N, dtype)` | Layout API (`@flyc.kernel`) | f32, f16, bf16 | Two-pass vectorized normalization |
 | **RMSNorm** | `build_rmsnorm_module(N, dtype)` | Layout API (`@flyc.kernel`) | f32, f16, bf16; optional fp32 weight | LDS-cached 3-pass pipeline |
@@ -18,7 +18,7 @@ All kernels use the `@flyc.kernel`/`@flyc.jit` API from `flydsl.compiler` and `f
 
 ---
 
-## 1. Normalization kernels
+## 1. Normalization Kernels
 
 ### 1.1 LayerNorm (`kernels/norm/layernorm_kernel.py`)
 
@@ -31,7 +31,7 @@ from kernels.norm.layernorm_kernel import build_layernorm_module
 executor = build_layernorm_module(N=8192, dtype_str="bf16")
 ```
 
-**Configuration constants:**
+**Configuration Constants:**
 | Constant | Value | Description |
 |---|---|---|
 | `BLOCK_THREADS` | 256 | Threads per block |
@@ -85,7 +85,7 @@ grad). The forward bakes `eps` into `Rstd`, so the backward does not need it.
 The public plain and fused-add training wrappers return `dweight` in the
 original weight dtype.
 
-**Configuration constants:** Same as LayerNorm (BLOCK_THREADS=256, VEC_WIDTH=8, etc.)
+**Configuration Constants:** Same as LayerNorm (BLOCK_THREADS=256, VEC_WIDTH=8, etc.)
 
 **Algorithm (3-pass with LDS caching):**
 1. **Pass 0**: Global → LDS row cache (one-pass global read, vectorized)
@@ -102,7 +102,7 @@ rmsnorm_kernel(self, Input, Gamma, Output, m_in)
 
 ---
 
-## 2. Softmax kernel
+## 2. Softmax Kernel
 
 ### 2.1 Softmax (`kernels/norm/softmax_kernel.py`)
 
@@ -123,12 +123,12 @@ executor = build_softmax_module(M=32768, N=8192, dtype_str="bf16")
 | `WARP_SIZE` | 64 | AMD wavefront size |
 
 **Algorithm (6 stages):**
-1. **Load data**: Vectorized global loads into register buffer with validity masks
-2. **Local max**: Per-thread vector reduction (`maxnumf`)
-3. **Global max**: Block-wide shuffle reduction (intra-wave XOR → wave0 finalize via LDS)
-4. **Local exp + sum**: `exp2(x * log2(e))` approximation, accumulate partial sums
-5. **Global sum**: Block-wide reduction for sum
-6. **Normalize + store**: Divide by sum, convert to output dtype, vectorized store
+1. **Load Data**: Vectorized global loads into register buffer with validity masks
+2. **Local Max**: Per-thread vector reduction (`maxnumf`)
+3. **Global Max**: Block-wide shuffle reduction (intra-wave XOR → wave0 finalize via LDS)
+4. **Local Exp + Sum**: `exp2(x * log2(e))` approximation, accumulate partial sums
+5. **Global Sum**: Block-wide reduction for sum
+6. **Normalize + Store**: Divide by sum, convert to output dtype, vectorized store
 
 **Kernel signature:**
 ```
@@ -186,7 +186,7 @@ neighbours — sample repeatedly and reject a device that is busy in any sample.
 
 ---
 
-## 3. GEMM kernel
+## 3. GEMM Kernel
 
 ### 3.1 Preshuffle GEMM (`kernels/gemm/preshuffle_gemm.py`)
 
@@ -298,7 +298,7 @@ python3 tests/kernels/test_flash_attn_fwd.py --dtype fp8 --compare --warmup 10 -
 
 ---
 
-## 4. Shared utilities
+## 4. Shared Utilities
 
 ### 4.1 Common kernel helpers (`kernels/common/kernels_common.py`)
 
@@ -337,7 +337,7 @@ Shared data movement and layout utilities for preshuffle GEMM kernels.
 | `lds_load_pack_k32(...)` | Load A-pack from LDS for K32 micro-step |
 | `swizzle_xor16(...)` | XOR-based swizzle for LDS bank-conflict avoidance |
 
-### 4.4 Layout coordinate helpers
+### 4.4 Layout Coordinate Helpers
 
 Native Fly dialect coordinate mapping (in `flydsl.expr` and `kernels/mma/mfma_preshuffle_pipeline.py`):
 
@@ -350,7 +350,7 @@ Native Fly dialect coordinate mapping (in `flydsl.expr` and `kernels/mma/mfma_pr
 
 ---
 
-## 5. Kernel API comparison
+## 5. Kernel API Comparison
 
 ### New API (GEMM)
 
@@ -373,7 +373,7 @@ def launch_fn(arg_c: fx.Tensor, ..., stream: fx.Stream = fx.Stream(None)):
 
 ---
 
-## 6. Kernel decision tree
+## 6. Kernel Decision Tree
 
 ```
 What operation do you need?
@@ -407,7 +407,7 @@ What operation do you need?
 
 ---
 
-## 7. Source files
+## 7. Source Files
 
 | File | Description |
 |---|---|
@@ -435,7 +435,7 @@ What operation do you need?
 | `kernels/common/kernels_common.py` | Common kernel utilities |
 | `kernels/common/tensor_shim.py` | GTensor/STensor abstraction |
 
-## 8. Test files
+## 8. Test Files
 
 | File | Tests |
 |---|---|

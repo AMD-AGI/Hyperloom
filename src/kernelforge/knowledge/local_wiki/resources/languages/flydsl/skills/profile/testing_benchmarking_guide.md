@@ -1,9 +1,9 @@
 <!-- Vendored from ROCm/FlyDSL@dd8373349:docs/testing_benchmarking_guide.md -->
-# Testing & benchmarking guide
+# Testing & Benchmarking Guide
 
 This guide covers the FlyDSL test infrastructure, how to run tests and benchmarks, how to write new tests, and how to measure and compare performance.
 
-## Quick reference
+## Quick Reference
 
 | Category | Location | Requires GPU | Description |
 |---|---|---|---|
@@ -24,9 +24,9 @@ bash scripts/run_benchmark.sh
 
 ---
 
-## 1. Test categories
+## 1. Test Categories
 
-### 1.1 MLIR lit tests (`tests/mlir/`)
+### 1.1 MLIR Lit Tests (`tests/mlir/`)
 
 MLIR-based tests organized by category, verified using the `fly-opt` tool. These tests confirm that Fly dialect operations lower correctly to standard MLIR dialects without requiring a GPU.
 
@@ -57,7 +57,7 @@ kernel language server.
 cmake --build build-fly --target flydsl-lsp-server -j$(nproc)
 ```
 
-### 1.2 Python tests (`tests/python/`)
+### 1.2 Python Tests (`tests/python/`)
 
 Python-based tests including AOT pre-compilation examples.
 
@@ -66,12 +66,12 @@ Python-based tests including AOT pre-compilation examples.
 python tests/python/examples/aot_example.py
 ```
 
-### 1.3 GPU kernel tests (`tests/kernels/`)
+### 1.3 GPU Kernel Tests (`tests/kernels/`)
 
 Full end-to-end tests that compile FlyDSL kernels, execute them on the GPU, and validate results against a PyTorch reference.
 
 **Files:**
-| Test file | Kernel | Description |
+| Test File | Kernel | Description |
 |---|---|---|
 | `test_vec_add.py` | VecAdd | Vector addition (C = A + B) |
 | `test_softmax.py` | Softmax | Row-wise softmax |
@@ -90,7 +90,7 @@ python tests/kernels/test_softmax.py
 python tests/kernels/test_preshuffle_gemm.py --in_dtype fp8 -M 16 -N 5120 -K 8192
 ```
 
-### 1.4 AOT examples (`tests/python/examples/`)
+### 1.4 AOT Examples (`tests/python/examples/`)
 
 AOT pre-compilation examples:
 
@@ -101,7 +101,7 @@ tests/python/examples/
 
 ---
 
-## 2. Test runner scripts
+## 2. Test Runner Scripts
 
 ### 2.1 `scripts/run_tests.sh`
 
@@ -170,7 +170,7 @@ gemm           16x40960x5120                      fp8         1.234     56.789
 
 ---
 
-## 3. Pytest configuration
+## 3. Pytest Configuration
 
 ### 3.1 `tests/conftest.py`
 
@@ -201,7 +201,7 @@ def insert_point(ctx):
 
 ---
 
-## 4. Performance measurement
+## 4. Performance Measurement
 
 ### 4.1 `tests/test_common.py`
 
@@ -247,7 +247,7 @@ gpu_us = bench_gpu_us_torch(fn, warmup=20, iters=200)
 
 ## 5. Test utilities (`tests/utils.py`)
 
-### Weight utilities
+### Weight Utilities
 
 ```python
 from tests.utils import pertoken_quant, shuffle_weight
@@ -261,9 +261,9 @@ shuffled = shuffle_weight(weight, layout=(16, 16))
 
 ---
 
-## 6. Writing new tests
+## 6. Writing New Tests
 
-### 6.1 PyIR test pattern (no GPU)
+### 6.1 PyIR Test Pattern (No GPU)
 
 ```python
 # tests/python/test_my_feature.py
@@ -279,7 +279,7 @@ def test_my_layout_op(ctx, insert_point):
     assert "fly.make_layout" in ir_str
 ```
 
-### 6.2 GPU kernel test pattern (new API)
+### 6.2 GPU Kernel Test Pattern (New API)
 
 ```python
 # tests/kernels/test_my_kernel.py
@@ -315,7 +315,7 @@ def test_my_kernel():
     assert err == 0, f"Mismatch: {err * 100:.2f}%"
 ```
 
-### 6.3 Benchmark test pattern
+### 6.3 Benchmark Test Pattern
 
 ```python
 from tests.kernels.benchmark_common import bench_gpu_us_torch
@@ -338,7 +338,7 @@ def benchmark_my_kernel():
 
 ---
 
-## 7. GEMM test CLI arguments
+## 7. GEMM Test CLI Arguments
 
 The `test_preshuffle_gemm.py` test supports extensive CLI configuration:
 
@@ -357,9 +357,9 @@ python tests/kernels/test_preshuffle_gemm.py \
 
 ---
 
-## 8. Test configuration via environment variables
+## 8. Test Configuration via Environment Variables
 
-| Variable | Used by | Description |
+| Variable | Used By | Description |
 |---|---|---|
 | `ROCDSL_SOFTMAX_SHAPES` | `test_softmax.py` | Override softmax test shapes (`"M,N,dtype;..."`) |
 | `ROCDSL_LAYERNORM_SHAPES` | `test_layernorm.py` | Override layernorm test shapes |
@@ -371,7 +371,7 @@ python tests/kernels/test_preshuffle_gemm.py \
 
 ---
 
-## 9. IR dump workflow
+## 9. IR Dump Workflow
 
 ### Via `MlirCompiler`
 
@@ -381,7 +381,7 @@ FLYDSL_DUMP_IR=1 FLYDSL_DUMP_DIR=./dumps python my_test.py
 
 Produces numbered `.mlir` files per pipeline stage plus `final_isa.s`.
 
-### Dedicated IR dump script
+### Dedicated IR Dump Script
 
 ```bash
 bash scripts/dumpir.sh
@@ -389,7 +389,7 @@ bash scripts/dumpir.sh
 
 ---
 
-## 10. Source files
+## 10. Source Files
 
 | File | Description |
 |---|---|
