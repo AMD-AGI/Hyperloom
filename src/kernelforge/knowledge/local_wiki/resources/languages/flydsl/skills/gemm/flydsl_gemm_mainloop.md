@@ -1,5 +1,5 @@
 ---
-title: FlyDSL GEMM — the main loop, as the fastest FlyDSL GEMMs build it
+title: FlyDSL GEMM — the main loop, as Primus-Turbo's FlyDSL GEMMs build it
 kind: language
 lever: flydsl_gemm_mainloop
 gens: [gfx950]
@@ -17,7 +17,7 @@ sources:
 # The FlyDSL GEMM main loop
 
 > The exemplar here is **Primus-Turbo's FlyDSL GEMM** (`primus_turbo/flydsl/{gemm,utils}`),
-> the fastest FlyDSL GEMMs we have on gfx950. "FP8" below means
+> built for training shapes (large M; small M is in `flydsl_gemm_small_m.md`). "FP8" below means
 > `gemm/gemm_fp8_kernel.py`, "FP4" means `gemm/gemm_mxfp4_kernel.py` and "GH" means `utils/gemm_helper.py`,
 > all at Turbo main `7615a5a2`. That commit pins flydsl 0.3.4.1, and it also runs unmodified on 0.3.2.
 > FlyDSL's own GEMM kernels are summarized in §8, for when you call them as a library.

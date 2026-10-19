@@ -28,6 +28,7 @@ or how to run the next round.
 | C store width, cross-lane reorder, cache policy, beta=1, fused epilogues | `flydsl_gemm_epilogue.md` |
 | Per-shape race, cache keys, launch overhead, CUDA graphs | `flydsl_gemm_autotune.md` |
 | Correctness gates, races, silent-wrong traps | `flydsl_gemm_correctness.md` |
+| M ≤ 256: decode-shape rulers, grid, split-K reduction, aiter tuned rows | `flydsl_gemm_small_m.md` |
 | Rulers, noise floors, A/B design, what to report | `flydsl_gemm_measurement.md` |
 | The kernel is wrong, not slow | `../bottleneck/debug-flydsl-kernel.md` |
 | Writing your first FlyDSL kernel | `../../API_docs/flydsl-tile-programming.md` |
@@ -38,11 +39,11 @@ or how to run the next round.
 (`../../../../framework/aiter/skills/optimize/aiter_levers/aiter_flydsl_libtype.md`)? Both are cheaper to
 answer than a rewrite.
 
-## Step 0 — start from the strongest kernel, not from a blank file
+## Step 0 — start from the reference kernel, not from a blank file
 
 Read the Primus-Turbo FlyDSL GEMM for your dtype and layout before designing your own (kernel map in
-`INDEX.md`). It is the fastest FlyDSL GEMM we have measured on gfx950, its comments record why each choice
-was made, and it runs on flydsl 0.3.2. Copy the structure and the reasoning; re-derive the constants
+`INDEX.md`). It is built for training shapes; for M ≤ 256 use `flydsl_gemm_small_m.md` instead. Its comments
+record why each choice was made, and it runs on flydsl 0.3.2. Copy the structure and the reasoning; re-derive the constants
 (tile tables, wait counts, margins, L2 thresholds) for your shape and machine. Those constants were tuned
 on specific shapes and on MI355X.
 

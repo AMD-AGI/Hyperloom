@@ -8,6 +8,11 @@ updated: 2026-08-28
 
 # FlyDSL's tunable surface
 
+> **Out of date for aiter's bf16 GEMM:** aiter #5145 (`4e58a9d89`, 2026-09-03) deleted `splitk_hgemm.py`,
+> `small_m_hgemm.py` and `hgemm_dispatch.py`, and replaced them with `kernels/gemm_a16w16_gfx950.py` plus
+> `gemm_a16w16_policy.py` (stages 2–9, `block_n` 16–256, split-K divisors of K up to 9). The `flydsl_hgemm`
+> description below is the pre-#5145 kernel. For small-M bf16 GEMM see `../../gemm/flydsl_gemm_small_m.md`.
+
 ## Route here when
 You are tuning a kernel FlyDSL already ships — Path A. You want to know which arguments move
 performance, which ones will raise, and what the legal ranges are.

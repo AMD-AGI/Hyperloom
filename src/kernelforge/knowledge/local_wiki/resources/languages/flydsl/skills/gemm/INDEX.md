@@ -11,10 +11,13 @@ pinned_source: AMD-AGI/Primus-Turbo@7615a5a2 (primus_turbo/flydsl/{gemm,utils});
 How to write and optimize a dense GEMM in FlyDSL on gfx950 (MI350/MI355X): fp8 (per-tensor and per-row
 scales), MXFP4, MXFP8 and bf16, layouts NT/NN/TN.
 
-**The exemplar is Primus-Turbo's FlyDSL GEMM** (`primus_turbo/flydsl/gemm` and `utils` at main `7615a5a2`).
-These are the fastest FlyDSL GEMMs we have measured on gfx950. Their comments and commit messages record
-why each choice was made, and the cards cite them by file and line. FlyDSL's own `kernels/gemm` are
-described in `flydsl_gemm_mainloop.md` §8, for when you call them as a library.
+**The exemplar is Primus-Turbo's FlyDSL GEMM** (`primus_turbo/flydsl/gemm` and `utils` at main `7615a5a2`). It is
+built for training shapes (large M). Its comments and commit messages record why each choice was made, and the
+cards cite them by file and line. FlyDSL's own `kernels/gemm` are described in `flydsl_gemm_mainloop.md` §8, for
+when you call them as a library.
+
+**Small M (decode, M ≤ 256) is not a Primus-Turbo target.** For it, read `flydsl_gemm_small_m.md`: the kernel there
+is FlyDSL's `gemm_a16w16_gfx950`, as shipped in aiter.
 
 Numbers marked *(field)* in these cards were measured on MI355X during FlyDSL kernel work. They give
 direction and order of magnitude; they are not targets for your shape.
@@ -25,6 +28,7 @@ direction and order of magnitude; they are not targets for your shape.
 |---|---|
 | starting work on a GEMM, or deciding what to do next | `flydsl_gemm_workflow.md` |
 | about to choose a tile, split-K or boundary body, or wanting the ceiling of an idea | `flydsl_gemm_grid_pricing.md` |
+| working on a GEMM with M ≤ 256 (decode, speculative verify), or aiter's FlyDSL a16w16 tuned rows | `flydsl_gemm_small_m.md` |
 | designing or editing the K loop (8-wave pipeline vs 4-wave whole-loop asm, waits, registers) | `flydsl_gemm_mainloop.md` |
 | working on LDS, swizzle, global→LDS DMA, descriptors, transpose reads, MX scales | `flydsl_gemm_datapath.md` |
 | ordering tiles across XCDs, writing scheduling hints, mapping waves | `flydsl_gemm_schedule_and_locality.md` |
@@ -85,3 +89,4 @@ the cache key sees.
 | `flydsl_gemm_attribution.md` | regime probes, subtractive and additive arms, energy at the power cap, wave-cycle budget |
 | `flydsl_gemm_correctness.md` | gates that reach the changed path, races, waits, bounds, register classes |
 | `flydsl_gemm_measurement.md` | rulers, arm order, warm-up, noise floors, statistics, closing a campaign |
+| `flydsl_gemm_small_m.md` | decode-shape GEMM: cold rulers, dispatch rounds, split-K reduction cost, tile/stage/cache-policy choices, aiter tuned rows |
