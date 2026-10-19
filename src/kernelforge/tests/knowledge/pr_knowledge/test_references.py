@@ -1160,6 +1160,24 @@ def test_a_budget_spent_before_probing_starts_no_probe(tmp_path):
     assert client.budgets == [], "probing must not start past the deadline"
 
 
+def test_a_probe_that_outlives_the_budget_reports_the_deadline(monkeypatch, tmp_path):
+    """Running out of time while probing is a deadline, not proof that the repository is untracked."""
+    now = 1_000.0
+
+    class _SlowProbe(_PathIndexClient):
+        def get_many(self, requests, *, budget_sec=None):
+            nonlocal now
+            now += 10.0
+            return super().get_many(requests, budget_sec=budget_sec)
+
+    monkeypatch.setattr(time, "monotonic", lambda: now)
+
+    result = collect_references(client=_SlowProbe({}), budget_sec=5.0, **_fork_workspace(tmp_path))
+
+    assert result.reason == REASON_SKIPPED_DEADLINE
+    assert result.stats["http_calls"] == len(PR_REPOS_EXPECTED)
+
+
 def test_probing_draws_on_the_caller_budget(tmp_path):
     """Charge path probing to what is left of the caller's deadline."""
     client = _BudgetRecordingClient({"csrc/k.cu": "ROCm/aiter"}, by_query={"mha": [1]}, prs={1: _pr_payload(1)})

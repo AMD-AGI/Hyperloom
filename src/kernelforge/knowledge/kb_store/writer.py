@@ -25,6 +25,7 @@ from kernelforge.knowledge.kb_store.identity.implementation import (
     hash_implementation_identity,
     implementation_signature,
 )
+from kernelforge.knowledge.kb_store.identity.kernel_recipe import KernelRecipeIdentity
 from kernelforge.knowledge.kb_store.identity.run import LoopKernel
 from kernelforge.knowledge.kb_store.identity.source_resolution import (
     find_defining_source,
@@ -390,18 +391,72 @@ def _write_run_experience_impl(
     summary_override=None,
     usage=None,
 ) -> dict[str, Any]:
+    gpu_type = str(getattr(config, "gpu_type", "") or "").strip()
+    refusal = _refusal_reason(gpu_type, outcome)
+    if refusal:
+        return {"written": False, "reason": refusal}
+    this_speedup = float(outcome.mean_case_speedup)
+    run = _resolve_run(config, kernel, outcome, gpu_type)
+
+    # The KB Store is addressed by the recipe identity, so the facade is opened on it rather than on a composed slug.
+    from kernelforge.knowledge.kb_store.recipe import KernelRecipeKB
+
+    kb = KernelRecipeKB.open_identity(run.identity, config)
+    if not kb.active:
+        log.info("experience write skipped: %s", kb.reason or "not_configured")
+        return {"written": False, "reason": kb.reason or "not_configured"}
+
+    # Experience prose + category.
+    if summary_override is not None:
+        summary = _normalize_summary(summary_override)
+    else:
+        summary = summarize_run(
+            config=config,
+            workspace=kernel.workspace,
+            prompt=_summary_prompt(run.identity.kernel_name, outcome.digest, kernel.kernel_source),
+            usage=usage,
+        )
+
+    metric = {
+        "wall_ms": outcome.best_wall_ms,
+        "baseline_wall_ms": outcome.baseline_wall_ms,
+        "speedup": round(this_speedup, 4),
+        "snr_db": outcome.snr_db,
+        "gpu_arch": outcome.gpu_target,
+    }
+    changed_files = touched_paths(outcome.cumulative_diff)
+
+    # Everything a later run needs to judge and reuse this solution, minus the diff: that travels as an artifact so a
+    # reader can rank candidates without pulling a patch it may not want.
+    knowledge = {
+        "task_id": outcome.experiment_id,
+        "category": summary["category"],
+        "strategy": summary["strategy"],
+        "recipe": summary["recipe"],
+        "lessons": summary["lessons"],
+        "metric": metric,
+        "changed_files": changed_files,
+        "dtypes": run.dtypes,
+        "source_files": list(run.impl_identity["source_paths"]),
+        "implementation_signature": run.impl_signature,
+        "implementation_identity": run.impl_identity,
+    }
+    return _store_experience(kb, knowledge, outcome.cumulative_diff, this_speedup)
+
+
+def _refusal_reason(gpu_type: str, outcome: RunOutcome) -> str:
+    """Why this run's result must not be recorded, or ``""`` when it may be."""
     # The hardware model addresses the record; without it the run would file its experience under a GPU-less address
     # that no read ever resolves to, so a silent write is worse than no write at all.
-    gpu_type = str(getattr(config, "gpu_type", "") or "").strip()
     if not gpu_type:
-        return {"written": False, "reason": "missing_gpu_type"}
+        return "missing_gpu_type"
 
     mean_case_speedup = outcome.mean_case_speedup
     if not isinstance(mean_case_speedup, (int, float)):
-        return {"written": False, "reason": "missing_mean_case_speedup"}
+        return "missing_mean_case_speedup"
     this_speedup = float(mean_case_speedup)
     if not math.isfinite(this_speedup) or this_speedup <= 0.0:
-        return {"written": False, "reason": "invalid_mean_case_speedup"}
+        return "invalid_mean_case_speedup"
     # Losing to the source baseline is deliberately not a refusal: an operator whose best port is still slower than
     # what ships is the one that most needs its progress carried forward, and withholding it made every later run read
     # the same losing seed. Only the champion pointer stays gated on speedup.
@@ -414,17 +469,26 @@ def _write_run_experience_impl(
         and math.isfinite(float(reused_speedup))
         and this_speedup <= float(reused_speedup)
     ):
-        return {"written": False, "reason": "no_improvement_over_reuse"}
-    cumulative_diff = outcome.cumulative_diff
-    if not (cumulative_diff or "").strip():
-        return {"written": False, "reason": "empty_diff"}
+        return "no_improvement_over_reuse"
+    if not (outcome.cumulative_diff or "").strip():
+        return "empty_diff"
+    return ""
 
+
+@dataclass(frozen=True)
+class _ResolvedRun:
+    """The address a run is filed under, its operator's input dtypes, and the implementation it was measured against."""
+
+    identity: KernelRecipeIdentity
+    dtypes: dict[str, str]
+    impl_signature: str
+    impl_identity: dict[str, Any]
+
+
+def _resolve_run(config, kernel: LoopKernel, outcome: RunOutcome, gpu_type: str) -> _ResolvedRun:
+    """Resolve the run's identity, input dtypes and implementation contract."""
     # Deterministic identity (never LLM-inferred, so the address is stable).
-    from kernelforge.knowledge.kb_store.identity.run import (
-        EXPERIENCE_ARTIFACT,
-        PATCH_ARTIFACT,
-        resolve_loop_identity,
-    )
+    from kernelforge.knowledge.kb_store.identity.run import resolve_loop_identity
 
     identity, concrete_op, framework = resolve_loop_identity(
         kernel,
@@ -460,50 +524,12 @@ def _write_run_experience_impl(
         backend_lang,
         impl_signature[:12],
     )
+    return _ResolvedRun(identity, dtypes, impl_signature, impl_identity)
 
-    # The KB Store is addressed by the recipe identity, so the facade is opened on it rather than on a composed slug.
-    from kernelforge.knowledge.kb_store.recipe import KernelRecipeKB
 
-    kb = KernelRecipeKB.open_identity(identity, config)
-    if not kb.active:
-        log.info("experience write skipped: %s", kb.reason or "not_configured")
-        return {"written": False, "reason": kb.reason or "not_configured"}
-
-    # Experience prose + category.
-    if summary_override is not None:
-        summary = _normalize_summary(summary_override)
-    else:
-        summary = summarize_run(
-            config=config,
-            workspace=kernel.workspace,
-            prompt=_summary_prompt(op, outcome.digest, kernel.kernel_source),
-            usage=usage,
-        )
-
-    metric = {
-        "wall_ms": outcome.best_wall_ms,
-        "baseline_wall_ms": outcome.baseline_wall_ms,
-        "speedup": round(this_speedup, 4),
-        "snr_db": outcome.snr_db,
-        "gpu_arch": outcome.gpu_target,
-    }
-    changed_files = touched_paths(cumulative_diff)
-
-    # Everything a later run needs to judge and reuse this solution, minus the diff: that travels as an artifact so a
-    # reader can rank candidates without pulling a patch it may not want.
-    knowledge = {
-        "task_id": outcome.experiment_id,
-        "category": summary["category"],
-        "strategy": summary["strategy"],
-        "recipe": summary["recipe"],
-        "lessons": summary["lessons"],
-        "metric": metric,
-        "changed_files": changed_files,
-        "dtypes": dtypes,
-        "source_files": list(impl_identity["source_paths"]),
-        "implementation_signature": impl_signature,
-        "implementation_identity": impl_identity,
-    }
+def _store_experience(kb, knowledge: dict[str, Any], cumulative_diff: str, speedup: float) -> dict[str, Any]:
+    """Hand the record, its patch and its readable account to the store, and report what the store did."""
+    from kernelforge.knowledge.kb_store.identity.run import EXPERIENCE_ARTIFACT, PATCH_ARTIFACT
 
     with tempfile.TemporaryDirectory(prefix="forge-loop-kb-") as staging:
         patch_path = Path(staging) / PATCH_ARTIFACT
@@ -521,30 +547,30 @@ def _write_run_experience_impl(
         )
         # The store names a record after its own content, so an LLM-written summary of a solution this run already
         # recorded is filed as a second record: same patch, same speedup, richer prose.
-        outcome = kb.write_candidate(
+        stored = kb.write_candidate(
             knowledge,
             files={
                 PATCH_ARTIFACT: patch_path,
                 EXPERIENCE_ARTIFACT: experience_path,
             },
-            speedup=this_speedup,
+            speedup=speedup,
         )
 
-    if not outcome.get("written"):
-        return {"written": False, "reason": outcome.get("reason") or "write_failed"}
+    if not stored.get("written"):
+        return {"written": False, "reason": stored.get("reason") or "write_failed"}
 
-    solution = str(outcome.get("solution") or "")
+    solution = str(stored.get("solution") or "")
     log.info(
         "experience written: %s (speedup %.3f, champion=%s)",
         solution,
-        this_speedup,
-        outcome.get("champion"),
+        speedup,
+        stored.get("champion"),
     )
     return {
         "written": True,
         "kernel": kb.canonical_id,
         "solution": solution,
-        "session_id": outcome.get("session_id", ""),
-        "champion": bool(outcome.get("champion")),
-        "speedup": this_speedup,
+        "session_id": stored.get("session_id", ""),
+        "champion": bool(stored.get("champion")),
+        "speedup": speedup,
     }

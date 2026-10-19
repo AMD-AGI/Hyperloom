@@ -244,7 +244,6 @@ cognitive-complexity src/kernelforge/gemm_tune/tune_robustness.py::run_isolated 
 cognitive-complexity src/kernelforge/gemm_tune/tuners/_aiter_dense_common.py::_augment_with_config_m_values 33
 cognitive-complexity src/kernelforge/gemm_tune/tuners/vllm_dense_tunableop.py::VllmDenseTunableopTuner._input_from_demand 33
 cognitive-complexity src/kernelforge/kernel_rewrite_controller/opportunity_agent.py::OpportunityAnalysisAgent.run 34
-cognitive-complexity src/kernelforge/knowledge/pr_knowledge/references.py::collect_references 39
 cognitive-complexity src/kernelforge/loop/analysis_evidence.py::AnalysisEvidenceMixin._apply_last_analysis_evidence 46
 cognitive-complexity src/kernelforge/loop/analysis_runtime.py::AnalysisRuntimeMixin._resolve_analysis_context 43
 cognitive-complexity src/kernelforge/loop/archive.py::CandidateArchive._reconcile_storage 32
@@ -897,9 +896,6 @@ function-lines src/kernelforge/kernel_rewrite_controller/recovery.py::recover_ta
 function-lines src/kernelforge/kernel_rewrite_controller/scheduler.py::dispatch_prepared_tasks 101
 function-lines src/kernelforge/kernel_rewrite_controller/task.py::parse_task_payload 113
 function-lines src/kernelforge/knowledge/kb_store/reader.py::_read_top_solutions_impl 113
-function-lines src/kernelforge/knowledge/kb_store/writer.py::_write_run_experience_impl 166
-function-lines src/kernelforge/knowledge/pr_knowledge/references.py::collect_references 143
-function-lines src/kernelforge/knowledge/pr_knowledge/search.py::discover 86
 function-lines src/kernelforge/loop/analysis_evidence.py::AnalysisEvidenceMixin._apply_last_analysis_evidence 160
 function-lines src/kernelforge/loop/analysis_evidence.py::AnalysisEvidenceMixin._build_orchestration_context 160
 function-lines src/kernelforge/loop/analysis_evidence.py::AnalysisEvidenceMixin._render_analysis_evidence_for_implementer 84
