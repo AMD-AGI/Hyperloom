@@ -46,6 +46,7 @@ from .resources import (
     read_container_cgroup,
 )
 from .subprocess_ import (
+    ReapWatch,
     SpecialistSubprocessConfig,
     SpecialistSubprocessDispatcher,
     _codex_mcp_config,
@@ -519,13 +520,15 @@ class LocalAgentRunner:
         spec = session.spec
         try:
             session.outcome = await self._dispatcher._reap_loop(
-                proc=session.proc,
-                workspace=spec.workspace,
-                done_files=tuple(spec.done_paths),
-                heartbeat_file=spec.heartbeat_path,
+                session.proc,
+                ReapWatch(
+                    workspace=spec.workspace,
+                    done_files=tuple(spec.done_paths),
+                    heartbeat_file=spec.heartbeat_path,
+                    task_id=spec.task_id,
+                ),
                 deadline=session.deadline,
                 started=session.started_mono,
-                task_id=spec.task_id,
             )
         except ScopeCancelled as exc:  # the caller's cancel scope fired: a stop request, not a failure
             session.cancelled = True

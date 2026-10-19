@@ -123,10 +123,8 @@ async def test_the_four_hour_cap_exists_for_an_unbounded_run(tmp_path: Path, clo
         )
         started = clock.mono
         outcome = await dispatcher._reap_loop(
-            proc=proc,
-            workspace=ws,
-            done_files=(ws / "specialist_done.json",),
-            heartbeat_file=heartbeat,
+            proc,
+            ss.ReapWatch(workspace=ws, done_files=(ws / "specialist_done.json",), heartbeat_file=heartbeat),
             deadline=None,
             started=started,
         )
