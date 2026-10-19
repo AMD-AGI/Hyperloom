@@ -404,67 +404,61 @@ def _extract_executive_summary(analysis_md_path: str) -> str:
     return block
 
 
-def _format_roofline_comparison_section(cmp: dict[str, Any]) -> list[str]:
-    """Render the ``## Roofline Comparison`` section from ``cmp`` (built by :func:`roofline_snapshot.build_roofline_comparison_from_history`)."""
+_ROOFLINE_HEADING = "## Roofline Comparison"
+
+#: The ceiling these percentages are measured against, stated wherever the table appears.
+_ROOFLINE_PEAK_NOTE = (
+    "_The **Theoretical peak** below is the decode "
+    "memory-roofline ceiling derived from the GPU's HBM "
+    "bandwidth and the model's weight + KV-cache traffic per "
+    "token (see `roofline_ceiling.compute_roofline_breakdown_from_state`). "
+    "It is an upper bound: real `output_throughput` always "
+    "stays under it because of comm overhead, kernel "
+    "efficiency < 100%, and KV-cache fragmentation. **Within "
+    "roofline %** = measured / peak; **Gap to roofline %** = "
+    "100 − Within."
+)
+
+
+def _format_snapshot_summary(heading: str, snapshot: dict[str, Any]) -> list[str]:
+    """One roofline snapshot's TraceLens executive summary, under *heading*."""
+    lines = [heading, "", f"`{snapshot.get('analysis_md_path')}`"]
+    if snapshot.get("ts"):
+        lines.append(f"_captured: {snapshot.get('ts')}_")
+    lines.append("")
+    lines.append(_extract_executive_summary(str(snapshot.get("analysis_md_path") or "")))
+    lines.append("")
+    return lines
+
+
+def _format_single_snapshot_roofline(cmp: dict[str, Any], baseline: dict[str, Any]) -> list[str]:
+    """The roofline section when the gain watermark never crossed and PRELUDE's snapshot stands alone."""
     from hyperloom.inference_optimizer.roofline_snapshot import format_roofline_metrics_table
 
-    lines: list[str] = ["## Roofline Comparison", ""]
-    baseline = cmp.get("baseline") or {}
-    latest = cmp.get("latest") or {}
     base_id = baseline.get("snapshot_id")
-    latest_id = latest.get("snapshot_id")
-    mode = cmp.get("mode") or ("single_snapshot" if (base_id is not None and base_id == latest_id) else "before_after")
+    return [
+        _ROOFLINE_HEADING,
+        "",
+        f"_Only one roofline snapshot was captured this session "
+        f"(snapshot #{base_id}). PR #321 retired the legacy "
+        "close-phase auto-roofline; refreshes are now driven by a "
+        "10% gain watermark over `last_roofline_tput` (see "
+        "`KernelPhase.maybe_enqueue_watermark_roofline`). The "
+        "watermark did not cross during this session, so the "
+        "PRELUDE bootstrap snapshot is the only datapoint available "
+        "for the report._",
+        "",
+        f"{_ROOFLINE_PEAK_NOTE}_",
+        "",
+        *format_roofline_metrics_table(cmp),
+        *_format_snapshot_summary(f"### Snapshot #{base_id} — Executive Summary", baseline),
+    ]
 
-    if not baseline.get("analysis_md_path"):
-        lines.append(
-            "_No roofline snapshot was captured during this session — "
-            "the `roofline` composite action never completed successfully._"
-        )
-        lines.append("")
-        return lines
 
-    if mode == "single_snapshot":
-        lines.append(
-            f"_Only one roofline snapshot was captured this session "
-            f"(snapshot #{base_id}). PR #321 retired the legacy "
-            "close-phase auto-roofline; refreshes are now driven by a "
-            "10% gain watermark over `last_roofline_tput` (see "
-            "`KernelPhase.maybe_enqueue_watermark_roofline`). The "
-            "watermark did not cross during this session, so the "
-            "PRELUDE bootstrap snapshot is the only datapoint available "
-            "for the report._"
-        )
-        lines.append("")
-        lines.append(
-            "_The **Theoretical peak** below is the decode "
-            "memory-roofline ceiling derived from the GPU's HBM "
-            "bandwidth and the model's weight + KV-cache traffic per "
-            "token (see `roofline_ceiling.compute_roofline_breakdown_from_state`). "
-            "It is an upper bound: real `output_throughput` always "
-            "stays under it because of comm overhead, kernel "
-            "efficiency < 100%, and KV-cache fragmentation. **Within "
-            "roofline %** = measured / peak; **Gap to roofline %** = "
-            "100 − Within._"
-        )
-        lines.append("")
-        lines.extend(format_roofline_metrics_table(cmp))
-        lines.append(f"### Snapshot #{base_id} — Executive Summary")
-        lines.append("")
-        lines.append(f"`{baseline.get('analysis_md_path')}`")
-        if baseline.get("ts"):
-            lines.append(f"_captured: {baseline.get('ts')}_")
-        lines.append("")
-        lines.append(_extract_executive_summary(str(baseline.get("analysis_md_path") or "")))
-        lines.append("")
-        return lines
+def _format_before_after_roofline(cmp: dict[str, Any], baseline: dict[str, Any], latest: dict[str, Any]) -> list[str]:
+    """The roofline section comparing the PRELUDE snapshot with the one a watermark refresh captured."""
+    from hyperloom.inference_optimizer.roofline_snapshot import format_roofline_metrics_table
 
-    lines.append(
-        "Before/after comparison of TraceLens Executive Summaries. "
-        "The baseline snapshot was captured at PRELUDE; the latest "
-        "snapshot was captured after a +10% gain watermark refresh "
-        "(see `KernelPhase.maybe_enqueue_watermark_roofline`)."
-    )
-    lines.append("")
     # The ceiling is normally a session constant, but a runtime dtype / quantization change moves it — and then the
     # two sides' Within % have different denominators, which the caveat has to say out loud.
     anchor_note = (
@@ -476,42 +470,51 @@ def _format_roofline_comparison_section(cmp: dict[str, Any]) -> list[str]:
         "quantization changed), so each Within % is measured against its own "
         "anchor and the Δ column is withheld."
     )
-    lines.append(
-        "_The **Theoretical peak** below is the decode "
-        "memory-roofline ceiling derived from the GPU's HBM "
-        "bandwidth and the model's weight + KV-cache traffic per "
-        "token (see `roofline_ceiling.compute_roofline_breakdown_from_state`). "
-        "It is an upper bound: real `output_throughput` always "
-        "stays under it because of comm overhead, kernel "
-        "efficiency < 100%, and KV-cache fragmentation. **Within "
-        "roofline %** = measured / peak; **Gap to roofline %** = "
-        f"100 − Within. {anchor_note}_"
-    )
-    lines.append("")
-    lines.extend(format_roofline_metrics_table(cmp))
-    lines.append(f"### Baseline snapshot #{base_id}")
-    lines.append("")
-    lines.append(f"`{baseline.get('analysis_md_path')}`")
-    if baseline.get("ts"):
-        lines.append(f"_captured: {baseline.get('ts')}_")
-    lines.append("")
-    lines.append(_extract_executive_summary(str(baseline.get("analysis_md_path") or "")))
-    lines.append("")
-    lines.append(f"### Post-optimization snapshot #{latest_id}")
-    lines.append("")
-    lines.append(f"`{latest.get('analysis_md_path')}`")
-    if latest.get("ts"):
-        lines.append(f"_captured: {latest.get('ts')}_")
-    lines.append("")
-    lines.append(_extract_executive_summary(str(latest.get("analysis_md_path") or "")))
-    lines.append("")
-    return lines
+    return [
+        _ROOFLINE_HEADING,
+        "",
+        "Before/after comparison of TraceLens Executive Summaries. "
+        "The baseline snapshot was captured at PRELUDE; the latest "
+        "snapshot was captured after a +10% gain watermark refresh "
+        "(see `KernelPhase.maybe_enqueue_watermark_roofline`).",
+        "",
+        f"{_ROOFLINE_PEAK_NOTE} {anchor_note}_",
+        "",
+        *format_roofline_metrics_table(cmp),
+        *_format_snapshot_summary(f"### Baseline snapshot #{baseline.get('snapshot_id')}", baseline),
+        *_format_snapshot_summary(f"### Post-optimization snapshot #{latest.get('snapshot_id')}", latest),
+    ]
+
+
+def _format_roofline_comparison_section(cmp: dict[str, Any]) -> list[str]:
+    """Render the ``## Roofline Comparison`` section from ``cmp`` (built by :func:`roofline_snapshot.build_roofline_comparison_from_history`)."""
+    baseline = cmp.get("baseline") or {}
+    if not baseline.get("analysis_md_path"):
+        return [
+            _ROOFLINE_HEADING,
+            "",
+            "_No roofline snapshot was captured during this session — "
+            "the `roofline` composite action never completed successfully._",
+            "",
+        ]
+    latest = cmp.get("latest") or {}
+    base_id = baseline.get("snapshot_id")
+    single = base_id is not None and base_id == latest.get("snapshot_id")
+    mode = cmp.get("mode") or ("single_snapshot" if single else "before_after")
+    if mode == "single_snapshot":
+        return _format_single_snapshot_roofline(cmp, baseline)
+    return _format_before_after_roofline(cmp, baseline, latest)
 
 
 _EXTERNAL_BASELINE_ADVISORY = (
     "> Advisory only. This block does not feed Objective, scoring, or any "
     "agent prompt; it is shown here purely for post-mortem comparison."
 )
+
+
+def _external_status(ext: dict[str, Any]) -> str:
+    """How the competitor-baseline fetch went, as the section reports it."""
+    return str(ext.get("status") or "unknown")
 
 
 def _format_unrequested_external_baseline(ext: dict[str, Any]) -> list[str]:
@@ -524,7 +527,7 @@ def _format_unrequested_external_baseline(ext: dict[str, Any]) -> list[str]:
         "`b300` / `mi355x` / `h200`) to fetch the matching InferenceX "
         "reference data point.",
         f"- Fetched at: {ext.get('fetched_at') or '(unknown)'}",
-        f"- Status: `{str(ext.get('status') or 'unknown')}` "
+        f"- Status: `{_external_status(ext)}` "
         f"reason=`{str(ext.get('reason') or '').strip()}` (rows matched: {ext.get('row_count', 0)})",
         "",
         _EXTERNAL_BASELINE_ADVISORY,
@@ -547,7 +550,7 @@ def _format_external_baseline_query(ext: dict[str, Any]) -> list[str]:
         f"precision=`{q.get('precision') or '(any)'}`  "
         f"ISL/OSL=`{q.get('isl') or '(any)'}/{q.get('osl') or '(any)'}`",
         f"- Fetched at: {ext.get('fetched_at') or '(unknown)'}",
-        f"- Status: `{str(ext.get('status') or 'unknown')}`{reason_suffix} (rows matched: {ext.get('row_count', 0)})",
+        f"- Status: `{_external_status(ext)}`{reason_suffix} (rows matched: {ext.get('row_count', 0)})",
     ]
     warning = ext.get("warning") or ""
     if warning:
@@ -558,7 +561,7 @@ def _format_external_baseline_query(ext: dict[str, Any]) -> list[str]:
 def _format_external_reference_best(ext: dict[str, Any]) -> list[str]:
     """The reference data point the fetch matched, or the note that there is none."""
     best = ext.get("best")
-    if str(ext.get("status") or "unknown") != "ok" or not isinstance(best, dict):
+    if _external_status(ext) != "ok" or not isinstance(best, dict):
         return ["", "- No reference best available — orchestrator was not affected by this section."]
     lines = [
         "",
