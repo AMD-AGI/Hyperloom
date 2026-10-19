@@ -80,7 +80,7 @@ Two different axes, routinely confused:
 | | Coalescing | Bank conflicts |
 |---|---|---|
 | Memory | **global** (HBM/L2) | **LDS** |
-| Granularity | 128 B cache line, across 64 lanes | 4 B bank, within a half-wave |
+| Granularity | 128 B cache line, across 64 lanes | 4 B bank, within one read phase (`../../hardware/mi350_lds.md`) |
 | Fix | wide + contiguous + aligned | pad or XOR swizzle over **64 banks** |
 | Card | this one | `lever_lds_banks.md` |
 
