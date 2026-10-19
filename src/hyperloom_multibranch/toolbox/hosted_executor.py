@@ -67,9 +67,13 @@ from hyperloom_multibranch.toolbox.reverify import (
     first_warning_difference,
 )
 
-__all__ = ["DEFAULT_TEST_TIMEOUT_SEC", "HostedExecutor", "OUTPUTS_DIR"]
+__all__ = ["DEFAULT_TEST_TIMEOUT_SEC", "HostedExecutor", "OUTPUTS_DIR", "TEST_SILENCE_TIMEOUT_SEC"]
 
 DEFAULT_TEST_TIMEOUT_SEC = 3600
+#: How long a round may go without server-log growth or benchmark output once the server is ready before it is reaped
+#: as hung. A serving benchmark writes ``server.log`` continuously, so ten quiet minutes (the user's choice) is a hang,
+#: not a slow test.
+TEST_SILENCE_TIMEOUT_SEC = 600.0
 #: Where a test's landed files go, below the session directory: ``tests/<request_id>/attempt-<n>``.
 OUTPUTS_DIR = "tests"
 _REPORT = "benchmark_report.json"
@@ -182,6 +186,7 @@ class HostedExecutor:
             environment=accepted.environment,  # type: ignore[arg-type]  # the sheet reads its overlay
             output_dir=output_dir,
             timeout_sec=self._timeout,
+            silence_timeout_sec=TEST_SILENCE_TIMEOUT_SEC,
             cwd=str(self._session),
             magpie_python=self._python,
             task_id=request.request_id or "",

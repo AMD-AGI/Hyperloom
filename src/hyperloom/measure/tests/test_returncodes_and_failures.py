@@ -46,6 +46,15 @@ def test_the_literal_sentinels_in_failures_equal_their_definitions() -> None:
     assert failures._EVAL_PROBE_UNPATCHABLE_RC == kill.EVAL_PROBE_UNPATCHABLE_RETURNCODE
     assert failures._SESSION_TIME_EXHAUSTED_RC == kill.SESSION_TIME_EXHAUSTED_RETURNCODE
     assert failures._ORCHESTRATOR_CANCELLED_RC == kill.ORCHESTRATOR_CANCELLED_RETURNCODE
+    assert failures._SERVER_STALLED_RC == kill.DETOKENIZER_STALL_RETURNCODE
+
+
+def test_a_server_that_went_silent_is_an_unclear_stall_unless_its_log_names_the_failure() -> None:
+    stalled = _classify(returncode=-911, logs=["server ready but log went silent\n"])
+    crashed = _classify(returncode=-911, logs=[IMPORT_ERROR_LOG])
+
+    assert (stalled.failure_class, stalled.failure_reason) == (FailureClass.UNCLEAR, "server_stalled")
+    assert (crashed.failure_class, crashed.failure_reason) == (FailureClass.CANDIDATE, failure_signature.IMPORT_ERROR)
 
 
 def test_a_clean_exit_is_a_success() -> None:

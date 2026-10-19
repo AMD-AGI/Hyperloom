@@ -16,11 +16,15 @@ import pytest
 from hyperloom.contracts.measurement import FailureClass, SandboxFacts, TestResult, Validity
 from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT
 from hyperloom.measure.points import AcceptedMeasurement
-from hyperloom.measure.socket import TestOutcome
+from hyperloom.measure.socket import TestCall, TestOutcome
 from hyperloom.measure.tests.hosted_fixtures import Rig, make_rig, point_yaml
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.toolbox.attempts import MeasurementRefused, TestJob
-from hyperloom_multibranch.toolbox.hosted_executor import HostedExecutor
+from hyperloom_multibranch.toolbox.hosted_executor import (
+    DEFAULT_TEST_TIMEOUT_SEC,
+    TEST_SILENCE_TIMEOUT_SEC,
+    HostedExecutor,
+)
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.tests.helpers import FakePlanner, Rig as ToolboxRig, build, req
 
@@ -161,6 +165,7 @@ async def test_the_compiled_environment_reaches_the_instruction_sheet(tmp_path: 
     assert result.validity is Validity.SUCCEEDED
     sheet = json.loads(r.backend.journal.load_spec(request_id, 1))
     assert [root["id"] for root in sheet["environment"]["roots"]] == ["yaml"]
+    assert sheet["procedure"]["silence_timeout_sec"] == TEST_SILENCE_TIMEOUT_SEC
 
 
 async def test_an_infrastructure_failure_retries_in_a_new_sandbox(tmp_path: Path, rig) -> None:
@@ -328,8 +333,10 @@ class _Stub:
 
     def __init__(self, outcome: TestOutcome, record: object = None) -> None:
         self.outcome, self.journal = outcome, _Journal(record)
+        self.calls: list[TestCall] = []
 
-    def run_test(self, call: object) -> TestOutcome:
+    def run_test(self, call: TestCall) -> TestOutcome:
+        self.calls.append(call)
         return self.outcome
 
 
@@ -352,6 +359,14 @@ async def test_a_success_the_journal_does_not_call_verified_is_refused(tmp_path:
     executor = HostedExecutor(_Stub(_outcome()), tmp_path)  # type: ignore[arg-type]
     with pytest.raises(MeasurementRefused, match="not recorded as a verified bundle"):
         await executor.run(_job(point_yaml(tmp_path)))
+
+
+async def test_every_attempt_carries_the_ten_minute_silence_timeout_under_the_hard_one(tmp_path: Path) -> None:
+    backend = _Stub(_outcome(1, FailureClass.UNCLEAR.value, "no_known_signature"))
+    await HostedExecutor(backend, tmp_path).run(_job(point_yaml(tmp_path)))  # type: ignore[arg-type]
+    (call,) = backend.calls
+    assert (call.silence_timeout_sec, call.timeout_sec) == (600.0, DEFAULT_TEST_TIMEOUT_SEC)
+    assert TEST_SILENCE_TIMEOUT_SEC == 600.0
 
 
 @pytest.mark.parametrize("failure", list(FailureClass), ids=lambda f: f.value)

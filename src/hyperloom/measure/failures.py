@@ -66,6 +66,7 @@ _PORT_IN_USE = re.compile(r"address already in use|\[Errno 98\]", re.IGNORECASE)
 # Sentinel return codes of the local flow (``orchestrator/actions/executors/_subprocess_kill.py``). The names stay
 # literal here because ``measure`` must not import another package's private module; ``test_failures`` pins every
 # value to its definition.
+_SERVER_STALLED_RC = -911
 _AGENTX_PREFLIGHT_RC = -912
 _EVAL_PROBE_UNPATCHABLE_RC = -914
 _SESSION_TIME_EXHAUSTED_RC = -915
@@ -139,7 +140,8 @@ def classify_test_failure(
         return _unclear("timeout")
     if returncode == 0:
         return FailureClassification(Disposition.SUCCEEDED)
-    return _from_logs(logs)
+    # The silence watchdog reaped a ready server that stopped writing; a crash it logged before going quiet names it.
+    return _from_logs(logs, unmatched="server_stalled" if returncode == _SERVER_STALLED_RC else "no_known_signature")
 
 
 def _from_error_class(error_class: str) -> FailureClassification:
@@ -152,14 +154,14 @@ def _from_error_class(error_class: str) -> FailureClassification:
     return FailureClassification(Disposition.PROGRAM_ERROR, failure_reason=f"unknown_error_class:{error_class}")
 
 
-def _from_logs(logs: Iterable[str]) -> FailureClassification:
+def _from_logs(logs: Iterable[str], *, unmatched: str) -> FailureClassification:
     text = "\n".join(_bounded(part) for part in logs if part)
     if _PORT_IN_USE.search(text):
         return _infra(PORT_IN_USE_REASON)
     signature = classify_failure(text)
     if signature.is_actionable:
         return FailureClassification(Disposition.FAILED, FailureClass.CANDIDATE, signature.kind)
-    return _unclear("no_known_signature")
+    return _unclear(unmatched)
 
 
 def _bounded(log: str) -> str:
