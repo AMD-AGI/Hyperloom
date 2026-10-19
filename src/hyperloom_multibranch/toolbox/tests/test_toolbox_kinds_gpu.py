@@ -231,9 +231,10 @@ async def test_a_patched_recipe_goes_through_the_planner_and_is_measured_on_the_
 PROFILE_TRACE = "*.trace.json.gz"  # SGLang writes <ts>-TP-<r>-<DECODE|EXTEND>.trace.json.gz and a merged one
 TRACELENS_JOB_SEC = 1800
 MIN_TOTAL_SHARE = 50.0  # percent of the GPU time the (at most 50) kept ops must add up to
-#: The per-op shares come from the ``ops_summary.csv`` TraceLens' skill route writes (the route runs an agent runtime,
-#: which needs its credentials); the ``bypass`` route writes none. ``HL_W13_ANALYSIS_ROUTE=bypass`` therefore shows empty shares.
-ANALYSIS_ROUTE = os.environ.get("HL_W13_ANALYSIS_ROUTE", "agent")
+#: The per-op shares come from the ``ops_summary.csv`` TraceLens' perf report writes. The ``report`` route (the tool's
+#: default) runs that report with no agent; ``agent`` runs an agent runtime over it, which needs its credentials; the
+#: ``bypass`` route writes none, so ``HL_W13_ANALYSIS_ROUTE=bypass`` shows empty shares.
+ANALYSIS_ROUTE = os.environ.get("HL_W13_ANALYSIS_ROUTE", "report")
 
 
 def _tree_bytes(directory: Path) -> int:
