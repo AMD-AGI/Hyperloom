@@ -45,6 +45,7 @@ _HARNESS_ERROR_CLASSES = frozenset(
         "benchmark_report_invalid_metric",
         "benchmark_report_missing",
         "eval_probe_unpatchable",
+        "inferencex_checkout_invalid",
         "magpie_nonzero_after_valid_measurement",
         "magpie_nonzero_invalid_measurement",
         "magpie_timeout",

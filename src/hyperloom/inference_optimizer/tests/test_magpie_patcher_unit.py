@@ -996,6 +996,7 @@ def test_a_model_needing_a_named_tokenizer_refuses_an_unpatchable_checkout(tmp_p
 
     scripts = tmp_path / "ix" / "benchmarks"
     scripts.mkdir(parents=True)
+    (scripts / "benchmark_lib.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
     (scripts / "vllm_mi300x.sh").write_text(
         '#!/usr/bin/env bash\nrun_benchmark_serving --result-dir "$WORKSPACE_DIR/" --drifted\n',
         encoding="utf-8",
@@ -1033,6 +1034,7 @@ def test_the_hook_is_required_even_with_evaluation_disabled(tmp_path, monkeypatc
 
     scripts = tmp_path / "ix" / "benchmarks"
     scripts.mkdir(parents=True)
+    (scripts / "benchmark_lib.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
     (scripts / "vllm_mi300x.sh").write_text(
         '#!/usr/bin/env bash\nrun_benchmark_serving --result-dir "$WORKSPACE_DIR/" --drifted\n',
         encoding="utf-8",

@@ -49,6 +49,7 @@ from ..specialists.domains import (
 )
 from .custom_specialist import deny_custom_specialist_delegate, deny_search_under_custom_only
 from .denial import PolicyDenied
+from .send_message import deny_malformed_send_message
 from ..specialists.profile import (
     SCOPE_DOMAIN as SPECIALIST_SCOPE_DOMAIN,
     SCOPE_DOMAINS as SPECIALIST_SCOPE_DOMAINS,
@@ -308,7 +309,7 @@ class PolicyGate:
         elif intent.type == IntentType.PROPOSE_ACTION:
             self._validate_propose_action(role, payload)
         elif intent.type == IntentType.SEND_MESSAGE:
-            self._validate_send_message_topic(payload)
+            deny_malformed_send_message(payload)
         elif intent.type == IntentType.REQUEST:
             self._validate_request(role, payload)
         elif intent.type == IntentType.REVIEW_VERDICT:
@@ -559,27 +560,6 @@ class PolicyGate:
             rule=RULE_ROUND_IN_FLIGHT,
             hint="Let the round settle; a second bring-up would fight it for the same cards and ports.",
         )
-
-    def _validate_send_message_topic(self, payload: dict[str, Any]) -> None:
-        """Require a non-empty ``topic`` on a ``SEND_MESSAGE`` intent.
-
-        Unknown topics are intentionally not rejected here — the
-        Coordinator soft-degrades them to ``"observation"`` — so agents can still surface unstructured observations.
-
-        Args:
-            payload (dict[str, Any]): the send_message payload, expected to
-                carry a ``topic`` string.
-
-        Returns:
-            None: returns silently when a topic is present.
-
-        Raises:
-            PolicyDenied: with ``rule='payload'`` when ``topic`` is missing
-                or blank.
-        """
-        topic = str(payload.get("topic", "")).strip()
-        if not topic:
-            raise PolicyDenied("send_message missing topic", rule="payload")
 
     def _validate_request(self, role: "AgentRole", payload: dict[str, Any]) -> None:
         """Validate a ``REQUEST`` intent against the routing matrix.
