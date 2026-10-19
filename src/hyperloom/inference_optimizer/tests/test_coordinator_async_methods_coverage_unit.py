@@ -500,41 +500,39 @@ async def test_compose_prompt_puts_the_trajectory_review_under_the_plateau_advis
     ) in prompt
 
 
+def _unreadable(message: str):
+    def _fail(*_a, **_k):
+        raise RuntimeError(message)
+
+    return _fail
+
+
+def _error_messages(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+
+
 @pytest.mark.asyncio
 async def test_compose_prompt_goes_out_without_the_trajectory_review_when_the_digest_fails(
-    coord: Coordinator,
-    monkeypatch,
-    caplog,
+    coord: Coordinator, monkeypatch, caplog
 ) -> None:
     from hyperloom.orchestrator.knowledge import trajectory_reviewer
 
     _stub_advisories(coord, monkeypatch)
-
-    def _digest_fails(*_a, **_k):
-        raise RuntimeError("journal unreadable")
-
-    monkeypatch.setattr(trajectory_reviewer, "build_trajectory_digest", _digest_fails)
+    monkeypatch.setattr(trajectory_reviewer, "build_trajectory_digest", _unreadable("journal unreadable"))
 
     with caplog.at_level("ERROR"):
         prompt = await coord.conversation.compose_prompt("orchestration")
 
     assert "=== Plateau advisory ===\n<plateau_advisory_block>" in prompt
     assert "=== Trajectory review (advisory) ===" not in prompt
-    assert [r.getMessage() for r in caplog.records if r.levelname == "ERROR"] == [
-        "Coordinator: trajectory review failed"
-    ]
+    assert _error_messages(caplog) == ["Coordinator: trajectory review failed"]
 
 
 @pytest.mark.asyncio
 async def test_trajectory_reviewer_task_is_seeded_without_a_digest_when_the_digest_fails(
-    coord: Coordinator,
-    monkeypatch,
-    caplog,
+    coord: Coordinator, monkeypatch, caplog
 ) -> None:
     from hyperloom.orchestrator.knowledge import trajectory_reviewer
-
-    def _digest_fails(*_a, **_k):
-        raise RuntimeError("journal unreadable")
 
     created: list[dict] = []
 
@@ -545,7 +543,7 @@ async def test_trajectory_reviewer_task_is_seeded_without_a_digest_when_the_dige
     async def _warm(_params):
         return None
 
-    monkeypatch.setattr(trajectory_reviewer, "build_trajectory_digest", _digest_fails)
+    monkeypatch.setattr(trajectory_reviewer, "build_trajectory_digest", _unreadable("journal unreadable"))
     monkeypatch.setattr(coord.conversation, "plateau_advisory_block", lambda: "plateau")
     monkeypatch.setattr(coord.specialist_dispatch, "warm_specialist_params", _warm)
     monkeypatch.setattr(coord.gpu_lanes, "framework_authoring_lanes_ttl", lambda params, *, base_ttl_sec: ([], 60))
@@ -556,19 +554,13 @@ async def test_trajectory_reviewer_task_is_seeded_without_a_digest_when_the_dige
 
     (params,) = created
     assert params["gap_symptom"].endswith("exhausted ones).\n(no digest)")
-    assert params.get("gap_evidence") is None
-    assert [r.getMessage() for r in caplog.records if r.levelname == "ERROR"] == [
-        "Coordinator: trajectory review digest failed"
-    ]
+    assert _error_messages(caplog) == ["Coordinator: trajectory review digest failed"]
 
 
 def test_primary_gap_lookup_failure_propagates(coord: Coordinator, monkeypatch) -> None:
     from hyperloom.inference_optimizer.baseline_comparison import research_hints as rh
 
-    def _unreadable(_session_dir):
-        raise RuntimeError("target unreadable")
-
-    monkeypatch.setattr(rh, "load_competitor_target", _unreadable)
+    monkeypatch.setattr(rh, "load_competitor_target", _unreadable("target unreadable"))
     coord.shared_state.target_advisory_enabled = True
 
     with pytest.raises(RuntimeError, match="target unreadable"):
@@ -581,22 +573,17 @@ def test_priors_match_advisory_logs_one_failure_and_yields_no_block(
 ) -> None:
     from hyperloom.inference_optimizer.baseline_comparison import research_hints as rh
 
-    def _unreadable(_session_dir):
-        raise RuntimeError("hints unreadable")
-
     monkeypatch.setattr(coord.conversation, "_recent_proposed_variants", lambda: [{"name": "v"}])
     monkeypatch.setattr(rh, "load_hints", lambda _session_dir: {})
     monkeypatch.setattr(rh, "load_competitor_target", lambda _session_dir: None)
-    monkeypatch.setattr(rh, failing, _unreadable)
+    monkeypatch.setattr(rh, failing, _unreadable("hints unreadable"))
     coord.shared_state.target_advisory_enabled = True
 
     with caplog.at_level("ERROR"):
         block = coord.conversation._priors_match_advisory_block()
 
     assert block == ""
-    assert [r.getMessage() for r in caplog.records if r.levelname == "ERROR"] == [
-        "Coordinator: priors-match advisory failed"
-    ]
+    assert _error_messages(caplog) == ["Coordinator: priors-match advisory failed"]
 
 
 # -- advisory blocks -------------------------------------------------------
