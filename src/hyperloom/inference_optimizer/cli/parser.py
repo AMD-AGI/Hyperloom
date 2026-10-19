@@ -804,23 +804,6 @@ def _build_parser() -> argparse.ArgumentParser:
     opt.add_argument("--critic-prompt", type=str, default=None, help="Override Critic system prompt")
     _add_custom_specialist_args(opt)
     opt.add_argument(
-        "--local-kb-root",
-        dest="local_kb_root",
-        type=str,
-        default=None,
-        help="Filesystem root for the local recipe-snapshot KB store. "
-        "All writes (put_recipe / append_attempt / delete_recipe) go "
-        "here. Defaults to "
-        "$HYPERLOOM_LOCAL_KB_ROOT, then $USER_DATA_PATH/kb, "
-        "then /workspace/hyperloom/kb. Layout is a 5-level "
-        "directory tree keyed by canonical_id components "
-        "(model -> hardware -> framework -> framework_version -> "
-        "precision); each leaf holds recipe.json + history/ + "
-        "attempts.ndjson + .lock. See "
-        "src/hyperloom/orchestrator/knowledge/recipe_kb/local_store.py for the "
-        "on-disk contract.",
-    )
-    opt.add_argument(
         "--degraded-kb",
         dest="degraded_kb",
         action="store_true",
@@ -885,13 +868,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "The specialist tool whitelist drops mcp__pr_monitor__* tools. "
         "Short-circuits the IR-3 PR Monitor probe; IR-3 sets this "
         "automatically when PR Monitor is unreachable (soft degrade).",
-    )
-    opt.add_argument(
-        "--pr-feed-window-days",
-        dest="pr_feed_window_days",
-        type=int,
-        default=30,
-        help="Look-back window for the PR feed warmup (days). Default: 30.",
     )
     # specialist research_lane capacity (locked at session start).
     opt.add_argument(

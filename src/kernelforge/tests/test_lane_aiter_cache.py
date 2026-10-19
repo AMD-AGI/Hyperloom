@@ -114,9 +114,11 @@ def _lane_factory(config: Config, workspace: Path, make_agent):
     return cli_lanes._make_lane_agent_factory(
         make_agent=make_agent,
         config=config,
-        workspace_dir=str(workspace),
-        driver=str(workspace / "forge_driver.py"),
-        source_files=[str(workspace / "src" / "kernel.py")],
+        binding=cli_lanes.LaneBinding(
+            workspace_dir=str(workspace),
+            driver=str(workspace / "forge_driver.py"),
+            source_files=[str(workspace / "src" / "kernel.py")],
+        ),
         session_kwargs={},
     )
 

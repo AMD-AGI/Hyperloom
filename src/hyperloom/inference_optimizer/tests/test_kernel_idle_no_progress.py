@@ -12,7 +12,7 @@ from hyperloom.orchestrator.phases import machine_state as ms
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 
-def _state(idle_ticks, *, idle_seconds=ms.KERNEL_IDLE_MIN_SECONDS):
+def _state(idle_ticks, *, idle_seconds=ms._kernel_idle_min_seconds()):
     # ``now_unix`` is pinned at 10_000.0 by the callers below, so backdating the streak start by ``idle_seconds``
     # gives an exact idle window.
     return SharedState(
@@ -35,21 +35,21 @@ def _patch(monkeypatch, *, work_pending):
 
 def test_idle_at_threshold_winds_down_to_sweep(monkeypatch):
     _patch(monkeypatch, work_pending=True)
-    state = _state(ms.KERNEL_IDLE_MAX_TICKS)
+    state = _state(ms._kernel_idle_max_ticks())
     result = ms.compute_next_phase(state, now_unix=10_000.0)
     assert result is not None
     _target, reason, evidence = result
     assert reason == "kernel_no_more_leverage"
     assert evidence["evidence"] == "kernel_idle_no_progress"
-    assert evidence["idle_ticks"] == ms.KERNEL_IDLE_MAX_TICKS
-    assert evidence["idle_max_ticks"] == ms.KERNEL_IDLE_MAX_TICKS
-    assert evidence["idle_seconds"] == ms.KERNEL_IDLE_MIN_SECONDS
-    assert evidence["idle_min_seconds"] == ms.KERNEL_IDLE_MIN_SECONDS
+    assert evidence["idle_ticks"] == ms._kernel_idle_max_ticks()
+    assert evidence["idle_max_ticks"] == ms._kernel_idle_max_ticks()
+    assert evidence["idle_seconds"] == ms._kernel_idle_min_seconds()
+    assert evidence["idle_min_seconds"] == ms._kernel_idle_min_seconds()
 
 
 def test_idle_below_tick_threshold_does_not_exit(monkeypatch):
     _patch(monkeypatch, work_pending=True)
-    state = _state(ms.KERNEL_IDLE_MAX_TICKS - 1)
+    state = _state(ms._kernel_idle_max_ticks() - 1)
     # Below the tick threshold and budget healthy -> KERNEL keeps running.
     assert ms.compute_next_phase(state, now_unix=10_000.0) is None
 
@@ -60,8 +60,8 @@ def test_idle_below_wall_clock_floor_does_not_exit(monkeypatch):
     # dispatch would otherwise look like a stall.
     _patch(monkeypatch, work_pending=True)
     state = _state(
-        ms.KERNEL_IDLE_MAX_TICKS * 100,
-        idle_seconds=ms.KERNEL_IDLE_MIN_SECONDS - 1.0,
+        ms._kernel_idle_max_ticks() * 100,
+        idle_seconds=ms._kernel_idle_min_seconds() - 1.0,
     )
     assert ms.compute_next_phase(state, now_unix=10_000.0) is None
 
@@ -70,7 +70,7 @@ def test_unstamped_streak_start_does_not_exit(monkeypatch):
     # A hand-built or partially-initialised state has no measured idle window; the guard must refuse to act on a tick
     # count it did not observe itself.
     _patch(monkeypatch, work_pending=True)
-    state = _state(ms.KERNEL_IDLE_MAX_TICKS)
+    state = _state(ms._kernel_idle_max_ticks())
     state.kernel_idle_since_unix = 0.0
     assert ms.compute_next_phase(state, now_unix=10_000.0) is None
 
@@ -79,7 +79,7 @@ def test_work_pending_no_longer_blocks_idle_exit(monkeypatch):
     # Regression for the production stall: ``kernel_work_pending`` answered True for 1130 consecutive idle ticks
     # because three attempts on the ledger could never be advanced.
     _patch(monkeypatch, work_pending=True)
-    state = _state(ms.KERNEL_IDLE_MAX_TICKS + 5)
+    state = _state(ms._kernel_idle_max_ticks() + 5)
     result = ms.compute_next_phase(state, now_unix=10_000.0)
     assert result is not None
     _target, reason, evidence = result

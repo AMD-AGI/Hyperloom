@@ -26,7 +26,7 @@ from . import geak_rebench as _geak_rebench
 from . import machine_state as _phase_state
 from .kernel_round_budget import controller_round_stop, integrate_within_phase, measurement_round_sec
 from hyperloom.common.env import env_bool, env_float, env_int
-from hyperloom.common.io import atomic_write_json
+from hyperloom.common.io import WriteOptions, atomic_write_json
 from hyperloom.common.launch_log_evidence import recipe_server_launch
 from hyperloom.common.perf_metric import axis_of, graded_axes_of
 from hyperloom.orchestrator.lever import (
@@ -801,9 +801,8 @@ class KernelPhase(CoordinatorCollaborator):
     def _gemm_tuning_required_before_kernel_opt(self) -> bool:
         """Decide whether GEMM tuning must run before kernel_opt.
 
-        When using the kernelforge gemm-tune backend: eligible on any supported
-        framework (sglang / vllm / vllm-aiter), with no precision or MoE
-        pre-filter. When using GEAK: only FP8 + SGLang (legacy behavior).
+        Eligible on any supported framework (sglang / vllm / vllm-aiter), with no
+        precision or MoE pre-filter.
 
         Returns:
             bool: ``True`` when GEMM tuning should run before source-level
@@ -812,24 +811,15 @@ class KernelPhase(CoordinatorCollaborator):
         if self._skip_gemm_tuning():
             return False
         ss = self.shared_state
-        precision = str(ss.precision or "").strip().lower()
         framework = str(ss.framework or "").strip().lower()
 
-        from ..kernel.request_handlers import resolve_gemm_tuning_backend
-
-        backend = resolve_gemm_tuning_backend({})
-
-        if backend == "forge":
-            # kernelforge gemm-tune handles any precision (bf16/fp16/fp8/fp4/mxfp4),
-            # dense or MoE, on sglang/vllm. Real e2e KEEPs span all of these —
-            # including bf16 *dense* (+11.1%) — so we must NOT pre-filter on
-            # precision/MoE here, or a category that can optimize gets silently
-            # blocked. Gate only on a supported framework and let forge itself
-            # return no_improvement when a shape can't be beaten.
-            eligible = framework in ("sglang", "vllm", "vllm-aiter")
-        else:
-            # GEAK: legacy FP8 + SGLang only.
-            eligible = precision == "fp8" and framework == "sglang"
+        # kernelforge gemm-tune handles any precision (bf16/fp16/fp8/fp4/mxfp4),
+        # dense or MoE, on sglang/vllm. Real e2e KEEPs span all of these —
+        # including bf16 *dense* (+11.1%) — so we must NOT pre-filter on
+        # precision/MoE here, or a category that can optimize gets silently
+        # blocked. Gate only on a supported framework and let forge itself
+        # return no_improvement when a shape can't be beaten.
+        eligible = framework in ("sglang", "vllm", "vllm-aiter")
 
         if not eligible:
             return False
@@ -2303,12 +2293,6 @@ class KernelPhase(CoordinatorCollaborator):
             return {}
         return data if isinstance(data, dict) else {}
 
-    @classmethod
-    def _geak_journey_kernels(cls, result: dict[str, Any]) -> list[dict[str, Any]]:
-        """Return the journey's kernel records, or ``[]`` when unreadable."""
-        journey = cls._load_geak_journey(result)
-        return [kernel for kernel in journey.get("kernels") or [] if isinstance(kernel, dict)]
-
     def record_geak_adopted_kernels(
         self,
         result: dict[str, Any],
@@ -3238,7 +3222,7 @@ class KernelPhase(CoordinatorCollaborator):
         try:
             if not path.parent.is_dir():
                 return
-            atomic_write_json(path, entry, make_parents=False)
+            atomic_write_json(path, entry, options=WriteOptions())
         except (OSError, TypeError, ValueError):
             log.warning("gemm result.json writeback failed for %s", path, exc_info=True)
 

@@ -63,7 +63,7 @@ async def test_a_settled_round_releases_the_machine_whatever_it_settled_as(store
 
     row = await store.get("r")
     assert row is not None and row.outcome == outcome
-    assert row.excludes_at(settled_at) is False
+    assert row.state == rs.SETTLED
     assert await store.excluding(settled_at) == []
     # And the next round is admitted at once, on the same instant.
     opened = await store.open("next", holder_task_id="t-2", lease_sec=_LEASE, now_unix=settled_at, request_id="q3")
@@ -80,8 +80,7 @@ async def test_an_open_round_holds_the_machine_until_explicit_settlement(store, 
 
     row = await store.get("r")
     assert row is not None
-    assert row.excludes_at(opened_at + _LEASE - 1.0) is True
-    assert row.excludes_at(opened_at + _LEASE + 1.0) is True
+    assert row.state == rs.OPEN
     assert [r.round_id for r in await store.excluding(opened_at)] == ["r"]
     assert [r.round_id for r in await store.excluding(opened_at + _LEASE + 1.0)] == ["r"]
 

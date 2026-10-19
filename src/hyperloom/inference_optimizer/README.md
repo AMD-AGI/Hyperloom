@@ -2,8 +2,8 @@
 
 The **inference_optimizer** package is the canonical entry point for
 Hyperloom's autonomous LLM inference optimization on AMD GPUs. It is
-the CLI/session layer — CLI, session paths, action `_meta` specs,
-protocol surfaces, and breakdown export — that launches the Coordinator
+the CLI/session layer — CLI, session paths, protocol surfaces,
+and breakdown export — that launches the Coordinator
 (a Python state machine) living in the sibling `hyperloom.orchestrator`
 package. The Coordinator drives Orchestration and Critic turns, specialists,
 and programmatic Kernel handlers through baseline measurement, profiling,
@@ -79,9 +79,8 @@ src/hyperloom/inference_optimizer/
 │   └── lock.py                 # Single-optimizer session lock
 ├── baseline_comparison/        # InferenceX reference fetching & target analysis
 ├── breakdown/                  # session_breakdown.json producer (downstream contract)
-├── actions/                    # Per-action markdown specs + scheduling metadata
+├── actions/                    # Per-action markdown specs
 ├── tools/                      # Operator CLIs (dump_session_breakdown/event_counts/…)
-├── experiments/                # A/B and roofline-audit scripts
 ├── assets/                     # install.sh + bare-metal/profile configs
 └── tests/                      # Unit + regression tests
 ```

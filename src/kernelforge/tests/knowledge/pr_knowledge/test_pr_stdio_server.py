@@ -13,6 +13,7 @@ import pytest
 
 from kernelforge.knowledge.pr_knowledge.search import PRLifecycle, PRReference, PRState, SearchOutcome
 from kernelforge.mcp_server import pr_stdio_server as server
+from kernelforge.mcp_server import stdio_transport
 
 from kernelforge.conftest import SRC_ROOT
 
@@ -403,7 +404,7 @@ def _feed_stdin(monkeypatch, lines: list[str]) -> None:
 
 
 def test_write_message_emits_one_compact_json_line(capsys):
-    server._write_message({"jsonrpc": "2.0", "id": 1, "result": {}})
+    stdio_transport.write_message({"jsonrpc": "2.0", "id": 1, "result": {}})
 
     out = capsys.readouterr().out
     assert out.count("\n") == 1

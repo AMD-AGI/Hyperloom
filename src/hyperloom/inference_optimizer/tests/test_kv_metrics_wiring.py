@@ -535,7 +535,6 @@ def test_phase_transitions_reach_the_recorder(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(sk, "_scan_logs_increment", lambda *_a, **_k: next(scans, sk._LogScan(*([False] * 7))))
     monkeypatch.setattr(sk, "stamp_server_ready", lambda *_a, **_k: None)
-    monkeypatch.setattr(sk, "_server_log_shows_death", lambda *_a, **_k: None)
     log_path = tmp_path / "server.log"
     log_path.write_text("x\n", encoding="utf-8")
 
@@ -753,7 +752,6 @@ def test_a_round_that_nobody_reached_is_still_unavailable(tmp_path):
 def test_aiperf_aggregate_json_timeslices_are_adopted(tmp_path):
     from hyperloom.orchestrator.actions.executors._kv_metrics import (
         aggregate_series,
-        find_server_metrics_export,
         read_aiperf_server_metrics,
     )
 
@@ -847,7 +845,6 @@ def test_aiperf_aggregate_json_timeslices_are_adopted(tmp_path):
         encoding="utf-8",
     )
 
-    assert find_server_metrics_export(tmp_path) == unusable
     rows = read_aiperf_server_metrics(path)
     assert [phase for _sample, _timing, phase in rows] == ["warmup", "warmup", "measured", "measured"]
     assert [sample.active_pool_usage for sample, _timing, _phase in rows] == [None, 0.25, None, 0.5]

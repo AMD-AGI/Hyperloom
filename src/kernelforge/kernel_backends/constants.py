@@ -37,9 +37,3 @@ def resolve_language_dirs(backend: str, local_knowledge_root: Path | str) -> tup
     root = Path(local_knowledge_root)
     names = _BACKEND_LANGUAGE_DIRS.get(backend, (backend,))
     return tuple(name for name in names if (root / "languages" / name).is_dir())
-
-
-def resolve_language_dir(backend: str, local_knowledge_root: Path | str) -> str | None:
-    """Return the PRIMARY languages/ subdirectory serving ``backend``, or None."""
-    dirs = resolve_language_dirs(backend, local_knowledge_root)
-    return dirs[0] if dirs else None

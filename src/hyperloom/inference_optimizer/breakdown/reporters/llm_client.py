@@ -20,20 +20,10 @@ REPORT_HTTP_TIMEOUT_SEC = 60.0
 
 __all__ = [
     "REPORT_HTTP_TIMEOUT_SEC",
-    "NullClient",
     "OpenAIHttpClient",
     "AnthropicClient",
     "build_client_from_env",
 ]
-
-
-@dataclass
-class NullClient:
-    """No-op client; compose treats this exactly like ``llm_client=None``."""
-
-    def complete(self, *, system: str, user: str) -> str:
-        """Return an empty string, disabling the narrative pass."""
-        return ""
 
 
 @dataclass
@@ -72,14 +62,16 @@ class AnthropicClient:
     def complete(self, *, system: str, user: str) -> str:
         """Issue one single-shot completion and return the reply text."""
         return llm_config.anthropic_completion(
+            request=llm_config.AnthropicCompletionRequest(
+                model=self.model,
+                messages=[{"role": "user", "content": user}],
+                max_tokens=self.max_output_tokens,
+                system=system,
+                timeout=self.timeout,
+                timeout_s=self.timeout_s,
+            ),
             component="breakdown",
             operation="compose_report",
-            model=self.model,
-            system=system,
-            messages=[{"role": "user", "content": user}],
-            max_tokens=self.max_output_tokens,
-            timeout=self.timeout,
-            timeout_s=self.timeout_s,
         ).text
 
 

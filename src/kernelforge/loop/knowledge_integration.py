@@ -1394,8 +1394,6 @@ def write_experience_to_kb(
     framework="",
     experience_id="",
     operator_name="",
-    implementation_signature_value="",
-    implementation_identity_value=None,
     llm_summary=True,
     incremental_summary=None,
     snr_db_override=None,
@@ -1439,8 +1437,8 @@ def write_experience_to_kb(
             kernel_source = Path(kernel).read_text(errors="replace")
 
         summary_override = None if llm_summary else incremental_summary or _cheap_summary(archive)
-        pristine_signature = implementation_signature_value or getattr(loop_runner.ic, "implementation_signature", "")
-        pristine_identity = implementation_identity_value or getattr(loop_runner.ic, "implementation_identity", None)
+        pristine_signature = getattr(loop_runner.ic, "implementation_signature", "")
+        pristine_identity = getattr(loop_runner.ic, "implementation_identity", None)
 
         status = write_run_experience(
             config=config,

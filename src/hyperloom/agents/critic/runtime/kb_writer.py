@@ -25,16 +25,7 @@ from .importance_mapping import (
     importance_for_kb_draft,
     importance_for_verdict,
 )
-from .kb_client import KBClient
-from .metrics import (
-    CRITIC_KB_BREAKER_OPEN_TOTAL,
-    CRITIC_KB_PRIOR_CACHE_HIT,
-    CRITIC_KB_PRIOR_CACHE_MISS,
-    CRITIC_KB_UNREACHABLE_TOTAL,
-    CRITIC_KB_WRITE_TOTAL,
-    CRITIC_REVIEW_VERDICT_TOTAL,
-    get_registry,
-)
+from .kb_client import KBClient, KBListQuery
 from .scope_builder import build_scope, scope_cache_key
 from .session_memory import SessionMemory
 from .slugify import slugify, slugify_safe
@@ -115,7 +106,7 @@ class KBWriter:
         return self._time_fn() < self._unreachable_until
 
     def kb_breaker_state(self) -> dict[str, Any]:
-        """Snapshot for ``judge_bundle.notes`` / metrics dashboards."""
+        """Snapshot for ``judge_bundle.notes``."""
         now = self._time_fn()
         return {
             "open": now < self._unreachable_until,
@@ -125,23 +116,11 @@ class KBWriter:
             "cooldown_seconds": self._breaker_cooldown,
         }
 
-    def _record_kb_failure(self, endpoint: str, exc: Exception) -> None:
+    def _record_kb_failure(self) -> None:
         """Account a transport error and possibly open the breaker."""
         self._consecutive_failures += 1
-        get_registry().counter(CRITIC_KB_UNREACHABLE_TOTAL).inc(
-            {
-                "endpoint": endpoint,
-            }
-        )
         if self._consecutive_failures >= self._breaker_threshold:
-            already_open = self._unreachable_until > self._time_fn()
             self._unreachable_until = self._time_fn() + self._breaker_cooldown
-            if not already_open:
-                get_registry().counter(CRITIC_KB_BREAKER_OPEN_TOTAL).inc(
-                    {
-                        "endpoint": endpoint,
-                    }
-                )
 
     def _record_kb_success(self) -> None:
         """Reset the breaker after any successful KB call."""
@@ -168,12 +147,10 @@ class KBWriter:
         if ctx is not None:
             cached = self.session_memory.get_cached_priors(ctx.session_id, cache_key)
             if cached is not None:
-                get_registry().counter(CRITIC_KB_PRIOR_CACHE_HIT).inc()
                 return {"priors": list(cached), "cache": "hit", "cache_key": cache_key}
 
         # Breaker open → short-circuit.
         if self.is_kb_unreachable():
-            get_registry().counter(CRITIC_KB_UNREACHABLE_TOTAL).inc({"endpoint": "list"})
             return {
                 "priors": [],
                 "cache": "kb_unreachable",
@@ -181,15 +158,10 @@ class KBWriter:
                 "breaker": self.kb_breaker_state(),
             }
 
-        get_registry().counter(CRITIC_KB_PRIOR_CACHE_MISS).inc()
         try:
-            response = self.client.list(
-                scope_filter=scope,
-                kind=kind,
-                limit=limit,
-            )
+            response = self.client.list(KBListQuery(scope_filter=scope, kind=kind, limit=limit))
         except KBTransportError as exc:
-            self._record_kb_failure("list", exc)
+            self._record_kb_failure()
             return {
                 "priors": [],
                 "cache": "kb_unreachable",
@@ -233,11 +205,6 @@ class KBWriter:
                 },
             )
         verdict_label = verdict.get("verdict")
-        get_registry().counter(CRITIC_REVIEW_VERDICT_TOTAL).inc(
-            {
-                "verdict": str(verdict_label),
-            }
-        )
         if verdict_label not in _KB_RELEVANT_VERDICTS:
             return WriteResult("skipped", {"reason": f"verdict={verdict_label}"})
 
@@ -356,19 +323,13 @@ class KBWriter:
 
         try:
             response = self.client.batch_insert(items, on_conflict="upsert")
-            get_registry().counter(CRITIC_KB_WRITE_TOTAL).inc(
-                {
-                    "endpoint": "batch_insert",
-                    "status": "200",
-                }
-            )
             self._record_kb_success()
             return WriteResult(
                 "ok",
                 {"response": response, "rejected": rejected},
             )
         except KBTransportError as exc:
-            self._record_kb_failure("batch_insert", exc)
+            self._record_kb_failure()
             self.dead_letter.append(
                 "batch_insert",
                 {"items": items, "on_conflict": "upsert"},
@@ -413,16 +374,10 @@ class KBWriter:
         """Upsert a payload, dead-lettering any transport/4xx failure."""
         try:
             response = self.client.upsert(payload)
-            get_registry().counter(CRITIC_KB_WRITE_TOTAL).inc(
-                {
-                    "endpoint": "upsert",
-                    "status": "200",
-                }
-            )
             self._record_kb_success()
             return WriteResult("ok", {"response": response})
         except KBTransportError as exc:
-            self._record_kb_failure("upsert", exc)
+            self._record_kb_failure()
             self.dead_letter.append(
                 "upsert",
                 payload,

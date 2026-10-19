@@ -159,20 +159,6 @@ def _fixture_breakdown(**overrides: Any) -> dict[str, Any]:
                 },
             ]
         },
-        "robustness": {
-            "turns": [
-                {
-                    "turn_idx": 0,
-                    "outcome": "intents",
-                    "tick_index": 1,
-                    "intents": [
-                        {"type": "send_message", "topic": "heartbeat", "payload": {"body_md": "ok (robustness)"}}
-                    ],
-                    "parse_warnings": [],
-                },
-                {"turn_idx": 1, "outcome": "no_envelope", "tick_index": 4, "intents": [], "parse_warnings": ["empty"]},
-            ]
-        },
         "telemetry": {
             "gpu_monitor_aggregate": {
                 "samples": 52,
@@ -210,7 +196,6 @@ def test_all_renderers_register_in_stable_order() -> None:
         "attribution",
         "optimizations",
         "critic",
-        "robustness",
     ]
     assert [sid for sid, _ in REGISTRY] == expected
 

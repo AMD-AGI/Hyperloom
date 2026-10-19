@@ -5,72 +5,11 @@
 
 from __future__ import annotations
 
-import csv
 import subprocess
 import sys
-from pathlib import Path
-
-import pytest
 
 
 _TL_MODULE = "hyperloom.orchestrator.trace_analysis.tracelens_analysis"
-
-
-@pytest.fixture(scope="module")
-def tl_module():
-    """Import tracelens_analysis as a module without executing main()."""
-    from hyperloom.orchestrator.trace_analysis import tracelens_analysis
-
-    return tracelens_analysis
-
-
-def _write_exec_details(
-    split_dir: Path,
-    rows: list[dict[str, object]],
-) -> Path:
-    """Write a minimal execution_details.csv matching TraceLens splitter output."""
-    path = split_dir / "execution_details.csv"
-    cols = [
-        "idx",
-        "output_path",
-        "event_count",
-        "num_gpu_events",
-        "gpu_duration",
-        "gpu_busy_duration",
-        "phase_num_prefill",
-        "phase_num_prefilldecode",
-        "phase_num_decode",
-        "phase_avg_bs",
-        "phase_avg_conc",
-        "num_steps",
-    ]
-    with path.open("w", encoding="utf-8") as fh:
-        w = csv.DictWriter(fh, fieldnames=cols)
-        w.writeheader()
-        for row in rows:
-            full = dict.fromkeys(cols, "")
-            full.update({k: str(v) for k, v in row.items()})
-            w.writerow(full)
-    return path
-
-
-def _make_chunk_files(split_dir: Path) -> dict[str, Path]:
-    """Create empty placeholder chunk files (the gate inspects the CSV, not trace contents)."""
-    chunks = {}
-    for label in (
-        "mixed_steady_state",
-        "decode_only_steady_state",
-        "prefilldecode_steady_state",
-    ):
-        p = split_dir / f"{label}_chunk.trace.json.gz"
-        p.write_bytes(b"")
-        chunks[label] = p
-    return chunks
-
-
-@pytest.fixture
-def split_dir(tmp_path):
-    return tmp_path / "trace_split"
 
 
 def _run_help():

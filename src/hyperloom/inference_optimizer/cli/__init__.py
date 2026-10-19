@@ -858,10 +858,9 @@ def _probe_critic_review_model(
         try:
             if protocol == "anthropic":
                 llm_config.anthropic_completion(
-                    model=model,
-                    messages=messages,
-                    max_tokens=16,
-                    timeout_s=_CRITIC_PROBE_TIMEOUT_SEC,
+                    request=llm_config.AnthropicCompletionRequest(
+                        model=model, messages=messages, max_tokens=16, timeout_s=_CRITIC_PROBE_TIMEOUT_SEC
+                    ),
                     component="critic",
                     operation="preflight",
                 )

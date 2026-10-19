@@ -46,11 +46,6 @@ def load_vendor_operator_playbooks() -> tuple[dict[str, Any], ...]:
     return tuple(usable)
 
 
-def _reset_vendor_operator_playbooks_cache() -> None:
-    """Clear the cached registry (tests only, e.g. after monkeypatching the path)."""
-    load_vendor_operator_playbooks.cache_clear()
-
-
 def _candidate_haystack(candidate: dict[str, Any]) -> str:
     """Join every text field a playbook's ``any_marker`` may match against."""
     fields = (

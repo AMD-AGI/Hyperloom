@@ -104,25 +104,6 @@ def test_forge_loop_rejects_an_unregistered_producer():
     assert "fusion" in result.output
 
 
-def test_forge_loop_refuses_to_return_after_a_read_it_was_told_not_to_do():
-    result = CliRunner().invoke(
-        main,
-        [
-            "forge-loop",
-            "--kernel",
-            "k.py",
-            "--driver",
-            "d.py",
-            "--workspace",
-            ".",
-            "--no-kb-warmstart",
-            "--return-after-read-kb",
-        ],
-    )
-    assert result.exit_code != 0
-    assert "--no-kb-warmstart" in result.output
-
-
 def test_legacy_loop_command_is_removed():
     result = CliRunner().invoke(main, ["loop", "--help"])
 
