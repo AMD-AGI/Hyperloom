@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
+import sys
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -324,6 +327,35 @@ class TestTheAttemptPutsTheProcessBack:
         assert workdir.is_dir()
         adapter.close()
         assert not workdir.exists()
+
+    def test_an_absent_aiter_leaves_nothing_to_drop(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "aiter", None)
+        adapter = dp._FusedMoeAdapter()
+        workdir = adapter._workdir
+        adapter.close()
+        assert not workdir.exists()
+
+    def test_a_broken_aiter_cache_drop_is_not_swallowed(self, monkeypatch):
+        cache = SimpleNamespace(cache_clear=lambda: None)
+        core = ModuleType("aiter.jit.core")
+        core.AITER_CONFIGS = SimpleNamespace(get_config_file=cache)
+        for name, module in (
+            ("aiter", ModuleType("aiter")),
+            ("aiter.jit", ModuleType("aiter.jit")),
+            ("aiter.jit.core", core),
+        ):
+            monkeypatch.setitem(sys.modules, name, module)
+
+        def broken():
+            raise RuntimeError("fused_moe import broke")
+
+        adapter = dp._FusedMoeAdapter()
+        monkeypatch.setattr(adapter, "_fused_moe", broken)
+        try:
+            with pytest.raises(RuntimeError, match="fused_moe import broke"):
+                adapter.close()
+        finally:
+            shutil.rmtree(adapter._workdir, ignore_errors=True)
 
     def test_it_works_as_a_context_manager(self, monkeypatch):
         monkeypatch.setenv("AITER_CONFIG_FMOE", "/etc/production.csv")
