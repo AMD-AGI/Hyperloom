@@ -2,7 +2,7 @@
 title: FlyDSL knowledge map — index, file roles & problem-routing
 kind: index
 scope: languages/flydsl
-updated: 2026-08-28
+updated: 2026-10-19
 ---
 
 # FlyDSL — knowledge map
@@ -36,7 +36,8 @@ documented in `framework/aiter/` (the `aiter_flydsl_libtype` lever). Backend-neu
    LDS, tiled copy/MMA) → `layout_system_guide.md` (layout algebra) → `architecture_guide.md` (compile
    stack). Read alongside **`API_docs/conventions.md`** (the authoring style guide) before writing any kernel.
 2. **`skills/optimize/flydsl_levers/`** — the levers: `flydsl_kernel_library.md` + `flydsl_knob_space.md` (Path A, using the
-   library) or `flydsl_authoring_method.md` + `flydsl_gemm_authoring.md` (Path B, structure-first authoring).
+   library) or `flydsl_authoring_method.md` + `flydsl_gemm_authoring.md` (Path B, structure-first authoring),
+   then `flydsl_gemm_grid_pricing.md` + `flydsl_gemm_schedule_and_locality.md` for a GEMM.
 3. **`skills/`** *when you hit a problem*: `profile/` (trace, benchmark), `bottleneck/` (debug),
    `optimize/{gemm,lds,prefetch}-*.md` for the targeted levers.
 
@@ -71,6 +72,8 @@ Substitute `<op>` with the operator (catalog below). Paths are relative to this 
 | "Use the aiter FlyDSL GEMM library — which knobs?" | `skills/optimize/flydsl_levers/flydsl_kernel_library.md` → `.../flydsl_knob_space.md` |
 | "Author & optimize a new kernel (structure-first)" | `skills/optimize/flydsl_levers/flydsl_authoring_method.md` → (GEMM) `.../flydsl_gemm_authoring.md` |
 | "Optimize a GEMM specifically" | `skills/optimize/gemm-optimization.md` → `skills/optimize/flydsl_levers/flydsl_gemm_authoring.md` |
+| "GEMM: pick the tile / split-K / boundary body; price an idea before building it" | `skills/optimize/flydsl_levers/flydsl_gemm_grid_pricing.md` → `.../flydsl_gemm_authoring.md` |
+| "GEMM: a 'neutral' change moved wall time (wave mapping, XCD order, sched fence, epilogue fusion)" | `skills/optimize/flydsl_levers/flydsl_gemm_schedule_and_locality.md` |
 | "LDS bank conflicts / double-buffer / swizzle" | `skills/optimize/lds-optimization.md` → `API_docs/conventions.md` (SharedAllocator) |
 | "Overlap loads / prefetch / pipeline" | `skills/optimize/prefetch-data-load.md` |
 | "Wrong output / NaN / won't compile / fix didn't take" | `skills/bottleneck/debug-flydsl-kernel.md` (clear cache first) → `API_docs/conventions.md` |
@@ -100,7 +103,9 @@ languages/flydsl/
 │   │   │   ├── flydsl_kernel_library.md  # Path A: the shipped aiter families (HGEMM, small-M, fp8-A8, MoE, GDR, silu_fq)
 │   │   │   ├── flydsl_knob_space.md      # Path A: the knob set + which 3 knobs are arch-pinned, not tunable
 │   │   │   ├── flydsl_authoring_method.md# Path B: structure-before-parameters workflow, with the stop conditions
-│   │   │   └── flydsl_gemm_authoring.md  # Path B: GEMM levers (tiling / LDS / MFMA loop / epilogue)
+│   │   │   ├── flydsl_gemm_authoring.md  # Path B: GEMM levers (tiling / LDS / MFMA loop / epilogue)
+│   │   │   ├── flydsl_gemm_grid_pricing.md # Path B: rounds & last-round fill, split-K gate, tile ratio, K granule, fixed cost
+│   │   │   └── flydsl_gemm_schedule_and_locality.md # Path B: co-resident waves, XCD order, sched masks, vmcnt, epilogue cost
 │   │   ├── gemm-optimization.md          # GEMM optimization walkthrough
 │   │   ├── lds-optimization.md           # LDS sizing / bank-conflict / buffering
 │   │   ├── prefetch-data-load.md         # prefetch & load-overlap / pipelining

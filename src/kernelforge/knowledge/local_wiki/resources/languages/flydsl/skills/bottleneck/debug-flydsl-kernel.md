@@ -3,9 +3,10 @@ name: debug-flydsl-kernel
 description: >
   Diagnose a FlyDSL kernel that is wrong, NaN, zero, hanging, or refusing to compile.
   Symptom-indexed: start from what you observed, land on the cause. Covers the stale-cache
-  false negative, softmax -inf arithmetic, partition/stride addressing, FP8 error budgets,
-  the range vs range_constexpr split, loop-carried state typing, buffer_load offset units,
-  and barrier divergence. Use when a FlyDSL kernel produces incorrect output or fails to build.
+  false negative and what the JIT cache key does not see, shape-dependent bounds baked from
+  host integers, softmax -inf arithmetic, partition/stride addressing, FP8 error budgets,
+  the range vs range_constexpr split, non-short-circuit and/or in traced code, loop-carried
+  state typing, buffer_load offset units, and barrier divergence. Use when a FlyDSL kernel produces incorrect output or fails to build.
   Usage: /debug-flydsl-kernel
 allowed-tools: Read Edit Bash Grep Glob Agent
 ---
@@ -29,12 +30,44 @@ compile_my_kernel.cache_clear()      # any @functools.lru_cache on the compile p
 Everything below assumes you have done this. A debugging session that skips it can burn hours
 "fixing" a bug that was already fixed.
 
+### What the cache key sees
+Clearing is the blunt fix; knowing the key tells you when a result was stale without one. In FlyDSL
+v0.3.2 (`python/flydsl/compiler/jit_function.py`) the key of a `@flyc.jit` call is built from:
+
+- the FlyDSL toolchain — the Python sources of `flydsl.{compiler,expr,extension,runtime,utils}` and the
+  native libraries (C++ passes) — plus the `.py` files of every directory in `FLYDSL_EXTRA_SOURCE_DIRS`;
+- the launcher's source, and the source of the functions it names — `@flyc.kernel` / `@flyc.jit`
+  functions always, **plain helper functions only if defined in the same directory**;
+- the methods it calls on the class the launcher is defined on;
+- closure values that are `int`, `float`, `bool`, `str`, `None`, `tuple` or `Enum`, and module globals
+  the launcher reads (scalars and builtin containers by value);
+- each argument's signature — for a raw `torch.Tensor`: dtype, rank and which axis has unit stride,
+  **not its shape** (raw tensors are wrapped layout-dynamic; `flyc.from_dlpack(t)` makes the shape
+  static and part of the key);
+- five environment variables: `FLYDSL_COMPILE_OPT_LEVEL`, `FLYDSL_COMPILE_BACKEND`,
+  `FLYDSL_COMPILE_LLVM_DIR`, `FLYDSL_DEBUG_ENABLE_DEBUG_INFO`, `FLYDSL_EXTRA_SOURCE_DIRS`.
+
+So these changes do **not** invalidate a compiled kernel: methods of a helper class you instantiate
+inside the kernel, plain helpers in another directory (a kernel in `kernels/gemm/` calling into
+`kernels/common/` is one), a `dict` / `list` / object captured by closure (or anything inside it), and
+environment variables your own code reads. Edits there need `FLYDSL_EXTRA_SOURCE_DIRS` pointing at the
+helper directory, `FLYDSL_RUNTIME_ENABLE_CACHE=0` (disables the disk cache; the in-memory cache stays),
+or a clean cache.
+
+Two checks that settle "did my change run?":
+- **Break it on purpose.** Make the kernel compute something wrong (scale by 2) without clearing the
+  cache. If the old correct result comes back, every earlier measurement of that edit was stale.
+- **Identical numbers are a signal.** Variants that should differ but report byte-identical timings, or
+  identical `VGPR_Count` / `Accum_VGPR_Count` / `SGPR_Count` in a rocprofv3 kernel trace, are almost
+  always one cached binary.
+
 ## Start from the symptom
 | What you observe | Most likely cause | Section |
 |---|---|---|
 | Output is all NaN | `-inf` minus `-inf` in softmax, or divide by zero | [§1](#1-all-nan) |
 | Output is all zeros | wrong output address, or an unwritten intermediate | [§2](#2-all-zeros) |
 | More than half the elements are wrong | missing partitions, or a layout/addressing mismatch | [§3](#3-mostly-wrong) |
+| Some shapes partly unwritten, depending on the order shapes ran | a bound baked from a host integer | [§3](#a-bound-or-address-baked-from-a-host-integer) |
 | 1–5% of elements are slightly off | FP8 quantization, or a scale applied twice | [§4](#4-slightly-off) |
 | Won't compile, or crashes at trace time | `range` vs `range_constexpr`, loop-state typing, scalar/vector mismatch | [§5](#5-wont-compile) |
 | GPU hangs | loop bounds, or a divergent barrier | [§6](#6-hang) |
@@ -143,6 +176,22 @@ Force `max_context_partition_num=1` (one-shot mode) to bypass the reduce kernel 
 here and fails with multiple partitions, the bug is in partitioning or reduction, not in the main
 compute.
 
+### A bound or address baked from a host integer
+A Python `int` folded into the IR — a `num_records_bytes`, a stride, an address constant — belongs to
+the one compiled artifact. If it was derived from a shape and reached the kernel through a channel the
+cache key does not see (a `dict` in a closure, a helper object's attribute; see
+[What the cache key sees](#what-the-cache-key-sees)), every later shape with the same dtype reuses the
+first shape's value.
+
+Signature: part of the output is never written — rows of zeros past a fixed byte count, or a gap spread
+evenly across one dimension — and only for some shapes. It hides when shapes run largest first, so a
+single-shape test passes. **The decisive experiment is to run the same shapes in reverse order:**
+failures that follow the shape are shape-specific; failures that follow the position are a stale bound.
+
+Fix: derive every quantity that varies with the shape from the kernel's traced arguments
+(`fx.Int32` sizes, the tensor's layout). Keep host constants for what genuinely changes the code —
+branch choice, unroll count, vector width — which changes the IR anyway.
+
 ### Differential against another backend
 ```python
 torch.testing.assert_close(flydsl_output, gluon_output, atol=5e-3, rtol=5e-3)
@@ -214,6 +263,25 @@ if const_expr(trans_v):
 **Do not write `const_expr(lane == 0)`.** Even with `known_block_size`, `gpu.thread_id("x")`, `lane`,
 and `warp_id` are runtime SSA values — the compiler knows their *range*, not which lane is executing.
 
+**`and` / `or` do not short-circuit in a traced body.** The rewriter turns `A and B` into a call,
+`dsl_and_(A, B)`, so both sides are evaluated first. `if const_expr(S and K % S == 0):` raises
+`ZeroDivisionError` at trace time when `S == 0`, although the same line is fine in plain Python. When the
+right side is only legal if the left is true (modulo, division, indexing, `.shape[i]`), nest two `if`s.
+
+**Only `@flyc.kernel` / `@flyc.jit` functions are rewritten.** A plain Python helper the kernel calls
+runs as ordinary Python at trace time, so `if <runtime value>:` inside it raises
+`RuntimeError: cannot evaluate dynamic 'Boolean' as Python bool during tracing`. Helpers may emit
+branch-free code (`range_constexpr` loops, `.select()`, masked loads/stores); a runtime `if` belongs in
+the decorated body. Settle this before planning a refactor that moves code into helpers.
+
+### `AssertionError: unexpected ast node <ast.ClassDef ...>`
+Raised by `ASTRewriter.transform`. The rewriter re-reads the kernel's source from disk with
+`inspect.getsource`, using the line numbers recorded when the module was imported; if the file changed
+since (an edit or sync under a long-running server or benchmark process), the lookup lands on whatever
+now sits there — a decorated class, in the case that produced this message. It says nothing about the
+kernel — restart the process, and keep sources
+frozen for the lifetime of a process that compiles lazily.
+
 ### Loop-carried state typing
 Keep loop-carried state in FlyDSL's own types (`fx.Int32`, `fx.Float32`, `Vector`, `ArithValue`) and
 unwrap only where a low-level helper demands a raw `ir.Value`:
@@ -284,6 +352,8 @@ sudo amdgpu-reset       # or reboot
 
 ## Checklist
 - [ ] Cleared `~/.flydsl` after the last code change
+- [ ] Edits outside the cache key (helper classes, other-directory helpers, closure dicts) re-run uncached
+- [ ] Shape-dependent bounds and addresses come from traced arguments, not host integers
 - [ ] `range_constexpr()` for every compile-time loop
 - [ ] No `const_expr` on a runtime GPU value (`lane`, `warp_id`, `thread_id`)
 - [ ] `buffer_load` offset units match `dtype` (bytes ÷ 4 for `i32`)
