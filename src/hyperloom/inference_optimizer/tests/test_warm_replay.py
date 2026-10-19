@@ -2793,9 +2793,9 @@ def test_an_overlay_with_no_recorded_root_is_left_for_local_resolution(tmp_path,
 
 def test_overlay_provenance_summary_counts_known_gaps():
     """A capture that missed paths, or landed gain outside the root, is a gap."""
-    from hyperloom.orchestrator.phases.prelude import _overlay_provenance_summary
+    from hyperloom.orchestrator.phases._warm_prior import overlay_provenance_summary
 
-    summary = _overlay_provenance_summary(
+    summary = overlay_provenance_summary(
         {
             "patches": [{"patch_file": "patch/overlays/000000/00-a.patch"}],
             "provenance": [
@@ -2814,15 +2814,15 @@ def test_overlay_provenance_summary_counts_known_gaps():
 
 
 def test_overlay_provenance_summary_is_absent_for_a_config_only_replay():
-    from hyperloom.orchestrator.phases.prelude import _overlay_provenance_summary
+    from hyperloom.orchestrator.phases._warm_prior import overlay_provenance_summary
 
-    assert _overlay_provenance_summary({"patches": [], "provenance": []}) == {}
+    assert overlay_provenance_summary({"patches": [], "provenance": []}) == {}
 
 
 def test_overlay_provenance_summary_tolerates_unusable_counts():
-    from hyperloom.orchestrator.phases.prelude import _overlay_provenance_summary
+    from hyperloom.orchestrator.phases._warm_prior import overlay_provenance_summary
 
-    summary = _overlay_provenance_summary(
+    summary = overlay_provenance_summary(
         {"patches": [], "provenance": [{"stack_index": 0, "artifacts_outside_root": "nope"}]}
     )
 

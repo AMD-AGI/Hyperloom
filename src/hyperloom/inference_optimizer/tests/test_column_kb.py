@@ -26,7 +26,7 @@ from hyperloom.orchestrator.knowledge.remote_recipe.values import (
     build_remote_knowledge,
     knowledge_to_warm_recipe,
 )
-from hyperloom.orchestrator.phases.prelude import _merge_named_current_recipe_configs
+from hyperloom.orchestrator.phases._warm_prior import merge_named_current_recipe_configs
 
 
 def _state(stack: list[dict]) -> SimpleNamespace:
@@ -144,7 +144,7 @@ def test_config_stage_replaces_rather_than_accumulates(tmp_path: Path) -> None:
 )
 def test_config_and_kernel_merge_fails_closed_on_conflict(kernel: dict) -> None:
     with pytest.raises(ValueError, match="conflict"):
-        _merge_named_current_recipe_configs(
+        merge_named_current_recipe_configs(
             [
                 ("config", {"extra_server_args": "--page-size 32", "extra_envs": {"SHARED": "recipe"}}),
                 ("kernel", kernel),
