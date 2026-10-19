@@ -118,10 +118,6 @@ cognitive-complexity src/hyperloom/orchestrator/knowledge/recipe_journal.py::Rec
 cognitive-complexity src/hyperloom/orchestrator/knowledge/recipe_journal.py::RecipeJournalCollaborator.finalize_recipe_and_journal 63
 cognitive-complexity src/hyperloom/orchestrator/knowledge/recipe_journal.py::RecipeJournalCollaborator.kb_amend_recipe 51
 cognitive-complexity src/hyperloom/orchestrator/knowledge/recipe_journal.py::_record_config_attempts 38
-cognitive-complexity src/hyperloom/orchestrator/knowledge/recipe_kb_t0.py::_build_warm_start_context 71
-cognitive-complexity src/hyperloom/orchestrator/knowledge/recipe_kb_t0.py::_cascade_warm_start_search 46
-cognitive-complexity src/hyperloom/orchestrator/knowledge/recipe_kb_t0.py::_find_config_donor 34
-cognitive-complexity src/hyperloom/orchestrator/knowledge/recipe_kb_t0.py::run_t0_anchor 60
 cognitive-complexity src/hyperloom/orchestrator/knowledge/remote_recipe/__init__.py::RemoteWarmRecipeAdapter.search 49
 cognitive-complexity src/hyperloom/orchestrator/knowledge/remote_recipe/sanitize.py::_sanitize_value 31
 cognitive-complexity src/hyperloom/orchestrator/knowledge/remote_recipe/values.py::_adopt_replayed_prior 70
@@ -312,7 +308,6 @@ cyclomatic-complexity src/hyperloom/orchestrator/kernel/request_handlers.py::_re
 cyclomatic-complexity src/hyperloom/orchestrator/kernel/request_handlers.py::_run_forge_gemm_tuning 56
 cyclomatic-complexity src/hyperloom/orchestrator/kernel/request_handlers.py::integrate_handler 46
 cyclomatic-complexity src/hyperloom/orchestrator/knowledge/recipe_journal.py::RecipeJournalCollaborator.finalize_recipe_and_journal 21
-cyclomatic-complexity src/hyperloom/orchestrator/knowledge/recipe_kb_t0.py::run_t0_anchor 27
 cyclomatic-complexity src/hyperloom/orchestrator/knowledge/remote_recipe/values.py::_adopt_replayed_prior 28
 cyclomatic-complexity src/hyperloom/orchestrator/loop/conversation.py::_format_inbox_event 30
 cyclomatic-complexity src/hyperloom/orchestrator/loop/coordinator.py::Coordinator._run_ticks 23
@@ -512,10 +507,7 @@ function-args src/hyperloom/orchestrator/kernel/request_handlers.py::_vllm_block
 function-args src/hyperloom/orchestrator/knowledge/agent_kb.py::PatchKB.stage_provenance 6
 function-args src/hyperloom/orchestrator/knowledge/recipe_kb/local_store.py::LocalRecipeStore.put_recipe 21
 function-args src/hyperloom/orchestrator/knowledge/recipe_kb_t0.py::_build_warm_start_context 9
-function-args src/hyperloom/orchestrator/knowledge/recipe_kb_t0.py::_cascade_warm_start_search 13
-function-args src/hyperloom/orchestrator/knowledge/recipe_kb_t0.py::_donor_is_trustworthy 6
-function-args src/hyperloom/orchestrator/knowledge/recipe_kb_t0.py::_find_config_donor 11
-function-args src/hyperloom/orchestrator/knowledge/recipe_kb_t0.py::_settle_warm_start_event 10
+function-args src/hyperloom/orchestrator/knowledge/recipe_kb_t0.py::_settle_warm_start_event 7
 function-args src/hyperloom/orchestrator/knowledge/recipe_kb_t0.py::run_t0_anchor 11
 function-args src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter._apply_verdict_outcome 7
 function-args src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter._handle_single_verdict 9
@@ -708,10 +700,7 @@ function-lines src/hyperloom/orchestrator/knowledge/recipe_journal.py::RecipeJou
 function-lines src/hyperloom/orchestrator/knowledge/recipe_journal.py::_record_config_attempts 140
 function-lines src/hyperloom/orchestrator/knowledge/recipe_kb/local_store.py::LocalRecipeStore.put_recipe 133
 function-lines src/hyperloom/orchestrator/knowledge/recipe_kb/schema.py::Recipe.from_dict 102
-function-lines src/hyperloom/orchestrator/knowledge/recipe_kb_t0.py::_build_warm_start_context 102
-function-lines src/hyperloom/orchestrator/knowledge/recipe_kb_t0.py::_cascade_warm_start_search 123
-function-lines src/hyperloom/orchestrator/knowledge/recipe_kb_t0.py::_find_config_donor 85
-function-lines src/hyperloom/orchestrator/knowledge/recipe_kb_t0.py::run_t0_anchor 329
+function-lines src/hyperloom/orchestrator/knowledge/recipe_kb_t0.py::run_t0_anchor 102
 function-lines src/hyperloom/orchestrator/knowledge/remote_recipe/__init__.py::RemoteWarmRecipeAdapter.search 104
 function-lines src/hyperloom/orchestrator/knowledge/remote_recipe/client.py::RemoteRecipeClient.read 95
 function-lines src/hyperloom/orchestrator/knowledge/remote_recipe/client.py::RemoteRecipeClient.write_if_better 82
@@ -974,7 +963,6 @@ module-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py 2657
 module-lines src/hyperloom/orchestrator/kernel/conc_sweep.py 1429
 module-lines src/hyperloom/orchestrator/kernel/request_handlers.py 4888
 module-lines src/hyperloom/orchestrator/knowledge/recipe_journal.py 1785
-module-lines src/hyperloom/orchestrator/knowledge/recipe_kb_t0.py 1318
 module-lines src/hyperloom/orchestrator/knowledge/remote_recipe/values.py 1284
 module-lines src/hyperloom/orchestrator/loop/coordinator.py 1423
 module-lines src/hyperloom/orchestrator/loop/dispatcher.py 1503
