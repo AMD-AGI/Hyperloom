@@ -14,7 +14,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from ._kernel_agent_tool import (
     HandlerResult,
@@ -393,6 +393,82 @@ class _AnalysisRun:
     analysis_mode: str
 
 
+def _analysis_tool_argv(payload: dict, run: _AnalysisRun, *, session_dir: Path, state: Any) -> list[str]:
+    """Invoke the reader this route uses, with the flags only that one takes.
+
+    Both tools share the rest of the CLI surface; only TraceLens takes ``--tracelens-root``.
+    """
+    cmd = [
+        sys.executable,
+        "-m",
+        _BYPASS_TRACE_ANALYSIS_MODULE if run.is_bypass else _TRACELENS_ANALYSIS_MODULE,
+        "--trace-input",
+        str(run.trace_input),
+        "--session-id",
+        str(payload.get("session_id") or session_dir.name),
+        "--workspace-path",
+        run.workspace_path,
+    ]
+    if not run.is_bypass:
+        # Pass the resolved root explicitly so the tool never relies on inherited env.
+        cmd += ["--tracelens-root", str(run.tracelens_root)]
+        # The tool's SDK run books its model requests onto this session's trajectory ledger.
+        for key, value in inherited_scope_fields().items():
+            cmd += [f"--trajectory-{key.replace('_', '-')}", str(value)]
+    elif str(getattr(state, "benchmark_mode", "") or "").strip().lower() == "agentx":
+        cmd += ["--require-single-rank"]
+        cmd += _optional_flags(("--tensor-parallel-size", optional_positive_int(getattr(state, "tp", None))))
+    return cmd
+
+
+def _workload_identity_flags(payload: dict, run: _AnalysisRun, *, state: Any, workload: dict) -> list[str]:
+    """Name the model, framework and platform the trace was captured from."""
+    model_path = str(
+        payload.get("model_path") or getattr(state, "model_path", "") or os.environ.get("MODEL_PATH") or ""
+    ).strip()
+    precision = str(
+        payload.get("precision") or getattr(state, "precision", "") or workload.get("precision") or ""
+    ).strip()
+    return _optional_flags(
+        ("--model-name", run.model_name),
+        ("--framework", run.framework),
+        ("--target-platform", run.target_platform),
+        ("--analysis-mode", run.analysis_mode),
+        ("--model-path", model_path),
+        ("--precision", precision),
+    )
+
+
+def _trace_window_flags(payload: dict, run: _AnalysisRun, workload: dict) -> list[str]:
+    """Tell the reader how to cut the trace.
+
+    Scriptable frameworks (xDiT) have no decode steady-state window, so they count denoise steps instead of
+    taking the LLM prefill/decode splitter, which would discard their raw diffusion kernels.
+    """
+    if run.scriptable:
+        num_denoise = optional_positive_int(payload.get("num_denoise_steps") or workload.get("num_inference_steps"))
+        return _optional_flags(("--num-denoise-steps", num_denoise))
+    if run.is_bypass:
+        return []
+    flags = ["--split-llm-inference"]
+    for flag, payload_key, workload_key in (
+        ("--split-conc", "split_conc", "conc"),
+        ("--split-osl", "split_osl", "osl"),
+        ("--split-r", "split_r", "random_range_ratio"),
+    ):
+        hint = payload.get(payload_key) or workload.get(workload_key)
+        if hint not in (None, ""):
+            flags += [flag, str(hint).strip()]
+    return flags
+
+
+def _requested_steady_state_mode(payload: dict, run: _AnalysisRun) -> str:
+    """The steady-state window the reader is asked for; a scriptable TraceLens run has no decode window."""
+    if run.scriptable and not run.is_bypass:
+        return "generic"
+    return str(payload.get("steady_state_mode") or os.environ.get("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "")).strip()
+
+
 def _build_trace_analyze_cmd(
     payload: dict,
     run: _AnalysisRun,
@@ -403,74 +479,20 @@ def _build_trace_analyze_cmd(
 ) -> "tuple[list[str], str]":
     """Assemble the trace-analysis tool argv (TraceLens or bypass); returns
     ``(cmd, steady_state_mode)`` so the caller can record discovery provenance."""
-    is_bypass = run.is_bypass
-    scriptable = run.scriptable
-    # Both tools share the CLI surface below except ``--tracelens-root``.
-    cmd = [
-        sys.executable,
-        "-m",
-        _BYPASS_TRACE_ANALYSIS_MODULE if is_bypass else _TRACELENS_ANALYSIS_MODULE,
-        "--trace-input",
-        str(run.trace_input),
-        "--session-id",
-        str(payload.get("session_id") or session_dir.name),
-        "--workspace-path",
-        run.workspace_path,
-    ]
-    if not is_bypass:
-        # Pass the resolved root explicitly so the tool never relies on inherited env.
-        cmd += ["--tracelens-root", str(run.tracelens_root)]
-        # The tool's SDK run books its model requests onto this session's trajectory ledger.
-        for key, value in inherited_scope_fields().items():
-            cmd += [f"--trajectory-{key.replace('_', '-')}", str(value)]
-    elif str(getattr(state, "benchmark_mode", "") or "").strip().lower() == "agentx":
-        cmd += ["--require-single-rank"]
-        cmd += _optional_flags(("--tensor-parallel-size", optional_positive_int(getattr(state, "tp", None))))
-
-    model_path = str(
-        payload.get("model_path") or getattr(state, "model_path", "") or os.environ.get("MODEL_PATH") or ""
-    ).strip()
-    precision = str(
-        payload.get("precision") or getattr(state, "precision", "") or workload.get("precision") or ""
-    ).strip()
-    cmd += _optional_flags(
-        ("--model-name", run.model_name),
-        ("--framework", run.framework),
-        ("--target-platform", run.target_platform),
-        ("--analysis-mode", run.analysis_mode),
-        ("--model-path", model_path),
-        ("--precision", precision),
-    )
-
-    if scriptable:
-        num_denoise = optional_positive_int(payload.get("num_denoise_steps") or workload.get("num_inference_steps"))
-        cmd += _optional_flags(("--num-denoise-steps", num_denoise))
-    elif not is_bypass:
-        cmd += ["--split-llm-inference"]
-        for flag, payload_key, workload_key in (
-            ("--split-conc", "split_conc", "conc"),
-            ("--split-osl", "split_osl", "osl"),
-            ("--split-r", "split_r", "random_range_ratio"),
-        ):
-            hint = payload.get(payload_key) or workload.get(workload_key)
-            if hint not in (None, ""):
-                cmd += [flag, str(hint).strip()]
-
+    steady_state_mode = _requested_steady_state_mode(payload, run)
     capture_folder = (
         payload.get("capture_folder") or payload.get("graph_capture_path") or payload.get("capture_folder_path")
     )
-    if scriptable and not is_bypass:
-        steady_state_mode = "generic"
-    else:
-        steady_state_mode = str(
-            payload.get("steady_state_mode") or os.environ.get("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "")
-        ).strip()
-    roofline_output_name = str(payload.get("roofline_output_name") or "").strip()
-    cmd += _optional_flags(
-        ("--capture-folder", capture_folder),
-        ("--steady-state-mode", steady_state_mode),
-        ("--roofline-output-name", roofline_output_name),
-    )
+    cmd = [
+        *_analysis_tool_argv(payload, run, session_dir=session_dir, state=state),
+        *_workload_identity_flags(payload, run, state=state, workload=workload),
+        *_trace_window_flags(payload, run, workload),
+        *_optional_flags(
+            ("--capture-folder", capture_folder),
+            ("--steady-state-mode", steady_state_mode),
+            ("--roofline-output-name", str(payload.get("roofline_output_name") or "").strip()),
+        ),
+    ]
     if payload.get("dry_run"):
         cmd += ["--dry-run"]
     return cmd, steady_state_mode
@@ -572,6 +594,266 @@ def _build_analysis_meta(
     }
 
 
+class _AnalysisUnavailable(Exception):
+    """The trace analysis cannot be dispatched; carries the failure the handler publishes."""
+
+    def __init__(self, failure: dict[str, Any]) -> None:
+        super().__init__(str(failure.get("error") or ""))
+        self.failure = failure
+
+
+class _FrameworkChoice(NamedTuple):
+    """The framework this analysis runs as, and any warning raised in choosing it."""
+
+    framework: str
+    warnings: list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class _ResolvedAnalysis:
+    """What the handler resolved from the payload and the session before the tool runs."""
+
+    run: _AnalysisRun
+    route: str
+    framework_warnings: list[dict[str, Any]]
+    metadata: dict
+    workload: dict
+
+
+@dataclass(frozen=True)
+class _AnalysisTiming:
+    """The window the tool was asked for and how long it took to answer."""
+
+    requested_mode: str
+    duration_sec: float
+
+
+def _resolve_analysis_framework(payload: dict, state: Any) -> _FrameworkChoice:
+    """Choose the framework this trace is read as.
+
+    Payload metadata remains authoritative for ordinary serving frameworks. The exception is a scriptable
+    session receiving a stale non-scriptable default (commonly ``sglang``): that would make xDiT follow the
+    LLM trace splitter, which discards its raw diffusion GPU kernels.
+    """
+    from hyperloom.inference_optimizer.framework_registry import is_scriptable
+
+    state_framework = str(state.framework or "").strip()
+    payload_framework = str(payload.get("framework") or "").strip()
+    if not (payload_framework and is_scriptable(state_framework) and not is_scriptable(payload_framework)):
+        return _FrameworkChoice(payload_framework or state_framework, [])
+    log.warning(
+        "trace_analyze: overriding payload framework %r with session scriptable framework %r to preserve the raw trace",
+        payload_framework,
+        state_framework,
+    )
+    return _FrameworkChoice(
+        state_framework,
+        [
+            {
+                "code": "stale_framework_overridden",
+                "severity": "warning",
+                "message": (
+                    f"overrode non-scriptable payload framework {payload_framework!r} "
+                    f"with scriptable session framework {state_framework!r} "
+                    "to preserve the raw trace"
+                ),
+                "payload_framework": payload_framework,
+                "session_framework": state_framework,
+            }
+        ],
+    )
+
+
+def _resolve_analysis_route(payload: dict) -> str:
+    """Choose the analysis route: default ``agent`` (TraceLens SDK/LLM) or the explicit ``bypass`` reader.
+
+    Only an absent or blank payload value defers to ``HYPERLOOM_TRACE_ANALYSIS_ROUTE``. An explicit unknown
+    route is a configuration error rather than a fall back to ``agent``, which could turn a no-LLM request
+    into a paid model session.
+    """
+    raw_route = payload.get("analysis_route")
+    route_text = "" if raw_route is None else str(raw_route).strip()
+    if not route_text:
+        route_text = os.environ.get("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "").strip()
+    explicit_route = route_text.lower()
+    if explicit_route and explicit_route not in _VALID_ANALYSIS_ROUTES:
+        valid_routes = sorted(_VALID_ANALYSIS_ROUTES)
+        message = (
+            f"unknown analysis_route {explicit_route!r} (expected one of {valid_routes}); "
+            "refusing to fall back to 'agent' because that may start an LLM session. "
+            "Use 'bypass' for no-LLM trace analysis."
+        )
+        log.error("trace_analyze: %s", message)
+        raise _AnalysisUnavailable(
+            {
+                "status": "failed",
+                "error_class": "invalid_analysis_route",
+                "error": message,
+                "requested_route": explicit_route,
+                "valid_routes": valid_routes,
+            }
+        )
+    return explicit_route or "agent"
+
+
+def _resolve_tracelens_checkout() -> Path:
+    """The TraceLens checkout both routes need, self-healed when it is missing or incomplete.
+
+    Bypass transitively imports TraceLens for source-path mapping, so neither route can run without it.
+    """
+    tracelens_root = _resolve_tracelens_root()
+    if not (tracelens_root / ".git").exists():
+        _maybe_selfheal_tracelens_root(tracelens_root, log=log)
+    tl_err = _tracelens_root_error(tracelens_root)
+    if tl_err:
+        raise _AnalysisUnavailable({"status": "failed", "error_class": "tracelens_root_missing", "error": tl_err})
+    return tracelens_root
+
+
+def _resolve_analysis(payload: dict, state: Any, session_dir: Path) -> _ResolvedAnalysis:
+    """Resolve the trace, workspace, route and workload one analysis request describes."""
+    from hyperloom.inference_optimizer.framework_registry import is_scriptable
+
+    trace_input = payload.get("trace_input") or payload.get("trace_dir")
+    if not trace_input:
+        raise _AnalysisUnavailable({"status": "failed", "error": "missing 'trace_input' in payload"})
+    choice = _resolve_analysis_framework(payload, state)
+    analysis_mode = (payload.get("analysis_mode") or "").strip()
+    if not analysis_mode and choice.framework.lower() in {"vllm", "sglang"}:
+        analysis_mode = "inference"
+    route = _resolve_analysis_route(payload)
+    tracelens_root = _resolve_tracelens_checkout()
+    # Pass the session root so artefacts settle under ``<session_dir>/kernel-agent/runs/...``.
+    workspace_path = payload.get("workspace_path") or str(session_dir)
+    Path(workspace_path).mkdir(parents=True, exist_ok=True)
+    metadata = _load_materialized_workload_metadata(state.baseline_config_path)
+    return _ResolvedAnalysis(
+        run=_AnalysisRun(
+            trace_input=trace_input,
+            workspace_path=workspace_path,
+            tracelens_root=tracelens_root,
+            is_bypass=route == "bypass",
+            scriptable=is_scriptable(choice.framework),
+            model_name=(payload.get("model_name") or state.model_name or state.model_path or "").strip(),
+            framework=choice.framework,
+            target_platform=(payload.get("target_platform") or state.gpu_type or "").strip(),
+            analysis_mode=analysis_mode,
+        ),
+        route=route,
+        framework_warnings=choice.warnings,
+        metadata=metadata,
+        workload=metadata.get("runtime_args", {}).get("workload", {}) if isinstance(metadata, dict) else {},
+    )
+
+
+async def _run_analysis_tool(cmd: list[str], timeout_sec: int) -> HandlerResult:
+    """Run the trace-analysis tool within its budget and shape whatever it exited with."""
+    try:
+        rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout_sec)
+    except subprocess.TimeoutExpired as exc:
+        cmd_repr = " ".join(str(c) for c in (getattr(exc, "cmd", None) or cmd))
+        return {
+            "status": "failed",
+            "error_class": "subprocess_timeout",
+            "error": f"TimeoutExpired after {timeout_sec}s: {cmd_repr[:1500]}",
+        }
+    return _shape_tool_result(rc, stdout, stderr)
+
+
+def _surface_artifact_paths(result: dict[str, Any]) -> str:
+    """Lift the tool's artifact paths onto the handler result, and answer where its report landed."""
+    artifacts = result.get("artifact_paths")
+    if not isinstance(artifacts, dict):
+        artifacts = {}
+    if artifacts.get("kernel_candidates"):
+        result["candidates_path"] = artifacts["kernel_candidates"]
+    report_path = result.get("trace_report_path") or artifacts.get("trace_report_path")
+    if report_path:
+        result["trace_report_path"] = str(report_path)
+        _enrich_candidate_trace_report(result.get("hot_kernels"), str(report_path))
+    # The reusable-vs-skipped audit sidecar.
+    if artifacts.get("tracelens_summary"):
+        result["tracelens_summary_path"] = str(artifacts["tracelens_summary"])
+    if artifacts.get("kernel_roofline"):
+        result["kernel_roofline_path"] = str(artifacts["kernel_roofline"])
+    return str(report_path or "")
+
+
+def _is_hard_analysis_failure(result: dict[str, Any]) -> bool:
+    """A failed tool run that is not the recognized no-steady-state outcome."""
+    return result.get("status") == "failed" and "trace_split_no_steady_state" not in str(result.get("error") or "")
+
+
+def _record_analysis_failure(result: dict[str, Any]) -> None:
+    """Record a failed tool run on the result so nothing downstream reads it as an empty-kernel success."""
+    failure_warning: dict[str, Any] = {
+        "code": "tracelens_analysis_failed",
+        "severity": "warning",
+        "message": (
+            "TraceLens analysis failed; refusing to treat this as a "
+            "successful empty-kernel result. See ``stderr_tail`` / "
+            "``error`` for the upstream failure."
+        ),
+    }
+    for key in ("returncode", "rc", "error", "stderr_tail", "raw_stdout_tail"):
+        if key in result and result[key] not in (None, ""):
+            failure_warning[key] = result[key]
+    health = list(result.get("trace_health_warnings") or [])
+    health.append(failure_warning)
+    result["trace_health_warnings"] = health
+    result["hot_kernels"] = []
+    result.setdefault("orchestrator_error", failure_warning.get("error", ""))
+
+
+def _record_discovery_tool_version(session_dir: Path, tool: str) -> None:
+    """Record the build of the reader that produced this session's hot kernels.
+
+    This run is the only place that build is in scope; nothing downstream can recover it.
+    """
+    try:
+        from hyperloom.inference_optimizer.breakdown.recorder import tool_versions
+
+        tool_versions.record_tool_version(session_dir, tool=tool)
+    except Exception as exc:  # noqa: BLE001
+        trace_recording_skipped(
+            "versions",
+            reason="caller raised before the recorder",
+            entity=tool,
+            error=exc,
+        )
+
+
+def _finalize_analysis_result(
+    result: HandlerResult,
+    resolved: _ResolvedAnalysis,
+    timing: _AnalysisTiming,
+    session_dir: Path,
+) -> HandlerResult:
+    """Surface the tool's artifacts, warnings and provenance on the result the Coordinator reads."""
+    report_path = _surface_artifact_paths(result)
+    if _is_hard_analysis_failure(result):
+        _record_analysis_failure(result)
+    # Prepend handler validation warnings so they reach the LLM.
+    result["trace_health_warnings"] = resolved.framework_warnings + list(result.get("trace_health_warnings") or [])
+    _enrich_candidate_runtime_metadata(result.get("hot_kernels"), resolved.metadata)
+    candidates_path = result.get("candidates_path")
+    if isinstance(candidates_path, str):
+        _enrich_candidates_artifact(candidates_path, resolved.metadata, trace_report_path=report_path)
+    # Surfaced for the caller's SBD V6 roofline event, which records the run as it
+    # happens rather than re-deriving it at export time.
+    result["analysis_meta"] = _build_analysis_meta(
+        result,
+        route=resolved.route,
+        requested_mode=timing.requested_mode,
+        trace_input=str(resolved.run.trace_input),
+        duration_sec=timing.duration_sec,
+    )
+    # Route and tool are one-to-one after the no-LLM TraceLens route was removed:
+    # agent runs TraceLens, while bypass runs its standalone reader.
+    _record_discovery_tool_version(session_dir, _analysis_tool(resolved.route))
+    return result
+
+
 async def trace_analyze_handler(
     payload: dict,
     *,
@@ -596,211 +878,22 @@ async def trace_analyze_handler(
     Returns the tool's result dict with ``status``, surfaced artifact paths, and
     ``trace_health_warnings``; on failure, ``returncode`` / ``error`` and empty ``hot_kernels``.
     """
-    trace_input = payload.get("trace_input") or payload.get("trace_dir")
-    if not trace_input:
-        return {"status": "failed", "error": "missing 'trace_input' in payload"}
     # Backfill workload context from SharedState when Orchestration omits it.
     from ...state.shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir)
-    state_framework = str(state.framework or "").strip()
-    payload_framework = str(payload.get("framework") or "").strip()
-    from hyperloom.inference_optimizer.framework_registry import is_scriptable
-
-    # Payload metadata remains authoritative for ordinary serving frameworks.
-    # The exception is a scriptable session receiving a stale non-scriptable
-    # default (commonly ``sglang``): that would make xDiT follow the LLM trace
-    # splitter, which discards its raw diffusion GPU kernels.
-    framework = payload_framework or state_framework
-    framework_warnings: list[dict[str, Any]] = []
-    if payload_framework and is_scriptable(state_framework) and not is_scriptable(payload_framework):
-        framework = state_framework
-        framework_warnings.append(
-            {
-                "code": "stale_framework_overridden",
-                "severity": "warning",
-                "message": (
-                    f"overrode non-scriptable payload framework {payload_framework!r} "
-                    f"with scriptable session framework {state_framework!r} "
-                    "to preserve the raw trace"
-                ),
-                "payload_framework": payload_framework,
-                "session_framework": state_framework,
-            }
-        )
-        log.warning(
-            "trace_analyze: overriding payload framework %r with session "
-            "scriptable framework %r to preserve the raw trace",
-            payload_framework,
-            state_framework,
-        )
-    target_platform = (payload.get("target_platform") or state.gpu_type or "").strip()
-    model_name = (payload.get("model_name") or state.model_name or state.model_path or "").strip()
-    analysis_mode = (payload.get("analysis_mode") or "").strip()
-    if not analysis_mode and framework.lower() in {"vllm", "sglang"}:
-        analysis_mode = "inference"
-
-    # Analysis route: default ``agent`` (TraceLens SDK/LLM); ``bypass`` (no-LLM,
-    # but still imports TraceLens for source mapping) is the explicit route via
-    # payload ``analysis_route`` / ``HYPERLOOM_TRACE_ANALYSIS_ROUTE``. Coerce to str.
-    # Only an absent or blank payload value defers to the env var. A non-blank
-    # value is kept even when unrecognized, so it reaches the check below rather
-    # than silently overriding the env with the ``agent`` default.
-    raw_route = payload.get("analysis_route")
-    route_text = "" if raw_route is None else str(raw_route).strip()
-    if not route_text:
-        route_text = os.environ.get("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "").strip()
-    explicit_route = route_text.lower()
-    # An explicit unknown route is a configuration error. Falling back to
-    # ``agent`` could turn a no-LLM request into a paid model session.
-    if explicit_route and explicit_route not in _VALID_ANALYSIS_ROUTES:
-        valid_routes = sorted(_VALID_ANALYSIS_ROUTES)
-        message = (
-            f"unknown analysis_route {explicit_route!r} (expected one of {valid_routes}); "
-            "refusing to fall back to 'agent' because that may start an LLM session. "
-            "Use 'bypass' for no-LLM trace analysis."
-        )
-        log.error("trace_analyze: %s", message)
-        return {
-            "status": "failed",
-            "error_class": "invalid_analysis_route",
-            "error": message,
-            "requested_route": explicit_route,
-            "valid_routes": valid_routes,
-        }
-    analysis_route = explicit_route or "agent"
-    is_bypass = analysis_route == "bypass"
-    # Both routes need an importable checkout: bypass transitively imports
-    # TraceLens for source-path mapping.
-    tracelens_root = _resolve_tracelens_root()
-    # Self-heal when the checkout is missing or incomplete (no .git).
-    if not (tracelens_root / ".git").exists():
-        _maybe_selfheal_tracelens_root(tracelens_root, log=log)
-    tl_err = _tracelens_root_error(tracelens_root)
-    if tl_err:
-        return {"status": "failed", "error_class": "tracelens_root_missing", "error": tl_err}
-
-    # Pass the session root so artefacts settle under ``<session_dir>/kernel-agent/runs/...``.
-    workspace_path = payload.get("workspace_path") or str(session_dir)
-    Path(workspace_path).mkdir(parents=True, exist_ok=True)
-
-    # Scriptable frameworks (xDiT) have no decode steady-state window, so feed the
-    # raw trace and drop the --split-* hints.
-    scriptable = is_scriptable(framework)
-
-    # Load materialized baseline workload metadata once.
-    metadata = _load_materialized_workload_metadata(state.baseline_config_path)
-    workload = metadata.get("runtime_args", {}).get("workload", {}) if isinstance(metadata, dict) else {}
-
+    try:
+        resolved = _resolve_analysis(payload, state, session_dir)
+    except _AnalysisUnavailable as exc:
+        return exc.failure
     cmd, steady_state_mode = _build_trace_analyze_cmd(
         payload,
-        _AnalysisRun(
-            trace_input=trace_input,
-            workspace_path=workspace_path,
-            tracelens_root=tracelens_root,
-            is_bypass=is_bypass,
-            scriptable=scriptable,
-            model_name=model_name,
-            framework=framework,
-            target_platform=target_platform,
-            analysis_mode=analysis_mode,
-        ),
+        resolved.run,
         session_dir=session_dir,
         state=state,
-        workload=workload,
+        workload=resolved.workload,
     )
-    timeout_sec = int(payload.get("budget_minutes", 60)) * 60
-
-    _disc_started = time.monotonic()
-    try:
-        rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout_sec)
-        result = _shape_tool_result(rc, stdout, stderr)
-    except subprocess.TimeoutExpired as exc:
-        cmd_repr = " ".join(str(c) for c in (getattr(exc, "cmd", None) or cmd))
-        result = {
-            "status": "failed",
-            "error_class": "subprocess_timeout",
-            "error": f"TimeoutExpired after {timeout_sec}s: {cmd_repr[:1500]}",
-        }
-    _disc_duration_sec = round(time.monotonic() - _disc_started, 3)
-    artifacts = result.get("artifact_paths") if isinstance(result, dict) else None
-    if isinstance(artifacts, dict) and artifacts.get("kernel_candidates"):
-        result["candidates_path"] = artifacts["kernel_candidates"]
-    # Surface analysis.md path at the handler boundary for the Coordinator.
-    if isinstance(result, dict):
-        report_path = result.get("trace_report_path")
-        if not report_path and isinstance(artifacts, dict):
-            report_path = artifacts.get("trace_report_path")
-        if report_path:
-            result["trace_report_path"] = str(report_path)
-            _enrich_candidate_trace_report(
-                result.get("hot_kernels"),
-                str(report_path),
-            )
-        # Surface the reusable-vs-skipped audit sidecar.
-        if isinstance(artifacts, dict) and artifacts.get("tracelens_summary"):
-            result["tracelens_summary_path"] = str(artifacts["tracelens_summary"])
-        if isinstance(artifacts, dict) and artifacts.get("kernel_roofline"):
-            result["kernel_roofline_path"] = str(artifacts["kernel_roofline"])
-
-        # A failed TraceLens run is a hard failure, not "empty candidates".
-        if result.get("status") == "failed" and "trace_split_no_steady_state" not in str(result.get("error") or ""):
-            failure_warning: dict[str, Any] = {
-                "code": "tracelens_analysis_failed",
-                "severity": "warning",
-                "message": (
-                    "TraceLens analysis failed; refusing to treat this as a "
-                    "successful empty-kernel result. See ``stderr_tail`` / "
-                    "``error`` for the upstream failure."
-                ),
-            }
-            for key in ("returncode", "rc", "error", "stderr_tail", "raw_stdout_tail"):
-                if key in result and result[key] not in (None, ""):
-                    failure_warning[key] = result[key]
-            health = list(result.get("trace_health_warnings") or [])
-            health.append(failure_warning)
-            result["trace_health_warnings"] = health
-            result["hot_kernels"] = []
-            result.setdefault("orchestrator_error", failure_warning.get("error", ""))
-
-        # Prepend handler validation warnings so they reach the LLM.
-        result["trace_health_warnings"] = framework_warnings + list(result.get("trace_health_warnings") or [])
-
-        _enrich_candidate_runtime_metadata(result.get("hot_kernels"), metadata)
-        candidates_path = result.get("candidates_path")
-        if isinstance(candidates_path, str):
-            _enrich_candidates_artifact(
-                candidates_path,
-                metadata,
-                trace_report_path=str(report_path or ""),
-            )
-
-        # Route and tool are one-to-one after the no-LLM TraceLens route was
-        # removed: agent runs TraceLens, while bypass runs its standalone reader.
-        _disc_tool = _analysis_tool(analysis_route)
-        # Surfaced for the caller's SBD V6 roofline event, which records the run
-        # as it happens rather than re-deriving it at export time.
-        result["analysis_meta"] = _build_analysis_meta(
-            result,
-            route=analysis_route,
-            requested_mode=steady_state_mode,
-            trace_input=str(trace_input),
-            duration_sec=_disc_duration_sec,
-        )
-        # This run is the only place the build of the reader that produced the
-        # session's hot kernels is in scope. Nothing downstream can recover it,
-        # so it is recorded here even though the rest of the discovery run is
-        # already on the roofline event.
-        try:
-            from hyperloom.inference_optimizer.breakdown.recorder import tool_versions
-
-            tool_versions.record_tool_version(session_dir, tool=_disc_tool)
-        except Exception as exc:  # noqa: BLE001
-            trace_recording_skipped(
-                "versions",
-                reason="caller raised before the recorder",
-                entity=_disc_tool,
-                error=exc,
-            )
-
-    return result
+    started = time.monotonic()
+    result = await _run_analysis_tool(cmd, int(payload.get("budget_minutes", 60)) * 60)
+    timing = _AnalysisTiming(steady_state_mode, round(time.monotonic() - started, 3))
+    return _finalize_analysis_result(result, resolved, timing, session_dir)
