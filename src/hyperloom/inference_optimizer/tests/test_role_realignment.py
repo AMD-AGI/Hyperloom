@@ -114,7 +114,7 @@ def test_critic_phase_orientation_is_delivered_not_inlined():
     """Critic phase awareness lives in the per-phase injector, not in critic.md."""
     from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
     from hyperloom.orchestrator.phases import machine_state as _ps
-    from hyperloom.orchestrator.roles.critic_agent import _PHASE_ORIENTATION
+    from hyperloom.orchestrator.roles._review_constraints import _PHASE_ORIENTATION
 
     body = (asset_system_prompts_dir() / "critic.md").read_text(encoding="utf-8")
     assert "Phase-specific rules" in body
