@@ -16,8 +16,8 @@ sources:
 # The FlyDSL GEMM epilogue
 
 > "GH" is `primus_turbo/flydsl/utils/gemm_helper.py`, and "FP8"/"FP4"/"MX8" are the dense fp8, MXFP4 and
-> MXFP8 kernels under `primus_turbo/flydsl/gemm/`, all at Primus-Turbo main `7615a5a2`. Numbers marked *(field)* were measured on MI355X. Use them for direction and order of
-> magnitude, not as targets.
+> MXFP8 kernels under `primus_turbo/flydsl/gemm/`, all at Primus-Turbo main `7615a5a2`. Numbers marked
+> *(field)* are measured values. Use them for direction and order of magnitude, not as targets.
 
 ## Route here when
 - The C store, a beta=1 read-back or a fused activation/quantization takes a visible share of the kernel.
@@ -36,8 +36,8 @@ sources:
   instructions.
 - **Pairing pays `64 B ÷ (W × 2 B)` for a W-wide fragment.** For 32-wide MFMA fragments, the scalar store
   already covers 64 B, so pairing gains nothing there (*(field)* +1.3% against +2.8–3.5% on 16-wide).
-- **At the power cap, store savings show up as clock, not as wall time inside a tile.** *(field)* Deleting an
-  fp8 GEMM's whole epilogue at 1400 W moved a same-process wall probe by 0 ± 1 pp, while the
+- **At the power cap, store savings show up as clock, not as wall time inside a tile.** *(field)* Deleting a
+  GEMM's whole epilogue at the power cap moved a same-process wall probe by 0 ± 1 pp, while the
   benchmark gained. Price store changes with `TCP_TCC_WRITE_REQ` (the mechanism) plus the real benchmark (the
   size), not with an in-process wall probe.
 
@@ -49,12 +49,12 @@ Run three ablations of the epilogue:
 3. **Same segments, fewer VALU instructions.** This measures the issue cost.
 
 Only (1) moving means the store is byte- or bandwidth-bound, and width or reorder work will not help.
-*(field)* On an MXFP4 NT GEMM, (2) gave +0.8%, (3) gave −0.5% and (1) gave −20.3%, so the store was
+*(field)* Ablation (2) gave +0.8%, (3) gave −0.5% and (1) gave −20.3%, so the store was
 byte-bound. Check that an ablation arm writes the same `M×N×2` bytes to the same rows. A probe that
 collapses four rows into one also cuts the bytes about 6×, and reads as a false request win.
 
 *(field)* The "best" epilogue does not carry over between shape families. A permlane wide store was optimal on
-dense 8192²×4096 (16 KB rows, `N % 256 == 0`). The same store was 0.7–1.3% slower on an NT GEMM with
+dense 8192²×4096 (16 KB rows, `N % 256 == 0`). The same store was 0.7–1.3% slower on an NT shape with
 5888 B output rows.
 
 ## 3. Store classes, from free to expensive
@@ -77,8 +77,8 @@ How to choose:
 - **First, see whether the reorder can be an address change.** When the output column is the B operand's
   slow axis (NT: output column = B row), permute B's rows in the G2S fill using the involution
   `W·t + m ↔ 2·m + t` within each `2W`-row block. The fill already takes arbitrary per-lane global offsets,
-  and the LDS swizzle key still follows the LDS row, so the reader does not change. *(field)* On an fp8 NT GEMM
-  with N=2880, this gave +2.7%: `buffer_store_short` 160→32, `buffer_store_dword` 0→64,
+  and the LDS swizzle key still follows the LDS row, so the reader does not change. *(field)* This gave
+  +2.7%: `buffer_store_short` 160→32, `buffer_store_dword` 0→64,
   and `v_cvt_pk` 160→96. The MFMA, barrier, VGPR and LDS counts were unchanged.
 - **When the output column is the operand's fast axis (NN/TN), use the row merge.** The transpose read's
   lane→column map is fixed by hardware, and a 16 B fill chunk holds 16 whole columns, so neither can be
@@ -95,7 +95,7 @@ How to choose:
   following VALU read (FP4:500-502).
 - When a VALU consumes the result, use the `rocdl.permlane16_swap` / `permlane32_swap` intrinsics, not inline
   asm. The hazard recognizer cannot see asm, so asm forces an `s_nop` on both sides. *(field)* Switching to the
-  intrinsic cut `s_nop` from 412 to 174 on a fused epilogue.
+  intrinsic cut `s_nop` from 412 to 174.
 - Issue all swaps first, then all stores, so the permlanes and the stores are far apart. *(field)* Only the two
   changes together, dropping the hard-coded `s_nop` and the two-phase order, took the count from 80 to 0.
 - **Never store the high half of an f32 accumulator as bf16.** That is truncation, not round-to-nearest-even.
@@ -128,16 +128,16 @@ At one wave per SIMD nothing overlaps the epilogue unless you put it inside MFMA
 - **C is write-once: store it non-temporal** (`nt`, aux=2). Caching it evicts the A/B band that the L2 tile
   order is keeping (FP8:72-73).
 - For a beta=1 burst too large for L2, use device scope `sc0|sc1|nt` (aux=19). Turbo switches at 26 MB
-  (`_cstore_aux`, FP8:74-77, 1885). That threshold is a measured value for MI355X.
-- **The sign is shape-dependent, so race it.** In the MXFP8 GEMM, `nt` cut the wide cells by 4.6% and 3.0%
-  and cost 0.9–1.9% on narrow cells whose slabs were already L2-resident. It is raced at a 1% margin, not
-  pinned (MX8:968-974; commit `d522ee0ae`).
+  (`_cstore_aux`, FP8:74-77, 1885). That threshold is a measured value.
+- **The sign is shape-dependent, so race it.** *(field)* In the MXFP8 GEMM, `nt` cut the wide cells by 4.6%
+  and 3.0% and cost 0.9–1.9% on narrow cells whose slabs were already L2-resident. It is raced at a 1%
+  margin, not pinned (MX8:968-974).
 - **Never mark byte-granular scale stores (E8M0) non-temporal.** They rely on L2 merging the write masks.
-  In the MXFP8 cast kernels that cost 15–40% (commit `d522ee0ae`).
+  *(field)* In the MXFP8 cast kernels that cost 15–40%.
 - Keep split-K partials cached, because the reduce reads them back.
-- **Pass cache-policy bits (`aux`) as a Python int.** On flydsl 0.3.2 and 0.3.4.1,
-  `rocdl.raw_ptr_buffer_load`, `raw_ptr_buffer_load_lds` and the buffer atomics replace any `aux` that
-  is neither an `int` nor an MLIR attribute with `None`, without an error
+- **Pass cache-policy bits (`aux`) as a Python int.** `rocdl.raw_ptr_buffer_load`,
+  `raw_ptr_buffer_load_lds` and the buffer atomics replace any `aux` that is neither an `int` nor an
+  MLIR attribute with `None`, without an error
   (`python/flydsl/expr/rocdl/__init__.py:663-819`). A traced value there silently means "default
   policy".
 

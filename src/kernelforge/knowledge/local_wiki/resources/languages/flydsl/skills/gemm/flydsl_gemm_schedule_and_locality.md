@@ -19,8 +19,8 @@ sources:
 > Each section here is a place where the obvious move measured in the wrong direction. Read the rule,
 > then check whether your kernel is in the regime it was measured in.
 >
-> Numbers marked *(field)* are measurements from FlyDSL GEMM work on MI355X. They are not reproducible
-> from a pinned source; use them for direction and order of magnitude only.
+> Numbers marked *(field)* are measured values. Use them for direction and order of magnitude, not as
+> targets.
 
 ## Route here when
 - A change that should be neutral (re-labelling waves, a new swizzle, a relaxed fence) moved wall time.
@@ -57,7 +57,7 @@ index algebra that can cost a quarter of the kernel, and ordinary counters will 
 ## 2. Tile order across XCDs
 
 Topology and the basic swizzle are in `../../../../common_methodology/optimization/lever_xcd_locality.md`.
-What FlyDSL GEMM work added:
+The GEMM-specific rules:
 
 **Decide by what co-resident workgroups reuse.**
 - Each tile streams a **private slab** larger than one XCD's L2: keep the workgroups that share a slab on the same XCD at the same time — cluster across all 8
@@ -65,8 +65,7 @@ What FlyDSL GEMM work added:
 - All tiles read a **shared slice**: clustering by XCD only fragments the
   sharing; the hardware round-robin (`block_id % 8`) with a narrow group-major band wins.
 
-*(field)* Porting one kernel's winning band/XCD setting to another kernel of the same campaign measured
-−0.8% to −5.7%. Predict the direction from the reuse class, then sweep 3–5 points on every shape class
+*(field)* Porting one kernel's winning band/XCD setting to another kernel gave −0.8% to −5.7%. Predict the direction from the reuse class, then sweep 3–5 points on every shape class
 you are scored on.
 
 **How Turbo orders tiles** (Primus-Turbo main `7615a5a2`, `primus_turbo/flydsl/utils/gemm_helper.py` = GH):
@@ -76,7 +75,7 @@ you are scored on.
 - `xcd_band_remap_pid` (GH:2694) gives each XCD every `num_xcd`-th run of `band` tiles. That keeps reuse
   inside a run while every XCD samples the whole tile range, which balances tiles of unequal cost.
 - **Gate the band on L2 bytes.** Once one band's operand slice outgrows an XCD's L2 slice (4 MiB on
-  MI355X), clustering buys no reuse and only costs balance. Turbo's dense fp8 table then switches to the
+  gfx950), clustering buys no reuse and only costs balance. Turbo's dense fp8 table then switches to the
   plain round-robin (`_NT_BAND_L2_BYTES`, `gemm/gemm_fp8_kernel.py:3186-3192`). The MXFP4 kernel picks
   the widest power-of-two N band whose B slice fits one XCD's L2, and no band once a single N tile fills
   it (`_mxfp4_l2_band`, `gemm/gemm_mxfp4_kernel.py:3131-3139`).
@@ -137,12 +136,12 @@ Gate any mask change on the ISA's `vgpr_spill_count` before benchmarking. Hint c
 loop in front of you; constants copied from another kernel are worse than none.
 
 **A count mismatch is never reported.** `sched_group_barrier` groups are filled greedily in program
-order. Checked with ROCm 7.2.1 `llc -mcpu=gfx950` on 4 independent MFMAs and 4 global loads:
-- with no hints the order was `L L L L M M M M`;
-- `(mfma 1, vmem 1) × 4` gave `M L M L M L M L`;
-- `(mfma 1, vmem 3) × 4` front-loaded the loads: `M L L L M L M M`;
-- two groups only gave `M L L M L L M M`: the head was pinned and the tail left free;
-- llc printed no warning in any case.
+order. For 4 independent MFMAs and 4 global loads:
+- with no hints the order is `L L L L M M M M`;
+- `(mfma 1, vmem 1) × 4` gives `M L M L M L M L`;
+- `(mfma 1, vmem 3) × 4` front-loads the loads: `M L L L M L M M`;
+- two groups only give `M L L M L L M M`: the head is pinned and the tail left free;
+- the compiler prints no warning in any case.
 Read the scheduled ISA after changing a hint table.
 
 **Kernels with hand-placed waits use none of this.** Turbo's dense kernels contain no
@@ -152,7 +151,7 @@ waves per SIMD, and `s_nop` issue pads inside whole-loop asm (`flydsl_gemm_mainl
 ## 4. gfx950 has one memory counter for loads and stores
 
 `s_waitcnt vmcnt(N)` and `s_waitcnt lgkmcnt(N)` assemble for gfx950; `s_waitcnt_vscnt`,
-`s_wait_loadcnt`, `s_wait_storecnt` and `s_wait_dscnt` do not (`llvm-mc -mcpu=gfx950`: "instruction not
+`s_wait_loadcnt`, `s_wait_storecnt` and `s_wait_dscnt` do not (the assembler reports "instruction not
 supported on this GPU" — they belong to later ISAs). Stores in flight count in `vmcnt`, so waiting for a
 load also waits for every earlier store. Consequences:
 - Dripping C stores into the main loop serializes them against the next operand wait.
@@ -162,11 +161,11 @@ load also waits for every earlier store. Consequences:
 **Write a wait as "what may still be in flight", not as a formula of the block shape.** At a phase
 barrier, leave outstanding only the fills that nothing reads before a later phase, and only the
 `ds_read`s whose consumers come after the barrier. Then race the pair:
-- *(field)* On the MXFP4 whole loop, `(vmcnt, lgkmcnt)` of `(10, 9)` and `(16, 15)` were both raced, the
+- *(field)* On one whole loop, `(vmcnt, lgkmcnt)` of `(10, 9)` and `(16, 15)` were both raced, the
   deeper one only for K ≥ 8192, with a 2% adoption margin. At `lgkmcnt` ≥ 15 or `vmcnt` ≥ 20 that kernel
   raced.
 - `lgkmcnt` 15 is the encoding limit of the 4-bit field, not a tuning boundary. The race threshold is
-  per kernel: a TN fp8 whole loop was fastest at 12 and still repeatable at 15.
+  per kernel: another whole loop was fastest at 12 and still repeatable at 15.
 - *(field)* The lgkm-side partial drain carried over between kernels and precisions (+0.8%). A one-`s_nop`
   pad after the barrier helped MXFP4 and was worth 0.00% on fp8. Port the lgkm side first.
 

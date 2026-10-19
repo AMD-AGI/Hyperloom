@@ -19,13 +19,13 @@ sources:
 > Scope: dense GEMM with M ≈ 1–256 (decode steps, speculative-decode verify), mostly bf16. Primus-Turbo's FlyDSL
 > GEMMs (the exemplar elsewhere in this package) are built for training shapes and do not target small M.
 > The small-M kernel in use today is FlyDSL's `gemm_a16w16_gfx950`, which aiter ships as its FlyDSL a16w16
-> backend since aiter #5145 (2026-09-03). That change deleted aiter's older `splitk_hgemm.py` /
+> backend since aiter #5145. That change deleted aiter's older `splitk_hgemm.py` /
 > `small_m_hgemm.py`; `../optimize/flydsl_levers/flydsl_kernel_library.md` and `../optimize/flydsl_levers/flydsl_knob_space.md` still
 > describe that older kernel.
 >
-> Numbers marked *(field)* come from tuning campaigns on the older aiter kernel and a fork of it (MI355X,
-> GLM-5.2 decode shapes, 2026-08/09). The mechanisms carry over to the current kernel; the configurations do
-> not. Each technique marked **not in the current kernel** is a porting candidate that must be re-measured on it.
+> Numbers marked *(field)* are measured values on aiter's earlier small-M kernel. The mechanisms carry over to
+> the current kernel; the configurations do not. Each technique marked **Not in the current kernel** is a porting
+> candidate to re-measure.
 
 ## Route here when
 - A decode or speculative-verify step spends visible time in dense GEMMs with M ≤ 256.
@@ -42,7 +42,7 @@ sources:
   `run_perftest` with the automatic rotation count picked 201 copies and read 41.56 µs for a kernel that read
   15.9–16.1 µs at every explicit count from 8 to 128.
 - **Time a replayed CUDA graph, and know the floor.** *(field)* An eager aiter call cost 16.7 µs of host time
-  against kernels of 4.6–8 µs. One graph node cost 1.75–1.95 µs on MI355X even for a 1-element op, so at
+  against kernels of 4.6–8 µs. One graph node cost 1.75–1.95 µs even for a 1-element op, so at
   M ≤ 16 on a small weight more than half the measured time is the node.
 - **Price candidates through the deployed entry** (`aiter.tuned_gemm.gemm_a16w16`), not a direct kernel call.
   *(field)* A row that a direct call measured 0.76 µs faster was 0.34 µs slower through the entry, and worth
@@ -54,10 +54,10 @@ sources:
   paid on an idle device made the step 18% slower (5742 vs 4853 µs). Deeper split-K buys parallelism from CUs
   that are idle only in the micro-benchmark.
 - **Allocate fresh tensors for each repetition.** *(field)* Eight allocations of one shape and configuration
-  read 3.73–6.19 µs, bimodally: an address (L2-set) effect, not noise (§5, XCD bands).
+  read 3.73–6.19 µs, bimodally: an address (L2-set) effect, not noise (§6, XCD placement).
 - **Per-shape noise is large.** *(field)* Per-shape drift of 3–7% while aggregates reproduced to 0.1–1.5%;
   the first arm of a probe read 1–2% slow after warm-up. Adopt a per-shape change only above that shape's
-  measured spread; order arms as a palindrome.
+  measured spread; within one process, order arms as a palindrome.
 - **A memory-side headroom estimate needs a measured streaming ceiling**, e.g. a plain read of the same B
   buffer, not the datasheet bandwidth. *(field)* 5.8–6.0 TB/s for a cold read of a 476 MB weight.
 
@@ -104,7 +104,7 @@ an idle-device tuner (§1).
   :441-461).
 - *(field, older kernel of the same design)* That protocol cost 1.5–2.5 µs per launch at M=1. Replacing it with
   per-split workspace planes, a last-arriving block that sums the planes in f32, and **one arrival counter per
-  128 B line** brought a 2048×2048, M=1, split-K 8 kernel from 4.66 to 3.85 µs (measured with a replayed weight;
+  128 B line** brought a 2048×2048, M=1, split-K 8 kernel from 4.66 to 3.85 µs (with a replayed, warm weight;
   the cost is latency and coherence, not bandwidth). Packing the per-tile counters as adjacent dwords put a whole
   launch on two cache lines and cost 1.1–2.5 µs. **Not in the current kernel.**
 - A per-split marginal cost does not show the reduction: price the whole kernel.
@@ -113,8 +113,8 @@ an idle-device tuner (§1).
 - Split-K must divide K. The current policy enumerates divisors of K from 2 to 9
   (`gemm_a16w16_policy.py:221`).
 - **A 256-tile cap refuses split-K on larger grids** (`num_pid_m * num_pid_n > SPLIT_K_SEMAPHORE_MAX_LEN`,
-  `gemm_a16w16_gfx950.py:1385`; `SPLIT_K_SEMAPHORE_MAX_LEN = 256`, `_utils.py:20`). The campaigns found no
-  physical reason for the cap in the kernel.
+  `gemm_a16w16_gfx950.py:1385`; `SPLIT_K_SEMAPHORE_MAX_LEN = 256`, `_utils.py:20`). No physical reason for
+  the cap was found in the kernel.
 - *(field)* bf16 partials exceeded a 0.02 relative-error gate at split-K ≈ 12 (0.0241); f32 partials read 0.
   Gate every deep split-K row on accuracy, not only the first one tuned.
 - Coherence scope of the partials on gfx950: `sc0 sc1` is system scope (past the MALL). *(field)* Using it for
@@ -128,8 +128,8 @@ an idle-device tuner (§1).
 ## 5. Tile, warps and pipeline
 
 - **At M ≤ 16–32, a narrow `tile_n` (16 or 32) with K split inside the block and split-K 1** beat cross-block
-  split-K on the campaign rows; it needs a predicated C-store tail. *(field)* One measurement on another shape
-  found `tile_n` 64 faster than 16 and 32, so race the width.
+  split-K on the rows compared; it needs a predicated C-store tail. *(field)* On another shape, `tile_n` 64 was
+  faster than 16 and 32, so race the width.
 - **Splitting the K dimension across warps needs an LDS reduction; splitting N across warps does not.** The
   number of K-warps is per shape and tracks `block_k` (it cannot exceed `block_k / 32`, the MFMA atom).
   *(field)* Moving warps from K to N was −1.0% and raised SNR from 50.8 to 94.8 dB.

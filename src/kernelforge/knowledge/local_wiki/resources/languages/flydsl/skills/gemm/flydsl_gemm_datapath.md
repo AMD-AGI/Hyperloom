@@ -19,11 +19,10 @@ sources:
 
 # LDS, global feed and prefetch in a FlyDSL GEMM
 
-> Numbers marked *(field)* are measurements from FlyDSL GEMM work on MI355X — not reproducible from a
-> pinned source; use them for direction and magnitude. ISA statements were checked with
-> `llvm-mc` / `llc -mcpu=gfx950` (ROCm 7.2.1). "PS" is FlyDSL's `kernels/gemm/preshuffle_gemm.py`; "GH",
-> "PR" and "FP4" are Primus-Turbo's `utils/gemm_helper.py`, `utils/prims.py` and
-> `gemm/gemm_mxfp4_kernel.py` under `primus_turbo/flydsl/` at main `7615a5a2`.
+> Numbers marked *(field)* are measured values. Use them for direction and order of magnitude, not as
+> targets. ISA statements were checked with `llvm-mc` / `llc -mcpu=gfx950`. "PS" is FlyDSL's
+> `kernels/gemm/preshuffle_gemm.py`; "GH", "PR" and "FP4" are Primus-Turbo's `utils/gemm_helper.py`,
+> `utils/prims.py` and `gemm/gemm_mxfp4_kernel.py` under `primus_turbo/flydsl/` at main `7615a5a2`.
 
 ## Route here when
 - An LDS, bank-conflict, swizzle or `lgkmcnt` question in a GEMM.
@@ -77,8 +76,8 @@ phase.
 - Padding must keep the 8- or 16-byte alignment a `ds_read_b64/b128` needs. `+1 element` on fp16 breaks
   it; pad by whole 16-byte slots, or swizzle.
 - Compare `SQ_LDS_BANK_CONFLICT` against the floor you computed by hand, not against zero.
-- **Zero conflicts is not a speedup and LDS is not the bound until a probe says so.** *(field, an
-  attention kernel)* A kernel with 81% of wave time in `WAIT_INST_LDS` gained 0.0% when its LDS reads were halved; the
+- **Zero conflicts is not a speedup and LDS is not the bound until a probe says so.** *(field)* A
+  kernel with 81% of wave time in `WAIT_INST_LDS` gained 0.0% when its LDS reads were halved; the
   stall counter could not say whether LDS bounded it. Use a halve-the-reads probe
   (`flydsl_gemm_attribution.md`).
 
@@ -89,9 +88,9 @@ phase.
   slot.
 - **Another wave reads what you wrote:** the writer waits `lgkmcnt(0)`, then everyone meets at
   `s_barrier` — which is what `fx.gpu.barrier()` lowers to.
-- **A FLAT (generic-address) access counts in both `vmcnt` and `lgkmcnt`.** Measured with `s_memtime` on
-  gfx950: waiting `lgkmcnt(0)` after a flat load from global took 96 ticks against 56 after a `global_load`,
-  and both took about 250 to `vmcnt(0)`. The lgkm count retires before the data arrives, so `lgkmcnt(0)` alone
+- **A FLAT (generic-address) access counts in both `vmcnt` and `lgkmcnt`.** *(field)* Waiting
+  `lgkmcnt(0)` after a flat load from global took 96 ticks against 56 after a `global_load`, and both
+  took about 250 to `vmcnt(0)`. The lgkm count retires before the data arrives, so `lgkmcnt(0)` alone
   does not make a flat load's data ready. Keep hot-loop pointers in the buffer or global address space.
 - `lgkmcnt` also counts scalar memory loads, which return out of order. A long stall on
   `s_waitcnt lgkmcnt(0)` may be an `s_load`, not LDS; keep scalar loads out of that window rather than
@@ -102,11 +101,10 @@ phase.
 - **After an intrinsic LDS DMA, the compiler drains everything before your `ds_read`.** It cannot prove
   which reads alias the DMA's destination, so it inserts `s_waitcnt vmcnt(0)`. Turbo issues those
   `ds_read`s in inline asm and supplies the wait itself (`vmcnt_hint`, `_packed_ds_read_tr_offsets`,
-  GH:1783). *(field)* On a long-K fp8 GEMM this drain removal gave +2.3%; `vmcnt(3)` was the deepest
-  setting that stayed bitwise repeatable. An asm `ds_read` must also drain its own `lgkmcnt` before the
-  consumer, because the compiler does not track it. On flydsl 0.3.2 and later,
-  `cdna4.BufferLoadAsyncLDS*` with `rocdl.asyncmark()` / `wait_asyncmark(n)` is the in-DSL alternative
-  (A16 uses it).
+  GH:1783). *(field)* At long K this drain removal gave +2.3%; `vmcnt(3)` was the deepest setting that
+  stayed bitwise repeatable. An asm `ds_read` must also drain its own `lgkmcnt` before the consumer,
+  because the compiler does not track it. `cdna4.BufferLoadAsyncLDS*` with `rocdl.asyncmark()` /
+  `wait_asyncmark(n)` is the in-DSL alternative (A16 uses it).
 
 ## 5. Global → LDS DMA
 
@@ -124,7 +122,7 @@ phase.
   error (`0x1000` lands outside the field), so a hand-written `offset:4096` silently reads the wrong
   place. *(field)* On gfx950 the LDS-DMA immediate applies to the LDS destination as well as the
   memory address, which lets a wave-major fill share one M0 write across steps; it was worth ~0.9%
-  per cell on one kernel.
+  per cell.
 - The M0 base of an LDS DMA must never go negative; see `flydsl_gemm_correctness.md` §5.
 
 **How Turbo issues the DMA** (`G2SLoader`, GH:305-386):
@@ -148,7 +146,7 @@ phase.
   contiguously turned the same byte saving into +2.0%. Merging requests pays only when it also cuts
   unique lines.
 - **A contraction stride ≡ 64 mod 128 bytes straddles lines.** Padding K so the row pitch is a
-  multiple of 128 B removed the straddle *(field: 2196 → 2554 TF/s on an fp8 GEMM)*.
+  multiple of 128 B removed the straddle *(field: 2196 → 2554 TF/s)*.
 - **Stores go out in 64-byte requests on gfx950.** Pairing two columns per lane halves the request
   count *(field: 2.36e7 → 1.21e7 write requests)*; `dwordx2` alone only cuts instruction count. Watch
   `TCP_TCC_WRITE_REQ` and `TA_BUFFER_WRITE_WAVEFRONTS` together.
@@ -160,8 +158,8 @@ phase.
   streams that are re-read stay cached).
 - **LDS immediates have windows.** A base at or above `0x10000` cannot use the 16-bit DS offset
   (`ds_read_b128 … offset:65536` does not assemble), and `ds_read2st64`'s 8-bit offset (256-byte units)
-  breaks when tiles widen. *(field: on a cast kernel, doubling the row stride from 512 to 1024 B
-  pushed offsets out of that window and the paired reads split — +38% `ds_read` instructions.)*
+  breaks when tiles widen. *(field)* Doubling the row stride from 512 to 1024 B pushed offsets out of
+  that window and the paired reads split: +38% `ds_read` instructions.
 
 ## 7. Prefetch inside the K loop
 
@@ -172,7 +170,7 @@ phase.
 - **Prefetch hides latency, not capacity.** *(field)* When the working set thrashed L2, deeper prefetch
   bought nothing; fix the tile order (`flydsl_gemm_schedule_and_locality.md` §2) or the footprint.
 - **Bypassing LDS for an operand several waves share costs twice.** Each wave reloads it from global,
-  and at one workgroup per CU nothing hides the longer L2 latency. *(field, MXFP4 8-wave GEMM)* B
+  and at one workgroup per CU nothing hides the longer L2 latency. *(field)* In an 8-wave kernel, B
   direct-to-VGPR ran ~22% slower; A direct-to-VGPR ran 2.5× slower on a long K. PS can load B straight
   to VGPR because B is pre-shuffled and each wave owns its own N slice.
 - A prefetch that pushes the kernel over a register tier costs more than it hides; re-read
@@ -223,9 +221,8 @@ at most 4 GiB.
   pre-shuffled on the host.
 - **Keep every operand row on a 128 B line.** Take the row stride from the tensor, not from K, so a
   caller can pad rows (`row_bytes`, FP4). For MXFP4, `K % 256 == 0` is what puts the row stride `K/2` on
-  a 128 B line; it is not a kernel constraint. In an interleaved A/B with the block count fixed, row
-  phases of 64, 32 and 96 B cost +8.4%, +11.6% and +12.0% (Turbo commit `f6d5ab685`). Pad K when memory
-  allows.
+  a 128 B line; it is not a kernel constraint. *(field)* With the block count fixed, row phases of 64,
+  32 and 96 B cost +8.4%, +11.6% and +12.0%. Pad K when memory allows.
 
 ## 11. MX scales
 

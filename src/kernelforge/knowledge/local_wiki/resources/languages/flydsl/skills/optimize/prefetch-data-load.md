@@ -214,9 +214,7 @@ K loads needed).
 1. **Know which loop form you wrote.** `range(..., init=...)` lowers to `scf.for` and carries only
    the values you `yield`; Python-int bounds are fine (they become index constants). A plain
    `range(...)` without `init=` also lowers to `scf.for` and carries every name the body reassigns.
-   Only `range_constexpr` unrolls. The old advice that Python-int bounds unroll and drop `init=` is
-   wrong for v0.2.4, v0.3.2 and v0.3.4.1 (`../bottleneck/debug-flydsl-kernel.md` § The three loop
-   forms).
+   Only `range_constexpr` unrolls (`../bottleneck/debug-flydsl-kernel.md` § The three loop forms).
 
 2. **Prefer internal types; unwrap only at hard boundaries.** Most loop-carried
    values can remain `fx.Int32`, `fx.Float32`, `ArithValue`, or `Vector`. If a

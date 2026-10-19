@@ -417,9 +417,9 @@ compute(acc_final, tile_final)
 
 **Three critical pitfalls (all verified by debugging):**
 
-1. **Bounds: Python ints are fine with `init=`; a plain `range()` needs `i32`.** *(KernelForge
-   correction — upstream v0.3.2 still says Python-int bounds unroll the loop and drop `init=`; tracing
-   `range(0, 15, 1, init=[acc])` on 0.3.2 emits `scf.for %arg2 = %c0 to %c15 step %c1 iter_args(...)`.)*
+1. **Bounds: Python ints are fine with `init=`; a plain `range()` needs `i32`.** *(Python-int bounds do
+   not unroll the loop or drop `init=`: `range(0, 15, 1, init=[acc])` emits
+   `scf.for %arg2 = %c0 to %c15 step %c1 iter_args(...)`.)*
    With `init=`, Python ints, `fx.Int32` and `fx.Int64` all work. Without `init=`, the loop is still a
    runtime `scf.for`, its carried state is inferred from the names the body reassigns, and its bounds
    must be Python ints or `fx.Int32` — `fx.Int64` raises `TypeError: for-loop start must be i32`.

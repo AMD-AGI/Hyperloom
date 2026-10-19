@@ -344,8 +344,7 @@ gfx950 has only `vmcnt`, `lgkmcnt` and `expcnt`. Loads and stores share `vmcnt`,
 load also waits for every earlier store. The split counters `s_wait_loadcnt` / `s_wait_storecnt` /
 `s_wait_dscnt` are gfx12-class instructions: `llvm-mc -mcpu=gfx950` rejects them as "not supported on
 this GPU". Avoid the positional form `s_waitcnt(N)`: it is a raw bitfield, so `s_waitcnt(8)` emits
-`s_waitcnt vmcnt(8) expcnt(0) lgkmcnt(0)` and `s_waitcnt(16)` emits `vmcnt(0) expcnt(1) lgkmcnt(0)`
-(traced on FlyDSL 0.3.2).
+`s_waitcnt vmcnt(8) expcnt(0) lgkmcnt(0)` and `s_waitcnt(16)` emits `vmcnt(0) expcnt(1) lgkmcnt(0)`.
 
 Barriers must be reached by every thread in the workgroup. A barrier inside a runtime `if` deadlocks;
 hoist it out.
