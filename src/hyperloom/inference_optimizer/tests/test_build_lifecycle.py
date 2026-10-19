@@ -57,7 +57,7 @@ def _fake_action(**kw):
 
 async def _enqueue_and_run(build_coord, executor, *, action, session_dir) -> tuple:
     """Run one build through SubAgentRunner; return (task_row, runner_result)."""
-    from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
+    from hyperloom.orchestrator.loop.sub_agent_runner import RunnerLinks, SubAgentRunner
 
     tid = await build_coord.build_lifecycle.enqueue_targeted_build(action)
     task_obj = await build_coord.tasks.get(tid)
@@ -66,7 +66,7 @@ async def _enqueue_and_run(build_coord, executor, *, action, session_dir) -> tup
         tasks=build_coord.tasks,
         executor_registry={"targeted_build": executor},
         session_dir=Path(session_dir),
-        shared_state=build_coord.shared_state,
+        links=RunnerLinks(shared_state=build_coord.shared_state),
     )
     lease = await build_coord.locks.try_acquire_many(
         ["build_lane"],
@@ -564,7 +564,7 @@ def test_targeted_build_params_pass_policy_gate(tmp_path):
 async def test_spawn_failure_marks_row_failed(build_coord, tmp_path):
     """spawn failure via sub_agent_runner writes failed terminal state and releases lane."""
     from hyperloom.orchestrator.actions.executors.targeted_build_executor import TargetedBuildExecutor
-    from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
+    from hyperloom.orchestrator.loop.sub_agent_runner import RunnerLinks, SubAgentRunner
 
     action = _action(["/nonexistent_compiler_xyz_P1_12"])
     tid = await build_coord.build_lifecycle.enqueue_targeted_build(action)
@@ -575,7 +575,7 @@ async def test_spawn_failure_marks_row_failed(build_coord, tmp_path):
         tasks=build_coord.tasks,
         executor_registry={"targeted_build": executor},
         session_dir=tmp_path,
-        shared_state=build_coord.shared_state,
+        links=RunnerLinks(shared_state=build_coord.shared_state),
     )
     lease = await build_coord.locks.try_acquire_many(
         ["build_lane"],

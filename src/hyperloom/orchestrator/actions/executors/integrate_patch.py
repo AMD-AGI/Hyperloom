@@ -3238,15 +3238,17 @@ class IntegratePatchExecutor:
         The KEEP closure alone cannot say which versions the enablement changed;
         the setup script checks the difference between the two.
         """
-        from ...enablement.recipe.keep_probe import graded_framework, probe_keep_environment
+        from ...enablement.recipe.keep_probe import KeepEvidence, graded_framework, probe_keep_environment
 
         closure, _assertions = await asyncio.to_thread(
             probe_keep_environment,
             params,
+            KeepEvidence(
+                build_manifest=(),
+                specialist_task_id=attempt.specialist_task_id,
+                provision_result=attempt.provision_result,
+            ),
             framework=graded_framework(params, ""),
-            build_manifest=(),
-            specialist_task_id=attempt.specialist_task_id,
-            provision_result=attempt.provision_result,
         )
         if not attempt.shared_state.enablement.record_closure_baseline(closure):
             return
@@ -4449,7 +4451,6 @@ class IntegratePatchExecutor:
             proposal,
             done_payload=done_payload,
             shared_state=extra.get("shared_state") or extra.get("state"),
-            session_dir=self.session_dir,
         )
 
     def _backup_artifacts(

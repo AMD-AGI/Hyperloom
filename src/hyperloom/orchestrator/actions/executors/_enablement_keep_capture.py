@@ -227,10 +227,12 @@ def capture_keep_records(
     framework = keep_probe.graded_framework(params, materialized_config)
     closure, assertions = keep_probe.probe_keep_environment(
         params,
+        keep_probe.KeepEvidence(
+            build_manifest=enablement.build_manifest,
+            specialist_task_id=attempt.specialist_task_id,
+            provision_result=attempt.provision_result,
+        ),
         framework=framework,
-        build_manifest=enablement.build_manifest,
-        specialist_task_id=attempt.specialist_task_id,
-        provision_result=attempt.provision_result,
         materialized_config=materialized_config,
     )
     launch_evidence, argv_refused = project_launch_evidence(bench_result.get("launch_evidence"))

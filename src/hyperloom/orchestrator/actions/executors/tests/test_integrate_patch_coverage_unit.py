@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import subprocess
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -535,8 +536,8 @@ async def test_framework_kb_writeback(tmp_path, monkeypatch):
 
     calls = {}
 
-    async def _fake_write(**kwargs):
-        calls.update(kwargs)
+    async def _fake_write(fields):
+        calls.update(asdict(fields))
         return "/tmp/lessons.jsonl"
 
     monkeypatch.setattr(
@@ -580,8 +581,8 @@ async def test_framework_kb_writeback_config_lever_untagged_proposal(tmp_path, m
 
     calls = {}
 
-    async def _fake_write(**kwargs):
-        calls.update(kwargs)
+    async def _fake_write(fields):
+        calls.update(asdict(fields))
         return "/tmp/lessons.jsonl"
 
     monkeypatch.setattr(

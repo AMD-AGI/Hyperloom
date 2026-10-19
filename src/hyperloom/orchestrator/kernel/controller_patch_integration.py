@@ -31,7 +31,7 @@ from .controller_publication import (
     discover_controller_patch_dirs,
     load_controller_publication,
 )
-from .patch_conflict_merge import apply_patch_resolving_conflicts
+from .patch_conflict_merge import LandingContext, apply_patch_resolving_conflicts
 
 _CONTROLLER_SOURCE = "kernel_rewrite_controller"
 _CONTROLLER_BACKEND = "forge"
@@ -372,10 +372,12 @@ async def integrate_controller_patches(
         merge = await apply_patch_resolving_conflicts(
             repo,
             publication.patch_path,
-            operator_id=publication.operator_id,
-            landed_operator_ids=[operator for operator, _ in landed.get(repo, [])],
-            landed_patches=[patch for _, patch in landed.get(repo, [])],
-            intent=f"{publication.operator_name} in {publication.kernel_path}",
+            LandingContext(
+                operator_id=publication.operator_id,
+                landed_operator_ids=[operator for operator, _ in landed.get(repo, [])],
+                landed_patches=[patch for _, patch in landed.get(repo, [])],
+                intent=f"{publication.operator_name} in {publication.kernel_path}",
+            ),
         )
         if not merge.applied:
             result = PatchIntegrationResult(

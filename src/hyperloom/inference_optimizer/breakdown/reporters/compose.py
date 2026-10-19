@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from .base import REGISTRY, RenderedSection, render_section, session_of
+from .base import REGISTRY, RenderedSection, fmt_pct, render_section, session_of
 from .cross_section import GlobalFacts, build_global_facts
 from .llm_prompt import SYSTEM_PROMPT, build_user_prompt, parse_llm_response
 
@@ -214,6 +214,7 @@ def _deterministic_exec_summary(g: GlobalFacts) -> str:
         out.append(f"- Gain attribution ({g.attribution_method}): " + "; ".join(g.gain_attribution_lines))
     else:
         out.append(f"- No measurable gain recorded ({g.attribution_method}).")
+    out.append(f"- Variants: {_variant_funnel_text(g)}.")
     funnel = g.kernel_pipeline_funnel
     out.append(
         f"- Kernel pipeline: detected={funnel['detected']} → "
@@ -225,6 +226,31 @@ def _deterministic_exec_summary(g: GlobalFacts) -> str:
         out.append("- Capabilities never invoked: " + ", ".join(f"`{c}`" for c in g.capabilities_not_attempted) + ".")
     out.extend(_data_quality_flag_lines(g))
     return "\n".join(out)
+
+
+def _variant_funnel_text(g: GlobalFacts) -> str:
+    """The variant funnel as one line, shared by the executive summary and the key facts."""
+    funnel = g.variant_funnel
+    runs = funnel["bench_runs"]
+    if not runs:
+        return "none benched"
+    rate = funnel["keep_rate_pct"]
+    rate_text = f" ({rate:.1f}%)" if rate is not None else ""
+    text = (
+        f"{_count(runs, 'bench run')} over {_count(funnel['distinct'], 'distinct change')} → "
+        f"kept {funnel['kept']}{rate_text} · reverted {funnel['reverted']} · failed {funnel['failed']}"
+    )
+    shipped: list[str] = []
+    if funnel["final_stack"] is not None:
+        shipped.append(f"final stack {_count(funnel['final_stack'], 'change')}")
+    if funnel["validated_gain_pct"] is not None:
+        shipped.append(f"validated {fmt_pct(funnel['validated_gain_pct'], plus=True)}")
+    return f"{text} → {', '.join(shipped)}" if shipped else text
+
+
+def _count(n: int, noun: str) -> str:
+    """``n`` followed by ``noun``, pluralised unless ``n`` is one."""
+    return f"{n} {noun}{'' if n == 1 else 's'}"
 
 
 def _data_quality_flag_lines(g: GlobalFacts) -> list[str]:
@@ -247,6 +273,7 @@ def _render_global_facts_block(g: GlobalFacts) -> str:
         f"objective `{g.objective}`"
     )
     out.append(f"- **Workload**: {g.workload_summary}")
+    out.append(f"- **Variants**: {_variant_funnel_text(g)}")
     out.append(
         f"- **Kernel pipeline**: detected={funnel['detected']} → "
         f"recommended={funnel['recommended']} → optimized={funnel['optimized']} → "

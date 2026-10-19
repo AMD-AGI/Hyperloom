@@ -158,6 +158,7 @@ def test_orchestration_prompt_has_no_scoreboard_block():
     from hyperloom.orchestrator.prompts.prompt_builder import (
         FULL_ENABLED_ACTIONS,
         build_orchestration_prompt,
+        SessionContext,
     )
     from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 
@@ -165,11 +166,9 @@ def test_orchestration_prompt_has_no_scoreboard_block():
     prompt = build_orchestration_prompt(
         action_registry=reg,
         enabled_actions=FULL_ENABLED_ACTIONS,
-        framework="sglang",
-        kernel_enabled=True,
-        objective_kind="gain_pct",
-        objective_value=10.0,
-        max_minutes=120,
+        session=SessionContext(
+            framework="sglang", kernel_enabled=True, objective_kind="gain_pct", objective_value=10.0, max_minutes=120
+        ),
     )
     forbidden = (
         "eff_score=",

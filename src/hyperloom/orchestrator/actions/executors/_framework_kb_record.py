@@ -8,7 +8,6 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, NamedTuple
 
 log = logging.getLogger(__name__)
@@ -91,7 +90,6 @@ async def write_framework_lesson(
     *,
     done_payload: Mapping[str, Any] | None,
     shared_state: Any,
-    session_dir: Path,
 ) -> None:
     """Append this attempt's outcome to the framework lesson ledger.
 
@@ -107,28 +105,29 @@ async def write_framework_lesson(
         return
     environment = _environment_of(shared_state)
     try:
-        from ...knowledge.kb_writeback import write_framework_record
+        from ...knowledge.kb_writeback import FrameworkOutcome, write_framework_record
 
         written = await write_framework_record(
-            pr_url=pr_url,
-            pr_sha=pr_sha,
-            patch_path=attribution.first_patch(),
-            outcome=lesson.outcome,
-            tps_delta_pct=float(lesson.tps_delta_pct),
-            session_id=environment.session_id,
-            framework=attribution.name("framework"),
-            gap_canonical_id=attribution.text("gap_canonical_id"),
-            gap_keywords=[keyword.lower() for keyword in attribution.entries("gap_keywords")],
-            model_class=environment.model_class,
-            gpu_type=environment.gpu_type,
-            precision=environment.precision,
-            applicability=lesson.config_fingerprint or attribution.text("applicability"),
-            provenance=attribution.text("provenance"),
-            accuracy_delta_pct=attribution.accuracy_delta_pct(lesson.accuracy_delta_pct),
-            changed_files=attribution.entries("changed_files"),
-            source_framework=attribution.name("source_framework"),
-            target_framework=attribution.name("target_framework"),
-            session_dir=session_dir,
+            FrameworkOutcome(
+                pr_url=pr_url,
+                pr_sha=pr_sha,
+                patch_path=attribution.first_patch(),
+                outcome=lesson.outcome,
+                tps_delta_pct=float(lesson.tps_delta_pct),
+                session_id=environment.session_id,
+                framework=attribution.name("framework"),
+                gap_canonical_id=attribution.text("gap_canonical_id"),
+                gap_keywords=[keyword.lower() for keyword in attribution.entries("gap_keywords")],
+                model_class=environment.model_class,
+                gpu_type=environment.gpu_type,
+                precision=environment.precision,
+                applicability=lesson.config_fingerprint or attribution.text("applicability"),
+                provenance=attribution.text("provenance"),
+                accuracy_delta_pct=attribution.accuracy_delta_pct(lesson.accuracy_delta_pct),
+                changed_files=attribution.entries("changed_files"),
+                source_framework=attribution.name("source_framework"),
+                target_framework=attribution.name("target_framework"),
+            )
         )
     except Exception as exc:  # noqa: BLE001 — KB write is best-effort
         log.warning("integrate_patch: framework KB writeback failed: %r", exc)
