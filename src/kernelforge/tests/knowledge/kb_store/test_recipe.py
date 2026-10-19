@@ -104,6 +104,73 @@ def test_a_run_without_a_configured_store_turns_every_call_into_a_no_op(
     }
 
 
+class _FailingStore:
+    """A record store whose every read raises ``failure``."""
+
+    def __init__(self, failure: Exception) -> None:
+        self._failure = failure
+
+    def candidates(self, *_args, **_kwargs):
+        raise self._failure
+
+    def search_identities(self, *_args, **_kwargs):
+        raise self._failure
+
+    def read_bytes(self, *_args, **_kwargs):
+        raise self._failure
+
+
+def _failing_kb(tmp_path, monkeypatch, failure: Exception) -> KernelRecipeKB:
+    spec, _driver = _spec(tmp_path)
+    config = _remote_config(tmp_path)
+    identity = _resolved_identity(spec, config)
+    return KernelRecipeKB(_FailingStore(failure), identity, SOFTMAX_IDENTITY, config=config)
+
+
+_EXPECTED_STORE_FAILURES = [
+    KBStoreError("link down"),
+    RewriteRecordError("unusable canonical id"),
+    OSError("disk gone"),
+]
+
+
+_EXPECTED_READ_FAILURES = [*_EXPECTED_STORE_FAILURES, ValueError("bad identity")]
+
+
+@pytest.mark.parametrize("failure", _EXPECTED_READ_FAILURES, ids=lambda failure: type(failure).__name__)
+def test_an_expected_store_failure_cold_starts_a_read_and_records_why(tmp_path, monkeypatch, failure):
+    kb = _failing_kb(tmp_path, monkeypatch, failure)
+
+    assert kb.read_top_n(tmp_path / "top") == []
+    assert kb.reason == f"{type(failure).__name__}: {failure}"
+
+
+@pytest.mark.parametrize("failure", _EXPECTED_READ_FAILURES, ids=lambda failure: type(failure).__name__)
+def test_an_expected_store_failure_cold_starts_a_fuzzy_search_and_records_why(tmp_path, monkeypatch, failure):
+    kb = _failing_kb(tmp_path, monkeypatch, failure)
+
+    assert kb.fallback_canonical_ids() == []
+    assert kb.reason == f"{type(failure).__name__}: {failure}"
+
+
+@pytest.mark.parametrize("failure", _EXPECTED_STORE_FAILURES, ids=lambda failure: type(failure).__name__)
+def test_an_unreadable_artifact_is_a_miss(tmp_path, monkeypatch, failure):
+    kb = _failing_kb(tmp_path, monkeypatch, failure)
+
+    assert kb.prior_file("session", "kernel.py") == b""
+
+
+def test_an_unexpected_store_error_propagates_from_every_read(tmp_path, monkeypatch):
+    kb = _failing_kb(tmp_path, monkeypatch, TypeError("store contract drifted"))
+
+    with pytest.raises(TypeError, match="store contract drifted"):
+        kb.read_top_n(tmp_path / "top")
+    with pytest.raises(TypeError, match="store contract drifted"):
+        kb.fallback_canonical_ids()
+    with pytest.raises(TypeError, match="store contract drifted"):
+        kb.prior_file("session", "kernel.py")
+
+
 def test_a_rewrite_is_filed_under_its_producer_owned_identity(tmp_path, monkeypatch):
     kb, store, _spec_ = _kb(tmp_path, monkeypatch)
 
@@ -299,14 +366,13 @@ def test_unsafe_mapping_path_is_rejected_before_digest_or_staging(tmp_path, monk
     monkeypatch.setattr(agent_kb_module.tempfile, "TemporaryDirectory", FixedTemporaryDirectory)
     monkeypatch.setattr(agent_kb_module, "_port_digest", tracked_digest)
 
-    outcome = kb.write_candidate(
-        {"tag": "unsafe"},
-        files={rel_path: Path(spec.flydsl_kernel)},
-        speedup=2.0,
-    )
+    with pytest.raises(RewriteRecordError, match="unsafe artifact path"):
+        kb.write_candidate(
+            {"tag": "unsafe"},
+            files={rel_path: Path(spec.flydsl_kernel)},
+            speedup=2.0,
+        )
 
-    assert outcome["written"] is False
-    assert "unsafe artifact path" in outcome["reason"]
     assert digest_called is False
     assert canary.read_bytes() == b"do not overwrite"
     assert store.knowledge == {}
@@ -628,15 +694,12 @@ def test_an_unreadable_artifact_fails_the_write_instead_of_recording_half_a_port
     tmp_path,
     monkeypatch,
 ):
-    """Nothing is recorded, and the reason says which artifact was missing."""
+    """Nothing is recorded, and the error says which artifact was missing."""
     kb, store, _spec_ = _kb(tmp_path, monkeypatch)
 
-    outcome = kb.write_candidate({"tag": "x"}, files=[tmp_path / "absent.py"], speedup=2.0)
+    with pytest.raises(FileNotFoundError, match="absent.py"):
+        kb.write_candidate({"tag": "x"}, files=[tmp_path / "absent.py"], speedup=2.0)
 
-    assert outcome["written"] is False
-    assert outcome["reason"].startswith("FileNotFoundError: ")
-    assert "absent.py" in outcome["reason"]
-    assert len(outcome["reason"]) <= MAX_REASON_LENGTH
     assert store.knowledge == {}
 
 
@@ -680,11 +743,11 @@ def test_a_refused_measured_write_back_redacts_the_error_that_opened_the_store(
     assert len(writeback["reason"]) == MAX_REASON_LENGTH
 
 
-def test_a_refused_candidate_write_redacts_and_bounds_the_store_error(
+def test_a_refused_candidate_write_raises_the_store_error(
     tmp_path,
     monkeypatch,
 ):
-    """A refused ``write_candidate`` reports the store's own words."""
+    """A refused ``write_candidate`` raises the store's own error for the writer to sanitize."""
     token = "kb-store-secret-9f3c"
     store = _use_in_memory_kb_store(monkeypatch)
     spec, _driver = _spec(tmp_path)
@@ -696,14 +759,8 @@ def test_a_refused_candidate_write_redacts_and_bounds_the_store_error(
 
     monkeypatch.setattr(store, "put_knowledge", refuse)
 
-    outcome = kb.write_candidate({"tag": "refused"}, files=[spec.flydsl_kernel], speedup=2.0)
-
-    assert outcome["written"] is False
-    assert token not in outcome["reason"]
-    assert outcome["reason"].startswith("KBStoreError: PUT https://[REDACTED]@")
-    assert "Bearer [REDACTED]" in outcome["reason"]
-    assert "the store said [REDACTED] expired" in outcome["reason"]
-    assert len(outcome["reason"]) == MAX_REASON_LENGTH
+    with pytest.raises(KBStoreError, match="the store said .* expired"):
+        kb.write_candidate({"tag": "refused"}, files=[spec.flydsl_kernel], speedup=2.0)
 
 
 def test_a_refused_flydsl_solution_write_redacts_and_bounds_the_store_error(
