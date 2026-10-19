@@ -746,7 +746,6 @@ function-lines src/hyperloom/orchestrator/measurement/apply_verification.py::ver
 function-lines src/hyperloom/orchestrator/phases/close.py::ClosePhase.on_enter_close 112
 function-lines src/hyperloom/orchestrator/phases/framework.py::FrameworkPhase._enqueue_framework_agent_authoring_specialist 85
 function-lines src/hyperloom/orchestrator/phases/framework.py::FrameworkPhase._record_framework_agent_authored_outcome 87
-function-lines src/hyperloom/orchestrator/phases/framework.py::FrameworkPhase._submit_framework_agent_candidate_for_review 97
 function-lines src/hyperloom/orchestrator/phases/internal.py::InternalTasksPhase._enqueue_internal_research_scout_task 81
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._fmoe_apply_verdict 131
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._maybe_reprofile_for_kernel 98
@@ -968,7 +967,7 @@ module-lines src/hyperloom/orchestrator/loop/coordinator.py 1423
 module-lines src/hyperloom/orchestrator/loop/dispatcher.py 1503
 module-lines src/hyperloom/orchestrator/loop/intent_router.py 1548
 module-lines src/hyperloom/orchestrator/loop/writeback.py 4748
-module-lines src/hyperloom/orchestrator/phases/framework.py 2923
+module-lines src/hyperloom/orchestrator/phases/framework.py 2920
 module-lines src/hyperloom/orchestrator/phases/kernel.py 4227
 module-lines src/hyperloom/orchestrator/phases/machine_state.py 2189
 module-lines src/hyperloom/orchestrator/phases/prelude.py 2640
