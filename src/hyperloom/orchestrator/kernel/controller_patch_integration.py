@@ -10,7 +10,7 @@ import subprocess
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from kernelforge.kernel_rewrite_controller.task import load_task
 
@@ -31,7 +31,7 @@ from .controller_publication import (
     discover_controller_patch_dirs,
     load_controller_publication,
 )
-from .patch_conflict_merge import apply_patch_resolving_conflicts
+from .patch_conflict_merge import PatchMergeOutcome, apply_patch_resolving_conflicts
 
 _CONTROLLER_SOURCE = "kernel_rewrite_controller"
 _CONTROLLER_BACKEND = "forge"
@@ -240,6 +240,296 @@ async def _default_validator(
     )
 
 
+class _IntegrationSession(NamedTuple):
+    """The session-owned collaborators one integration pass works through."""
+
+    session_dir: Path
+    shared_state: Any
+    record_keep: KeepRecorder
+    validate: PatchValidator
+    admit_round: RoundAdmission
+
+
+class _WorktreeInspection(NamedTuple):
+    """What the integration repository looked like before a patch was applied."""
+
+    head_before: str
+    touched: list[str]
+    refusal: PatchIntegrationResult | None
+
+
+class _ValidationOutcome(NamedTuple):
+    """The E2E verdict on one applied patch."""
+
+    validation: dict[str, Any]
+    refusal: PatchIntegrationResult | None
+
+
+class _KeepCommit(NamedTuple):
+    """The commit a KEEP landed on, or why it did not land."""
+
+    commit: str
+    failure_reason: str
+
+
+def _refusal(
+    publication: ControllerPatchPublication,
+    status: str,
+    reason: str,
+    head_before: str = "",
+) -> PatchIntegrationResult:
+    """A result for a publication this run carries no further."""
+    return PatchIntegrationResult(
+        operator_id=publication.operator_id,
+        status=status,
+        reason=reason,
+        base_commit=publication.base_commit,
+        best_commit=publication.best_commit,
+        repo_root=str(publication.repo_root),
+        integration_head_before=head_before,
+    )
+
+
+def _e2e_kept(validation: dict[str, Any]) -> bool:
+    """Whether the E2E run both completed and decided KEEP."""
+    return (
+        str(validation.get("status") or "ok").lower() == "ok"
+        and str(validation.get("decision") or "").upper() == "KEEP"
+    )
+
+
+def _commit_keep(
+    publication: ControllerPatchPublication,
+    validation: dict[str, Any],
+    touched: list[str],
+    head_before: str,
+) -> _KeepCommit:
+    """Commit the validated patch into the integration repository, undoing it when the commit fails."""
+    repo = publication.repo_root
+    committed, commit_note = _git_commit_kept(
+        repo,
+        f"hyperloom: keep KernelForge rewrite {publication.operator_id}",
+        touched,
+    )
+    # A KEEP is only durable once HEAD carries it, so ask Git rather than the note.
+    keep_commit = _head_commit(repo)
+    if committed and keep_commit and keep_commit != head_before:
+        return _KeepCommit(keep_commit, "")
+    # Pods, compiled artifacts and the JIT tree come back from the apply
+    # manifest first; the local worktree is reversed after, because its
+    # own backup holds the patched bytes.
+    settle_note = _settle_apply_manifest(validation, kept=False)
+    revert_note = _revert_note(repo, publication.patch_path)
+    return _KeepCommit("", (commit_note or "git commit did not advance HEAD") + settle_note + revert_note)
+
+
+def _integration_summary(
+    results: list[PatchIntegrationResult],
+    results_dir: Path,
+) -> ControllerIntegrationSummary:
+    """Roll the per-patch outcomes up into the run's verdict."""
+    kept = sum(result.status == "kept" for result in results)
+    reverted = sum(result.status.startswith("reverted_") for result in results)
+    # "completed" says the loop ran, which is not the same as the loop having done anything.
+    admitted_nothing = bool(results) and kept == 0 and reverted == 0
+    return ControllerIntegrationSummary(
+        status="no_patch_admitted" if admitted_nothing else "completed",
+        results=tuple(results),
+        kept_count=kept,
+        reverted_count=reverted,
+        skipped_count=len(results) - kept - reverted,
+        results_dir=str(results_dir),
+    )
+
+
+class _ControllerIntegration:
+    """One sequential pass over a Controller's published patches."""
+
+    def __init__(self, session: _IntegrationSession, results_dir: Path) -> None:
+        self._session = session
+        self._results_dir = results_dir
+        self.results: list[PatchIntegrationResult] = []
+        # One base commit per repository rather than one repository per run.
+        self._pinned_bases: dict[Path, str] = {}
+        self._pinned_heads: dict[Path, str] = {}
+        self._pin_errors: dict[Path, str] = {}
+        # Patches already committed into each repository, so a merge can be held to
+        # keeping what they added.
+        self._landed: dict[Path, list[tuple[str, Path]]] = {}
+        self._rounds_run = 0
+
+    async def integrate(self, index: int, patch_dir: Path) -> None:
+        """Apply, validate and record the publication in ``patch_dir``."""
+        try:
+            publication = load_controller_publication(patch_dir)
+        except ControllerPublicationError as error:
+            self._record(index, PatchIntegrationResult(patch_dir.name, "skipped_invalid", str(error)))
+            return
+        refusal = self._refuse_against_pinned_base(publication)
+        if refusal is not None:
+            self._record(index, refusal)
+            return
+        worktree = self._inspect_worktree(publication)
+        if worktree.refusal is not None:
+            self._record(index, worktree.refusal)
+            return
+        self._record(index, await self._apply_and_validate(publication, worktree))
+
+    def _record(self, index: int, result: PatchIntegrationResult) -> None:
+        """Keep one patch's outcome and publish it beside the others."""
+        self.results.append(result)
+        _write_result(self._results_dir, index, result)
+
+    def _refuse_against_pinned_base(
+        self,
+        publication: ControllerPatchPublication,
+    ) -> PatchIntegrationResult | None:
+        """Pin the repository on first sight, and refuse a publication built on another base."""
+        repo = publication.repo_root
+        if repo not in self._pinned_bases:
+            self._pinned_bases[repo] = publication.base_commit
+            self._pinned_heads[repo], self._pin_errors[repo] = _head_against_base(repo, publication.base_commit)
+        if self._pin_errors.get(repo):
+            return _refusal(
+                publication,
+                "skipped_baseline_mismatch",
+                self._pin_errors[repo],
+                self._pinned_heads.get(repo, ""),
+            )
+        if publication.base_commit != self._pinned_bases[repo]:
+            return _refusal(
+                publication,
+                "skipped_baseline_mismatch",
+                f"repository {repo} is pinned to controller base {self._pinned_bases[repo]} for this integration",
+            )
+        return None
+
+    def _inspect_worktree(self, publication: ControllerPatchPublication) -> _WorktreeInspection:
+        """Read the integration repository's HEAD, and refuse a worktree already dirty on these paths."""
+        repo = publication.repo_root
+        # Scoped to the paths this patch touches, not to the whole repository.
+        touched = _patch_touched_paths(repo, [publication.patch_path])
+        try:
+            head_before = _git_output(repo, "rev-parse", "HEAD").lower()
+            # A patch whose paths cannot be read is one nothing can be scoped to, so it falls back to asking about the
+            # whole tree.
+            scope = ["--", *sorted(touched)] if touched else []
+            clean = _git_output(repo, "status", "--porcelain", "--untracked-files=no", *scope)
+        except (OSError, subprocess.SubprocessError) as error:
+            reason = f"could not inspect integration repository: {error}"
+            return _WorktreeInspection("", touched, _refusal(publication, "skipped_invalid", reason))
+        if not clean:
+            return _WorktreeInspection(head_before, touched, None)
+        changed = ", ".join(sorted(touched)) if touched else "the repository"
+        refusal = _refusal(
+            publication,
+            "skipped_dirty_worktree",
+            f"uncommitted tracked changes on the paths this patch modifies: {changed}",
+            head_before,
+        )
+        return _WorktreeInspection(head_before, touched, refusal)
+
+    async def _merge_onto_landed(self, publication: ControllerPatchPublication) -> PatchMergeOutcome:
+        """Apply the patch, rebuilt against the KEEPs already committed above it.
+
+        Lanes all diff against the pinned base, so every KEEP committed above makes the diffs still
+        queued stale on the files it touched.
+        """
+        landed = self._landed.get(publication.repo_root, [])
+        return await apply_patch_resolving_conflicts(
+            publication.repo_root,
+            publication.patch_path,
+            operator_id=publication.operator_id,
+            landed_operator_ids=[operator for operator, _ in landed],
+            landed_patches=[patch for _, patch in landed],
+            intent=f"{publication.operator_name} in {publication.kernel_path}",
+        )
+
+    async def _validate_applied_patch(
+        self,
+        publication: ControllerPatchPublication,
+        head_before: str,
+    ) -> _ValidationOutcome:
+        """Run the E2E decision on the patch now in the worktree, reverting it unless it KEEPs."""
+        repo = publication.repo_root
+        try:
+            validation = await self._session.validate(publication)
+        except Exception as error:  # noqa: BLE001 - translated into a skipped_invalid result
+            reason = f"E2E validation raised: {error}" + _revert_note(repo, publication.patch_path)
+            return _ValidationOutcome({}, _refusal(publication, "reverted_e2e_failed", reason, head_before))
+        if _e2e_kept(validation):
+            return _ValidationOutcome(validation, None)
+        reason = str(validation.get("error") or validation.get("decision_reason") or "E2E did not KEEP")
+        refusal = PatchIntegrationResult(
+            operator_id=publication.operator_id,
+            status="reverted_e2e_failed",
+            reason=reason + _revert_note(repo, publication.patch_path),
+            base_commit=publication.base_commit,
+            best_commit=publication.best_commit,
+            repo_root=str(repo),
+            integration_head_before=head_before,
+            new_tput=float(validation.get("new_tput") or 0.0),
+            gain_pct=float(validation.get("gain_pct") or 0.0),
+        )
+        return _ValidationOutcome(validation, refusal)
+
+    async def _record_keep_in_state(
+        self,
+        publication: ControllerPatchPublication,
+        validation: dict[str, Any],
+        keep_commit: str,
+    ) -> str:
+        """Record the committed KEEP into SharedState; says what stopped it (``""`` when nothing did)."""
+        try:
+            await self._session.record_keep(_keep_result(publication, validation, keep_commit))
+            self._session.shared_state.save(Path(self._session.session_dir))
+        except Exception as error:  # noqa: BLE001 - KEEP is already committed to Git
+            return f"Git KEEP committed; SharedState recording failed: {error}"
+        return ""
+
+    async def _apply_and_validate(
+        self,
+        publication: ControllerPatchPublication,
+        worktree: _WorktreeInspection,
+    ) -> PatchIntegrationResult:
+        """Land one publication as a validated commit, or say why this run keeps nothing of it."""
+        if (stop := self._session.admit_round(self._rounds_run)) is not None:
+            return PatchIntegrationResult(
+                operator_id=publication.operator_id, status=stop.error_class, reason=stop.never_started
+            )
+        merge = await self._merge_onto_landed(publication)
+        if not merge.applied:
+            return _refusal(
+                publication,
+                "reverted_apply_conflict" if merge.conflicted else "reverted_apply_failed",
+                merge.error + merge.note(),
+                worktree.head_before,
+            )
+        self._rounds_run += 1
+        outcome = await self._validate_applied_patch(publication, worktree.head_before)
+        if outcome.refusal is not None:
+            return outcome.refusal
+        commit = _commit_keep(publication, outcome.validation, worktree.touched, worktree.head_before)
+        if not commit.commit:
+            return _refusal(publication, "reverted_commit_failed", commit.failure_reason, worktree.head_before)
+        record_reason = await self._record_keep_in_state(publication, outcome.validation, commit.commit)
+        self._landed.setdefault(publication.repo_root, []).append((publication.operator_id, publication.patch_path))
+        return PatchIntegrationResult(
+            operator_id=publication.operator_id,
+            status="kept",
+            merge_strategy=merge.strategy,
+            reason=record_reason + merge.note() + _settle_apply_manifest(outcome.validation, kept=True),
+            base_commit=publication.base_commit,
+            best_commit=publication.best_commit,
+            repo_root=str(publication.repo_root),
+            integration_head_before=worktree.head_before,
+            integration_head_after=commit.commit,
+            keep_commit=commit.commit,
+            new_tput=float(outcome.validation.get("new_tput") or 0.0),
+            gain_pct=float(outcome.validation.get("gain_pct") or 0.0),
+        )
+
+
 async def integrate_controller_patches(
     *,
     patches_root: str | Path,
@@ -265,236 +555,18 @@ async def integrate_controller_patches(
     integration_root = Path(patches_root).resolve().parent.parent / "integration"
     results_dir = integration_root / "results"
     results_dir.mkdir(parents=True, exist_ok=True)
-    validate = validator or (
-        lambda publication: _default_validator(
-            publication,
-            session_dir=Path(session_dir),
-        )
+    session = _IntegrationSession(
+        session_dir=Path(session_dir),
+        shared_state=shared_state,
+        record_keep=record_keep,
+        validate=validator or (lambda publication: _default_validator(publication, session_dir=Path(session_dir))),
+        admit_round=admit_round,
     )
-    results: list[PatchIntegrationResult] = []
-    # One base commit per repository rather than one repository per run.
-    pinned_bases: dict[Path, str] = {}
-    pinned_heads: dict[Path, str] = {}
-    pin_errors: dict[Path, str] = {}
-    # Patches already committed into each repository, so a merge can be held to
-    # keeping what they added.
-    landed: dict[Path, list[tuple[str, Path]]] = {}
-    rounds_run = 0
-
+    integration = _ControllerIntegration(session, results_dir)
     for index, patch_dir in enumerate(_priority_ordered_patch_dirs(patches_root)):
-        try:
-            publication = load_controller_publication(patch_dir)
-        except ControllerPublicationError as error:
-            result = PatchIntegrationResult(
-                operator_id=patch_dir.name,
-                status="skipped_invalid",
-                reason=str(error),
-            )
-            results.append(result)
-            _write_result(results_dir, index, result)
-            continue
-        repo = publication.repo_root
-        if repo not in pinned_bases:
-            pinned_bases[repo] = publication.base_commit
-            pinned_heads[repo], pin_errors[repo] = _head_against_base(repo, publication.base_commit)
+        await integration.integrate(index, patch_dir)
 
-        if pin_errors.get(repo):
-            result = PatchIntegrationResult(
-                operator_id=publication.operator_id,
-                status="skipped_baseline_mismatch",
-                reason=pin_errors[repo],
-                base_commit=publication.base_commit,
-                best_commit=publication.best_commit,
-                repo_root=str(repo),
-                integration_head_before=pinned_heads.get(repo, ""),
-            )
-            results.append(result)
-            _write_result(results_dir, index, result)
-            continue
-
-        if publication.base_commit != pinned_bases[repo]:
-            result = PatchIntegrationResult(
-                operator_id=publication.operator_id,
-                status="skipped_baseline_mismatch",
-                reason=f"repository {repo} is pinned to controller base {pinned_bases[repo]} for this integration",
-                base_commit=publication.base_commit,
-                best_commit=publication.best_commit,
-                repo_root=str(repo),
-            )
-            results.append(result)
-            _write_result(results_dir, index, result)
-            continue
-
-        # Scoped to the paths this patch touches, not to the whole repository.
-        touched = _patch_touched_paths(repo, [publication.patch_path])
-        try:
-            head_before = _git_output(repo, "rev-parse", "HEAD").lower()
-            # A patch whose paths cannot be read is one nothing can be scoped to, so it falls back to asking about the
-            # whole tree.
-            scope = ["--", *sorted(touched)] if touched else []
-            clean = _git_output(repo, "status", "--porcelain", "--untracked-files=no", *scope)
-        except (OSError, subprocess.SubprocessError) as error:
-            result = PatchIntegrationResult(
-                operator_id=publication.operator_id,
-                status="skipped_invalid",
-                reason=f"could not inspect integration repository: {error}",
-                base_commit=publication.base_commit,
-                best_commit=publication.best_commit,
-                repo_root=str(repo),
-            )
-            results.append(result)
-            _write_result(results_dir, index, result)
-            continue
-        if clean:
-            changed = ", ".join(sorted(touched)) if touched else "the repository"
-            result = PatchIntegrationResult(
-                operator_id=publication.operator_id,
-                status="skipped_dirty_worktree",
-                reason=f"uncommitted tracked changes on the paths this patch modifies: {changed}",
-                base_commit=publication.base_commit,
-                best_commit=publication.best_commit,
-                repo_root=str(repo),
-                integration_head_before=head_before,
-            )
-            results.append(result)
-            _write_result(results_dir, index, result)
-            continue
-        if (stop := admit_round(rounds_run)) is not None:
-            result = PatchIntegrationResult(
-                operator_id=publication.operator_id, status=stop.error_class, reason=stop.never_started
-            )
-            results.append(result)
-            _write_result(results_dir, index, result)
-            continue
-
-        # Lanes all diff against the pinned base, so every KEEP committed above
-        # makes the diffs still queued stale on the files it touched.
-        merge = await apply_patch_resolving_conflicts(
-            repo,
-            publication.patch_path,
-            operator_id=publication.operator_id,
-            landed_operator_ids=[operator for operator, _ in landed.get(repo, [])],
-            landed_patches=[patch for _, patch in landed.get(repo, [])],
-            intent=f"{publication.operator_name} in {publication.kernel_path}",
-        )
-        if not merge.applied:
-            result = PatchIntegrationResult(
-                operator_id=publication.operator_id,
-                status="reverted_apply_conflict" if merge.conflicted else "reverted_apply_failed",
-                reason=merge.error + merge.note(),
-                base_commit=publication.base_commit,
-                best_commit=publication.best_commit,
-                repo_root=str(repo),
-                integration_head_before=head_before,
-            )
-            results.append(result)
-            _write_result(results_dir, index, result)
-            continue
-
-        rounds_run += 1
-        try:
-            validation = await validate(publication)
-        except Exception as error:  # noqa: BLE001 - translated into a skipped_invalid result
-            result = PatchIntegrationResult(
-                operator_id=publication.operator_id,
-                status="reverted_e2e_failed",
-                reason=f"E2E validation raised: {error}" + _revert_note(repo, publication.patch_path),
-                base_commit=publication.base_commit,
-                best_commit=publication.best_commit,
-                repo_root=str(repo),
-                integration_head_before=head_before,
-            )
-            results.append(result)
-            _write_result(results_dir, index, result)
-            continue
-
-        if (
-            str(validation.get("status") or "ok").lower() != "ok"
-            or str(validation.get("decision") or "").upper() != "KEEP"
-        ):
-            result = PatchIntegrationResult(
-                operator_id=publication.operator_id,
-                status="reverted_e2e_failed",
-                reason=str(validation.get("error") or validation.get("decision_reason") or "E2E did not KEEP")
-                + _revert_note(repo, publication.patch_path),
-                base_commit=publication.base_commit,
-                best_commit=publication.best_commit,
-                repo_root=str(repo),
-                integration_head_before=head_before,
-                new_tput=float(validation.get("new_tput") or 0.0),
-                gain_pct=float(validation.get("gain_pct") or 0.0),
-            )
-            results.append(result)
-            _write_result(results_dir, index, result)
-            continue
-
-        committed, commit_note = _git_commit_kept(
-            repo,
-            f"hyperloom: keep KernelForge rewrite {publication.operator_id}",
-            touched,
-        )
-        # A KEEP is only durable once HEAD carries it, so ask Git rather than the note.
-        keep_commit = _head_commit(repo)
-        if not committed or not keep_commit or keep_commit == head_before:
-            # Pods, compiled artifacts and the JIT tree come back from the apply
-            # manifest first; the local worktree is reversed after, because its
-            # own backup holds the patched bytes.
-            settle_note = _settle_apply_manifest(validation, kept=False)
-            revert_note = _revert_note(repo, publication.patch_path)
-            result = PatchIntegrationResult(
-                operator_id=publication.operator_id,
-                status="reverted_commit_failed",
-                reason=(commit_note or "git commit did not advance HEAD") + settle_note + revert_note,
-                base_commit=publication.base_commit,
-                best_commit=publication.best_commit,
-                repo_root=str(repo),
-                integration_head_before=head_before,
-            )
-            results.append(result)
-            _write_result(results_dir, index, result)
-            continue
-
-        try:
-            await record_keep(_keep_result(publication, validation, keep_commit))
-            shared_state.save(Path(session_dir))
-        except Exception as error:  # noqa: BLE001 - KEEP is already committed to Git
-            record_reason = f"Git KEEP committed; SharedState recording failed: {error}"
-        else:
-            record_reason = ""
-        landed.setdefault(repo, []).append((publication.operator_id, publication.patch_path))
-        result = PatchIntegrationResult(
-            operator_id=publication.operator_id,
-            status="kept",
-            merge_strategy=merge.strategy,
-            reason=record_reason + merge.note() + _settle_apply_manifest(validation, kept=True),
-            base_commit=publication.base_commit,
-            best_commit=publication.best_commit,
-            repo_root=str(repo),
-            integration_head_before=head_before,
-            integration_head_after=keep_commit,
-            keep_commit=keep_commit,
-            new_tput=float(validation.get("new_tput") or 0.0),
-            gain_pct=float(validation.get("gain_pct") or 0.0),
-        )
-        results.append(result)
-        _write_result(results_dir, index, result)
-
-    kept = sum(result.status == "kept" for result in results)
-    reverted = sum(result.status.startswith("reverted_") for result in results)
-    skipped = len(results) - kept - reverted
-    # "completed" says the loop ran, which is not the same as the loop having done anything.
-    if results and kept == 0 and reverted == 0:
-        status = "no_patch_admitted"
-    else:
-        status = "completed"
-    summary = ControllerIntegrationSummary(
-        status=status,
-        results=tuple(results),
-        kept_count=kept,
-        reverted_count=reverted,
-        skipped_count=skipped,
-        results_dir=str(results_dir),
-    )
+    summary = _integration_summary(integration.results, results_dir)
     atomic_write_json(integration_root / "summary.json", summary.to_dict(), fmt=JsonFormat(trailing_newline=True))
     return summary
 
