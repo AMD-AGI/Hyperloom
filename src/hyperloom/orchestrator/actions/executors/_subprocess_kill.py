@@ -18,7 +18,7 @@ import sys
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
 
@@ -1045,6 +1045,79 @@ class _WatchedRound:
     scan_offsets: dict[str, int] | None = None
 
 
+@dataclass
+class _RoundActivity:
+    """Where a watched round's log scan stopped, when its server reported ready, and when output last arrived."""
+
+    started_at: float
+    offsets: dict[str, int]
+    residuals: dict[str, str] = field(default_factory=dict)
+    identities: dict[str, tuple[int, int]] = field(default_factory=dict)
+    ready_at: float | None = None
+    last_activity_at: float | None = None
+
+    @classmethod
+    def watching(cls, watched: _WatchedRound, started_at: float) -> _RoundActivity:
+        """Open a watch over ``watched``, pinning the identity of every log that already exists."""
+        activity = cls(started_at, {} if watched.scan_offsets is None else watched.scan_offsets)
+        for path in activity.offsets:
+            try:
+                stat = os.stat(path)
+            except OSError:
+                continue
+            activity.identities[path] = (stat.st_dev, stat.st_ino)
+        return activity
+
+    def note_log_progress(
+        self, server_log_path: str | None, recorders: _RecorderFanout, capture: _StreamCapture | None, now: float
+    ) -> None:
+        """Advance the ready and last-output marks from the bytes the watched logs gained since the previous poll."""
+        if server_log_path:
+            scan = _scan_logs_increment(server_log_path, self.offsets, self.residuals, self.identities)
+            if scan.saw_ready and self.ready_at is None:
+                self.ready_at = self.last_activity_at = now
+                stamp_server_ready(server_log_path, now - self.started_at)
+                recorders.note_phase(_READY_PHASE, now)
+            if scan.grew:
+                self.last_activity_at = now
+            recorders.note_client_phases(scan, now)
+            if capture is not None and (scan.saw_progress or scan.child_spoke):
+                capture.note_output()
+        if capture is not None and capture.last_activity_at is not None:
+            self.last_activity_at = max(self.last_activity_at or self.started_at, capture.last_activity_at)
+
+    def reusing_warm_server(self, server_log_path: str | None, elapsed: float) -> bool:
+        """Whether a round found no log baseline and has since run long enough to be reusing a warm server."""
+        # Telemetry only: this guess never arms the silence gate.
+        return bool(server_log_path) and not self.offsets and elapsed >= _WARM_REUSE_PROBE_AFTER_SEC
+
+    def silence_remaining_sec(self, silence_timeout_sec: float | None, now: float) -> float | None:
+        """Seconds left in the post-ready silence window, or ``None`` while that gate is unarmed."""
+        if self.ready_at is None or silence_timeout_sec is None or self.last_activity_at is None:
+            return None
+        return silence_timeout_sec - (now - self.last_activity_at)
+
+
+def _enforce_stop_gates(
+    proc: subprocess.Popen, watched: _WatchedRound, *, cancel_scope: CancelScope | None, now: float, elapsed: float
+) -> None:
+    """Raise as soon as the session budget, an orchestrator cancellation or the round cap is spent."""
+    if watched.session_deadline_sec is not None and now >= watched.session_deadline_sec:
+        raise _SessionDeadlineExceeded(overrun_sec=now - watched.session_deadline_sec, elapsed_sec=elapsed)
+    if cancel_scope is not None and cancel_scope.cancelled:
+        raise _OrchestratorCancelled(reason=cancel_scope.reason, elapsed_sec=elapsed)
+    if watched.hard_timeout is not None and elapsed >= watched.hard_timeout:
+        raise subprocess.TimeoutExpired(proc.args, watched.hard_timeout)
+
+
+def _poll_slice_sec(watched: _WatchedRound, now: float, elapsed: float, silence_remaining: float | None) -> float:
+    """How long to wait on the child before the nearest armed gate has to be re-checked."""
+    hard = None if watched.hard_timeout is None else watched.hard_timeout - elapsed
+    session = None if watched.session_deadline_sec is None else watched.session_deadline_sec - now
+    gates = (STOP_GATE_POLL_SECONDS, hard, session, silence_remaining)
+    return min(sec for sec in gates if sec is not None)
+
+
 def _communicate_with_watchdog(
     proc: subprocess.Popen,
     watched: _WatchedRound,
@@ -1054,28 +1127,15 @@ def _communicate_with_watchdog(
     cancel_scope: CancelScope | None = None,
 ) -> tuple[str | bytes, str | bytes]:
     """Wait for exit, enforcing cancellation, session budget and explicit round caps."""
-    hard_timeout = watched.hard_timeout
     server_log_path = watched.server_log_path
     silence_timeout_sec = watched.silence_timeout_sec
-    server_already_ready = watched.server_already_ready
-    session_deadline_sec = watched.session_deadline_sec
     start = time.monotonic() if watched.started_at is None else watched.started_at
-    offsets = {} if watched.scan_offsets is None else watched.scan_offsets
-    residuals: dict[str, str] = {}
-    identities: dict[str, tuple[int, int]] = {}
-    for path in offsets:
-        try:
-            stat = os.stat(path)
-        except OSError:
-            continue
-        identities[path] = (stat.st_dev, stat.st_ino)
-    ready_at: float | None = None
-    last_activity_at: float | None = None
+    activity = _RoundActivity.watching(watched, start)
     completed = False
-    if server_already_ready:
+    if watched.server_already_ready:
         recorders.note_phase(_READY_PHASE, start)
-    if server_log_path and server_already_ready:
-        stamp_server_ready(server_log_path, 0.0)
+        if server_log_path:
+            stamp_server_ready(server_log_path, 0.0)
     try:
         while True:
             # An exit already observed belongs to the child, not to an expired gate.
@@ -1085,41 +1145,15 @@ def _communicate_with_watchdog(
                 return result
             now = time.monotonic()
             elapsed = now - start
-            if session_deadline_sec is not None and now >= session_deadline_sec:
-                raise _SessionDeadlineExceeded(overrun_sec=now - session_deadline_sec, elapsed_sec=elapsed)
-            if cancel_scope is not None and cancel_scope.cancelled:
-                raise _OrchestratorCancelled(reason=cancel_scope.reason, elapsed_sec=elapsed)
-            if hard_timeout is not None and elapsed >= hard_timeout:
-                raise subprocess.TimeoutExpired(proc.args, hard_timeout)
-            if server_log_path:
-                scan = _scan_logs_increment(server_log_path, offsets, residuals, identities)
-                if scan.saw_ready and ready_at is None:
-                    ready_at = last_activity_at = now
-                    stamp_server_ready(server_log_path, elapsed)
-                    recorders.note_phase(_READY_PHASE, now)
-                if scan.grew:
-                    last_activity_at = now
-                recorders.note_client_phases(scan, now)
-                if capture is not None and (scan.saw_progress or scan.child_spoke):
-                    capture.note_output()
-            if capture is not None and capture.last_activity_at is not None:
-                last_activity_at = max(last_activity_at or start, capture.last_activity_at)
-            # This telemetry-only guess never arms the silence gate.
-            warm_reuse_probe = server_log_path and not offsets and elapsed >= _WARM_REUSE_PROBE_AFTER_SEC
-            if ready_at is not None or server_already_ready or warm_reuse_probe:
+            _enforce_stop_gates(proc, watched, cancel_scope=cancel_scope, now=now, elapsed=elapsed)
+            activity.note_log_progress(server_log_path, recorders, capture, now)
+            server_is_live = activity.ready_at is not None or watched.server_already_ready
+            if server_is_live or activity.reusing_warm_server(server_log_path, elapsed):
                 recorders.tick(now)
-            silence_remaining = None
-            if ready_at is not None and silence_timeout_sec is not None:
-                silence_remaining = silence_timeout_sec - (now - last_activity_at)
-                if silence_remaining <= 0:
-                    raise _ServerStalledDetected(grace_sec=silence_timeout_sec, elapsed_sec=elapsed)
-            slice_sec = STOP_GATE_POLL_SECONDS
-            if hard_timeout is not None:
-                slice_sec = min(slice_sec, hard_timeout - elapsed)
-            if session_deadline_sec is not None:
-                slice_sec = min(slice_sec, session_deadline_sec - now)
-            if silence_remaining is not None:
-                slice_sec = min(slice_sec, silence_remaining)
+            silence_remaining = activity.silence_remaining_sec(silence_timeout_sec, now)
+            if silence_remaining is not None and silence_remaining <= 0:
+                raise _ServerStalledDetected(grace_sec=silence_timeout_sec or 0.0, elapsed_sec=elapsed)
+            slice_sec = _poll_slice_sec(watched, now, elapsed, silence_remaining)
             try:
                 if capture is None:
                     result = proc.communicate(timeout=max(0.0, slice_sec))
