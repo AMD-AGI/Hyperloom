@@ -55,7 +55,7 @@ def _resolve_gpu_type(
 
 
 def _autodetect_gpu_type() -> str | None:
-    """Return mi300x|mi308x|mi325x|mi355x or None if undetectable."""
+    """Return a known AMD GPU type, or None if undetectable."""
     import subprocess
 
     try:
@@ -64,22 +64,30 @@ def _autodetect_gpu_type() -> str | None:
             capture_output=True,
             text=True,
             timeout=5,
-        ).stdout.upper()
-        for tag in _PRODUCT_TAGS:
-            if tag in out:
-                return tag.lower()
+        ).stdout
+        if product := _gpu_type_from_product_name(out):
+            return product
     except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError, OSError):
-        # rocm-smi missing / slow / not permitted; fall through to the torch gcnArchName probe below (autodetect is
+        # rocm-smi missing / slow / not permitted; fall through to the torch product/architecture probe (autodetect is
         # best-effort).
         pass
     try:
         import torch
 
-        arch = torch.cuda.get_device_properties(0).gcnArchName
+        props = torch.cuda.get_device_properties(0)
+        if product := _gpu_type_from_product_name(getattr(props, "name", "")):
+            return product
+        arch = props.gcnArchName
         gfx = arch.split(":", 1)[0].lower()
         return _GFX_TO_RUNNER.get(gfx)
     except Exception:  # noqa: BLE001
         return None
+
+
+def _gpu_type_from_product_name(name: str) -> str | None:
+    """Resolve a product label before considering its shared gfx architecture."""
+    upper = name.upper()
+    return next((tag.lower() for tag in _PRODUCT_TAGS if tag in upper), None)
 
 
 def _resolve_amd_gpu_type(explicit: str | None = None) -> str | None:
