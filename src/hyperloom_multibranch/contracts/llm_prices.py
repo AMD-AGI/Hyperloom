@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, fields
 from functools import cache
 from pathlib import Path
@@ -47,6 +48,21 @@ class TokenCounts:
 
     def __add__(self, other: TokenCounts) -> TokenCounts:
         return TokenCounts(*(getattr(self, item.name) + getattr(other, item.name) for item in fields(self)))
+
+    @classmethod
+    def from_anthropic_usage(cls, usage: Mapping[str, object]) -> TokenCounts:
+        """The counts of an Anthropic ``usage`` block. A split ``cache_creation`` bills each cache write by its
+        lifetime; without it every cache write is a 5-minute one. A missing or unusable count is 0."""
+        split = usage.get("cache_creation")
+        split = split if isinstance(split, Mapping) else {}
+        written = _count(split, "ephemeral_5m_input_tokens") if split else _count(usage, "cache_creation_input_tokens")
+        return cls(
+            _count(usage, "input_tokens"),
+            _count(usage, "output_tokens"),
+            _count(usage, "cache_read_input_tokens"),
+            written,
+            _count(split, "ephemeral_1h_input_tokens"),
+        )
 
 
 @dataclass(frozen=True)
@@ -84,6 +100,11 @@ def price_of(model: str) -> ModelPrice:
     if found is None:
         raise UnpricedModel(f"the price sheet ({PRICE_SHEET.name}) has no rate for model {model!r}")
     return found
+
+
+def _count(usage: Mapping[str, object], key: str) -> int:
+    value = usage.get(key)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
 
 
 @cache

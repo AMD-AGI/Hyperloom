@@ -20,10 +20,6 @@ from hyperloom_multibranch.contracts.llm_prices import TokenCounts
 
 #: The model of calls the log does not name (codex turns): the launch's own model.
 UNNAMED = ""
-_CACHE_READ = "cache_read_input_tokens"
-_CACHE_WRITE = "cache_creation_input_tokens"
-_INPUT = "input_tokens"
-_OUTPUT = "output_tokens"
 
 
 @dataclass(frozen=True)
@@ -53,7 +49,7 @@ def launch_usage(process_log: Path) -> LaunchUsage:
             and isinstance(message.get("usage"), Mapping)
         ):
             key = str(message.get("id") or f"#{len(messages)}")
-            messages[key] = (str(message.get("model") or UNNAMED), _claude_tokens(message["usage"]))
+            messages[key] = (str(message.get("model") or UNNAMED), TokenCounts.from_anthropic_usage(message["usage"]))
         elif row.get("type") == "turn.completed" and isinstance(usage, Mapping):
             turns += _codex_tokens(usage)
     tokens: dict[str, TokenCounts] = {}
@@ -81,17 +77,9 @@ def _rows(process_log: Path) -> Iterator[Mapping[str, object]]:
                 yield row
 
 
-def _claude_tokens(usage: Mapping[str, object]) -> TokenCounts:
-    split = usage.get("cache_creation")
-    split = split if isinstance(split, Mapping) else {}
-    hour = _count(split, "ephemeral_1h_input_tokens")
-    written = _count(split, "ephemeral_5m_input_tokens") if split else _count(usage, _CACHE_WRITE)
-    return TokenCounts(_count(usage, _INPUT), _count(usage, _OUTPUT), _count(usage, _CACHE_READ), written, hour)
-
-
 def _codex_tokens(usage: Mapping[str, object]) -> TokenCounts:
     cached = _count(usage, "cached_input_tokens")
-    return TokenCounts(max(0, _count(usage, _INPUT) - cached), _count(usage, _OUTPUT), cached)
+    return TokenCounts(max(0, _count(usage, "input_tokens") - cached), _count(usage, "output_tokens"), cached)
 
 
 def _count(usage: Mapping[str, object], key: str) -> int:
