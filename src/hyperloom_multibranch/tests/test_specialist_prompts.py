@@ -83,6 +83,10 @@ def test_the_role_profiles_on_demand_never_the_root_prelude_profiled():
     assert "profile your head only once it carries gains you committed" in prompt
 
 
+def test_the_role_says_an_explore_delta_carries_the_claimed_change():
+    assert "an empty delta tests nothing" in role_prompt(WORKLOAD)
+
+
 def test_the_role_waits_for_a_test_only_through_wait_test():
     prompt = role_prompt(WORKLOAD)
 

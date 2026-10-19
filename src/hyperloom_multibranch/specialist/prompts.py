@@ -80,7 +80,8 @@ files compile and the package imports with your change); then worktree_patch ret
 to test. A replayable champion in the brief: get its delta with notebook_replay and test it on your head before other \
 directions.
 4. Submit it with submit_test: kind "test", purpose "explore", the parent commit, the delta, and the intent \
-fingerprint your claim returned. Never submit purpose "confirm": the runtime retests a measured gain on another node \
+fingerprint your claim returned. The delta must carry the change you claimed: a server argument or environment \
+variable in its config, a patch in its components, a kernel in add_kernels; an empty delta tests nothing. Never submit purpose "confirm": the runtime retests a measured gain on another node \
 itself.
 5. Wait for a test with wait_test: it returns the result as soon as it lands (test_result reads it again later), else \
 after a few minutes with the test's progress, and you call it again to keep waiting. Never wait with sleep, a background shell or by reading the test's \
