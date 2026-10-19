@@ -39,12 +39,7 @@ def _runner(tmp_path: Path, monkeypatch) -> SubAgentRunner:
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     sd = paths.make_session_dir()
     db = SqliteConnection(tmp_path / "coord.db")
-    return SubAgentRunner(
-        ResourceLockManager(SqliteLeaseBackend(db)),
-        TaskRegistry(db),
-        session_dir=sd,
-        policy=None,
-    )
+    return SubAgentRunner(ResourceLockManager(SqliteLeaseBackend(db)), TaskRegistry(db), session_dir=sd)
 
 
 def _progress_notes(task) -> list[dict]:

@@ -53,8 +53,7 @@ def _enter(state: SharedState, phase: str, at_unix: float) -> None:
         to_phase=phase,
         reason="phase_entered",
         evidence={},
-        ts="2026-05-19T00:00:00+00:00",
-        ts_unix=at_unix,
+        at=ps.PhaseClock(ts="2026-05-19T00:00:00+00:00", ts_unix=at_unix),
     )
 
 

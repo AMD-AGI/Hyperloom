@@ -23,7 +23,7 @@ from hyperloom.orchestrator.knowledge.recipe_kb import (
     cid_to_path_components,
     recipe_canonical_id,
 )
-from hyperloom.orchestrator.knowledge.recipe_kb.local_store import _matches_labels
+from hyperloom.orchestrator.knowledge.recipe_kb.local_store import RecipeFilters, _matches_labels
 
 
 def test_from_dict_reads_legacy_framework_key() -> None:
@@ -511,23 +511,21 @@ def test_search_with_two_labels_uses_AND_semantics(tmp_path: Path) -> None:
 def test_search_with_metric_filters_lower_bound(tmp_path: Path) -> None:
     store = LocalRecipeStore(root=tmp_path)
     cids = _seed_diverse_recipes(store)
-    rows = store.search(metric_filters={"throughput": {"min": 10000}})
+    rows = store.search(filters=RecipeFilters(metric_filters={"throughput": {"min": 10000}}))
     assert {r["canonical_id"] for r in rows} == {cids["a"], cids["b"]}
 
 
 def test_search_with_metric_filters_upper_bound(tmp_path: Path) -> None:
     store = LocalRecipeStore(root=tmp_path)
     cids = _seed_diverse_recipes(store)
-    rows = store.search(metric_filters={"throughput": {"max": 6000}})
+    rows = store.search(filters=RecipeFilters(metric_filters={"throughput": {"max": 6000}}))
     assert {r["canonical_id"] for r in rows} == {cids["c"]}
 
 
 def test_search_with_metric_filters_two_bounds(tmp_path: Path) -> None:
     store = LocalRecipeStore(root=tmp_path)
     cids = _seed_diverse_recipes(store)
-    rows = store.search(
-        metric_filters={"throughput": {"min": 7500, "max": 12000}},
-    )
+    rows = store.search(filters=RecipeFilters(metric_filters={"throughput": {"min": 7500, "max": 12000}}))
     assert {r["canonical_id"] for r in rows} == {cids["a"]}
 
 
@@ -537,17 +535,14 @@ def test_search_excludes_rows_missing_the_metric_key(tmp_path: Path) -> None:
     cid = _cid(model="no-tput")
     # ``best_throughput`` defaults to 0.0; a high min trips the missing-key path.
     store.put_recipe(canonical_id=cid, extras={"mfu": 0.5})
-    rows = store.search(metric_filters={"throughput": {"min": 100}})
+    rows = store.search(filters=RecipeFilters(metric_filters={"throughput": {"min": 100}}))
     assert rows == []
 
 
 def test_search_combined_label_and_metric(tmp_path: Path) -> None:
     store = LocalRecipeStore(root=tmp_path)
     cids = _seed_diverse_recipes(store)
-    rows = store.search(
-        label_match={"task": "pretrain"},
-        metric_filters={"mfu": {"min": 0.35}},
-    )
+    rows = store.search(label_match={"task": "pretrain"}, filters=RecipeFilters(metric_filters={"mfu": {"min": 0.35}}))
     assert [r["canonical_id"] for r in rows] == [cids["a"]]
 
 
@@ -563,14 +558,14 @@ def test_search_updated_since_filters_old_rows(tmp_path: Path) -> None:
 
     time.sleep(0.001)
     store.put_recipe(canonical_id=cid_new)
-    rows = store.search(updated_since=cutoff)
+    rows = store.search(filters=RecipeFilters(updated_since=cutoff))
     assert [r["canonical_id"] for r in rows] == [cid_new, cid_old]
 
 
 def test_search_order_by_invalid_raises(tmp_path: Path) -> None:
     store = LocalRecipeStore(root=tmp_path)
     with pytest.raises(ValueError):
-        store.search(order_by="banana ASC")
+        store.search(filters=RecipeFilters(order_by="banana ASC"))
 
 
 def test_search_supports_all_six_order_by_values(tmp_path: Path) -> None:
@@ -585,7 +580,7 @@ def test_search_supports_all_six_order_by_values(tmp_path: Path) -> None:
         "version DESC",
         "version ASC",
     ):
-        rows = store.search(order_by=ob)
+        rows = store.search(filters=RecipeFilters(order_by=ob))
         assert len(rows) == 3, f"order_by={ob!r}"
 
 

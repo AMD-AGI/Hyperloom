@@ -10,7 +10,7 @@ import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     SESSION_TIME_EXHAUSTED_RETURNCODE,
@@ -64,6 +64,16 @@ class RecordedLaunch:
     started_at: float
     finished_at: float
     returncode: int
+
+
+class _LaunchRequest(NamedTuple):
+    """The parts of a launch call a recorded launch keeps."""
+
+    cmd: Sequence[str]
+    cwd: str | None
+    server_log_path: str | None
+    timeout: int | float | None
+    session_deadline_sec: float | None
 
 
 @dataclass
@@ -127,6 +137,7 @@ class ScriptedLaunchBackend:
             subprocess.TimeoutExpired: When a hanging attempt hits ``timeout``
                 with budget to spare.
         """
+        request = _LaunchRequest(cmd, cwd, server_log_path, timeout, session_deadline_sec)
         budget_left = self._budget_left(session_deadline_sec)
         attempt = self._next_attempt()
         started = self.clock.elapsed
@@ -148,9 +159,7 @@ class ScriptedLaunchBackend:
         elif reap_at is not None:
             self._spend(reap_at, on_output)
             self.clock.mark(f"launch:{_label(attempt)}:reaped")
-            self.calls.append(
-                self._record(attempt, cmd, cwd, server_log_path, session_deadline_sec, timeout, started, -1)
-            )
+            self.calls.append(self._record(attempt, request, started, -1))
             raise subprocess.TimeoutExpired(cmd=list(cmd), timeout=reap_at)
         else:
             self._spend(spend, on_output)
@@ -160,9 +169,7 @@ class ScriptedLaunchBackend:
             stamp_server_ready(server_log_path, attempt.duration_sec)
 
         self.clock.mark(f"launch:{_label(attempt)}:rc={returncode}")
-        self.calls.append(
-            self._record(attempt, cmd, cwd, server_log_path, session_deadline_sec, timeout, started, returncode)
-        )
+        self.calls.append(self._record(attempt, request, started, returncode))
         return subprocess.CompletedProcess(
             args=list(cmd),
             returncode=returncode,
@@ -241,24 +248,16 @@ class ScriptedLaunchBackend:
                 path.write_text(str(content), encoding="utf-8")
 
     def _record(
-        self,
-        attempt: LaunchAttempt,
-        cmd: Sequence[str],
-        cwd: str | None,
-        server_log_path: str | None,
-        session_deadline_sec: float | None,
-        timeout: int | float | None,
-        started: float,
-        returncode: int,
+        self, attempt: LaunchAttempt, request: _LaunchRequest, started: float, returncode: int
     ) -> RecordedLaunch:
         """Build the :class:`RecordedLaunch` kept for this launch."""
         return RecordedLaunch(
             attempt=attempt,
-            cmd=tuple(str(c) for c in cmd),
-            cwd=cwd,
-            server_log_path=server_log_path,
-            session_deadline_sec=session_deadline_sec,
-            timeout=None if timeout is None else float(timeout),
+            cmd=tuple(str(c) for c in request.cmd),
+            cwd=request.cwd,
+            server_log_path=request.server_log_path,
+            session_deadline_sec=request.session_deadline_sec,
+            timeout=None if request.timeout is None else float(request.timeout),
             started_at=started,
             finished_at=self.clock.elapsed,
             returncode=returncode,

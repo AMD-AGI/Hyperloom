@@ -23,6 +23,7 @@ from hyperloom.orchestrator.loop.sub_agent_runner import ExecutionCleanupUnconfi
 from hyperloom.orchestrator.specialists import subprocess_ as ss
 from hyperloom.orchestrator.specialists.subprocess_ import (
     SpecialistSubprocessDispatcher,
+    SpecialistSpawn,
 )
 
 
@@ -40,14 +41,16 @@ async def test_pre_cancelled_specialist_never_starts(monkeypatch, tmp_path, back
     monkeypatch.setattr(ss.subprocess, "Popen", local_spawn)
     with use_cancel_scope(scope), pytest.raises(CancelledError, match="session_stopped"):
         await dispatcher.run(
-            task_id="cancelled-specialist",
-            workspace=tmp_path,
-            worktree=None,
-            worktree_base=None,
-            system_prompt="system",
-            user_prompt="user",
-            max_turns=1,
-            gpu_lease=lease,
+            SpecialistSpawn(
+                task_id="cancelled-specialist",
+                workspace=tmp_path,
+                worktree=None,
+                worktree_base=None,
+                system_prompt="system",
+                user_prompt="user",
+                max_turns=1,
+                gpu_lease=lease,
+            )
         )
     local_spawn.assert_not_called()
     if lease is not None:
@@ -108,14 +111,16 @@ async def test_specialist_scope_cancel_stops_before_harvest(monkeypatch, tmp_pat
         with use_cancel_scope(scope):
             run = asyncio.create_task(
                 dispatcher.run(
-                    task_id="running-specialist",
-                    workspace=tmp_path,
-                    worktree=None,
-                    worktree_base=None,
-                    system_prompt="system",
-                    user_prompt="user",
-                    max_turns=1,
-                    gpu_lease=lease,
+                    SpecialistSpawn(
+                        task_id="running-specialist",
+                        workspace=tmp_path,
+                        worktree=None,
+                        worktree_base=None,
+                        system_prompt="system",
+                        user_prompt="user",
+                        max_turns=1,
+                        gpu_lease=lease,
+                    )
                 )
             )
         await asyncio.wait_for(entered.wait(), 3)
@@ -281,15 +286,17 @@ async def test_ray_followup_ack_preserves_reap_outcome(monkeypatch, tmp_path, ph
     filename = "specialist_done.json" if phase in {"done", "natural"} else "specialist_done.partial.json"
     (tmp_path / filename).write_text(json.dumps(payload), encoding="utf-8")
     result = await dispatcher.run(
-        task_id="ray-reap-outcome",
-        workspace=tmp_path,
-        worktree=None,
-        worktree_base=None,
-        system_prompt="system",
-        user_prompt="user",
-        max_turns=1,
-        gpu_lease=lease,
-        deadline=Deadline.after(0 if phase == "timeout" else 600, now=100),
+        SpecialistSpawn(
+            task_id="ray-reap-outcome",
+            workspace=tmp_path,
+            worktree=None,
+            worktree_base=None,
+            system_prompt="system",
+            user_prompt="user",
+            max_turns=1,
+            gpu_lease=lease,
+            deadline=Deadline.after(0 if phase == "timeout" else 600, now=100),
+        )
     )
     assert result.timed_out is (phase == "timeout")
     assert result.stale_heartbeat is (phase == "stale")

@@ -42,6 +42,7 @@ from hyperloom.orchestrator.phases.machine_state import (
     compute_next_phase,
     record_phase_transition,
     workflow_predicate_inputs,
+    PhaseFlags,
 )
 from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_SKIP_TO_CLOSE, SharedState
 
@@ -59,9 +60,7 @@ def _writer_fixture(tmp_path, *, denied: bool) -> dict:
     state.save(tmp_path)
     predicate_inputs = workflow_predicate_inputs(
         SharedState(phase="PRELUDE", macro_cycle=0, baseline_tput=100.0),
-        kernel_enabled=True,
-        optimize_enabled=True,
-        enablement_enabled=True,
+        flags=PhaseFlags(kernel_enabled=True, optimize_enabled=True, enablement_enabled=True),
     )
     with session_scope(tmp_path):
         phase_event.record_entry(
@@ -209,7 +208,7 @@ def test_skip_to_close_without_baseline_exports_under_session_contract(tmp_path)
         # Open the segment whose exit evidence carries the frozen inputs.
         record_phase_transition(state, to_phase="ENABLEMENT", reason="phase_entered")
         state.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_CLOSE)
-        target, reason, evidence = compute_next_phase(state, enablement_enabled=True)
+        target, reason, evidence = compute_next_phase(state, flags=PhaseFlags(enablement_enabled=True))
         assert (target, reason) == ("CLOSE", "baseline_failed")
         assert evidence["baseline_tput"] == 0.0
         frozen = evidence["predicate_inputs"]["global"]

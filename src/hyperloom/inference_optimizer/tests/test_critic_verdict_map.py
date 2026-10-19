@@ -1852,6 +1852,12 @@ async def test_delegate_explore_with_grid_creates_task_directly(tmp_path: Path):
     create_calls: list[dict[str, Any]] = []
 
     class _TaskRegistry:
+        async def queued(self) -> list:
+            return []
+
+        async def running(self) -> list:
+            return []
+
         async def create_or_return_existing(self, **kwargs: Any):
             create_calls.append(dict(kwargs))
             from hyperloom.orchestrator.state.task_registry import Task
@@ -1900,6 +1906,12 @@ async def test_delegate_explore_seeds_the_stack_with_the_anchor(tmp_path: Path):
     created: list[dict[str, Any]] = []
 
     class _TaskRegistry:
+        async def queued(self) -> list:
+            return []
+
+        async def running(self) -> list:
+            return []
+
         async def create_or_return_existing(self, **kwargs: Any):
             created.append(dict(kwargs["params"]))
             from hyperloom.orchestrator.state.task_registry import Task

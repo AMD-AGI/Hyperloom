@@ -151,6 +151,30 @@ def test_the_round_rule_refuses_nothing_without_a_snapshot() -> None:
     _emit(_llm_gate(), IntentType.DELEGATE, {"action_name": "baseline", "params": {}})
 
 
+# -- send_message recipient shape -----------------------------------------
+def test_send_message_to_a_single_recipient_is_admitted() -> None:
+    """``to`` names one recipient; the inbox filter and the events row agree."""
+    _emit(_llm_gate(), IntentType.SEND_MESSAGE, {"to": "critic", "topic": "observation", "body_md": "x"})
+
+
+def test_send_message_without_to_broadcasts() -> None:
+    """An absent ``to`` is the broadcast form and stays admitted."""
+    _emit(_llm_gate(), IntentType.SEND_MESSAGE, {"topic": "observation", "body_md": "x"})
+
+
+@pytest.mark.parametrize("to", [["critic", "kernel_agent"], 3, {"agent": "critic"}, ""])
+def test_send_message_with_a_non_string_to_is_denied(to) -> None:
+    """A ``to`` the events row cannot bind is denied, not crashed on.
+
+    A JSON array of recipients is the shape a model reaches for to address
+    several agents at once; before the check it reached the events INSERT
+    and faulted the running phase event.
+    """
+    with pytest.raises(PolicyDenied) as excinfo:
+        _emit(_llm_gate(), IntentType.SEND_MESSAGE, {"to": to, "topic": "observation", "body_md": "x"})
+    assert excinfo.value.rule == "payload"
+
+
 # -- The prompt and the gate agree ----------------------------------------
 def test_the_prompt_never_advertises_an_action_the_gate_denies() -> None:
     """Ties the rendered per-phase sets to what the propose channel accepts."""
