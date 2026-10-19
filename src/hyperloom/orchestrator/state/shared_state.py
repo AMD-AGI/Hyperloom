@@ -29,6 +29,7 @@ if TYPE_CHECKING:  # import cycle: perf_metric is imported lazily at call time
     from hyperloom.common.perf_metric import GradedComparison
 
 from . import _profile_workload
+from ._explore_search_ledger import shape_explore_search
 from . import kernel_decision_settings as _kernel_decision_settings
 from ._shared_state.attempt_audit import _AUDIT_ACTIONS, _KEY_METRIC_MAP
 from ._shared_state.enablement_round import EnablementRound
@@ -143,6 +144,20 @@ def resolve_graded_comparison(
         keep_threshold_pct=keep_threshold_pct,
         degrade_reason=degrade_reason,
     )
+
+
+def _last_lifecycle_fields(last: Any) -> dict[str, Any]:
+    """Report the sequence, status and phase the most recent lifecycle row carries."""
+    if not isinstance(last, dict):
+        return {}
+    fields: dict[str, Any] = {}
+    if last.get("seq") is not None:
+        fields["last_seq"] = last.get("seq")
+    if last.get("status"):
+        fields["last_lifecycle_status"] = str(last.get("status"))
+    if last.get("phase"):
+        fields["last_lifecycle_phase"] = str(last.get("phase"))
+    return fields
 
 
 def _normalize_envs(value: Any) -> dict[str, str]:
@@ -923,10 +938,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             filtered["pending_kernel_integrations"] = {}
         if not isinstance(filtered.get("current_best"), dict):
             filtered["current_best"] = {}
-        # Normalize the unified ``explore_search`` ledger at load.
-        filtered["explore_search"] = cls._build_explore_search(
-            existing=filtered.get("explore_search"),
-        )
+        filtered["explore_search"] = shape_explore_search(filtered.get("explore_search"))
 
         if isinstance(filtered.get("enablement"), dict):
             filtered["enablement"] = EnablementRound.from_dict(filtered["enablement"])
@@ -936,70 +948,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         filtered["schema_version"] = LATEST_STATE_SCHEMA_VERSION
 
         return cls(**filtered)
-
-    @staticmethod
-    def _build_explore_search(
-        *,
-        existing: Any,
-    ) -> dict[str, Any]:
-        """Shape the unified ``explore_search`` ledger at load time."""
-        from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint as _fp
-
-        existing = existing if isinstance(existing, dict) else {}
-        out: dict[str, Any] = dict(existing)
-        out.setdefault("schema_version", 1)
-        out.setdefault("tested", {})
-        out.setdefault("accepted", [])
-        out.setdefault("rejected", [])
-        out.setdefault("domains_round_summary", [])
-        out.setdefault("name_index", {})
-        out.setdefault("cursor", len(out.get("tested") or {}))
-        out.setdefault("last_round", {})
-
-        # winners_history: normalize persisted rows, sorted by (round_id, ts).
-        wh: list[dict[str, Any]] = []
-        for source_list in (existing.get("winners_history") or [],):
-            if not isinstance(source_list, list):
-                continue
-            for entry in source_list:
-                if not isinstance(entry, dict):
-                    continue
-                controls: dict[str, Any] = {}
-                for key in ("remove_args", "unset_envs"):
-                    raw = entry.get(key)
-                    if isinstance(raw, str):
-                        vals = [raw.strip()] if raw.strip() else []
-                    elif isinstance(raw, (list, tuple, set)):
-                        vals = [str(v).strip() for v in raw if str(v).strip()]
-                    else:
-                        vals = []
-                    if vals:
-                        controls[key] = vals
-                mode = str(entry.get("args_mode") or "append").strip().lower()
-                if mode == "replace":
-                    controls["args_mode"] = "replace"
-                fp_val = entry.get("fingerprint") or _fp(
-                    str(entry.get("extra_server_args") or ""),
-                    dict(entry.get("extra_envs") or {}),
-                    **controls,
-                )
-                wh.append(
-                    {
-                        "round_id": str(entry.get("round_id") or ""),
-                        "variant_name": str(entry.get("variant_name") or entry.get("name") or ""),
-                        "fingerprint": str(fp_val),
-                        "gain_pct": entry.get("gain_pct"),
-                        "extra_args": str(entry.get("extra_args") or entry.get("extra_server_args") or ""),
-                        "extra_envs": dict(entry.get("extra_envs") or {}),
-                        **controls,
-                        "provenance": str(entry.get("provenance") or ""),
-                        "ts": str(entry.get("ts") or ""),
-                    }
-                )
-        wh.sort(key=lambda r: (str(r.get("round_id") or ""), str(r.get("ts") or "")))
-        out["winners_history"] = wh
-
-        return out
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize this state to a plain JSON-compatible dict."""
@@ -1094,10 +1042,9 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         except Exception:  # noqa: BLE001 — derived backfill, never blocks save
             pass
 
-    def _langfuse_status_summary(self) -> dict[str, Any]:
-        """Flatten the state into an OTEL-friendly scalar status snapshot."""
-        last = self.lifecycle[-1] if self.lifecycle else {}
-        summary: dict[str, Any] = {
+    def _session_status_fields(self) -> dict[str, Any]:
+        """Report the session's own scalar status: phase, stop reason, validated gain and workload identity."""
+        return {
             "phase": self.phase or "",
             "stop_reason": self.stop_reason or "",
             "closing_phase": bool(self.closing_phase),
@@ -1113,28 +1060,32 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             "framework": self.framework or os.environ.get("FRAMEWORK", "") or "",
             "kb_hit": str((self.warm_start_context or {}).get("status") or ""),
         }
+
+    def _explore_runtime_telemetry(self) -> dict[str, Any]:
+        """Report session and FRAMEWORK_AGENT elapsed seconds, and the share of the session spent exploring."""
+        telemetry: dict[str, Any] = {}
         try:
             from ..phases.machine_state import PHASE_FRAMEWORK_AGENT, phase_cumulative_seconds
 
             session_elapsed_s = max(0.0, self.elapsed_minutes() * 60.0)
-            summary["session_elapsed_s"] = int(round(session_elapsed_s))
+            telemetry["session_elapsed_s"] = int(round(session_elapsed_s))
             explore_elapsed_s = phase_cumulative_seconds(self, phase=PHASE_FRAMEWORK_AGENT)
-            summary["explore_elapsed_s"] = int(round(explore_elapsed_s))
-            summary["explore_ratio"] = (
+            telemetry["explore_elapsed_s"] = int(round(explore_elapsed_s))
+            telemetry["explore_ratio"] = (
                 round(explore_elapsed_s / session_elapsed_s, 4) if session_elapsed_s > 0.0 else 0.0
             )
         except Exception:
             log.debug("explore runtime telemetry derivation failed", exc_info=True)
+        return telemetry
+
+    def _langfuse_status_summary(self) -> dict[str, Any]:
+        """Flatten the state into an OTEL-friendly scalar status snapshot."""
+        summary = self._session_status_fields()
+        summary.update(self._explore_runtime_telemetry())
         tput = self.current_best.get("tput")
         if isinstance(tput, (int, float)) and not isinstance(tput, bool):
             summary["current_best_tput"] = round(float(tput), 1)
-        if isinstance(last, dict):
-            if last.get("seq") is not None:
-                summary["last_seq"] = last.get("seq")
-            if last.get("status"):
-                summary["last_lifecycle_status"] = str(last.get("status"))
-            if last.get("phase"):
-                summary["last_lifecycle_phase"] = str(last.get("phase"))
+        summary.update(_last_lifecycle_fields(self.lifecycle[-1] if self.lifecycle else {}))
         return {k: v for k, v in summary.items() if isinstance(v, (str, bool, int, float))}
 
     # Mutators (Coordinator only — LLM agents go via intents)
