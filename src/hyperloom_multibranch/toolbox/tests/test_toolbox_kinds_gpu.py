@@ -51,6 +51,7 @@ from hyperloom_multibranch.toolbox.local_hosted import (
 from hyperloom_multibranch.toolbox.planner import HostedPlanner
 from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
 from hyperloom_multibranch.toolbox.tests.helpers import FakeRepo, req
+from hyperloom_multibranch.toolbox.tools.op_shares import DEGRADED_NOTICE
 
 MODEL = os.environ.get("HL_W13_MODEL", "")
 INFERENCEX = os.environ.get("HL_W13_INFERENCEX", "")
@@ -308,6 +309,7 @@ async def test_a_profile_on_two_cards_is_analysed_by_the_real_tracelens_into_op_
             summary=pointer.summary,
             top_op_shares=sorted(pointer.op_shares.items(), key=lambda item: -item[1])[:5],
         )
+        assert DEGRADED_NOTICE not in pointer.summary, f"TraceLens report is degraded: {pointer.summary}"
         assert pointer.op_shares, f"TraceLens left no op shares: {pointer.summary}"
         assert pointer.commit_id == request.parent_commit and pointer.profile_request_id == request_id
         assert all(0.0 < share <= 100.0 for share in pointer.op_shares.values())
