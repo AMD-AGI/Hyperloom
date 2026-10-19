@@ -12,7 +12,7 @@ from collections.abc import Awaitable
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 from hyperloom.common.deadline import Deadline
 import logging as _logging
 from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close_out
@@ -71,6 +71,13 @@ def _task_is_dead(task: Task | None) -> bool:
     if task is None:
         return False
     return str(getattr(task, "state", "") or "") in _DEAD_TASK_STATES
+
+
+class CloseArtifact(NamedTuple):
+    """The file a close step produced, as the close-out records it."""
+
+    path: str = ""
+    digest: str = ""
 
 
 class ClosePhase(CoordinatorCollaborator):
@@ -378,8 +385,10 @@ class ClosePhase(CoordinatorCollaborator):
                     "report",
                     status="done",
                     task_id=report_task.task_id,
-                    artifact_path=str(_receipt_path.relative_to(Path(self.session_dir))) if _receipt_path else "",
-                    artifact_digest=hashlib.sha256(_receipt_path.read_bytes()).hexdigest() if _receipt_path else "",
+                    artifact=CloseArtifact(
+                        path=str(_receipt_path.relative_to(Path(self.session_dir))) if _receipt_path else "",
+                        digest=hashlib.sha256(_receipt_path.read_bytes()).hexdigest() if _receipt_path else "",
+                    ),
                 )
                 _close_out.record_close_artifacts(self.session_dir, final_json_path=_json_path, final_md_path=_md_path)
                 self._coord.writeback.emit_lifecycle(
@@ -409,7 +418,7 @@ class ClosePhase(CoordinatorCollaborator):
                 "session_breakdown",
                 status="done",
                 task_id=bd_task.task_id,
-                artifact_path=_close_out.SESSION_BREAKDOWN_PATH,
+                artifact=CloseArtifact(path=_close_out.SESSION_BREAKDOWN_PATH),
             )
         else:
             await self._record_close_step(
@@ -455,7 +464,7 @@ class ClosePhase(CoordinatorCollaborator):
             # receipt names the path only.
             _close_out.record_close_artifacts(self.session_dir, artifact_package_path=pkg_path)
             await self._record_close_step(
-                "artifact_package", status="done", detail=str(pkg_path), artifact_path=str(pkg_path)
+                "artifact_package", status="done", detail=str(pkg_path), artifact=CloseArtifact(path=str(pkg_path))
             )
         else:
             await self._record_close_step(
@@ -781,8 +790,7 @@ class ClosePhase(CoordinatorCollaborator):
         status: str,
         task_id: str = "",
         detail: str = "",
-        artifact_path: str = "",
-        artifact_digest: str = "",
+        artifact: CloseArtifact = CloseArtifact(),
     ) -> None:
         """Record one settled close step (best-effort, per-step persist).
 
@@ -802,8 +810,8 @@ class ClosePhase(CoordinatorCollaborator):
                 task_id=task_id,
                 detail=detail,
                 optional=step in _OPTIONAL_CLOSE_STEPS,
-                artifact_path=artifact_path,
-                artifact_digest=artifact_digest,
+                artifact_path=artifact.path,
+                artifact_digest=artifact.digest,
                 error=detail if status == "failed" else "",
             ),
         )
