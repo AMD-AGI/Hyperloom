@@ -759,6 +759,72 @@ def _create_patch_snapshot(
     return manifest
 
 
+def _snapshot_backup_bytes(row: dict[str, Any]) -> bytes:
+    """The content a snapshot row backed up for its path."""
+    return Path(str(row.get("backup") or "")).read_bytes()
+
+
+def _restore_worktree_path(target: Path, row: dict[str, Any]) -> None:
+    """Put one snapshotted path back on disk: its backed-up bytes and mode, or absent when it did not exist."""
+    if row.get("existed"):
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(_snapshot_backup_bytes(row))
+        if row.get("mode") is not None:
+            target.chmod(int(row["mode"]))
+    elif target.exists() or target.is_symlink():
+        target.unlink()
+
+
+def _restore_index_entry(repo: str, rel: str, entry: str) -> None:
+    """Put ``rel``'s git index entry back to ``entry``, removing it when the snapshot recorded none."""
+    if not entry:
+        subprocess.run(
+            ["git", "update-index", "--force-remove", "--", rel],
+            cwd=repo,
+            capture_output=True,
+            timeout=15,
+            check=True,
+        )
+        return
+    metadata, entry_path = entry.split("\t", 1)
+    mode, blob, stage = metadata.split()
+    if stage != "0" or entry_path != rel:
+        raise ValueError("unsupported pre-existing unmerged index entry")
+    subprocess.run(
+        ["git", "update-index", "--cacheinfo", mode, blob, rel],
+        cwd=repo,
+        capture_output=True,
+        timeout=15,
+        check=True,
+    )
+
+
+def _verify_restored_row(repo: str, row: dict[str, Any], entry: str) -> None:
+    """Raise unless the worktree bytes and the index entry came back exactly as the snapshot recorded them."""
+    rel = str(row.get("path") or "")
+    target = Path(repo) / rel
+    if row.get("existed"):
+        if not target.is_file() or target.read_bytes() != _snapshot_backup_bytes(row):
+            raise OSError("worktree restore verification failed")
+    elif target.exists() or target.is_symlink():
+        raise OSError("removed path still exists after restore")
+    if _index_entries(repo, [rel]).get(rel, "") != entry:
+        raise OSError("index restore verification failed")
+
+
+def _restore_snapshot_row(repo: str, row: dict[str, Any]) -> str:
+    """Restore one snapshotted path and its index entry; return why it failed, or ``""`` when it took."""
+    rel = str(row.get("path") or "")
+    entry = str(row.get("index_entry") or "").strip()
+    try:
+        _restore_worktree_path(Path(repo) / rel, row)
+        _restore_index_entry(repo, rel, entry)
+        _verify_restored_row(repo, row, entry)
+    except (OSError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        return f"{rel}:{type(exc).__name__}:{exc}"
+    return ""
+
+
 def _restore_patch_snapshot(manifest: Any) -> dict[str, Any]:
     """Restore exact touched paths/index entries; never reset unrelated work."""
     if isinstance(manifest, (str, Path)):
@@ -773,48 +839,9 @@ def _restore_patch_snapshot(manifest: Any) -> dict[str, Any]:
     for row in manifest.get("paths") or []:
         if not isinstance(row, dict):
             continue
-        rel = str(row.get("path") or "")
-        target = Path(repo) / rel
-        try:
-            if row.get("existed"):
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(Path(str(row.get("backup") or "")).read_bytes())
-                if row.get("mode") is not None:
-                    target.chmod(int(row["mode"]))
-            elif target.exists() or target.is_symlink():
-                target.unlink()
-            entry = str(row.get("index_entry") or "").strip()
-            if entry:
-                metadata, entry_path = entry.split("\t", 1)
-                mode, blob, stage = metadata.split()
-                if stage != "0" or entry_path != rel:
-                    raise ValueError("unsupported pre-existing unmerged index entry")
-                subprocess.run(
-                    ["git", "update-index", "--cacheinfo", mode, blob, rel],
-                    cwd=repo,
-                    capture_output=True,
-                    timeout=15,
-                    check=True,
-                )
-            else:
-                subprocess.run(
-                    ["git", "update-index", "--force-remove", "--", rel],
-                    cwd=repo,
-                    capture_output=True,
-                    timeout=15,
-                    check=True,
-                )
-            if row.get("existed"):
-                expected = Path(str(row.get("backup") or "")).read_bytes()
-                if not target.is_file() or target.read_bytes() != expected:
-                    raise OSError("worktree restore verification failed")
-            elif target.exists() or target.is_symlink():
-                raise OSError("removed path still exists after restore")
-            actual_index = _index_entries(repo, [rel]).get(rel, "")
-            if actual_index != entry:
-                raise OSError("index restore verification failed")
-        except (OSError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-            errors.append(f"{rel}:{type(exc).__name__}:{exc}")
+        failure = _restore_snapshot_row(repo, row)
+        if failure:
+            errors.append(failure)
     return {"ok": not errors, "errors": errors}
 
 

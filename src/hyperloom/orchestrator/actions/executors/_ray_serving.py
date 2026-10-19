@@ -12,7 +12,7 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, NoReturn
 
 from hyperloom.common.env_safety import scrub_benchmark_process_env
 from hyperloom.common.visible_devices import COUNTING_VISIBLE_DEVICE_VARS
@@ -758,44 +758,7 @@ class ServingLease:
                 # process-tree machinery, not to a timeout path; say plainly what may have been left behind so an
                 # operator can look.
                 if timed_out:
-                    # Deliberately NOT killing the actor. ``ray.kill`` runs
-                    # neither ``__ray_terminate__`` nor atexit, so a round that
-                    # really is still running keeps its server subprocesses --
-                    # but killing the actor hands its GPUs straight back to the
-                    # scheduler, and the next round would be placed on cards a
-                    # live server still maps. That trades a bounded wait for
-                    # concurrent GPU use, which corrupts quietly.
-                    #
-                    # Leaving the actor alive keeps those devices reserved, so
-                    # nothing else can be placed on them. The cost is that they
-                    # stay out of circulation until the session ends or an
-                    # operator intervenes -- the same asymmetry the lane leases
-                    # settle on: a resource stuck is recoverable, a resource
-                    # shared is not.
-                    self._abandon_ref(ref)
-                    # Declared here, honoured by ensure(), run_session_kill() and
-                    # close(). Declaring it without those would be the same
-                    # half-measure a prior revision shipped: the quarantine held
-                    # inside this method while the caller's finally: close() went
-                    # on to kill the actor anyway.
-                    self._quarantined = _round_label(cmd)
-                    # Outlives this lease object on purpose; see _QUARANTINED_ACTORS.
-                    if self._actor is not None and self._actor not in _QUARANTINED_ACTORS:
-                        _QUARANTINED_ACTORS.append(self._actor)
-                    log.warning(
-                        "ServingLease: abandoning round %s after %.0fs without a response, and KEEPING its actor "
-                        "alive on purpose: its subprocess tree cannot be confirmed gone, so its GPUs stay reserved "
-                        "rather than being returned to the scheduler. They will not be reusable until this session "
-                        "ends; if you need them sooner, confirm no server of that round survives and kill the actor "
-                        "by hand",
-                        _round_label(cmd),
-                        time.monotonic() - started_at,
-                    )
-                    raise subprocess.TimeoutExpired(
-                        cmd,
-                        wait_ceiling,
-                        stderr=_round_wait_timeout_stderr(time.monotonic() - started_at, wait_ceiling),
-                    )
+                    self._quarantine_unresponsive_round(ref, cmd, wait_ceiling=wait_ceiling, started_at=started_at)
                 # The cancel path keeps the behaviour it had on main: an operator
                 # or a shutdown asked for this, and the caller is waiting on the
                 # teardown rather than on a round.
@@ -810,6 +773,48 @@ class ServingLease:
                     "the orchestrator cancelled this action; its Ray actor was killed after "
                     f"{CANCEL_ROUND_GRACE_SEC:.0f}s without returning the round",
                 )
+
+    def _quarantine_unresponsive_round(
+        self,
+        ref: Any,
+        cmd: list[str],
+        *,
+        wait_ceiling: float,
+        started_at: float,
+    ) -> NoReturn:
+        """Give up on a round that outlived its ceiling, keeping its actor alive, and raise the caller's timeout.
+
+        Deliberately NOT killing the actor. ``ray.kill`` runs neither ``__ray_terminate__`` nor atexit, so a round
+        that really is still running keeps its server subprocesses -- but killing the actor hands its GPUs straight
+        back to the scheduler, and the next round would be placed on cards a live server still maps. That trades a
+        bounded wait for concurrent GPU use, which corrupts quietly. Leaving the actor alive keeps those devices
+        reserved, so nothing else can be placed on them. The cost is that they stay out of circulation until the
+        session ends or an operator intervenes -- the same asymmetry the lane leases settle on: a resource stuck is
+        recoverable, a resource shared is not.
+
+        Raises:
+            subprocess.TimeoutExpired: Always; the round is the caller's timeout.
+        """
+        self._abandon_ref(ref)
+        # Declared here, honoured by ensure(), run_session_kill() and close().
+        self._quarantined = _round_label(cmd)
+        # Outlives this lease object on purpose; see _QUARANTINED_ACTORS.
+        if self._actor is not None and self._actor not in _QUARANTINED_ACTORS:
+            _QUARANTINED_ACTORS.append(self._actor)
+        log.warning(
+            "ServingLease: abandoning round %s after %.0fs without a response, and KEEPING its actor "
+            "alive on purpose: its subprocess tree cannot be confirmed gone, so its GPUs stay reserved "
+            "rather than being returned to the scheduler. They will not be reusable until this session "
+            "ends; if you need them sooner, confirm no server of that round survives and kill the actor "
+            "by hand",
+            _round_label(cmd),
+            time.monotonic() - started_at,
+        )
+        raise subprocess.TimeoutExpired(
+            cmd,
+            wait_ceiling,
+            stderr=_round_wait_timeout_stderr(time.monotonic() - started_at, wait_ceiling),
+        )
 
     def _abandon_ref(self, ref: Any) -> None:
         """Drop a round this lease will never collect. Never raises."""

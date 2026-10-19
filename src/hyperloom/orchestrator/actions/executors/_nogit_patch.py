@@ -13,7 +13,7 @@ import subprocess
 from hyperloom.common.git_safety import safe_directory_args
 from hyperloom.common.unified_diff import parse_patch_manifest, strip_path_components
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from ...delivery.ledger import append_record, mark_prepared
 from ...delivery import file_digest as _file_digest
@@ -133,6 +133,44 @@ def _reverse_applies_cleanly(framework_root: Path, patch_path: Path) -> bool:
     return False
 
 
+class _StripLevelProbe(NamedTuple):
+    """What the forward ``patch --dry-run`` sweep over the candidate ``-p`` levels found."""
+
+    #: The first level that applied cleanly, or ``None`` when none did.
+    level: int | None
+    tried_levels: list[int]
+    #: One line per level probed, for the feedback a failed apply carries back to the author.
+    stderrs: list[str]
+    #: Why the sweep stopped early; empty when every candidate level was probed.
+    cli_error: str
+
+
+def _detect_strip_level(framework_root: Path, patch_path: Path) -> _StripLevelProbe:
+    """Probe the candidate ``-p`` levels and report the first one a forward dry run accepts."""
+    tried_levels: list[int] = []
+    stderrs: list[str] = []
+    for lvl in _P_LEVELS:
+        tried_levels.append(lvl)
+        try:
+            cp = subprocess.run(
+                ["patch", f"-p{lvl}", "--dry-run", "-i", str(patch_path)],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+                cwd=str(framework_root),
+                # ``patch`` prompts ("Assume -R? [n]") on an already-applied hunk; without a closed stdin it can
+                # inherit the parent's and block until the 60s timeout.
+                stdin=subprocess.DEVNULL,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            return _StripLevelProbe(None, tried_levels, stderrs, f"patch CLI unavailable or timed out: {exc}")
+        stderrs.append(f"-p{lvl}: {cp.stderr.strip()}" if cp.stderr.strip() else f"-p{lvl}: (no stderr)")
+        if cp.returncode == 0:
+            return _StripLevelProbe(lvl, tried_levels, stderrs, "")
+    return _StripLevelProbe(None, tried_levels, stderrs, "")
+
+
 def _bak_name(patch_stem: str, rel_target: Path, seq: int) -> str:
     """Return a backup filename unique within a shared ``backup_root``."""
     flat = _UNSAFE_NAME_RE.sub("_", str(rel_target))
@@ -182,37 +220,16 @@ def _apply_patch_no_git(
             patch_path.name,
         )
 
-    # Detect strip level via dry-run; accumulate stderr per level for feedback.
-    detected_level: int | None = None
-    dry_run_stderrs: list[str] = []
-    tried_levels: list[int] = []
-    for lvl in _P_LEVELS:
-        tried_levels.append(lvl)
-        try:
-            cp = subprocess.run(
-                ["patch", f"-p{lvl}", "--dry-run", "-i", str(patch_input)],
-                capture_output=True,
-                text=True,
-                timeout=60,
-                check=False,
-                cwd=str(framework_root),
-                # ``patch`` prompts ("Assume -R? [n]") on an already-applied hunk; without a closed stdin it can
-                # inherit the parent's and block until the 60s timeout.
-                stdin=subprocess.DEVNULL,
-            )
-        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-            err_msg = f"patch CLI unavailable or timed out: {exc}"
-            feedback = ApplyFeedback(
-                patch=str(patch_path),
-                channel="nogit",
-                tried_levels=tried_levels,
-                stderr=err_msg,
-            )
-            return False, err_msg, [], feedback
-        dry_run_stderrs.append(f"-p{lvl}: {cp.stderr.strip()}" if cp.stderr.strip() else f"-p{lvl}: (no stderr)")
-        if cp.returncode == 0:
-            detected_level = lvl
-            break
+    probe = _detect_strip_level(framework_root, patch_input)
+    detected_level, tried_levels = probe.level, probe.tried_levels
+    if probe.cli_error:
+        feedback = ApplyFeedback(
+            patch=str(patch_path),
+            channel="nogit",
+            tried_levels=tried_levels,
+            stderr=probe.cli_error,
+        )
+        return False, probe.cli_error, [], feedback
     if detected_level is None:
         # Before reporting failure, distinguish "does not apply" from "already
         # applied". A specialist commonly writes a superset patch AND the subset
@@ -244,7 +261,7 @@ def _apply_patch_no_git(
                 patch_path.name,
             )
             return True, "", [], None
-        combined_stderr = "\n".join(dry_run_stderrs)
+        combined_stderr = "\n".join(probe.stderrs)
         err_msg = f"patch --dry-run failed at all strip levels for {patch_path.name}"
         source_ctx = read_patch_source_context(patch_text, framework_root, radius=50)
         feedback = ApplyFeedback(
