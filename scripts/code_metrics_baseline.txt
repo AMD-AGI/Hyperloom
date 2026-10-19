@@ -162,7 +162,7 @@ cognitive-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase.pr
 cognitive-complexity src/hyperloom/orchestrator/phases/kernel_stack.py::KernelStackPhase._run_kernel_stack_validation_e2e 62
 cognitive-complexity src/hyperloom/orchestrator/phases/kernel_stack.py::KernelStackPhase.drain_pending_keep_integrates 32
 cognitive-complexity src/hyperloom/orchestrator/phases/machine_state.py::kernel_work_pending 38
-cognitive-complexity src/hyperloom/orchestrator/phases/machine_state.py::replay_next_phase 83
+cognitive-complexity src/hyperloom/orchestrator/phases/machine_state.py::replay_next_phase 82
 cognitive-complexity src/hyperloom/orchestrator/phases/macro_cycle.py::MacroCycleCollaborator.plan_cycle_focus 41
 cognitive-complexity src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._collect_warm_kernel_plan 42
 cognitive-complexity src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._judge_warm_replay_accuracy 33
@@ -768,7 +768,7 @@ function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase.promote_
 function-lines src/hyperloom/orchestrator/phases/kernel_stack.py::KernelStackPhase._run_kernel_stack_validation_e2e 220
 function-lines src/hyperloom/orchestrator/phases/machine.py::MachinePhase.advance_phase_if_needed 149
 function-lines src/hyperloom/orchestrator/phases/machine_state.py::record_phase_transition 87
-function-lines src/hyperloom/orchestrator/phases/machine_state.py::replay_next_phase 167
+function-lines src/hyperloom/orchestrator/phases/machine_state.py::replay_next_phase 165
 function-lines src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._judge_warm_replay_accuracy 123
 function-lines src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._prepare_warm_kernel_kb 269
 function-lines src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._settle_warm_replay 388

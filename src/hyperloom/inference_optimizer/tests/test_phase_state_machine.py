@@ -20,7 +20,7 @@ from hyperloom.orchestrator.policy.gate import (
     PolicyGate,
 )
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
-from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_SKIP_TO_CLOSE, SharedState
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 
 from ._geak_helpers import stop_geak_before_launch
@@ -266,6 +266,38 @@ def test_the_initial_roofline_wait_stops_at_the_optimization_reserve():
     assert phase_state.replay_next_phase(out[2]["predicate_inputs"]) == out
     state.session_budget_usable_sec = lambda: 6_000.0
     assert phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(kernel_enabled=True)) is None
+
+
+def test_a_close_hint_during_the_hold_does_not_end_the_session_before_optimizing():
+    """An agent that read the held phase's spent share as a spent session asked to close; PRELUDE exits normally."""
+    state = _prelude_state(usable_sec=10_000.0, baseline_tput=1074.7, auto_roofline_pending_task_id="rl-1")
+    state.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_CLOSE)
+    flags = phase_state.PhaseFlags(kernel_enabled=True)
+    assert phase_state.compute_next_phase(state, flags=flags) is None
+    state.auto_roofline_pending_task_id = ""
+    out = phase_state.compute_next_phase(state, flags=flags)
+    assert out is not None and out[:2] == (phase_state.PHASE_FRAMEWORK_AGENT, "prelude_done")
+    assert "hint" not in out[2]
+    assert phase_state.replay_next_phase(out[2]["predicate_inputs"]) == out
+
+
+def test_a_close_hint_before_any_baseline_still_closes_prelude():
+    state = _prelude_state(usable_sec=10_000.0)
+    state.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_CLOSE)
+    out = phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(kernel_enabled=True))
+    assert out is not None and out[:2] == (phase_state.PHASE_CLOSE, "baseline_failed")
+
+
+def test_the_status_block_says_a_held_prelude_is_not_out_of_session_time():
+    state = _prelude_state(usable_sec=10_000.0, baseline_tput=1074.7, auto_roofline_pending_task_id="rl-1")
+    hold = [line for line in phase_state.phase_status_summary(state).splitlines() if line.startswith("hold")]
+    # 10000 s usable minus the 5400 s optimization reserve of a 180 min session.
+    assert hold == [
+        "hold      : waiting for up to 4600s for the initial roofline; remaining_sec above is this phase's share, "
+        "not the session's, and the optimization phases follow"
+    ]
+    state.auto_roofline_pending_task_id = ""
+    assert "hold" not in phase_state.phase_status_summary(state)
 
 
 def test_prelude_exit_states_whether_one_optimization_round_still_fits():
