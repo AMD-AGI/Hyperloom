@@ -24,7 +24,7 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
     derive_journal_outcome,
     summarize_change,
 )
-from hyperloom.orchestrator.knowledge.recipe_kb import recipe_canonical_id
+from hyperloom.orchestrator.knowledge.recipe_kb import LocalRecipeStoreError, recipe_canonical_id
 from hyperloom.orchestrator.knowledge.workload_tags import workload_shape_tags
 from hyperloom.orchestrator.lever import LEVER_CONFIG, lever_kind_for_task
 
@@ -564,47 +564,50 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         if fact.variant_name is not None:
             provenance_base["source_variant_name"] = fact.variant_name
 
-        if fact.is_keep and fact.gain_pct is not None and fact.gain_pct > 0:
-            statement = self._build_statement(
-                change=fact.change,
-                kind="lesson",
-            )
-            impact = self._build_measured_impact(
-                gain_pct=fact.gain_pct,
-                throughput_after=fact.throughput_after,
-                stack_depth=len(self.shared_state.optimization_stack or []),
-                measured_at=now_iso,
-            )
-            live = self.read_local_recipe_row()
-            recipe_overrides = self.kb_best_config_overrides_for_keep(
-                live=live,
-                best_config_candidate=fact.best_config_candidate,
-                throughput_after=fact.throughput_after,
-            )
-            self.kb_amend_recipe(
-                append_lesson={
-                    "statement": statement,
-                    "measured_impact": impact,
-                },
-                recipe_overrides=recipe_overrides or None,
-                provenance_details=provenance_base,
-            )
-            return
+        try:
+            if fact.is_keep and fact.gain_pct is not None and fact.gain_pct > 0:
+                statement = self._build_statement(
+                    change=fact.change,
+                    kind="lesson",
+                )
+                impact = self._build_measured_impact(
+                    gain_pct=fact.gain_pct,
+                    throughput_after=fact.throughput_after,
+                    stack_depth=len(self.shared_state.optimization_stack or []),
+                    measured_at=now_iso,
+                )
+                live = self.read_local_recipe_row()
+                recipe_overrides = self.kb_best_config_overrides_for_keep(
+                    live=live,
+                    best_config_candidate=fact.best_config_candidate,
+                    throughput_after=fact.throughput_after,
+                )
+                self.kb_amend_recipe(
+                    append_lesson={
+                        "statement": statement,
+                        "measured_impact": impact,
+                    },
+                    recipe_overrides=recipe_overrides or None,
+                    provenance_details=provenance_base,
+                )
+                return
 
-        severity = self._pitfall_severity_for(fact.pitfall_severity_dict)
-        if severity is not None:
-            description = self._build_statement(
-                change=fact.change,
-                severity=severity,
-                kind="pitfall",
-            )
-            self.kb_amend_recipe(
-                append_pitfall={
-                    "description": description,
-                    "severity": severity,
-                },
-                provenance_details=provenance_base,
-            )
+            severity = self._pitfall_severity_for(fact.pitfall_severity_dict)
+            if severity is not None:
+                description = self._build_statement(
+                    change=fact.change,
+                    severity=severity,
+                    kind="pitfall",
+                )
+                self.kb_amend_recipe(
+                    append_pitfall={
+                        "description": description,
+                        "severity": severity,
+                    },
+                    provenance_details=provenance_base,
+                )
+        except (LocalRecipeStoreError, OSError, ValueError) as error:
+            log.warning("recipe KB write for task %s failed: %s", fact.task.task_id, error)
 
     def _record_fact_per_task(
         self,

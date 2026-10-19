@@ -20,6 +20,7 @@ from hyperloom.orchestrator.roles.mock_backend import (
 from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
 from hyperloom.orchestrator.knowledge.recipe_kb import (
     LocalRecipeStore,
+    LocalRecipeStoreError,
     RecipeKB,
     recipe_canonical_id,
 )
@@ -978,3 +979,66 @@ def test_finalize_reports_error_when_put_recipe_fails(tmp_path: Path) -> None:
         "result_type": _close_out.RESULT_TRANSPORT_FAILED,
         "error_class": "OSError",
     }
+
+
+def _fact_write_for_three_kept_variants(coord) -> None:
+    import asyncio
+    from types import SimpleNamespace
+
+    from hyperloom.inference_optimizer.session.optimization_journal import Verdict
+
+    task = SimpleNamespace(kind="explore", task_id="t-ledger", params={})
+    variants = [
+        {
+            "variant_name": f"v{i}",
+            "outcome": "KEEP",
+            "fingerprint": f"fp{i}",
+            "variant": {"extra_server_args": f"--flag-{i}"},
+            "metrics": {"base_tput": 100.0, "tput": 110.0, "gain_pct": 10.0},
+        }
+        for i in range(3)
+    ]
+    asyncio.run(
+        coord.recipe_journal.fact_write_hook(
+            task=task,
+            result={"round_id": "explore-001", "per_variant_outcomes": variants},
+            verdict=Verdict.ADOPTED,
+            adopted_variants={"fp0", "fp1", "fp2"},
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("method", "failure"),
+    [
+        ("put_recipe", OSError("disk full")),
+        ("get_authoritative_recipe", LocalRecipeStoreError("recipe row is corrupt")),
+        ("get_authoritative_recipe", ValueError("not valid json")),
+    ],
+    ids=["write-os-error", "read-store-error", "read-value-error"],
+)
+def test_fact_write_hook_records_every_variant_when_the_recipe_store_fails(tmp_path: Path, method, failure) -> None:
+    """A cross-session KB failure must not cost the session its later variants' rows."""
+    coord = _make_coordinator(tmp_path)
+
+    def _boom(**_kwargs):
+        raise failure
+
+    setattr(coord.recipe_kb, method, _boom)
+
+    _fact_write_for_three_kept_variants(coord)
+
+    assert [row["variant_name"] for row in coord.shared_state.attempts] == ["v0", "v1", "v2"]
+    assert [entry.variant_name for entry in coord.recipe_journal.ensure_journal().entries] == ["v0", "v1", "v2"]
+
+
+def test_fact_write_hook_lets_an_unexpected_recipe_store_error_propagate(tmp_path: Path) -> None:
+    coord = _make_coordinator(tmp_path)
+
+    def _boom(**_kwargs):
+        raise TypeError("put_recipe signature drifted")
+
+    coord.recipe_kb.put_recipe = _boom
+
+    with pytest.raises(TypeError, match="put_recipe signature drifted"):
+        _fact_write_for_three_kept_variants(coord)
