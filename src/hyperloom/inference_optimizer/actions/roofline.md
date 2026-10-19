@@ -59,17 +59,14 @@ current `analysis.md` snapshot and resource conflicts (concurrent
 profile / kernel work on the same GPU) are serialised by the lane /
 GPU lease rather than a policy deny.
 
-## PolicyGate denies LLM proposals
+## Coordinator-owned: not LLM-proposable
 
-`propose_action{action_name='roofline'|'profile'}` and
-`delegate{action_name='roofline'|'profile'}` are denied at PolicyGate
-with `rule='phase_incompatible'`: both names are Coordinator-managed
-and absent from `PHASE_LLM_PROPOSABLE_ACTIONS`, so the single LLM-
-facing R1 phase rule rejects any LLM-side proposal. To run a profile
-instead of a full roofline, the operator launches with
-`--no-enable-roofline` (the Coordinator then auto-enqueues a `profile`
-task in PRELUDE and at every watermark crossing); there is no
-LLM-driven path.
+`roofline` and `profile` are Coordinator-managed actions. They are not
+in the LLM-proposable action set for any phase, so any LLM proposal for
+either is denied at PolicyGate with `rule="coordinator_managed_action"`. To run a plain profile instead of a full roofline,
+the operator launches with `--no-enable-roofline` (the Coordinator then
+auto-enqueues a `profile` task in PRELUDE and at every watermark
+crossing); there is no LLM-driven path.
 
 ## Failure semantics
 
@@ -79,13 +76,14 @@ Either sub-step failing causes the whole `roofline` task to fail:
   `error_class=profile_failed`; no `last_profile_trace` update.
 * `trace_analyze` failure (after profile succeeded) →
   `roofline.status=failed` with `error_class=trace_analyze_failed`;
-  `last_profile_trace` **is** updated (profile artifact is still
-  valuable) but no `last_trace_analyze` cache.
+  `last_profile_trace` and `last_trace_analyze` keep the previous
+  successful pair, because a trace is recorded only together with its
+  analysis.
 
-Profile startup retries use the existing bounded Roofline retry policy.
-TraceLens may also re-analyze the same trace once with an alternate
+The profile runs once; a failed profile is not re-run with the same
+configuration. TraceLens may re-analyze the same trace once with an alternate
 steady-state mode when its first selected chunk is missing, empty, or
-low-quality. If those bounded retries fail, the roofline fails and does not
+low-quality. If that re-analysis fails, the roofline fails and does not
 fall back to the raw, non-steady trace. A failed roofline does not block
 downstream dispatch; later Coordinator refresh conditions may enqueue a fresh
 analysis task.

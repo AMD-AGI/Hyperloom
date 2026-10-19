@@ -12,22 +12,32 @@ import os
 import shlex
 import subprocess
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 import yaml
 
 from hyperloom.common.env_safety import build_benchmark_env
 from hyperloom.common.jsonio import read_json
 from hyperloom.common.visible_devices import VISIBLE_DEVICE_VARS, effective_mask_tokens, is_rocr_level
-from hyperloom.orchestrator.loop.coordinator_helpers import (
+from hyperloom.orchestrator.kernel.geak_config import (
     _accepted_config_as_variant,
-    _coerce_tp,
-    _resolve_gpu_pin,
+)
+from hyperloom.orchestrator.actions.executors._gpu_pin import (
+    coerce_tp,
+    resolve_gpu_pin,
     _resolve_handoff_gpu_ids,
     _resolve_handoff_gpu_ids_space,
 )
 from ._accuracy_gate import parse_eval_results
+from ._gpu_power import (
+    ServerLogPhaseDriver,
+    build_gpu_power_recorder,
+    read_measured_gpu_power,
+    read_measured_gpu_power_by_gpu,
+)
+from ._subprocess_kill import _scan_logs_increment
 from ._launch_evidence import build_launch_evidence, persist_launch_evidence
+from ._workload_envs import GEAK_METRIC_OUTPUT
 
 log = logging.getLogger(__name__)
 
@@ -80,19 +90,56 @@ def _parse_isl_osl(spec: str) -> tuple[int, int]:
 
 def _geak_replay_server_log(out_dir: Path) -> str | None:
     """Return the newest server log created inside this replay's output only."""
-    candidates = [out_dir / "server.log"]
     try:
-        candidates.extend(out_dir.glob("replica_*/attempt_*/server.log"))
+        existing = _replay_server_logs(out_dir)
+        return max(existing, key=lambda path: Path(path).stat().st_mtime) if existing else None
     except OSError:
-        # Replay-log discovery is best effort; retain the direct log candidate.
-        logging.debug("Unable to enumerate GEAK replica server logs", exc_info=True)
-    existing = [path for path in candidates if path.is_file()]
-    if not existing:
+        # Replay-log discovery is best effort.
+        logging.debug("Unable to enumerate GEAK replay server logs", exc_info=True)
         return None
+
+
+def _replay_server_logs(out_dir: Path) -> list[str]:
+    """Every server log this replay has written so far, oldest first: one per replica boot."""
+    candidates = [out_dir / "server.log", *sorted(out_dir.glob("replica_*/attempt_*/server.log"))]
+    return [str(path) for path in candidates if path.is_file()]
+
+
+def _run_with_power_sampling(
+    run: Callable[[], subprocess.CompletedProcess], out_dir: Path, env: Mapping[str, str], entry: dict[str, Any]
+) -> subprocess.CompletedProcess:
+    """Run one replay under the power recorder and record its measured power into ``entry``.
+
+    Both power fields stay ``None`` when sampling is off, nothing was measured, or the replay raised.
+    """
+    entry.update(gpu_power_avg_w=None, gpu_power_by_gpu_w=None)
+    proc = _run_sampled(run, out_dir, env)
+    entry["gpu_power_avg_w"] = read_measured_gpu_power(out_dir)[1]
+    entry["gpu_power_by_gpu_w"] = read_measured_gpu_power_by_gpu(out_dir)[1]
+    return proc
+
+
+def _run_sampled(
+    run: Callable[[], subprocess.CompletedProcess], out_dir: Path, env: Mapping[str, str]
+) -> subprocess.CompletedProcess:
+    """Run one replay with the measured-phase power recorder a native round gets.
+
+    The replay boots its own servers, so the watchdog's phase marks are not available; the driver reads the same
+    ready / warmup / measured / eval markers from the logs the replay writes. Writes ``gpu_power.json`` into
+    ``out_dir`` whenever sampling is on.
+    """
+    recorder = build_gpu_power_recorder(str(out_dir / "server.log"), dict(env))
+    if recorder is None:
+        return run()
+    driver = ServerLogPhaseDriver(recorder, lambda: _replay_server_logs(out_dir), scan=_scan_logs_increment)
+    driver.start()
     try:
-        return str(max(existing, key=lambda path: path.stat().st_mtime))
-    except OSError:
-        return None
+        return run()
+    finally:
+        try:
+            driver.stop()
+        finally:
+            recorder.close()
 
 
 def _replay_serving_env(handoff: Mapping[str, Any], env_spec: Mapping[str, Any]) -> dict[str, str]:
@@ -109,10 +156,10 @@ def _replay_serving_env(handoff: Mapping[str, Any], env_spec: Mapping[str, Any])
         raise ValueError("invalid_replay_recipe_envs")
     frozen = bool(handoff or benchmark)
     legacy_env = {} if frozen else os.environ
-    tp = _coerce_tp(handoff.get("tp"), recipe_envs.get("TP"), legacy_env.get("TP"))
+    tp = coerce_tp(handoff.get("tp"), recipe_envs.get("TP"), legacy_env.get("TP"))
     pin = handoff.get("gpu_pin")
     if not isinstance(pin, dict):
-        pin = _resolve_gpu_pin(recipe_envs=recipe_envs, environ=legacy_env)
+        pin = resolve_gpu_pin(recipe_envs=recipe_envs, environ=legacy_env)
     gpu_ids = ",".join(effective_mask_tokens(handoff.get("gpu_ids"))) or _resolve_handoff_gpu_ids(gpu_pin=pin, tp=tp)
     space = str(handoff.get("gpu_ids_space") or _resolve_handoff_gpu_ids_space(gpu_pin=pin))
     if space not in {"absolute", "logical"} or _resolve_handoff_gpu_ids_space(gpu_pin=pin) == "none":
@@ -141,6 +188,19 @@ def _replay_serving_env(handoff: Mapping[str, Any], env_spec: Mapping[str, Any])
     }
 
 
+def _replay_point_failure(
+    proc: subprocess.CompletedProcess, tput: object, basis: str, requested_basis: str
+) -> dict[str, str] | None:
+    """The fields of a replayed point that does not count, or ``None`` when it measured the requested basis."""
+    measured = proc.returncode == 0 and isinstance(tput, (int, float)) and tput > 0
+    if not measured:
+        return {"status": "failed", "error": (proc.stderr or "")[-500:] or "no throughput"}
+    if basis != requested_basis:
+        error = f"measured {basis}, not the requested {requested_basis}"
+        return {"status": "failed", "error": error, "metric_basis": basis}
+    return None
+
+
 async def sweep_via_geak(
     *,
     result: dict[str, Any],
@@ -152,9 +212,16 @@ async def sweep_via_geak(
     pin_num_prompts: bool = False,
     handoff: Mapping[str, Any] | None = None,
     env_spec: Mapping[str, Any] | None = None,
+    metric_axis: tuple[str, str] = GEAK_METRIC_OUTPUT,
 ) -> dict[str, Any]:
-    """Run a CONC × (ISL, OSL) sweep on the GEAK-optimized server."""
+    """Run a CONC × (ISL, OSL) sweep on the GEAK-optimized server.
+
+    ``metric_axis`` is the ``(E2E_METRIC, metric_basis)`` pair from ``geak_metric_axis``. Every point is measured
+    on it, and a point whose summary records another basis fails: a GEAK that cannot measure the requested axis
+    and falls back to another would otherwise have that number rank the points.
+    """
     handoff = handoff or {}
+    e2e_metric, requested_basis = metric_axis
     bench_client = str(result.get("bench_client") or "native").strip() or "native"
     bench_script = result.get("bench_script") or result.get("geak_bench_script")
     final_launch_script = str(result.get("final_launch_script") or "").strip()
@@ -247,6 +314,7 @@ async def sweep_via_geak(
                     "EXTRA_SERVER_ARGS": flags,
                     "EXTRA_ENV": env_str,
                     "BENCH_CLIENT": bench_client,
+                    "E2E_METRIC": e2e_metric,
                 }
             )
             for name in VISIBLE_DEVICE_VARS:
@@ -283,32 +351,39 @@ async def sweep_via_geak(
             }
             ttft = tpot = e2el = None
             tput = None
+            basis = ""
             succeeded = False
             err: str | None = None
             try:
-                proc = await asyncio.to_thread(_run)
+                proc = await asyncio.to_thread(_run_with_power_sampling, _run, out_dir, env, entry)
                 summ = read_json(out_dir / "bench_summary.json", default={}, require_dict=True)
                 # ``throughput_tok_s_median`` is the metric-neutral median of
-                # whatever basis GEAK measured, and the only field populated in
-                # both modes: bench_e2e.sh nulls the output-named alias under
-                # E2E_METRIC=total precisely so nobody reads total throughput
-                # under an "output" name. In output mode the two are the same
-                # number, so this keeps synthetic sweeps byte-identical while
-                # letting an agentic one report at all. The output-named field
-                # stays as the fallback for summaries written before it existed.
+                # whatever basis GEAK measured, and the only field populated on
+                # every axis: GEAK nulls the output-named alias off the output
+                # axis precisely so nobody reads another axis under an "output"
+                # name. On output the two are the same number, so synthetic
+                # sweeps stay byte-identical. The output-named field stays as the
+                # fallback for summaries written before the neutral one existed.
                 tput = summ.get("throughput_tok_s_median")
                 if tput is None:
                     tput = summ.get("output_throughput_tok_s_median")
+                # A summary that names no basis predates the field and was measured on output.
+                basis = str(summ.get("metric_basis") or GEAK_METRIC_OUTPUT[1])
                 ttft = summ.get("ttft_ms_median")
                 tpot = summ.get("tpot_ms_median")
                 e2el = summ.get("e2el_ms_median")
-                if proc.returncode == 0 and isinstance(tput, (int, float)) and tput > 0:
+                failure = _replay_point_failure(proc, tput, basis, requested_basis)
+                if failure is None:
                     succeeded = True
                     evaluation = parse_eval_results(out_dir, framework=backend)
                     entry.update(
                         {
                             "status": "succeeded",
-                            "output_throughput": tput,
+                            "measured_value": tput,
+                            "metric_basis": basis,
+                            # ``output_throughput`` is GRADED_OUTPUT, which the perf snapshot reads, so a number on
+                            # any other axis published under it would be recorded as the session's output throughput.
+                            **({"output_throughput": tput} if basis == GEAK_METRIC_OUTPUT[1] else {}),
                             "ttft_mean_ms": ttft,
                             "tpot_mean_ms": tpot,
                             "accuracy": evaluation.get("accuracy"),
@@ -316,8 +391,8 @@ async def sweep_via_geak(
                         }
                     )
                 else:
-                    err = (proc.stderr or "")[-500:] or "no throughput"
-                    entry.update({"status": "failed", "error": err})
+                    err = failure["error"]
+                    entry.update(failure)
             except Exception as exc:  # noqa: BLE001
                 err = repr(exc)
                 entry.update({"status": "failed", "error": err})
@@ -344,7 +419,9 @@ async def sweep_via_geak(
                 isl=isl,
                 osl=osl,
                 success=succeeded,
-                output_throughput_tok_s=tput if isinstance(tput, (int, float)) else None,
+                output_throughput_tok_s=(
+                    tput if isinstance(tput, (int, float)) and basis == GEAK_METRIC_OUTPUT[1] else None
+                ),
                 mean_ttft_ms=ttft if isinstance(ttft, (int, float)) else None,
                 mean_tpot_ms=tpot if isinstance(tpot, (int, float)) else None,
                 mean_e2el_ms=e2el if isinstance(e2el, (int, float)) else None,
@@ -352,10 +429,11 @@ async def sweep_via_geak(
             )
             entries.append(entry)
 
-    # The replay runs one (conc, isl, osl) repeated, so the fastest succeeded point is the headline.
+    # The replay runs one (conc, isl, osl) repeated, so the best succeeded point is the headline. Every succeeded
+    # point was measured on the requested basis, and every axis GEAK measures is higher-is-better.
     succeeded = [e for e in entries if e["status"] == "succeeded"]
-    measured = [e for e in succeeded if isinstance(e.get("output_throughput"), (int, float))]
-    promotion_measurement = max(measured, key=lambda e: e["output_throughput"], default={})
+    measured = [e for e in succeeded if isinstance(e.get("measured_value"), (int, float))]
+    promotion_measurement = max(measured, key=lambda e: e["measured_value"], default={})
     return {
         "status": "succeeded" if succeeded else "failed",
         **({"error": str(entries[0].get("error") or "replay_failed")} if entries and not succeeded else {}),

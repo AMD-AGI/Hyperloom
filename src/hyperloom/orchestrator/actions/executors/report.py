@@ -8,8 +8,6 @@ from __future__ import annotations
 import json
 import logging
 import math
-import os
-import subprocess
 from collections import Counter
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -17,16 +15,17 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common import io as _common_io
-from hyperloom.common.env import env_bool
 from hyperloom.common.platform_probe import platform_fingerprint
 
 from ...bus.message_bus import MessageBus
 from ...bus.storage.connection import SqliteConnection
 from hyperloom.inference_optimizer.breakdown.stop_reasons import (
     AGENTX_PREFLIGHT_STOP_REASON,
+    BACKEND_UNHEALTHY_STOP_REASON,
     PATCH_RECOVERY_INCOMPLETE_STOP_REASON,
 )
 from hyperloom.inference_optimizer.session.paths import db_path_for
+from ...measurement.baseline_budget import BASELINE_BUDGET_STOP_EXPLANATIONS
 from ...state.shared_state import SharedState
 
 
@@ -272,16 +271,7 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
         "an improvement over a baseline that was never the baseline, so the run stopped with the figure kept and "
         "marked. Resume with more budget to measure a comparable baseline."
     ),
-    "baseline_over_latency_budget": (
-        "The baseline's own mean end-to-end latency exceeded --max-latency-ms, or the baseline reported no "
-        "end-to-end latency at all, so the run stopped before optimizing. The budget refuses any KEEP over the "
-        "ceiling or without a measured latency, and the reference the run is measured against already fails it — no "
-        "candidate built on it could have been promoted, so continuing would have spent the whole time budget "
-        "refusing every winner in turn. If the baseline reported no latency, make the workload's entrypoint write "
-        "e2el_mean_ms; otherwise either the ceiling is lower than this workload's floor on this hardware, or the "
-        "baseline configuration itself is the thing to fix. Relaunch with a ceiling the baseline can meet, or "
-        "without one, to see what the search finds."
-    ),
+    **BASELINE_BUDGET_STOP_EXPLANATIONS,
     # Recipe KB knowledge-plane bootstrap failures.
     "warm_replay_rollback_failed": (
         "Warm replay rollback could not restore every Recipe/Kernel mutation; "
@@ -335,6 +325,15 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
     # Host-level terminals: something outside the model ended the run.
     "supervisor_coordinator_died": "The out-of-band supervisor found the coordinator's process gone; this record was written by the supervisor because there was no coordinator left to write one.",
     "supervisor_tick_stalled": "The out-of-band supervisor found the coordinator's tick not advancing inside its stall window and asked the session to end.",
+    BACKEND_UNHEALTHY_STOP_REASON: (
+        "A reactor agent stopped producing decisions, so the run stopped instead of spending the rest of its budget "
+        "on it; the best validated result was kept. A no_intent_streak observation naming the agent means it kept "
+        "answering without emitting an intent; for the orchestration agent, agents/orchestration/mcp_setup.json "
+        "records whether Claude Code offered it the emit_intent tool. Without one, its LLM backend kept failing for "
+        "an hour without one successful turn, and the backend_error observations name the agent and carry the error "
+        "each call returned: repair the backend (credentials, endpoint, quota, or a prompt the model rejects). "
+        "Resume once the cause is fixed."
+    ),
 }
 
 
@@ -376,8 +375,9 @@ def _platform_fingerprint(gpu_type: str | None = None) -> dict[str, Any]:
     return platform_fingerprint(gpu_type, multi_node=multi_node)
 
 
-def _append_composite_perf_section(lines: list[str], summary: dict[str, Any]) -> None:
+def _format_composite_perf_section(summary: dict[str, Any]) -> list[str]:
     """Render recorded grading; summaries predating the snapshot keep their legacy layout."""
+    lines: list[str] = []
     comparison = summary.get("performance_comparison")
     if comparison is not None:
         from hyperloom.common.perf_metric import GRADED_OUTPUT, INTVTY_OBJECTIVES, INTVTY_V1
@@ -400,12 +400,13 @@ def _append_composite_perf_section(lines: list[str], summary: dict[str, Any]) ->
         if graded_on_intvty:
             lines.append(f"- reference tput      : `{comparison['tput_reference']:.1f}` tok/s (total, diagnostic)")
             lines.append(f"- candidate tput      : `{comparison['tput_candidate']:.1f}` tok/s (total, diagnostic)")
-        return
+        return lines
 
     from hyperloom.common.gain_math import gain_pct
     from hyperloom.common.perf_metric import (
         GRADED_INTVTY,
         INTVTY_V1,
+        intvty_grading_enabled,
         intvty_of,
         parse_intvty_noise_pct,
         perf_snapshot_from_mapping,
@@ -414,11 +415,10 @@ def _append_composite_perf_section(lines: list[str], summary: dict[str, Any]) ->
 
     baseline = perf_snapshot_from_mapping(summary.get("baseline_perf"))
     if not baseline:
-        return
+        return lines
     cb = summary.get("current_best") or {}
     cb_snap = perf_snapshot_from_mapping(cb) if isinstance(cb, dict) else None
-    lines.append("## AgentX perf (interactivity objective, per-chip tput guard)")
-    lines.append("")
+    lines.extend(["## AgentX perf (interactivity objective, per-chip tput guard)", ""])
     lines.append(f"- baseline intvty P90 : `{intvty_of(baseline):.1f}` tok/s/user (slow tail)")
     lines.append(f"- baseline total tput : `{total_tput_of(baseline):.1f}` tok/s")
     if cb_snap:
@@ -439,12 +439,11 @@ def _append_composite_perf_section(lines: list[str], summary: dict[str, Any]) ->
     elif objective:
         lines.append(f"- grading mode        : `{objective}`")
     else:
-        from hyperloom.common.perf_metric import intvty_grading_enabled
-
         if intvty_grading_enabled(benchmark_mode=str(summary.get("benchmark_mode") or "")):
             lines.append(f"- grading mode        : `{INTVTY_V1}` (noise band `{parse_intvty_noise_pct():.1f}%`)")
         else:
             lines.append("- grading mode        : `output_throughput` (AgentX grading not in effect)")
+    return lines
 
 
 def _cumulative_validation_status(summary: dict[str, Any]) -> str:
@@ -591,7 +590,7 @@ def _format_md(summary: dict[str, Any]) -> str:
     lines.append(f"- **Budget**: {summary['max_minutes']} minutes")
     lines.append(f"- **Generated**: {summary['report_generated_at']}")
     lines.append("")
-    # Per-framework primary metric: serving reports throughput (tok/s/GPU), scriptable xDiT reports per-image latency
+    # Per-framework primary metric: serving reports throughput (tok/s), scriptable xDiT reports per-image latency
     # (e2el_mean_ms).
     from hyperloom.inference_optimizer import framework_registry
 
@@ -635,7 +634,7 @@ def _format_md(summary: dict[str, Any]) -> str:
         lines.append(f"- ttft_mean      : `{cb.get('ttft_mean_ms'):.1f}` ms")
     if cb.get("e2el_mean_ms") is not None:
         lines.append(f"- e2el_mean      : `{cb.get('e2el_mean_ms'):.1f}` ms")
-    _append_composite_perf_section(lines, summary)
+    lines.extend(_format_composite_perf_section(summary))
     lines.append("")
     lines.extend(_format_completeness_annotations(summary))
     lines.append("## Run summary")
@@ -871,7 +870,7 @@ def _format_roofline_comparison_section(cmp: dict[str, Any]) -> list[str]:
             f"(snapshot #{base_id}). PR #321 retired the legacy "
             "close-phase auto-roofline; refreshes are now driven by a "
             "10% gain watermark over `last_roofline_tput` (see "
-            "`Coordinator._maybe_enqueue_watermark_roofline`). The "
+            "`KernelPhase.maybe_enqueue_watermark_roofline`). The "
             "watermark did not cross during this session, so the "
             "PRELUDE bootstrap snapshot is the only datapoint available "
             "for the report._"
@@ -904,7 +903,7 @@ def _format_roofline_comparison_section(cmp: dict[str, Any]) -> list[str]:
         "Before/after comparison of TraceLens Executive Summaries. "
         "The baseline snapshot was captured at PRELUDE; the latest "
         "snapshot was captured after a +10% gain watermark refresh "
-        "(see `Coordinator._maybe_enqueue_watermark_roofline`)."
+        "(see `KernelPhase.maybe_enqueue_watermark_roofline`)."
     )
     lines.append("")
     # The ceiling is normally a session constant, but a runtime dtype / quantization change moves it — and then the
@@ -1362,14 +1361,12 @@ class ReportExecutor:
             json_path,
             state.cumulative_gain_validated,
         )
-        publish_result = self._maybe_publish_results(session_dir, state)
         return {
             "status": "succeeded",
             "session_id": state.session_id,
             "json_path": str(json_path),
             "md_path": str(md_path),
             "summary": summary,
-            "publish_result": publish_result,
         }
 
     def _resolve_session_dir(self, ctx) -> Path | None:
@@ -1386,50 +1383,6 @@ class ReportExecutor:
         if candidate.exists() and (candidate / "state.json").exists():
             return candidate
         return None
-
-    def _maybe_publish_results(self, session_dir: Path, state: SharedState) -> dict[str, Any]:
-        """Best-effort publish hook for code-driven optimizer runs (opt-in unless the results service URL is configured)."""
-        service_url = os.environ.get("HYPERLOOM_RESULTS_SERVICE_URL", "")
-        if not service_url and not env_bool("HYPERLOOM_RESULTS_AUTO_PUBLISH"):
-            return {"enabled": False, "reason": "HYPERLOOM_RESULTS_SERVICE_URL not set"}
-
-        repo_root = Path(__file__).resolve().parents[3]
-        helper = repo_root / "ci" / "publish_artifacts.py"
-        if not helper.exists():
-            return {"enabled": False, "reason": f"{helper} not found"}
-
-        cmd = [
-            "python3",
-            str(helper),
-            "--task-dir",
-            str(session_dir),
-            "--out-dir",
-            str(session_dir / "normalized"),
-            "--model",
-            state.model_name or "unknown",
-            "--display-name",
-            state.session_id or "hyperloom-report",
-        ]
-        if service_url:
-            cmd.extend(["--url", service_url])
-
-        try:
-            proc = subprocess.run(
-                cmd,
-                text=True,
-                capture_output=True,
-                timeout=60,
-                check=False,
-            )
-            return {
-                "enabled": True,
-                "returncode": proc.returncode,
-                "stdout": proc.stdout[-4000:],
-                "stderr": proc.stderr[-4000:],
-            }
-        except (OSError, subprocess.SubprocessError) as e:
-            log.warning("report_executor: result publish failed: %s", e)
-            return {"enabled": True, "error": str(e)}
 
 
 report_executor = ReportExecutor()

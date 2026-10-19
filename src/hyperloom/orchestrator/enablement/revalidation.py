@@ -15,7 +15,6 @@ from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
 
 from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
 from ..collaborator import CoordinatorCollaborator
-from ..loop.coordinator_helpers import baseline_benchmark_script
 from ..state.task_registry import TerminalTaskReuse, create_in_cursor, task_dispatch_origin
 from .params import _enablement_carrier_params
 
@@ -34,7 +33,7 @@ class _RowAlreadyLive(Exception):
 class EnablementRevalidation(CoordinatorCollaborator):
     """Re-measures a kept enablement round against a real baseline."""
 
-    async def _maybe_enqueue_enablement_baseline_revalidation(self) -> str:
+    async def maybe_enqueue_enablement_baseline_revalidation(self) -> str:
         """Enqueue one genuine baseline to revalidate a KEEP'd eval-origin patch."""
         state = self.shared_state
         if not bool(state.enablement.validation_pending):
@@ -46,7 +45,7 @@ class EnablementRevalidation(CoordinatorCollaborator):
                 if str(getattr(t, "task_id", "") or "") == tracked_tid:
                     return tracked_tid
         # Do not open a row the dispatcher would cancel on sight.
-        denied = self._time_budget_denial_for_action("baseline")
+        denied = self._coord.dispatcher.time_budget_denial_for_action("baseline")
         if denied is not None:
             log.info("ENABLEMENT revalidation: window held open, not enqueued -- %s", denied)
             return ""
@@ -56,35 +55,17 @@ class EnablementRevalidation(CoordinatorCollaborator):
             "disable_run_eval": False,
             **_enablement_carrier_params(state),
         }
-        benchmark_script = baseline_benchmark_script(state)
+        benchmark_script = state.accepted_baseline_script()
         if benchmark_script:
             params["benchmark_script"] = benchmark_script
-        accepted_cfg = str(state.enablement.accepted_config_path or "").strip()
-        probe_cfg = str(state.enablement.probe_config_path or "").strip()
-        cfg = accepted_cfg or probe_cfg
-        if cfg:
-            params["config_path"] = cfg
-        effective = state.enablement.accepted_config
-        for key in ("extra_envs", "extra_server_args", "remove_args", "unset_envs", "args_mode"):
-            if effective.get(key):
-                params[key] = effective[key]
-        # Carry the active runtime override so the revalidation baseline runs under the same framework runtime as the
-        # KEEP'd candidate.
-        active_rt = state.enablement.active_runtime or {}
-        if isinstance(active_rt, dict) and active_rt:
-            from .runtime.stack_actions import FrameworkRuntime
-
-            rt_obj = FrameworkRuntime.from_state(active_rt)
-            rt_override = rt_obj.to_runtime_override()
-            if rt_override:
-                params["runtime_override"] = rt_override
+        params.update(self.baseline_launch_params())
         task_id = await self._open_revalidation_row(params)
         if not task_id:
             return ""
         enablement_event.record_revalidation(
             generation=int(state.enablement.revalidation_generation or 0),
             task_id=task_id,
-            config_path=cfg,
+            config_path=params.get("config_path", ""),
         )
         # Persist the task_id so _promote_baseline can verify identity.
         if task_id and task_id != str(state.enablement.revalidation_task_id or ""):
@@ -94,6 +75,24 @@ class EnablementRevalidation(CoordinatorCollaborator):
             except Exception:
                 log.debug("enablement revalidation: save of task_id failed", exc_info=True)
         return task_id
+
+    def baseline_launch_params(self) -> dict[str, Any]:
+        """The config, launch controls and framework runtime every baseline-arm launch boots under."""
+        enablement = self.shared_state.enablement
+        params: dict[str, Any] = {}
+        cfg = enablement.accepted_config_path or enablement.probe_config_path
+        if cfg:
+            params["config_path"] = cfg
+        for key in ("extra_envs", "extra_server_args", "remove_args", "unset_envs", "args_mode"):
+            if enablement.accepted_config.get(key):
+                params[key] = enablement.accepted_config[key]
+        if enablement.active_runtime:
+            from .runtime.stack_actions import FrameworkRuntime
+
+            rt_override = FrameworkRuntime.from_state(enablement.active_runtime).to_runtime_override()
+            if rt_override:
+                params["runtime_override"] = rt_override
+        return params
 
     async def _open_revalidation_row(self, params: dict[str, Any]) -> str:
         """Open this revalidation window's round, on a generation it can use.
@@ -107,7 +106,7 @@ class EnablementRevalidation(CoordinatorCollaborator):
             stays open and the next tick tries again.
         """
         state = self.shared_state
-        baseline_lanes, baseline_ttl = self._registry_lanes_ttl("baseline")
+        baseline_lanes, baseline_ttl = self._coord.dispatcher.registry_lanes_ttl("baseline")
         task_id, generation = await self._open_round_past_spent_generations(
             params=params,
             key_for=lambda gen: f"enablement_revalidation:gen{gen}",
@@ -120,7 +119,7 @@ class EnablementRevalidation(CoordinatorCollaborator):
         state.enablement.revalidation_generation = generation
         return task_id
 
-    async def _open_row_past_spent_generations(
+    async def open_row_past_spent_generations(
         self,
         *,
         kind: str,

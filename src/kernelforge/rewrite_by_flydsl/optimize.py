@@ -223,55 +223,38 @@ def _restore_best_kernel(
     return True
 
 
-def run_optimize(
+def _source_baseline_json(experiments_dir: str, source_ms, source_case_ms) -> str:
+    """Write the source kernel's timings for the loop to anchor its score on, when both halves are known.
+
+    Both or neither: a wall time without per-case times cannot anchor the score,
+    and per-case times without a wall time leave the published aggregate on a
+    different kernel than the score.
+    """
+    if not (source_ms and source_case_ms):
+        return ""
+    baseline_path = Path(experiments_dir) / "forge_loop_baseline.json"
+    baseline_path.parent.mkdir(parents=True, exist_ok=True)
+    baseline_path.write_text(json.dumps({"wall_ms": float(source_ms), "case_times": dict(source_case_ms)}, indent=2))
+    return str(baseline_path)
+
+
+def _forge_loop_cmd(
     spec: RewriteSpec,
     driver_path: str,
     config: Config,
     *,
     experiments_dir: str,
-    max_hours: float = 1.0,
-    git_branch: str = "forge-rewrite-optimize",
-    permission_mode: str | None = None,
-    supervisor_backend: str = "codex",
-    profile_timeout_sec: int = 1800,
-    result_json: str | None = None,
-    deadline_unix: float | None = None,
-    stop_at_unix: float | None = None,
-    source_ms: float | None = None,
-    source_case_ms: dict[str, float] | None = None,
-    on_new_best: Callable[[dict], None] | None = None,
-    new_best_poll_sec: float = 5.0,
-) -> dict:
-    """Run forge-loop over the FlyDSL kernel; return its parsed result dict.
-
-    ``source_ms`` and ``source_case_ms`` are the source kernel's own timings. Passed together they become the loop's
-    scoring anchor, so every speedup it reports -- each KEEP and the final result -- is measured against the kernel
-    the port replaced rather than against the port. Without them the loop anchors on its own first bench, which
-    scores the search against the port and cannot be composed back onto the source: the equal-weight mean of
-    per-case ratios does not multiply.
-
-    ``on_new_best`` is polled every ``new_best_poll_sec`` with the parsed result of each KEEP, and once more after the
-    loop exits so the last one cannot be missed by timing. Anything it raises is logged and swallowed, because the
-    rewrite layer publishes from it and publishing is not worth losing an optimization run over.
-
-    ``llm_usage`` on the returned dict is the run's furthest-along token ledger, recovered from the experiment record
-    when the result file could not carry it. ``llm_usage_complete`` is set only when the loop exited cleanly with a
-    result of its own, which is the one case where that ledger is final.
-    """
-    if result_json is None:
-        result_json = str(Path(experiments_dir) / "forge_loop_result.json")
-
-    # Both halves or neither: a wall time without per-case times cannot anchor the score, and per-case times without
-    # a wall time leave the published aggregate on a different kernel than the score.
-    baseline_json = ""
-    if source_ms and source_case_ms:
-        baseline_path = Path(experiments_dir) / "forge_loop_baseline.json"
-        baseline_path.parent.mkdir(parents=True, exist_ok=True)
-        baseline_path.write_text(
-            json.dumps({"wall_ms": float(source_ms), "case_times": dict(source_case_ms)}, indent=2)
-        )
-        baseline_json = str(baseline_path)
-
+    result_json: str,
+    max_hours: float,
+    git_branch: str,
+    supervisor_backend: str,
+    profile_timeout_sec: int,
+    roofline_ceiling: bool,
+    baseline_json: str,
+    deadline_unix: float | None,
+    permission_mode: str | None,
+) -> list[str]:
+    """The forge-loop invocation this rewrite optimizes its ported kernel with."""
     cmd = _forge_loop_argv() + [
         "forge-loop",
         "--kernel",
@@ -308,6 +291,9 @@ def run_optimize(
         supervisor_backend,
         "--profile-timeout-sec",
         str(profile_timeout_sec),
+        # Spelled out either way, so the nested loop does what this caller asked rather than whatever its default is.
+        "--roofline-ceiling",
+        "on" if roofline_ceiling else "off",
     ]
     if baseline_json:
         cmd += ["--baseline-json", baseline_json]
@@ -322,6 +308,116 @@ def run_optimize(
         cmd += ["--model", config.agent_model]
     if permission_mode:
         cmd += ["--permission-mode", permission_mode]
+    return cmd
+
+
+def _trusted_loop_result(result_json: str, stdout_text: str, *, returncode) -> tuple[dict, str]:
+    """The forge-loop result that belongs to THIS run, and the experiment id it was keyed on.
+
+    ``--result-json`` is trusted only when its ``experiment_id`` matches the one
+    this run announced on stdout: forge-loop writes that file on every new best,
+    not only at the end. Otherwise the stdout sentinel answers -- inherently this
+    run's output, captured live, and only emitted on a clean exit.
+    """
+    expected_id = _announced_experiment_id(stdout_text)
+    try:
+        parsed = json.loads(Path(result_json).read_text())
+    except (OSError, ValueError):
+        parsed = None
+    result: dict = {}
+    if parsed is not None and expected_id and parsed.get("experiment_id") == expected_id:
+        result = parsed
+    if not result:
+        match = _RESULT_RE.search(stdout_text)
+        if match is not None:
+            try:
+                result = json.loads(match.group(1))
+            except ValueError:
+                log.warning("optimize: could not parse forge-loop sentinel JSON")
+    if not result:
+        log.warning(
+            "optimize: no trusted forge-loop result (exit %s, expected experiment_id %s)",
+            returncode,
+            expected_id,
+        )
+    return result, expected_id or ""
+
+
+def _annotated_optimize_result(
+    result: dict,
+    *,
+    terminated_for_deadline: bool,
+    restored: bool,
+    nested_usage,
+) -> dict:
+    """The loop's result with what only this layer knows about the run folded in."""
+    if not result and not terminated_for_deadline and not nested_usage:
+        return {}
+    annotations: dict = {
+        "terminated_for_deadline": terminated_for_deadline,
+        "best_kernel_restored": restored,
+    }
+    if nested_usage:
+        annotations["llm_usage"] = nested_usage
+    return {**result, **annotations}
+
+
+def run_optimize(
+    spec: RewriteSpec,
+    driver_path: str,
+    config: Config,
+    *,
+    experiments_dir: str,
+    max_hours: float = 1.0,
+    git_branch: str = "forge-rewrite-optimize",
+    permission_mode: str | None = None,
+    supervisor_backend: str = "codex",
+    profile_timeout_sec: int = 1800,
+    roofline_ceiling: bool = False,
+    result_json: str | None = None,
+    deadline_unix: float | None = None,
+    stop_at_unix: float | None = None,
+    source_ms: float | None = None,
+    source_case_ms: dict[str, float] | None = None,
+    on_new_best: Callable[[dict], None] | None = None,
+    new_best_poll_sec: float = 5.0,
+) -> dict:
+    """Run forge-loop over the FlyDSL kernel; return its parsed result dict.
+
+    ``source_ms`` and ``source_case_ms`` are the source kernel's own timings. Passed together they become the loop's
+    scoring anchor, so every speedup it reports -- each KEEP and the final result -- is measured against the kernel
+    the port replaced rather than against the port. Without them the loop anchors on its own first bench, which
+    scores the search against the port and cannot be composed back onto the source: the equal-weight mean of
+    per-case ratios does not multiply.
+
+    ``on_new_best`` is polled every ``new_best_poll_sec`` with the parsed result of each KEEP, and once more after the
+    loop exits so the last one cannot be missed by timing. Anything it raises is logged and swallowed, because the
+    rewrite layer publishes from it and publishing is not worth losing an optimization run over.
+
+    ``llm_usage`` on the returned dict is the run's furthest-along token ledger, recovered from the experiment record
+    when the result file could not carry it. ``llm_usage_complete`` is set only when the loop exited cleanly with a
+    result of its own, which is the one case where that ledger is final.
+    """
+    if result_json is None:
+        result_json = str(Path(experiments_dir) / "forge_loop_result.json")
+
+    baseline_json = _source_baseline_json(experiments_dir, source_ms, source_case_ms)
+
+    cmd = _forge_loop_cmd(
+        spec,
+        driver_path,
+        config,
+        experiments_dir=experiments_dir,
+        result_json=result_json,
+        max_hours=max_hours,
+        git_branch=git_branch,
+        supervisor_backend=supervisor_backend,
+        profile_timeout_sec=profile_timeout_sec,
+        roofline_ceiling=roofline_ceiling,
+        baseline_json=baseline_json,
+        deadline_unix=deadline_unix,
+        permission_mode=permission_mode,
+    )
 
     log.info("optimize: launching forge-loop over %s", spec.flydsl_kernel_name)
     print(f"  [forge-rewrite] optimize: {' '.join(cmd)}", flush=True)
@@ -429,31 +525,7 @@ def run_optimize(
         return failed
     stdout_text = "".join(collected)
 
-    # Trust --result-json only if it belongs to THIS run, keyed on experiment_id. forge-loop writes the file on every
-    # new best (not only at the end) and stamps its experiment_id into it, and announces that same id on stdout.
-    expected_id = _announced_experiment_id(stdout_text)
-    try:
-        parsed = json.loads(Path(result_json).read_text())
-    except (OSError, ValueError):
-        parsed = None
-    result: dict = {}
-    if parsed is not None and expected_id and parsed.get("experiment_id") == expected_id:
-        result = parsed
-
-    # Otherwise fall back to the stdout sentinel — inherently this run's output (captured live), and only emitted on a
-    # clean exit.
-    m = _RESULT_RE.search(stdout_text) if not result else None
-    if m is not None:
-        try:
-            result = json.loads(m.group(1))
-        except ValueError:
-            log.warning("optimize: could not parse forge-loop sentinel JSON")
-    if not result:
-        log.warning(
-            "optimize: no trusted forge-loop result (exit %s, expected experiment_id %s)",
-            proc.returncode,
-            expected_id,
-        )
+    result, expected_id = _trusted_loop_result(result_json, stdout_text, returncode=proc.returncode)
 
     restored = _restore_best_kernel(
         spec,
@@ -466,20 +538,16 @@ def run_optimize(
     # the experiment record holding more of the run's spend than the result does.
     nested_usage = _latest_ledger(
         result.get("llm_usage"),
-        _experiment_llm_usage(experiments_dir, expected_id or ""),
+        _experiment_llm_usage(experiments_dir, expected_id),
+    )
+    annotated = _annotated_optimize_result(
+        result,
+        terminated_for_deadline=terminated_for_deadline,
+        restored=restored,
+        nested_usage=nested_usage,
     )
     # Only a loop that reported its own result on a clean exit has closed its ledger; every other exit truncates it at
     # the last session boundary it managed to checkpoint.
-    usage_complete = bool(result) and not terminated_for_deadline and _poll_process(proc) == 0
-
-    if not result and not terminated_for_deadline and not nested_usage:
-        return {}
-    annotations: dict = {
-        "terminated_for_deadline": terminated_for_deadline,
-        "best_kernel_restored": restored,
-    }
-    if nested_usage:
-        annotations["llm_usage"] = nested_usage
-    if usage_complete:
-        annotations["llm_usage_complete"] = True
-    return {**result, **annotations}
+    if annotated and result and not terminated_for_deadline and _poll_process(proc) == 0:
+        annotated["llm_usage_complete"] = True
+    return annotated

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from kernelforge.loop.run_state import RunState, SCHEMA_VERSION
+from kernelforge.loop.run_state import RunState
 from kernelforge.loop.search_policy import (
     MARGINAL_GAIN_FLOOR,
     NO_CHANGES_ESCALATION_THRESHOLD,
@@ -294,4 +294,3 @@ def test_run_state_persists_plan_search_policy():
     assert restored.search_objective == OBJECTIVE_DISCOVER_NEW_MECHANISM
     assert restored.search_mode_residence_remaining == 2
     assert restored.diversification_cycle_completed is True
-    assert restored.schema_version == SCHEMA_VERSION

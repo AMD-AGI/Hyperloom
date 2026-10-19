@@ -31,6 +31,23 @@ PROTECTED_GLOBS = (
     "conftest.py",
 )
 
+# Untracked files the toolchain drops in a workspace on its own while a kernel runs. Only these named outputs are
+# ignored; any other new file a session leaves remains a safety violation.
+TOOL_OWNED_UNTRACKED_GLOBS = (
+    # rocprof runs below the git root, so cover root and nested directories.
+    ".rocprofv3/*",
+    "*/.rocprofv3/*",
+    "*_results.db",
+    # AITER may create JIT shards during a turn; its configured root always ends
+    # in ``aiter_cache``, regardless of the experiments directory.
+    "aiter_cache/*",
+    "*/aiter_cache/*",
+)
+
+FORGE_LOOP_OUTPUT_DIRNAME = "forge_experiments"
+
+_BOOKKEEPING_DIRNAMES = frozenset({".git", FORGE_LOOP_OUTPUT_DIRNAME})
+
 PROTECTED_DIRS = frozenset(
     {
         "benchmark",
@@ -118,7 +135,7 @@ def protected_path_inventory(
     ):
         # The repository's own bookkeeping is not part of the measurement surface, and it moves on its own: git
         # rewrites the index whenever a stat cache goes cold, which a build alone is enough to cause.
-        dirnames[:] = [name for name in dirnames if name != ".git"]
+        dirnames[:] = [name for name in dirnames if name not in _BOOKKEEPING_DIRNAMES]
         parent = Path(directory)
         entries = [*filenames]
         for dirname in dirnames:

@@ -1,30 +1,25 @@
 name: CI E2E (single-GPU smoke run)
 
-# Every PR targeting `main` or `v1.0-dev` dispatches ONE single-GPU inference-optimizer
-# run built from the PR's branch, monitors it, and reports green (Succeeded) / red
-# (Failed or timeout). Opt OUT by adding the `skip-e2e-test` label. Runs on a
-# self-hosted runner that can reach the run API.
+# A PR targeting `main` or `v1.0-dev` dispatches ONE single-GPU inference-optimizer
+# run built from its branch only while it carries the `run-e2e` label: adding the
+# label starts a run, and every new commit pushed while it stays starts another.
+# Without the label nothing is dispatched. Only collaborators can label a PR, so the
+# label is also the approval to spend the shared GPUs. The run is monitored and
+# reported green (Succeeded) / red (Failed or timeout). Runs on a self-hosted runner
+# that can reach the run API.
+#
+# Re-run WITHOUT a new commit (e.g. after a transient cluster fault): remove
+# `run-e2e` and add it again.
 #
 # Run ONE PR on a different runner (for proving a replacement without moving everyone
 # onto it): set `vars.CI_E2E_CANARY_RUNNER_LABEL` to that runner's label and add the
-# `e2e-canary` label to the PR. The label alone does not start a run -- add `retest`
-# or comment `/retest` after it. Remove the label to go back.
-#
-# Re-run WITHOUT a new commit (e.g. after a transient cluster fault):
-#   * add the `retest` label to the PR (auto-removed so it can be re-applied), or
-#   * comment `/retest` (or `/retest-failed`) on the PR.
-# NOTE: the comment path uses `issue_comment`, which GitHub always loads from the
-# DEFAULT branch's workflow file. It only works once this workflow lives on the
-# default branch. The `retest` label path works from the PR branch immediately.
+# `e2e-canary` label to the PR before `run-e2e`. Remove `e2e-canary` to go back.
 
 on:
   pull_request:
     branches: [main, v1.0-dev]   # PRs whose BASE branch is main or v1.0-dev
-    # opened/synchronize/reopened = run on create + new commits + reopen.
-    # labeled/unlabeled = re-evaluate for `skip-e2e-test` / `retest`.
-    types: [opened, synchronize, reopened, labeled, unlabeled]
-  issue_comment:
-    types: [created]
+    # labeled = `run-e2e` was just added; the other three run only while it is on.
+    types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
     inputs:
       head_ref:
@@ -34,32 +29,7 @@ on:
         description: "Exact commit SHA to run (defaults to the resolved head_ref)"
         required: false
 
-# A newer commit / retest on the same PR cancels the in-flight run; the cleanup step
-# below cancels the workload so no GPU is leaked.
-#
-# A comment that is NOT a `/retest` command must stay OUT of that group. GitHub
-# evaluates `concurrency` when the run is created -- before the `resolve` job's `if`
-# below -- so an ordinary review comment on a PR would otherwise cancel that PR's
-# in-flight run and then skip itself, losing a multi-hour GPU run to a comment. Such
-# comments get a group of their own (keyed by comment id) so they cancel nothing. The
-# `/retest` predicate is kept identical to the one in `resolve.if`, so exactly the
-# comments that can start a run are the comments that can cancel one.
-#
-# workflow_dispatch has no pull_request.number / issue.number, so the group used
-# to fall through to github.ref (refs/heads/main for every dispatch) and
-# cancel-in-progress killed the previous GPU smoke. Key on inputs.head_sha
-# (then head_ref) so two fork-PR dispatches can run without cancelling each other.
-concurrency:
-  group: >-
-    ci-e2e-${{
-      (github.event_name == 'issue_comment' && !contains(github.event.comment.body, '/retest'))
-      && format('noop-comment-{0}', github.event.comment.id)
-      || (github.event.pull_request.number || github.event.issue.number || inputs.head_sha || inputs.head_ref || github.ref)
-    }}
-  cancel-in-progress: true
-
-# The workflow token writes the live commit status, the sticky PR report comment, and
-# removes the consumed `retest` label.
+# The workflow token writes the live commit status and the sticky PR report comment.
 permissions:
   contents: read
   statuses: write
@@ -67,20 +37,17 @@ permissions:
   issues: write
 
 jobs:
-  # Cheap gate that decides whether to run and resolves the PR metadata for every
-  # supported trigger (pull_request / issue_comment `/retest` / workflow_dispatch).
-  # The job-level `if` keeps unrelated comments and labels from allocating a runner.
+  # Cheap gate that resolves the PR metadata for every supported trigger
+  # (pull_request carrying `run-e2e` / workflow_dispatch). The job-level `if` is the
+  # whole decision for a PR: an unlabeled PR, or a label other than `run-e2e` being
+  # added, never allocates a runner.
   resolve:
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'issue_comment' &&
-       github.event.issue.pull_request != null &&
-       contains(github.event.comment.body, '/retest')) ||
       (github.event_name == 'pull_request' &&
-       (github.event.action != 'labeled' ||
-        github.event.label.name == 'retest' ||
-        github.event.label.name == 'skip-e2e-test') &&
-       (github.event.action != 'unlabeled' || github.event.label.name == 'skip-e2e-test'))
+       ((github.event.action == 'labeled' && github.event.label.name == 'run-e2e') ||
+        (github.event.action != 'labeled' &&
+         contains(github.event.pull_request.labels.*.name, 'run-e2e'))))
     # GitHub API + jq only. Keep Hyperloom-e2e-ci for the smoke job.
     runs-on: ubuntu-latest
     outputs:
@@ -101,8 +68,6 @@ jobs:
           API_URL: ${{ github.api_url }}
           REPO: ${{ github.repository }}
           EVENT: ${{ github.event_name }}
-          ACTION: ${{ github.event.action }}
-          LABEL: ${{ github.event.label.name }}
           PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
           # The pool, and the runner a PR opts into with the `e2e-canary` label.
           # CANARY is empty unless somebody sets the variable, and an empty CANARY
@@ -113,9 +78,6 @@ jobs:
           PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
-          COMMENT_BODY: ${{ github.event.comment.body }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
-          IS_PR_COMMENT: ${{ github.event.issue.pull_request != null }}
           DISPATCH_HEAD_REF: ${{ inputs.head_ref }}
           DISPATCH_HEAD_SHA: ${{ inputs.head_sha }}
           REF_NAME: ${{ github.ref_name }}
@@ -150,42 +112,11 @@ jobs:
               fi
               ;;
             pull_request)
+              # The job's `if` already required `run-e2e`.
               labels_json="$PR_LABELS_JSON"
-              if echo "$PR_LABELS_JSON" | jq -e 'index("skip-e2e-test")' >/dev/null 2>&1; then
-                echo "skip-e2e-test present; skipping"; emit; exit 0
-              fi
-              if [ "$ACTION" = "labeled" ] && [ "$LABEL" != "retest" ]; then
-                echo "labeled '$LABEL' (not retest); skipping"; emit; exit 0
-              fi
-              if [ "$ACTION" = "unlabeled" ] && [ "$LABEL" != "skip-e2e-test" ]; then
-                echo "unlabeled '$LABEL' (not skip-e2e-test); skipping"; emit; exit 0
-              fi
               run=true
               pr_number="$PR_NUMBER_EVT"; head_ref="$PR_HEAD_REF"
               head_sha="$PR_HEAD_SHA"; head_repo="$PR_HEAD_REPO"
-              ;;
-            issue_comment)
-              if [ "$IS_PR_COMMENT" != "true" ]; then
-                echo "not a PR comment; skipping"; emit; exit 0
-              fi
-              body="$(printf '%s' "$COMMENT_BODY" | tr -d '\r')"
-              if ! printf '%s' "$body" | grep -qiE '(^|[[:space:]])/retest(-failed)?([[:space:]]|$)'; then
-                echo "no /retest command; skipping"; emit; exit 0
-              fi
-              pr_number="$ISSUE_NUMBER"
-              pr_json="$(curl -sS -H "Authorization: Bearer $GH_TOKEN" \
-                -H "Accept: application/vnd.github+json" \
-                "$API_URL/repos/$REPO/pulls/$pr_number")"
-              head_ref="$(printf '%s' "$pr_json" | jq -r '.head.ref // ""')"
-              head_sha="$(printf '%s' "$pr_json" | jq -r '.head.sha // ""')"
-              head_repo="$(printf '%s' "$pr_json" | jq -r '.head.repo.full_name // ""')"
-              # `github.event.pull_request` does not exist on an issue_comment, so the
-              # labels have to come from the PR fetched above or `/retest` would always
-              # land on the pool. `[]?` for the same reason the three lines above use
-              # `// ""`: on an error body this must degrade to "no labels" and let the
-              # head_sha check below report it, not abort the step with a jq trace.
-              labels_json="$(printf '%s' "$pr_json" | jq -c '[.labels[]?.name]')"
-              run=true
               ;;
           esac
           # One decision for every trigger, rather than an expression on the job that
@@ -212,10 +143,17 @@ jobs:
   e2e:
     needs: resolve
     if: needs.resolve.outputs.run == 'true'
+    # Joined only once `resolve` has decided to run. At workflow level, every event on
+    # the PR -- adding an unrelated label included -- would create a run in this group
+    # and cancel the GPU run in flight. A newer commit still preempts the old run, and
+    # the cleanup step below cancels its workload so no GPU is leaked. A dispatch has
+    # no PR number, so it keys on head_sha: two dispatches of different commits do not
+    # cancel each other.
+    concurrency:
+      group: ci-e2e-${{ needs.resolve.outputs.pr_number || needs.resolve.outputs.head_sha || needs.resolve.outputs.head_ref || github.ref }}
+      cancel-in-progress: true
     # A self-hosted runner that can reach github.com + the run API. Which one is
-    # decided in `resolve`, not in an expression here: the answer depends on the PR's
-    # labels, and `github.event.pull_request` is null on an issue_comment, so an
-    # expression on this line would silently send every `/retest` to the pool.
+    # decided in `resolve`, from the PR's labels.
     #
     # Defaults to the `Hyperloom-e2e-ci` pool. Two things move it, most specific first:
     #
@@ -225,18 +163,10 @@ jobs:
     #   * `vars.CI_E2E_RUNNER_LABEL` moves every PR that is not opted in above. For
     #     once a replacement is trusted and the whole pool should follow.
     runs-on: ${{ needs.resolve.outputs.runner_label }}
-    # Covers a full MAX_HOURS run + setup/baseline overhead.
-    timeout-minutes: 240
+    # Covers the wait for a GPU (QUEUE_TIMEOUT_S, 4h) and the run once its sandbox is
+    # ready (MAX_HOURS plus an hour of setup and close-out), with room for the rest.
+    timeout-minutes: ${{ fromJSON(vars.CI_E2E_JOB_TIMEOUT_MIN || '510') }}
     steps:
-      - name: Consume retest label
-        if: github.event_name == 'pull_request' && github.event.action == 'labeled' && github.event.label.name == 'retest'
-        run: |
-          curl -sS -X DELETE \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github+json" \
-            "${{ github.api_url }}/repos/${{ github.repository }}/issues/${{ needs.resolve.outputs.pr_number }}/labels/retest" \
-            -o /dev/null -w 'remove-label HTTP=%{http_code}\n' || true
-
       - name: Checkout (workflow scripts only)
         uses: actions/checkout@v7
 
@@ -246,9 +176,15 @@ jobs:
       - name: Dispatch + monitor single-GPU smoke run
         id: run
         env:
-          E2E_API_KEY: ${{ secrets.CI_E2E_API_KEY }}
-          E2E_API_BASE: ${{ secrets.CI_E2E_API_BASE }}
-          E2E_INFRA_TYPE: ${{ secrets.CI_E2E_INFRA_TYPE }}
+          # Dispatron's compat facade, which speaks the same frozen
+          # /api/v1/orchestration/workloads contract the retired backend did. No
+          # ingress and unauthenticated because it is only reachable inside the
+          # cluster -- which the runner carrying `dispatron-ci` is.
+          DISPATRON_BASE_URL: ${{ vars.CI_E2E_DISPATRON_BASE_URL || 'http://dispatron-api.dispatron.svc.cluster.local:8080' }}
+          DISPATCH_TOKEN: ${{ secrets.CI_E2E_API_KEY }}
+          # Read by `dispatron-ci-cancel` in the cleanup step below, so a hard-killed
+          # job still releases its GPUs.
+          DISPATCH_UID_FILE: ${{ runner.temp }}/e2e_session_uid
           MODEL: ${{ secrets.CI_E2E_MODEL }}
           MODEL_CLASS: ${{ secrets.CI_E2E_MODEL_CLASS }}
           MODEL_BASE: ${{ secrets.CI_E2E_MODEL_BASE }}
@@ -275,33 +211,67 @@ jobs:
           GH_STATUS_SHA: ${{ needs.resolve.outputs.head_sha }}
           GH_STATUS_DETAILS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           STATUS_INTERVAL_S: "300"
-          # Poll long enough to cover the run budget.
           POLL_INTERVAL_S: "60"
-          POLL_MAX: "220"
+          # How long to wait for a GPU. Counted separately from the run, so a busy
+          # cluster ends the check as "no capacity" instead of spending the run's time.
+          QUEUE_TIMEOUT_S: ${{ vars.CI_E2E_QUEUE_TIMEOUT_S || '14400' }}
         run: |
           chmod +x .github/scripts/ci-e2e-dispatch.sh
           .github/scripts/ci-e2e-dispatch.sh
 
-      # If the job is cancelled (manual stop, or a newer commit / retest via concurrency
+      # The dispatch step posts the terminal status itself. A job that ends without
+      # one -- cancelled, or killed mid-run -- would otherwise leave the check pending
+      # on the commit for good.
+      - name: Backstop terminal commit status
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          API_URL: ${{ github.api_url }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ needs.resolve.outputs.head_sha }}
+          DETAILS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -euo pipefail
+          if [ -f "${RUNNER_TEMP}/ci_e2e_status_terminal" ]; then exit 0; fi
+          uid="$(cat "${RUNNER_TEMP}/e2e_session_uid" 2>/dev/null || true)"
+          case "$JOB_STATUS" in
+            success) state=success; desc="CI E2E run passed; terminal status backfilled" ;;
+            cancelled) state=error; desc="CI E2E cancelled before a terminal run state" ;;
+            *) state=failure; desc="CI E2E job ${JOB_STATUS} before a terminal run state" ;;
+          esac
+          [ -n "$uid" ] && desc="${desc}; uid=${uid}"
+          curl -fsS -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "$API_URL/repos/$REPO/statuses/$SHA" \
+            -d "$(jq -n --arg s "$state" --arg d "${desc:0:139}" --arg u "$DETAILS_URL" \
+              '{state:$s, description:$d, context:"ci-e2e/run", target_url:$u}')"
+
+      # If the job is cancelled (manual stop, or a newer commit via concurrency
       # cancel-in-progress), GitHub still runs this step — cancel the workload so the
       # GPU run doesn't leak. Reliable even when the main step is hard-killed.
       - name: Cancel workload on job cancel
         if: cancelled()
         env:
-          E2E_API_KEY: ${{ secrets.CI_E2E_API_KEY }}
-          E2E_API_BASE: ${{ secrets.CI_E2E_API_BASE }}
+          DISPATRON_BASE_URL: ${{ vars.CI_E2E_DISPATRON_BASE_URL || 'http://dispatron-api.dispatron.svc.cluster.local:8080' }}
+          DISPATCH_TOKEN: ${{ secrets.CI_E2E_API_KEY }}
+          DISPATCH_UID_FILE: ${{ runner.temp }}/e2e_session_uid
+          CI_E2E_INSECURE: ${{ secrets.CI_E2E_INSECURE || '0' }}
         run: |
-          uid="$(cat "${RUNNER_TEMP}/e2e_session_uid" 2>/dev/null || true)"
-          if [ -z "$uid" ]; then echo "no session uid recorded; nothing to cancel"; exit 0; fi
-          if [ -z "${E2E_API_BASE:-}" ]; then echo "no API base; cannot cancel"; exit 0; fi
-          echo "cancelling workload $uid"
-          curl -sS -k -o /dev/null -w 'DELETE HTTP=%{http_code}\n' \
-            -X DELETE -H "Authorization: Bearer ${E2E_API_KEY}" \
-            "${E2E_API_BASE%/}/api/v1/orchestration/workloads/${uid}"
+          command -v dispatron-ci-cancel >/dev/null 2>&1 || {
+            echo "dispatron-ci-cancel is not on PATH; cannot cancel"; exit 0
+          }
+          insecure=""
+          if [ "${CI_E2E_INSECURE:-0}" = "1" ]; then insecure="--insecure"; fi
+          # Tells a recorded cancel (202) apart from a confirmed one, so a cancel that
+          # did not stop the workload cannot read as "the GPUs are back".
+          dispatron-ci-cancel --base-url "$DISPATRON_BASE_URL" $insecure
 
 # --- docs: quick reference -------------------------------------------------
-# Triggers:  PR (base main/v1.0-dev) · `retest` label · `/retest` comment · manual dispatch
-# Opt out:   add the `skip-e2e-test` label (PRs that don't touch runtime code).
+# Triggers:  `run-e2e` label on a PR (base main/v1.0-dev): when it is added, then on
+#            every new commit while it stays · manual dispatch
+# Re-run:    remove `run-e2e` and add it again.
 # Runner:    `Hyperloom-e2e-ci` pool, unless `vars.CI_E2E_CANARY_RUNNER_LABEL` is set
 #            and the PR carries `e2e-canary` (that PR only), or
 #            `vars.CI_E2E_RUNNER_LABEL` is set (all PRs).

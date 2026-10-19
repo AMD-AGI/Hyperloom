@@ -109,10 +109,14 @@ def enumerate_candidates(request: CandidateSearchRequest) -> list[Candidate]:
 
 def _run_github(request: CandidateSearchRequest) -> list[Candidate]:
     """Query anonymous GitHub Search; best-effort - empty list on failure."""
+    # A request that names the failure searches for it; perf discovery names
+    # nothing and takes the perf terms.
+    terms = tuple(_resolve_keywords(request)) or github_backend.PERF_TERMS
     prs = github_backend.search_perf_prs(
         request.repo_url,
         limit=request.max_search_candidates,
         states=request.pr_states,
+        terms=terms,
     )
     return [_pr_to_candidate(pr, request.repo_url, "github") for pr in prs]
 

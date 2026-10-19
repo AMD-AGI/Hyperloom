@@ -8,9 +8,11 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
-from kernelforge.fusion import command as cli_module
+from kernelforge.fusion import serving_gate
+from kernelforge.fusion.source_snapshot import _snapshot_fusion_source
 from kernelforge.fusion.models import FusionArtifacts, ValidationResult
 from kernelforge.fusion.validate import (
+    KERNEL_KEEP_CHECKPOINT,
     SMOKE_STAGE_DECODE_CRASH,
     SMOKE_STAGE_DECODE_PROBE,
     SMOKE_STAGE_STARTUP_CRASH,
@@ -64,7 +66,7 @@ def _kept_result(source_file: str):
 
 def _run_gate(monkeypatch, tmp_path, verdict, *, repo_root="", pristine_dir="", source=None):
     """Drive the gate against one smoke verdict; report what the smoke saw on disk."""
-    monkeypatch.setattr(cli_module, "_serving_check_enabled", lambda: True)
+    monkeypatch.setattr(serving_gate, "_serving_check_enabled", lambda: True)
     out = tmp_path / "out"
     out.mkdir(exist_ok=True)
     observed: dict[str, object] = {}
@@ -72,12 +74,12 @@ def _run_gate(monkeypatch, tmp_path, verdict, *, repo_root="", pristine_dir="", 
     def fake_smoke(*_a, **_k):
         patch = out / "fusion.patch"
         observed["patch"] = patch.read_text(encoding="utf-8") if patch.is_file() else ""
-        observed["checkpoint"] = (out / cli_module.KERNEL_KEEP_CHECKPOINT).is_file()
+        observed["checkpoint"] = (out / KERNEL_KEEP_CHECKPOINT).is_file()
         return verdict
 
-    monkeypatch.setattr(cli_module, "serving_smoke_verdict", fake_smoke)
+    monkeypatch.setattr(serving_gate, "serving_smoke_verdict", fake_smoke)
     result, vr = _kept_result(source or "/m.py")
-    cli_module.apply_serving_gate(
+    serving_gate.apply_serving_gate(
         result,
         framework="vllm",
         out=out,
@@ -99,7 +101,7 @@ def test_a_non_git_install_hands_over_a_patch_when_the_smoke_is_killed(monkeypat
     repo, source = _pip_install(tmp_path)
     out = tmp_path / "out"
     out.mkdir()
-    pristine = cli_module._snapshot_fusion_source(str(repo), str(source), out)
+    pristine = _snapshot_fusion_source(str(repo), str(source), out)
     assert pristine, "snapshot precondition"
     source.write_text("def forward(x):\n    return fused_norm(x)  # fused\n", encoding="utf-8")
 
@@ -132,7 +134,7 @@ def test_the_checkpoint_is_only_written_once_a_patch_exists(monkeypatch, tmp_pat
 
     assert observed["patch"] == ""
     assert observed["checkpoint"] is False
-    assert not (out / cli_module.KERNEL_KEEP_CHECKPOINT).exists()
+    assert not (out / KERNEL_KEEP_CHECKPOINT).exists()
 
 
 def test_a_stale_patch_cannot_complete_the_current_checkpoint(monkeypatch, tmp_path):
@@ -140,7 +142,7 @@ def test_a_stale_patch_cannot_complete_the_current_checkpoint(monkeypatch, tmp_p
     out = tmp_path / "out"
     out.mkdir()
     stale_patch = out / "fusion.patch"
-    stale_checkpoint = out / cli_module.KERNEL_KEEP_CHECKPOINT
+    stale_checkpoint = out / KERNEL_KEEP_CHECKPOINT
     stale_patch.write_text("OLD KERNEL\n", encoding="utf-8")
     stale_checkpoint.write_text('{"kept": true, "pattern_id": "old"}', encoding="utf-8")
     state_seen_by_export: dict[str, bool] = {}
@@ -150,9 +152,9 @@ def test_a_stale_patch_cannot_complete_the_current_checkpoint(monkeypatch, tmp_p
         state_seen_by_export["checkpoint"] = stale_checkpoint.exists()
         return FusionArtifacts()
 
-    monkeypatch.setattr(cli_module, "export_artifacts", empty_export)
+    monkeypatch.setattr(serving_gate, "export_artifacts", empty_export)
 
-    exported = cli_module._export_salvage_patch(
+    exported = serving_gate._export_salvage_patch(
         out,
         "/site-packages/vllm/model.py",
         repo_root="/site-packages",
@@ -170,7 +172,7 @@ def test_a_boot_time_oom_keeps_the_kernel_and_its_patch(monkeypatch, tmp_path):
     repo, source = _pip_install(tmp_path)
     out = tmp_path / "out"
     out.mkdir()
-    pristine = cli_module._snapshot_fusion_source(str(repo), str(source), out)
+    pristine = _snapshot_fusion_source(str(repo), str(source), out)
     source.write_text("def forward(x):\n    return fused_norm(x)\n", encoding="utf-8")
 
     result, vr, out, _observed = _run_gate(
@@ -192,7 +194,7 @@ def test_a_boot_time_oom_keeps_the_kernel_and_its_patch(monkeypatch, tmp_path):
     assert vr.kernel_speedup == 2.5
     assert result.termination_reason == "serving_unconfirmed"
     assert (out / "fusion.patch").is_file()
-    ckpt = out / cli_module.KERNEL_KEEP_CHECKPOINT
+    ckpt = out / KERNEL_KEEP_CHECKPOINT
     assert json.loads(ckpt.read_text(encoding="utf-8"))["kept"] is True
 
 
@@ -201,7 +203,7 @@ def test_a_probe_error_keeps_the_kernel_and_its_patch(monkeypatch, tmp_path):
     repo, source = _pip_install(tmp_path)
     out = tmp_path / "out"
     out.mkdir()
-    pristine = cli_module._snapshot_fusion_source(str(repo), str(source), out)
+    pristine = _snapshot_fusion_source(str(repo), str(source), out)
     source.write_text("def forward(x):\n    return fused_norm(x)\n", encoding="utf-8")
 
     result, vr, out, _observed = _run_gate(
@@ -221,7 +223,7 @@ def test_a_probe_error_keeps_the_kernel_and_its_patch(monkeypatch, tmp_path):
     assert result.kept is True
     assert vr.kernel_speedup == 2.5
     assert (out / "fusion.patch").is_file()
-    assert (out / cli_module.KERNEL_KEEP_CHECKPOINT).is_file()
+    assert (out / KERNEL_KEEP_CHECKPOINT).is_file()
 
 
 def test_a_gpu_fault_in_decode_discards_the_keep_and_the_patch(monkeypatch, tmp_path):
@@ -229,7 +231,7 @@ def test_a_gpu_fault_in_decode_discards_the_keep_and_the_patch(monkeypatch, tmp_
     repo, source = _pip_install(tmp_path)
     out = tmp_path / "out"
     out.mkdir()
-    pristine = cli_module._snapshot_fusion_source(str(repo), str(source), out)
+    pristine = _snapshot_fusion_source(str(repo), str(source), out)
     source.write_text("def forward(x):\n    return fused_norm(x)\n", encoding="utf-8")
 
     result, vr, out, _observed = _run_gate(
@@ -251,4 +253,4 @@ def test_a_gpu_fault_in_decode_discards_the_keep_and_the_patch(monkeypatch, tmp_
     assert vr.kernel_speedup is None
     assert result.termination_reason == "serving_crash"
     assert not (out / "fusion.patch").exists()
-    assert not (out / cli_module.KERNEL_KEEP_CHECKPOINT).exists()
+    assert not (out / KERNEL_KEEP_CHECKPOINT).exists()

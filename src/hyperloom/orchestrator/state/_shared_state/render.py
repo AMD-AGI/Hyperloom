@@ -72,6 +72,30 @@ def _as_float(value: Any) -> float:
         return 0.0
 
 
+def untested_proposal_line(row: dict[str, Any], *, why_chars: int | None = 80) -> str:
+    """Render one ``untested_proposal_rows`` row, marking each field it carries.
+
+    ``why_chars`` bounds the reason; ``None`` shows a reason its producer has already bounded in full.
+    """
+    parts = [f"• {row['name']} [{row['domain']}·{row['severity'] or 'sev?'}]"]
+    if row["atomic"]:
+        parts.append("ATOMIC")
+    if row["extra_args"]:
+        parts.append(f"+args={row['extra_args']}")
+    if row["extra_envs"]:
+        parts.append("+envs=" + ",".join(f"{k}={v}" for k, v in sorted(row["extra_envs"].items())))
+    if row["remove_args"]:
+        parts.append("-args=" + " ".join(row["remove_args"]))
+    if row["unset_envs"]:
+        parts.append("-envs=" + ",".join(row["unset_envs"]))
+    if row["args_mode"] == "replace":
+        parts.append("mode=replace")
+    reason = row["reason"].replace("\n", " ").strip()[:why_chars].rstrip()
+    if reason:
+        parts.append(f"why={reason}")
+    return _flatten_for_prompt(" ".join(parts))
+
+
 class _RenderMixin:
     def to_policy_denial_summary(self, *, top_k: int = 6) -> str:
         """Render the most recent PolicyGate denials for prompt injection.
@@ -137,11 +161,6 @@ class _RenderMixin:
             if unvalidated
             else ""
         )
-        resume_revalidation_tag = (
-            " ⚠ resume_pending_revalidation=true — recheck current stack before trusting validated gain"
-            if bool(getattr(self, "resume_pending_revalidation", False))
-            else ""
-        )
         geak_pending_status = (
             str(self.geak_pending.get("status") or "") if isinstance(getattr(self, "geak_pending", None), dict) else ""
         )
@@ -172,7 +191,7 @@ class _RenderMixin:
             f"gain      : validated={self.cumulative_gain_validated:.2f}%{validated_age}",
             f"stack     : {len(self.optimization_stack)} entries "
             f"(validated_at_len={self.cumulative_gain_validated_stack_len})"
-            f"{unvalidated_tag}{resume_revalidation_tag}{geak_pending_tag}",
+            f"{unvalidated_tag}{geak_pending_tag}",
         ]
         # Surface reusable hot kernels still owing a kernel_opt attempt.
         untried_hot = self.untried_hot_reusable_kernels()
@@ -207,6 +226,40 @@ class _RenderMixin:
         return (
             f"{budget:g} ms mean end-to-end: a KEEP over it, or with no latency reported, is refused "
             "(reason latency_budget_exceeded / latency_unmeasured in explore_search and the journal)"
+        )
+
+    def to_constraint_sections(self) -> list[str]:
+        """A header and the summary line for each session budget that is set, latency first."""
+        sections: list[str] = []
+        for title, block in (("Latency", self.to_latency_budget_summary()), ("Power", self.to_power_budget_summary())):
+            if block:
+                sections += [f"=== {title} budget (constraint) ===", block]
+        return sections
+
+    def to_power_budget_summary(self) -> str:
+        """One line stating the power budgets and the cap the cards are at; empty when no budget is set."""
+        budget = float(getattr(self, "power_budget_w", 0.0) or 0.0)
+        per_gpu = dict(getattr(self, "power_budget_per_gpu_w", None) or {})
+        if budget <= 0 and not per_gpu:
+            return ""
+        caps = sorted(
+            {
+                float(row["power_cap_w"])
+                for row in ((getattr(self, "gpu_power_settings", None) or {}).get("observed") or {}).values()
+                if isinstance(row, dict) and isinstance(row.get("power_cap_w"), (int, float))
+            }
+        )
+        parts = []
+        if budget > 0:
+            parts.append(f"{budget:g} W total across the serving GPUs")
+        if per_gpu:
+            parts.append(
+                "per-GPU " + ", ".join(f"GPU {g} {w:g} W" for g, w in sorted(per_gpu.items(), key=lambda i: int(i[0])))
+            )
+        cap = f", cards capped at {'/'.join(f'{c:g}' for c in caps)} W" if caps else ""
+        return (
+            f"{'; '.join(parts)}{cap}: a KEEP over a budget, or with no per-GPU power reported, is refused (reason "
+            "power_budget_exceeded / gpu_power_budget_exceeded / power_unmeasured in explore_search and the journal)"
         )
 
     def to_warm_start_summary(self, *, max_lines: int = 12) -> str:
@@ -349,39 +402,45 @@ class _RenderMixin:
             rows.append(f"  · (+{len(ordered) - max_entries} older gaps elided; see state.json `gaps[]`)")
         return "\n".join(rows)
 
-    def _untested_proposal_rows(self) -> list[dict[str, Any]]:
-        """Executable proposals from this cycle that no explore round has benched."""
-        from hyperloom.common.coerce import to_int
+    def benched_fingerprints(self) -> set[str]:
+        """Content fingerprints of every variant an explore round has benched."""
+        from ...actions.executors._proposal_identity import content_fingerprint
 
-        from ...actions.executors._proposal_identity import (
-            controls_of,
-            effective_fingerprint,
-            is_executable,
-            normalize_proposal,
-        )
-
-        def content_fingerprint(fields: dict[str, Any]) -> str:
-            return effective_fingerprint(fields["extra_args"], fields["extra_envs"], controls=controls_of(fields))
-
-        cycle = to_int(self.macro_cycle, default=0)
-        benched = {
-            content_fingerprint(normalize_proposal(row))
+        return {
+            content_fingerprint(row)
             for row in ((self.explore_search or {}).get("tested") or {}).values()
             if isinstance(row, dict)
         }
+
+    def untested_proposal_rows(self) -> list[dict[str, Any]]:
+        """Executable proposals from this cycle that no explore round has benched.
+
+        Ordered by round ``priority`` (predictor rounds set one, specialist rounds
+        do not), then gap severity, then most recent. A row's ``provenance`` is its
+        round's, ``specialist:<domain>`` unless the round's recorder set one; a
+        proposal cannot choose it, since a specialist writes its own proposals.
+        """
+        from hyperloom.common.coerce import to_int
+
+        from ...actions.executors._proposal_identity import content_fingerprint, is_executable, normalize_proposal
+
+        cycle = to_int(self.macro_cycle, default=0)
+        benched = self.benched_fingerprints()
         severity_of = {
             str(g.get("canonical_id") or ""): str(g.get("severity") or "").strip().lower()
             for g in (self.gaps or [])
             if isinstance(g, dict)
         }
-        ranked: list[tuple[int, int, dict[str, Any]]] = []
+        ranked: list[tuple[int, int, int, dict[str, Any]]] = []
         seen: set[str] = set()
         for order, entry in enumerate(self.specialist_rounds or []):
             if not isinstance(entry, dict) or to_int(entry.get("cycle"), default=0) != cycle:
                 continue
             domain = str(entry.get("domain") or "?").removesuffix("_specialist")
             severity = severity_of.get(str(entry.get("gap_canonical_id") or ""), "")
+            priority = to_int(entry.get("priority"), default=0)
             task_id = str(entry.get("task_id") or "")[:8]
+            provenance = str(entry.get("provenance") or f"specialist:{domain}")
             for index, proposal in enumerate(entry.get("proposal_set") or []):
                 if not isinstance(proposal, dict):
                     continue
@@ -395,43 +454,35 @@ class _RenderMixin:
                 row["name"] = row["name"] or f"{domain or 'specialist'}-{task_id}-{index}"
                 row["domain"] = domain
                 row["severity"] = severity
-                ranked.append((GAP_SEVERITY_RANK.get(severity, 0), order, row))
-        ranked.sort(key=lambda r: (-r[0], -r[1]))
-        return [row for _, _, row in ranked]
+                row["fingerprint"] = fingerprint
+                row["provenance"] = provenance
+                # Already checked against the read this round's dispatch was shown, which travels with them.
+                row["experience_citations"] = list(proposal.get("experience_citations") or [])
+                row["kb_read_id"] = str(entry.get("kb_read_id") or "")
+                row["kb_rendered_refs"] = list(entry.get("kb_rendered_refs") or [])
+                ranked.append((priority, GAP_SEVERITY_RANK.get(severity, 0), order, row))
+        ranked.sort(key=lambda r: (-r[0], -r[1], -r[2]))
+        return [row for _, _, _, row in ranked]
 
-    @staticmethod
-    def _untested_proposal_line(row: dict[str, Any]) -> str:
-        """Render one queue row, marking each field it carries."""
-        parts = [f"• {row['name']} [{row['domain']}·{row['severity'] or 'sev?'}]"]
-        if row["atomic"]:
-            parts.append("ATOMIC")
-        if row["extra_args"]:
-            parts.append(f"+args={row['extra_args']}")
-        if row["extra_envs"]:
-            parts.append("+envs=" + ",".join(f"{k}={v}" for k, v in sorted(row["extra_envs"].items())))
-        if row["remove_args"]:
-            parts.append("-args=" + " ".join(row["remove_args"]))
-        if row["unset_envs"]:
-            parts.append("-envs=" + ",".join(row["unset_envs"]))
-        if row["args_mode"] == "replace":
-            parts.append("mode=replace")
-        reason = row["reason"].replace("\n", " ").strip()[:80].rstrip()
-        if reason:
-            parts.append(f"why={reason}")
-        return _flatten_for_prompt(" ".join(parts))
+    def to_untested_proposals_summary(self, *, max_entries: int = 12, skip_provenance: str = "") -> str:
+        """Render the specialist proposals still waiting for a benchmark slot.
 
-    def to_untested_proposals_summary(self, *, max_entries: int = 12) -> str:
-        """Render the specialist proposals still waiting for a benchmark slot."""
-        rows = self._untested_proposal_rows()
+        Args:
+            max_entries: Rows rendered in full; the rest are counted.
+            skip_provenance: Leave out the rows a producer with its own section renders.
+        """
+        rows = [
+            row for row in self.untested_proposal_rows() if not skip_provenance or row["provenance"] != skip_provenance
+        ]
         if not rows:
             return ""
         out = [
             "Executable specialist proposals from this cycle that no explore round has benched.",
-            "Ranked by gap severity, then most recent. Compose the next `explore` grid from these;",
-            "dispatch an ATOMIC entry verbatim as one variant — never split or re-derive its flags.",
+            "Ranked by gap severity, then most recent. The Coordinator benches the head of this",
+            "queue whenever no explore is queued or running; dispatch `explore` only for variants not listed here.",
             "",
         ]
-        out.extend(self._untested_proposal_line(row) for row in rows[:max_entries])
+        out.extend(untested_proposal_line(row) for row in rows[:max_entries])
         if len(rows) > max_entries:
             out.append(f"(+{len(rows) - max_entries} more not shown)")
         return "\n".join(out)
@@ -546,14 +597,13 @@ class _RenderMixin:
         lines += [
             f"baseline_tput={self.baseline_tput}  baseline_acc={self.baseline_accuracy}",
             f"baseline_failure_streak={self.baseline_failure_streak}",
-            f"current_best={self.current_best or '(none)'}",
+            f"current_best={self._format_current_best()}",
             f"optimization_stack={self._format_optimization_stack()}",
             (
                 f"cumulative_gain_validated={self.cumulative_gain_validated}% "
                 f"(stack_len_at_validation={self.cumulative_gain_validated_stack_len}, "
                 f"ts={self.cumulative_gain_validated_ts or '(never)'})"
             ),
-            f"current_action={self.current_action or '(idle)'}",
             f"crash_count={self.crash_count}",
             f"pruned_families={self.pruned_families or '(none)'}",
             f"last_profile_trace={self.last_profile_trace or '(none)'}",
@@ -580,7 +630,7 @@ class _RenderMixin:
             f"last_action_failures={self._format_last_action_failures()}",
             f"agent_last_active={self._format_agent_last_active()}",
             f"gain_gated_action_count={int(self.gain_gated_action_count or 0)}",
-            f"tick={int(self.tick or 0)}  target_gap_pct={float(self.target_gap_pct or 0.0):.2f}",
+            f"tick={int(self.tick or 0)}",
             f"macro_cycle={int(self.macro_cycle or 0)}",
             f"stop_reason={self.stop_reason or '(none)'}",
             f"closing_phase={self.closing_phase}  "
@@ -683,7 +733,16 @@ class _RenderMixin:
         gain = entry.get("gain_pct")
         result = entry.get("result") if isinstance(entry.get("result"), dict) else {}
         tput = entry.get("tput") or entry.get("output_throughput") or result.get("output_throughput")
-        gain_s = f"{gain:+.2f}%" if isinstance(gain, (int, float)) else " no_meas"
+        # A REVERT carries no ``gain_pct`` by design; its graded movement is ``graded_gain_pct``. Only a row with
+        # neither was never measured on the graded axis -- printing "no_meas" for a guard refusal sends readers
+        # hunting for a broken extractor.
+        graded_gain = entry.get("graded_gain_pct")
+        if isinstance(gain, (int, float)) and not isinstance(gain, bool):
+            gain_s = f"{gain:+.2f}%"
+        elif isinstance(graded_gain, (int, float)) and not isinstance(graded_gain, bool):
+            gain_s = f"{graded_gain:+.2f}%"
+        else:
+            gain_s = " no_meas"
         tput_s = f" (tput={tput:.1f})" if isinstance(tput, (int, float)) and tput > 0 else ""
         # The gain column is meaningless without the axis it was taken on.
         graded_obj = str(entry.get("graded_objective") or "").strip()
@@ -765,6 +824,16 @@ class _RenderMixin:
             outcome = str(entry.get("outcome") or "?").upper()
             out.append(f"      {str(fp)[:16]} {outcome:7s} {_RenderMixin._format_variant_line(entry)}")
         return "\n".join(out)
+
+    def _format_current_best(self) -> str:
+        """Render ``current_best`` without its ``optimization_stack`` and ``measurement``.
+
+        The stack, which grows with every stacked KEEP, has its own line; the
+        measurement is launch evidence (paths, identity hashes) no decision reads.
+        """
+        if not self.current_best:
+            return "(none)"
+        return str({k: v for k, v in self.current_best.items() if k not in ("optimization_stack", "measurement")})
 
     def _format_optimization_stack(self) -> str:
         """Render the optimization stack as ``action:variant`` parts."""

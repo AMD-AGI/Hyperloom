@@ -388,7 +388,7 @@ class WorkspaceGuard:
     ) -> None:
         """Save enough exact state to reconstruct an arbitrary dirty baseline."""
         self.baseline_tracked_paths = set(_nul_paths(_git_output(self.root, "ls-files", "-z")))
-        self.baseline_dirty_paths = set([*unstaged, *staged, *untracked])
+        self.baseline_dirty_paths = {*unstaged, *staged, *untracked}
         for relative in self.baseline_dirty_paths:
             self.baseline_path_snapshots[relative] = self._filesystem_snapshot(self.root / relative)
         self.baseline_index_entries = self._index_entries()
@@ -475,13 +475,8 @@ class WorkspaceGuard:
 
     def _checkout_index_path(self, relative: str) -> None:
         """Restore one clean tracked path from the already-restored index."""
-        path = self.root / relative
-        try:
-            metadata = path.lstat()
-        except FileNotFoundError:
-            metadata = None
-        if metadata is not None and stat.S_ISDIR(metadata.st_mode):
-            shutil.rmtree(path)
+        # checkout-index skips a path whose stat matches the index entry, which a same-size edit can satisfy.
+        self._remove_filesystem_path(self.root / relative)
         self._run_git_restore("checkout-index", "--force", "--", relative)
 
     def _restore_baseline(self) -> None:
@@ -520,17 +515,15 @@ class WorkspaceGuard:
         )
 
         after_unstaged, after_staged, after_untracked = self._current_changes()
-        changed_paths = set(
-            [
-                *before_unstaged,
-                *before_staged,
-                *before_untracked,
-                *after_unstaged,
-                *after_staged,
-                *after_untracked,
-                *self.baseline_path_snapshots,
-            ]
-        )
+        changed_paths = {
+            *before_unstaged,
+            *before_staged,
+            *before_untracked,
+            *after_unstaged,
+            *after_staged,
+            *after_untracked,
+            *self.baseline_path_snapshots,
+        }
         for relative in sorted(
             changed_paths,
             key=lambda value: len(Path(value).parts),
@@ -738,7 +731,9 @@ class WorkspaceGuard:
         else:
             unstaged, staged, untracked = self._current_changes()
         tracked_changes = list(dict.fromkeys([*unstaged, *staged]))
-        protected_changes = [path for path in tracked_changes if self._is_protected(path)]
+        protected_changes = [
+            path for path in tracked_changes if not self.spec.allow_tracked_changes or self._is_protected(path)
+        ]
         protected_untracked = [path for path in untracked if self._is_protected(path)]
         current_protected = self._ignored_protected_paths()
         changed_snapshots = [

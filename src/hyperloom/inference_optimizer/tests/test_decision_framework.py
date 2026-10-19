@@ -37,9 +37,6 @@ def _silent_backends() -> dict[str, object]:
 def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
-    # Pin the kernel-agent root so request handlers resolve from disk.
-    kernel_agent_root = Path(__file__).resolve().parents[4] / "src" / "hyperloom" / "agents" / "kernel"
-    monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(kernel_agent_root))
     # Stub the interpreter resolver to avoid a real Magpie import probe.
     monkeypatch.setenv("MAGPIE_PYTHON", "/usr/bin/python3")
     from hyperloom.orchestrator.actions.executors import _benchmark_interpreter
@@ -75,7 +72,7 @@ async def test_trace_analyze_does_not_record_kernel_opt(
             type=IntentType.REQUEST,
             payload={"target_agent": "kernel_agent", "kind": "trace_analyze", "params": {"trace_input": "/tmp/t.json"}},
         )
-        await c._handle_intent("orchestration", intent)
+        await c.router.handle_intent("orchestration", intent)
         assert c.shared_state.last_kernel_opt == {}
     finally:
         await c.stop()
@@ -99,7 +96,7 @@ async def test_run_gemm_tuning_response_records_to_shared_state(
         }
         c.shared_state.save(session_dir)
 
-        await c._handle_gemm_tuning_result(
+        await c.phase_kernel._handle_gemm_tuning_result(
             {
                 "status": "ok",
                 "decision": "KEEP",
@@ -124,6 +121,25 @@ async def test_run_gemm_tuning_response_records_to_shared_state(
 
 
 @pytest.mark.asyncio
+async def test_a_gemm_lane_the_phase_could_not_fund_is_no_attempt_and_stays_armed(session_dir):
+    """The lane never started, so it neither counts as an attempt nor latches GEMM tuning off for a later entry."""
+    from hyperloom.orchestrator.kernel import request_handlers as kernel_request_handlers
+    from hyperloom.orchestrator.kernel.lane_budget import LANE_GEMM
+
+    c = Coordinator(session_dir, backends=_silent_backends())
+    try:
+        c.shared_state.framework = "sglang"
+
+        await c.phase_kernel._handle_gemm_tuning_result(kernel_request_handlers._unfunded_lane_skip(LANE_GEMM))
+
+        assert c.shared_state.last_gemm_tuning == {}
+        assert c.shared_state.gemm_tuning_attempts == []
+        assert c.phase_kernel._gemm_tuning_required_before_kernel_opt()
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
 async def test_run_optimization_no_longer_gated_on_fp8_gemm_tuning(session_dir):
     """The gemm-before-run_optimization sequence deny was removed; the request-layer pre-deny no longer fires."""
     c = Coordinator(session_dir, backends=_silent_backends())
@@ -138,7 +154,7 @@ async def test_run_optimization_no_longer_gated_on_fp8_gemm_tuning(session_dir):
             "candidates_path": "/tmp/candidates.json",
         }
 
-        assert c._sequence_denial_for_request("kernel_agent", "run_optimization") is None
+        assert c.dispatcher.admission_denial_for_request("kernel_agent", "run_optimization") is None
     finally:
         await c.stop()
 
@@ -154,6 +170,7 @@ async def test_kernel_entry_auto_runs_gemm_tuning_for_fp8_sglang(
         c.shared_state.precision = "fp8"
         c.shared_state.framework = "sglang"
         c.shared_state.baseline_tput = 800.0
+        c.shared_state.baseline_runtime_sec = 600.0
         c.shared_state.last_profile_trace = "/tmp/profile.trace.json.gz"
         c.shared_state.last_trace_analyze = {
             "trace_input": "/tmp/profile.trace.json.gz",
@@ -191,7 +208,7 @@ async def test_kernel_entry_auto_runs_gemm_tuning_for_fp8_sglang(
             lambda _self, _env_var, env_value: env_value,
         )
 
-        await c._run_kernel_agent(SimpleNamespace(task=SimpleNamespace(params={"from_phase": "FRAMEWORK_AGENT"})))
+        await c.phase_kernel.run_agent(SimpleNamespace(task=SimpleNamespace(params={"from_phase": "FRAMEWORK_AGENT"})))
 
         assert calls
         assert c.shared_state.gemm_tuning_attempts
@@ -200,7 +217,7 @@ async def test_kernel_entry_auto_runs_gemm_tuning_for_fp8_sglang(
         assert c.shared_state.current_best["tput"] == 900.0
         assert c.shared_state.cumulative_gain_validated == pytest.approx(12.5)
         assert c.shared_state.optimization_stack[-1]["action"] == "gemm_tuning"
-        assert c._gemm_tuning_required_before_kernel_opt() is False
+        assert c.phase_kernel._gemm_tuning_required_before_kernel_opt() is False
     finally:
         await c.stop()
 

@@ -324,129 +324,10 @@ def test_create_only_reason_does_not_depend_on_the_candidates(tmp_path):
         assert resolution.reason == "pure_create_requires_explicit_root", candidates
 
 
-# Artifact stacking
-
-
-def test_kept_artifacts_reach_the_replay_script(tmp_path):
-    source = tmp_path / "server_args.py"
-    source.write_text("# fixed\n", encoding="utf-8")
-    backup = tmp_path / "server_args.py.bak"
-    backup.write_text("# original\n", encoding="utf-8")
-
-    # Populate the round archive as snapshot_round would.
-    art_dir = tmp_path / "reports" / "enablement" / "s1" / "artifacts"
-    art_dir.mkdir(parents=True)
-    (art_dir / "000_server_args.py").write_text("# fixed\n", encoding="utf-8")
-    (art_dir / "000_server_args.py.orig").write_text("# original\n", encoding="utf-8")
-
-    enablement = EnablementRound()
-    enablement.kept_rounds = [
-        {
-            "task_id": "s1",
-            "patches": [],
-            "artifacts": [
-                {
-                    "target": "/sgl-workspace/sglang/python/sglang/srt/server_args.py",
-                    "source": str(source),
-                    "backup": str(backup),
-                }
-            ],
-        }
-    ]
-
-    write_setting_script(tmp_path, enablement, "sglang", model="/models/M")
-    artifacts = tmp_path / "reports" / "enablement" / "artifacts"
-    assert (artifacts / "001_server_args.py").read_text() == "# fixed\n"
-    assert (artifacts / "001_server_args.py.orig").read_text() == "# original\n"
-
-
-def test_artifact_only_repair_renders_a_replay_script(tmp_path):
-    """101901 shipped two artifacts and no diff; its script had no install lines."""
-    sources = []
-    art_dir = tmp_path / "reports" / "enablement" / "s1" / "artifacts"
-    art_dir.mkdir(parents=True)
-    for idx, name in enumerate(("server_args.py", "quark_w4a4_mxfp4_moe.py")):
-        src = tmp_path / name
-        src.write_text(f"# {name}\n", encoding="utf-8")
-        sources.append(src)
-        # Populate the archive as snapshot_round would.
-        (art_dir / f"{idx:03d}_{name}").write_text(f"# {name}\n", encoding="utf-8")
-
-    enablement = EnablementRound()
-    enablement.kept_rounds = [
-        {
-            "task_id": "s1",
-            "patches": [],
-            "artifacts": [
-                {"target": f"/sgl-workspace/sglang/python/sglang/srt/{s.name}", "source": str(s)} for s in sources
-            ],
-        }
-    ]
-
-    write_setting_script(tmp_path, enablement, "sglang", model="/models/GLM-5.2-MXFP4", tp=8)
-    text = (tmp_path / "reports" / "enablement" / "enablement_setting.sh").read_text()
-    assert "enablement fix replay script" in text
-    assert text.count("install -D") == 2
-
-
-def test_script_without_artifacts_stays_a_launch_recipe():
+def test_script_without_a_setup_stays_a_launch_recipe():
     text = render_reference_script(framework="sglang", server_args="")
     assert "current best launch recipe" in text
-    assert "install -D" not in text
-
-
-def test_each_round_emits_its_patches_before_its_artifacts():
-    """A round that patches and whole-file-replaces one file must replay in apply order."""
-    text = render_reference_script(
-        framework="sglang",
-        server_args="",
-        framework_root="/sgl-workspace/sglang",
-        rounds=[
-            {
-                "patches": ["patches/001_r1.patch"],
-                "artifacts": [{"archive_path": "artifacts/001_a.py", "target": "/t/a.py"}],
-            },
-            {"patches": ["patches/002_r2.patch"], "artifacts": []},
-        ],
-    )
-    order = [line for line in text.splitlines() if line.startswith("apply_patch ") or line.startswith("install -D ")]
-    assert order == [
-        "apply_patch patches/001_r1.patch",
-        'install -D "$SCRIPT_DIR"/artifacts/001_a.py /t/a.py',
-        "apply_patch patches/002_r2.patch",
-    ]
-
-
-def test_generated_artifact_script_installs_and_launches(tmp_path):
-    source = tmp_path / "patched.py"
-    source.write_text("# patched\n", encoding="utf-8")
-    target = tmp_path / "tree" / "pkg" / "mod.py"
-    target.parent.mkdir(parents=True)
-    target.write_text("# original\n", encoding="utf-8")
-
-    # Populate the round archive as snapshot_round would.
-    art_dir = tmp_path / "reports" / "enablement" / "s1" / "artifacts"
-    art_dir.mkdir(parents=True)
-    (art_dir / "000_mod.py").write_text("# patched\n", encoding="utf-8")
-
-    enablement = EnablementRound()
-    enablement.kept_rounds = [
-        {
-            "task_id": "s1",
-            "patches": [],
-            "artifacts": [{"target": str(target), "source": str(source)}],
-        }
-    ]
-    rel = write_setting_script(tmp_path, enablement, "sglang", model="/models/M")
-
-    proc = subprocess.run(
-        ["bash", "-c", f'python3(){{ echo LAUNCHED; }}; source "{tmp_path / rel}"'],
-        capture_output=True,
-        text=True,
-    )
-    assert proc.returncode == 0, proc.stderr
-    assert "LAUNCHED" in proc.stdout
-    assert target.read_text() == "# patched\n"
+    assert "enablement_setup.sh" not in text
 
 
 # Accumulated config
@@ -485,8 +366,9 @@ def test_replay_script_is_valid_bash(tmp_path):
     enablement.kept_artifacts = [{"target": "/sgl-workspace/sglang/art.py", "source": str(source)}]
 
     rel = write_setting_script(tmp_path, enablement, "sglang", model="/models/M", tp=8)
-    proc = subprocess.run(["bash", "-n", str(tmp_path / rel)], capture_output=True)
-    assert proc.returncode == 0, proc.stderr.decode()
+    for script in (tmp_path / rel, tmp_path / "reports" / "enablement" / "enablement_setup.sh"):
+        proc = subprocess.run(["bash", "-n", str(script)], capture_output=True)
+        assert proc.returncode == 0, proc.stderr.decode()
 
 
 # State migration

@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from kernelforge.loop import task_preparer
+from kernelforge.loop import task_preflight
 
 pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git not available")
 
@@ -160,7 +161,7 @@ def _prepare_with_spec_reading_driver(
         captured["preflight_bench"] = bench
         case_ids = re.findall(r"case_ms:\s*(\S+)", bench.stdout)
         ok = bench.returncode == 0 and len(case_ids) == 2
-        return task_preparer.PreflightResult(
+        return task_preflight.PreflightResult(
             ok=ok,
             correctness_ok=ok,
             bench_ok=ok,
@@ -306,7 +307,7 @@ def test_a_declared_suite_still_gates_preflight_when_the_spec_cannot_be_staged(t
 
     async def recording_preflight(*_args, **kwargs):
         captured["expected_case_ids"] = kwargs.get("expected_case_ids")
-        return task_preparer.PreflightResult(
+        return task_preflight.PreflightResult(
             ok=False,
             correctness_ok=False,
             bench_ok=False,
@@ -371,7 +372,7 @@ def test_a_failed_rematerialization_stops_advertising_the_absent_bundle(tmp_path
         return "prepared"
 
     async def failing_preflight(*_args, **_kwargs):
-        return task_preparer.PreflightResult(
+        return task_preflight.PreflightResult(
             ok=False,
             correctness_ok=False,
             bench_ok=False,
@@ -503,7 +504,7 @@ def test_a_source_the_rollback_cannot_put_back_fails_the_preparation(tmp_path, m
         return "prepared"
 
     async def passing_preflight(*_args, **_kwargs):
-        return task_preparer.PreflightResult(
+        return task_preflight.PreflightResult(
             ok=True,
             correctness_ok=True,
             bench_ok=True,
@@ -569,7 +570,7 @@ def test_a_source_that_comes_back_on_a_retry_is_not_still_reported_as_lost(tmp_p
 
     async def preflight_that_passes_on_the_retry(*_args, **_kwargs):
         ok = verdicts.pop(0)
-        return task_preparer.PreflightResult(
+        return task_preflight.PreflightResult(
             ok=ok,
             correctness_ok=ok,
             bench_ok=ok,
@@ -618,7 +619,7 @@ def test_preparation_gives_back_the_source_the_caller_had_not_the_one_head_holds
         return "prepared"
 
     async def passing_preflight(*_args, **_kwargs):
-        return task_preparer.PreflightResult(
+        return task_preflight.PreflightResult(
             ok=True,
             correctness_ok=True,
             bench_ok=True,
@@ -681,7 +682,7 @@ def test_external_bundle_reuses_its_own_spec_beside_the_driver(tmp_path, monkeyp
         bench = _run_driver(Path(driver_script), "--bench-mode")
         case_ids = re.findall(r"case_ms:\s*(\S+)", bench.stdout)
         ok = bench.returncode == 0 and len(case_ids) == 2
-        return task_preparer.PreflightResult(
+        return task_preflight.PreflightResult(
             ok=ok,
             correctness_ok=ok,
             bench_ok=ok,

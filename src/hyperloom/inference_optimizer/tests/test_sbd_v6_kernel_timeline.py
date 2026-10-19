@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import types
 from pathlib import Path
 from typing import Any
@@ -49,7 +50,6 @@ def _forge_recorder():
         macro_cycle=3,
         route=ROUTE_FORGE,
         route_reason="kernel_opt_backend_order=forge",
-        code_revision="abc1234",
     )
     assert recorder is not None
     recorder.begin(
@@ -71,8 +71,10 @@ def _geak_recorder(*, macro_cycle: int = 1):
 
 def _phase_with_recorder(tmp_path: Path, recorder: Any) -> KernelPhase:
     phase = object.__new__(KernelPhase)
-    phase.session_dir = tmp_path
-    phase.shared_state = types.SimpleNamespace(macro_cycle=3)
+    phase._coord = types.SimpleNamespace(
+        session_dir=tmp_path,
+        shared_state=types.SimpleNamespace(macro_cycle=3),
+    )
     phase._kernel_timeline_recorder = recorder
     return phase
 
@@ -1479,6 +1481,7 @@ def test_record_backend_versions_and_timeline_mirrors_each_attempt(tmp_path):
             },
             "proposal": {"decision": "KEEP"},
         },
+        recorder=recorder,
     )
     recorder.finish(tput_after=1000.0)
 
@@ -1622,6 +1625,27 @@ def test_gemm_tuning_records_one_row_per_tuner_not_a_merged_row(tmp_path):
     assert failed["error_class"] == "input_missing"
     # The failed tuner's error must not land on the row that succeeded.
     assert kept["error_class"] != "input_missing"
+
+
+def test_geak_absent_backends_land_on_the_result(tmp_path):
+    eval_dir = tmp_path / "eval"
+    eval_dir.mkdir()
+    (eval_dir / "env_report.json").write_text(
+        json.dumps({"absent_backends": {"ck": {"probe": "which ckProfiler"}}}), encoding="utf-8"
+    )
+    result = {"status": "ok", "returncode": 0, "eval_dir": str(eval_dir)}
+    phase = _phase_with_recorder(tmp_path, _geak_recorder())
+
+    phase._record_geak_delegation_timeline(
+        result,
+        handoff={"exp_root": str(tmp_path)},
+        started_at="2026-09-02T00:00:00+00:00",
+        duration_sec=1.0,
+        runner_timeout_sec=300,
+        kill_timeout_sec=360,
+    )
+
+    assert result["absent_backends"] == {"ck": "which ckProfiler"}
 
 
 def test_geak_runner_outcome_is_wired_to_geak_delegation(tmp_path):

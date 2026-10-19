@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from hyperloom.orchestrator.loop.coordinator_helpers import (
+from hyperloom.orchestrator.kernel.geak_config import (
     _geak_accepted_kernel_specs,
     geak_is_cand_tag,
     geak_spec_is_env,

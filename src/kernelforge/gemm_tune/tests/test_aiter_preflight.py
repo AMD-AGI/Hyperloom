@@ -8,7 +8,7 @@ import importlib.util
 import os
 from types import SimpleNamespace
 
-from kernelforge.gemm_tune.aiter_preflight import classify, collect, is_aligned, main, serve_aiter_path
+from kernelforge.gemm_tune.aiter_preflight import classify, collect, is_aligned, serve_aiter_path
 
 
 def test_is_aligned_exact_and_editable_subpath():
@@ -59,35 +59,6 @@ def test_classify_unset_root_and_commit_are_soft():
 def test_classify_no_serving_aiter_is_hard():
     hard, _ = classify(None, "/opt/aiter", "abc123")
     assert any("not importable" in m for m in hard)
-
-
-def test_main_strict_fails_on_misalignment(monkeypatch, tmp_path):
-    root = tmp_path / "aiter_src"
-    root.mkdir()
-    monkeypatch.setenv("AITER_ROOT_DIR", str(root))
-    monkeypatch.setenv("AITER_COMMIT", "abc123")
-    # serving aiter resolves somewhere else entirely -> misaligned
-    monkeypatch.setattr("kernelforge.gemm_tune.aiter_preflight.serve_aiter_path", lambda: "/usr/local/aiter")
-    assert main(["--strict"]) == 1
-
-
-def test_main_non_strict_returns_zero_on_misalignment(monkeypatch, tmp_path):
-    root = tmp_path / "aiter_src"
-    root.mkdir()
-    monkeypatch.setenv("AITER_ROOT_DIR", str(root))
-    monkeypatch.setattr("kernelforge.gemm_tune.aiter_preflight.serve_aiter_path", lambda: "/usr/local/aiter")
-    assert main([]) == 0  # warn-only by default
-
-
-def test_main_strict_passes_when_aligned(monkeypatch, tmp_path):
-    root = tmp_path / "aiter_src"
-    root.mkdir()
-    serve = root / "aiter"
-    serve.mkdir()
-    monkeypatch.setenv("AITER_ROOT_DIR", str(root))
-    monkeypatch.setenv("AITER_COMMIT", "abc123")
-    monkeypatch.setattr("kernelforge.gemm_tune.aiter_preflight.serve_aiter_path", lambda: os.path.realpath(str(serve)))
-    assert main(["--strict"]) == 0
 
 
 def test_collect_aligned(monkeypatch, tmp_path):

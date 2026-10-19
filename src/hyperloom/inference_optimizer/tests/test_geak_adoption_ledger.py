@@ -10,7 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from hyperloom.orchestrator.loop.coordinator_helpers import (
+from hyperloom.orchestrator.kernel.geak_config import (
     _geak_accepted_kernel_specs,
     _geak_overlay_digest,
     _geak_overlay_is_loadable,

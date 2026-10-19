@@ -17,8 +17,8 @@ from typing import Any
 from hyperloom.common.coerce import to_unix
 from hyperloom.common.env import forge_explicitly_enabled
 from hyperloom.common.gpu_partition import published_shape
-from hyperloom.common.timeutil import now_iso
 from hyperloom.common.perf_metric import is_agentx_mode
+from hyperloom.common.timeutil import now_iso
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     agentx_enabled as _agentx_enabled,
 )
@@ -33,7 +33,6 @@ from hyperloom.common.workload_defaults import (
     DEFAULT_PRECISION,
 )
 from ..session.paths import _SESSION_SKELETON
-from ..session.session_paths import agent_prompt_snapshot
 from .model_gate import _load_model_arch, _load_model_config_tags
 from ..model_config_utils import summarize_model_config
 
@@ -59,7 +58,34 @@ def resolve_model_display_name(args: argparse.Namespace) -> str:
 
 
 # Bump when a change makes previously recorded AgentX measurements incomparable.
+# The MLPerf client is a different workload, but it is opt-in: the epoch stays
+# so aiperf sessions remain resumable. The backend name is what resume compares.
 AGENTX_MEASUREMENT_EPOCH = 1
+
+
+def _requested_framework(args: Any) -> str:
+    """--framework, else $FRAMEWORK, else ""."""
+    return (getattr(args, "framework", None) or "").strip() or (os.environ.get("FRAMEWORK", "") or "").strip()
+
+
+def resolve_framework_version(args: argparse.Namespace) -> str:
+    """Resolve ``framework_version``: --framework-version > $FRAMEWORK_VERSION > auto-detect > ""."""
+    explicit = (getattr(args, "framework_version", None) or "").strip() or (
+        os.environ.get("FRAMEWORK_VERSION", "") or ""
+    ).strip()
+    if explicit:
+        return explicit
+    framework = _requested_framework(args)
+    if not framework:
+        return ""
+    from ..recipe_snapshot_constants import (
+        DEFAULT_FRAMEWORK_VERSION_SLUG,
+        detect_framework_version,
+    )
+
+    detected = detect_framework_version(framework)
+    # Treat the failure-slug as "no info".
+    return "" if detected == DEFAULT_FRAMEWORK_VERSION_SLUG else detected
 
 
 def seed_grading(framework: str, benchmark_mode: str) -> dict[str, Any]:
@@ -107,6 +133,17 @@ def agentx_state_is_stale(state: Any) -> str:
                 f"epoch {AGENTX_MEASUREMENT_EPOCH}; the recorded results describe "
                 "a different workload and cannot anchor or be compared against"
             )
+        from hyperloom.common.agentx_workload import agentic_backend
+
+        # Sessions recorded before the backend was persisted are aiperf.
+        had_backend = str(getattr(state, "agentx_backend", "") or "") or "aiperf"
+        want_backend = agentic_backend()
+        if had_backend != want_backend:
+            return (
+                f"session was measured with agentic backend {had_backend!r} but this "
+                f"run is {want_backend!r}; the recorded results describe a different "
+                "workload and cannot anchor or be compared against"
+            )
     return ""
 
 
@@ -129,6 +166,18 @@ def latency_budget_scope_error(framework: str | None, requested_ms: float | None
     )
 
 
+def _budget_resume_conflict(flag: str, unit: str, archived: float, requested: float | None) -> str:
+    """Why a resume-time budget differs from the archived one, or ``\"\"``; omitting the flag keeps the archive."""
+    if requested is None or float(requested) == archived:
+        return ""
+    recorded = f"{archived:g} {unit}" if archived > 0 else "no budget"
+    return (
+        f"{flag} {float(requested):g} differs from the {recorded} this session was "
+        "graded under; its KEEPs would be judged against a constraint they were never measured "
+        "for. Resume without the flag to keep the recorded budget, or start a fresh session"
+    )
+
+
 def latency_budget_resume_conflict(state: Any, requested_ms: float | None) -> str:
     """Return why ``--max-latency-ms`` cannot apply to a resumed session, or ``\"\"``.
 
@@ -136,21 +185,214 @@ def latency_budget_resume_conflict(state: Any, requested_ms: float | None) -> st
     value would leave them judged against a constraint the new one does not
     state. Omitting the flag keeps the archived budget.
     """
-    if requested_ms is None:
-        return ""
-    archived = float(getattr(state, "latency_budget_ms", 0.0) or 0.0)
-    if float(requested_ms) == archived:
-        return ""
-    recorded = f"{archived:g} ms" if archived > 0 else "no budget"
-    return (
-        f"--max-latency-ms {float(requested_ms):g} differs from the {recorded} this session was "
-        "graded under; its KEEPs would be judged against a constraint they were never measured "
-        "for. Resume without the flag to keep the recorded budget, or start a fresh session"
+    return _budget_resume_conflict(
+        "--max-latency-ms", "ms", float(getattr(state, "latency_budget_ms", 0.0) or 0.0), requested_ms
     )
+
+
+def power_budget_resume_conflict(state: Any, requested_w: float | None) -> str:
+    """Return why ``--max-power-w`` cannot apply to a resumed session, or ``\"\"``."""
+    return _budget_resume_conflict(
+        "--max-power-w", "W", float(getattr(state, "power_budget_w", 0.0) or 0.0), requested_w
+    )
+
+
+def per_gpu_power_budget_resume_conflict(state: Any, requested: dict[str, float] | None) -> str:
+    """Return why ``--max-per-gpu-power-w`` cannot apply to a resumed session, or ``\"\"``."""
+    if requested is None:
+        return ""
+    archived = {str(g): float(w) for g, w in (getattr(state, "power_budget_per_gpu_w", None) or {}).items()}
+    if {str(g): float(w) for g, w in requested.items()} == archived:
+        return ""
+    recorded = ", ".join(f"GPU {g} {w:g} W" for g, w in sorted(archived.items())) or "no per-GPU limits"
+    return (
+        f"--max-per-gpu-power-w differs from the {recorded} this session was graded under; its KEEPs would be "
+        "judged against a constraint they were never measured for. Resume without the flag to keep the recorded "
+        "limits, or start a fresh session"
+    )
+
+
+def power_budget_unmeasurable_error(
+    *, total_w: float | None, per_gpu_w: dict[str, float] | None, nodes: int, framework: str | None
+) -> str:
+    """Why a power budget could never be measured on this session, or ``""``; checked at launch and on resume.
+
+    Every round would be ``power_unmeasured``, so the run would spend a whole baseline only to stop as if it were over
+    budget.
+    """
+    if not (total_w and float(total_w) > 0) and not per_gpu_w:
+        return ""
+    if nodes >= 2:
+        return (
+            "--max-power-w / --max-per-gpu-power-w cannot be measured on a multi-node session: the GPU power sampler "
+            "reads only this host's cards"
+        )
+    from .. import framework_registry
+
+    if framework_registry.is_scriptable(framework):
+        return (
+            f"--max-power-w / --max-per-gpu-power-w cannot be measured on the scriptable framework {framework!r}: the "
+            "GPU power sampler follows a server's measured phase, and a scriptable round runs no server"
+        )
+    from hyperloom.common.gpu_power_settings import gpu_power_sampling_unavailable
+
+    reason = gpu_power_sampling_unavailable()
+    return f"--max-power-w / --max-per-gpu-power-w cannot be measured: {reason}" if reason else ""
+
+
+def per_gpu_power_budget_error(
+    per_gpu_w: dict[str, float] | None,
+    *,
+    total_w: float | None,
+    available_gpus: set[int] | None,
+) -> str:
+    """Why the per-GPU power limits cannot be used, or ``""``; checked at launch, before anything runs.
+
+    *available_gpus* is the session's visible mask, or every card amd-smi reported when there is no mask, or
+    ``None`` when neither is known (then a listed card cannot be checked, which refuses).
+    """
+    if not per_gpu_w:
+        return ""
+    listed = sorted(int(g) for g in per_gpu_w)
+    if available_gpus is None:
+        return "--max-per-gpu-power-w cannot be checked: no visible-device mask is set and amd-smi reported no GPUs"
+    missing = [g for g in listed if g not in available_gpus]
+    if missing:
+        return (
+            f"--max-per-gpu-power-w names GPU(s) {', '.join(map(str, missing))}, which this session cannot use "
+            f"(available: {', '.join(map(str, sorted(available_gpus))) or 'none'})"
+        )
+    if total_w is not None and sum(per_gpu_w.values()) > float(total_w):
+        return (
+            f"the --max-per-gpu-power-w limits add up to {sum(per_gpu_w.values()):g} W, more than --max-power-w "
+            f"{float(total_w):g} W"
+        )
+    return ""
+
+
+_MAX_LATENCY_MS = "max_latency_ms"
+_MAX_POWER_W = "max_power_w"
+_MAX_PER_GPU_POWER_W = "max_per_gpu_power_w"
+_NODES = "nodes"
+
+
+def constraint_budgets_from_args(args: Any) -> dict[str, Any]:
+    """The session's latency and power budgets from the CLI: the only copy, archived with the session."""
+    return {
+        "latency_budget_ms": float(getattr(args, _MAX_LATENCY_MS, None) or 0.0),
+        "power_budget_w": float(getattr(args, _MAX_POWER_W, None) or 0.0),
+        "power_budget_per_gpu_w": dict(getattr(args, _MAX_PER_GPU_POWER_W, None) or {}),
+    }
+
+
+def constraint_budget_resume_conflict(args: Any, state: Any) -> str:
+    """Why a resume cannot keep the latency and power budgets the session was graded under, or ``""``."""
+    return (
+        latency_budget_resume_conflict(state, getattr(args, _MAX_LATENCY_MS, None))
+        or power_budget_resume_conflict(state, getattr(args, _MAX_POWER_W, None))
+        or per_gpu_power_budget_resume_conflict(state, getattr(args, _MAX_PER_GPU_POWER_W, None))
+        or power_budget_unmeasurable_error(
+            total_w=getattr(state, "power_budget_w", 0.0),
+            per_gpu_w=getattr(state, "power_budget_per_gpu_w", None),
+            nodes=max(int(getattr(args, _NODES, 1) or 1), int(getattr(state, _NODES, 1) or 1)),
+            framework=state.framework,
+        )
+    )
+
+
+def resolve_launch_gpu_power(args: Any, *, nodes: int) -> dict[str, Any]:
+    """The launch's GPU power settings record; exits 2 before anything runs when the declared settings cannot be
+    applied or a requested power budget cannot be measured or checked."""
+    from hyperloom.common.gpu_power_settings import visible_gpu_indices
+
+    gpu_power, error = resolve_gpu_power_settings(
+        power_cap_w=getattr(args, "gpu_power_cap_w", None),
+        perf_level=getattr(args, "gpu_perf_level", None),
+        nodes=nodes,
+    )
+    observed = {int(gpu) for gpu in (gpu_power.get("observed") or {})} or None
+    error = (
+        error
+        or power_budget_unmeasurable_error(
+            total_w=getattr(args, _MAX_POWER_W, None),
+            per_gpu_w=getattr(args, _MAX_PER_GPU_POWER_W, None),
+            nodes=nodes,
+            framework=_requested_framework(args),
+        )
+        or per_gpu_power_budget_error(
+            getattr(args, _MAX_PER_GPU_POWER_W, None),
+            total_w=getattr(args, _MAX_POWER_W, None),
+            available_gpus=visible_gpu_indices() or observed,
+        )
+    )
+    if error:
+        print(f"ERROR: {error}.", file=sys.stderr)
+        sys.exit(2)
+    return gpu_power
+
+
+def resolve_gpu_power_settings(
+    *,
+    power_cap_w: float | None,
+    perf_level: str | None,
+    nodes: int,
+    read: Any = None,
+) -> tuple[dict[str, Any], str]:
+    """Read the cards' power settings and check the declared ones; ``(record, error)``.
+
+    ``record`` is what the session stores and the platform fingerprint shows: the declared values and what each card
+    reported. ``error`` is non-empty when a declared value does not hold, or cannot be checked, and the launch must stop.
+    Nothing is set here; the operator sets power cap and perf level with ``amd-smi set`` before launch.
+    """
+    from hyperloom.common.gpu_power_settings import (
+        GpuPowerSettingsError,
+        declared_setting_problems,
+        normalize_perf_level,
+        read_gpu_power_settings,
+        visible_gpu_indices,
+    )
+
+    declared: dict[str, Any] = {}
+    if power_cap_w is not None:
+        declared["power_cap_w"] = float(power_cap_w)
+    if perf_level:
+        declared["perf_level"] = normalize_perf_level(perf_level)
+    if nodes >= 2:
+        if declared:
+            return {}, (
+                "--gpu-power-cap-w / --gpu-perf-level cannot be checked on a multi-node session: they describe the "
+                "benchmark nodes' cards, which this process cannot read, and an unverifiable assertion is not a "
+                "satisfied one"
+            )
+        return {}, ""
+    try:
+        observed = (read or read_gpu_power_settings)()
+    except GpuPowerSettingsError as exc:
+        if declared:
+            return {"declared": declared}, f"the declared GPU power settings cannot be checked: {exc}"
+        return {}, ""
+    gpus = visible_gpu_indices()
+    record = {
+        "declared": declared,
+        "observed": {str(gpu): row for gpu, row in sorted(observed.items()) if gpus is None or gpu in gpus},
+    }
+    problems = declared_setting_problems(
+        observed,
+        power_cap_w=declared.get("power_cap_w"),
+        perf_level=declared.get("perf_level"),
+        gpus=gpus,
+    )
+    if problems:
+        return record, (
+            "the GPUs are not at the declared power settings (set them with amd-smi before launch): "
+            + "; ".join(problems)
+        )
+    return record, ""
 
 
 def _build_agentx_corpus_shape_seed() -> dict[str, Any]:
     """Return the canonical corpus shape, until a measurement replaces it."""
+    from hyperloom.common.agentx_workload import MLPERF_CORPUS, is_mlperf_backend, mlperf_trajectories
     from hyperloom.inference_optimizer.agentx.mapping import (
         CANONICAL_CORPUS_DURATION_S,
         CANONICAL_CORPUS_ENTRIES,
@@ -159,6 +401,14 @@ def _build_agentx_corpus_shape_seed() -> dict[str, Any]:
         CANONICAL_OSL,
         CANONICAL_PREFIX_CACHE_HIT,
     )
+
+    if is_mlperf_backend():
+        # The MLPerf corpus has no published shape; the first measurement supplies it.
+        return {
+            "corpus_loader": MLPERF_CORPUS,
+            "corpus_entries": mlperf_trajectories(),
+            "source": "canonical_mlperf",
+        }
 
     return {
         "corpus_loader": CANONICAL_CORPUS_LOADER,
@@ -171,12 +421,22 @@ def _build_agentx_corpus_shape_seed() -> dict[str, Any]:
     }
 
 
+def _custom_specialist_fields(args: argparse.Namespace) -> dict[str, Any]:
+    """The operator-defined specialist's SharedState fields from the parsed ``--custom-specialist-*`` flags."""
+    return {
+        "custom_specialist_prompt": str(getattr(args, "custom_specialist_prompt", "") or ""),
+        "custom_specialist_description": str(getattr(args, "custom_specialist_description", "") or ""),
+        "custom_specialist_only": bool(getattr(args, "custom_specialist_only", False)),
+    }
+
+
 def _seed_shared_state(
     session_dir: Path,
     args: argparse.Namespace,
     *,
     session_id: str,
     compute_partition: dict[str, Any] | None = None,
+    gpu_power_settings: dict[str, Any] | None = None,
 ) -> SharedState:
     """Construct and persist the initial :class:`SharedState` for a run."""
     # research_lane capacity is locked for the session; clamp to [0, ceiling].
@@ -208,12 +468,6 @@ def _seed_shared_state(
         plateau_overrides["explore_empty_streak"] = int(args.plateau_explore_empty_streak)
     if getattr(args, "plateau_explore_lookback", None) is not None:
         plateau_overrides["explore_lookback"] = int(args.plateau_explore_lookback)
-    if getattr(args, "plateau_kernel_revert_streak", None) is not None:
-        plateau_overrides["kernel_revert_streak"] = int(args.plateau_kernel_revert_streak)
-    if getattr(args, "plateau_kernel_keep_gain", None) is not None:
-        plateau_overrides["kernel_keep_gain_pct"] = float(args.plateau_kernel_keep_gain)
-    if getattr(args, "plateau_kernel_lookback", None) is not None:
-        plateau_overrides["kernel_lookback"] = int(args.plateau_kernel_lookback)
 
     # Resolve int workload knobs from the CLI arg, applying the shared fallback default when unset.
     def _int_arg(arg_name: str, default: int) -> int:
@@ -227,27 +481,6 @@ def _seed_shared_state(
             return int(default)
         return resolved if resolved > 0 else int(default)
 
-    def _resolve_framework_version(args_in: Any) -> str:
-        """Resolve ``framework_version`` for the recipe-snapshot canonical id."""
-        explicit = (getattr(args_in, "framework_version", None) or "").strip() or (
-            os.environ.get("FRAMEWORK_VERSION", "") or ""
-        ).strip()
-        if explicit:
-            return explicit
-        framework = (getattr(args_in, "framework", None) or "").strip() or (
-            os.environ.get("FRAMEWORK", "") or ""
-        ).strip()
-        if not framework:
-            return ""
-        from ..recipe_snapshot_constants import (
-            DEFAULT_FRAMEWORK_VERSION_SLUG,
-            detect_framework_version,
-        )
-
-        detected = detect_framework_version(framework)
-        # Treat the failure-slug as "no info".
-        return "" if detected == DEFAULT_FRAMEWORK_VERSION_SLUG else detected
-
     # KB architecture tags from config.json; fresh-launch only.
     _cfg_tags = _load_model_config_tags(str(args.model))
 
@@ -255,11 +488,17 @@ def _seed_shared_state(
     _kernel_optimizer_record = "forge" if forge_explicitly_enabled() else "geak"
 
     # Reference launch recipe (fresh-launch only, fail-soft): lowest-priority base for the baseline server args.
-    _ref_args, _ref_envs, _ref_model, _ref_source, _ref_controls = _resolve_reference_recipe(args)
+    _ref_args, _ref_envs, _ref_model, _ref_controls = _resolve_reference_recipe(args)
 
     # Canonical model identity (prefers the quantize prelude's pinned source name).
     _model_identity = resolve_model_display_name(args)
     benchmark_mode = "agentx" if _agentx_enabled() else "synthetic"
+    if _agentx_enabled():
+        from hyperloom.common.agentx_workload import agentic_backend
+
+        agentx_backend = agentic_backend()
+    else:
+        agentx_backend = ""
     state = SharedState(
         session_id=session_id,
         claw_session_id=(os.environ.get("CLAW_SESSION_ID") or "").strip(),
@@ -279,15 +518,16 @@ def _seed_shared_state(
         # config.json structural summary, persisted for downstream collectors.
         model_info=summarize_model_config(str(args.model)),
         framework=os.environ.get("FRAMEWORK", "sglang"),
-        # The only copy of the budget. Validated at the CLI, so anything that reaches here is usable, and archived
-        # with the session so a resume restores it without a second source to reconcile.
-        latency_budget_ms=float(getattr(args, "max_latency_ms", None) or 0.0),
+        # The only copy of the budgets. Validated at the CLI, so anything that reaches here is usable, and archived
+        # with the session so a resume restores them without a second source to reconcile.
+        **constraint_budgets_from_args(args),
+        gpu_power_settings=dict(gpu_power_settings or {}),
         gpu_type=str(getattr(args, "gpu_type", None) or os.environ.get("GPU_TYPE", "")),
         # Workload metadata mirrored from CLI/env.
         tp=_int_arg("tp", DEFAULT_TP),
         ep=_int_arg("ep", DEFAULT_EP),
         precision=(str(getattr(args, "precision", None) or DEFAULT_PRECISION).strip()),
-        framework_version=_resolve_framework_version(args),
+        framework_version=resolve_framework_version(args),
         conc=_int_arg("conc", DEFAULT_CONC),
         isl=_int_arg("isl", DEFAULT_ISL),
         osl=_int_arg("osl", DEFAULT_OSL),
@@ -295,7 +535,6 @@ def _seed_shared_state(
         max_model_len=_int_arg("max_model_len", 0),
         kernel_enabled=not getattr(args, "no_kernel", False),
         kernel_optimizer=_kernel_optimizer_record,
-        target_summary=args.target_summary or _default_target_summary(args),
         # AgentX corpus shape: seeded from canonical constants if AgentX is on;
         # overwritten by the measured shape after every aiperf run.
         agentx_corpus_shape=_build_agentx_corpus_shape_seed() if benchmark_mode == "agentx" else {},
@@ -305,19 +544,22 @@ def _seed_shared_state(
         reference_envs=_ref_envs,
         reference_launch_controls=_ref_controls,
         reference_model=_ref_model,
-        reference_source=_ref_source,
         # Operator launch shape; the process env carries it for one process only, so a resume re-exports it from here
         # rather than from argv.
         operator_server_args=str(getattr(args, "server_args", "") or "").strip(),
         operator_extra_env=parse_operator_extra_env(args),
+        **_custom_specialist_fields(args),
         bypass_scripts_dir=os.environ.get("HYPERLOOM_BYPASS_SCRIPTS_DIR", "").strip(),
         framework_repo_path=os.environ.get("FRAMEWORK_REPO_PATH", "").strip(),
         benchmark_backend=os.environ.get("HYPERLOOM_BENCHMARK_BACKEND", "").strip().lower(),
         compute_partition=dict(compute_partition if compute_partition is not None else (published_shape() or {})),
-        nodes=max(1, int(getattr(args, "nodes", 1) or 1)),
+        nodes=max(1, int(getattr(args, _NODES, 1) or 1)),
         warm_replay_enabled=not bool(getattr(args, "no_warm_replay", False)),
-        warm_replay_min_confidence=float(getattr(args, "warm_replay_min_confidence", 0.7)),
-        warm_replay_min_reproduce_pct=float(getattr(args, "warm_replay_min_reproduce_pct", 0.8)),
+        **(
+            {}
+            if getattr(args, "warm_replay_min_confidence", None) is None
+            else {"warm_replay_min_confidence": float(args.warm_replay_min_confidence)}
+        ),
         max_minutes=int((args.max_hours or 0) * 60),
         research_lane_capacity=research_lane_capacity,
         gpu_specialist_capacity=gpu_specialist_capacity,
@@ -345,6 +587,7 @@ def _seed_shared_state(
         ),
         benchmark_mode=benchmark_mode,
         agentx_epoch=AGENTX_MEASUREMENT_EPOCH if _agentx_enabled() else 0,
+        agentx_backend=agentx_backend,
         grading=seed_grading(os.environ.get("FRAMEWORK", "sglang"), benchmark_mode),
         conc_sweep_concs=_parse_conc_sweep_concs(args, benchmark_mode),
         conc_sweep_total_budget_sec=int(
@@ -359,17 +602,22 @@ def _snapshot_system_prompts(
     session_dir: Path,
     *,
     prompts: dict[str, str],
+    macro_cycle: int,
     orchestration_phase: str = "",
 ) -> None:
-    """Persist each agent's effective system prompt to ``agents/<role>/system_prompt.snapshot.md``."""
+    """Persist each agent's effective system prompt via the shared snapshot writer.
+
+    The orchestration role additionally writes a phase-scoped copy when ``orchestration_phase`` is set.
+    """
+    from hyperloom.orchestrator.prompts import write_prompt_snapshot
+
     for role, body in prompts.items():
-        target = agent_prompt_snapshot(session_dir, role)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(body or "(empty)", encoding="utf-8")
+        write_prompt_snapshot(session_dir, role, body, macro_cycle=macro_cycle)
     boot_phase = orchestration_phase.strip()
     if boot_phase and "orchestration" in prompts:
-        scoped = agent_prompt_snapshot(session_dir, "orchestration", phase=boot_phase)
-        scoped.write_text(prompts["orchestration"] or "(empty)", encoding="utf-8")
+        write_prompt_snapshot(
+            session_dir, "orchestration", prompts["orchestration"], phase=boot_phase, macro_cycle=macro_cycle
+        )
 
 
 def _print_session_skeleton(session_dir: Path) -> None:
@@ -514,29 +762,6 @@ def _reconcile_crash_count(state: SharedState, session_dir: Path) -> None:
         log.exception("crash_count reconcile (final.json) failed (non-fatal)")
 
 
-def _default_target_summary(args: argparse.Namespace) -> str:
-    """Compose a human-readable objective summary from the CLI target flags."""
-    roofline = getattr(args, "target_roofline", None)
-    also = f" or {roofline}% of the roofline ceiling" if roofline else ""
-    if args.target_gain:
-        return (
-            f"Establish baseline on {Path(args.model).name} then drive "
-            f"cumulative_gain_validated to >= {args.target_gain}%{also} within "
-            f"{args.max_hours}h."
-        )
-    if args.target_tput:
-        from .. import framework_registry
-
-        target = framework_registry.format_primary_metric(getattr(args, "framework", None), args.target_tput)
-        return f"Establish baseline on {Path(args.model).name} then reach {target}{also} within {args.max_hours}h."
-    if roofline:
-        return (
-            f"Establish baseline on {Path(args.model).name} then reach {roofline}% "
-            f"of the roofline ceiling within {args.max_hours}h."
-        )
-    return f"Optimize {Path(args.model).name} for up to {args.max_hours}h (no target)."
-
-
 def _parse_conc_sweep_concs(args: argparse.Namespace, benchmark_mode: str) -> list[int]:
     """Parse ``--conc-sweep-concs`` into a list[int]; non-integers warned+dropped."""
     from hyperloom.orchestrator.kernel.conc_sweep import default_concs_for_mode
@@ -572,11 +797,11 @@ def _read_failure_summary(session_dir: Path) -> dict | None:
 
 def _resolve_reference_recipe(
     args: argparse.Namespace,
-) -> tuple[str, dict[str, str], str, str, dict[str, Any]]:
+) -> tuple[str, dict[str, str], str, dict[str, Any]]:
     """Resolve the reference launch recipe for a fresh launch."""
     source = (getattr(args, "reference_script", None) or "").strip()
     if not source:
-        return ("", {}, "", "", {})
+        return ("", {}, "", {})
 
     framework = (os.environ.get("FRAMEWORK", "") or "sglang").strip().lower()
     from ..reference_script import parse_reference_script
@@ -596,4 +821,4 @@ def _resolve_reference_recipe(
         raise SystemExit(2)
 
     print(f"Reference script: {source} ({len(recipe.server_args.split())} arg tokens, {len(recipe.envs)} env(s))")
-    return (recipe.server_args, dict(recipe.envs), recipe.model or "", source, dict(controls))
+    return (recipe.server_args, dict(recipe.envs), recipe.model or "", dict(controls))

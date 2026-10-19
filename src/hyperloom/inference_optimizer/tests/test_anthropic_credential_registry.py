@@ -135,7 +135,7 @@ def _install_scripts() -> list[Path]:
     return [
         root / "assets" / "install.sh",
         root / "assets" / "install_baremetal.sh",
-        root.parents[0] / "agents" / "kernel" / "scripts" / "install.sh",
+        root / "assets" / "install_kernel_tools.sh",
     ]
 
 

@@ -27,6 +27,22 @@ _GAPS_MAX_ENTRIES = 50
 _GAPS_ATTEMPTS_HISTORY = 20
 
 
+def _merge_gap_attempts(existing: list[Any], incoming: list[Any]) -> list[Any]:
+    """Merge ``incoming`` attempts into ``existing`` once each, newest-last, capped at the history limit.
+
+    ``refresh_gaps`` re-derives every attempt from the whole failure log on each call, so an equal attempt (same
+    failure: action, error class, variant and ts) is the same one, not a new one. Equal rows take the incoming
+    position so a re-derived log keeps its newest-last order under the cap.
+    """
+    older = [a for a in existing if a not in incoming]
+    merged: list[Any] = []
+    for attempt in older + incoming:
+        if attempt not in merged:
+            merged.append(attempt)
+    # Capped tail; callers supply newest-last lists (convention).
+    return merged[-_GAPS_ATTEMPTS_HISTORY:]
+
+
 class GapsStateMixin:
     """Gap ledger read/write helpers mixed into SharedState."""
 
@@ -41,7 +57,7 @@ class GapsStateMixin:
         return None
 
     def upsert_gap(self, entry: dict[str, Any]) -> dict[str, Any]:
-        """Insert or update one gap row, keyed by ``canonical_id``. Coordinator-only writer (Inv-1 single-writer). Returns the merged entry."""
+        """Insert or update one gap row, keyed by ``canonical_id``. Coordinator-only writer. Returns the merged entry."""
         if not isinstance(entry, dict):
             return {}
         cid = str(entry.get("canonical_id") or "").strip()
@@ -76,11 +92,7 @@ class GapsStateMixin:
             existing["last_updated_ts"] = now
             incoming_attempts = list(entry.get("attempts") or [])
             if incoming_attempts:
-                merged_attempts = list(existing.get("attempts") or []) + incoming_attempts
-                # Capped tail; callers supply newest-last lists (convention).
-                if len(merged_attempts) > _GAPS_ATTEMPTS_HISTORY:
-                    merged_attempts = merged_attempts[-_GAPS_ATTEMPTS_HISTORY:]
-                existing["attempts"] = merged_attempts
+                existing["attempts"] = _merge_gap_attempts(list(existing.get("attempts") or []), incoming_attempts)
             merged = existing
         # Enforce global cap, trimming oldest after the upsert so the just-touched gap is retained.
         if len(self.gaps) > _GAPS_MAX_ENTRIES:
@@ -127,19 +139,20 @@ _GAP_ATTEMPT_ARTIFACT_KEYS: tuple[str, ...] = (
 class GapRefreshCollaborator(CoordinatorCollaborator):
     """Gap-signal extraction from baselines, attempt history, and research hints."""
 
-    async def _refresh_gaps(self, *, reason: str) -> None:
+    async def refresh_gaps(self, *, reason: str, workload_id: str) -> None:
         """Refresh :attr:`SharedState.gaps` from observable signals. Additive upsert deduped by canonical_id.
 
         Args:
             reason: Tag describing the refresh trigger, used only in logging.
+            workload_id: The workload's canonical Recipe id that the derived gap rows are keyed on.
         """
         state = self.shared_state
-        for entry in self._extract_gaps_from_baseline():
+        for entry in self._extract_gaps_from_baseline(workload_id):
             state.upsert_gap(entry)
-        for entry in self._extract_gaps_from_attempts():
+        for entry in self._extract_gaps_from_attempts(workload_id):
             state.upsert_gap(entry)
 
-        plane = getattr(self, "knowledge_plane", None)
+        plane = self.knowledge_plane
         if plane is not None and hasattr(plane, "recipe_kb_traverse_issues"):
             try:
                 traverse = getattr(plane, "recipe_kb_traverse_issues")
@@ -165,8 +178,8 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
             len(state.gaps),
         )
 
-    def _extract_gaps_from_baseline(self) -> list[dict[str, Any]]:
-        """Derive initial gap rows from the baseline snapshot (throughput_below_target, baseline_unstable); reuse the workload canonical_id (``_workload_canonical_id``, matching ``recipe_kb_t0.run_t0_anchor``) so traverse rows align.
+    def _extract_gaps_from_baseline(self, workload_id: str) -> list[dict[str, Any]]:
+        """Derive initial gap rows from the baseline snapshot (throughput_below_target, baseline_unstable); key the rows on ``workload_id`` (matching ``recipe_kb_t0.run_t0_anchor``) so traverse rows align.
 
         Returns:
             A list of gap row dicts derived from the baseline; empty when no
@@ -176,13 +189,12 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
         gaps: list[dict[str, Any]] = []
         if state.baseline_tput <= 0:
             return gaps
-        anchor = self._workload_canonical_id()
-        target_gap = float(getattr(state, "target_gap_pct", 0.0) or 0.0)
+        target_gap = self._coord.target_gap_pct()
         if target_gap > 0.0:
             severity = "high" if target_gap >= 10.0 else "medium" if target_gap >= 3.0 else "low"
             gaps.append(
                 {
-                    "canonical_id": f"{anchor}#throughput_below_target",
+                    "canonical_id": f"{workload_id}#throughput_below_target",
                     "symptom": (f"current_best is {target_gap:.1f}% short of the run objective target"),
                     "layer": "framework",
                     "severity": severity,
@@ -193,7 +205,7 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
         if state.baseline_failure_streak > 0:
             gaps.append(
                 {
-                    "canonical_id": f"{anchor}#baseline_unstable",
+                    "canonical_id": f"{workload_id}#baseline_unstable",
                     "symptom": (f"baseline crashed {state.baseline_failure_streak} consecutive time(s)"),
                     "layer": "system",
                     "severity": ("high" if state.baseline_failure_streak >= 2 else "medium"),
@@ -203,7 +215,7 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
             )
         return gaps
 
-    def _extract_gaps_from_attempts(self) -> list[dict[str, Any]]:
+    def _extract_gaps_from_attempts(self, workload_id: str) -> list[dict[str, Any]]:
         """Derive gaps from rolling failures + winners history (recurring (action, error_class[, variant]) + explore plateau).
 
         Returns:
@@ -211,7 +223,6 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
             an explore-plateau signal.
         """
         state = self.shared_state
-        anchor = self._workload_canonical_id()
         gaps: list[dict[str, Any]] = []
 
         # Already capped by ``record_action_failure``; read the whole log.
@@ -240,7 +251,7 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
             else:
                 cid_variant = f":{variant}" if variant else ""
                 seen_failures[key] = {
-                    "canonical_id": f"{anchor}#fail:{action}:{err}{cid_variant}",
+                    "canonical_id": f"{workload_id}#fail:{action}:{err}{cid_variant}",
                     "symptom": symptom,
                     "layer": layer,
                     "severity": "medium",
@@ -261,7 +272,7 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
         if no_promote >= 3 and recent_promotions == 0:
             gaps.append(
                 {
-                    "canonical_id": f"{anchor}#explore_plateau",
+                    "canonical_id": f"{workload_id}#explore_plateau",
                     "symptom": (f"{no_promote} consecutive grid rounds without a new current_best"),
                     "layer": "framework",
                     "severity": "high" if no_promote >= 6 else "medium",
@@ -271,7 +282,7 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
             )
         return gaps
 
-    def _seed_gaps_from_research_hints(self) -> None:
+    def seed_gaps_from_research_hints(self) -> None:
         """Inject research hints as advisory gaps[] seeds (idempotent)."""
         from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
 
@@ -339,11 +350,12 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
             return ("system", "system_specialist")
         return ("framework", authoring_domain_for_framework(framework))
 
-    def _record_explore_round_gaps(
+    def record_explore_round_gaps(
         self,
         *,
         task: "Task | None",
         result: dict[str, Any],
+        workload_id: str,
     ) -> None:
         """Append per-variant KEEP/REVERT outcomes to the matching gap (or the anchor gap as fallback).
 
@@ -352,6 +364,7 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
                 ``None`` is a no-op.
             result: The explore result; its ``per_variant_outcomes`` drive the
                 appended gap attempts.
+            workload_id: Canonical id of the anchor gap used when the task names no gap.
         """
         if task is None:
             return
@@ -359,7 +372,7 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
         if not isinstance(per_variant, list) or not per_variant:
             return
         params = dict(task.params or {})
-        canonical = str(params.get("gap_canonical_id") or "").strip() or self._workload_canonical_id()
+        canonical = str(params.get("gap_canonical_id") or "").strip() or workload_id
         state = self.shared_state
         existing = state.find_gap(canonical)
         if existing is None:
@@ -390,7 +403,7 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
                     attempt[key] = str(value)
             state.append_gap_attempt(canonical, attempt)
 
-    def _record_explore_variant_failures(
+    def record_explore_variant_failures(
         self,
         *,
         task: "Task | None",

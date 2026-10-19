@@ -34,12 +34,10 @@ from hyperloom.orchestrator.enablement.recipe.projections import (
 )
 from hyperloom.orchestrator.enablement.recipe.steps import command_digest
 from hyperloom.orchestrator.enablement.recipe.sufficiency import REASON_BLOCKS, _BUILTIN_REQUIRED_INPUTS
-from hyperloom.orchestrator.enablement.recipe.setup_ledger import (
-    build_execution_row,
-    mark_round_disposition,
-)
+from hyperloom.orchestrator.enablement.recipe.setup_ledger import build_execution_row
 from hyperloom.orchestrator.enablement.runtime import targeted_build
 from hyperloom.orchestrator.enablement.runtime.build_actions import TargetedBuildAction
+from hyperloom.orchestrator.state.shared_state import EnablementRound
 
 NO_FS = "/nonexistent-probe-root"
 
@@ -72,8 +70,14 @@ def _row(cmd="pip install foo", *, seq=1, outcome="applied", task="r1", env=None
     )
 
 
+def _marked(rows, *, round_task_id, disposition, accepted):
+    rnd = EnablementRound(setup_executions=list(rows))
+    rnd.mark_setup_round(round_task_id, disposition, accepted=accepted)
+    return rnd.setup_executions
+
+
 def _accepted(rows, task="r1"):
-    return mark_round_disposition(rows, round_task_id=task, disposition="kept", accepted=True)
+    return _marked(rows, round_task_id=task, disposition="kept", accepted=True)
 
 
 def test_an_outcome_outside_the_recorded_vocabulary_is_refused():
@@ -103,15 +107,11 @@ def test_empty_ledger_and_no_commands_raises_nothing_for_setup():
 
 
 def test_only_applied_executions_project_a_step():
-    rows = [
-        _row("pip install a", seq=1),
-        _row("pip install b", seq=2, outcome="failed"),
-        _row("pip install c", seq=3, outcome="skipped"),
-    ]
-    state = {"setup_commands": ["pip install a", "pip install b", "pip install c"], "setup_executions": rows}
+    rows = [_row("pip install a", seq=1), _row("pip install b", seq=2, outcome="failed")]
+    state = {"setup_commands": ["pip install a", "pip install b"], "setup_executions": rows}
     steps = build_recipe_steps(state, attempt_summary=_build_attempt_summary)
     assert [s["cmd"] for s in steps] == ["pip install a"]
-    assert len(state["setup_executions"]) == 3
+    assert len(state["setup_executions"]) == 2
 
 
 def test_command_reapplied_by_the_accepted_round_is_present_at_final_launch():
@@ -130,7 +130,7 @@ def test_a_later_keep_takes_presence_from_the_earlier_one():
     first = _accepted([_row(cmd, seq=1, task="t1")], task="t1")
     assert first[0]["present_at_final_launch"] is True
 
-    second = mark_round_disposition(
+    second = _marked(
         [*first, _row("pip install bar", seq=2, task="t2")],
         round_task_id="t2",
         disposition="kept",
@@ -144,7 +144,7 @@ def test_a_later_keep_takes_presence_from_the_earlier_one():
 def test_a_command_only_the_earlier_keep_ran_is_capped_out_of_the_final_one():
     """The stale flag used to answer for it, so truncation could never fire."""
     first = _accepted([_row("pip install foo", seq=1, task="t1")], task="t1")
-    rows = mark_round_disposition(
+    rows = _marked(
         [*first, _row("pip install bar", seq=2, task="t2")],
         round_task_id="t2",
         disposition="kept",
@@ -156,7 +156,7 @@ def test_a_command_only_the_earlier_keep_ran_is_capped_out_of_the_final_one():
 
 @pytest.mark.parametrize("disposition", ["apply_failed", "no_patches", "reverted"])
 def test_command_from_a_discarded_round_raises_effect_outside_verified_launch(disposition):
-    rows = mark_round_disposition(
+    rows = _marked(
         [_row("pip install stranded", seq=1, task="r1")],
         round_task_id="r1",
         disposition=disposition,
@@ -233,11 +233,6 @@ def test_a_failed_non_python_installer_scopes_nothing_of_its_own():
     assert "setup_effect_outside_verified_launch" in codes
 
 
-def test_a_skipped_non_python_installer_scopes_nothing():
-    rows = _accepted([_row("apt-get install -y libfoo", seq=1, outcome="skipped", task="kept")], task="kept")
-    assert "closure_scope_incomplete" not in _codes(_decide({"setup_executions": rows}))
-
-
 @pytest.mark.parametrize(
     "cmd",
     [
@@ -250,7 +245,7 @@ def test_credentialed_command_is_sanitized_without_losing_its_digest(cmd):
     """Sanitization is of the recorded text only: the digest that counts
     occurrences is over the verbatim string, so the three spellings the
     allowlist admits equally still collapse onto one command."""
-    rows = [_row(cmd, seq=i, outcome=outcome) for i, outcome in enumerate(("applied", "failed", "skipped"), start=1)]
+    rows = [_row(cmd, seq=i, outcome=outcome) for i, outcome in enumerate(("applied", "failed"), start=1)]
     for row in rows:
         assert "user:token" not in row["cmd_sanitized"] and "host" not in row["cmd_sanitized"]
         assert row["cmd_digest"] == command_digest(cmd)
@@ -903,6 +898,8 @@ def test_credential_classes_over_the_admitted_grammar():
         ("pip install -ihttps://user:token@host/simple foo", "index_url"),
         ("pip install -fhttps://user:token@host/links foo", "find_links"),
         ("conda install -chttps://user:token@host/channel foo", "channel"),
+        ("pip install -ihttps://user:token@host/simple?k=v foo", "index_url"),
+        ("conda install -chttps://user:token@host/channel?k=v foo", "channel"),
     ],
 )
 def test_compact_short_options_are_classified_and_sanitized(command, credential_class):
@@ -910,6 +907,25 @@ def test_compact_short_options_are_classified_and_sanitized(command, credential_
     assert row["credential_class"] == credential_class
     assert "user:token" not in row["cmd_sanitized"]
     assert "host" not in row["cmd_sanitized"]
+
+
+@pytest.mark.parametrize(
+    ("command", "sanitized"),
+    [
+        ("rm -rf /tmp/x", "rm -rf /tmp/x"),
+        (
+            "pip install -rrequirements.txt -c constraints.txt foo",
+            "pip install -rrequirements.txt -c constraints.txt foo",
+        ),
+        ("pip install -ihttps://user:token@host/simple foo", "pip install -i<index_url> foo"),
+        ("pip install -ihttps://user:token@host/simple?k=v foo", "pip install -i<index_url> foo"),
+        ("pip install -i=https://user:token@host/simple?k=v foo", "pip install -i=<index_url> foo"),
+        ("pip install --index-url=https://user:token@host/simple foo", "pip install --index-url=<index_url> foo"),
+        ("pip install --index-url https://user:token@host/simple foo", "pip install --index-url <index_url> foo"),
+    ],
+)
+def test_sanitizing_keeps_each_option_as_written(command, sanitized):
+    assert sanitize_command_text(command) == sanitized
 
 
 def test_an_inline_index_assignment_classifies_and_sanitizes_as_the_flag_does():
@@ -1664,7 +1680,7 @@ def test_build_inputs_reach_the_emitted_step_stripped_of_credential_material():
 def test_a_round_with_no_task_id_claims_no_ledger_rows():
     """Rows a lane never identified stay unreported, never silently accepted."""
     rows = [_row("pip install x", seq=1, task="r1")]
-    unchanged = mark_round_disposition(rows, round_task_id="", disposition="kept", accepted=True)
+    unchanged = _marked(rows, round_task_id="", disposition="kept", accepted=True)
     assert unchanged[0]["round_disposition"] == "unreported"
     assert unchanged[0]["present_at_final_launch"] is False
 
@@ -2198,31 +2214,10 @@ def test_a_session_that_never_recorded_the_check_names_nothing():
 
 
 def _persisted(result_value, *, present=True):
-    """Push a KEEP result through the lane's persistence and read it back."""
-    from types import SimpleNamespace
-
-    from hyperloom.orchestrator.enablement.lane import _stack_keep_recipe_records
-
-    enablement = SimpleNamespace(
-        build_extensions_not_carried=[],
-        launch_argv_refused=False,
-        **{
-            name: {}
-            for name in (
-                "accepted_stack_targets",
-                "patch_targets",
-                "launch_evidence",
-                "environment_closure",
-                "installed_versions_at_keep",
-                "roots",
-                "patch_roots",
-                "base_sha",
-                "source_snapshots",
-            )
-        },
-    )
+    """Push a KEEP result through the round's persistence and read it back."""
+    enablement = EnablementRound()
     res = {"enablement_build_extensions_not_carried": result_value} if present else {}
-    _stack_keep_recipe_records(SimpleNamespace(enablement=enablement), res)
+    enablement.record_keep(res)
     return enablement.build_extensions_not_carried
 
 
@@ -2268,6 +2263,20 @@ def test_levers_with_no_reader_block_the_replay():
 
 def test_an_unscannable_tree_leaves_the_levers_unverified():
     assert "levers_unverified" in _codes(_decide({}, section={"levers_without_readers": None}))
+
+
+@pytest.mark.parametrize(
+    ("field", "code"),
+    [("levers_without_readers", "levers_unverified"), ("build_extensions_not_carried", "build_carry_unverified")],
+)
+def test_a_skipped_scan_alone_refuses_an_otherwise_sufficient_replay(field, code):
+    """``None`` is a scan that did not run, not one that found nothing."""
+    clean = _decide(_sufficient_state(), {**_sufficient_section(), field: []})
+    skipped = _decide(_sufficient_state(), {**_sufficient_section(), field: None})
+
+    assert clean["status"] == "sufficient", clean["reasons"]
+    assert skipped["reasons"] == [{"code": code, "blocks": "replay", "scope": field}]
+    assert skipped["status"] == "insufficient"
 
 
 def test_levers_all_read_name_nothing():

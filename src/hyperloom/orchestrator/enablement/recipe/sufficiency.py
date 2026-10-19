@@ -11,10 +11,13 @@ produced by an older writer cannot be mistaken for one this contract judged.
 
 from __future__ import annotations
 
+import json
 from pathlib import PurePosixPath
-import shlex
+import re
 from typing import Any, Iterable, Mapping, Sequence
 
+from .launch_flags import PARALLELISM_AXES as _PARALLELISM_AXES
+from .launch_flags import requested_flags as _requested_flags
 from .steps import BUILD_KIND, PATCH_KIND, SETUP_KIND, command_digest, select_linked_build
 
 SCHEMA_VERSION = 1
@@ -72,15 +75,6 @@ _RUN_LOCAL_REQUESTED_FLAGS: frozenset[str] = frozenset(
     }
 )
 
-#: The requested spellings of each parallelism axis ``observed_model_binding``
-#: reports, so the requested side is compared against the binding rather than
-#: against a launch line the extractor strips these from.
-_PARALLELISM_AXES: tuple[tuple[str, frozenset[str]], ...] = (
-    ("tp", frozenset({"tensor_parallel_size", "tp_size", "tp"})),
-    ("dp", frozenset({"data_parallel_size", "dp_size"})),
-    ("pp", frozenset({"pipeline_parallel_size", "pp_size"})),
-)
-
 #: Compared through ``observed_model_binding.model_digest`` instead.
 _MODEL_IDENTITY_FLAGS: frozenset[str] = frozenset(
     {"model", "model_path", "tokenizer", "tokenizer_path", "served_model_name"}
@@ -126,36 +120,6 @@ def read_status(section: Mapping[str, Any] | None) -> dict[str, Any]:
     if any(str(r.get("code")) not in REASON_BLOCKS for r in reasons):
         return {**dict(decision), "status": "insufficient"}
     return dict(decision)
-
-
-def _normalize_flag(name: str) -> str:
-    return str(name or "").lstrip("-").replace("-", "_")
-
-
-def _requested_flags(argv: str) -> dict[str, str]:
-    """Parse an argv string into ``{normalized_flag: value}``."""
-    try:
-        tokens = shlex.split(str(argv or ""))
-    except ValueError:
-        return {}
-    flags: dict[str, str] = {}
-    index = 0
-    while index < len(tokens):
-        token = tokens[index]
-        if not token.startswith("-"):
-            index += 1
-            continue
-        if "=" in token:
-            name, _, value = token.partition("=")
-            flags[_normalize_flag(name)] = value
-        else:
-            value = ""
-            if index + 1 < len(tokens) and not tokens[index + 1].startswith("-"):
-                value = tokens[index + 1]
-                index += 1
-            flags[_normalize_flag(token)] = value
-        index += 1
-    return flags
 
 
 def _activation_reasons(section: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -220,15 +184,80 @@ def _requested_vs_observed_reasons(evidence: Mapping[str, Any]) -> list[dict[str
         if flag in _RUN_LOCAL_REQUESTED_FLAGS or flag in _MODEL_AND_PARALLELISM_FLAGS:
             continue
         if flag in observed:
-            value = observed[flag]
+            value: Any = observed[flag]
         elif flag in identity:
-            value = str(identity[flag])
+            value = identity[flag]
+        elif flag.startswith("no_") and not requested and isinstance(identity.get(flag[3:]), bool):
+            # ``--no-X`` is argparse's negation of ``--X``: the engine records
+            # it as ``X: False``, under the name without the prefix.
+            value, requested = identity[flag[3:]], "false"
         else:
             reasons.append(_reason("activation_incomplete", f"requested:{flag}"))
             continue
-        if requested and str(value).strip().lower() != requested.strip().lower():
+        if not _setting_matches(requested, value):
             reasons.append(_reason("launch_evidence_mismatch", f"requested:{flag}"))
     return reasons
+
+
+def _setting_matches(requested: str, observed: Any) -> bool:
+    """Whether an observed setting is the one a requested flag asked for.
+
+    A bare flag asks for presence, and for ``True`` where the engine records a
+    boolean. A JSON operand is compared as structure: the engine records the
+    parsed object, which prints differently from the JSON that was passed and
+    carries the defaults it filled in besides, so each requested key must hold
+    its requested value and the rest are the engine's own. Strings inside it
+    compare exactly -- an architecture name is case-sensitive -- while a plain
+    operand keeps the case-insensitive comparison it always had.
+    """
+    if not requested:
+        return observed is True or not isinstance(observed, bool)
+    structured = _as_structure(requested)
+    return _value_matches(structured, _as_structure(observed), fold=not isinstance(structured, (Mapping, list)))
+
+
+def _as_structure(value: Any) -> Any:
+    if isinstance(value, str) and value.lstrip().startswith(("{", "[")):
+        try:
+            return json.loads(value)
+        except ValueError:
+            return value
+    return value
+
+
+def _value_matches(requested: Any, observed: Any, *, fold: bool = False) -> bool:
+    if isinstance(requested, Mapping):
+        return isinstance(observed, Mapping) and all(
+            key in observed and _value_matches(item, observed[key]) for key, item in requested.items()
+        )
+    if isinstance(requested, list):
+        return (
+            isinstance(observed, (list, tuple))
+            and len(observed) == len(requested)
+            and all(_value_matches(r, o) for r, o in zip(requested, observed))
+        )
+    want = _scalar_text(requested, fold=fold)
+    if isinstance(observed, str):
+        enum = _ENUM_REPR_RE.fullmatch(observed.strip())
+        if enum:
+            # ``<CUDAGraphMode.FULL: 2>`` is what ``"FULL"`` and ``2`` both select.
+            members = (enum.group("name"), enum.group("value").strip().strip("'\""))
+            return want in {_scalar_text(member, fold=fold) for member in members}
+    return want == _scalar_text(observed, fold=fold)
+
+
+def _scalar_text(value: Any, *, fold: bool) -> str:
+    if isinstance(value, str):
+        text = value.strip()
+    elif isinstance(value, (bool, type(None))):
+        text = json.dumps(value)
+    else:
+        text = str(value).strip()
+    return text.lower() if fold or not isinstance(value, str) else text
+
+
+#: An enum member as the engine's record prints it, kept verbatim by the reader.
+_ENUM_REPR_RE = re.compile(r"<[A-Za-z_][\w.]*\.(?P<name>[A-Za-z_]\w*): (?P<value>.*)>", re.DOTALL)
 
 
 def _acquisition_is_pinned(acquisition: Mapping[str, Any]) -> bool:

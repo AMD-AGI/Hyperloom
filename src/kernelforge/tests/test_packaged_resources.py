@@ -8,3 +8,4 @@ def test_packaged_resource_paths_are_available():
     # found nothing read it, and `Config.knowledge_dir` went with it.
     assert (resource_path("local_knowledge") / "hardware").is_dir()
     assert (resource_path("examples") / "flydsl-softmax-forge-loop").is_dir()
+    assert (resource_path("roofline_ceiling") / "ceiling_analyst.md").is_file()

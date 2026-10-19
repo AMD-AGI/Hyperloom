@@ -35,6 +35,37 @@ class AssemblyPreparationError(ValueError):
     """No verified assembly implementation is available for optimization."""
 
 
+# The exact key set of ``assembly_preparation/result.json``; resume refuses any other shape.
+_READY_RECORD_FIELDS = frozenset(
+    {
+        "status",
+        "origin",
+        "kernel",
+        "assembly",
+        "gpu_target",
+        "source_base_commit",
+        "preparation_commit",
+        "source_sha256",
+        "launcher_sha256",
+        "initial_assembly_sha256",
+        "binding_manifest",
+        "binding_manifest_sha256",
+        "source_benchmark",
+        "initial_assembly_benchmark",
+        "roundtrip_mean_case_speedup",
+        "correctness",
+        "canonical_correctness",
+        "canonical_unverified_reason",
+        "acceptance_config_sha256",
+        "source_numerical_evidence",
+        "roundtrip_numerical_evidence",
+        "numerical_execution_probe_evidence",
+        "build_failure_probe_passed",
+        "execution_probe_passed",
+    }
+)
+
+
 def _git(workspace: Path, *args: str) -> str:
     result = subprocess.run(["git", "-C", str(workspace), *args], capture_output=True, text=True, check=True)
     return result.stdout.strip()
@@ -142,13 +173,12 @@ def _no_op_source(text: str) -> str:
         raise AssemblyPreparationError("assembly execution probe requires AMDHSA kernel entries")
     # gfx950 kernarg preloading can skip the function prologue and start at an
     # aligned LLVM basic block. Stop those entries too, without changing the ABI.
-    text = re.sub(
+    return re.sub(
         r"^([ \t]*\.LBB[\w.$]*:)[ \t]*(?:(?://|;)[^\n]*)?$",
         r"\1\n    s_endpgm // FORGE_ASSEMBLY_EXECUTION_PROBE",
         text,
         flags=re.MULTILINE,
     )
-    return text
 
 
 async def verify_assembly(
@@ -218,7 +248,8 @@ async def _verify_numerical_source(workspace: Path, assembly: Path, baseline: di
 def _load_ready(path: Path, workspace: Path, kernel: Path, assembly: Path, base_commit: str, target: str) -> dict:
     record: dict = json.loads(path.read_text(encoding="utf-8"))
     if (
-        record.get("schema_version") != 4
+        not isinstance(record, dict)
+        or set(record) != _READY_RECORD_FIELDS
         or record.get("status") != "ready"
         or record.get("kernel") != kernel.relative_to(workspace).as_posix()
         or record.get("assembly") != assembly.relative_to(workspace).as_posix()
@@ -247,6 +278,53 @@ def _load_ready(path: Path, workspace: Path, kernel: Path, assembly: Path, base_
     if frozen_changes:
         raise AssemblyPreparationError("frozen assembly inputs changed after preparation: " + ", ".join(frozen_changes))
     return record
+
+
+async def _measure_source_baseline(
+    driver: str, workspace: Path, threshold: float, deadline: float
+) -> tuple[dict, object]:
+    """Correctness and timing for the original source, which the assembly roundtrip is judged against."""
+    source_report = await _validate(driver, threshold, deadline)
+    if not source_report.results or not source_report.all_passed:
+        raise AssemblyPreparationError(source_report.failed_output or "original source correctness failed")
+    acceptance = await accept_candidate(
+        str(workspace),
+        timeout_cap_sec=_timeout(deadline),
+        candidate_label="assembly source baseline",
+        kernel_backend="assembly",
+    )
+    if not acceptance.passed:
+        raise AssemblyPreparationError(acceptance.detail)
+    source_bench = await bench_wallclock(driver, timeout_sec=_timeout(deadline, 600))
+    if not source_bench.get("success") or not source_bench.get("case_times"):
+        raise AssemblyPreparationError("original source benchmark failed")
+    _assembly_score(source_bench, source_bench)
+    return source_bench, acceptance.numerical_evidence
+
+
+def _restore_prepared_workspace(
+    workspace: Path,
+    *,
+    start_commit: str,
+    paths: list[str],
+    kernel_path: Path,
+    original: bytes,
+    assembly: Path,
+    original_assembly: bytes | None,
+    manifest: Path,
+    capture: bool,
+) -> None:
+    """Put back everything preparation touched, for a run that did not reach a record."""
+    _git(workspace, "reset", "--soft", start_commit)
+    _git(workspace, "reset", start_commit, "--", *paths)
+    kernel_path.write_bytes(original)
+    if kernel_path != assembly:
+        if original_assembly is None:
+            assembly.unlink(missing_ok=True)
+        else:
+            assembly.write_bytes(original_assembly)
+    if capture:
+        manifest.unlink(missing_ok=True)
 
 
 async def prepare_assembly(
@@ -295,22 +373,7 @@ async def prepare_assembly(
     if capture:
         paths.append(manifest.relative_to(workspace).as_posix())
     try:
-        source_report = await _validate(driver, threshold, deadline)
-        if not source_report.results or not source_report.all_passed:
-            raise AssemblyPreparationError(source_report.failed_output or "original source correctness failed")
-        acceptance = await accept_candidate(
-            str(workspace),
-            timeout_cap_sec=_timeout(deadline),
-            candidate_label="assembly source baseline",
-            kernel_backend="assembly",
-        )
-        if not acceptance.passed:
-            raise AssemblyPreparationError(acceptance.detail)
-        source_numerical_evidence = acceptance.numerical_evidence
-        source_bench = await bench_wallclock(driver, timeout_sec=_timeout(deadline, 600))
-        if not source_bench.get("success") or not source_bench.get("case_times"):
-            raise AssemblyPreparationError("original source benchmark failed")
-        _assembly_score(source_bench, source_bench)
+        source_bench, source_numerical_evidence = await _measure_source_baseline(driver, workspace, threshold, deadline)
         if capture:
             kernel_path.write_text(export_source, encoding="utf-8")
             export_report = await _validate(driver, threshold, deadline)
@@ -340,7 +403,6 @@ async def prepare_assembly(
         if _git(workspace, "diff", "--cached", "--name-only"):
             _git(workspace, "commit", "-m", "forge: bind compiler assembly to original launcher")
         record = {
-            "schema_version": 4,
             "status": "ready",
             "origin": provenance["frontend"] + "_compiler" if capture else "existing_assembly",
             "kernel": paths[0],
@@ -374,13 +436,14 @@ async def prepare_assembly(
         return record
     finally:
         if not committed:
-            _git(workspace, "reset", "--soft", start_commit)
-            _git(workspace, "reset", start_commit, "--", *paths)
-            kernel_path.write_bytes(original)
-            if kernel_path != assembly:
-                if original_assembly is None:
-                    assembly.unlink(missing_ok=True)
-                else:
-                    assembly.write_bytes(original_assembly)
-            if capture:
-                manifest.unlink(missing_ok=True)
+            _restore_prepared_workspace(
+                workspace,
+                start_commit=start_commit,
+                paths=paths,
+                kernel_path=kernel_path,
+                original=original,
+                assembly=assembly,
+                original_assembly=original_assembly,
+                manifest=manifest,
+                capture=capture,
+            )

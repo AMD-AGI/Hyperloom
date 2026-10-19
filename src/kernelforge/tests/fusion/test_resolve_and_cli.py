@@ -25,20 +25,17 @@ from kernelforge.agent_backends.workspace_guard import WorkspaceGuard, Workspace
 
 from kernelforge.fusion import discover as discover_module
 from kernelforge.fusion import author as author_module
+from kernelforge.fusion import agent_selection
 from kernelforge.fusion import command as cli_module
+from kernelforge.fusion import harness_authoring
 from kernelforge.fusion.author import (
     AUTHOR_RC_SAFETY,
     run_author,
 )
-from kernelforge.fusion.command import (
-    _create_agent_backend,
-    _framework_repo_root,
-    _package_root,
-    _resolve_agent_choice,
-    _reset_fusion_source,
-    _snapshot_fusion_source,
-    main,
-)
+from kernelforge.fusion.agent_selection import _create_agent_backend, _resolve_agent_choice
+from kernelforge.fusion.command import _framework_repo_root, _package_root
+from kernelforge.fusion.source_snapshot import _reset_fusion_source, _snapshot_fusion_source
+from kernelforge.fusion.command import run as main
 from kernelforge.fusion.emit import export_artifacts
 from kernelforge.fusion.llm_failure import AUTH, LlmUnavailableError
 from kernelforge.fusion.locate import resolve_framework_source_file
@@ -191,7 +188,7 @@ def test_explicit_claude_wins_over_openai_credentials(clean_agent_env, monkeypat
     monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
     provider, model = _resolve_agent_choice("claude", None)
     assert provider == "claude"
-    assert model == "claude-opus-5"
+    assert model == "claude-opus-5-5"
 
 
 def test_agent_model_precedence(clean_agent_env, monkeypatch):
@@ -217,8 +214,8 @@ def test_explicit_backend_disables_cross_provider_fallback(
         name="codex",
         runtime=SimpleNamespace(provider="codex", model="gpt-explicit"),
     )
-    monkeypatch.setattr(cli_module, "resolve_agent_runtime", fake_resolve)
-    monkeypatch.setattr(cli_module, "create_registered_backend", lambda runtime: backend)
+    monkeypatch.setattr(agent_selection, "resolve_agent_runtime", fake_resolve)
+    monkeypatch.setattr(agent_selection, "create_registered_backend", lambda runtime: backend)
 
     assert _create_agent_backend("codex", "gpt-explicit") is backend
     assert captured["fallback_provider"] == ""
@@ -241,8 +238,8 @@ def test_explicit_secure_sandbox_mode_is_wired(
         name="codex",
         runtime=SimpleNamespace(provider="codex", model="gpt-explicit", sandbox_mode=mode),
     )
-    monkeypatch.setattr(cli_module, "resolve_agent_runtime", fake_resolve)
-    monkeypatch.setattr(cli_module, "create_registered_backend", lambda runtime: backend)
+    monkeypatch.setattr(agent_selection, "resolve_agent_runtime", fake_resolve)
+    monkeypatch.setattr(agent_selection, "create_registered_backend", lambda runtime: backend)
 
     assert _create_agent_backend("codex", "gpt-explicit", mode) is backend
     assert captured["sandbox_mode"] == mode
@@ -259,8 +256,8 @@ def test_bypass_is_wired(clean_agent_env, monkeypatch):
         name="codex",
         runtime=SimpleNamespace(provider="codex", model="gpt-explicit", sandbox_mode="bypass"),
     )
-    monkeypatch.setattr(cli_module, "resolve_agent_runtime", fake_resolve)
-    monkeypatch.setattr(cli_module, "create_registered_backend", lambda runtime: backend)
+    monkeypatch.setattr(agent_selection, "resolve_agent_runtime", fake_resolve)
+    monkeypatch.setattr(agent_selection, "create_registered_backend", lambda runtime: backend)
 
     assert _create_agent_backend("codex", "gpt-explicit", "bypass") is backend
     assert captured["sandbox_mode"] == "bypass"
@@ -279,8 +276,8 @@ def test_bypass_is_wired_without_retired_external_sandbox_env(clean_agent_env, m
         name="codex",
         runtime=SimpleNamespace(provider="codex", model="gpt-explicit", sandbox_mode="bypass"),
     )
-    monkeypatch.setattr(cli_module, "resolve_agent_runtime", fake_resolve)
-    monkeypatch.setattr(cli_module, "create_registered_backend", lambda runtime: backend)
+    monkeypatch.setattr(agent_selection, "resolve_agent_runtime", fake_resolve)
+    monkeypatch.setattr(agent_selection, "create_registered_backend", lambda runtime: backend)
 
     assert _create_agent_backend("codex", "gpt-explicit", "bypass") is backend
     assert captured["sandbox_mode"] == "bypass"
@@ -289,35 +286,35 @@ def test_bypass_is_wired_without_retired_external_sandbox_env(clean_agent_env, m
 def test_retired_external_sandbox_env_does_not_confirm_bypass(clean_agent_env, monkeypatch):
     """Legacy HYPERLOOM_CODEX_EXTERNAL_SANDBOX=1 must not substitute bypass mode."""
     monkeypatch.setenv("HYPERLOOM_CODEX_EXTERNAL_SANDBOX", "1")
-    assert cli_module._resolve_agent_sandbox_mode(None) == "workspace-write"
+    assert agent_selection._resolve_agent_sandbox_mode(None) == "workspace-write"
 
 
 def test_sandbox_mode_explicit_value_wins_over_environment(clean_agent_env, monkeypatch):
     monkeypatch.setenv("FORGE_AGENT_SANDBOX_MODE", "read-only")
-    assert cli_module._resolve_agent_sandbox_mode(None) == "read-only"
-    assert cli_module._resolve_agent_sandbox_mode("workspace-write") == "workspace-write"
+    assert agent_selection._resolve_agent_sandbox_mode(None) == "read-only"
+    assert agent_selection._resolve_agent_sandbox_mode("workspace-write") == "workspace-write"
 
 
 def test_invalid_sandbox_mode_is_rejected(clean_agent_env):
     with pytest.raises(click.UsageError, match="unsupported agent sandbox mode"):
-        cli_module._resolve_agent_sandbox_mode("unconfined")
+        agent_selection._resolve_agent_sandbox_mode("unconfined")
 
 
 def test_author_harness_is_staged_inside_worktree_then_published(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     out = tmp_path / "out"
-    staging = cli_module._author_harness_target(str(repo), out)
+    staging = harness_authoring._author_harness_target(str(repo), out)
     assert Path(staging).resolve().is_relative_to(repo.resolve())
 
-    ready, reason, _deterministic = cli_module._prepare_author_harness(
+    ready, reason, _deterministic = harness_authoring._prepare_author_harness(
         staging,
         str(out / "kernel_harness.py"),
         inherited=False,
     )
     assert ready, reason
     Path(staging).write_text("print('validated')\n", encoding="utf-8")
-    ok, reason = cli_module._finish_author_harness(
+    ok, reason = harness_authoring._finish_author_harness(
         staging,
         str(out / "kernel_harness.py"),
         inherited=False,
@@ -334,8 +331,8 @@ def test_author_harness_staging_survives_running_the_harness(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     out = tmp_path / "out"
-    staging = cli_module._author_harness_target(str(repo), out)
-    ready, reason, _deterministic = cli_module._prepare_author_harness(
+    staging = harness_authoring._author_harness_target(str(repo), out)
+    ready, reason, _deterministic = harness_authoring._prepare_author_harness(
         staging,
         str(out / "kernel_harness.py"),
         inherited=False,
@@ -346,7 +343,7 @@ def test_author_harness_staging_survives_running_the_harness(tmp_path):
     cache.mkdir()
     (cache / "kernel_harness.cpython-310.pyc").write_bytes(b"\x00bytecode")
 
-    ok, reason = cli_module._finish_author_harness(
+    ok, reason = harness_authoring._finish_author_harness(
         staging,
         str(out / "kernel_harness.py"),
         inherited=False,
@@ -363,8 +360,8 @@ def test_author_harness_staging_tolerates_another_harness(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     out = tmp_path / "out"
-    staging = cli_module._author_harness_target(str(repo), out)
-    ready, reason, _deterministic = cli_module._prepare_author_harness(
+    staging = harness_authoring._author_harness_target(str(repo), out)
+    ready, reason, _deterministic = harness_authoring._prepare_author_harness(
         staging,
         str(out / "kernel_harness.py"),
         inherited=False,
@@ -374,7 +371,7 @@ def test_author_harness_staging_tolerates_another_harness(tmp_path):
     sibling = Path(staging).parent / "kernel_harness_c262b47917a2.py"
     sibling.write_text("print('other run')\n", encoding="utf-8")
 
-    ok, reason = cli_module._finish_author_harness(
+    ok, reason = harness_authoring._finish_author_harness(
         staging,
         str(out / "kernel_harness.py"),
         inherited=False,
@@ -392,8 +389,8 @@ def test_author_harness_staging_still_reports_foreign_leftovers(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     out = tmp_path / "out"
-    staging = cli_module._author_harness_target(str(repo), out)
-    ready, reason, _deterministic = cli_module._prepare_author_harness(
+    staging = harness_authoring._author_harness_target(str(repo), out)
+    ready, reason, _deterministic = harness_authoring._prepare_author_harness(
         staging,
         str(out / "kernel_harness.py"),
         inherited=False,
@@ -402,7 +399,7 @@ def test_author_harness_staging_still_reports_foreign_leftovers(tmp_path):
     Path(staging).write_text("print('validated')\n", encoding="utf-8")
     (Path(staging).parent / "stray.py").write_text("STRAY = True\n", encoding="utf-8")
 
-    ok, reason = cli_module._finish_author_harness(
+    ok, reason = harness_authoring._finish_author_harness(
         staging,
         str(out / "kernel_harness.py"),
         inherited=False,
@@ -421,8 +418,8 @@ def test_inherited_harness_staging_detects_author_mutation(tmp_path):
     final = out / "kernel_harness.py"
     final.parent.mkdir()
     final.write_text("print('inherited')\n", encoding="utf-8")
-    staging = cli_module._author_harness_target(str(repo), out)
-    ready, reason, _deterministic = cli_module._prepare_author_harness(
+    staging = harness_authoring._author_harness_target(str(repo), out)
+    ready, reason, _deterministic = harness_authoring._prepare_author_harness(
         staging,
         str(final),
         inherited=True,
@@ -430,7 +427,7 @@ def test_inherited_harness_staging_detects_author_mutation(tmp_path):
     assert ready, reason
     Path(staging).write_text("print('mutated')\n", encoding="utf-8")
 
-    ok, reason = cli_module._finish_author_harness(
+    ok, reason = harness_authoring._finish_author_harness(
         staging,
         str(final),
         inherited=True,
@@ -1009,11 +1006,11 @@ def test_prepare_author_harness_marks_an_occupied_staging_target_deterministic(
     repo = tmp_path / "repo"
     repo.mkdir()
     out = tmp_path / "out"
-    staging = cli_module._author_harness_target(str(repo), out)
+    staging = harness_authoring._author_harness_target(str(repo), out)
     Path(staging).parent.mkdir(parents=True, exist_ok=True)
     Path(staging).write_text("print('left behind')\n", encoding="utf-8")
 
-    ready, reason, deterministic = cli_module._prepare_author_harness(
+    ready, reason, deterministic = harness_authoring._prepare_author_harness(
         staging,
         str(out / "kernel_harness.py"),
         inherited=False,
@@ -1027,18 +1024,18 @@ def test_prepare_author_harness_marks_an_occupied_staging_target_deterministic(
 class TestAgentTimeoutSetting:
     def test_default_is_two_hours(self, monkeypatch):
         monkeypatch.delenv("FORGE_FUSION_AGENT_TIMEOUT_SEC", raising=False)
-        assert cli_module._agent_timeout_sec() == 7200
+        assert agent_selection._agent_timeout_sec() == 7200
 
     def test_override_is_honoured(self, monkeypatch):
         monkeypatch.setenv("FORGE_FUSION_AGENT_TIMEOUT_SEC", "900")
-        assert cli_module._agent_timeout_sec() == 900
+        assert agent_selection._agent_timeout_sec() == 900
 
     @pytest.mark.parametrize("value", ["not-a-number", "0", "-1"])
     def test_unusable_override_fails_loudly(self, monkeypatch, value):
         """A silently ignored budget would leave the two-hour default in place."""
         monkeypatch.setenv("FORGE_FUSION_AGENT_TIMEOUT_SEC", value)
         with pytest.raises(click.UsageError, match="FORGE_FUSION_AGENT_TIMEOUT_SEC"):
-            cli_module._agent_timeout_sec()
+            agent_selection._agent_timeout_sec()
 
 
 def _venv_in_git_layout(tmp_path):

@@ -1,6 +1,6 @@
 ---
 name: hyperloom-setup
-description: Configure Hyperloom in the current agent workspace after pip install --target . by collecting LLM settings, choosing direct baremetal or Docker execution, writing .env, and running the setup backend directly only in baremetal mode.
+description: Configures Hyperloom after pip install --target . by collecting core LLM/runtime settings once, choosing direct baremetal or Docker execution, writing .env, deploying the workspace's local Experience KB service, and running the setup backend directly only in baremetal mode.
 ---
 
 # Hyperloom Setup
@@ -11,6 +11,9 @@ directory in the agent, and installs Hyperloom into the current directory:
 ```bash
 pip install your_package.whl --target .
 ```
+
+The Experience KB service ships inside Hyperloom. Setup deploys one local
+service per workspace; every optimize run reads from and writes to it.
 
 The current directory is the Hyperloom workspace and install target. It is normal
 for this directory to contain many Python package folders; users do not need to
@@ -51,8 +54,8 @@ required values. Ask the user each question, collect the answer, warn before
 writing `.env`, write `.env`, read it back for validation, and continue to the
 setup command. If setup already completed for this workspace and the user is not
 changing provider, model, `USER_DATA_PATH`, run mode, Docker target host, or
-bare-metal framework setup choice, do not run setup again; continue with the
-demo skill using the existing `.env`.
+bare-metal framework setup choice, reuse the existing setup, but still run the
+Experience KB service step before handing off to a demo.
 
 ## Step 1: Confirm Workspace
 
@@ -78,7 +81,32 @@ custom model id) present two options — `Use default (<value>)` and `Custom` �
 and only when the user picks `Custom` ask a plain-text follow-up for the exact
 value.
 
-1. Ask the Anthropic base URL with the structured UI.
+1. Ask how Hyperloom authenticates to Claude with the structured UI. Present
+   exactly these two option labels in this order:
+   1. `Anthropic API key` — API-credit billing; the official endpoint, the AMD
+      gateway, or a custom gateway.
+   2. `Claude subscription (Pro/Max)` — the user's own Claude plan, through a
+      long-lived token from `claude setup-token`; no API key.
+
+   With `Claude subscription (Pro/Max)`:
+   - Do not ask the base URL: a subscription token is only valid against
+     `https://api.anthropic.com`, so write that value. Never pair it with the AMD
+     gateway or a custom URL.
+   - Tell the user to run `claude setup-token` themselves, in their own
+     terminal. It opens a browser sign-in and prints a token starting with
+     `sk-ant-oat01-`; it waits for that round-trip, so do not run it for them from
+     a non-interactive shell. They paste the token into `.env` (question 2), never
+     into chat.
+   - Write `CLAUDE_CODE_OAUTH_TOKEN=<PLEASE_FILL_IN>` instead of the
+     `ANTHROPIC_API_KEY` placeholder.
+   - An `ANTHROPIC_API_KEY` (or `ANTHROPIC_AUTH_TOKEN`) outranks the subscription
+     token, so the run would bill API credits instead. If `.env` or the shell
+     already holds one, tell the user and ask whether to remove it; do not
+     delete a non-placeholder secret without their answer.
+
+   With `Anthropic API key`, ask the base URL next (below).
+
+   Ask the Anthropic base URL with the structured UI (API-key path only).
    - Present exactly these three option labels in this order:
      - `Use default (https://api.anthropic.com)` — this remains the recommended
        default.
@@ -98,11 +126,14 @@ value.
    options — `Use default (<value>)` and `Custom` — and only ask a plain-text
    follow-up for the exact value when the user picks `Custom`.
 
-   - Write `ANTHROPIC_API_KEY=<PLEASE_FILL_IN>` unless already set to a non-placeholder value.
-   - Ask `ANTHROPIC_BASE_URL` with exactly these option labels in this order:
+   - API-key path: write `ANTHROPIC_API_KEY=<PLEASE_FILL_IN>` unless already set
+     to a non-placeholder value. Subscription path: write
+     `CLAUDE_CODE_OAUTH_TOKEN=<PLEASE_FILL_IN>` unless already set to a
+     non-placeholder value, and no `ANTHROPIC_API_KEY` placeholder.
+   - API-key path only: ask `ANTHROPIC_BASE_URL` with exactly these option labels in this order:
      `Use default (https://api.anthropic.com)` /
      `Use AMD gateway (https://llm-api.amd.com/anthropic)` / `Custom`.
-   - Ask `CLAUDE_MODEL`: options `Use default (claude-opus-5)` / `Custom`.
+   - Ask `CLAUDE_MODEL`: options `Use default (claude-opus-5-5)` / `Custom`.
 4. Explain `USER_DATA_PATH`:
    - It is the writable root for Hyperloom runtime files, dependency checkouts, logs, optimizer runs, and generated env files.
    - Offer `<workspace>/session` (the current workspace directory plus a
@@ -110,6 +141,8 @@ value.
      absolute path. Each optimizer run still creates its own UTC-stamped
      subdirectory under it.
    - If an existing `USER_DATA_PATH` is visible in the current shell or terminal context, offer that exact value as one option.
+     Say that another workspace using the same value shares its Experience KB data home, which only one workspace's
+     service can serve, unless `HYPERLOOM_KB_HOME` gives each workspace its own.
    - Always offer a custom path option.
    - Do not auto-select; write `USER_DATA_PATH` only after the user explicitly chooses (they may accept the default).
 
@@ -222,7 +255,28 @@ Before writing, explicitly tell the user:
 
 Write the Anthropic keys plus the common keys:
 
-- `Anthropic`: `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `CLAUDE_MODEL`.
+- `Anthropic`, API-key path: `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `CLAUDE_MODEL`.
+- `Anthropic`, subscription path: `CLAUDE_CODE_OAUTH_TOKEN`,
+  `ANTHROPIC_BASE_URL=https://api.anthropic.com`, `CLAUDE_MODEL`.
+- `Experience KB`: do not write `HYPERLOOM_KB_URL` or `HYPERLOOM_KB_TOKEN` by
+  hand. After writing the other keys, run:
+
+  ```bash
+  PYTHONPATH="$PWD:${PYTHONPATH:-}" python3 -m hyperloom.inference_optimizer.experience_kb_service init-env
+  ```
+
+  It points `HYPERLOOM_KB_URL` at the workspace's own local service
+  (`http://127.0.0.1:<port>`, a port derived from the workspace path) and
+  generates `HYPERLOOM_KB_TOKEN`, but only for a key that is missing or
+  still `<PLEASE_FILL_IN>`; it keeps every other value. It prints only whether
+  each key was `written` or `kept`, never the token.
+- `Global Experience KB`: do not ask for one and do not write its keys.
+  `HYPERLOOM_GLOBAL_KB_URL`, `HYPERLOOM_GLOBAL_KB_TOKEN`, and
+  `HYPERLOOM_KB_AUTO_PUSH` are optional and the user's to set; keep any value
+  already in `.env`. Unset, the workspace uses only its local KB. With them
+  set, `python3 -m hyperloom.inference_optimizer.experience_kb_service push`
+  and `python3 -m hyperloom.inference_optimizer.experience_kb_service pull`
+  sync with that global KB; setup runs neither.
 
 Common keys:
 
@@ -262,11 +316,17 @@ Skip this key entirely when the selected Anthropic base URL host is not
 After writing `.env`, tell the user to edit the file directly and replace each `<PLEASE_FILL_IN>` placeholder. Wait for the user to confirm before running setup.
 
 Then read `.env` back and confirm:
+
 - non-secret values are correct;
 - secret values are `set` or `missing`;
 - no secret key still equals `<PLEASE_FILL_IN>`.
+- subscription path: `CLAUDE_CODE_OAUTH_TOKEN` is set, and neither
+  `ANTHROPIC_API_KEY` nor `ANTHROPIC_AUTH_TOKEN` is set in `.env` or the shell
+  (either would take precedence over the subscription).
+- `HYPERLOOM_KB_URL` and `HYPERLOOM_KB_TOKEN` are both set.
 
-If any required secret is missing or still a placeholder, stop and ask the user to edit `.env` again.
+If any required secret is missing or still a placeholder, stop and ask the user
+to edit `.env` again.
 
 ## Step 4: Run Setup Backend
 
@@ -283,7 +343,7 @@ For `none` with a preinstalled SGLang/vLLM stack:
 
 ```bash
 export REPO_ROOT="$(pwd -P)"
-PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework none --yes
+PYTHONPATH="$REPO_ROOT" python3 -m hyperloom setup -- --install-framework none --yes
 ```
 
 For **preinstalled ATOM**, activate its existing environment or keep the user's
@@ -298,7 +358,7 @@ Run the non-mutating verification from the selected workspace:
 ```bash
 export PYTHON="${PYTHON:-$(command -v python3)}"
 export INFERENCE_OPTIMIZER_FORCE_PYTHON=1
-"$PYTHON" -m hyperloom.inference_optimizer.setup --check-only -- \
+"$PYTHON" -m hyperloom setup --check-only -- \
   --install-framework none --frameworks atom --require-frameworks \
   --user-data-path "${USER_DATA_PATH:?USER_DATA_PATH missing}"
 ```
@@ -310,7 +370,7 @@ ROCm hotfixes. Do not repeat completed setup just for the handoff or overwrite
 the already selected `USER_DATA_PATH`.
 
 ```bash
-"$PYTHON" -m hyperloom.inference_optimizer.setup -- \
+"$PYTHON" -m hyperloom setup -- \
   --install-framework none --frameworks atom --require-frameworks \
   --user-data-path "${USER_DATA_PATH:?USER_DATA_PATH missing}" --yes
 ```
@@ -326,7 +386,7 @@ defaults to isolated, the flag below is explicit):
 
 ```bash
 export REPO_ROOT="$(pwd -P)"
-PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework vllm --framework-env isolated --yes
+PYTHONPATH="$REPO_ROOT" python3 -m hyperloom setup -- --install-framework vllm --framework-env isolated --yes
 ```
 
 Downgrade path only when the user explicitly chooses a pre-0.28 vLLM on a host
@@ -335,14 +395,14 @@ that failed the glibc check:
 ```bash
 export REPO_ROOT="$(pwd -P)"
 export VLLM_VERSION=0.27.1
-PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework vllm --framework-env isolated --yes
+PYTHONPATH="$REPO_ROOT" python3 -m hyperloom setup -- --install-framework vllm --framework-env isolated --yes
 ```
 
 For `sglang`:
 
 ```bash
 export REPO_ROOT="$(pwd -P)"
-PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework sglang --yes
+PYTHONPATH="$REPO_ROOT" python3 -m hyperloom setup -- --install-framework sglang --yes
 ```
 
 For `atom` (installs AITER, then ATOM at `ATOM_REF` as an editable checkout under
@@ -350,7 +410,7 @@ the dependency root, and verifies that `atom` and its server module import):
 
 ```bash
 export REPO_ROOT="$(pwd -P)"
-PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework atom --yes
+PYTHONPATH="$REPO_ROOT" python3 -m hyperloom setup -- --install-framework atom --yes
 ```
 
 `none` reuses a preinstalled framework; it does not remove it. If no serving
@@ -362,10 +422,11 @@ other existing remote/special workflows, not to bypass checks in this local ATOM
 
 ### `docker`
 
-Do **not** run `hyperloom.inference_optimizer.setup` on the host.
+Do **not** run `hyperloom setup` on the host.
 The example (workload) skill will start the container and run setup inside it.
 
 After writing `.env`, tell the user:
+
 - setup on the host is skipped in docker mode;
 - the demo skill will `docker run` + `docker exec` setup inside the ROCm container;
 - `FRAMEWORK` being unset after this skill is expected.
@@ -395,24 +456,64 @@ the demo skill runs setup inside the container. Read
   the failure. Offer SGLang/vLLM/ATOM installation only for the framework the user
   intends to run. Do not invent a `FRAMEWORK` value or silently switch frameworks.
 
+## Experience KB service
+
+The workspace's Experience KB service runs wherever the optimizer runs. Its
+data and `service.log` live under `$HYPERLOOM_KB_HOME` when set, otherwise
+`$USER_DATA_PATH/experience-kb`, and every
+optimize launch starts it again when nothing serves `HYPERLOOM_KB_URL`.
+
+In `docker` mode, skip this step: the service starts inside the container at
+the first optimize launch.
+
+In `baremetal` mode, start it now and check its health, loading `.env` without
+printing any values:
+
+```bash
+set -a
+. "$PWD/.env"
+set +a
+PYTHONPATH="$PWD:${PYTHONPATH:-}" python3 -m hyperloom.inference_optimizer.experience_kb_service ensure
+```
+
+It prints whether the service was started, restarted, or already running,
+never the token.
+If it fails, report its message; when another process already serves that port
+with a different token, ask the user to set another port in `HYPERLOOM_KB_URL`
+and rerun this step. Do not continue to a demo until it succeeds.
+
+When the `.env` settings the service uses change (the Anthropic gateway or
+model), or Hyperloom is upgraded, the next run of this step or of an optimize
+launch restarts it with them.
+
+The same entry point also runs the `hyperloom-kb` skill's commands on the
+workspace's service, such as
+`python3 -m hyperloom.inference_optimizer.experience_kb_service labels` or
+`restore <label_id>`, defaulting to this workspace's schema. Setup itself
+runs none of them.
+
 ## Step 6: Report Result
 
 Report:
+
 - The `.env` path.
 - The run mode (`baremetal` or `docker`).
 - The Docker target host when `HYPERLOOM_RUN_MODE=docker`.
 - The setup command that was run (or that host setup was skipped in `docker` mode).
 - Whether setup completed or failed (in `docker` mode, report that host setup was skipped).
 - The detected `FRAMEWORK` value (or that it is unset).
+- Experience KB service: in `baremetal` mode, `ready` with its URL once the
+  service step succeeds, or `failed`; in `docker` mode, that it starts inside
+  the container at the first optimize launch.
 - The last relevant error lines on failure.
 
 Do not print secret values back to the user.
 
 ## Step 7: Hand Off to a Demo Skill
 
-When setup completed in `baremetal` mode, or when `.env` is written in `docker`
-mode, ask the user whether they want to run a demo optimization now, and if so
-which option:
+When setup and the Experience KB service step completed in `baremetal` mode, or
+when `.env` is written in `docker` mode, ask the user whether they want to run a
+demo optimization now, and if so which option:
 
 - `3h` — short, no-kernel run. Best for a first end-to-end check.
 - `12h` — medium-length Qwen3-14B-FP8 run on SGLang, vLLM or ATOM; the demo

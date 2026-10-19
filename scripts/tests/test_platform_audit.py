@@ -189,7 +189,7 @@ def test_epyc_generation_declines_on_non_numeric_skus():
 
 
 def test_sample_cores_spreads_across_the_topology(monkeypatch):
-    monkeypatch.setattr(pa, "physical_cores", lambda: list(range(0, 64)))
+    monkeypatch.setattr(pa, "physical_cores", lambda: list(range(64)))
     assert pa.sample_cores(4) == [0, 16, 32, 48]
 
 
@@ -197,7 +197,7 @@ def test_sample_cores_degrades_on_small_parts(monkeypatch):
     """A part with fewer cores than requested must not index out of range."""
     monkeypatch.setattr(pa, "physical_cores", lambda: [0, 1])
     assert pa.sample_cores(4) == [0, 1]
-    monkeypatch.setattr(pa, "physical_cores", lambda: [])
+    monkeypatch.setattr(pa, "physical_cores", list)
     assert pa.sample_cores(4) == []
 
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import re
 
-from hyperloom.common.timeutil import iso_z, now_iso, utc_now_compact
+from hyperloom.common.timeutil import iso_z, now_iso, parse_iso_unix_or_zero, utc_now_compact
 
 
 def test_now_iso_z_suffix():
@@ -35,3 +35,10 @@ class TestIsoZ:
 
     def test_unparseable_returned_unchanged(self):
         assert iso_z("not-a-timestamp") == "not-a-timestamp"
+
+
+def test_parse_iso_unix_or_zero():
+    assert parse_iso_unix_or_zero("") == 0.0
+    assert parse_iso_unix_or_zero("not-a-date") == 0.0
+    assert parse_iso_unix_or_zero("2025-01-01T00:00:00Z") > 0
+    assert parse_iso_unix_or_zero("2025-01-01T00:00:00") > 0

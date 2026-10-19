@@ -171,6 +171,7 @@ def test_watchdog_clock_boundaries(monkeypatch, tmp_path, reused, ready, log, no
             silence_timeout_sec=600,
             server_log_path=str(tmp_path / "server.log") if log else None,
             server_already_ready=reused,
+            recorders=sk._RecorderFanout([]),
         )
     assert now[0] == expected
     assert 599.0 in waited
@@ -214,7 +215,7 @@ def test_unobserved_reuse_keeps_other_stop_gates_and_telemetry(monkeypatch, tmp_
             server_already_ready=True,
             session_deadline_sec=3 if gate == "session" else None,
             cancel_scope=scope,
-            kv_recorder=recorder,
+            recorders=sk._RecorderFanout([recorder]),
         )
     assert now[0] == {"hard": 10, "session": 3, "cancel": 4}[gate]
     recorder.note_phase.assert_called_once_with("measured", 0)
@@ -231,7 +232,10 @@ def test_exited_process_wins_over_expired_gates(monkeypatch):
         def communicate(self):
             return "finished", ""
 
-    assert sk._communicate_with_watchdog(Proc(), hard_timeout=0, session_deadline_sec=-1) == ("finished", "")
+    out = sk._communicate_with_watchdog(
+        Proc(), hard_timeout=0, session_deadline_sec=-1, recorders=sk._RecorderFanout([])
+    )
+    assert out == ("finished", "")
 
 
 def test_log_rotation_and_truncation_do_not_invent_activity(tmp_path):
@@ -738,7 +742,7 @@ def _sentinel_returncodes() -> dict[int, set[str]]:
         for name, value in vars(module).items():
             if not isinstance(value, int) or isinstance(value, bool):
                 continue
-            if not (name.endswith("_RETURNCODE") or name.endswith("_RC")):
+            if not (name.endswith(("_RETURNCODE", "_RC"))):
                 continue
             assigned.setdefault(value, set()).add(f"{short}.{name}")
     return assigned

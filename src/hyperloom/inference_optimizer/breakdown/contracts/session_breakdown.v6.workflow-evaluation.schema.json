@@ -36,7 +36,7 @@
               "const": "hyperloom.workflow_evaluation.v1"
             },
             "contract_digest": {
-              "const": "1874f07b458e942a8a96ca32c1eb3dbe7423dedc3b5dec8f66dd121f5770dff7"
+              "const": "b25e226ab010f94a9db0935dcfb2a839f97c47580cc1c1b537c4b1742bfc15fc"
             },
             "run_flags": {
               "type": "object",
@@ -680,10 +680,12 @@
             "",
             "active_inferencex_checkout_missing",
             "agentx_client_unavailable",
+            "backend_unhealthy",
             "baseline_accuracy_failed",
             "baseline_arg_error",
             "baseline_failed",
             "baseline_over_latency_budget",
+            "baseline_over_power_budget",
             "coordinator_exception",
             "custom",
             "emergency",
@@ -986,9 +988,7 @@
             null,
             "skip_to_kernel",
             "skip_to_sweep",
-            "skip_to_close",
-            "extend_explore_budget",
-            "extend_kernel_budget"
+            "skip_to_close"
           ]
         },
         "sweep_result": {
@@ -1346,8 +1346,7 @@
         "phase_spent_sec",
         "runtime_sec",
         "post_ready_runtime_sec",
-        "warm_runtime_sec",
-        "double_run"
+        "warm_runtime_sec"
       ],
       "properties": {
         "failure_streak": {
@@ -1362,6 +1361,15 @@
         },
         "tput": {
           "type": "number"
+        },
+        "initial_analysis_pending": {
+          "type": "boolean"
+        },
+        "analysis_affordable_sec": {
+          "type": [
+            "number",
+            "null"
+          ]
         },
         "session_usable_sec": {
           "type": [
@@ -1390,9 +1398,6 @@
             "number",
             "null"
           ]
-        },
-        "double_run": {
-          "type": "boolean"
         }
       },
       "additionalProperties": false
@@ -1405,6 +1410,15 @@
       "properties": {
         "tput": {
           "type": "number"
+        },
+        "initial_analysis_pending": {
+          "type": "boolean"
+        },
+        "analysis_affordable_sec": {
+          "type": [
+            "number",
+            "null"
+          ]
         }
       },
       "additionalProperties": false

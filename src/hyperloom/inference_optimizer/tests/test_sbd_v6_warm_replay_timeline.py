@@ -59,7 +59,6 @@ def _recorder(**overrides: Any):
         "donor": {"canonical_id": "recipe-abc", "session_id": "sess-donor"},
         "expected_gain_pct": 12.0,
         "confidence": 0.82,
-        "min_reproduce_pct": 0.8,
         "session_baseline_tput": 15630.0,
         "kernel_count": 0,
         "recipe_suppressed": False,

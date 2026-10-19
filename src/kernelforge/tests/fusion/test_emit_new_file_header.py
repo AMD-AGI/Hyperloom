@@ -5,19 +5,10 @@
 
 from __future__ import annotations
 
-import importlib.util
 from pathlib import Path
 
+from hyperloom.common.unified_diff import PatchOp, PatchTarget, parse_patch_manifest
 from kernelforge.fusion.emit import _export_nongit, _unified_file_diff
-
-
-_APPLY_PATH = (
-    Path(__file__).resolve().parents[3] / "hyperloom" / "agents" / "kernel" / "tools" / "apply_kernel_patch.py"
-)
-_SPEC = importlib.util.spec_from_file_location("apply_kernel_patch_tool", _APPLY_PATH)
-assert _SPEC and _SPEC.loader
-apply_kernel_patch = importlib.util.module_from_spec(_SPEC)
-_SPEC.loader.exec_module(apply_kernel_patch)
 
 
 def test_unified_file_diff_marks_an_absent_base_as_a_creation():
@@ -74,8 +65,8 @@ def test_nongit_export_is_read_back_as_one_create_plus_one_edit(tmp_path):
         fused_module=str(repo / "model_fused.py"),
     )
 
-    descriptors = apply_kernel_patch.parse_patch_manifest(Path(arts.patch).read_text(encoding="utf-8"))
+    descriptors = parse_patch_manifest(Path(arts.patch).read_text(encoding="utf-8"))
     assert descriptors == [
-        {"op": "write", "path": "model.py", "mode": "", "binary": False, "is_new": False},
-        {"op": "write", "path": "model_fused.py", "mode": "0644", "binary": False, "is_new": True},
+        PatchTarget(PatchOp.WRITE, "b/model.py"),
+        PatchTarget(PatchOp.WRITE, "b/model_fused.py", mode="0644", is_new=True),
     ]

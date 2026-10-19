@@ -40,6 +40,7 @@ from hyperloom.orchestrator.kernel.conc_sweep import (
 from hyperloom.common.gain_math import conc_pair_comparison as _build_comparison
 from hyperloom.common.perf_metric import graded_metric_key
 from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.phases.kernel_stack import KernelStackPhase
 
 
 # Fixtures
@@ -1151,44 +1152,47 @@ def test_record_conc_sweep_writes_last_conc_sweep():
     assert s.last_conc_sweep_watermark == watermark
 
 
-def test_exit_normal_sweep_reads_the_ladder_as_the_sweep():
+def test_sweep_exits_based_on_ladder_status():
     """The concurrency ladder is the only sweep, so its status is the phase's."""
-    from hyperloom.orchestrator.phases.machine_state import exit_normal_sweep
+    from hyperloom.orchestrator.phases.machine_state import compute_next_phase
 
-    class _State:
-        last_conc_sweep = {}
-        phase = "SWEEP"
-        phase_started_ts = "2026-06-02T10:00:00+00:00"
-        max_minutes = 360
-        phase_budget_pct = {"SWEEP": 0.50}
+    def _State(last_conc_sweep=None):
+        return SharedState(
+            last_conc_sweep=last_conc_sweep or {},
+            phase="SWEEP",
+            phase_started_ts="2026-06-02T10:00:00+00:00",
+            max_minutes=360,
+            phase_budget_pct={"SWEEP": 0.50},
+        )
+
+    def _next(state):
+        # optimize_enabled=False blocks cycle_reloop so the sweep status drives the exit.
+        return compute_next_phase(state, optimize_enabled=False)
 
     # Nothing recorded => don't exit (budget remaining).
-    assert exit_normal_sweep(_State()) is None
+    assert _next(_State()) is None
 
-    _State.last_conc_sweep = {"status": "succeeded"}
-    result = exit_normal_sweep(_State())
+    result = _next(_State({"status": "succeeded"}))
     assert result is not None
-    reason, evidence = result
+    _target, reason, evidence = result
     assert reason == "sweep_done", reason
     assert evidence.get("sweep_status") == "succeeded"
 
     # Skipped also counts as "done" (the action reached a terminal decision).
     for terminal in ("partial", "completed", "skipped"):
-        _State.last_conc_sweep = {"status": terminal}
-        result = exit_normal_sweep(_State())
-        assert result is not None and result[0] == "sweep_done", terminal
+        result = _next(_State({"status": terminal}))
+        assert result is not None and result[1] == "sweep_done", terminal
 
-    _State.last_conc_sweep = {"status": "failed"}
-    result = exit_normal_sweep(_State())
+    result = _next(_State({"status": "failed"}))
     assert result is not None
-    reason, evidence = result
+    _target, reason, evidence = result
     assert reason == "sweep_failed"
     assert evidence.get("sweep_status") == "failed"
 
 
 def test_the_sweep_exit_evidence_separates_a_skip_from_a_spent_budget():
     """``was_skipped`` covers both outcomes, so the row must carry what tells them apart."""
-    from hyperloom.orchestrator.phases.machine_state import exit_normal_sweep
+    from hyperloom.orchestrator.phases.machine_state import compute_next_phase
 
     state = SharedState(
         phase="SWEEP",
@@ -1197,7 +1201,9 @@ def test_the_sweep_exit_evidence_separates_a_skip_from_a_spent_budget():
         phase_budget_pct={"SWEEP": 0.50},
     )
     state.record_conc_sweep({"status": "skipped", "was_skipped": True, "skip_reason": "no_optimization_to_compare"})
-    _, declined = exit_normal_sweep(state)
+    result = compute_next_phase(state)
+    assert result is not None
+    _, _, declined = result
     assert declined["sweep_was_skipped"] is True
     assert declined["sweep_skip_budget_exhausted"] is False
 
@@ -1210,7 +1216,9 @@ def test_the_sweep_exit_evidence_separates_a_skip_from_a_spent_budget():
             "summary": {"successful_pairs": 0},
         }
     )
-    spent_reason, spent = exit_normal_sweep(state)
+    result = compute_next_phase(state)
+    assert result is not None
+    _, spent_reason, spent = result
     assert spent_reason == "sweep_failed"
     assert spent["sweep_was_skipped"] is True
     assert spent["sweep_skip_budget_exhausted"] is True
@@ -1222,7 +1230,9 @@ def test_the_sweep_exit_evidence_separates_a_skip_from_a_spent_budget():
             "summary": {"successful_pairs": 0},
         }
     )
-    no_pair_reason, no_pair = exit_normal_sweep(state)
+    result = compute_next_phase(state)
+    assert result is not None
+    _, no_pair_reason, no_pair = result
     assert no_pair_reason == "sweep_failed"
     assert no_pair["sweep_status"] == "skipped"
 
@@ -1260,12 +1270,10 @@ def test_on_enter_sweep_drains_pending_keep_integrates(monkeypatch):
         {"kernel_id": "k002", "integration_id": "integration-2"},
     ]
     coord.shared_state.pending_kernel_integration_records = lambda: [pending_queue.pop(0)] if pending_queue else []
-    coord._record_integrate_keep = AsyncMock()
+    coord.writeback.record_integrate_keep = AsyncMock()
     coord.session_dir = Path("/tmp/sess")
 
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
-
-    asyncio.run(Coordinator._drain_pending_keep_integrates(coord))
+    asyncio.run(KernelStackPhase.drain_pending_keep_integrates(coord))
 
     assert fake_integrate.await_count == 2, fake_integrate.await_args_list
     assert coord.shared_state.save.call_count >= 2
@@ -2500,3 +2508,122 @@ def test_single_server_pre_arm_skip_on_closing_phase(
     all_points = payload["baseline"]["points"] + payload["optimized"]["points"]
     assert all(p["status"] == "skipped" for p in all_points)
     assert payload["budget_skip_reason"] == "session_deadline_reserve"
+
+
+@pytest.mark.parametrize("scope_published", [True, False], ids=["scope", "reaped_rung_only"])
+def test_a_cancelled_sweep_stops_the_ladder_and_is_not_failed(
+    session_dir: Path,
+    baseline_yaml: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scope_published: bool,
+):
+    """A phase transition reaping the baseline boot ends the sweep there, as cancelled rather than failed.
+
+    The cancelled scope stays cancelled, so before the fix every lower boot attempt and the whole Option B ladder
+    were started and reaped within a second each, and the sweep then summarised itself as eight failed pairs.
+    """
+    from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cancel_scope
+    from hyperloom.orchestrator.actions.stop_attribution import ORCHESTRATOR_CANCELLED_CLASS
+    from hyperloom.orchestrator.phases.machine_state import compute_next_phase
+
+    teardown_log: list[tuple] = []
+    _patch_lifecycle_eligible(monkeypatch, teardown_log)
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors._ray_serving.maybe_serving_lease", lambda **_kwargs: None
+    )
+    state = _make_state(baseline_config_path=str(baseline_yaml))
+    scope = CancelScope()
+    transition = "phase_transition:SWEEP->CLOSE"
+    calls: list[str] = []
+
+    async def _fake_run_grid(*, grid: list[GridVariant], **kw):
+        variant = grid[0]
+        calls.append(variant.name)
+        if variant.name.startswith("baseline_"):
+            # The transition lands while the baseline server is booting; the grid runner reaps the round.
+            scope.cancel(reason=transition)
+            reaped = _fake_variant(variant.name, throughput=None, status="skipped", envs=variant.extra_envs)
+            reaped.error_class = ORCHESTRATOR_CANCELLED_CLASS
+            return [reaped]
+        return [_fake_variant(variant.name, throughput=100.0, envs=variant.extra_envs)]
+
+    monkeypatch.setattr("hyperloom.orchestrator.kernel.conc_sweep.run_grid", _fake_run_grid)
+    monkeypatch.setattr("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", _fake_materialize)
+
+    if scope_published:
+        with use_cancel_scope(scope):
+            payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[2, 4, 8]))
+    else:
+        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[2, 4, 8]))
+
+    baseline_calls = [name for name in calls if name.startswith("baseline_")]
+    assert baseline_calls == ["baseline_conc8"], f"the ladder kept going after the cancel: {baseline_calls}"
+    assert payload["status"] == "cancelled"
+    assert payload["cancelled"] is True
+    assert payload["cancel_reason"] == (transition if scope_published else ORCHESTRATOR_CANCELLED_CLASS)
+    baseline_points = payload["baseline"]["points"]
+    assert len(baseline_points) == 3
+    assert all(point["status"] == "skipped" for point in baseline_points)
+    assert {point["error_class"] for point in baseline_points} == {ORCHESTRATOR_CANCELLED_CLASS}
+    assert teardown_log, "the reaped boot's server must still be torn down"
+
+    # The phase closes on the budget that ordered the transition, not on sweep_failed.
+    state.record_conc_sweep(payload)
+    assert state.last_conc_sweep["status"] == "cancelled"
+    now = 1_800_000_000.0
+    sweep_state = SharedState(
+        last_conc_sweep=dict(state.last_conc_sweep),
+        phase="SWEEP",
+        phase_started_unix=now - 600.0,
+        start_ts="2026-06-02T10:00:00+00:00",
+        max_minutes=180,
+        phase_budget_pct={"SWEEP": 0.05, "CLOSE": 0.02},
+    )
+    sweep_state.elapsed_charged_sec = 7000.0
+    result = compute_next_phase(sweep_state, now_unix=now, optimize_enabled=False)
+    assert result is not None
+    target, reason, evidence = result
+    assert target == "CLOSE"
+    assert reason == "sweep_budget_cap"
+    assert evidence["sweep_status"] == "cancelled"
+
+
+def test_the_sweep_phase_budget_waits_for_the_sweep_it_granted():
+    """SWEEP's cap is a share of the whole session; it must not cut short the sweep the phase itself granted.
+
+    Three-hour session, SWEEP at 5%: the cap is 540 s, while the sweep enqueued on entry was granted the 3624 s the
+    session clock still had. Ten minutes in, with no result yet, the phase waits for the grant; once the grant has
+    run out, or the sweep has landed, the ordinary exits apply again.
+    """
+    from hyperloom.orchestrator.phases.machine_state import compute_next_phase
+
+    now = 1_800_000_000.0
+
+    def _state(*, granted_until: float, last_conc_sweep: dict[str, Any] | None = None) -> SharedState:
+        state = SharedState(
+            last_conc_sweep=last_conc_sweep or {},
+            phase="SWEEP",
+            phase_started_unix=now - 600.0,
+            start_ts="2026-06-02T10:00:00+00:00",
+            max_minutes=180,
+            phase_budget_pct={"SWEEP": 0.05, "CLOSE": 0.02},
+        )
+        state.elapsed_charged_sec = 7000.0
+        state.conc_sweep_granted_until_unix = granted_until
+        return state
+
+    def _next(state: SharedState):
+        return compute_next_phase(state, now_unix=now, optimize_enabled=False)
+
+    granted = now - 600.0 + 3624 + 600
+    assert _next(_state(granted_until=granted)) is None
+
+    expired = _next(_state(granted_until=now - 1.0))
+    assert expired is not None and expired[1] == "sweep_budget_cap"
+    assert expired[2]["predicate_inputs"]["budget"]["cap_sec"] == 540.0
+
+    no_grant = _next(_state(granted_until=0.0))
+    assert no_grant is not None and no_grant[1] == "sweep_budget_cap"
+
+    landed = _next(_state(granted_until=granted, last_conc_sweep={"status": "succeeded"}))
+    assert landed is not None and landed[1] == "sweep_done"

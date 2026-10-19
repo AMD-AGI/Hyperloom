@@ -559,6 +559,169 @@ def serving_smoke(
     return verdict.ok, verdict.reason
 
 
+def _serving_smoke_env(framework: str, env_flags: dict, gpu: str, tp: int) -> dict[str, str]:
+    """The environment the smoke server boots under, with the fusion flags applied.
+
+    AITER is opt-in per framework contract: ``vllm-aiter`` := vLLM with AITER on;
+    plain ``vllm`` keeps vLLM's own default (do NOT force AITER, or a plain-vLLM
+    smoke silently runs a non-target path -> false PASS/FAIL). Matches
+    ``kernelforge.gemm_tune``.
+    """
+    env = dict(os.environ)
+    env["HIP_VISIBLE_DEVICES"] = _hip_visible_devices(gpu, tp)
+    fw = (framework or "").strip().lower()
+    if fw == "vllm-aiter":
+        env.setdefault("VLLM_ROCM_USE_AITER", "1")
+    elif not _is_vllm_framework(framework):
+        env.setdefault("SGLANG_USE_AITER", "1")
+    env.update({str(key): str(value) for key, value in (env_flags or {}).items()})
+    return env
+
+
+def _await_server_ready(server: subprocess.Popen, slog: str, timeout_s: int) -> SmokeVerdict | None:
+    """Wait for the server to answer, or the verdict that says why it never did.
+
+    Boot is also where CUDA graphs are captured, so a fault here does implicate
+    the kernel -- but a rejected config or an OOM does not, and both exit through
+    this same path.
+    """
+    import time as _time
+
+    deadline = _time.time() + timeout_s
+    while _time.time() < deadline:
+        if server.poll() is not None:
+            tail = _tail_text(slog)
+            return SmokeVerdict(
+                False,
+                f"server exited rc={server.returncode} before ready: {_serving_crash_reason(tail)}",
+                SMOKE_STAGE_STARTUP_CRASH,
+                _is_hard_gpu_fault(tail),
+            )
+        tail = _tail_text(slog)
+        if _contains_marker(tail, _SERVER_READY_MARKERS):
+            return None
+        if _contains_marker(tail, _SERVING_CRASH_MARKERS):
+            return SmokeVerdict(
+                False,
+                f"server crashed at startup: {_serving_crash_reason(tail)}",
+                SMOKE_STAGE_STARTUP_CRASH,
+                _is_hard_gpu_fault(tail),
+            )
+        _time.sleep(3)
+    return SmokeVerdict(False, f"server not ready within {timeout_s}s", SMOKE_STAGE_BOOT_TIMEOUT)
+
+
+def _decode_crash_verdict(server: subprocess.Popen, tail: str) -> SmokeVerdict | None:
+    """The verdict for a scheduler that died inside the CUDA-graph decode loop, or None."""
+    if server.poll() is None and not _contains_marker(tail, _SERVING_CRASH_MARKERS):
+        return None
+    return SmokeVerdict(
+        False,
+        f"scheduler crashed during CUDA-graph decode: {_serving_crash_reason(tail)}",
+        SMOKE_STAGE_DECODE_CRASH,
+        _is_hard_gpu_fault(tail),
+    )
+
+
+def _vllm_decode_verdict(
+    server: subprocess.Popen,
+    slog: str,
+    *,
+    port: int,
+    isl: int,
+    osl: int,
+    num_prompts: int,
+    conc: int,
+    timeout_s: int,
+    metrics: Optional[dict],
+) -> SmokeVerdict:
+    """Run the vLLM decode probe against the live server and judge what came back."""
+    probe_ok, probe_detail = _vllm_decode_probe(
+        port, isl=isl, osl=osl, num_prompts=num_prompts, conc=conc, timeout_s=timeout_s, metrics=metrics
+    )
+    tail = _tail_text(slog)
+    if metrics is not None:
+        # Read the WHOLE log: pass activation is logged at compile time, long before the tail window.
+        activated, evidence = pass_activation_evidence(_full_log_text(slog))
+        metrics["pass_activated"] = activated
+        metrics["activation_evidence"] = evidence
+    crashed = _decode_crash_verdict(server, tail)
+    if crashed is not None:
+        return crashed
+    if not probe_ok:
+        # The server is up and unfaulted, so this is the probe's own transport/response failure, not the kernel
+        # misbehaving.
+        return SmokeVerdict(False, f"decode probe failed: {probe_detail}", SMOKE_STAGE_DECODE_PROBE)
+    return SmokeVerdict(True, "serving smoke ok: fused kernel survives CUDA-graph decode")
+
+
+def _sglang_decode_verdict(
+    server: subprocess.Popen,
+    slog: str,
+    env: dict[str, str],
+    *,
+    port: int,
+    isl: int,
+    osl: int,
+    num_prompts: int,
+    conc: int,
+    timeout_s: int,
+) -> SmokeVerdict:
+    """Run the SGLang decode bench against the live server and judge what came back."""
+    try:
+        bench = subprocess.run(
+            [
+                "python3",
+                "-m",
+                "sglang.bench_serving",
+                "--backend",
+                "sglang",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(port),
+                "--dataset-name",
+                "random",
+                "--random-input-len",
+                str(isl),
+                "--random-output-len",
+                str(osl),
+                "--num-prompts",
+                str(num_prompts),
+                "--max-concurrency",
+                str(conc),
+                "--random-range-ratio",
+                "1.0",
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            cwd=str(_runtime_dir("serving_smoke")),
+        )
+    except subprocess.TimeoutExpired:
+        # A server that came up and then stopped answering is the fused kernel hanging in the decode loop; nothing in
+        # the environment stalls only here.
+        return SmokeVerdict(
+            False,
+            "decode bench timed out (possible hang in fused kernel)",
+            SMOKE_STAGE_DECODE_HANG,
+            True,
+        )
+    bout = (bench.stdout or "") + "\n" + (bench.stderr or "")
+    crashed = _decode_crash_verdict(server, _tail_text(slog))
+    if crashed is not None:
+        return crashed
+    if bench.returncode != 0 or "Output token throughput" not in bout:
+        # The bench itself failed against a live, unfaulted server.
+        return SmokeVerdict(
+            False,
+            f"decode bench failed rc={bench.returncode}: {bout[-300:]}",
+            SMOKE_STAGE_DECODE_BENCH,
+        )
+    return SmokeVerdict(True, "serving smoke ok: fused kernel survives CUDA-graph decode")
+
+
 def serving_smoke_verdict(
     model_path: str,
     env_flags: dict,
@@ -605,7 +768,6 @@ def serving_smoke_verdict(
     import time as _time
 
     is_vllm = _is_vllm_framework(framework)
-    fw = (framework or "").strip().lower()
     same_tree, mismatch = framework_tree_is_the_imported_one(framework_root, framework)
     if not same_tree:
         return SmokeVerdict(False, mismatch, SMOKE_STAGE_FRAMEWORK_MISMATCH)
@@ -614,16 +776,7 @@ def serving_smoke_verdict(
     if not roomy:
         return SmokeVerdict(False, busy, SMOKE_STAGE_GPU_BUSY)
 
-    env = dict(os.environ)
-    env["HIP_VISIBLE_DEVICES"] = _hip_visible_devices(gpu, tp)
-    # AITER is opt-in per framework contract: ``vllm-aiter`` := vLLM with AITER on;
-    # plain ``vllm`` keeps vLLM's own default (do NOT force AITER, or a plain-vLLM
-    # smoke silently runs a non-target path -> false PASS/FAIL). Matches kernelforge.gemm_tune.
-    if fw == "vllm-aiter":
-        env.setdefault("VLLM_ROCM_USE_AITER", "1")
-    elif not is_vllm:
-        env.setdefault("SGLANG_USE_AITER", "1")
-    env.update({str(k): str(v) for k, v in (env_flags or {}).items()})
+    env = _serving_smoke_env(framework, env_flags, gpu, tp)
 
     slog = log_path or str(_runtime_dir("serving_smoke") / f"server_{port}.log")
     if metrics is not None:
@@ -658,129 +811,33 @@ def serving_smoke_verdict(
             cwd=str(_runtime_dir("serving_smoke")),
         )
 
-        deadline = _time.time() + timeout_s
-        ready = False
-        while _time.time() < deadline:
-            if server.poll() is not None:
-                tail = _tail_text(slog)
-                # Boot is also where CUDA graphs are captured, so a fault here does
-                # implicate the kernel -- but a rejected config or an OOM does not,
-                # and both exit through this same path.
-                return SmokeVerdict(
-                    False,
-                    f"server exited rc={server.returncode} before ready: {_serving_crash_reason(tail)}",
-                    SMOKE_STAGE_STARTUP_CRASH,
-                    _is_hard_gpu_fault(tail),
-                )
-            tail = _tail_text(slog)
-            if _contains_marker(tail, _SERVER_READY_MARKERS):
-                ready = True
-                break
-            if _contains_marker(tail, _SERVING_CRASH_MARKERS):
-                return SmokeVerdict(
-                    False,
-                    f"server crashed at startup: {_serving_crash_reason(tail)}",
-                    SMOKE_STAGE_STARTUP_CRASH,
-                    _is_hard_gpu_fault(tail),
-                )
-            _time.sleep(3)
-        if not ready:
-            return SmokeVerdict(
-                False,
-                f"server not ready within {timeout_s}s",
-                SMOKE_STAGE_BOOT_TIMEOUT,
-            )
+        not_ready = _await_server_ready(server, slog, timeout_s)
+        if not_ready is not None:
+            return not_ready
 
         # Exercise the fused kernel in the real CUDA-graph decode loop.
         if is_vllm:
-            probe_ok, probe_detail = _vllm_decode_probe(
-                port, isl=isl, osl=osl, num_prompts=num_prompts, conc=conc, timeout_s=timeout_s, metrics=metrics
+            return _vllm_decode_verdict(
+                server,
+                slog,
+                port=port,
+                isl=isl,
+                osl=osl,
+                num_prompts=num_prompts,
+                conc=conc,
+                timeout_s=timeout_s,
+                metrics=metrics,
             )
-            stail = _tail_text(slog)
-            if metrics is not None:
-                # Read the WHOLE log: pass activation is logged at compile time,
-                # long before the tail window.
-                activated, evidence = pass_activation_evidence(_full_log_text(slog))
-                metrics["pass_activated"] = activated
-                metrics["activation_evidence"] = evidence
-            if server.poll() is not None or _contains_marker(stail, _SERVING_CRASH_MARKERS):
-                return SmokeVerdict(
-                    False,
-                    f"scheduler crashed during CUDA-graph decode: {_serving_crash_reason(stail)}",
-                    SMOKE_STAGE_DECODE_CRASH,
-                    _is_hard_gpu_fault(stail),
-                )
-            if not probe_ok:
-                # The server is up and unfaulted, so this is the probe's own
-                # transport/response failure, not the kernel misbehaving.
-                return SmokeVerdict(
-                    False,
-                    f"decode probe failed: {probe_detail}",
-                    SMOKE_STAGE_DECODE_PROBE,
-                )
-            return SmokeVerdict(
-                True,
-                "serving smoke ok: fused kernel survives CUDA-graph decode",
-            )
-        try:
-            bench = subprocess.run(
-                [
-                    "python3",
-                    "-m",
-                    "sglang.bench_serving",
-                    "--backend",
-                    "sglang",
-                    "--host",
-                    "127.0.0.1",
-                    "--port",
-                    str(port),
-                    "--dataset-name",
-                    "random",
-                    "--random-input-len",
-                    str(isl),
-                    "--random-output-len",
-                    str(osl),
-                    "--num-prompts",
-                    str(num_prompts),
-                    "--max-concurrency",
-                    str(conc),
-                    "--random-range-ratio",
-                    "1.0",
-                ],
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=timeout_s,
-                cwd=str(_runtime_dir("serving_smoke")),
-            )
-        except subprocess.TimeoutExpired:
-            # A server that came up and then stopped answering is the fused kernel
-            # hanging in the decode loop; nothing in the environment stalls only here.
-            return SmokeVerdict(
-                False,
-                "decode bench timed out (possible hang in fused kernel)",
-                SMOKE_STAGE_DECODE_HANG,
-                True,
-            )
-        bout = (bench.stdout or "") + "\n" + (bench.stderr or "")
-        stail = _tail_text(slog)
-        if server.poll() is not None or _contains_marker(stail, _SERVING_CRASH_MARKERS):
-            return SmokeVerdict(
-                False,
-                f"scheduler crashed during CUDA-graph decode: {_serving_crash_reason(stail)}",
-                SMOKE_STAGE_DECODE_CRASH,
-                _is_hard_gpu_fault(stail),
-            )
-        if bench.returncode != 0 or "Output token throughput" not in bout:
-            # The bench itself failed against a live, unfaulted server.
-            return SmokeVerdict(
-                False,
-                f"decode bench failed rc={bench.returncode}: {bout[-300:]}",
-                SMOKE_STAGE_DECODE_BENCH,
-            )
-        return SmokeVerdict(
-            True,
-            "serving smoke ok: fused kernel survives CUDA-graph decode",
+        return _sglang_decode_verdict(
+            server,
+            slog,
+            env,
+            port=port,
+            isl=isl,
+            osl=osl,
+            num_prompts=num_prompts,
+            conc=conc,
+            timeout_s=timeout_s,
         )
     except Exception as e:  # noqa: BLE001 — a harness error is a soft-fail, never a crash.
         return SmokeVerdict(

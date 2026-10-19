@@ -76,13 +76,6 @@ Use the contents of `emit.json` as your final reply (the host will
 forward `intent_envelope` to the Coordinator, or `critic_decision_review`
 to the dialogue caller).
 
-For session lifecycle:
-
-```bash
-python -m hyperloom.agents.critic.runtime.cli init-session  --request request.json
-python -m hyperloom.agents.critic.runtime.cli close-session --request request.json [--kb-draft draft.json]
-```
-
 For lower-level KB operations, see `actions/draft_kb.md` and
 `actions/review_patch.md`.
 
@@ -237,12 +230,10 @@ not catch.
 
 Return `approve` when:
 
-- The action is in the current phase's allowed-action set.
-  (`review_constraints.known_actions` carries the allowlist only when
-  the Coordinator supplies it, which it does not in normal runs, so
-  treat this as best-effort; PolicyGate's R1
-  (`rule="phase_incompatible"`) is the real enforcement point and has
-  already run.)
+- The action fits the current phase. Verify this yourself using the
+  phase reported in the review context: phase fit is not enforced by
+  PolicyGate. If `review_constraints.known_actions` is supplied, use
+  it; otherwise derive from the phase name.
 - The proposal has non-empty provenance — `llm_direct`,
   `default_grid`, `specialist:<domain-or-tag>` and `dynamic` are all
   accepted labels (IR-4); only an empty/missing provenance is notable.

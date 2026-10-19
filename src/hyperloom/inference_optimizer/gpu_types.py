@@ -87,7 +87,7 @@ def _resolve_amd_gpu_type(explicit: str | None = None) -> str | None:
     explicit_norm = str(explicit or "").strip().lower()
     if explicit_norm:
         return explicit_norm if explicit_norm in _AMD_GPU_TYPES else None
-    env_norm = os.environ.get("GPU_TYPE", "").strip().lower()
+    env_norm = (os.environ.get("TARGET_GPU_TYPE", "") or os.environ.get("GPU_TYPE", "")).strip().lower()
     if env_norm:
         return env_norm if env_norm in _AMD_GPU_TYPES else None
     detected = (_autodetect_gpu_type() or "").strip().lower()

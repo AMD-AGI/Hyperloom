@@ -25,7 +25,7 @@ DEFAULT_GPU_LEASE_TTL_SEC = 1800
 # Reserved synthetic gpu_id base for single-node Ray pending-observation slots.
 _RAY_OBS_ID_BASE = 100000
 
-# GPU-lease / gpu_research_lane TTL grace over the agent wall budget.
+# Lease TTL grace over how long the holder is expected to run: a GPU agent's wall budget, or an action's expected cost.
 GPU_LEASE_TTL_GRACE = 0.1
 
 

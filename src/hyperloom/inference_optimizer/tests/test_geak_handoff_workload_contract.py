@@ -13,8 +13,12 @@ from unittest.mock import Mock
 import pytest
 import yaml
 
+from hyperloom.orchestrator.actions.executors._server_lifecycle import GpuHandoff
+from hyperloom.orchestrator.actions.executors._workload_envs import geak_acceptance
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.state.shared_state import SharedState
+
+from ._geak_helpers import stop_geak_before_launch
 
 
 @pytest.fixture(autouse=True)
@@ -47,11 +51,21 @@ def _isolate_workload_env(monkeypatch: pytest.MonkeyPatch) -> None:
             monkeypatch.delenv(key, raising=False)
 
 
-def _coord(tmp_path: Path, *, framework: str = "sglang", agentx: bool = True, metric: str = "total") -> Coordinator:
+#: GEAK's ``E2E_METRIC`` value -> the ``metric_basis`` that must ride with it.
+_BASIS_OF = {
+    "output": "aggregate_output_tok_s",
+    "e2e_norm_intvty_p50": "e2e_norm_intvty_p50",
+}
+
+
+def _coord(
+    tmp_path: Path, *, framework: str = "sglang", agentx: bool = True, metric: str = "e2e_norm_intvty_p50"
+) -> Coordinator:
     benchmarks = tmp_path / "InferenceX" / "benchmarks"
     benchmarks.mkdir(parents=True)
     for name in ("benchmark_lib.sh", f"{framework}_mi355x.sh", "aiperf_client.sh"):
         (benchmarks / name).write_text("# stub\n", encoding="utf-8")
+    keep_rule = geak_acceptance(_BASIS_OF[metric], 5.0)
     workload_spec = (
         {
             "workload_spec": {
@@ -62,7 +76,8 @@ def _coord(tmp_path: Path, *, framework: str = "sglang", agentx: bool = True, me
                 "duration_s": 3600,
                 "geak_loop_duration_s": 900,
                 "concurrency": 6,
-                "metric_basis": "aggregate_total_token_tok_s" if metric == "total" else "aggregate_output_tok_s",
+                "metric_basis": _BASIS_OF[metric],
+                **({"acceptance": keep_rule} if keep_rule else {}),
             }
         }
         if agentx
@@ -124,23 +139,56 @@ def _coord(tmp_path: Path, *, framework: str = "sglang", agentx: bool = True, me
             },
         },
     )
-    coord.shared_state.current_best["measurement"]["launch_identity"] = coord.build_env_spec()["launch_identity"]
-    coord._record_geak_kernel_journey = lambda _result: None
+    coord.shared_state.current_best["measurement"]["launch_identity"] = coord.writeback.build_env_spec()[
+        "launch_identity"
+    ]
+    coord.phase_kernel._record_geak_kernel_journey = lambda _result: None
     return coord
 
 
 async def _handoff(coord: Coordinator, monkeypatch: pytest.MonkeyPatch) -> dict:
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
-        Mock(side_effect=RuntimeError("stop after handoff write")),
-    )
-    await coord._run_geak_kernel_phase(from_phase="KERNEL")
+    stop_geak_before_launch(monkeypatch)
+    await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
     return json.loads((coord.session_dir / "geak" / "handoff.json").read_text(encoding="utf-8"))
+
+
+_GPUS_FREE = GpuHandoff(reaped=[], busy=[], holders=[], unverified="")
+
+
+def _gpus_at_handoff(
+    monkeypatch: pytest.MonkeyPatch, answer: GpuHandoff | Exception
+) -> list[tuple[Path, list[int] | None]]:
+    """Answer the hand-off's GPU check with ``answer``; return the (session dir, cards) it was asked about."""
+    asked: list[tuple[Path, list[int] | None]] = []
+
+    def _check(session_dir: Path, cards: list[int] | None, *, timeout_sec: float) -> GpuHandoff:
+        asked.append((Path(session_dir), cards))
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._server_lifecycle.free_gpus_for_handoff", _check)
+    return asked
+
+
+def _launch_mock_runner(coord: Coordinator, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[dict]:
+    """Let the phase reach the runner launch; return the env of each launch."""
+    coord.phase_kernel._geak_timeouts = lambda: (60, 90, False)
+    launches: list[dict] = []
+
+    def _start_runner(_cmd, *, env, **_kwargs):
+        launches.append(dict(env))
+        process = Mock(returncode=0)
+        process.communicate.return_value = ("", "")
+        return process
+
+    monkeypatch.setattr("hyperloom.orchestrator.phases.kernel.subprocess.Popen", _start_runner)
+    return launches
 
 
 @pytest.mark.parametrize("framework", ["sglang", "vllm"])
 @pytest.mark.asyncio
-async def test_agentx_handoff_keeps_supported_schema_and_frozen_launch_controls(
+async def test_agentx_handoff_keeps_supported_schema_and_hands_geak_the_recipe_launcher(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, framework: str
 ) -> None:
     coord = _coord(tmp_path, framework=framework)
@@ -154,13 +202,15 @@ async def test_agentx_handoff_keeps_supported_schema_and_frozen_launch_controls(
 
     assert handoff["schema_version"] == 3
     assert handoff["bench_client"] == "auto"
-    assert handoff["bench_launcher"] == "native"
+    # The builtin is resolvable (asserted next), so GEAK derives the Magpie
+    # launcher from launch_server_script and Hyperloom leaves bench_launcher unset.
+    assert "bench_launcher" not in handoff
     assert not {"bench_client_config", "benchmark_mode", "workload_identity"} & handoff.keys()
     assert handoff["launch_server_script"] == str(tmp_path / "InferenceX" / "benchmarks" / f"{framework}_mi355x.sh")
     recipe = yaml.safe_load(Path(coord.shared_state.baseline_config_path).read_text(encoding="utf-8"))
     assert handoff["workload_spec"] == recipe["benchmark"]["workload_spec"]
-    assert handoff["workload_spec"]["metric_basis"] == "aggregate_total_token_tok_s"
-    assert handoff["e2e_metric"] == "total"
+    assert handoff["workload_spec"]["metric_basis"] == "e2e_norm_intvty_p50"
+    assert handoff["e2e_metric"] == "e2e_norm_intvty_p50"
     assert handoff["framework"] == framework
     assert handoff["model_path"] == "/models/accepted"
     assert handoff["gpu_type"] == "mi355x"
@@ -184,9 +234,86 @@ async def test_agentx_handoff_keeps_supported_schema_and_frozen_launch_controls(
     assert spec["config"]["args_mode"] == "replace"
 
 
+_RECIPE_SERVER_COMMAND = (
+    "python -m atom.entrypoints.openai_server --model /models/accepted --served-model-name /models/accepted"
+    " --host 0.0.0.0 --server-port 8000 --tensor-parallel-size 2 --kv_cache_dtype fp8 --block-size 128"
+    " --gpu-memory-utilization 0.95 --cudagraph-capture-sizes \\[1\\,2\\,4\\]"
+    ' --online_quant_config \\{\\"global_quant_config\\":\\"ptpc_fp8\\"\\}'
+    " --method eagle3 --draft-model Inferact/MiniMax-M3-EAGLE3-GQA --num-speculative-tokens 3"
+    " --trust-remote-code\n"
+)
+_RECIPE_STDERR_TRACE = (
+    "++ export PYTHONDONTWRITEBYTECODE=1\n"
+    "+ export HIP_VISIBLE_DEVICES=0,1\n"
+    "+ export AIPERF_SERVER_METRICS_URLS=http://localhost:8000/metrics\n"
+    "+ export AITER_LOG_LEVEL\n"
+    "+ export AITER_QUICK_REDUCE_QUANTIZATION=INT4\n"
+    "+ export ATOM_FORCE_ATTN_TRITON=1\n"
+    "+ write_command /run/server_command.txt python -m atom.entrypoints.openai_server\n"
+    "+ export AFTER_LAUNCH=1\n"
+)
+
+
+@pytest.mark.asyncio
+async def test_agentx_handoff_forwards_the_recipe_measured_server_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    coord = _coord(tmp_path, framework="atom")
+    run_dir = tmp_path / "runs" / "baseline" / "benchmark_atom"
+    run_dir.mkdir(parents=True)
+    (run_dir / "server.log").write_text("atom server log without an argv line\n", encoding="utf-8")
+    (run_dir / "server_command.txt").write_text(_RECIPE_SERVER_COMMAND, encoding="utf-8")
+    (run_dir / "benchmark_stderr.log").write_text(_RECIPE_STDERR_TRACE, encoding="utf-8")
+    measurement = coord.shared_state.current_best["measurement"]
+    measurement.pop("resolved_server_launch_flags")
+    measurement["launch_evidence"] = {"framework": "atom", "actual_server_log_path": str(run_dir / "server.log")}
+
+    handoff = await _handoff(coord, monkeypatch)
+
+    config = handoff["baseline_env_spec"]["config"]
+    assert config["server_launch_flags"] == (
+        "--kv_cache_dtype fp8 --block-size 128 --gpu-memory-utilization 0.95"
+        " --method eagle3 --draft-model Inferact/MiniMax-M3-EAGLE3-GQA --num-speculative-tokens 3"
+        " --trust-remote-code"
+    )
+    assert config["extra_envs"] == {
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "AITER_QUICK_REDUCE_QUANTIZATION": "INT4",
+        "ATOM_FORCE_ATTN_TRITON": "1",
+        "ACCEPTED_SETTING": "1",
+    }
+    assert handoff["accepted_env"] == "ACCEPTED_SETTING=1"
+    assert handoff["mem_fraction"] == 0.95
+    # Builtin resolvable here too, so the launcher is derived, not frozen native.
+    assert "bench_launcher" not in handoff
+
+
+@pytest.mark.asyncio
+async def test_agentx_handoff_freezes_native_when_no_builtin_is_resolvable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # With the AgentX client in benchmark_script and no resolvable server builtin
+    # on disk, GEAK has no Magpie server phase to launch: handing it the client
+    # would boot/replay/teardown and return no pid. Hyperloom therefore omits
+    # launch_server_script and freezes the launcher to native, so GEAK boots from
+    # baseline_env_spec instead.
+    coord = _coord(tmp_path, framework="atom")
+    (tmp_path / "InferenceX" / "benchmarks" / "atom_mi355x.sh").unlink()
+
+    handoff = await _handoff(coord, monkeypatch)
+
+    assert "launch_server_script" not in handoff
+    assert handoff["bench_launcher"] == "native"
+
+
 @pytest.mark.parametrize(
     ("metric_override", "expected_metric"),
-    [(None, "total"), ("intvty_v1", "total"), ("composite_v1", "output"), ("output", "output")],
+    [
+        (None, "e2e_norm_intvty_p50"),
+        ("intvty_v1", "e2e_norm_intvty_p50"),
+        ("composite_v1", "output"),
+        ("output", "output"),
+    ],
 )
 @pytest.mark.asyncio
 async def test_agentx_geak_metric_aligned_result_is_only_a_proposal_proxy(
@@ -199,28 +326,20 @@ async def test_agentx_geak_metric_aligned_result_is_only_a_proposal_proxy(
     if metric_override is not None:
         monkeypatch.setenv("HYPERLOOM_PERF_METRIC", metric_override)
     coord = _coord(tmp_path, metric=expected_metric)
-    monkeypatch.setenv("E2E_METRIC", "output" if expected_metric == "total" else "total")
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
-        lambda _name: tmp_path / "mock_geak_runner.py",
-    )
-    coord._geak_timeouts = lambda: (60, 90, False)
-    captured_env = {}
-
-    def _start_runner(_cmd, *, env, **_kwargs):
-        captured_env.update(env)
-        process = Mock(returncode=0)
-        process.communicate.return_value = ("", "")
-        return process
-
-    monkeypatch.setattr("hyperloom.orchestrator.phases.kernel.subprocess.Popen", _start_runner)
+    # Seed a DIFFERENT axis so the assertion below proves the handoff overrides the
+    # inherited env rather than happening to agree with it.
+    monkeypatch.setenv("E2E_METRIC", "total")
+    launches = _launch_mock_runner(coord, monkeypatch, tmp_path)
+    _gpus_at_handoff(monkeypatch, _GPUS_FREE)
     with caplog.at_level("INFO", logger="hyperloom.orchestrator.phases.kernel"):
-        await coord._run_geak_kernel_phase(from_phase="KERNEL")
+        await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
+    [captured_env] = launches
     assert (handoff["e2e_metric"], captured_env["E2E_METRIC"]) == (expected_metric, expected_metric)
-    expected_basis = "aggregate_total_token_tok_s" if expected_metric == "total" else "aggregate_output_tok_s"
-    assert handoff["workload_spec"]["metric_basis"] == expected_basis
+    assert handoff["workload_spec"]["metric_basis"] == _BASIS_OF[expected_metric]
+    # The nested rule survives the recipe round trip, so GEAK grades on the bar the rebench keeps on.
+    assert handoff["workload_spec"].get("acceptance") == geak_acceptance(_BASIS_OF[expected_metric], 5.0)
     assert handoff["same_config_reference_status"] == "unverified"
     assert handoff["same_config_reference_verification_status"] == "unverified_workload"
     assert handoff["orchestrator_best_tput_same_config"] == 0.0
@@ -231,9 +350,64 @@ async def test_agentx_geak_metric_aligned_result_is_only_a_proposal_proxy(
     assert coord.shared_state.geak_result["error_class"] == "no_result_json"
 
 
+@pytest.mark.asyncio
+async def test_gpus_a_leftover_server_still_holds_are_not_handed_to_geak(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    coord = _coord(tmp_path)
+    launches = _launch_mock_runner(coord, monkeypatch, tmp_path)
+    holder = "pgid=274559 python3 -m sglang.launch_server"
+    asked = _gpus_at_handoff(
+        monkeypatch,
+        GpuHandoff(reaped=[274559], busy=[(6, 281000.0, 288000.0)], holders=[holder], unverified=""),
+    )
+
+    await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
+
+    # The recipe pins ROCR_VISIBLE_DEVICES=6,7, so GEAK's logical 0,1 are physical cards 6 and 7.
+    assert asked == [(tmp_path, [6, 7])]
+    assert launches == []
+    result = coord.shared_state.geak_result
+    assert (result["status"], result["error_class"]) == ("error", "gpus_busy_at_handoff")
+    assert "GPU6 281000/288000 MiB" in result["error"]
+    assert holder in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_gpus_that_cannot_be_checked_are_still_handed_to_geak(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    coord = _coord(tmp_path)
+    launches = _launch_mock_runner(coord, monkeypatch, tmp_path)
+    _gpus_at_handoff(
+        monkeypatch, GpuHandoff(reaped=[], busy=[], holders=[], unverified="rocm-smi could not report VRAM")
+    )
+
+    with caplog.at_level("WARNING", logger="hyperloom.orchestrator.phases.kernel"):
+        await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
+
+    assert len(launches) == 1
+    assert coord.shared_state.geak_result["error_class"] == "no_result_json"
+    assert "cannot confirm GPUs [6, 7] are free" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_defect_in_the_gpu_check_raises_instead_of_handing_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    coord = _coord(tmp_path)
+    launches = _launch_mock_runner(coord, monkeypatch, tmp_path)
+    _gpus_at_handoff(monkeypatch, TypeError("defect"))
+
+    with pytest.raises(TypeError, match="defect"):
+        await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
+
+    assert launches == []
+
+
 @pytest.mark.parametrize(
     ("metric_override", "expected_metric"),
-    [(None, "output"), ("intvty_v1", "total"), ("composite_v1", "output"), ("output", "output")],
+    [(None, "output"), ("intvty_v1", "e2e_norm_intvty_p50"), ("composite_v1", "output"), ("output", "output")],
 )
 @pytest.mark.asyncio
 async def test_synthetic_handoff_keeps_existing_protocol_and_metric_policy(

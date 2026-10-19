@@ -11,7 +11,6 @@ from typing import Any
 from kernelforge.durable_io import atomic_write_text
 
 
-SESSION_SCHEMA_VERSION = 2
 MAX_ANALYSIS_SESSION_ATTEMPTS = 2
 
 
@@ -76,7 +75,6 @@ class AnalysisSessionJournal:
         if self.path.is_file():
             state = json.loads(self.path.read_text())
             expected = (
-                state.get("schema_version") == SESSION_SCHEMA_VERSION,
                 state.get("analysis_commit") == self.analysis_commit,
                 state.get("driver_digest") == self.driver_digest,
                 state.get("source_digest") == self.source_digest,
@@ -87,7 +85,6 @@ class AnalysisSessionJournal:
             return state
 
         state = {
-            "schema_version": SESSION_SCHEMA_VERSION,
             "analysis_commit": self.analysis_commit,
             "driver_digest": self.driver_digest,
             "source_digest": self.source_digest,

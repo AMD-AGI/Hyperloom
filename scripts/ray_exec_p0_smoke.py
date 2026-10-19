@@ -91,7 +91,7 @@ def main(argv: list[str] | None = None) -> int:
         if pending and not ready:
             print("[smoke] PASS: gpu-specialist actor is PENDING (queued) while serving holds GPUs")
         else:
-            print("[smoke] FAIL: specialist ran despite no free GPU (共卡!)")
+            print("[smoke] FAIL: specialist ran despite no free GPU (GPU shared!)")
             ok = False
 
         # (3) Kill the serving actor -> subprocess must be reaped (no escape).

@@ -28,7 +28,7 @@ frameworks, see [Run a Hyperloom optimization](optimize.md) instead.
 
 ```bash
 export HYPERLOOM_BENCHMARK_BACKEND=bypass
-python3 -m hyperloom.inference_optimizer.cli -v optimize \
+python3 -m hyperloom optimize -v \
   --framework custom \
   --framework-path /path/to/my-checkout \
   --benchmark-scripts-dir /path/to/my-scripts \
@@ -121,8 +121,9 @@ margin, then require later legs to stay inside it) is the pattern that holds up.
 
 ## Pinning knobs with `--extra-env`
 
-`--extra-env` carries the knobs your script reads. Hyperloom interprets none of
-them, but their semantics matter:
+`--extra-env` carries the knobs your script reads. A pin becomes a real
+environment variable for the session, so it also sets a Hyperloom control
+variable of the same name. Their semantics matter:
 
 > Whatever you pin becomes part of the **measurement contract**. A variant can
 > add keys but must not overwrite a pinned one, because the baseline number was
@@ -135,8 +136,27 @@ and asks the search for an increment on existing work; pinning none of them
 makes the baseline the stock path, so every switch the search finds is its own
 discovery.
 
-The CLI persists these pins in `state.json` and serializes them into
-`INFERENCE_OPTIMIZER_EXTRA_ENV` as a JSON object for the executors.
+The CLI exports each pin under its own name, persists them in `state.json`, and
+also serializes them into `INFERENCE_OPTIMIZER_EXTRA_ENV` as a JSON object so a
+resume can tell which names the previous launch set.
+
+On a fresh launch a pin and an `export` of the same name are equivalent: no name
+is withheld. For a knob Hyperloom resolves itself — `ISL`, `OSL`, `CONC`, `TP`,
+`EP`, `PRECISION`, `MAX_MODEL_LEN`, `FRAMEWORK` — the environment is one rung of
+that knob's ladder: **an explicit flag wins, then the environment (where your
+pin lands), then the default**. So `--extra-env ISL=4096` sets the ISL, and
+`--isl 2048 --extra-env ISL=4096` runs at 2048. On a resume the two stop being
+equivalent for `ISL`, `OSL`, `CONC`, `TP`, `EP` and — when the session recorded
+one — `MAX_MODEL_LEN`: the pin is still honoured, but a bare `export` is
+overwritten by the session's recorded value, so the ladder reads **flag, then the
+pins in effect for this resume (its own `--extra-env`, or the launch's persisted
+pins when it passes none), then the recorded value, then the environment, then
+the default**. `PRECISION` keeps the fresh-launch ladder on a resume too, with
+the recorded value and the checkpoint's dtype below the environment. `FRAMEWORK`
+belongs to the session: a resume re-exports the recorded framework and reads
+`$FRAMEWORK` only when the session recorded none, so neither a pin nor a flag
+changes it.
+Everything else a pin names is set directly and is not interpreted.
 **Forward every pin as its own `--extra-env` flag** — a dropped pin is lost
 silently. On `--resume` the persisted pins are re-exported, so they only need
 re-passing when you want to change them.

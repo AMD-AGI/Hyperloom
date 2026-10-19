@@ -50,7 +50,7 @@ def site_dir(tmp_path: Path, monkeypatch):
     # test after the first would be answered from the first one's layout.
     editable_repo._editable_roots_cached.cache_clear()
     monkeypatch.setattr(editable_repo.sys, "path", [str(directory)])
-    monkeypatch.setattr(editable_repo.site, "getsitepackages", lambda: [])
+    monkeypatch.setattr(editable_repo.site, "getsitepackages", list)
     monkeypatch.setattr(editable_repo.site, "getusersitepackages", lambda: "")
     for attribute in ("prefix", "exec_prefix", "base_prefix"):
         monkeypatch.setattr(editable_repo.sys, attribute, str(empty))

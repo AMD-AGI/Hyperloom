@@ -219,14 +219,7 @@ class TestTheWrapperForwardsTheNewInputs:
         ],
     )
     def test_a_populated_field_reaches_the_forge_cli(self, key, flag):
-        import importlib.util
-
-        spec = importlib.util.spec_from_file_location(
-            "_fgt",
-            Path(rh.__file__).parents[2] / "agents" / "kernel" / "tools" / "forge_gemm_tuning.py",
-        )
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
+        from hyperloom.orchestrator.kernel import forge_gemm_tuning as mod
 
         base = {
             "model_path": "/m",
@@ -234,9 +227,9 @@ class TestTheWrapperForwardsTheNewInputs:
             "precision": "bf16",
             "output_dir": "/o",
         }
-        assert flag not in mod._build_cmd(base)
+        assert flag not in mod.build_command(base)
 
-        cmd = mod._build_cmd({**base, key: "/tmp/x.json"})
+        cmd = mod.build_command({**base, key: "/tmp/x.json"})
         assert cmd[cmd.index(flag) + 1] == "/tmp/x.json"
 
 

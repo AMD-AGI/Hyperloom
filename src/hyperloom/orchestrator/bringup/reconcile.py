@@ -134,6 +134,7 @@ class Reconciler:
         resources: Any = None,
         proposals: Callable[[], Mapping[str, Any]] | None = None,
         session_dir: Any = None,
+        result_pending: Callable[[str], bool] | None = None,
         terminal_holder_cap_sec: float = TERMINAL_HOLDER_CAP_SEC,
         review_ttl_sec: float = REVIEW_TTL_SEC,
     ):
@@ -149,6 +150,9 @@ class Reconciler:
             proposals: Returns the in-memory pending proposals, so a durable
                 timeout deny also reaches the copy the loop consults.
             session_dir: Where SharedState is saved after a terminal is set.
+            result_pending: Whether a terminal task's result is still to be
+                booked by the dispatcher; ``None`` treats every terminal row
+                as booked.
             terminal_holder_cap_sec: Cap for a round whose holder went terminal.
             review_ttl_sec: TTL for an undecided review.
         """
@@ -162,6 +166,7 @@ class Reconciler:
         self._resources = resources
         self._proposals = proposals
         self._session_dir = session_dir
+        self._result_pending = result_pending
         self.terminal_holder_cap_sec = max(0.0, float(terminal_holder_cap_sec))
         self.review_ttl_sec = max(0.0, float(review_ttl_sec))
         self.last_report = ReconcileReport()
@@ -215,10 +220,6 @@ class Reconciler:
             msg_id = str(row["msg_id"])
             if await self._author_timeout_deny(msg_id, str(row["from_agent"]), age=age, now_unix=now_unix):
                 report.denied_reviews.append(msg_id)
-                self._record_timeout_terminal(msg_id, age=age)
-            # Marked either way: a verdict that beat this write to the log is
-            # still one the copy the loop reads has to carry.
-            self._mark_decided(msg_id)
 
     async def _author_timeout_deny(self, msg_id: str, to_agent: str, *, age: float, now_unix: float) -> bool:
         """Write the coordinator's timeout deny, unless a verdict beat it there.
@@ -247,6 +248,9 @@ class Reconciler:
             applied = cur.rowcount == 1
         if applied:
             log.warning("RECONCILE: review timeout denied proposal %s after %.0fs", msg_id, age)
+            self._record_timeout_terminal(msg_id, age=age)
+            if self._proposals is not None:
+                self._proposals().pop(msg_id, None)
         return applied
 
     def _record_timeout_terminal(self, msg_id: str, *, age: float) -> None:
@@ -266,23 +270,20 @@ class Reconciler:
             },
         )
 
-    def _mark_decided(self, msg_id: str) -> None:
-        """Record the deny on the in-memory proposal the loop consults."""
-        if self._proposals is None:
-            return
-        pending = self._proposals().get(msg_id)
-        if pending is None:
-            return
-        pending.decided = True
-        pending.verdict = TIMEOUT_VERDICT
-
     async def _resolve_open_rounds(self, now_unix: float, report: ReconcileReport) -> None:
         """Advance completed owners without timing out active ownership."""
         for round_row in await self._rounds.open_rounds():
             await self._advance_or_expire(round_row, now_unix, report)
 
     async def _close_stale_validation_window(self, now_unix: float, report: ReconcileReport) -> None:
-        """Close a revalidation window whose task will never report."""
+        """Close a revalidation window whose task will never report.
+
+        A terminal row is not yet a task that will never report: the row goes
+        terminal inside the execution, and the result is booked by the pump that
+        runs after this pass. Closing the window in between leaves the writeback
+        a promoted revalidation with no window to credit it to, so the lane never
+        succeeds although the baseline it was waiting for passed.
+        """
         state = self._shared_state
         if state is None or not bool(state.enablement.validation_pending):
             return
@@ -291,6 +292,8 @@ class Reconciler:
             return
         row = await self._task(tracked)
         if row is not None and row.state not in TERMINAL_STATES:
+            return
+        if self._result_pending is not None and self._result_pending(tracked):
             return
         state.enablement.validation_pending = False
         state.enablement.revalidation_task_id = ""
@@ -356,9 +359,7 @@ class Reconciler:
         successor = await self._successor(round_row.holder_task_id)
         if successor is not None:
             moved = await self._rounds.handoff(
-                round_row.round_id,
-                holder_task_id=round_row.holder_task_id,
-                fence=round_row.fence,
+                round_row,
                 new_holder_task_id=successor.task_id,
                 # A successor that declares no TTL inherits what the round has left.
                 lease_sec=float(successor.lease_ttl_sec) or (round_row.expires_unix - round_row.renewed_unix),
@@ -379,9 +380,7 @@ class Reconciler:
         """Settle a completed owner after its successor/review window ends."""
         outcome = EXPIRED_REAPED
         result = await self._rounds.settle(
-            round_row.round_id,
-            holder_task_id=round_row.holder_task_id,
-            fence=round_row.fence,
+            round_row,
             outcome=outcome,
             now_unix=now_unix,
             request_id=f"reconcile:{why}:{round_row.round_id}:{round_row.fence}",
@@ -435,8 +434,6 @@ class Reconciler:
         if self._proposals is None:
             return False
         for pending in self._proposals().values():
-            if pending.decided:
-                continue
             params = pending.payload.get("params", {})
             if str(params.get("specialist_task_id", "")) == holder_task_id:
                 return True

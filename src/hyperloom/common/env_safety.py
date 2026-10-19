@@ -7,9 +7,13 @@ from __future__ import annotations
 
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES as _GPU_MASK_ENV_NAMES
 
+import json
+import logging
 import os
 import re
 from collections.abc import Mapping
+
+log = logging.getLogger(__name__)
 
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -17,6 +21,9 @@ _PYTHON_PACKAGE_ROOT_BASENAMES: frozenset[str] = frozenset({"site-packages", "di
 
 BLOCKED_UNTRUSTED_ENV_NAMES: frozenset[str] = frozenset(
     {
+        # Names a second variable for the agentic client to export, so it reaches a shell indirection the way the
+        # loader vars below do: whoever sets it chooses which variable gets written, not merely a value.
+        "AGENTX_KEEP_ALIVE_ENV",
         "BASH_ENV",
         "CDPATH",
         "ENV",
@@ -165,7 +172,6 @@ DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "HYPERLOOM_WHEEL_TAG",
         "INFERENCE_OPTIMIZER_FORCE_PYTHON",
         "KERNEL_AGENT_ENV",
-        "KERNEL_AGENT_ROOT",
         "KERNEL_OPT_BACKEND_ORDER",
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
@@ -214,7 +220,6 @@ KERNEL_AGENT_ENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "GEAK_RUN_MODE",
         "GEAK_SCORE_TARGET",
         "GEAK_SKIP_PROFILE",
-        "HYPERLOOM_KERNEL_AGENT_ROOT",
         "HYPERLOOM_ROOT",
         "HYPERLOOM_RUNTIME_DIR",
         "HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV",
@@ -222,7 +227,6 @@ KERNEL_AGENT_ENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "INFERENCEX_PATH",
         "KERNEL_AGENT_ENV",
         "KERNEL_AGENT_LOG_LEVEL",
-        "KERNEL_AGENT_ROOT",
         # KernelForge's writable-state root.
         "KERNELFORGE_PROJECT_ROOT",
         "KERNEL_OPT_BACKEND_ORDER",
@@ -300,7 +304,61 @@ def is_secret_shaped_env_name(key: object) -> bool:
     upper = str(key or "").strip().upper()
     for exempt in _SECRET_FRAGMENT_EXEMPTIONS:
         upper = upper.replace(exempt, "")
+    # Header strings carry Authorization values, matching the ``*CUSTOM_HEADERS`` text-redaction pattern above.
+    if upper.endswith("CUSTOM_HEADERS"):
+        return True
     return any(fragment in upper for fragment in _SECRET_NAME_FRAGMENTS)
+
+
+# Env-var name fragments whose value is masked before an env snapshot leaves this process. Shared with the Langfuse
+# session_start snapshot, which matches every marker as a substring.
+SENSITIVE_ENV_NAME_MARKERS: tuple[str, ...] = (
+    "SECRET",
+    "TOKEN",
+    "PASSWORD",
+    "PASSWD",
+    "PASSPHRASE",
+    "CREDENTIAL",
+    "PRIVATE_KEY",
+    "PRIVATEKEY",
+    "API_KEY",
+    "APIKEY",
+    "ACCESS_KEY",
+    "SECRET_KEY",
+    "AUTH",
+    "SIGNATURE",
+    "HEADERS",
+    "CUSTOM_HEADERS",
+)
+
+# As a substring TOKEN also hits tuning knobs (``MAX_NUM_BATCHED_TOKENS``, ``TOKENIZERS_PARALLELISM``), so a record of
+# launch knobs treats it as a credential only as a whole name segment (``HF_TOKEN``, ``HF_TOKEN_2``,
+# ``GITHUB_TOKEN_BACKUP``), and never in ``PER_TOKEN`` (``SGLANG_USE_AITER_FP8_PER_TOKEN``).
+_SUBSTRING_MARKERS_EXCEPT_TOKEN: tuple[str, ...] = tuple(m for m in SENSITIVE_ENV_NAME_MARKERS if m != "TOKEN")
+_TOKEN_SEGMENT_RE = re.compile(r"(?:^|_)TOKEN(?=_|$)")
+_PER_TOKEN_SEGMENT_RE = re.compile(r"(?:^|_)PER_TOKEN(?=_|$)")
+
+
+def _is_credential_env_name(key: object) -> bool:
+    upper = str(key or "").strip().upper()
+    if upper in BENCHMARK_SECRET_ENV_NAMES:
+        return True
+    if any(marker in upper for marker in _SUBSTRING_MARKERS_EXCEPT_TOKEN):
+        return True
+    return bool(_TOKEN_SEGMENT_RE.search(_PER_TOKEN_SEGMENT_RE.sub("", upper)))
+
+
+def redact_secret_env_values(env: Mapping[str, object] | None) -> dict[str, object]:
+    """Copy ``env`` with every credential's value masked, for a record that leaves this process.
+
+    A credential-shaped name is masked whole; any other string value is still scrubbed of recognizable credentials.
+    """
+    return {
+        key: "[REDACTED]"
+        if _is_credential_env_name(key)
+        else (redact_secret_values(value) if isinstance(value, str) and value else value)
+        for key, value in (env or {}).items()
+    }
 
 
 def is_allowed_external_env_key(key: object) -> bool:
@@ -362,6 +420,35 @@ def filter_untrusted_env_mapping(
             continue
         allowed[name] = str(value)
     return allowed, dropped
+
+
+OPERATOR_EXTRA_ENV_VAR = "INFERENCE_OPTIMIZER_EXTRA_ENV"
+
+
+def operator_extra_env(raw: str | None = None) -> dict[str, str]:
+    """Return the operator's ``--extra-env`` pins from the CLI handoff blob.
+
+    The pins are also exported under their own names; this blob is what survives a state roundtrip and what a
+    resume reads to tell which names the previous launch set.
+
+    Args:
+        raw: The serialized blob, or ``None`` to read it from the environment.
+
+    Returns:
+        The pins; empty when unset or unparseable, because a malformed pin must not take the run down with it.
+    """
+    blob = (os.environ.get(OPERATOR_EXTRA_ENV_VAR, "") if raw is None else raw).strip()
+    if not blob:
+        return {}
+    try:
+        parsed = json.loads(blob)
+    except (TypeError, ValueError):
+        log.warning("ignoring unparseable %s; the operator's pins are not in effect", OPERATOR_EXTRA_ENV_VAR)
+        return {}
+    if not isinstance(parsed, dict):
+        log.warning("ignoring non-object %s; the operator's pins are not in effect", OPERATOR_EXTRA_ENV_VAR)
+        return {}
+    return {str(key).strip(): str(value) for key, value in parsed.items() if str(key).strip()}
 
 
 def scrub_child_process_env(env: dict[str, str]) -> dict[str, str]:
@@ -431,6 +518,8 @@ __all__ = [
     "BLOCKED_UNTRUSTED_ENV_NAMES",
     "BLOCKED_VARIANT_ENV_NAMES",
     "GPU_MASK_ENV_NAMES",
+    "OPERATOR_EXTRA_ENV_VAR",
+    "SENSITIVE_ENV_NAME_MARKERS",
     "build_benchmark_env",
     "filter_untrusted_env_mapping",
     "is_allowed_dotenv_key",
@@ -439,7 +528,9 @@ __all__ = [
     "is_allowed_variant_env_key",
     "is_python_package_root",
     "is_secret_shaped_env_name",
+    "operator_extra_env",
     "redact_file_in_place",
+    "redact_secret_env_values",
     "redact_secret_values",
     "scrub_benchmark_process_env",
     "scrub_child_process_env",

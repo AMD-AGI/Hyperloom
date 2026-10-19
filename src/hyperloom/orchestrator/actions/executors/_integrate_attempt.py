@@ -25,6 +25,7 @@ class IntegrateAttempt:
     done_payload: dict[str, Any] | None = field(default_factory=dict)
     provision_result: ProvisionResult | None = None
     stack_action: EnablementStackAction | None = None
+    localization_action: EnablementStackAction | None = None
     localization_patches: list[Path] = field(default_factory=list)
     localization_touched: list[str] = field(default_factory=list)
     base_sha_by_root: dict[str, str] = field(default_factory=dict)
@@ -35,9 +36,15 @@ class IntegrateAttempt:
     extra_envs_applied: dict[str, str] = field(default_factory=dict)
     extra_server_args_applied: str = ""
     dropped_env_overrides: list[str] = field(default_factory=list)
-    setup_result: dict[str, Any] = field(default_factory=dict)
+    setup_commands_applied: list[str] = field(default_factory=list)
     switch_manifest: list[dict[str, Any]] = field(default_factory=list)
     pending: dict[str, Any] = field(default_factory=dict)
+
+    def drop_localization(self) -> None:
+        """Forget the localization, so its manifest is not recorded for a change that was never applied."""
+        self.localization_action = None
+        self.localization_patches = []
+        self.localization_touched = []
 
     @property
     def attempt_venv_root(self) -> str:
@@ -45,3 +52,10 @@ class IntegrateAttempt:
         if self.provision_result is None:
             return ""
         return self.provision_result.runtime.venv_root
+
+    @property
+    def runtime_source_root(self) -> str:
+        """The tree the acquired runtime imports, or no tree when this attempt did not provision."""
+        if self.provision_result is None:
+            return ""
+        return self.provision_result.runtime.source_root

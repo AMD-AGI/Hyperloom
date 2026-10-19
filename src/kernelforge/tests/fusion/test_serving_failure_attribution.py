@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from kernelforge.fusion import command as cli_module
+from kernelforge.fusion import serving_gate
 from kernelforge.fusion.validate import (
     SMOKE_STAGE_STARTUP_CRASH,
     SmokeVerdict,
@@ -73,14 +73,14 @@ def test_the_root_cause_outranks_the_wrapper_that_points_at_it() -> None:
 
 def _gate_verdict(monkeypatch, tmp_path, server_log: str):
     """Run the serving gate against a failed boot and return the resulting verdict."""
-    monkeypatch.setattr(cli_module, "_serving_check_enabled", lambda: True)
+    monkeypatch.setattr(serving_gate, "_serving_check_enabled", lambda: True)
     verdict = SmokeVerdict(
         ok=False,
         reason=_serving_crash_reason(server_log),
         stage=SMOKE_STAGE_STARTUP_CRASH,
         blames_kernel=_is_hard_gpu_fault(server_log),
     )
-    monkeypatch.setattr(cli_module, "serving_smoke_verdict", lambda *a, **k: verdict)
+    monkeypatch.setattr(serving_gate, "serving_smoke_verdict", lambda *a, **k: verdict)
     vr = SimpleNamespace(note="", kept=True, correctness_passed=True, kernel_speedup=1.5)
     result = SimpleNamespace(
         kept=True,
@@ -93,7 +93,7 @@ def _gate_verdict(monkeypatch, tmp_path, server_log: str):
         termination_reason="",
     )
 
-    cli_module.apply_serving_gate(
+    serving_gate.apply_serving_gate(
         result,
         framework="vllm",
         out=tmp_path,

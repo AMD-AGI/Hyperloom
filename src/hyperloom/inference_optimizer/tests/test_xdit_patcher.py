@@ -110,7 +110,7 @@ def test_verify_warns_with_remediation_when_missing(tmp_path: Path, monkeypatch,
 
 def test_verify_false_no_xdit_tree(monkeypatch) -> None:
     """No discoverable base_model.py (empty $XDIT_PATH, no xfuser) -> False."""
-    monkeypatch.setattr(_xdit_patcher, "_discover_xfuser_base_models", lambda: [])
+    monkeypatch.setattr(_xdit_patcher, "_discover_xfuser_base_models", list)
     assert verify_xdit_profiler_baked() is False
 
 

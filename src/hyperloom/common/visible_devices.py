@@ -5,7 +5,7 @@
 The same tuple of mask variables and the same "split on ``,``/``;``, keep the
 first occurrence of each non-negative int" parser had accumulated five separate
 copies (``bus/gpu_pool``, ``policy/gate``, ``actions/executors/_ray_serving``,
-``common/env_safety``, ``loop/coordinator_helpers``), and their empty-mask
+``common/env_safety``, ``actions/executors/_gpu_pin``), and their empty-mask
 semantics had already drifted apart. This module is the single definition; it
 imports nothing outside the standard library so the pure-helper layers can use
 it without dragging in the SQLite connection ``gpu_pool`` owns.
@@ -43,6 +43,7 @@ __all__ = [
     "VISIBLE_DEVICE_VARS",
     "detect_gpu_count",
     "effective_mask_tokens",
+    "hip_mask_within_rocr",
     "is_rocr_level",
     "mask_tokens",
     "parse_device_list",
@@ -184,6 +185,14 @@ def effective_mask_tokens(raw: Any) -> list[str]:
         seen.add(key)
         out.append(tok)
     return out
+
+
+def hip_mask_within_rocr(env: Any) -> str | None:
+    """The HIP mask indexing every device ``ROCR_VISIBLE_DEVICES`` exposes, or ``None`` when ROCR sets no view."""
+    visible = effective_mask_tokens(env.get("ROCR_VISIBLE_DEVICES"))
+    if not visible:
+        return None
+    return ",".join(str(index) for index in range(len(visible)))
 
 
 def detect_gpu_count() -> int:

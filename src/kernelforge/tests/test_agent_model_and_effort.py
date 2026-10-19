@@ -62,8 +62,9 @@ def test_no_call_site_pins_a_reasoning_effort() -> None:
         "cli.py",
         "orchestrator/agent.py",
         "orchestrator/supervisor.py",
-        "fusion/command.py",
+        "fusion/agent_selection.py",
         "gemm_tune/tier3/generate.py",
+        "roofline_ceiling/command.py",
     }
     unexpected = [entry for entry in offenders if entry.rsplit(":", 1)[0] not in allowed]
     assert not unexpected, "call sites pinning a reasoning effort: " + ", ".join(unexpected)
@@ -89,10 +90,11 @@ def test_every_runtime_is_built_where_the_switches_are_read() -> None:
                 found.append(str(path.relative_to(_SRC)))
     allowed = {
         "config.py",
-        "fusion/command.py",
+        "fusion/agent_selection.py",
         "gemm_tune/tier3/generate.py",
         "orchestrator/agent.py",
         "orchestrator/supervisor.py",
+        "roofline_ceiling/command.py",
     }
     unexpected = sorted(set(found) - allowed)
     assert not unexpected, "runtimes built outside the switch-reading modules: " + ", ".join(unexpected)

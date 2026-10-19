@@ -57,7 +57,7 @@ Hyperloom reads credentials from two places, in order:
 
 Shell environment variables always win over `.env`.
 Both the inference optimizer CLI dotenv loader and
-`src/hyperloom/agents/kernel/scripts/install.sh` honor this rule. Do *not*
+`src/hyperloom/inference_optimizer/assets/install.sh` honor this rule. Do *not*
 manually `source .env` from chat — it inverts the precedence and can
 overwrite an exported key with a stale value from disk.
 
@@ -193,8 +193,8 @@ export CODEX_MODEL=your-gateway-kernel-model
 
 Custom orchestration models are allowed by default: preflight validates the
 chosen `CLAUDE_MODEL` against your gateway's `/models` catalog. To restore the
-stricter AMD Claude allowlist (`claude-opus-5` preferred, `claude-opus-4-8` /
-`claude-opus-4-7` / `claude-opus-4-6` fallback), set
+stricter AMD Claude allowlist (`claude-opus-5-5` preferred, `claude-opus-5` /
+`claude-opus-4-8` / `claude-opus-4-7` / `claude-opus-4-6` fallback), set
 `INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0`.
 
 A gateway that exposes no `/models` route cannot be probed; preflight warns and
@@ -295,8 +295,8 @@ At preflight, the inference optimizer CLI:
 
 1. Confirm `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL` and the matching
    API key are set and current.
-2. Re-run preflight (any `python -m hyperloom.inference_optimizer.cli ...` command) or
-   `bash "$REPO_ROOT/hyperloom/agents/kernel/scripts/install.sh" --check-only`.
+2. Re-run preflight (any `python -m hyperloom optimize ...` command) or
+   `bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install.sh" --check-only`.
 3. Inspect `~/.claude/config.json` — `customApiUrl` must point at the
    resolved Anthropic-side upstream gateway.
 

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from collections.abc import Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,12 +14,15 @@ from typing import Any
 
 import yaml
 
-from hyperloom.inference_optimizer.framework_registry import server_args_env_name
+from hyperloom.inference_optimizer.framework_registry import expert_parallel_flag, server_args_env_name
 
 from hyperloom.inference_optimizer.grid_server_args import merge_server_args
 from hyperloom.inference_optimizer.grid_server_args import tokenize_server_args_preserving_json
 from hyperloom.inference_optimizer.grid_server_args import validate_server_args_shell_safe
-from ._recipe_script import apply_recipe_levers, recipe_owns_argv
+
+from ._multi_node_env import is_multi_node
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -86,11 +90,65 @@ def add_server_arg_unless_pinned(
     return True
 
 
+def _pinned_values(tokens: Sequence[str], aliases: Sequence[str]) -> list[str | None]:
+    """Return the value of every whole-token occurrence of ``aliases``; ``None`` where one has none."""
+    values: list[str | None] = []
+    for index, token in enumerate(tokens):
+        name, assigned, value = token.partition("=")
+        if name not in aliases:
+            continue
+        if assigned:
+            values.append(value)
+        elif index + 1 < len(tokens) and not tokens[index + 1].startswith("-"):
+            values.append(tokens[index + 1])
+        else:
+            values.append(None)
+    return values
+
+
+def _expert_parallel_arg(text: str, framework: str | None, envs: Mapping[str, Any]) -> str:
+    """Return the flag ``text`` still owes the server to run at ``envs["EP"]``; empty when it owes none.
+
+    The flag shards experts across the ``envs["TP"]`` ranks this config launches with, so an EP that does not divide
+    them gets none. A multi-node server is launched by the multi-node launcher, which passes EP itself.
+
+    Raises:
+        ValueError: When ``text`` pins an expert-parallel size other than ``envs["EP"]``.
+    """
+    size = int(envs.get("EP") or 1)
+    row = expert_parallel_flag(framework)
+    if row is None or size <= 1 or is_multi_node():
+        return ""
+    flag, aliases, sized = row
+    split = tokenize_server_args_preserving_json(text)
+    pinned = _pinned_values(split[1] if split else [], aliases)
+    if sized and any(value is None or not value.isdigit() or int(value) != size for value in pinned):
+        raise ValueError(
+            f"EP={size} but the server args already pin an expert-parallel size of {pinned} "
+            f"({' / '.join(aliases)}); drop the pin or pass --ep to match it"
+        )
+    if pinned:
+        return ""
+    tp = int(envs.get("TP") or size)
+    if tp % size:
+        log.warning(
+            "EP=%d does not divide the launched TP=%d (after any clamp to the visible GPUs); "
+            "launching without expert parallelism.",
+            size,
+            tp,
+        )
+        return ""
+    return f"{flag} {size}" if sized else flag
+
+
 def seal_server_argv(
     envs: MutableMapping[str, Any],
     framework: str | None,
 ) -> ServerArgv:
     """Write the final server argument string into ``envs`` and return its argv.
+
+    The run's ``EP`` env is honoured here, below every composer, so no
+    replacement of the argument string can drop the expert-parallel flag.
 
     Args:
         envs: The benchmark env mapping being materialised.
@@ -100,21 +158,37 @@ def seal_server_argv(
         ServerArgv: The sealed argv.
 
     Raises:
-        ValueError: When the composed string carries shell control syntax.
+        ValueError: When the composed string carries shell control syntax, or
+            pins an expert-parallel size that contradicts ``envs["EP"]``.
     """
     env_name = server_args_env_name(framework)
     text = validate_server_args_shell_safe(str(envs.get(env_name) or ""))
+    text = merge_server_args(text, _expert_parallel_arg(text, framework, envs))
     sealed = _sealed(framework, env_name, text)
     if sealed.text or env_name in envs:
         envs[env_name] = sealed.text
     return sealed
 
 
+class ConfigUnreadable(Exception):
+    """A materialised benchmark YAML that cannot be read as a config."""
+
+
 def _load_config(config_path: str | Path) -> dict[str, Any]:
-    """Read a materialised benchmark YAML, empty when it is not a mapping."""
-    with Path(config_path).open(encoding="utf-8") as handle:
-        cfg = yaml.safe_load(handle)
-    return cfg if isinstance(cfg, dict) else {}
+    """Read a materialised benchmark YAML.
+
+    Raises:
+        ConfigUnreadable: When the file cannot be opened, is not UTF-8, is not
+            YAML a safe loader can construct, or does not hold a mapping.
+    """
+    try:
+        with Path(config_path).open(encoding="utf-8") as handle:
+            cfg = yaml.safe_load(handle)
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        raise ConfigUnreadable(f"{config_path}: {exc}") from exc
+    if not isinstance(cfg, dict):
+        raise ConfigUnreadable(f"{config_path}: holds {type(cfg).__name__}, not a mapping")
+    return cfg
 
 
 def _benchmark_envs(config_path: str | Path) -> tuple[str | None, dict[str, Any]]:
@@ -134,6 +208,9 @@ def config_server_argv(config_path: str | Path) -> ServerArgv:
 
     Returns:
         ServerArgv: The argv carried by the config's benchmark envs.
+
+    Raises:
+        ConfigUnreadable: When the config cannot be read.
     """
     framework, envs = _benchmark_envs(config_path)
     env_name = server_args_env_name(framework)
@@ -149,6 +226,9 @@ def config_launch_env(config_path: str | Path, base: Mapping[str, str]) -> dict[
 
     Returns:
         dict[str, str]: ``base`` overlaid with the config's benchmark envs.
+
+    Raises:
+        ConfigUnreadable: When the config cannot be read.
     """
     _framework, envs = _benchmark_envs(config_path)
     merged = {str(key): str(value) for key, value in base.items()}
@@ -159,9 +239,6 @@ def config_launch_env(config_path: str | Path, base: Mapping[str, str]) -> dict[
 def reseal_config_argv(config_path: str | Path, text: str) -> ServerArgv:
     """Replace a materialised config's server argv, through the same seal.
 
-    On an agentic recipe the rendered copy is re-rendered without the flags the
-    replacement dropped, so the copy and the declared string stay one argv.
-
     Args:
         config_path: Path to the materialised YAML, rewritten in place.
         text: The replacement argument string.
@@ -170,23 +247,14 @@ def reseal_config_argv(config_path: str | Path, text: str) -> ServerArgv:
         ServerArgv: The re-sealed argv.
 
     Raises:
+        ConfigUnreadable: When the config cannot be read.
         ValueError: When the replacement carries shell control syntax.
     """
     path = Path(config_path)
-    previous = config_server_argv(path).argv
     cfg = _load_config(path)
     bench = cfg.setdefault("benchmark", {})
     envs = bench.setdefault("envs", {})
     envs[server_args_env_name(bench.get("framework"))] = text.strip()
-    if recipe_owns_argv(bench):
-        kept = set(text.split())
-        envs["AGENTX_SERVER_SCRIPT"] = apply_recipe_levers(
-            bench,
-            inherited_script=str(envs.get("AGENTX_SERVER_SCRIPT") or ""),
-            server_args=text,
-            remove_args=[token for token in previous if token.startswith("--") and token not in kept],
-            env_levers={},
-        )
     sealed = seal_server_argv(envs, bench.get("framework"))
     with path.open("w", encoding="utf-8") as handle:
         yaml.safe_dump(cfg, handle, sort_keys=False)
@@ -194,6 +262,7 @@ def reseal_config_argv(config_path: str | Path, text: str) -> ServerArgv:
 
 
 __all__ = [
+    "ConfigUnreadable",
     "ServerArgv",
     "add_server_arg_unless_pinned",
     "config_launch_env",

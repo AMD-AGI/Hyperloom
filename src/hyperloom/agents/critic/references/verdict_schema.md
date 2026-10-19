@@ -83,7 +83,7 @@ Approve example:
   "verdict": "approve",
   "source": "critic",
   "confidence": "high",
-  "reasoning": "Controlled A/B evidence shows a 4.2% tok/s/GPU gain with passing accuracy and active-path proof.",
+  "reasoning": "Controlled A/B evidence shows a 4.2% tok/s gain with passing accuracy and active-path proof.",
   "predicted_gain_pct": 4.2,
   "kb_evidence": [
     "kb:qwen3/attn-dispatch-best-config"
@@ -161,5 +161,6 @@ Allowed values:
 
 There is no combined wrapper object. When both a review and a KB draft
 are produced, they are supplied as two separate JSON payloads — the
-review via `commit-review --review`, the draft via `close-session
---kb-draft` — each matching its own schema above.
+review via `commit-review --review`, the draft via a separate `commit-review`
+on a `kb_draft_request` whose review carries `kb_drafts` — each matching its
+own schema above.

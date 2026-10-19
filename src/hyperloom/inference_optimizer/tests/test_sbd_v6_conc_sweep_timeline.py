@@ -968,3 +968,21 @@ def test_every_recorded_block_is_the_block_the_schema_declares(_bound_session):
     assert {name: recorded ^ set(declared.__annotations__) for name, (recorded, declared) in blocks.items()} == {
         name: set() for name in blocks
     }
+
+
+def test_a_sweep_the_orchestrator_cancelled_is_degraded_on_the_timeline(_bound_session):
+    """The timeline's status vocabulary has no ``cancelled``; the sweep's own word stays on the result."""
+    recorder = _recorder()
+    recorder.finish(
+        _final(
+            status="cancelled",
+            cancelled=True,
+            cancel_reason="phase_transition:SWEEP->CLOSE",
+            summary={"successful_pairs": 0, "failed_pairs": 2},
+        )
+    )
+
+    event = _events(_bound_session)[0]
+    assert event["status"] == "degraded"
+    assert event["ext"]["result"]["status"] == "cancelled"
+    assert event["ext"]["failure"] is None

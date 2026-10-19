@@ -6,7 +6,8 @@
 from __future__ import annotations
 
 import re
-from dataclasses import asdict, dataclass
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass, replace
 from typing import Any, Callable, Pattern
 
 
@@ -82,6 +83,16 @@ class FailureSignature:
         """Serialize to a plain dict for JSON output."""
         return asdict(self)
 
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, Any]) -> "FailureSignature":
+        """Rehydrate :meth:`to_dict`'s output after it crossed the task table as JSON.
+
+        JSON hands ``secondary_kinds`` back as a list. A payload without the
+        verdict fails as the dataclass does, naming the missing ``kind``.
+        """
+        signature = cls(**raw)
+        return replace(signature, secondary_kinds=tuple(signature.secondary_kinds))
+
 
 # --- CapabilityGap projection -----------------------------------------------
 
@@ -133,6 +144,13 @@ def _grp(match: re.Match[str]) -> str:
             return g.strip()
     return ""
 
+
+#: A fast path the framework reports switching off; also scanned on successful runs.
+CAPABILITY_DISABLED_PATTERNS: tuple[Pattern[str], ...] = (
+    re.compile(r"([A-Za-z_][A-Za-z0-9_]*_supported)\s*\(\s*\)\s*(?:returned|is|==)?\s*False"),
+    re.compile(r"falling back to (?:the\s+)?(?:naive|slow|reference) (?:path|implementation)"),
+    re.compile(r"disabled on (?:ROCm|HIP|AMD)"),
+)
 
 _RULES: tuple[_Rule, ...] = (
     _Rule(
@@ -261,11 +279,7 @@ _RULES: tuple[_Rule, ...] = (
     _Rule(
         kind=CAPABILITY_DISABLED,
         bridge_layer="framework",
-        patterns=(
-            re.compile(r"([A-Za-z_][A-Za-z0-9_]*_supported)\s*\(\s*\)\s*(?:returned|is|==)?\s*False"),
-            re.compile(r"falling back to (?:the\s+)?(?:naive|slow|reference) (?:path|implementation)"),
-            re.compile(r"disabled on (?:ROCm|HIP|AMD)"),
-        ),
+        patterns=CAPABILITY_DISABLED_PATTERNS,
         confidence=0.6,
         symbol_from=_grp,
     ),
@@ -437,7 +451,6 @@ class EnablementRequest:
     framework: str
     model: str
     repo_url: str
-    launch_log: str = ""
     gpu_type: str = ""
     max_search_candidates: int = 5
 
@@ -457,15 +470,9 @@ class EnablementRequest:
             framework=framework,
             model=model,
             repo_url=repo_url,
-            launch_log=str(raw.get("launch_log") or ""),
             gpu_type=str(raw.get("gpu_type") or "").strip().lower(),
             max_search_candidates=int(raw.get("max_search_candidates", 5)),
         )
-
-    @property
-    def signature(self) -> FailureSignature:
-        """Classify :attr:`launch_log` on demand."""
-        return classify_failure(self.launch_log)
 
 
 # --- Runnable gate ---------------------------------------------------------

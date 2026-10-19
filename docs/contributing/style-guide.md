@@ -39,7 +39,8 @@ When this guide and tooling disagree, **tooling wins** — update the guide if y
 Ruff is the single formatter and linter for Python.
 
 - **Format:** `ruff format .` (Black-compatible; 120 columns).
-- **Lint:** `ruff check .` — rules `E`, `F`, `W` (pycodestyle errors, Pyflakes, warnings).
+- **Lint:** `ruff check .` — base rules `E`, `F`, `W` (pycodestyle errors, Pyflakes, warnings), `BLE` (no blind `except Exception`), `RUF100` (no unused `# noqa`), plus the principle rules below.
+- **Ruff version:** CI pins `ruff==0.16.2` (`lint.yml`) and the pre-commit hook uses the same `rev`; bump both together.
 - **Ignored globally:** `E501` (line length — owned by the formatter), `E741` (single-letter names in math/parsing helpers).
 
 Run both before opening a PR that touches Python:
@@ -51,11 +52,85 @@ ruff format --check .   # or `ruff format .` to apply
 
 **Do not** add `# noqa` or per-file ignores unless there is a documented reason (import cycles, test patterns). Existing per-file ignores live in `[tool.ruff.lint.per-file-ignores]` — extend that table instead of inline suppressions.
 
-**Future rules** (`B`, `I`, `UP`, `SIM`, `RUF`) are commented in `pyproject.toml` and will be enabled once the backlog is zero. New code should already follow import sorting and common bugbear patterns even before those rules are turned on.
+**Principle rules** are hard gates (`extend-select` in `pyproject.toml`): the tree is at zero and any new finding fails CI.
+
+| Rules | What they hold |
+|-------|----------------|
+| `G`, `LOG` | Logging takes `%`-style arguments, not f-strings; correct logger API (`exc_info` only where there is an exception, no root-logger calls in new code) |
+| `TD001`, `TD003`–`TD007`, `FIX001`, `FIX003`, `FIX004` | A `TODO` is allowed but must link an issue and be well-formed; no `FIXME`/`XXX`/`HACK` markers |
+| `PGH` | No blanket `# noqa` or `# type: ignore` — name the code (`# type: ignore[import-not-found]`) |
+| `RSE`, `RET`, `PIE` | `raise X` not `raise X()`; explicit, consistent returns with no `else` after `return`; no redundant `pass`, `range(0, n)` or `lambda: []` wrappers |
+| `ERA` | No commented-out code. The detector is a heuristic: a prose comment that happens to parse as Python (`# Subcommand: verify`) trips it — reword the comment |
+| `DTZ` | `datetime` values carry a timezone |
+| `A` | Do not shadow builtins (`aiter`, AMD's kernel library, is allowed by name) |
+| `C4` | Comprehension and collection-call idioms (`{}` over `dict()`, no `[x for x in y]`) |
+
+Where existing code needs the old shape for a behavioural reason — persisted naive timestamps, keyword names that mirror a stdlib signature, root-logger calls in an unconfigured CLI — the exception is a per-file ignore with that reason next to it, not a `# noqa`.
+
+**Not yet enabled:** `I` (import sorting) and `UP` (pyupgrade) are clean mechanical rewrites but touch hundreds of lines that open PRs also touch, so turning them on waits for a team decision on when to land the rewrite. `B`, `SIM` and the rest of `RUF` carry a backlog and belong behind a ratchet rather than a hard gate. New code should already follow import sorting and common bugbear patterns.
 
 ### Size and complexity
 
-Nothing enforces these today: Ruff selects `E`/`F`/`W` only (no `C901`), and CI's Pylint is `--errors-only`, which excludes `R0912`/`R0915`. They are **review triggers for new and rewritten code** — the point at which a reviewer asks for a split or for the reason the shape is right.
+Two layers. The **gate** is the `code-metrics` CI job (`scripts/code_metrics.py`): it measures the white-box metrics below on every PR and fails the PR when a file the PR touches gets worse. The **review triggers** under it are the softer numbers a reviewer asks about.
+
+| Gated dimension | Fails when | Why this number | Tool |
+|-----------------|-----------|-----------------|------|
+| Cyclomatic complexity | > 20 | The [Complexity ceiling](#complexity-ceiling): twice McCabe's 10, the point where a function has more paths than a reviewer can hold while reading it | ruff `C901` |
+| Cognitive complexity | > 30 | Twice SonarSource's S3776 default of 15, the same step as the ceiling; it weights nesting, so past 30 a function has to be re-read rather than read | complexipy |
+| Function length | > 80 lines | A function past one screen; counted as below, `def` line through the last line | the script |
+| Nested block depth | > 5 | pylint `R1702` default: past five levels the innermost line depends on six conditions at once | ruff `PLR1702` |
+| Parameter count | > 5 | pylint `R0913` default: past five, the call site stops reading as a sentence and the values travel together anyway — pass the object they come from, or name them in a dataclass (A8). `self`/`cls` and `*args`/`**kwargs` do not count; keyword-only parameters do | ruff `PLR0913` |
+| Module length | > 1200 lines (over 800 is a report-only warning) | Half again the 800-line review trigger; at that size a module almost always holds more than one job | the script |
+| Duplicated code | any clone of >= 100 tokens and >= 10 lines | SonarSource CPD defaults | jscpd |
+| Dead code | any finding at >= 80% confidence | vulture's recommended CI setting | vulture |
+
+The thresholds, the reason for each and the exact tool versions live in `pyproject.toml` under `[tool.hyperloom.code_metrics]`. The scope is all of `src` and `scripts`, minus the same vendored and shipped-example trees as Ruff's `extend-exclude`; files under a `tests/` directory are exempt from everything but duplication. Suppression comments (`# noqa` for the Ruff-measured dimensions, complexipy's ignore marker, `jscpd:ignore-start`) do not hide a unit from the gate: Ruff and complexipy run with their ignore switches, and jscpd reads copies with its markers defused. Vulture alone honours `# noqa`, because that marker belongs to Ruff: `# noqa: F401` is the sanctioned form for a side-effect import or a re-export, and Ruff's `RUF100` flags one that suppresses nothing.
+
+Units that were already over a threshold when the gate landed are recorded with their value in `scripts/code_metrics_baseline.txt`, one sorted line per unit (`<metric> <path>::<Class.method> <value>`, or `<metric> <path> <value>` for a module), so moving code inside a file does not disturb them and a change to the baseline is one line per unit in the diff.
+
+**Only the files a PR touches are judged** (the diff against the merge base; for a push to `main`, against the commit it replaced). A file the PR does not touch never fails it, whatever is found there; the report lists such findings as information. In a touched file:
+
+- a unit over a threshold that is not in the baseline fails — new code meets the limits;
+- a baselined unit that got worse than its recorded value fails — **do not grow the backlog**: adding branches or lines to a unit, or lines to a module, that is already over is a failure, not a judgement call;
+- in both cases the same file at the merge base is measured too, and a unit the base already had at that value or worse is backlog, not this PR's debt — the comparison the [Complexity ceiling](#complexity-ceiling) defines;
+- a baselined unit that improved, dropped under the limit or was deleted fails as *out of date* until `python scripts/code_metrics.py --update-baseline` is run and the baseline committed in the same PR (the command can only lower or remove entries). When the PR leaves the unit exactly as the merge base had it (`main` improved it without tightening the baseline), the entry is listed for information and does not fail; a PR that moves the value either way still tightens it; this covers the per-file dimensions, which the gate can measure at the base.
+
+Across the whole file, not only touched entries: relative to the base branch the PR's baseline may only lose entries or lower values, and the config may not loosen (no raised limit, no new exclusion, no file the base's scope measured left unmeasured). Adding a unit to the baseline is not a way to pass.
+
+**Override: the `baseline-raise` label.** A PR that has to land a new or worse unit, grow the baseline, or keep a failing design-check finding carries the `baseline-raise` label, and its description says why. The gate reads the label from the GitHub API when it runs (adding or removing the label re-runs the job; the push to `main` reads the label of the PR whose merge it is); new, worse and baseline-growth findings and the failing design checks are then *waived* — still listed in full in the job log and the report, no longer failing. It waives nothing else: an out-of-date entry, a loosened config and the checks without a baseline still fail.
+
+CI judges a PR with the base branch's copy of the gate scripts, so a PR that edits `scripts/code_metrics*.py` does not grade itself; the report lists every edit to the gate's scripts, workflows or tool pins under *Gate implementation changed* for a reviewer. A gate change that the base's copy cannot run (a new config key, say) lands in two steps: first teach the scripts to accept it, then use it.
+
+A unit that only moved to another file keeps its baseline entry when its qualified name (a module: its file name) is unique among the moved units and its value is no worse; a renamed unit, or one moved to another class, does not, and has to meet the limits. The report — new, worse and out-of-date units with links to the lines — is on the job summary and in one sticky PR comment. Run the gate locally with the install line in the script's docstring; `--base-ref origin/main` judges the files changed since the merge base and adds the base-branch checks.
+
+Editing a unit that was already over is not a demand to repay its debt — the gate only asks that it not get worse. Extracting a helper while you are in there is in scope, and the gate rewards it with an out-of-date entry to tighten; a standalone rewrite of an unrelated module is a separate PR (see [`AGENTS.md`](../../AGENTS.md) § *One concern per change*).
+
+**Checks without a baseline.** The same job runs four checks that have no backlog to carry, and the design checks below. Each of the four fails the PR on its own, and `baseline-raise` does not waive them:
+
+| Check | Fails when | Scope |
+|-------|-----------|-------|
+| Comments | an added run of more than 8 consecutive full-line `#` comments; an added comment that points at a PR or issue (`#1234`, `PR 1234`, `GH-1234`, `issue #12`, a `/pull/` link) or narrates an incident (`after the outage`, a dated `incident`, `postmortem`). A comment starting with `TODO` and the line after it may link an issue, as Ruff's `TD003` asks. A comment the PR only moves, re-indents or carries through a rename is not added | added lines of `.py` files, tests included; docstrings are not comments |
+| English only | a CJK character (CJK ideographs, CJK symbols and punctuation, halfwidth and fullwidth forms) | every tracked text file, and on a PR its title, body and every commit message. Test data that needs a multi-byte character uses a non-CJK one (the euro sign is three bytes in UTF-8) |
+| Production code does not import test code | a module under `src/` or `scripts/` that is not itself a test imports a `tests` package or a `test_*` module (a module merely named `test` is not test code) | the whole tree. Move what both sides need into a non-test module |
+| Repeated literals | the PR takes a string or bytes value (3+ characters) or a number (other than 0, 1, -1 and 2) from fewer than 3 occurrences in a module to 3 or more | the production modules the PR touches, counted before and after (a renamed module against the file it came from; a literal that only moved between touched modules is not added); dict keys, `x["key"]` subscripts, the key of `.get`/`.pop`/`.setdefault` and of an `in` test, keyword names, docstrings, f-string text, annotations and `__all__` do not count. Name the value once as a module-level constant |
+
+The comment and literal checks are diff-only on purpose: the history in a comment is cheap to keep out and expensive to strip later, and a whole-tree literal count would flag most modules in the tree for values nobody is changing.
+
+**Design checks.** The same job also runs diff-only checks for the code-shape review rules A1 and A8-A12 (`scripts/code_metrics_design.py`). Each has its own section in the report. A1, A8 and the A12 forwarder fail the PR (the `baseline-raise` label waives them, with the reason in the description); A9, A10, A11 and the A12 single-implementation abstraction are advisory, as the A rules rate them, and are listed without failing. They judge only what the PR adds in the production modules it touches; tests (a `tests/` package, a `test_*.py` module, `conftest.py`) are exempt from all of them. A line is *added* when the diff adds it and the PR did not remove the same text elsewhere (a move, a re-indent, a renamed file); a function or class is *new* when its `def`/`class` line is added and the same file at the merge base (for a renamed file, the file it came from) had no unit of that qualified name, so editing an existing function never makes it new.
+
+| Check | Fails when | Exempt |
+|-------|-----------|--------|
+| A1 Private name of another package | an added import, or attribute access through an imported name, of a private name (`_x`, not a dunder) or of a module under a private package, owned by another package unit. The units come from `.importlinter`: the root packages and every module a contract names as a layer or an independent module (`hyperloom.cli`, `hyperloom.orchestrator`, `hyperloom.agents.critic`, `kernelforge.kernel_backends.hip`, ...); a module belongs to the longest unit that prefixes it, and `scripts/` is a unit of its own. The units are read from the merge base's contracts file, so a PR cannot redraw the units it is judged by, and moving `import-contracts` counts as loosening | same-unit use; dunders; third-party packages. Fix: make the name public in its owner, or move the caller there |
+| A8 Flag argument | a new function whose first statement is `if <flag>:` (or `if not <flag>:`, or a comparison of a two-value `Literal` parameter) with a branch ending in `return` or `raise`, where the flag is a `bool` (annotated, or defaulting to `True`/`False`) or two-value `Literal` parameter | `main`, click/typer commands (`@*.command`, `.group`, `.option`, ...), functions taking an `argparse.Namespace`. Fix: one function per value |
+| A9 Tuple return | a new function annotated to return `tuple[...]` (also `typing.Tuple`, and inside `Optional`/`Union`/`\|`) of more than `tuple-return-max-elements` (2) positions, or returning a tuple display that long | `tuple[X, ...]`; dunders (`__reduce__`), whose shape the protocol fixes. Fix: a dataclass or `NamedTuple` |
+| A10 Raw vocabulary comparison | an added `==`/`!=` against, `in` over a tuple/list/set display of, or `case` pattern of, a string that is the value of a member of exactly one `Enum` under `vocabulary-roots` (`src`), in a module that names that enum (imports or defines it), when the other side reads as a member: its `.value`, or a name whose words end like the enum's (`status` or `run_status` for `RunStatus`) | a value two enums share, or one compared in a module that never names its enum: that is another vocabulary using the same word; a comparison with raw input (`raw`, `v`, `str(x)`): that is the conversion to the member. Fix: compare with the member; convert outside input once, where it enters |
+| A11 Hidden global write | an added `global` statement, or store into `globals()` | none (`nonlocal` is a closure, not module state). Fix: pass the value in and return the result, or keep the state on an object the caller owns |
+| A12 Pure forwarder | a new function (not a dunder, no decorator but `staticmethod`/`classmethod`) whose body is one `return` of a call passing exactly its own parameters (receiver aside) through unchanged | a call of a builtin (by its bare name), of a class (a factory), of `.get` (a table lookup) or of a method of a constant (`", ".join`); a call of one of the parameters; a decorated function (the decorator caches, registers or wraps); a method overriding one its base class (under `vocabulary-roots`) defines. Fix: call the target directly |
+| A12 Single-implementation abstraction | a new ABC or `Protocol` with exactly one implementation under `vocabulary-roots` (a subclass; for a protocol also a class defining all its methods), in the same package unit | an interface a lower unit declares for a higher one to implement. Fix: use the implementation until a second one exists |
+
+A10 is limited to the enum's own vocabulary on purpose: matched against every enum value in `src`, almost every hit in the tree was a dict field that uses the same word for another vocabulary (a `status` of `"failed"` or `"unknown"` read from a tool's JSON), not a bypassed enum; and the place that converts outside input to the member has to compare the raw string, so only a subject that already reads as the member is judged.
+
+**Review triggers.** These are not gated; they are the point at which a reviewer asks for a split or for the reason the shape is right. One of them has a ceiling above it that a reviewer blocks on; see [Complexity ceiling](#complexity-ceiling).
 
 | Unit | Trigger | Where the number comes from |
 |------|---------|-----------------------------|
@@ -65,7 +140,7 @@ Nothing enforces these today: Ruff selects `E`/`F`/`W` only (no `C901`), and CI'
 
 Neither number identifies a problem on its own. A long function can be one prompt template with a complexity of 1, and a short one can carry a dozen field comparisons that still need semantic review. Crossing a trigger asks the reviewer to look for a responsibility boundary, not to assume there is one — and "this is a single template" is an accepted answer. Split when it improves ownership, data flow, or testability.
 
-**How the lines are counted:** a function spans its `def` line through its last line, decorators excluded and blank, comment and docstring lines included; a nested or `async` function is measured on its own, not folded into its parent. Module length is physical lines. The triggers cover the Python whose style we own — `src/hyperloom` and `src/kernelforge`, minus Ruff's `extend-exclude` in `pyproject.toml`, which already names the vendored SDK copies and the shipped `src/kernelforge/data` examples. Tests are exempt from the size triggers — a table-driven test that gains a case per behaviour is doing its job — though the command below still reports them. They are not exempt from the duplication and boundary rules.
+**How the lines are counted:** a function spans its `def` line through its last line, decorators excluded and blank, comment and docstring lines included; a nested or `async` function is measured on its own, not folded into its parent. Module length is physical lines. Tests are exempt from the size triggers — a table-driven test that gains a case per behaviour is doing its job — though not from the duplication and boundary rules.
 
 Measure rather than argue:
 
@@ -73,9 +148,30 @@ Measure rather than argue:
 ruff check --select C901 --config "lint.mccabe.max-complexity=10" src/hyperloom src/kernelforge
 ```
 
-Passing a trigger is not a merge blocker — it means the PR description says why, or the change splits. The tree carries a backlog above all three: **do not grow it**, and prefer leaving a file you touched smaller than you found it. Editing a unit that was already over the trigger is not a demand to repay its debt; adding branches or a second responsibility to it is. Extracting a helper while you are in there is in scope; a standalone rewrite of an unrelated module is a separate PR (see [`AGENTS.md`](../../AGENTS.md) § *One concern per change*).
+Passing a trigger is not a merge blocker — it means the PR description says why, or the change splits. Passing the ceiling below is, and so is the `code-metrics` gate above.
 
 Structure the split along the boundaries the code already has — one job per module, cohesive inside, dependencies pointing one way down the layers. A split that only moves lines to a second file, leaving the two halves reaching into each other, trades one long file for a cycle.
+
+#### Complexity ceiling
+
+Cyclomatic complexity above 20 is the one number here a review blocks on. It covers two cases: a function the change adds, and a function whose complexity the change raises — from at or below 20 to above it, or higher still when it was already above. A unit that stood above 20 before the change and that the change does not make worse is backlog, not this PR's debt.
+
+The ceiling sits at twice the trigger because the trigger asks a question the ceiling has stopped accepting answers to: at 10, "this is one dispatch table" settles it; at 20 the unit carries more branches than a reviewer can keep in their head while reading it, and a paragraph in the description does not make it reviewable. Split it, or keep the new branches out of it.
+
+Measure both sides — the head tree, and the same file at the merge base, since the verdict is a comparison:
+
+```bash
+ruff check --select C901 --config "lint.mccabe.max-complexity=20" --force-exclude \
+  --output-format concise <changed .py files under src/, tests excluded>
+
+git show "$(git merge-base origin/main HEAD)":<path> > /tmp/base.py
+ruff check --select C901 --config "lint.mccabe.max-complexity=20" --isolated \
+  --output-format concise /tmp/base.py
+```
+
+The tree carried 124 units above 20 when the ceiling was introduced (2026-10-10). The ceiling is what stops that number growing; it is not a demand to pay the 124 down.
+
+CI now measures the ceiling: the `code-metrics` job (see [Size and complexity](#size-and-complexity)) applies exactly these two cases to every function in the files a PR touches under `src/` and `scripts/`, comparing the head with the merge base, and the units already above 20 are its baseline. The `baseline-raise` label waives that CI check; review then accepts the override only when the PR description gives the reason the function stays above 20.
 
 ### Module structure
 
@@ -99,6 +195,31 @@ from hyperloom... import local...
 - **Imports** — stdlib, then third party, then `hyperloom.*`, separated by blank lines. Some modules intentionally import after constants (see per-file `E402` ignores); do not reorder those without understanding the cycle.
 - **Constants** — `UPPER_SNAKE_CASE` at module level; prefix private constants with `_`.
 - **Types** — use modern syntax (`str | None`, `list[str]`, `collections.abc` for parameters). Prefer typed public APIs; `Any` only at boundaries (JSON, subprocess, LLM payloads).
+
+#### Dependency direction
+
+Imports between packages point one way, and CI enforces it: the `import-linter (architecture contracts)` job in `lint.yml` (and the `import-linter` pre-commit hook) runs `lint-imports` against the contracts in [`.importlinter`](../../.importlinter). A PR that adds an import breaking one of them fails, and the output names the contract and the import chain.
+
+| Contract | Rule |
+|----------|------|
+| `hl-top-layers` | `hyperloom.cli` > `orchestrator` > `agents` > `inference_optimizer` > `common`: a package imports only from layers below it |
+| `kf-only-common` | `kernelforge` imports nothing from `hyperloom` except `hyperloom.common` |
+| `common-is-leaf` | `hyperloom.common` imports nothing else from the project, `kernelforge` included |
+| `agents-independent` | `hyperloom.agents.*` packages do not import each other |
+| `kf-backends-independent` | `kernelforge.kernel_backends.*` packages do not import each other |
+| `kf-entry-protected` | `hyperloom.agents`, `inference_optimizer` and `common` do not import `kernelforge` directly; the orchestrator and `hyperloom.cli` are the way in |
+| `acyclic` | no import cycle between sibling packages anywhere under `hyperloom` or `kernelforge` |
+
+Imports inside functions count; imports under `if TYPE_CHECKING:` and test code do not. A new package under `hyperloom/agents/` or `kernelforge/kernel_backends/` is added to its independence list in the same PR.
+
+Two contracts carry the violations that existed when the gate landed, as exact `importer -> imported` lines under `ignore_imports`: `hl-top-layers` lists the upward imports of `hyperloom.inference_optimizer.cli` (an entry point that sits inside the core layer), and `acyclic` lists the imports that break today's cycles. These baselines only shrink. The contracts fail on an `ignore_imports` line that no longer matches an import, so a PR that removes one of those imports deletes its line in the same commit. Do not add a line to get a new import through: move the code to the layer it belongs in, or invert the dependency (pass a callable or a protocol down instead of importing up). The baseline is per module pair, so another import between two modules already listed is not caught; do not lean on that.
+
+Run it locally without installing the project:
+
+```bash
+pip install "import-linter==2.15"
+PYTHONPATH=src lint-imports --no-cache
+```
 
 ### Type checking (mypy)
 
@@ -126,7 +247,7 @@ Bandit scans production code (`src/hyperloom`, `scripts/`). Tests are excluded.
 
 ### Pylint
 
-CI runs `pylint --errors-only` on core packages (fatal/error severity only). Fix new error-level issues in touched modules; convention, refactor, and style messages are intentionally out of scope — including `R0912`/`R0915`, which is why the thresholds in [Size and complexity](#size-and-complexity) are carried by review rather than by a gate.
+CI runs `pylint --errors-only` on core packages (fatal/error severity only). Fix new error-level issues in touched modules; convention, refactor, and style messages are intentionally out of scope here; the size and complexity limits CI does hold are the `code-metrics` job's — see [Size and complexity](#size-and-complexity).
 
 ### Tests (pytest)
 
@@ -227,7 +348,8 @@ reuse lint
 | `.pre-commit-config.yaml` | Local hooks mirroring static analysis |
 | `.gitleaks.toml` | Secret-scan allowlists |
 | `REUSE.toml` | Default license annotation |
-| `.github/workflows/lint.yml` | Ruff, Bandit, Pylint (CI) |
+| `.importlinter` | Architecture contracts (import-linter) |
+| `.github/workflows/lint.yml` | Ruff, import-linter, Bandit, Pylint (CI) |
 | `.github/workflows/tests-coverage.yml` | Pytest + coverage gate |
 | `.github/workflows/secret-scan.yml` | Gitleaks |
 | `.github/workflows/reuse-lint.yml` | REUSE |

@@ -67,7 +67,7 @@ def test_means_are_weighted_by_sample_count():
     """A 35-sample block must not pull the round's mean as hard as a 126-sample one."""
     out = gpu_metrics_from_report({"gpu_monitor": [MAGPIE_BLOCK, MAGPIE_BLOCK_2]})
 
-    # (476.5*35 + 471.6*126) / 161
+    # Weighted mean: (476.5*35 + 471.6*126) / 161
     assert out["avg_power_w"] == 472.67
     assert out["avg_temp_c"] == 58.76
     assert out["max_power_w"] == 943.0

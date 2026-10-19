@@ -385,6 +385,17 @@ Apply these non-negotiable opportunity rules:
     Write the same single-process driver contract; forge-loop task preparer adds
     torchrun launch, process-group setup, and cross-rank reductions when
     world_size > 1.
+12. Read the Runtime Findings section of trace-evidence.md and the analysis.md
+    executive summary before ranking. When the findings show a hot operator's
+    fast path disabled, falling back, or missing its tuned config, do not
+    publish a rewrite of the fallback implementation; skip it, because the fix
+    is restoring the dispatch or configuration. The Hot GEMMs Missing Tuned
+    Config section names the exact kernel_ids whose traced shapes missed their
+    tuned config; those rows are such operators. When Idle or Exposed Comm,
+    or the share in the Exposed Memcpy section of trace-evidence.md, exceeds
+    Compute, the workload is host-, communication-, or copy-bound: publish a
+    compute kernel only when its measured share still justifies it, and state
+    that bound in its evidence.
 
 Do not start profiling, serving, or benchmark commands. Shell execution is not
 available. Use read and search tools for investigation. You may write only under

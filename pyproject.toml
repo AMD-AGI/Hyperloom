@@ -41,6 +41,14 @@ web = [
     "markdownify>=0.11",
     "cachetools>=5.3",
 ]
+# The Experience KB service on a PostgreSQL server (``HYPERLOOM_KB_DATABASE_URL``), as a global KB runs; a workspace's
+# service keeps its database in SQLite and needs none of this. The connection pool checks each connection it hands
+# out, which needs psycopg-pool 3.2.
+kb-service = [
+    "PyYAML>=6.0",
+    "psycopg[binary]>=3.2,<4",
+    "psycopg-pool>=3.2,<4",
+]
 # Full runtime dependency set installed by the packaged install.sh.
 runtime = [
     "PyYAML>=6.0",
@@ -90,6 +98,8 @@ forge-profiling = [
 test = [
     "hyperloom-inference_optimizer[runtime]",
     "hyperloom-inference_optimizer[ci]",
+    # The Experience KB tests run on PostgreSQL too when HYPERLOOM_KB_TEST_DATABASE_URL names a server.
+    "hyperloom-inference_optimizer[kb-service]",
     "pytest>=8.0",
     "pytest-asyncio>=1.0",
     "jsonschema>=4.18",
@@ -144,12 +154,13 @@ dev = [
 ]
 
 [project.scripts]
-inference_optimizer = "hyperloom.inference_optimizer.cli:main"
-hyperloom = "hyperloom.inference_optimizer.setup:main"
-quantization-agent = "hyperloom.agents.quantization.cli:main"
+hyperloom = "hyperloom.cli:main"
 # Built-in kernel-opt agent. The orchestrator dispatches
 # ``python -m kernelforge.cli`` directly; this is for interactive use.
 kernelforge = "kernelforge.cli:main"
+hyperloom-kb = "hyperloom_kb.cli:main"
+hyperloom-kb-serve = "hyperloom_kb.http_service:main"
+hyperloom-kb-collect = "hyperloom_kb.collect.cli:main"
 
 [tool.setuptools]
 # setuptools defaults this to true for pyproject-based config, which makes
@@ -186,12 +197,13 @@ exclude = [
     "*.testing.*",
     "testing",
     "testing.*",
-    # kernelforge's shipped resource trees (knowledge_base / local_knowledge /
-    # examples / serving_patches). They contain .py files, so with implicit
-    # namespace discovery setuptools would otherwise hand them out as
-    # importable top-level modules. They ship as package-data instead.
-    "kernelforge.data",
-    "kernelforge.data.*",
+    # KernelForge's examples and local-wiki resources contain .py reference
+    # files. Keep those resource trees out of implicit namespace discovery;
+    # they ship only through the package-data declarations below.
+    "kernelforge.examples",
+    "kernelforge.examples.*",
+    "kernelforge.knowledge.local_wiki.resources",
+    "kernelforge.knowledge.local_wiki.resources.*",
     # Scripted launch/specialist backends and a virtual clock: scaffolding a
     # test drives, not a runtime component. Nothing in the shipped tree imports
     # it, and the production launch boundary it substitutes
@@ -212,6 +224,10 @@ exclude = [
 ".cursor/skills/hyperloom-setup" = [
     "src/hyperloom/skills/hyperloom-setup/SKILL.md",
 ]
+# Operates any Experience KB service with the hyperloom-kb CLI: labels, restores, exclusions, sync.
+".agents/skills/hyperloom-kb" = ["src/hyperloom_kb/skills/hyperloom-kb/SKILL.md"]
+".claude/skills/hyperloom-kb" = ["src/hyperloom_kb/skills/hyperloom-kb/SKILL.md"]
+".cursor/skills/hyperloom-kb" = ["src/hyperloom_kb/skills/hyperloom-kb/SKILL.md"]
 # Demo run skills chained from /hyperloom-setup.
 ".agents/skills/hyperloom-qwen3-8b-3h" = ["examples/hyperloom-qwen3-8b-3h/SKILL.md"]
 ".claude/skills/hyperloom-qwen3-8b-3h" = ["examples/hyperloom-qwen3-8b-3h/SKILL.md"]
@@ -268,14 +284,9 @@ hyperloom = [
     "SKILL.md",
     "README.md",
 ]
-# No top-level SKILL.md: kernel work is dispatched programmatically, so the
-# former agent skill file was replaced by docs/reference/kernel-execution-path.md.
-"hyperloom.agents.kernel" = [
-    "scripts/*.sh",
-]
-# Vendor-operator-playbook registry (see tools/_vendor_operator_playbooks.py):
+# Vendor-operator-playbook registry (see trace_analysis/_vendor_operator_playbooks.py):
 # read at runtime by classify_patchability(), so it must ship.
-"hyperloom.agents.kernel.tools" = [
+"hyperloom.orchestrator.trace_analysis" = [
     "vendor_operator_playbooks.json",
 ]
 # ``agentx/deploy.py`` copies these into InferenceX ``benchmarks/`` at runtime
@@ -294,15 +305,22 @@ hyperloom = [
 "hyperloom.inference_optimizer.multi_node.scripts" = [
     "*.sh",
 ]
-# kernelforge's read-only resource trees. Upstream KernelForge shipped these
-# from the repository root via hatchling ``force-include``; setuptools has no
-# equivalent, so they physically live under ``src/kernelforge/data`` and are
-# resolved through ``kernelforge.resources.resource_path``. The glob is
-# deliberately type-agnostic: the trees hold .md, .json, .py, .patch, .csv and
-# more, and a missed extension only breaks wheel installs (every dev and CI
-# path uses ``pip install -e``).
+# KernelForge's read-only resources live with their owning features and are
+# resolved through ``kernelforge.resources.resource_path``. The globs are
+# deliberately type-agnostic because the trees hold several asset types.
 kernelforge = [
-    "data/**/*",
+    "examples/**/*",
+]
+"kernelforge.knowledge.local_wiki" = [
+    "resources/**/*",
+]
+"kernelforge.roofline_ceiling" = [
+    "resources/**/*",
+]
+hyperloom_kb = [
+    "py.typed",
+    "declarations/*.yaml",
+    "mappings/*.yaml",
 ]
 
 [tool.pytest.ini_options]
@@ -331,6 +349,7 @@ relative_files = true
 source = [
     "src/hyperloom",
     "src/kernelforge",
+    "src/hyperloom_kb",
     "OOB",  # optional component; not always present in a clone
 ]
 # Omitted: tests / package boilerplate, CLI drivers, subprocess wrappers, and
@@ -360,12 +379,13 @@ omit = [
     "src/hyperloom/orchestrator/actions/executors/_multi_node_env.py",
     # Breakdown LLM HTTP client.
     "src/hyperloom/inference_optimizer/breakdown/reporters/llm_client.py",
-    # Stand-alone kernel-agent CLI tools.
-    "src/hyperloom/agents/kernel/tools/tracelens_analysis.py",
-    "src/hyperloom/agents/kernel/tools/tracelens_skill_runner.py",
-    "src/hyperloom/agents/kernel/tools/apply_kernel_patch.py",
-    # Kernel-agent tool backends (subprocess submit).
-    "src/hyperloom/agents/kernel/tools/backends/*",
+    # Kernel tools that need real traces or a live framework install.
+    "src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py",
+    "src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py",
+    "src/hyperloom/orchestrator/kernel/apply_kernel_patch.py",
+    # GEAK runner and Ray cluster lifecycle (subprocess submit).
+    "src/hyperloom/orchestrator/kernel/geak_runner.py",
+    "src/hyperloom/orchestrator/actions/executors/_ray_runtime.py",
     # quantization_agent CLI driver (argparse entrypoint).
     "src/hyperloom/agents/quantization/cli.py",
     # OOB server-side runtime (CLI, HTTP server, scheduler, auth proxy, agent
@@ -390,15 +410,21 @@ omit = [
     "src/hyperloom/orchestrator/actions/executors/baseline.py",
     # --- kernelforge (ported verbatim from KernelForge's own omit list) ---
     "*/test_*.py",
-    # Shipped resource trees: knowledge-base sample drivers and reference
-    # kernels, not library code.
-    "src/kernelforge/data/*",
+    # Shipped sample drivers, reference kernels, and local-wiki assets.
+    "src/kernelforge/examples/*",
+    "src/kernelforge/knowledge/local_wiki/resources/*",
     # Byte-identical upstream KB Store SDK; validated by checksum contract tests.
-    "src/kernelforge/knowledge/remote_exp/kb_store_client.py",
+    "src/kernelforge/knowledge/kb_store/remote_client.py",
     # CLI entry points (argument plumbing; exercised via the CLIs themselves).
-    "src/kernelforge/cli.py",
+    "src/kernelforge/cli/*",
     "src/kernelforge/gemm_tune/cli.py",
     "src/kernelforge/fusion/command.py",
+    # The forge-fuse stages command.py drives.
+    "src/kernelforge/fusion/agent_selection.py",
+    "src/kernelforge/fusion/compile_pass_claim.py",
+    "src/kernelforge/fusion/harness_authoring.py",
+    "src/kernelforge/fusion/serving_gate.py",
+    "src/kernelforge/fusion/source_snapshot.py",
     # GPU toolchain + profilers: shell out to rocprofv3 / rocprof-compute /
     # ninja / the build system and require real hardware.
     "src/kernelforge/mcp_server/tools/bench.py",
@@ -407,7 +433,7 @@ omit = [
     # Claude Agent SDK transport (spawns the agent CLI, network).
     "src/kernelforge/orchestrator/agent.py",
     # Filesystem index walker over the curated knowledge tree.
-    "src/kernelforge/knowledge/local_index.py",
+    "src/kernelforge/knowledge/local_wiki/index.py",
     # gemm-tune hardware tuners (drive vendor GEMM libraries on-device).
     "src/kernelforge/gemm_tune/tuners/sglang_dense_bf16.py",
     "src/kernelforge/gemm_tune/tuners/vllm_moe_triton.py",
@@ -451,13 +477,99 @@ total_shards = 6
 # Repository variable name: when truthy, CI skips fail_under enforcement.
 relax_fail_under_repo_var = "COVERAGE_RELAX_FAIL_UNDER"
 
+# White-box code-metrics gate: ``scripts/code_metrics.py``, run by
+# ``.github/workflows/code-metrics.yml``. Each number below carries its reason.
+# Units already over a threshold are recorded in ``baseline`` (one line each) and
+# may only go down; a file is judged only when a change touches it. CI refuses a
+# change that loosens anything in this table relative to the base branch: a
+# raised limit, a new ``exclude`` entry, a dropped root, a raised duplication,
+# dead-code or warning parameter.
+[tool.hyperloom.code_metrics]
+baseline = "scripts/code_metrics_baseline.txt"
+# Production Python: all of ``src`` (so a new package is in scope by default) and
+# ``scripts``. Plain repository paths only; pathspec magic and globs are refused.
+# Files under a ``tests/`` directory are exempt from every dimension but
+# duplication, as in the style guide's "Size and complexity".
+roots = ["src", "scripts"]
+# Same vendored / shipped-example trees as ``[tool.ruff] extend-exclude``.
+exclude = [
+    "src/hyperloom/orchestrator/knowledge/remote_recipe/_vendor/kb_store_client.py",
+    "src/kernelforge/examples",
+    "src/kernelforge/knowledge/local_wiki/resources",
+    "src/kernelforge/knowledge/kb_store/remote_client.py",
+]
+# SonarSource CPD defaults: a clone is at least 100 tokens and 10 lines (jscpd).
+duplication-min-tokens = 100
+duplication-min-lines = 10
+# vulture's documented setting for CI: report only findings it is >= 80% sure of.
+dead-code-min-confidence = 80
+# A module over this many lines is listed in the report as a warning, never a
+# failure: the size at which a reviewer asks for a split (the style guide's
+# module-length review trigger).
+module-lines-warning = 800
+# Design checks (scripts/code_metrics_design.py), diff-only like the comment and
+# literal checks. A1 takes its package units (root packages, layers and
+# independent modules) from these import-linter contracts.
+import-contracts = ".importlinter"
+# A10 compares against the values of the enums defined here; A12 counts the
+# implementations of a new ABC or Protocol here.
+vocabulary-roots = ["src"]
+# A9: a function returning a tuple of more elements than this fails; past two,
+# positions stop naming themselves (the review rule's NamedTuple/dataclass line).
+tuple-return-max-elements = 2
+
+[tool.hyperloom.code_metrics.thresholds]
+# Twice McCabe's 10 (the style guide's review trigger): at 20 a function has
+# more paths than a reviewer can hold while reading it, so an explanation in the
+# PR no longer makes it reviewable. Same number and the same two cases (added,
+# or raised) as the style guide's "Complexity ceiling".
+cyclomatic-complexity = 20
+# Twice SonarSource's S3776 default of 15, the same step as the cyclomatic
+# limit: cognitive complexity weights nesting, so a value past 30 is a function
+# a reader has to re-read rather than read.
+cognitive-complexity = 30
+# Physical lines, ``def`` through the last line, decorators excluded, comments
+# and docstrings included: a function no longer fits one screen past 80, and
+# most of this tree's functions stay well under (the review trigger is ~60).
+function-lines = 80
+# pylint R1702 default: past five nested blocks, the innermost line depends on
+# six conditions at once; extract the inner loop or invert a condition.
+nested-blocks = 5
+# pylint R0913 default: past five, a call site no longer reads as a sentence and the
+# values travel together anyway -- pass the object they come from, or name them in a
+# dataclass. ``self``/``cls`` and ``*args``/``**kwargs`` do not count; keyword-only
+# parameters do.
+function-args = 5
+# Fails above 1200 physical lines: half again the review trigger of 800, the
+# size at which a module almost always holds more than one job.
+module-lines = 1200
+# Any clone (see duplication-min-*) counts; the value is a file's duplicated lines.
+duplicated-lines = 0
+# Any vulture finding at dead-code-min-confidence counts.
+dead-code = 0
+
+# Exact versions: the script refuses to measure with any other, because each
+# release can change what a metric counts. CI installs these same pins.
+[tool.hyperloom.code_metrics.tools]
+ruff = "0.16.2"
+complexipy = "8.0.1"
+vulture = "2.16"
+jscpd = "5.4.1"
+
 # Bandit security linter. ``B101`` (assert_used) is skipped repo-wide because
 # nearly all hits are test assertions and runtime invariants.
 [tool.bandit]
 skips = ["B101"]
-# ``src/kernelforge/data`` holds shipped knowledge-base sample kernels and
-# reference drivers -- third-party illustrative code, not Hyperloom's own.
-exclude_dirs = ["*/tests/*", "*/test/*", "build", ".venv", "src/kernelforge/data"]
+# Shipped knowledge-base sample kernels and reference drivers are third-party
+# illustrative code, not Hyperloom's own.
+exclude_dirs = [
+    "*/tests/*",
+    "*/test/*",
+    "build",
+    ".venv",
+    "src/kernelforge/examples",
+    "src/kernelforge/knowledge/local_wiki/resources",
+]
 
 # Pylint: minimal defaults for local runs; CI passes ``--errors-only``.
 [tool.pylint.main]
@@ -474,10 +586,11 @@ extend-exclude = [
     "TraceLens-internal",
     "InferenceX",
     "src/hyperloom/orchestrator/knowledge/remote_recipe/_vendor/kb_store_client.py",
-    # Knowledge base / examples / serving patches, not source we own the style
-    # of. The example drivers are .py and would otherwise be reformatted.
-    "src/kernelforge/data",
-    "src/kernelforge/knowledge/remote_exp/kb_store_client.py",
+    # Local-wiki resources and example drivers are not source whose style this
+    # repository owns.
+    "src/kernelforge/examples",
+    "src/kernelforge/knowledge/local_wiki/resources",
+    "src/kernelforge/knowledge/kb_store/remote_client.py",
 ]
 
 [tool.ruff.lint]
@@ -486,21 +599,46 @@ select = ["E", "F", "W", "BLE", "RUF100"]
 # math / parsing helpers where single-letter locals are idiomatic.
 ignore = ["E501", "E741"]
 
-# Future-proofing -- uncomment once the current findings are at zero.
-# extend-select = ["B", "I", "UP", "SIM", "RUF"]
+# Principle rules held at zero: any new finding fails CI. See the style guide's
+# "Formatting and lint" section for what each family enforces and why.
+extend-select = [
+    "G",  # logging calls take %-style args, not pre-formatted strings
+    "TD001", "TD003", "TD004", "TD005", "TD006", "TD007",  # TODO hygiene (issue link required)
+    "FIX001", "FIX003", "FIX004",  # no FIXME / XXX / HACK markers (TODO stays allowed)
+    "PGH",  # no blanket `# noqa` / `# type: ignore`, no eval-like misuse
+    "RSE",  # `raise X`, not `raise X()`
+    "ERA",  # no commented-out code
+    "PIE",  # no redundant pass / range start / lambda wrappers
+    "RET",  # explicit, consistent returns
+    "DTZ",  # timezone-aware datetimes
+    "LOG",  # correct logging API use
+    "A",  # do not shadow builtins
+    "C4",  # comprehension / collection-call idioms
+]
+# Still off pending a team decision -- each rewrites hundreds of lines that the
+# open PRs touch: "I" (import sorting), "UP" (pyupgrade). "B", "SIM" and the
+# rest of "RUF" carry a backlog and belong behind a ratchet, not a hard gate.
+
+[tool.ruff.lint.flake8-builtins]
+# ``aiter`` is AMD's kernel library, imported under its own name throughout;
+# the builtin ``aiter`` (async iterator) is never used in this tree.
+ignorelist = ["aiter"]
 
 # C901 (mccabe) is the complexity trigger in the style guide's "Size and
 # complexity" table. It stays off rather than on-and-ignored: the tree carries a
 # backlog above the default max of 10, so selecting it would red the tree instead
-# of gating new code. Measure on demand -- no config edit needed:
+# of gating new code. The code-metrics gate above measures it at 20 on the files a
+# change touches. Measure on demand -- no config edit needed:
 #   ruff check --select C901 --config "lint.mccabe.max-complexity=10" src/hyperloom src/kernelforge
 # [tool.ruff.lint.mccabe]
 # max-complexity = 10
 
 [tool.ruff.lint.per-file-ignores]
 # Tests re-import inside function bodies (E402), redefine fixtures (F811), and
-# bind setup values they assert on indirectly (F841).
-"**/tests/**/*.py" = ["F811", "E402", "F841"]
+# bind setup values they assert on indirectly (F841). They build fixtures with
+# ``dict(key=...)`` (C408), and fakes mirror the keyword names of the APIs they
+# stand in for, builtins included (A002, A006).
+"**/tests/**/*.py" = ["F811", "E402", "F841", "C408", "A002", "A006"]
 # Modules whose imports sit below the module-level constants / helpers they
 # close over (cycle-safe or lazy ordering).
 "src/hyperloom/orchestrator/loop/coordinator.py" = ["E402"]
@@ -515,6 +653,29 @@ ignore = ["E501", "E741"]
 # The import sits under the comment block explaining why the attribute name is
 # shared with kernelforge.llm rather than redeclared here.
 "src/kernelforge/fusion/llm_failure.py" = ["E402"]
+# Sphinx reads the module-level name ``copyright``.
+"docs/conf.py" = ["A001"]
+# Keyword names that mirror a stdlib signature callers already use:
+# ``subprocess.run(input=...)`` and ``BaseHTTPRequestHandler.log_message(format, ...)``.
+# Renaming them would break keyword callers / the override.
+"src/hyperloom/orchestrator/actions/executors/_git.py" = ["A002"]
+"src/kernelforge/llm/git.py" = ["A002"]
+"src/hyperloom_kb/http_service.py" = ["A002"]
+# Naive local-time timestamps are part of these files' on-disk / directory-name
+# formats (persisted ``isoformat()`` strings, log-clock parsing); making them
+# timezone-aware would change what existing readers parse and compare.
+"src/kernelforge/tracker/experiment.py" = ["DTZ005"]
+"src/kernelforge/tracker/schema.py" = ["DTZ005"]
+"src/kernelforge/tracker/usage_ledger.py" = ["DTZ005"]
+"src/hyperloom/orchestrator/actions/executors/bypass_report.py" = ["DTZ005"]
+"src/hyperloom/orchestrator/actions/executors/baseline.py" = ["DTZ001"]
+"src/hyperloom/orchestrator/rehearsal/scenario.py" = ["DTZ001"]
+# These call the root logger directly; a root-level call configures logging on
+# first use when nothing else has, so moving them to a module logger changes
+# what an unconfigured process prints.
+"src/hyperloom/inference_optimizer/cli/model_gate.py" = ["LOG015"]
+"src/hyperloom/inference_optimizer/model_config_utils.py" = ["LOG015"]
+"src/hyperloom/orchestrator/actions/executors/_geak_sweep.py" = ["LOG015"]
 
 # Markdown formatting in Ruff is still preview/experimental; keep ``ruff format``
 # scoped to Python so CI ``ruff format --check`` does not rewrite docs/skills.

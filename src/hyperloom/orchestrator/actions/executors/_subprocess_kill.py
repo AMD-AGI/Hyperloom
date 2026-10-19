@@ -279,8 +279,19 @@ _WARM_REUSE_PROBE_AFTER_SEC: float = 30.0
 
 
 def resolve_benchmark_timeouts(env: Mapping[str, str] | None = None) -> tuple[float, float]:
-    """Resolve the invocation's silence and hard caps, rejecting invalid overrides."""
+    """Resolve the invocation's silence and hard caps, rejecting invalid overrides.
+
+    An MLPerf agentic run works through a fixed trajectory count rather than a
+    fixed window, so its default hard cap is sized to that count; the stock
+    default reaped a healthy 150-trajectory baseline at 38%. An explicit
+    ``INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC`` still wins.
+    """
+    from hyperloom.common.agentx_workload import is_mlperf_backend, mlperf_benchmark_timeout_sec
+
     source = os.environ if env is None else env
+    hard_default = 7800.0
+    if is_mlperf_backend(source):
+        hard_default = max(hard_default, mlperf_benchmark_timeout_sec(source))
 
     def positive(name: str, default: float) -> float:
         raw = source.get(name, str(default))
@@ -294,8 +305,14 @@ def resolve_benchmark_timeouts(env: Mapping[str, str] | None = None) -> tuple[fl
 
     return (
         positive("INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC", 600.0),
-        positive("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", 7800.0),
+        positive("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", hard_default),
     )
+
+
+def sync_agentx_phase_wait(envs: dict[str, Any], timeout_sec: float) -> None:
+    """Move an exported ``AGENTX_PHASE_WAIT_TIMEOUT_S`` to the cap; the client accepts only an unsigned integer."""
+    if "AGENTX_PHASE_WAIT_TIMEOUT_S" in envs:
+        envs["AGENTX_PHASE_WAIT_TIMEOUT_S"] = str(math.ceil(timeout_sec))
 
 
 class _StreamCapture:
@@ -640,6 +657,15 @@ def _resolve_scan_logs(server_log_path: str) -> list[str]:
             text = str(name)
             if text not in out and name.exists():
                 out.append(text)
+    # Magpie writes its stderr into the run directory it creates under the round's (``benchmark_*/``), which is where
+    # the eval-start marker lands. Reached only through a nested ``server.log``, that stderr went unread whenever the
+    # engine logged to the round's own ``server.log`` (``SERVER_LOG``), and the accuracy eval was folded into the
+    # measured phase.
+    try:
+        nested_stderr = sorted(primary.parent.glob(f"benchmark_*/{_EVAL_LOG_NAME}"))
+    except OSError:
+        nested_stderr = []
+    out.extend(text for text in map(str, nested_stderr) if text not in out)
     return out
 
 
@@ -833,6 +859,45 @@ def _build_kv_recorder(server_log_path: str | None, env: dict[str, str] | None) 
         return None
 
 
+class _RecorderFanout:
+    """Drives this round's recorders from the watchdog's single ``note_phase`` / ``tick`` / ``close`` calls.
+
+    Each call is isolated: one recorder raising must not starve the others of their phase marks or their ``close``.
+    """
+
+    def __init__(self, recorders: list[Any]) -> None:
+        self._recorders = recorders
+
+    def _each(self, method: str, *args: Any, **kwargs: Any) -> None:
+        for recorder in self._recorders:
+            try:
+                getattr(recorder, method)(*args, **kwargs)
+            except Exception:
+                log.warning("round recorder %s.%s failed", type(recorder).__name__, method, exc_info=True)
+
+    def note_phase(self, phase: str, mono: float) -> None:
+        self._each("note_phase", phase, mono)
+
+    def tick(self, mono: float) -> None:
+        self._each("tick", mono)
+
+    def close(self, *, aborted: bool = False) -> None:
+        self._each("close", aborted=aborted)
+
+
+def _build_round_recorders(server_log_path: str | None, env: dict[str, str] | None) -> _RecorderFanout:
+    """KV metrics and measured-phase GPU power for this round, behind one recorder surface."""
+    from ._gpu_power import build_gpu_power_recorder
+
+    return _RecorderFanout(
+        [
+            recorder
+            for recorder in (_build_kv_recorder(server_log_path, env), build_gpu_power_recorder(server_log_path, env))
+            if recorder is not None
+        ]
+    )
+
+
 def _run_relative_path(workspace: Path) -> str:
     """Path of this round's workspace below ``runs/``, which is what the session breakdown keys rows by."""
     parts = workspace.parts
@@ -888,7 +953,7 @@ def run_with_session_kill(
                     server_already_ready=server_already_ready,
                     session_deadline_sec=session_deadline_sec,
                     cancel_scope=cancel_scope,
-                    kv_recorder=_build_kv_recorder(server_log_path, child_env),
+                    recorders=_build_round_recorders(server_log_path, child_env),
                 )
             except subprocess.TimeoutExpired as exc:
                 kill_my_spawned_server(proc)
@@ -997,7 +1062,7 @@ def _communicate_with_watchdog(
     server_already_ready: bool = False,
     session_deadline_sec: float | None = None,
     cancel_scope: CancelScope | None = None,
-    kv_recorder: Any = None,
+    recorders: _RecorderFanout,
     started_at: float | None = None,
     scan_offsets: dict[str, int] | None = None,
 ) -> tuple[str | bytes, str | bytes]:
@@ -1015,8 +1080,8 @@ def _communicate_with_watchdog(
     ready_at: float | None = None
     last_activity_at: float | None = None
     completed = False
-    if kv_recorder is not None and server_already_ready:
-        kv_recorder.note_phase("measured", start)
+    if server_already_ready:
+        recorders.note_phase("measured", start)
     if server_log_path and server_already_ready:
         stamp_server_ready(server_log_path, 0.0)
     try:
@@ -1039,25 +1104,23 @@ def _communicate_with_watchdog(
                 if scan.saw_ready and ready_at is None:
                     ready_at = last_activity_at = now
                     stamp_server_ready(server_log_path, elapsed)
-                    if kv_recorder is not None:
-                        kv_recorder.note_phase("measured", now)
+                    recorders.note_phase("measured", now)
                 if scan.grew:
                     last_activity_at = now
-                if kv_recorder is not None:
-                    if scan.saw_warmup_begin:
-                        kv_recorder.note_phase("warmup", now)
-                    if scan.saw_measured_begin:
-                        kv_recorder.note_phase("measured", now)
-                    if scan.saw_eval_start:
-                        kv_recorder.note_phase("eval", now)
+                if scan.saw_warmup_begin:
+                    recorders.note_phase("warmup", now)
+                if scan.saw_measured_begin:
+                    recorders.note_phase("measured", now)
+                if scan.saw_eval_start:
+                    recorders.note_phase("eval", now)
                 if capture is not None and (scan.saw_progress or scan.child_spoke):
                     capture.note_output()
             if capture is not None and capture.last_activity_at is not None:
                 last_activity_at = max(last_activity_at or start, capture.last_activity_at)
             # This telemetry-only guess never arms the silence gate.
             warm_reuse_probe = server_log_path and not offsets and elapsed >= _WARM_REUSE_PROBE_AFTER_SEC
-            if kv_recorder is not None and (ready_at is not None or server_already_ready or warm_reuse_probe):
-                kv_recorder.tick(now)
+            if ready_at is not None or server_already_ready or warm_reuse_probe:
+                recorders.tick(now)
             silence_remaining = None
             if ready_at is not None and silence_timeout_sec is not None:
                 silence_remaining = silence_timeout_sec - (now - last_activity_at)
@@ -1081,8 +1144,7 @@ def _communicate_with_watchdog(
             except subprocess.TimeoutExpired:
                 continue
     finally:
-        if kv_recorder is not None:
-            kv_recorder.close(aborted=not completed)
+        recorders.close(aborted=not completed)
 
 
 __all__ = [
@@ -1107,4 +1169,5 @@ __all__ = [
     "session_deadline_to_remaining_sec",
     "session_remaining_to_deadline_sec",
     "stamp_server_ready",
+    "sync_agentx_phase_wait",
 ]

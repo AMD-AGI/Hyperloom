@@ -222,24 +222,24 @@ class TestLiftRefusesAndSaysWhy:
 
     def test_an_over_budget_winner_does_not_reach_current_best(self, tmp_path):
         coord = self._coord(tmp_path, 250.0)
-        assert coord._lift_to_current_best("explore", 1200.0, self._winner(e2el_mean_ms=1211.0)) is False
+        assert coord.writeback.lift_to_current_best("explore", 1200.0, self._winner(e2el_mean_ms=1211.0)) is False
         assert not coord.shared_state.current_best
         assert not coord.shared_state.optimization_stack
 
     def test_an_untimed_winner_is_refused(self, tmp_path):
         coord = self._coord(tmp_path, 250.0)
-        assert coord._lift_to_current_best("integrate_patch", 1200.0, self._winner()) is False
+        assert coord.writeback.lift_to_current_best("integrate_patch", 1200.0, self._winner()) is False
         assert not coord.shared_state.current_best
 
     def test_an_in_budget_winner_is_promoted(self, tmp_path):
         coord = self._coord(tmp_path, 250.0)
-        assert coord._lift_to_current_best("explore", 1200.0, self._winner(e2el_mean_ms=183.0)) is True
+        assert coord.writeback.lift_to_current_best("explore", 1200.0, self._winner(e2el_mean_ms=183.0)) is True
         assert coord.shared_state.current_best
 
     def test_with_no_budget_an_untimed_winner_still_promotes(self, tmp_path):
         """Off by default: KEEP behaviour is exactly as it was when unset."""
         coord = self._coord(tmp_path, 0.0)
-        assert coord._lift_to_current_best("explore", 1200.0, self._winner()) is True
+        assert coord.writeback.lift_to_current_best("explore", 1200.0, self._winner()) is True
 
 
 class TestIntegrateDecisionsHonourTheVeto:

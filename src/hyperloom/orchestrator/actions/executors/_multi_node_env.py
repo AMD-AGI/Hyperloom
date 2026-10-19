@@ -248,7 +248,7 @@ def magpie_remote_env() -> dict[str, str]:
             "Magpie will try to launch a local server and likely fail. "
             "Multi-node needs the platform's cluster hand-off: check "
             "HYPERLOOM_MN_EXT_SERVICE_URL (or _HEAD_IP for rayjob) is set in the "
-            "environment `python -m hyperloom.inference_optimizer.cli optimize` runs in.",
+            "environment `python -m hyperloom optimize` runs in.",
             os.environ.get("INFERENCE_OPTIMIZER_NODES"),
             _state_path(),
         )

@@ -172,7 +172,7 @@ def test_build_client_wires_the_anthropic_backend(monkeypatch: pytest.MonkeyPatc
 
     assert isinstance(client, AnthropicClient)
     assert client.timeout_s == REPORT_HTTP_TIMEOUT_SEC
-    assert client.model == "claude-opus-5"
+    assert client.model == "claude-opus-5-5"
     assert client.max_output_tokens == 1024
     assert built["openai"] == []
 

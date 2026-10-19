@@ -14,8 +14,9 @@
 # Then run `aiperf profile` (AgentX weka-trace scenario) as the client, and map
 # its export into the InferenceX result schema. The client owns profiling: InferenceX's
 # benchmark_serving.py self-triggers /start_profile, and aiperf does not, so
-# when PROFILE=1 this script self-brackets a /start_profile..stop_profile window
-# after AIPerf reports the measured phase through its progress API.
+# when PROFILE=1 this script calls /start_profile after AIPerf reports the
+# measured phase through its progress API, and ends the capture as described in
+# the PROFILE branch below.
 #
 # Inputs (from Magpie env): MODEL, TP, PORT, MAX_MODEL_LEN, CONC, RESULT_DIR,
 #   RESULT_FILENAME, PROFILE, EXTRA_VLLM_ARGS, FRAMEWORK, GPU_TYPE/RUNNER_TYPE,
@@ -47,10 +48,11 @@
 #   AGENTX_TRACE_FIRST_FILE_TIMEOUT_S (separate, shorter bound for the case
 #     where NO trace file appears at all -- a failed capture, not a slow one;
 #     default 900, clamped to AGENTX_TRACE_FLUSH_TIMEOUT_S. The first rank file
-#     landed at t+350s on that same GLM-5.3 capture),
+#     landed at t+350s on that same GLM-5.3 capture. A server-bounded capture
+#     whose traces are not complete this long after /start_profile, with the
+#     measured phase still running, is stopped once with /stop_profile and
+#     then flushed like any other),
 #   AGENTX_KEEP_SERVER, AGENTX_PROFILE_WINDOW_S,
-#   AGENTX_PROFILE_WARMUP_S (deprecated and ignored; phase-gated profiling
-#     replaced the fixed warmup delay),
 #   AGENTX_SERVER_SCRIPT (override builtin name), AIPERF_BIN.
 set -euo pipefail
 
@@ -113,6 +115,14 @@ else
     log "ERROR: FRAMEWORK unset and AGENTX_SERVER_SCRIPT not provided; cannot resolve the builtin server script"
     exit 2
   fi
+  # An agentic recipe ignores MAGPIE_RUN_PHASE and runs its own replay, so it
+  # never yields a server for this client to drive.
+  case "$BUILTIN" in
+    */agentic/*)
+      log "ERROR: AGENTX_SERVER_SCRIPT=${BUILTIN} is an agentic recipe, not a server launcher; pass the recipe's server args via --server-args and its env via --extra-env"
+      exit 2
+      ;;
+  esac
   if [ ! -f "${BENCH_DIR}/${BUILTIN}" ]; then
     log "ERROR: builtin server script not found: ${BENCH_DIR}/${BUILTIN}"
     exit 2
@@ -218,48 +228,6 @@ else
 
   # Fail loud if the builtin server phase did not record a pid: proceeding would
   # run a benchmark against a server we cannot reliably tear down.
-  #
-  # An agentic recipe is the exception: it ignores MAGPIE_RUN_PHASE and owns the
-  # whole lifecycle -- boot, replay, aggregate, teardown -- so it returns with
-  # the result already written and no server left to track. Replaying again here
-  # would drive a server that is already gone.
-  if [ -z "${SERVER_PID:-}" ] && [ -f "${RESULT_DIR}/${RESULT_FILENAME}.json" ]; then
-    case "$BUILTIN" in
-      */agentic/*)
-        _AG_RESULT="${RESULT_DIR}/${RESULT_FILENAME}.json"
-        log "agentic recipe ran its own replay; result at ${_AG_RESULT}"
-        # The agentic writer emits only InferenceX's NESTED leaderboard schema,
-        # but Magpie reads FLAT top-level keys, so returning as-is makes a
-        # healthy run read as 0.00 req/s. Derive the flat keys with the same
-        # map_aiperf.py the non-agentic path uses and UNION them in; existing
-        # (nested) keys always win, so the leaderboard schema is untouched.
-        _AG_PJ="$(find "$RESULT_DIR" -name 'profile_export_aiperf.json' -print -quit 2>/dev/null || true)"
-        if [ -n "$_AG_PJ" ]; then
-          _AG_FLAT="$(mktemp)"
-          if python3 "${BENCH_DIR}/map_aiperf.py" "$_AG_PJ" "$_AG_FLAT" >/dev/null 2>&1 \
-             && python3 - "$_AG_RESULT" "$_AG_FLAT" <<'PYMERGE'
-import json, os, sys
-res, flat = sys.argv[1], sys.argv[2]
-with open(res) as f: agentic = json.load(f)
-with open(flat) as f: mapped = json.load(f)
-merged = {**mapped, **agentic}
-assert all(merged[k] == agentic[k] for k in agentic)
-with open(res + ".tmp", "w") as f: json.dump(merged, f, indent=2)
-os.replace(res + ".tmp", res)
-PYMERGE
-          then
-            log "merged flat Magpie metrics into ${_AG_RESULT} (agentic schema preserved)"
-          else
-            log "WARN could not derive flat metrics; Magpie may read 0.00 req/s"
-          fi
-          rm -f "$_AG_FLAT"
-        else
-          log "WARN no profile_export_aiperf.json under ${RESULT_DIR}; Magpie may read 0.00 req/s"
-        fi
-        exit 0
-        ;;
-    esac
-  fi
   if [ -z "${SERVER_PID:-}" ]; then
     log "ERROR: builtin server phase wrote no pid to ${PIDFILE}; refusing to run (would risk a GPU leak)"
     exit 3
@@ -303,7 +271,7 @@ _model_family() {
 }
 _default_loader() {
   case "$(_model_family "$1")" in
-    dsv4*|deepseekv4*|glm52*|minimaxm3*|kimik3*)
+    dsv4*|deepseekv4*|glm52*|glm53*|minimaxm3*|kimik3*)
       printf 'semianalysis_cc_traces_weka_062126' ;;
     *)
       printf 'semianalysis_cc_traces_weka_062126_256k' ;;
@@ -610,11 +578,14 @@ AIPERF_RC=0
 if [ "${PROFILE:-0}" = "1" ]; then
   # Single-node trace capture: aiperf (a generic client) never triggers vLLM's
   # /start_profile the way InferenceX's benchmark_serving.py does, so this script
-  # self-brackets a bounded profiling window inside aiperf's measured phase.
-  # The profiler is already ENABLED on the server (builtin server phase adds the
-  # framework's --profiler-config/env when PROFILE=1); /start_profile begins
-  # recording and /stop_profile flushes the trace to torch_profiler_dir for
-  # TraceLens. Only fires under PROFILE=1, so measurement rounds pay no cost.
+  # starts the capture inside aiperf's measured phase. The profiler is already
+  # ENABLED on the server (builtin server phase adds the framework's
+  # --profiler-config/env when PROFILE=1); /start_profile begins recording. A
+  # capture with a server-side step bound (SGLang num_steps, vLLM max_iterations)
+  # stops and writes its traces on its own; any other capture is closed after
+  # AGENTX_PROFILE_WINDOW_S by /stop_profile, which flushes the trace to
+  # torch_profiler_dir for TraceLens. Only fires under PROFILE=1, so measurement
+  # rounds pay no cost.
   PWIN="${AGENTX_PROFILE_WINDOW_S:-20}"
   _require_uint AGENTX_PROFILE_WINDOW_S "$PWIN"
   : "${AGENTX_CAPTURE_ID:?AGENTX_CAPTURE_ID required for AgentX profiling}"
@@ -625,6 +596,8 @@ if [ "${PROFILE:-0}" = "1" ]; then
   TRACE_CACHE_FILE="$(dirname "$CAPTURE_STATUS_FILE")/trace-validation-cache.json"
   TRACE_FLUSH_BUDGET="${AGENTX_TRACE_FLUSH_TIMEOUT_S:-1800}"
   case "$TRACE_FLUSH_BUDGET" in "" | *[!0-9]*) TRACE_FLUSH_BUDGET=1800 ;; esac
+  TRACE_FIRST_FILE_BOUND="${AGENTX_TRACE_FIRST_FILE_TIMEOUT_S:-900}"
+  case "$TRACE_FIRST_FILE_BOUND" in "" | *[!0-9]*) TRACE_FIRST_FILE_BOUND=900 ;; esac
   rm -f "$CAPTURE_STATUS_FILE"
   PHASE_GATE_FAILURE_REASON="profiling_phase_unavailable"
   _write_profile_capture_status() {
@@ -647,9 +620,6 @@ if [ "${PROFILE:-0}" = "1" ]; then
       log "ERROR failed to write trace-capture status via ${PHASE_GATE}"
     fi
   }
-  if [ -n "${AGENTX_PROFILE_WARMUP_S:-}" ]; then
-    log "WARN AGENTX_PROFILE_WARMUP_S is ignored: profiling now starts from AIPerf's measured-phase signal"
-  fi
   # The progress API is brought up for every round further above; capture only
   # needs to know whether that succeeded, since it cannot gate a window without it.
   if [ ! -f "$PHASE_GATE" ]; then
@@ -727,8 +697,7 @@ if [ "${PROFILE:-0}" = "1" ]; then
     # /start_profile, a profiler that never armed) -- waiting out the full
     # flush budget for it buys nothing. The first rank file landed at t+350s on
     # the GLM-5.3 8-rank measurement, so the default leaves real margin.
-    _first="${AGENTX_TRACE_FIRST_FILE_TIMEOUT_S:-900}"
-    case "$_first" in "" | *[!0-9]*) _first=900 ;; esac
+    _first="$TRACE_FIRST_FILE_BOUND"
     [ "$_first" -gt "$_budget" ] && _first="$_budget"
     log "waiting for the profiler trace to finish writing (expect ${_want:-?} rank files, bound ${_budget}s, first-file bound ${_first}s)"
     _prev=""; _stable=0; _cnt=0
@@ -771,7 +740,48 @@ if [ "${PROFILE:-0}" = "1" ]; then
     log "WARN trace flush did not settle within ${_budget}s (${_cnt} file(s), $(( ${_now##* } / 1048576 )) MiB, expected ${_want} ranks). The files are very likely TRUNCATED and will fail gzip -t; raise AGENTX_TRACE_FLUSH_TIMEOUT_S. The benchmark measurement remains available, but trace capture will be marked failed."
     return 4
   }
-  log "PROFILE=1: waiting for AIPerf's measured phase before opening a ${PWIN}s profile window"
+  # The server stops a step-bounded capture itself and answers a second stop with
+  # an error (SGLang) or ignores it (vLLM), so the client posts none while the
+  # bound can still end it: the capture ends when every rank trace is complete, or
+  # fails if the measured phase ends first. Only a capture still open after
+  # TRACE_FIRST_FILE_BOUND is stopped, so a server that ignores its bound cannot
+  # keep recording into host RAM; the traces, not the stop response, decide it.
+  _wait_for_bounded_capture() {
+    local _rc=0 _stop=rejected
+    CAPTURE_RESULT=""
+    if [ -z "$(_trace_dirs)" ]; then
+      log "no profiler output directory is configured; nothing to wait for"
+      return 2
+    fi
+    log "server-bounded capture: waiting for all ${TP:-0} rank traces or the end of the measured phase (safety deadline ${TRACE_FIRST_FILE_BOUND}s)"
+    CAPTURE_RESULT="$(
+      _trace_command wait-bounded-capture --snapshot "$TRACE_SNAPSHOT" --tp "${TP:-0}" \
+        --api-url "http://127.0.0.1:${AIPERF_PROGRESS_PORT}" --phase profiling --pid "$APID" \
+        --deadline-seconds "$TRACE_FIRST_FILE_BOUND"
+    )" || _rc=$?
+    case "$_rc" in
+      0) log "bounded capture complete: ${CAPTURE_RESULT}"; return 0 ;;
+      3) log "WARN the measured phase ended before every rank trace was complete: ${CAPTURE_RESULT}" ;;
+      4)
+        TRACE_FLUSH_START_NS=$(date +%s%N)
+        TRACE_FLUSH_DEADLINE_NS=$(( TRACE_FLUSH_START_NS + TRACE_FLUSH_BUDGET * 1000000000 ))
+        curl -sf -X POST "http://localhost:${PORT}/stop_profile" >/dev/null 2>&1 && _stop=accepted
+        log "WARN the capture bound did not end the capture within ${TRACE_FIRST_FILE_BOUND}s; stop_profile ${_stop}: ${CAPTURE_RESULT}"
+        CAPTURE_RESULT="${CAPTURE_RESULT%\}}, \"stop_profile\": \"${_stop}\"}"
+        _wait_for_trace_flush
+        return
+        ;;
+      *)
+        CAPTURE_RESULT='{"stop_reason":"capture_gate_failed"}'
+        log "WARN bounded capture gate failed (rc=${_rc})"
+        return 1
+        ;;
+    esac
+    _now=$(_trace_stat) || return 1
+    [ "${_now%% *}" -eq 0 ] && return 3
+    return 5
+  }
+  log "PROFILE=1: waiting for AIPerf's measured phase before starting the profile capture"
   run_aiperf & APID=$!
   PHASE_START_NS=""
   if [ -n "$AIPERF_PROGRESS_PORT" ] && PHASE_START_NS="$(
@@ -789,43 +799,41 @@ if [ "${PROFILE:-0}" = "1" ]; then
     # until the cgroup OOM-killer takes it out mid-run. Forward the body when
     # there is one; vLLM ignores it (its bounds ride on --profiler-config.*).
     _pbody="${PROFILE_EXTRA_BODY:-}"
-    AUTO_BOUNDED=0
     if [ -n "$_pbody" ] && [ "$_pbody" != "{}" ]; then
       _pstart=(-H "Content-Type: application/json" -d "$_pbody")
       log "start_profile: forwarding capture bounds ${_pbody}"
-      if python3 "$PHASE_GATE" is-auto-bounded --framework "${_ka_target:-${FRAMEWORK:-}}" --body "$_pbody"; then
-        AUTO_BOUNDED=1
-      fi
     else
       _pstart=()
+    fi
+    AUTO_BOUNDED=0
+    if python3 "$PHASE_GATE" is-auto-bounded --framework "${_ka_target:-${FRAMEWORK:-}}" \
+         --body "$_pbody" --vllm-args="${EXTRA_VLLM_ARGS:-}"; then
+      AUTO_BOUNDED=1
     fi
     TRACE_SNAPSHOT="$(_trace_command snapshot-traces)" || TRACE_SNAPSHOT=""
     if curl -sf -X POST "${_pstart[@]+"${_pstart[@]}"}" \
          "http://localhost:${PORT}/start_profile" >/dev/null 2>&1; then
       log "start_profile OK"
-      if CAPTURE_RESULT="$(
-        python3 "$PHASE_GATE" wait-capture-stop \
-          --api-url "http://127.0.0.1:${AIPERF_PROGRESS_PORT}" \
-          --phase profiling \
-          --pid "$APID" \
-          --max-window-seconds "$PWIN"
-      )"; then
-        log "profile capture stop decision: ${CAPTURE_RESULT}"
-      else
-        CAPTURE_RESULT='{"stop_reason":"capture_gate_failed"}'
-        log "WARN capture stop gate failed; stopping the profiler immediately"
-      fi
-      STOP_OK=0
+      STOP_OK=1
       FLUSH_RC=0
-      # Auto-stop validation and any subsequent flush share one completion budget.
-      TRACE_FLUSH_START_NS=$(date +%s%N)
-      TRACE_FLUSH_DEADLINE_NS=$(( TRACE_FLUSH_START_NS + TRACE_FLUSH_BUDGET * 1000000000 ))
-      # Native num_steps may already have stopped SGLang. Never POST a redundant
-      # stop unless current complete traces cannot prove that auto-stop finished.
-      if [ "$AUTO_BOUNDED" -eq 1 ] && _trace_complete; then
-        STOP_OK=1
-        log "profile auto-completed: current GPU traces cover all expected ranks; skipping stop_profile"
+      if [ "$AUTO_BOUNDED" -eq 1 ]; then
+        _wait_for_bounded_capture || FLUSH_RC=$?
       else
+        if CAPTURE_RESULT="$(
+          python3 "$PHASE_GATE" wait-capture-stop \
+            --api-url "http://127.0.0.1:${AIPERF_PROGRESS_PORT}" \
+            --phase profiling \
+            --pid "$APID" \
+            --max-window-seconds "$PWIN"
+        )"; then
+          log "profile capture stop decision: ${CAPTURE_RESULT}"
+        else
+          CAPTURE_RESULT='{"stop_reason":"capture_gate_failed"}'
+          log "WARN capture stop gate failed; stopping the profiler immediately"
+        fi
+        STOP_OK=0
+        TRACE_FLUSH_START_NS=$(date +%s%N)
+        TRACE_FLUSH_DEADLINE_NS=$(( TRACE_FLUSH_START_NS + TRACE_FLUSH_BUDGET * 1000000000 ))
         if curl -sf -X POST "http://localhost:${PORT}/stop_profile" >/dev/null 2>&1; then
           STOP_OK=1
           log "stop_profile OK"
@@ -843,6 +851,7 @@ if [ "${PROFILE:-0}" = "1" ]; then
           2) FLUSH_REASON="profiler_output_unconfigured" ;;
           3) FLUSH_REASON="trace_files_missing" ;;
           4) FLUSH_REASON="trace_flush_timeout" ;;
+          5) FLUSH_REASON="bounded_capture_incomplete" ;;
           *) FLUSH_REASON="trace_flush_failed" ;;
         esac
         _write_profile_capture_status "failed" "$FLUSH_REASON" "$PHASE_START_NS" "$CAPTURE_RESULT"

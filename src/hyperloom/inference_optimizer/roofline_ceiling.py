@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.checkpoint_quant import WeightDeclaration, weight_declarations
 from hyperloom.inference_optimizer.model_config_utils import _merge_config_scopes
 
 log = logging.getLogger(__name__)
@@ -132,38 +133,28 @@ def _resolve_quant_config_weight_bytes(quant_cfg: Any) -> float:
             return 0.0
         return b / 8.0 if b > 0 else 0.0
 
-    def _spec_bytes(scope: Any) -> float:
-        """Weight bytes-per-element declared by one quant scope, ``0.0`` if none."""
-        if not isinstance(scope, dict):
-            return 0.0
-        spec = scope.get("weight") or scope.get("weights")
-        if not isinstance(spec, dict):
-            return 0.0
-        tag = str(spec.get("dtype") or spec.get("type") or "").strip().lower()
+    def _declared_bytes(decl: WeightDeclaration) -> float:
+        """Weight bytes-per-element one nested declaration names, ``0.0`` if none."""
         # Both tables, exactly as the flat ``quant_method`` path above does.
-        if tag in _DTYPE_BYTES:
-            return _DTYPE_BYTES[tag]
-        if tag in _QUANT_WEIGHT_BYTES:
-            return _QUANT_WEIGHT_BYTES[tag]
-        return _bits_to_bytes(spec.get("num_bits") or spec.get("bits"))
+        if decl.dtype in _DTYPE_BYTES:
+            return _DTYPE_BYTES[decl.dtype]
+        if decl.dtype in _QUANT_WEIGHT_BYTES:
+            return _QUANT_WEIGHT_BYTES[decl.dtype]
+        return decl.bits / 8.0
 
-    # Wrapper toolkits nest the precision on a weight spec: Quark under global_quant_config, compressed-tensors under
-    # config_groups.*.weights.
-    for scope in (quant_cfg.get("global_quant_config"), quant_cfg):
-        whole = _spec_bytes(scope)
-        if whole > 0:
-            return whole
+    whole, per_layer = weight_declarations(quant_cfg)
+    for decl in whole:
+        by = _declared_bytes(decl)
+        if by > 0:
+            return by
 
     # The per-group containers are different: one entry per layer pattern, and they need not agree -- a Quark MoE
     # checkpoint routinely stores the routed experts at fp4 and the attention projections at fp8.
     tallies: dict[float, int] = {}
-    for container in (quant_cfg.get("layer_quant_config"), quant_cfg.get("config_groups")):
-        if not isinstance(container, dict):
-            continue
-        for scope in container.values():
-            by = _spec_bytes(scope)
-            if by > 0:
-                tallies[by] = tallies.get(by, 0) + 1
+    for decl in per_layer:
+        by = _declared_bytes(decl)
+        if by > 0:
+            tallies[by] = tallies.get(by, 0) + 1
     if tallies:
         return max(tallies.items(), key=lambda kv: (kv[1], kv[0]))[0]
     return _bits_to_bytes(quant_cfg.get("bits") or quant_cfg.get("w_bit"))

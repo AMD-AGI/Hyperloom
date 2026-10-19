@@ -854,6 +854,148 @@ def _summarize_shape_results(shape_results: list[dict[str, Any]]) -> dict[str, A
     }
 
 
+def _invoke_tuner(
+    *,
+    script: Path,
+    base_args: list[str],
+    input_csv: Path,
+    tuned_csv: Path,
+    work_dir: Path,
+    aiter_root: Path | None,
+    ctx: TuneContext,
+    tuner_name: str,
+) -> tuple[int, str, str, Path | None]:
+    """Run the aiter tuner, per shape under isolation or once for the whole file.
+
+    Either way ``--timeout`` is injected so a faulting candidate is isolated by
+    aiter instead of hanging the run.
+    """
+    if not _tr.is_isolation_enabled():
+        cmd = _tr.with_task_timeout(["python3", str(script), "-i", str(input_csv), "-o", str(tuned_csv), *base_args])
+        rc, stdout, stderr = run_subprocess(
+            cmd, cwd=aiter_root, timeout_s=ctx.timeout_s, log_file=work_dir / "tune.log"
+        )
+        return rc, stdout, stderr, None
+    # Per-shape process isolation + provenance-keyed fault blocklist.
+    blocklist = _tr.FaultBlocklist(
+        getattr(ctx, "faulted_blocklist_path", None),
+        {
+            "gpu_type": ctx.gpu_type,
+            "quant_type": getattr(ctx, "quant_type", ""),
+            "tp": getattr(ctx, "tp", 1),
+            "tuner": tuner_name,
+        },
+    )
+    return _tr.run_isolated(
+        script=str(script),
+        base_args=base_args,
+        input_csv=input_csv,
+        tuned_stem=tuned_csv.stem,
+        work_dir=work_dir,
+        aiter_root=aiter_root,
+        outer_timeout_s=ctx.timeout_s,
+        task_timeout_s=_tr.DEFAULT_TASK_TIMEOUT_S,
+        gpu_ids=getattr(ctx, "gpu_ids", "") or "",
+        blocklist=blocklist,
+    )
+
+
+def _splitk_support_fn(script_key: str, ctx: TuneContext):
+    """The per-shape production split-K limit for this op, or None to use the static cap.
+
+    The trial dispatch keeps splitK above ``FORGE_MAX_SPLITK`` where the kernel
+    actually supports it and tightens below it where it does not. An op with no
+    registered production callable falls back to the static cap -- validating
+    against the wrong kernel is worse than not validating.
+    """
+    if os.environ.get("FORGE_SPLITK_TRIAL", "1") == "0":
+        return None
+    try:
+        from ..aiter_splitk_validate import make_support_fn
+
+        # Pin the in-process trial dispatch to the tuner's assigned card; on a shared node the assigned GPU
+        # may not be device 0.
+        return make_support_fn(op=script_key, gpu_ids=getattr(ctx, "gpu_ids", "") or "")
+    except Exception:  # noqa: BLE001 — fall back to the static cap
+        return None
+
+
+def _apply_splitk_cap(artifact: str, profile_csv: Path, *, script_key: str, ctx: TuneContext) -> bool:
+    """Hold the deployed table to split-K values production can serve; say whether it changed.
+
+    The aiter *tuner* can pick a splitK the production dispatch cannot run
+    (serving it raises "This GEMM is not supported!" and crashes engine init),
+    and some (op, libtype) pairs reach a wrapper that takes no splitK at all,
+    which deploys a config benchmarked with split-K and serves it without. Run
+    unconditionally rather than only when this tuner asked for ``--splitK``: the
+    cap also enforces that forwarding contract, and a caller-supplied CSV can
+    carry splitK>0 on its own. Rows at splitK=0 take a fast path inside the cap,
+    so a table without split-K pays nothing.
+    """
+    n_capped, force_candidate = _cap_splitk_to_serve_safe(
+        Path(artifact),
+        profile_csv,
+        int(os.environ.get("FORGE_MAX_SPLITK", "2")),
+        support_fn=_splitk_support_fn(script_key, ctx),
+        forwarding_libtypes=_SPLITK_FORWARDING_LIBTYPES.get(script_key, frozenset()),
+    )
+    if n_capped:
+        log.info("serve-safe splitK cap: rewrote/dropped %d row(s) beyond production support", n_capped)
+    return force_candidate
+
+
+def _shape_results_from_compare_report(tuner_name: str, run_start_time: float, work_dir: Path) -> list[dict]:
+    """Per-shape rows from the compare table aiter writes to disk instead of stdout.
+
+    aiter writes the ``--compare`` table to ``/tmp/aiter_compare/`` when there
+    are more than 30 shapes; stdout then carries only a "Successfully tuned N
+    shapes" summary.
+    """
+    compare_report = _find_latest_compare_report(tuner_name, run_start_time)
+    if compare_report is None or not compare_report.is_file():
+        log.info("no compare report for %s under /tmp/aiter_compare after run start", tuner_name)
+        return []
+    log.info("compare report found for %s: %s", tuner_name, compare_report)
+    dest = work_dir / f"compare_{tuner_name}.txt"
+    try:
+        shutil.copy2(compare_report, dest)
+    except OSError as exc:
+        log.warning(
+            "failed to archive compare report for %s (%s -> %s): %s",
+            tuner_name,
+            compare_report,
+            dest,
+            exc,
+        )
+    else:
+        log.info("archived compare report for %s to %s", tuner_name, dest)
+    try:
+        return _parse_tuner_stdout(compare_report.read_text(encoding="utf-8", errors="replace"), "")
+    except OSError:
+        return []
+
+
+def _shape_results_for_run(
+    stdout: str,
+    stderr: str,
+    *,
+    tuner_name: str,
+    run_start_time: float,
+    work_dir: Path,
+) -> list[dict]:
+    """What this run tuned per shape, from stdout or from whichever artifact still says.
+
+    Some aiter versions print only a "Successfully tuned shapes" summary (no
+    per-shape Pre/Post table) while still writing a valid tuned candidate CSV.
+    """
+    shape_results = _parse_tuner_stdout(stdout, stderr)
+    if not shape_results:
+        shape_results = _shape_results_from_compare_report(tuner_name, run_start_time, work_dir)
+    if not shape_results:
+        shape_results = _parse_candidate_csv(work_dir / f"candidate_{tuner_name}.csv")
+    return shape_results
+
+
 def run_aiter_dense_tuner(
     *,
     tuner_name: str,
@@ -929,40 +1071,16 @@ def run_aiter_dense_tuner(
 
     run_start_time = time.time()
 
-    iso_candidate: Path | None = None
-    if _tr.is_isolation_enabled():
-        # Per-shape process isolation + provenance-keyed fault blocklist.
-        blocklist = _tr.FaultBlocklist(
-            getattr(ctx, "faulted_blocklist_path", None),
-            {
-                "gpu_type": ctx.gpu_type,
-                "quant_type": getattr(ctx, "quant_type", ""),
-                "tp": getattr(ctx, "tp", 1),
-                "tuner": tuner_name,
-            },
-        )
-        rc, stdout, stderr, iso_candidate = _tr.run_isolated(
-            script=str(script),
-            base_args=base_args,
-            input_csv=input_csv,
-            tuned_stem=tuned_csv.stem,
-            work_dir=work_dir,
-            aiter_root=aiter_root,
-            outer_timeout_s=ctx.timeout_s,
-            task_timeout_s=_tr.DEFAULT_TASK_TIMEOUT_S,
-            gpu_ids=getattr(ctx, "gpu_ids", "") or "",
-            blocklist=blocklist,
-        )
-    else:
-        # Default single invocation, now with --timeout so a faulting candidate is isolated by aiter instead of
-        # hanging the whole run.
-        cmd = _tr.with_task_timeout(["python3", str(script), "-i", str(input_csv), "-o", str(tuned_csv), *base_args])
-        rc, stdout, stderr = run_subprocess(
-            cmd,
-            cwd=aiter_root,
-            timeout_s=ctx.timeout_s,
-            log_file=work_dir / "tune.log",
-        )
+    rc, stdout, stderr, iso_candidate = _invoke_tuner(
+        script=script,
+        base_args=base_args,
+        input_csv=input_csv,
+        tuned_csv=tuned_csv,
+        work_dir=work_dir,
+        aiter_root=aiter_root,
+        ctx=ctx,
+        tuner_name=tuner_name,
+    )
 
     if rc == 124:
         return TuneResult(
@@ -989,80 +1107,15 @@ def run_aiter_dense_tuner(
         shutil.copy2(candidate, dest)
         artifact = str(dest)
 
-    # The aiter *tuner* can pick a splitK the production dispatch cannot run (serving it raises "This GEMM is not
-    # supported!" and crashes engine init), and some (op, libtype) pairs reach a wrapper that takes no splitK at all,
-    # which deploys a config benchmarked with split-K and serves it without. Run unconditionally rather than only when
-    # this tuner asked for --splitK: the cap also enforces that forwarding contract, and a caller-supplied CSV can
-    # carry splitK>0 on its own. Rows at splitK=0 take a fast path inside the cap, so a table without split-K pays
-    # nothing.
-    max_splitk = int(os.environ.get("FORGE_MAX_SPLITK", "2"))
-    # Prefer the REAL per-shape production split-K limit (trial-dispatch) over the static FORGE_MAX_SPLITK: it
-    # keeps splitK>cap where the kernel actually supports it and tightens below cap where it does not. Falls back to
-    # the static cap for any op the trial has no registered production callable for -- validating against the wrong
-    # kernel is worse than not validating.
-    support_fn = None
-    if os.environ.get("FORGE_SPLITK_TRIAL", "1") != "0":
-        try:
-            from ..aiter_splitk_validate import make_support_fn
+    force_candidate = _apply_splitk_cap(artifact, profile_csv, script_key=script_key, ctx=ctx)
 
-            # Pin the in-process trial dispatch to the tuner's assigned card; on a shared node the assigned GPU
-            # may not be device 0.
-            support_fn = make_support_fn(op=script_key, gpu_ids=getattr(ctx, "gpu_ids", "") or "")
-        except Exception:  # noqa: BLE001 — fall back to the static cap
-            support_fn = None
-    n_capped, force_candidate = _cap_splitk_to_serve_safe(
-        Path(artifact),
-        profile_csv,
-        max_splitk,
-        support_fn=support_fn,
-        forwarding_libtypes=_SPLITK_FORWARDING_LIBTYPES.get(script_key, frozenset()),
+    shape_results = _shape_results_for_run(
+        stdout,
+        stderr,
+        tuner_name=tuner_name,
+        run_start_time=run_start_time,
+        work_dir=work_dir,
     )
-    if n_capped:
-        log.info(
-            "serve-safe splitK cap: rewrote/dropped %d row(s) beyond production support",
-            n_capped,
-        )
-
-    shape_results = _parse_tuner_stdout(stdout, stderr)
-    if not shape_results:
-        # aiter writes the --compare table to /tmp/aiter_compare/ when >30 shapes (stdout carries only a "Successfully
-        # tuned N shapes" summary).
-        compare_report = _find_latest_compare_report(tuner_name, run_start_time)
-        if compare_report is not None and compare_report.is_file():
-            log.info(
-                "compare report found for %s: %s",
-                tuner_name,
-                compare_report,
-            )
-            dest = work_dir / f"compare_{tuner_name}.txt"
-            try:
-                shutil.copy2(compare_report, dest)
-            except OSError as exc:
-                log.warning(
-                    "failed to archive compare report for %s (%s -> %s): %s",
-                    tuner_name,
-                    compare_report,
-                    dest,
-                    exc,
-                )
-            else:
-                log.info("archived compare report for %s to %s", tuner_name, dest)
-            try:
-                shape_results = _parse_tuner_stdout(compare_report.read_text(encoding="utf-8", errors="replace"), "")
-            except OSError:
-                shape_results = []
-        else:
-            log.info(
-                "no compare report for %s under /tmp/aiter_compare after run start",
-                tuner_name,
-            )
-    if not shape_results:
-        # Some aiter versions print only a "Successfully tuned shapes" summary (no per-shape Pre/Post table) while
-        # still writing a valid tuned candidate CSV.
-        candidate_csv_path = work_dir / f"candidate_{tuner_name}.csv"
-        fallback_rows = _parse_candidate_csv(candidate_csv_path)
-        if fallback_rows:
-            shape_results = fallback_rows
 
     # improved=False carries two different meanings: "compared against a baseline and did not win", and "never had a
     # baseline to compare against".
@@ -1200,12 +1253,111 @@ def _filter_unimproved_rows(
     return dropped, len(kept_lines) - 1
 
 
+@dataclass(frozen=True)
+class _DeployedColumns:
+    """Where the deployed CSV keeps the columns the splitK cap reads."""
+
+    m: int
+    n: int
+    k: int
+    splitk: int
+    libtype: int | None
+
+    def shape_key(self, row: list[str]) -> tuple[str, str, str]:
+        """The ``(M, N, K)`` this row describes, as the profile index is keyed."""
+        return row[self.m], row[self.n], row[self.k]
+
+
+def _deployed_columns(header: list[str]) -> _DeployedColumns | None:
+    """Locate the columns the cap reads, or None when the header lacks one.
+
+    Case-insensitive: were the deployed header's case ever to stop matching
+    exactly, the cap would return early and pass unsafe splitK rows through
+    unchanged -> serve crash.
+    """
+    index = {str(name).strip().lower(): position for position, name in enumerate(header)}
+    try:
+        return _DeployedColumns(index["m"], index["n"], index["k"], index["splitk"], index.get("libtype"))
+    except KeyError:
+        return None
+
+
+def _serve_safe_candidates(
+    profile_csv: Path,
+    header: list[str],
+) -> dict[tuple[str, str, str], list[tuple[float, int, list[str]]]]:
+    """Index the profile's usable candidates per shape, as ``(us, splitK, row)``.
+
+    The splitK cap is applied per shape at selection rather than here, so
+    ``support_fn`` can keep a splitK above the static ceiling where the kernel
+    supports it.
+    """
+    by_shape: dict[tuple[str, str, str], list[tuple[float, int, list[str]]]] = defaultdict(list)
+    schema_ok = True
+    try:
+        with profile_csv.open() as handle:
+            for record in csv.DictReader(handle):
+                # A candidate must carry every column the deployed CSV has, or the rewritten row would get empty cells
+                # and a renamed/absent errRatio would silently disable the correctness filter.
+                if any(column not in record for column in header):
+                    schema_ok = False
+                    continue
+                try:
+                    micros, splitk = float(record["us"]), int(record["splitK"])
+                    err_ratio = float(record.get("errRatio") or 0)  # absent -> 0 (no KeyError)
+                except (KeyError, ValueError, TypeError):
+                    continue
+                if micros <= 0 or err_ratio > 0.01:
+                    continue
+                by_shape[(record["M"], record["N"], record["K"])].append(
+                    (micros, splitk, [record[column] for column in header])
+                )
+    except OSError:
+        by_shape = defaultdict(list)
+    if not schema_ok:
+        log.warning(
+            "splitK cap: profile %s lacks columns present in the tuned CSV; some "
+            "serve-safe candidates were skipped (possible aiter schema drift)",
+            profile_csv,
+        )
+    return by_shape
+
+
+def _fastest_serve_safe(
+    candidates: Sequence[tuple[float, int, list[str]]],
+    max_splitk: int,
+) -> tuple[float, int, list[str]] | None:
+    """The fastest candidate whose splitK the deployment can serve, or None when there is none."""
+    return min((c for c in candidates if c[1] <= max_splitk), key=lambda c: c[0], default=None)
+
+
+def _forwards_splitk(row: list[str], libtype: int | None, forwarding_libtypes: frozenset[str]) -> bool:
+    """Whether this row's libtype has a production wrapper that forwards splitK."""
+    if libtype is None or libtype >= len(row):
+        # No libtype column to check against a contract that is keyed on it;
+        # treat as non-forwarding, matching the fail-closed default.
+        return False
+    return str(row[libtype]).strip().lower() in forwarding_libtypes
+
+
+def _shape_splitk_ceiling(support_fn, max_splitk: int, shape: tuple[int, int, int]) -> int:
+    """The highest splitK this shape may ship, trialled per shape where a trial exists."""
+    if support_fn is None:
+        return max_splitk
+    try:
+        supported = support_fn(*shape)
+    except Exception:  # noqa: BLE001 — trial failure must not abort the cap
+        return max_splitk  # degrade to the static cap, never crash the tuner
+    return max_splitk if supported is None else int(supported)
+
+
 def _cap_splitk_to_serve_safe(
     artifact_csv: Path,
     profile_csv: Path,
     max_splitk: int,
+    *,
+    forwarding_libtypes: frozenset[str],
     support_fn=None,
-    forwarding_libtypes: frozenset[str] | None = None,
 ) -> tuple[int, bool]:
     """Rewrite deployed rows whose splitK production cannot dispatch or forward.
 
@@ -1218,79 +1370,26 @@ def _cap_splitk_to_serve_safe(
 
     ``forwarding_libtypes`` is the set of libtypes whose wrapper forwards splitK
     for this op (see ``_SPLITK_FORWARDING_LIBTYPES``); a row on any other
-    libtype is capped at 0 regardless of dispatch support, and ``None`` disables
-    the check.
+    libtype is capped at 0 regardless of dispatch support.
     """
     try:
-        with artifact_csv.open() as f:
-            rows = list(csv.reader(f))
+        with artifact_csv.open() as handle:
+            rows = list(csv.reader(handle))
     except OSError:
         return 0, False
     if len(rows) < 2:
         return 0, False
     hdr = rows[0]
-    # Case-insensitive column lookup: if the deployed-header case ever fails an exact match the cap would return early
-    # (0, False) and pass unsafe splitK rows through unchanged -> serve crash.
-    _col = {str(h).strip().lower(): i for i, h in enumerate(hdr)}
-    try:
-        mi, ni, ki, ski = (_col[c] for c in ("m", "n", "k", "splitk"))
-    except KeyError:
+    columns = _deployed_columns(hdr)
+    if columns is None:
         return 0, False
-
-    # Index every valid candidate per shape; the cap is applied per-shape at selection so support_fn can keep
-    # splitK>max_splitk where the kernel supports.
-    by_shape: dict[tuple[str, str, str], list[tuple[float, int, list[str]]]] = defaultdict(list)
-    schema_ok = True
-    try:
-        with profile_csv.open() as f:
-            for r in csv.DictReader(f):
-                # A candidate must carry every column the deployed CSV has, or the rewritten row would get empty cells
-                # and a renamed/absent errRatio would silently disable the correctness filter.
-                if any(c not in r for c in hdr):
-                    schema_ok = False
-                    continue
-                try:
-                    us, sk = float(r["us"]), int(r["splitK"])
-                    er = float(r.get("errRatio") or 0)  # absent -> 0 (no KeyError)
-                except (KeyError, ValueError, TypeError):
-                    continue
-                if us <= 0 or er > 0.01:
-                    continue
-                by_shape[(r["M"], r["N"], r["K"])].append((us, sk, [r[c] for c in hdr]))
-    except OSError:
-        by_shape = defaultdict(list)
-    if not schema_ok:
-        log.warning(
-            "splitK cap: profile %s lacks columns present in the tuned CSV; some "
-            "serve-safe candidates were skipped (possible aiter schema drift)",
-            profile_csv,
-        )
-
-    lti = _col.get("libtype")
-
-    def _forwards(row: list[str]) -> bool:
-        if forwarding_libtypes is None:
-            return True
-        if lti is None or lti >= len(row):
-            # No libtype column to check against a contract that is keyed on it;
-            # treat as non-forwarding, matching the fail-closed default.
-            return False
-        return str(row[lti]).strip().lower() in forwarding_libtypes
-
-    def _shape_max(m: int, n: int, k: int) -> int:
-        if support_fn is None:
-            return max_splitk
-        try:
-            v = support_fn(m, n, k)
-        except Exception:  # noqa: BLE001 — trial failure must not abort the cap
-            return max_splitk  # degrade to the static cap, never crash the tuner
-        return max_splitk if v is None else int(v)
+    by_shape = _serve_safe_candidates(profile_csv, hdr)
 
     out, changed, has_splitk = [hdr], 0, False
     dropped_unforwarded = 0
     for row in rows[1:]:
         try:
-            sk = int(row[ski])
+            sk = int(row[columns.splitk])
         except (ValueError, IndexError):
             out.append(row)
             continue
@@ -1299,30 +1398,29 @@ def _cap_splitk_to_serve_safe(
             # per-shape max, so skip the (GPU-dispatching) trial entirely for these rows.
             out.append(row)
             continue
-        if not _forwards(row):
+        if not _forwards_splitk(row, columns.libtype, forwarding_libtypes):
             # The wrapper for this libtype takes no splitK, so the only
             # honourable value is 0 -- fall through to candidate replacement
             # with maxsk=0 rather than shipping a measurement production cannot
             # reproduce.
-            maxsk = 0
             dropped_unforwarded += 1
             try:
-                key = (row[mi], row[ni], row[ki])
+                key = columns.shape_key(row)
             except IndexError:
                 out.append(row)
                 continue
-            safe = min(
-                (c for c in by_shape.get(key, ()) if c[1] <= maxsk),
-                key=lambda c: c[0],
-                default=None,
-            )
+            safe = _fastest_serve_safe(by_shape.get(key, ()), 0)
             if safe is not None:
                 out.append(safe[2])
             changed += 1
             continue
         try:
-            key = (row[mi], row[ni], row[ki])
-            maxsk = _shape_max(int(row[mi]), int(row[ni]), int(row[ki]))
+            key = columns.shape_key(row)
+            maxsk = _shape_splitk_ceiling(
+                support_fn,
+                max_splitk,
+                (int(row[columns.m]), int(row[columns.n]), int(row[columns.k])),
+            )
         except (ValueError, IndexError):
             out.append(row)
             continue
@@ -1330,11 +1428,7 @@ def _cap_splitk_to_serve_safe(
             out.append(row)
             has_splitk = has_splitk or sk > 0
             continue
-        safe = min(
-            (c for c in by_shape.get(key, ()) if c[1] <= maxsk),
-            key=lambda c: c[0],
-            default=None,
-        )
+        safe = _fastest_serve_safe(by_shape.get(key, ()), maxsk)
         if safe is not None:
             out.append(safe[2])
             has_splitk = has_splitk or safe[1] > 0
@@ -1350,7 +1444,7 @@ def _cap_splitk_to_serve_safe(
             "with a splitK=0 candidate or dropped, because serving them would "
             "have run a config slower than the one benchmarked",
             dropped_unforwarded,
-            sorted(forwarding_libtypes or ()),
+            sorted(forwarding_libtypes),
         )
     return changed, has_splitk
 

@@ -136,7 +136,7 @@ The pinned workload skill at
 [`docs/how-to/multi-node/hyperloom-remote-mn-qwen3-30b/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/docs/how-to/multi-node/hyperloom-remote-mn-qwen3-30b/SKILL.md)
 contains two ready-to-run blocks — **Workload A (infera + PD)** and **Workload B
 (rayjob)** — each a `FLAGS` list and an `Environment` block. The agent runs
-`inference_optimizer optimize` with those blocks and monitors `state.json` until a
+`hyperloom optimize` with those blocks and monitors `state.json` until a
 terminal `stop_reason`.
 
 ### `optimize` flags
@@ -151,13 +151,14 @@ The following flags are used in multi-node workload skill blocks.
 | `--gpus-per-node` | GPUs per pod (default 8); feeds the TP feasibility check |
 | `--tp` | Tensor parallelism degree |
 | `--ep` | Expert parallelism degree (MoE; often `ep == tp`) |
-| `--isl`, `--osl`, `--conc` | Benchmark input length, output length, and concurrency. These must be flags — the corresponding env vars are ignored and overwritten |
-| `--gpu-type`, `--precision` | Target GPU (for example `mi325x`) and dtype (`bf16`). Flags are authoritative; env vars are not |
+| `--isl`, `--osl`, `--conc` | Benchmark input length, output length, and concurrency. The flag wins; on a fresh launch the corresponding env var is next, then the default. On a resume it is the pins in effect for this resume (its own `--extra-env`, or the launch's persisted pins when it passes none), then the session's recorded value, then the env var, then the default |
+| `--gpu-type`, `--precision` | Target GPU (for example `mi325x`) and dtype (`bf16`). `--precision` has its own ladder on both branches: the flag, then `$PRECISION`, then the session's recorded value, then the checkpoint's dtype, then the default. `--gpu-type` is a hint: on a fresh launch the hardware probe wins and a disagreeing flag only warns; a resume takes the GPU type from the session and ignores the flag |
 | `--framework` | `sglang` |
 | `--target-gain`, `--max-hours` | Optimization goal and time budget |
-| `--pd-mode disaggregated` | Enable PD disaggregation (infera only) |
-| `--pd-prefill-nodes`, `--pd-prefill-tp`, `--pd-prefill-ep`, `--pd-prefill-extra-args` | Prefill topology (infera PD) |
-| `--pd-decode-nodes`, `--pd-decode-tp`, `--pd-decode-ep`, `--pd-decode-extra-args` | Decode topology (infera PD) |
+| `--pd-mode disaggregated` | Enable PD disaggregation (infera and rayjob) |
+| `--pd-prefill-nodes`, `--pd-prefill-tp` | Prefill topology |
+| `--pd-decode-nodes`, `--pd-decode-tp` | Decode topology |
+| `--pd-prefill-ep`, `--pd-prefill-extra-args`, `--pd-decode-ep`, `--pd-decode-extra-args` | Per-role EP and server args (infera only; rayjob rejects them) |
 | `--pd-transfer-backend` | KV transfer plane for PD. Use `mooncake`; `nixl` can produce 0 output tokens |
 | `--server-args "..."` | Extra sglang args applied on every server restart |
 | `--no-framework-agent` | Skip the framework-tuning agent phase |
@@ -188,7 +189,7 @@ The following example shows an infera + PD disaggregated launch after the
 platform has handed a cluster over:
 
 ```bash
-inference_optimizer optimize \
+hyperloom optimize \
   --model ${NFS_SHARED_ROOT}/models/Qwen3-30B-A3B \
   --nodes 2 --mn-backend infera \
   --pd-mode disaggregated \
@@ -198,8 +199,8 @@ inference_optimizer optimize \
 ```
 
 For rayjob, replace `--mn-backend infera` with `--mn-backend rayjob` and omit
-the `--pd-*` flags. The platform supplies `HYPERLOOM_MN_EXT_HEAD_IP` instead of
-the SSH and IP variables.
+the per-role `--pd-*-ep` / `--pd-*-extra-args` flags. The platform supplies
+`HYPERLOOM_MN_EXT_HEAD_IP` instead of the SSH and IP variables.
 
 ## Troubleshooting
 
@@ -310,7 +311,7 @@ failed before writing `manifest.json`.
 find "$USER_DATA_PATH" -name manifest.json
 
 # Resume with the exact session directory
-python3 -m hyperloom.inference_optimizer.cli optimize \
+python3 -m hyperloom optimize \
   --resume-from /path/to/session
 ```
 

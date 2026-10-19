@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import asyncio
-import importlib.util
 import json
 import logging
 import math
@@ -15,108 +14,16 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from hyperloom.common.git_safety import safe_directory_args
+from hyperloom.common.unified_diff import PatchOp, repo_relative_manifest
 from hyperloom.inference_optimizer.trace.task_progress import heartbeat_while_output_flows
+from hyperloom.orchestrator.kernel import apply_kernel_patch
 
 log = logging.getLogger(__name__)
 
-# Kernel-agent shell tools root; read lazily so late env injection wins.
-_KERNEL_AGENT_ROOT_ENV = "HYPERLOOM_KERNEL_AGENT_ROOT"
-
-
-def _kernel_agent_root_from_env() -> Path | None:
-    """Read the kernel-agent install root from the environment at call time.
-
-    Resolved lazily on every call so a late ``os.environ`` injection by the CLI
-    preflight still wins.
-
-    Returns:
-        Path | None: The kernel-agent root as a :class:`~pathlib.Path`, or
-            ``None`` when ``HYPERLOOM_KERNEL_AGENT_ROOT`` is unset or empty.
-    """
-    raw = os.environ.get(_KERNEL_AGENT_ROOT_ENV)
-    if not raw:
-        return None
-    return Path(raw)
-
-
 HandlerResult = dict[str, Any]
-
-
-_APPLY_TOOL_MODULE: Any | None = None
-
-
-def _kernel_agent_root_error() -> str | None:
-    """Validate that the kernel-agent install root is configured and present.
-
-    Returns:
-        str | None: A human-readable error message when the root env var is
-            unset or points at a missing directory, or ``None`` when the root
-            exists and is usable.
-    """
-    root = _kernel_agent_root_from_env()
-    if root is None:
-        return (
-            f"{_KERNEL_AGENT_ROOT_ENV} is not set; run "
-            "src/hyperloom/inference_optimizer/assets/install.sh and source $KERNEL_AGENT_ENV "
-            "(default: $USER_DATA_PATH/runtime/kernel-agent.env.sh)"
-        )
-    if not root.is_dir():
-        return f"{_KERNEL_AGENT_ROOT_ENV} does not exist: {root}"
-    return None
-
-
-def _kernel_agent_tool_path(tool_name: str) -> Path:
-    """Resolve the absolute path to a kernel-agent shell tool.
-
-    Args:
-        tool_name (str): File name of the tool under ``<root>/tools/`` (for
-            example ``tracelens_analysis.py``).
-
-    Returns:
-        Path: The resolved path to the requested tool.
-
-    Raises:
-        RuntimeError: If the kernel-agent root is unset/missing, or the named
-            tool does not exist under ``<root>/tools/``.
-    """
-    err = _kernel_agent_root_error()
-    if err:
-        raise RuntimeError(err)
-    root = _kernel_agent_root_from_env()
-    assert root is not None
-    path = root / "tools" / tool_name
-    if not path.is_file():
-        raise RuntimeError(f"kernel-agent tool not found: {path}")
-    return path
-
-
-def _load_apply_tool() -> Any:
-    """Lazily import and cache the kernel-agent ``apply_kernel_patch.py`` module.
-
-    Loaded by file path via :mod:`importlib.util` and memoized in the module
-    global ``_APPLY_TOOL_MODULE`` so subsequent calls reuse the same module.
-
-    Returns:
-        Any: The imported ``apply_kernel_patch`` module object.
-
-    Raises:
-        RuntimeError: If the kernel-agent root/tool path cannot be resolved.
-        ImportError: If the module cannot be loaded from its resolved path.
-    """
-    global _APPLY_TOOL_MODULE
-    if _APPLY_TOOL_MODULE is not None:
-        return _APPLY_TOOL_MODULE
-    path = _kernel_agent_tool_path("apply_kernel_patch.py")
-    spec = importlib.util.spec_from_file_location("hyperloom_apply_kernel_patch", path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"cannot load apply_kernel_patch.py from {path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    _APPLY_TOOL_MODULE = module
-    return module
 
 
 def _artifact_paths_from_payload(payload: dict) -> list[str]:
@@ -165,10 +72,8 @@ def _final_content_snapshot(
     if not (patch_path.endswith(".patch") and repo_root):
         return snapshot_dir
     try:
-        descriptors = _load_apply_tool().parse_patch_manifest(
-            Path(patch_path).read_text(encoding="utf-8", errors="replace")
-        )
-        writes = [str(d.get("path") or "") for d in descriptors if d.get("op") == "write"]
+        targets = repo_relative_manifest(Path(patch_path).read_text(encoding="utf-8", errors="replace"))
+        writes = [t.path for t in targets if t.op is PatchOp.WRITE]
     except Exception:  # noqa: BLE001 — an unreadable patch is apply's error to report.
         return snapshot_dir
     if not writes:
@@ -222,7 +127,6 @@ def _maybe_apply_kernel_patch(
     # Same fold as the integrate workspace: a fusion sibling keys this dir by its
     # ``llm:<recipe>`` operator name, which ``mkdir`` rejects on some filesystems.
     backup_root = payload.get("backup_root") or (patches_dir(session_dir, fs_safe_id(kid)) / "backup")
-    tool = _load_apply_tool()
     # Snapshot mode: a snapshot dir of byte-exact final files lands atomically.
     snapshot_dir = str(payload.get("snapshot_dir") or "").strip() or None
     repo_root = str(payload.get("kernel_repo") or payload.get("repo") or "").strip() or None
@@ -231,7 +135,7 @@ def _maybe_apply_kernel_patch(
         snapshot_dir=snapshot_dir,
         repo_root=repo_root,
     )
-    return tool.apply_kernel_patch(
+    return apply_kernel_patch.apply_kernel_patch(
         patch_path=patch_path,
         target_file=target_file,
         backup_root=backup_root,
@@ -266,29 +170,16 @@ def materialize_unified_patch_snapshot(
     if not root.is_dir():
         raise FileNotFoundError(f"kernel repo does not exist: {root}")
 
-    tool = _load_apply_tool()
     patch_text = patch.read_text(encoding="utf-8", errors="replace")
-    descriptors = tool.parse_patch_manifest(patch_text)
-    if not descriptors:
-        raise ValueError(f"patch has no file operations: {patch}")
-
-    # Paths the patch CREATES: these must be produced by ``git apply``, never
-    # pre-seeded with a base, or apply fails "already exists". Everything else
-    # is a modify whose base we must supply. ``is_new`` comes from
-    # ``parse_patch_manifest`` (single source of truth for both the path
-    # normalization and the create/modify disposition), which avoids a second,
-    # drift-prone parse of the raw patch text.
-    _new_file_paths = {
-        str(desc.get("path") or "") for desc in descriptors if desc.get("op") == "write" and desc.get("is_new")
-    }
+    targets = repo_relative_manifest(patch_text)
 
     snap = Path(snapshot_dir) if snapshot_dir is not None else patch.parent / "fusion_snapshot"
     if snap.exists():
         shutil.rmtree(snap)
     snap.mkdir(parents=True, exist_ok=True)
 
-    for desc in descriptors:
-        rel = Path(str(desc.get("path") or ""))
+    for target in targets:
+        rel = Path(target.path)
         if not rel.parts or rel.is_absolute() or ".." in rel.parts:
             raise ValueError(f"unsafe patch path: {rel}")
         dst = snap / rel
@@ -300,7 +191,7 @@ def materialize_unified_patch_snapshot(
         if base.returncode == 0:
             dst.parent.mkdir(parents=True, exist_ok=True)
             dst.write_bytes(base.stdout)
-        elif rel.as_posix() not in _new_file_paths:
+        elif not target.is_new:
             # ``git show HEAD:`` failed and this is a MODIFY (not a create):
             # non-git repo_root (e.g. vLLM/sglang under site-packages/
             # dist-packages) or an untracked-but-present file. Fall back to the
@@ -350,9 +241,9 @@ def materialize_unified_patch_snapshot(
         msg = (proc.stderr or proc.stdout or "").strip()
         raise RuntimeError(f"could not materialize patch snapshot: {msg[:500]}")
 
-    for desc in descriptors:
-        if desc.get("op") == "write" and not (snap / str(desc["path"])).is_file():
-            raise RuntimeError(f"snapshot missing final content for {desc['path']}")
+    for target in targets:
+        if target.op is PatchOp.WRITE and not (snap / target.path).is_file():
+            raise RuntimeError(f"snapshot missing final content for {target.path}")
     return str(snap)
 
 
@@ -372,7 +263,7 @@ def _maybe_revert_kernel_patch(apply_result: HandlerResult) -> HandlerResult:
     if not apply_result.get("manifest_path"):
         return {"status": "skipped", "reason": "no applied patch manifest"}
     try:
-        return _load_apply_tool().revert_kernel_patch(apply_result["manifest_path"])
+        return apply_kernel_patch.revert_kernel_patch(apply_result["manifest_path"])
     except Exception as exc:  # noqa: BLE001
         return {
             "status": "failed",
@@ -394,7 +285,7 @@ def _maybe_finalize_kernel_patch(
     if not apply_result.get("manifest_path"):
         return {"status": "skipped", "reason": "no applied patch manifest"}
     try:
-        return _load_apply_tool().finalize_kernel_patch(apply_result["manifest_path"])
+        return apply_kernel_patch.finalize_kernel_patch(apply_result["manifest_path"])
     except Exception as exc:  # noqa: BLE001
         return {
             "status": "failed",
@@ -411,12 +302,11 @@ def _tool_label(cmd: list[str]) -> str:
         cmd (list[str]): The command and arguments.
 
     Returns:
-        str: The first ``.py`` argument's stem, else the executable's name.
+        str: The last dotted component of the module run with ``-m``, else the executable's name.
     """
-    for arg in cmd:
-        text = str(arg)
-        if text.endswith(".py"):
-            return Path(text).stem
+    for flag, module in zip(cmd, cmd[1:]):
+        if str(flag) == "-m":
+            return str(module).rsplit(".", 1)[-1]
     return Path(str(cmd[0])).name if cmd else "subprocess"
 
 
@@ -424,12 +314,16 @@ async def _run_subprocess(
     cmd: list[str],
     *,
     timeout_sec: int,
+    env: Mapping[str, str] | None = None,
+    label: str = "",
 ) -> tuple[int, str, str]:
     """Run a bounded subprocess without blocking the reactor.
 
     Args:
         cmd: The command and arguments to run.
         timeout_sec: Per-run timeout in seconds.
+        env: Base environment for the child; this process's environment when omitted.
+        label: Name the liveness heartbeat reports; derived from ``cmd`` when empty.
 
     Returns:
         A tuple of ``(returncode, stdout, stderr)``.
@@ -441,6 +335,8 @@ async def _run_subprocess(
         or timeout_sec <= 0
     ):
         raise ValueError("timeout_sec must be finite and positive")
+
+    base_env = dict(env) if env is not None else None
 
     def _run(on_output: Callable[[], None]) -> tuple[int, str, str]:
         """Run the command synchronously in a worker thread.
@@ -460,7 +356,7 @@ async def _run_subprocess(
         Raises:
             subprocess.TimeoutExpired: When the command exceeds ``timeout_sec``.
         """
-        env = os.environ.copy()
+        child_env = dict(base_env) if base_env is not None else os.environ.copy()
         from ._multi_node_env import (
             is_multi_node,
             ray_gcs_address_from_state,
@@ -474,26 +370,26 @@ async def _run_subprocess(
             # the RAY_ADDRESS path below is unchanged for those.
             ssh_env = infera_ssh_env_from_state()
             if ssh_env:
-                env.update(ssh_env)
+                child_env.update(ssh_env)
             addr = "" if ssh_env else ray_gcs_address_from_state()
             if addr:
-                env.setdefault("RAY_ADDRESS", addr)
-        env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
+                child_env.setdefault("RAY_ADDRESS", addr)
+        child_env["PATH"] = f"/opt/venv/bin:{child_env.get('PATH', '')}"
         # The heartbeat around this call is only as honest as the child's
         # flushing: block-buffered on a pipe, it looks dead between flushes.
         # ``setdefault`` so an operator who set this deliberately still wins.
-        env.setdefault("PYTHONUNBUFFERED", "1")
+        child_env.setdefault("PYTHONUNBUFFERED", "1")
         # ``run_with_session_kill`` reaps the whole descendant tree on every exit path.
         cp = run_with_session_kill(
             cmd,
-            env=env,
+            env=child_env,
             timeout=timeout_sec,
             text=True,
             on_output=on_output,
         )
         return cp.returncode, cp.stdout or "", cp.stderr or ""
 
-    async with heartbeat_while_output_flows(unit="kernel_tool", label=_tool_label(cmd)) as activity:
+    async with heartbeat_while_output_flows(unit="kernel_tool", label=label or _tool_label(cmd)) as activity:
         return await asyncio.to_thread(_run, activity.note)
 
 

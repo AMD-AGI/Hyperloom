@@ -33,6 +33,19 @@ def _cfg(tmp_path, script):
     return p
 
 
+def test_mlperf_client_skips_aiperf_preflight(tmp_path, monkeypatch):
+    calls = {"deploy": 0, "preflight": 0, "mlperf": 0}
+    monkeypatch.setattr(_DEPLOY, lambda d: calls.__setitem__("deploy", calls["deploy"] + 1))
+    monkeypatch.setattr(_CHECK, lambda b, **k: calls.__setitem__("preflight", calls["preflight"] + 1))
+    monkeypatch.setattr(
+        "hyperloom.inference_optimizer.agentx.preflight.check_mlperf_harness",
+        lambda env: calls.__setitem__("mlperf", calls["mlperf"] + 1),
+    )
+    cfg = _cfg(tmp_path, "mlperf_agentic_client.sh")
+    assert runtime.maybe_prepare_agentx(env={}, inferencex_path=str(tmp_path), config_path=cfg) is True
+    assert calls == {"deploy": 1, "preflight": 0, "mlperf": 1}
+
+
 def test_noop_when_not_aiperf_script(tmp_path, monkeypatch):
     calls = {"deploy": 0, "preflight": 0}
     monkeypatch.setattr(_DEPLOY, lambda d: calls.__setitem__("deploy", calls["deploy"] + 1))

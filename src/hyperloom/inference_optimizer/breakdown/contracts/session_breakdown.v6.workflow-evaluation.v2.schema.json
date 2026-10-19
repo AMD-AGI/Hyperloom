@@ -36,7 +36,7 @@
               "const": "hyperloom.workflow_evaluation.v2"
             },
             "contract_digest": {
-              "const": "691c681d2d8abbac8953bad1e30deea3e3c9891e82f9ef9ff6ac45b2cde8ef09"
+              "const": "ece338b2454c563d288fedb46481083d5e0cab980d64eb3414ab57d078d32aa8"
             },
             "run_flags": {
               "type": "object",
@@ -716,10 +716,12 @@
             "",
             "active_inferencex_checkout_missing",
             "agentx_client_unavailable",
+            "backend_unhealthy",
             "baseline_accuracy_failed",
             "baseline_arg_error",
             "baseline_failed",
             "baseline_over_latency_budget",
+            "baseline_over_power_budget",
             "coordinator_exception",
             "custom",
             "emergency",
@@ -1044,9 +1046,7 @@
             null,
             "skip_to_kernel",
             "skip_to_sweep",
-            "skip_to_close",
-            "extend_explore_budget",
-            "extend_kernel_budget"
+            "skip_to_close"
           ]
         },
         "sweep_result": {
@@ -1357,6 +1357,12 @@
         "cycle_reloop_min_remaining_sec": {
           "type": "number",
           "minimum": 0
+        },
+        "baseline_tput": {
+          "type": [
+            "number",
+            "null"
+          ]
         }
       },
       "additionalProperties": false
@@ -1408,8 +1414,7 @@
         "phase_spent_sec",
         "runtime_sec",
         "post_ready_runtime_sec",
-        "warm_runtime_sec",
-        "double_run"
+        "warm_runtime_sec"
       ],
       "properties": {
         "failure_streak": {
@@ -1424,6 +1429,15 @@
         },
         "tput": {
           "type": "number"
+        },
+        "initial_analysis_pending": {
+          "type": "boolean"
+        },
+        "analysis_affordable_sec": {
+          "type": [
+            "number",
+            "null"
+          ]
         },
         "session_usable_sec": {
           "type": [
@@ -1452,9 +1466,6 @@
             "number",
             "null"
           ]
-        },
-        "double_run": {
-          "type": "boolean"
         }
       },
       "additionalProperties": false
@@ -1467,6 +1478,15 @@
       "properties": {
         "tput": {
           "type": "number"
+        },
+        "initial_analysis_pending": {
+          "type": "boolean"
+        },
+        "analysis_affordable_sec": {
+          "type": [
+            "number",
+            "null"
+          ]
         }
       },
       "additionalProperties": false

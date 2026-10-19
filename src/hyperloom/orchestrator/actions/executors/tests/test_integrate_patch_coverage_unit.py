@@ -17,12 +17,14 @@ import pytest
 
 from hyperloom.orchestrator.tests._helpers import patch_integrate_patch_roots
 
+from hyperloom.orchestrator.actions.executors import _accuracy_gate
+from hyperloom.orchestrator.actions.executors import _setup_replay
 from hyperloom.orchestrator.actions.executors import integrate_patch as ip
 
-from hyperloom.orchestrator.tests._helpers import variant_result
+from hyperloom.orchestrator.tests._helpers import integrate_extra, variant_result
 from hyperloom.orchestrator.actions.executors.integrate_patch import (
     IntegratePatchExecutor,
-    _git_checkout_clean,
+    _git_reset_clean,
     _detect_p_level,
     _read_done_payload,
 )
@@ -30,6 +32,7 @@ from hyperloom.orchestrator.actions.executors._workload_envs import (
     FrameworkScriptMismatchError,
 )
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
+from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 from hyperloom.orchestrator.state.task_registry import Task
 
 
@@ -85,7 +88,7 @@ def _make_ctx(task_id: str, params: dict[str, Any], extra: dict | None = None) -
         idempotency_key=task_id,
         requires_lanes=tuple(),
     )
-    return RunnerContext(task=task, lease=None, extra=extra or {})
+    return RunnerContext(task=task, lease=None, extra=integrate_extra(params) if extra is None else extra)
 
 
 def _stub_bench(result: dict, gate: dict):
@@ -128,6 +131,9 @@ async def test_rejected_by_critic(tmp_path):
     _write_workspace(session, "spec")
 
     class _SS:
+        phase = "FRAMEWORK_AGENT"
+        enablement = EnablementRound()
+
         def get_specialist_patch_verdict(self, tid):
             return "reject"
 
@@ -155,6 +161,9 @@ async def test_forged_task_without_critic_verdict_is_rejected(tmp_path):
     _write_workspace(session, "spec")
 
     class _SS:
+        phase = "FRAMEWORK_AGENT"
+        enablement = EnablementRound()
+
         def get_specialist_patch_verdict(self, tid):
             return ""  # no verdict on record
 
@@ -186,11 +195,14 @@ async def test_forged_task_rejected_before_any_side_effect(tmp_path, monkeypatch
 
     def _spy_setup(*args, **kwargs):
         called["setup"] = True
-        return {"applied": [], "skipped": [], "failed": []}
+        return []
 
-    monkeypatch.setattr(ip, "_run_setup_commands", _spy_setup)
+    monkeypatch.setattr(_setup_replay, "run_setup_commands", _spy_setup)
 
     class _SS:
+        phase = "FRAMEWORK_AGENT"
+        enablement = EnablementRound()
+
         def get_specialist_patch_verdict(self, tid):
             return ""  # no verdict -> must reject before setup
 
@@ -237,6 +249,9 @@ async def test_bench_is_bounded_by_the_session_budget(tmp_path, monkeypatch):
     _write_workspace(session, "spec")
 
     class _SS:
+        phase = "FRAMEWORK_AGENT"
+        enablement = EnablementRound()
+
         baseline_runtime_sec = 600.0
 
         def get_specialist_patch_verdict(self, tid):
@@ -679,11 +694,11 @@ def test_find_framework_proposal():
     assert found["id"] == 1
 
 
-def test_git_checkout_clean(tmp_path):
+def test_git_reset_clean(tmp_path):
     repo = tmp_path / "repo"
     _init_git_repo(repo)
     (repo / "src.py").write_text("dirty\n", encoding="utf-8")
-    ok, _ = _git_checkout_clean(repo)
+    ok, _ = _git_reset_clean(repo, "HEAD")
     assert ok
     assert (repo / "src.py").read_text().endswith("return 1\n")
 
@@ -696,7 +711,7 @@ def test_detect_p_level_none_for_unmatched(tmp_path):
         "diff --git a/zzz.py b/zzz.py\n--- a/zzz.py\n+++ b/zzz.py\n@@ -1,1 +1,1 @@\n-X\n+Y\n",
         encoding="utf-8",
     )
-    assert _detect_p_level(repo, bad, three_way=False) is None
+    assert _detect_p_level(repo, bad) is None
 
 
 def test_read_done_payload_missing(tmp_path):
@@ -754,7 +769,10 @@ async def test_bench_patch_with_accuracy(tmp_path, monkeypatch):
         return [_FakeVR(status="succeeded", workspace=str(tmp_path))]
 
     monkeypatch.setattr(ip, "run_grid", _fake_run_grid)
-    monkeypatch.setattr(ip, "parse_eval_results", lambda rd, framework=None: {"accuracy": 0.9})
+    monkeypatch.setattr(ip, "parse_eval_results", lambda rd, framework=None, benchmark_mode="": {"accuracy": 0.9})
+    monkeypatch.setattr(
+        _accuracy_gate, "parse_eval_results", lambda rd, framework=None, benchmark_mode="": {"accuracy": 0.9}
+    )
     ex = IntegratePatchExecutor(session_dir=tmp_path)
     bench, gate = await ex._bench_patch(
         params={"config_path": str(cfg), "accuracy_baseline": 0.8},
@@ -776,7 +794,10 @@ async def test_bench_patch_accuracy_regression_fails(tmp_path, monkeypatch):
         return [_FakeVR(status="succeeded", workspace=str(tmp_path))]
 
     monkeypatch.setattr(ip, "run_grid", _fake_run_grid)
-    monkeypatch.setattr(ip, "parse_eval_results", lambda rd, framework=None: {"accuracy": 0.50})
+    monkeypatch.setattr(ip, "parse_eval_results", lambda rd, framework=None, benchmark_mode="": {"accuracy": 0.50})
+    monkeypatch.setattr(
+        _accuracy_gate, "parse_eval_results", lambda rd, framework=None, benchmark_mode="": {"accuracy": 0.50}
+    )
     ex = IntegratePatchExecutor(session_dir=tmp_path)
     _, gate = await ex._bench_patch(
         params={"config_path": str(cfg), "accuracy_baseline": 0.95},
@@ -798,7 +819,10 @@ async def test_bench_patch_missing_baseline_skips_with_warning(tmp_path, monkeyp
         return [_FakeVR(status="succeeded", workspace=str(tmp_path))]
 
     monkeypatch.setattr(ip, "run_grid", _fake_run_grid)
-    monkeypatch.setattr(ip, "parse_eval_results", lambda rd, framework=None: {"accuracy": 0.9})
+    monkeypatch.setattr(ip, "parse_eval_results", lambda rd, framework=None, benchmark_mode="": {"accuracy": 0.9})
+    monkeypatch.setattr(
+        _accuracy_gate, "parse_eval_results", lambda rd, framework=None, benchmark_mode="": {"accuracy": 0.9}
+    )
     ex = IntegratePatchExecutor(session_dir=tmp_path)
     with caplog.at_level("WARNING"):
         _, gate = await ex._bench_patch(
@@ -1162,15 +1186,26 @@ async def test_a_cancel_in_the_apply_stage_still_hands_the_stash_back(tmp_path, 
 
 
 @pytest.mark.asyncio
-async def test_provisioned_runtime_is_retired_when_no_mutation_reaches_gate(tmp_path, monkeypatch):
+@pytest.mark.parametrize(("verdict", "runtime_survives"), [("kept", True), ("reverted", False)])
+async def test_a_runtime_only_round_is_benched_and_its_verdict_decides_the_runtime(
+    tmp_path, monkeypatch, verdict, runtime_survives
+):
+    """The acquired runtime is the round's whole change; the gate, not the apply stage, decides its fate."""
     from types import SimpleNamespace
     from hyperloom.agents.framework import isolation
+    from hyperloom.common.failure_signature import classify_failure
     from hyperloom.orchestrator.enablement.runtime import adapters
-    from hyperloom.orchestrator.enablement.runtime.stack_actions import FrameworkRuntime, ProvisionResult
+    from hyperloom.orchestrator.enablement.runtime.stack_actions import (
+        EnablementStackAction,
+        FrameworkRuntime,
+        ProvisionResult,
+    )
 
     session = tmp_path / "session"
     workspace = _write_workspace(session, "spec")
-    (workspace / "specialist_done.json").write_text(json.dumps({"patches_written": []}))
+    (workspace / "specialist_done.json").write_text(
+        json.dumps({"patches_written": [], "needs_runtime": {"packages": ["transformers==4.57.1"]}})
+    )
     runtime = tmp_path / "attempt-runtime" / "venv"
     runtime.mkdir(parents=True)
     (runtime / "installed").write_text("runtime")
@@ -1179,21 +1214,39 @@ async def test_provisioned_runtime_is_retired_when_no_mutation_reaches_gate(tmp_
         adapters,
         "get_adapter",
         lambda _fw: SimpleNamespace(
+            build_stack_action=lambda _request: EnablementStackAction(
+                kind="runtime_candidate",
+                framework="vllm",
+                gap_id="gap.enablement.missing_model_arch",
+                capability="missing_model_arch",
+            ),
             provision=lambda *_args: ProvisionResult(ok=True, runtime=FrameworkRuntime(venv_root=str(runtime))),
             probe=lambda *_args: True,
         ),
     )
+    gated: list[str] = []
+
+    async def _gate(_self, attempt, _params, _extra):
+        assert runtime.exists()
+        gated.append(attempt.pending["attempt_venv_root"])
+        return {"status": verdict, "specialist_task_id": "spec"}
+
+    monkeypatch.setattr(IntegratePatchExecutor, "_stage_gate", _gate)
     result = await IntegratePatchExecutor(session_dir=session)(
         _make_ctx(
             "task",
             {
                 "specialist_task_id": "spec",
-                "runtime_candidate": {"kind": "runtime_candidate", "framework": "vllm"},
+                "enablement": True,
+                "enablement_failure_signature": classify_failure(
+                    "ValueError: Model architectures ['DeepseekV4ForCausalLM'] are not supported for now."
+                ).to_dict(),
             },
         )
     )
-    assert result["status"] == "no_patches"
-    assert not runtime.exists()
+    assert gated == [str(runtime)]
+    assert result["status"] == verdict
+    assert runtime.exists() is runtime_survives
 
 
 @pytest.mark.asyncio
@@ -1205,7 +1258,11 @@ async def test_cancel_preserves_cancellation_when_recovery_save_fails(tmp_path, 
     _init_git_repo(repo)
     _write_workspace(session, "spec")
     state = SimpleNamespace(
-        current_best={}, get_specialist_patch_verdict=lambda _sid: "approve", save=lambda _path: None
+        phase="FRAMEWORK_AGENT",
+        enablement=EnablementRound(),
+        current_best={},
+        get_specialist_patch_verdict=lambda _sid: "approve",
+        save=lambda _path: None,
     )
 
     def fail_save(_path):
@@ -1238,7 +1295,11 @@ async def test_apply_only_restores_user_stash_but_resume_refuses_unproven_user_m
     user = repo / "user.txt"
     user.write_text("USER")
     state = SimpleNamespace(
-        current_best={}, get_specialist_patch_verdict=lambda _sid: "approve", save=lambda _path: None
+        phase="FRAMEWORK_AGENT",
+        enablement=EnablementRound(),
+        current_best={},
+        get_specialist_patch_verdict=lambda _sid: "approve",
+        save=lambda _path: None,
     )
     result = await IntegratePatchExecutor(session_dir=session)(
         _make_ctx(
@@ -1299,7 +1360,7 @@ async def test_no_patches_forwards_ungrounded_patches(tmp_path, monkeypatch):
     """When a patch could not be grounded, the integrate result must carry
     ``patches_ungrounded`` so framework.py can surface it in the next round's
     mandate.  Without this forwarding the field stays in done_payload and is
-    never read by _maybe_rearm_enablement."""
+    never read by maybe_rearm_enablement."""
     session = tmp_path / "s"
     session.mkdir()
     ws = session / "runs" / "specialist" / "spec"

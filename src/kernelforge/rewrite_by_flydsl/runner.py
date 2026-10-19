@@ -14,8 +14,11 @@ from pathlib import Path
 
 from kernelforge.llm.git import git
 from kernelforge.config import Config
-from kernelforge.knowledge.experience_integration import git_checkout_branch
-from kernelforge.knowledge.experience_reader import sanitize_read_error
+from kernelforge.loop.knowledge_integration import git_checkout_branch
+from kernelforge.knowledge.kb_store.errors import (
+    kb_store_secrets,
+    sanitize_read_error,
+)
 from kernelforge.rewrite_by_flydsl import (
     driver_contract,
     flydsl_rewrite_driver_preparation,
@@ -23,7 +26,6 @@ from kernelforge.rewrite_by_flydsl import (
     report,
     seed,
 )
-from kernelforge.rewrite_by_flydsl.agent_kb import kb_store_secrets
 from kernelforge.rewrite_by_flydsl.applyback import generate_applyback_patch
 from kernelforge.rewrite_by_flydsl.attempt import (
     create_attempt_workspace,
@@ -37,7 +39,7 @@ from kernelforge.rewrite_by_flydsl.kb import (
 )
 from kernelforge.rewrite_by_flydsl.optimize import run_optimize
 from kernelforge.rewrite_by_flydsl.port_loop import PortResult, run_port_loop
-from kernelforge.rewrite_by_flydsl.budget import DEFAULT_REWRITE_BUDGET
+from kernelforge.rewrite_by_flydsl.budget import DEFAULT_REWRITE_BUDGET, RewriteBudgetPolicy
 from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
 from kernelforge.tracker import UsageAccumulator, UsageLedgerFile, combine_usage_totals
 
@@ -127,6 +129,331 @@ def _ensure_git_committed(
             )
 
 
+def _run_usage(usage, optimize_result: dict | None = None, *, optimize_ran: bool = False) -> dict:
+    """This run's cumulative spend: the in-process stages plus the nested forge-loop's own ledger.
+
+    A forge-loop that was cut off or killed reports a ledger that stops at its
+    last checkpoint, so the totals are published as partial rather than as a
+    complete provider-priced answer.
+    """
+    opt_result = optimize_result or {}
+    nested = opt_result.get("llm_usage")
+    return combine_usage_totals(
+        usage.totals(),
+        nested if isinstance(nested, dict) else None,
+        incomplete=optimize_ran and not opt_result.get("llm_usage_complete"),
+    )
+
+
+def _emit_final(result, result_json: str | None) -> dict:
+    """Publish the run's result where every consumer reads it: the file and the sentinel line."""
+    payload = report.emit_result(result, result_json)
+    print(f"{report.SENTINEL}{payload}{report.SENTINEL}", flush=True)
+    return result.to_dict()
+
+
+def _plan_budget(
+    *,
+    started_at: float,
+    deadline_unix: float | None,
+    optimize_max_hours: float,
+    applyback_enabled: bool,
+) -> tuple[float, RewriteBudgetPolicy, float]:
+    """The run's deadline, budget policy and search cutoff, announced as it is decided.
+
+    A run that will not produce a patch spends nothing holding a reserve for
+    one, so the policy drops the apply-back reserve when the caller declined it.
+    """
+    if not deadline_unix or deadline_unix <= 0:
+        deadline_unix = started_at + optimize_max_hours * 3600.0
+    budget = DEFAULT_REWRITE_BUDGET if applyback_enabled else DEFAULT_REWRITE_BUDGET.without_applyback()
+    search_stop_unix = budget.search_stop_unix(deadline_unix)
+    print(
+        "  [forge-rewrite] budget: "
+        f"remaining={max(0, int(deadline_unix - started_at))}s "
+        f"search={max(0, int(search_stop_unix - started_at))}s "
+        f"applyback_reserve={budget.applyback_reserve_sec}s",
+        flush=True,
+    )
+    return deadline_unix, budget, search_stop_unix
+
+
+def _git_head(workspace: str) -> str:
+    """The workspace's HEAD commit, or "" when it has none that resolves."""
+    result = _git(workspace, "rev-parse", "HEAD")
+    if result.returncode != 0 or not result.stdout.strip():
+        return ""
+    return result.stdout.strip().splitlines()[0]
+
+
+def _with_port_fallbacks(opt: dict, *, best_ms, speedup, port_commit: str) -> dict:
+    """The OPTIMIZE result, falling back to the ported kernel's own figures where it reported none."""
+    filled = dict(opt)
+    if filled.get("best_ms") is None:
+        filled["best_ms"] = best_ms
+    if filled.get("mean_case_speedup") is None:
+        filled["mean_case_speedup"] = speedup
+    if not filled.get("best_commit"):
+        filled["best_commit"] = port_commit
+    return filled
+
+
+def _conforming_driver(
+    spec,
+    driver_path: str,
+    *,
+    config: Config,
+    experiments_dir: str,
+    search_stop_unix: float,
+    invocation_spec_file: str,
+    usage,
+    prepare_driver: bool,
+):
+    """The driver's validated rewrite contract, or the reason it has none.
+
+    A driver that does not already conform is handed to rewrite driver
+    preparation first, unless the caller declined that.
+    """
+    preflight = flydsl_rewrite_driver_preparation.preflight_rewrite_driver(
+        spec,
+        driver_path,
+        deadline_unix=search_stop_unix,
+    )
+    if not preflight.ok and prepare_driver:
+        print(
+            f"  [forge-rewrite] driver does not conform "
+            f"[{preflight.failure_class}]; invoking rewrite driver preparation",
+            flush=True,
+        )
+        prepared = asyncio.run(
+            flydsl_rewrite_driver_preparation.prepare_rewrite_driver(
+                spec=spec,
+                driver_path=driver_path,
+                config=config,
+                experiments_dir=experiments_dir,
+                deadline_unix=search_stop_unix,
+                invocation_spec_file=invocation_spec_file,
+                initial_preflight=preflight,
+                usage=usage,
+            )
+        )
+        if not prepared.ok or prepared.preflight is None:
+            return None, (
+                prepared.error or "rewrite driver preparation failed",
+                prepared.failure_class or flydsl_rewrite_driver_preparation.DRIVER_PREPARATION_FAILED,
+            )
+        preflight = prepared.preflight
+        print(
+            f"  [forge-rewrite] prepared driver {Path(driver_path).name} in {prepared.attempts} attempt(s)",
+            flush=True,
+        )
+    elif preflight.ok:
+        print(
+            f"  [forge-rewrite] supplied driver {Path(driver_path).name} already conforms; preparation skipped",
+            flush=True,
+        )
+    if not preflight.ok:
+        return None, (preflight.detail, preflight.failure_class)
+    for warning in preflight.warnings:
+        print(f"  [forge-rewrite] driver contract warning: {warning}", flush=True)
+    if preflight.source_ms is None:
+        return None, (
+            "the conforming rewrite driver reported no source baseline",
+            driver_contract.REF_TIMING_UNPARSEABLE,
+        )
+    return preflight, None
+
+
+def _read_flydsl_kb(
+    spec,
+    driver_path: str,
+    config: Config,
+    *,
+    source_case_ms,
+    framework: str,
+    search_stop_unix: float,
+) -> RewriteKbReadResult:
+    """What the KB can offer for this source+driver, restoring the seed when the read fails.
+
+    The warm start builds a KB Store client from the store URL and bearer token,
+    and the guard here catches whatever its own reader did not: the client is
+    constructed outside that sanitizer's ``try``, so a construction failure of
+    any type other than ``KBStoreError`` arrives here untouched.
+    """
+    kb_seed = Path(spec.flydsl_kernel).read_bytes() if Path(spec.flydsl_kernel).is_file() else None
+    try:
+        return asyncio.run(
+            try_flydsl_kb_warmstart(
+                spec,
+                driver_path,
+                config,
+                source_case_ms=source_case_ms,
+                framework=framework,
+                stop_at_unix=search_stop_unix,
+            )
+        )
+    except Exception as error:  # noqa: BLE001 - KB failure must cold-start
+        if kb_seed is None:
+            Path(spec.flydsl_kernel).unlink(missing_ok=True)
+        else:
+            Path(spec.flydsl_kernel).write_bytes(kb_seed)
+        return RewriteKbReadResult(
+            read_reason="read_error",
+            read_error=sanitize_read_error(error, secrets=kb_store_secrets(config)),
+        )
+
+
+def _measure_flydsl_baseline(
+    spec,
+    driver_path: str,
+    *,
+    preflight,
+    search_stop_unix: float,
+    source_case_ms,
+):
+    """Time the ported FlyDSL kernel, or say why it could not be timed.
+
+    An unavailable bench is not fatal -- the port is still correct -- but a
+    failure class the contract calls fatal ends the run.
+    """
+    if time.time() >= search_stop_unix:
+        return None, None, None
+    flydsl_budget = max(1, min(600, int(search_stop_unix - time.time())))
+    candidate = driver_contract.preflight_candidate(
+        spec,
+        driver_path,
+        reference_case_ids=preflight.reference_case_ids,
+        timeout_sec=flydsl_budget,
+    )
+    for warning in candidate.warnings:
+        print(f"  [forge-rewrite] driver contract warning: {warning}", flush=True)
+    if candidate.ok:
+        return candidate.timing_ms, scored_speedup(candidate.case_ms, source_case_ms), None
+    if candidate.failure_class in _FATAL_CANDIDATE_FAILURES:
+        return None, None, (candidate.detail, candidate.failure_class)
+    print(
+        f"  [forge-rewrite] candidate bench unavailable [{candidate.failure_class}]: {candidate.detail}",
+        flush=True,
+    )
+    return None, None, None
+
+
+def _publish_port_kb(
+    spec,
+    driver_path: str,
+    config: Config,
+    *,
+    rewrite_kb_enabled: bool,
+    port,
+    source_ms,
+    flydsl_best_ms,
+    speedup,
+    port_commit: str,
+    framework: str,
+) -> dict:
+    """Record the ported kernel in the KB.
+
+    A newly produced correct port is independently reusable even when it is
+    slower than the source; a port that was warm-started from the KB is already
+    there.
+    """
+    if not rewrite_kb_enabled:
+        return {"written": False, "reason": "disabled"}
+    if port.attempts == 0:
+        return {"written": False, "reason": "kb_warmstart_reused"}
+    written = write_flydsl_kb_solution(
+        spec,
+        driver_path,
+        config,
+        source_ms=source_ms,
+        flydsl_best_ms=flydsl_best_ms,
+        speedup=speedup,
+        best_commit=port_commit,
+        framework=framework,
+        snr_db=port.snr_db,
+        session_key=port_commit,
+    )
+    print(
+        f"  [forge-rewrite] PORT KB publish: {written.get('reason') or written.get('solution')}",
+        flush=True,
+    )
+    return written
+
+
+def _publish_final_kb(
+    spec,
+    driver_path: str,
+    config: Config,
+    *,
+    rewrite_kb_enabled: bool,
+    opt: dict,
+    source_ms,
+    framework: str,
+    port,
+    port_commit: str,
+    optimize_session_key: str,
+) -> dict:
+    """Record the run's final best in the KB, replacing the record of the session that produced it."""
+    if not rewrite_kb_enabled:
+        return {"written": False, "reason": "disabled"}
+    final_commit = str(opt.get("best_commit") or "")
+    return write_flydsl_kb_solution(
+        spec,
+        driver_path,
+        config,
+        source_ms=source_ms,
+        flydsl_best_ms=opt.get("best_ms"),
+        speedup=opt.get("mean_case_speedup"),
+        best_commit=final_commit,
+        framework=framework,
+        # PORT's reading measures the artifact being recorded only while the run's best is still the ported kernel.
+        # Once OPTIMIZE has moved the best off that commit, it describes a kernel this record is not about.
+        snr_db=port.snr_db if final_commit == port_commit else None,
+        # The run's final result belongs to the OPTIMIZE session when there was one, and to the PORT session
+        # otherwise -- either way it replaces that session's record instead of standing beside it.
+        session_key=optimize_session_key or port_commit,
+    )
+
+
+def _run_applyback(
+    spec,
+    config: Config,
+    *,
+    rewrite_base_commit: str,
+    experiments_dir: str,
+    framework: str,
+    opt: dict,
+    source_ms,
+    port,
+    deadline_unix: float,
+    import_modules,
+    max_attempts: int,
+    usage,
+):
+    """Turn the standalone best back into a patch against the caller's framework tree."""
+    applyback = generate_applyback_patch(
+        spec,
+        config,
+        base_commit=rewrite_base_commit,
+        experiments_dir=experiments_dir,
+        framework=framework,
+        best_commit=str(opt.get("best_commit") or ""),
+        source_ms=source_ms,
+        flydsl_best_ms=opt.get("best_ms"),
+        speedup=opt.get("mean_case_speedup"),
+        reference_snr_db=port.snr_db,
+        deadline_unix=deadline_unix,
+        import_modules=import_modules,
+        max_attempts=max_attempts,
+        usage=usage,
+    )
+    if applyback.ok:
+        print(f"  [forge-rewrite] apply-back patch ready: {applyback.patch_path}", flush=True)
+    else:
+        print(f"  [forge-rewrite] APPLY-BACK FAILED: {applyback.error}", flush=True)
+    return applyback
+
+
 def run_rewrite(
     *,
     op_name: str,
@@ -146,6 +473,7 @@ def run_rewrite(
     permission_mode: str | None = None,
     supervisor_backend: str = "codex",
     profile_timeout_sec: int = 1800,
+    roofline_ceiling: bool = False,
     optimize_git_branch: str = "forge-rewrite-optimize",
     result_json: str | None = None,
     deadline_unix: float | None = None,
@@ -168,24 +496,16 @@ def run_rewrite(
     usage = UsageAccumulator(on_update=usage_ledger.publish)
     usage_ledger.publish(usage.totals())
     started_at = time.time()
-    if not deadline_unix or deadline_unix <= 0:
-        deadline_unix = started_at + optimize_max_hours * 3600.0
-    rewrite_budget = DEFAULT_REWRITE_BUDGET if applyback_enabled else DEFAULT_REWRITE_BUDGET.without_applyback()
-    search_stop_unix = rewrite_budget.search_stop_unix(deadline_unix)
-    print(
-        "  [forge-rewrite] budget: "
-        f"remaining={max(0, int(deadline_unix - started_at))}s "
-        f"search={max(0, int(search_stop_unix - started_at))}s "
-        f"applyback_reserve={rewrite_budget.applyback_reserve_sec}s",
-        flush=True,
+    deadline_unix, rewrite_budget, search_stop_unix = _plan_budget(
+        started_at=started_at,
+        deadline_unix=deadline_unix,
+        optimize_max_hours=optimize_max_hours,
+        applyback_enabled=applyback_enabled,
     )
 
     # The framework patch must be based on the pristine caller-owned repository, before the standalone FlyDSL
     # seed/PORT commits are introduced.
-    base_result = _git(workspace, "rev-parse", "HEAD")
-    rewrite_base_commit = (
-        base_result.stdout.strip().splitlines()[0] if base_result.returncode == 0 and base_result.stdout.strip() else ""
-    )
+    rewrite_base_commit = _git_head(workspace)
     # A resolvable HEAD is what the agent sessions need, not evidence that the caller wants a framework patch. Asking
     # is what makes one required: a consumer of the standalone kernel has no framework tree for a patch to target, and
     # its run must not be judged on a stage it declined.
@@ -195,20 +515,6 @@ def run_rewrite(
 
     # Producer-owned scratch the consumer may reclaim.
     temporary_paths: list[str] = []
-
-    def _total_usage(optimize_result: dict | None = None, *, optimize_ran: bool = False) -> dict:
-        """This run's cumulative spend: the in-process stages plus the nested forge-loop's own ledger.
-
-        A forge-loop that was cut off or killed reports a ledger that stops at its last checkpoint, so the totals are
-        published as partial rather than as a complete provider-priced answer.
-        """
-        opt_result = optimize_result or {}
-        nested = opt_result.get("llm_usage")
-        return combine_usage_totals(
-            usage.totals(),
-            nested if isinstance(nested, dict) else None,
-            incomplete=optimize_ran and not opt_result.get("llm_usage_complete"),
-        )
 
     # Emit a clean, scorable failure result (no traceback) on any setup error so the caller can attribute it, instead
     # of the process dying opaquely.
@@ -220,15 +526,13 @@ def run_rewrite(
             port_attempts=0,
             source_ms=None,
             optimize_result={},
-            llm_usage=_total_usage(),
+            llm_usage=_run_usage(usage),
             failure_class=failure_class,
             failure_detail=reason,
             temporary_paths=temporary_paths,
             budget_policy=rewrite_budget,
         )
-        payload = report.emit_result(result, result_json)
-        print(f"{report.SENTINEL}{payload}{report.SENTINEL}", flush=True)
-        return result.to_dict()
+        return _emit_final(result, result_json)
 
     # A fresh directory each run stops a rerun inheriting a previous kernel; on the import path so drivers still reach
     # the candidate by module name.
@@ -282,56 +586,20 @@ def run_rewrite(
     print(f"  [forge-rewrite] seeded skeleton {spec.flydsl_kernel_relpath}", flush=True)
 
     # (3) Validate the rewrite-specific dual-path contract.
-    preflight = flydsl_rewrite_driver_preparation.preflight_rewrite_driver(
+    preflight, driver_failure = _conforming_driver(
         spec,
         driver_path,
-        deadline_unix=search_stop_unix,
+        config=config,
+        experiments_dir=experiments_dir,
+        search_stop_unix=search_stop_unix,
+        invocation_spec_file=invocation_spec_file,
+        usage=usage,
+        prepare_driver=prepare_driver,
     )
-    if not preflight.ok and prepare_driver:
-        print(
-            f"  [forge-rewrite] driver does not conform "
-            f"[{preflight.failure_class}]; invoking rewrite driver preparation",
-            flush=True,
-        )
-        prepared = asyncio.run(
-            flydsl_rewrite_driver_preparation.prepare_rewrite_driver(
-                spec=spec,
-                driver_path=driver_path,
-                config=config,
-                experiments_dir=experiments_dir,
-                deadline_unix=search_stop_unix,
-                invocation_spec_file=invocation_spec_file,
-                initial_preflight=preflight,
-                usage=usage,
-            )
-        )
-        if not prepared.ok or prepared.preflight is None:
-            return _setup_failed(
-                prepared.error or "rewrite driver preparation failed",
-                prepared.failure_class or flydsl_rewrite_driver_preparation.DRIVER_PREPARATION_FAILED,
-            )
-        preflight = prepared.preflight
-        print(
-            f"  [forge-rewrite] prepared driver {Path(driver_path).name} in {prepared.attempts} attempt(s)",
-            flush=True,
-        )
-    elif preflight.ok:
-        print(
-            f"  [forge-rewrite] supplied driver {Path(driver_path).name} already conforms; preparation skipped",
-            flush=True,
-        )
-    if not preflight.ok:
-        return _setup_failed(preflight.detail, preflight.failure_class)
-
-    for warning in preflight.warnings:
-        print(f"  [forge-rewrite] driver contract warning: {warning}", flush=True)
+    if driver_failure is not None:
+        return _setup_failed(*driver_failure)
     source_ms = preflight.source_ms
     source_case_ms = preflight.source_case_ms
-    if source_ms is None:
-        return _setup_failed(
-            "the conforming rewrite driver reported no source baseline",
-            driver_contract.REF_TIMING_UNPARSEABLE,
-        )
     print(
         f"  [forge-rewrite] source baseline: {source_ms:.4f} ms (full suite, "
         f"cases={list(preflight.reference_case_ids)})",
@@ -343,34 +611,15 @@ def run_rewrite(
 
     # (5) KB warm-start / PORT: an exact source+driver match may materialize a prior standalone FlyDSL file, but it
     # must pass today's FlyDSL-only and correctness gates before PORT is skipped.
-    kb_seed = Path(spec.flydsl_kernel).read_bytes() if Path(spec.flydsl_kernel).is_file() else None
     if rewrite_kb_enabled:
-        try:
-            kb_read = asyncio.run(
-                try_flydsl_kb_warmstart(
-                    spec,
-                    driver_path,
-                    config,
-                    source_case_ms=source_case_ms,
-                    framework=framework,
-                    stop_at_unix=search_stop_unix,
-                )
-            )
-        except Exception as error:  # noqa: BLE001 - KB failure must cold-start
-            if kb_seed is None:
-                Path(spec.flydsl_kernel).unlink(missing_ok=True)
-            else:
-                Path(spec.flydsl_kernel).write_bytes(kb_seed)
-            # The warm start builds a KB Store client from the store URL and bearer token, and this guard catches
-            # whatever its own reader did not: the client is constructed outside that sanitizer's ``try``, so a
-            # construction failure of any type other than ``KBStoreError`` arrives here untouched.
-            kb_read = RewriteKbReadResult(
-                read_reason="read_error",
-                read_error=sanitize_read_error(
-                    error,
-                    secrets=kb_store_secrets(config),
-                ),
-            )
+        kb_read = _read_flydsl_kb(
+            spec,
+            driver_path,
+            config,
+            source_case_ms=source_case_ms,
+            framework=framework,
+            search_stop_unix=search_stop_unix,
+        )
     else:
         kb_read = RewriteKbReadResult(read_reason="disabled")
     if kb_read.applied:
@@ -404,7 +653,7 @@ def run_rewrite(
             port_attempts=port.attempts,
             source_ms=source_ms,
             optimize_result={},
-            llm_usage=_total_usage(),
+            llm_usage=_run_usage(usage),
             kb_experience={
                 "read": kb_read.to_dict(),
                 "write": {"written": False, "reason": "port_failed"},
@@ -414,9 +663,7 @@ def run_rewrite(
             temporary_paths=temporary_paths,
             budget_policy=rewrite_budget,
         )
-        payload = report.emit_result(result, result_json)
-        print(f"{report.SENTINEL}{payload}{report.SENTINEL}", flush=True)
-        return result.to_dict()
+        return _emit_final(result, result_json)
     print(f"  [forge-rewrite] PORT OK (attempt {port.attempts}, SNR={port.snr_db})", flush=True)
 
     # Commit the correct port so forge-loop starts from a clean committed state.
@@ -432,62 +679,31 @@ def run_rewrite(
         [attempt.relative_root],
         branch=optimize_git_branch,
     )
-    port_commit_result = _git(workspace, "rev-parse", "HEAD")
-    port_commit = (
-        port_commit_result.stdout.strip().splitlines()[0]
-        if port_commit_result.returncode == 0 and port_commit_result.stdout.strip()
-        else ""
-    )
+    port_commit = _git_head(workspace)
 
     # (5b) Interim result: measure the ported FlyDSL kernel and write the result JSON NOW, reflecting a SUCCESSFUL
     # port (compiled + correct) with the ported kernel's own time as the interim best.
-    flydsl_baseline_ms = None
-    flydsl_baseline_speedup = None
-    if time.time() < search_stop_unix:
-        flydsl_budget = max(1, min(600, int(search_stop_unix - time.time())))
-        candidate = driver_contract.preflight_candidate(
-            spec,
-            driver_path,
-            reference_case_ids=preflight.reference_case_ids,
-            timeout_sec=flydsl_budget,
-        )
-        for warning in candidate.warnings:
-            print(f"  [forge-rewrite] driver contract warning: {warning}", flush=True)
-        if candidate.ok:
-            flydsl_baseline_ms = candidate.timing_ms
-            flydsl_baseline_speedup = scored_speedup(candidate.case_ms, source_case_ms)
-        elif candidate.failure_class in _FATAL_CANDIDATE_FAILURES:
-            return _setup_failed(candidate.detail, candidate.failure_class)
-        else:
-            print(
-                f"  [forge-rewrite] candidate bench unavailable [{candidate.failure_class}]: {candidate.detail}",
-                flush=True,
-            )
-    # A newly produced correct port is independently reusable even when it is slower than the source.
-    if rewrite_kb_enabled and port.attempts > 0:
-        port_kb_write = write_flydsl_kb_solution(
-            spec,
-            driver_path,
-            config,
-            source_ms=source_ms,
-            flydsl_best_ms=flydsl_baseline_ms,
-            speedup=flydsl_baseline_speedup,
-            best_commit=port_commit,
-            framework=framework,
-            snr_db=port.snr_db,
-            session_key=port_commit,
-        )
-        print(
-            f"  [forge-rewrite] PORT KB publish: {port_kb_write.get('reason') or port_kb_write.get('solution')}",
-            flush=True,
-        )
-    elif rewrite_kb_enabled:
-        port_kb_write = {
-            "written": False,
-            "reason": "kb_warmstart_reused",
-        }
-    else:
-        port_kb_write = {"written": False, "reason": "disabled"}
+    flydsl_baseline_ms, flydsl_baseline_speedup, bench_failure = _measure_flydsl_baseline(
+        spec,
+        driver_path,
+        preflight=preflight,
+        search_stop_unix=search_stop_unix,
+        source_case_ms=source_case_ms,
+    )
+    if bench_failure is not None:
+        return _setup_failed(*bench_failure)
+    port_kb_write = _publish_port_kb(
+        spec,
+        driver_path,
+        config,
+        rewrite_kb_enabled=rewrite_kb_enabled,
+        port=port,
+        source_ms=source_ms,
+        flydsl_best_ms=flydsl_baseline_ms,
+        speedup=flydsl_baseline_speedup,
+        port_commit=port_commit,
+        framework=framework,
+    )
     interim = report.build_result(
         op_name=op_name,
         port_ok=True,
@@ -499,7 +715,7 @@ def run_rewrite(
         },
         applyback_result={"ok": False, "error": "apply-back pending"} if applyback_enabled else None,
         applyback_required=applyback_required,
-        llm_usage=_total_usage(),
+        llm_usage=_run_usage(usage),
         kb_experience={
             "read": kb_read.to_dict(),
             "write": port_kb_write,
@@ -573,6 +789,7 @@ def run_rewrite(
             permission_mode=permission_mode,
             supervisor_backend=supervisor_backend,
             profile_timeout_sec=profile_timeout_sec,
+            roofline_ceiling=roofline_ceiling,
             deadline_unix=deadline_unix,
             stop_at_unix=search_stop_unix,
             # Anchor the loop on the source, so every score it reports -- each KEEP published below and the run's
@@ -594,63 +811,43 @@ def run_rewrite(
         )
 
     # (7) Report: FlyDSL best vs source baseline.
-    if opt.get("best_ms") is None:
-        opt = {**opt, "best_ms": flydsl_baseline_ms}
-    if opt.get("mean_case_speedup") is None:
-        opt = {**opt, "mean_case_speedup": flydsl_baseline_speedup}
-    if not opt.get("best_commit"):
-        opt = {**opt, "best_commit": port_commit}
+    opt = _with_port_fallbacks(
+        opt,
+        best_ms=flydsl_baseline_ms,
+        speedup=flydsl_baseline_speedup,
+        port_commit=port_commit,
+    )
 
-    if rewrite_kb_enabled:
-        final_commit = str(opt.get("best_commit") or "")
-        kb_write = write_flydsl_kb_solution(
-            spec,
-            driver_path,
-            config,
-            source_ms=source_ms,
-            flydsl_best_ms=opt.get("best_ms"),
-            speedup=opt.get("mean_case_speedup"),
-            best_commit=final_commit,
-            framework=framework,
-            # PORT's reading measures the artifact being recorded only while the run's best is still the ported kernel.
-            # Once OPTIMIZE has moved the best off that commit, it describes a kernel this record is not about.
-            snr_db=port.snr_db if final_commit == port_commit else None,
-            # The run's final result belongs to the OPTIMIZE session when there was one, and to the PORT session
-            # otherwise -- either way it replaces that session's record instead of standing beside it.
-            session_key=optimize_session_key or port_commit,
-        )
-    else:
-        kb_write = {"written": False, "reason": "disabled"}
+    kb_write = _publish_final_kb(
+        spec,
+        driver_path,
+        config,
+        rewrite_kb_enabled=rewrite_kb_enabled,
+        opt=opt,
+        source_ms=source_ms,
+        framework=framework,
+        port=port,
+        port_commit=port_commit,
+        optimize_session_key=optimize_session_key,
+    )
 
     # The standalone best is now restored in the rewrite workspace.
     applyback = None
     if applyback_enabled:
-        applyback = generate_applyback_patch(
+        applyback = _run_applyback(
             spec,
             config,
-            base_commit=rewrite_base_commit,
+            rewrite_base_commit=rewrite_base_commit,
             experiments_dir=experiments_dir,
             framework=framework,
-            best_commit=str(opt.get("best_commit") or ""),
+            opt=opt,
             source_ms=source_ms,
-            flydsl_best_ms=opt.get("best_ms"),
-            speedup=opt.get("mean_case_speedup"),
-            reference_snr_db=port.snr_db,
+            port=port,
             deadline_unix=deadline_unix,
             import_modules=applyback_import_modules,
             max_attempts=max_applyback_attempts,
             usage=usage,
         )
-        if applyback.ok:
-            print(
-                f"  [forge-rewrite] apply-back patch ready: {applyback.patch_path}",
-                flush=True,
-            )
-        else:
-            print(
-                f"  [forge-rewrite] APPLY-BACK FAILED: {applyback.error}",
-                flush=True,
-            )
     result = report.build_result(
         op_name=op_name,
         port_ok=True,
@@ -659,7 +856,7 @@ def run_rewrite(
         optimize_result=opt,
         applyback_result=applyback.to_dict() if applyback is not None else None,
         applyback_required=applyback_required,
-        llm_usage=_total_usage(opt, optimize_ran=optimize_ran),
+        llm_usage=_run_usage(usage, opt, optimize_ran=optimize_ran),
         kb_experience={
             "read": kb_read.to_dict(),
             "write": kb_write,
@@ -667,12 +864,10 @@ def run_rewrite(
         temporary_paths=temporary_paths,
         budget_policy=rewrite_budget,
     )
-    payload = report.emit_result(result, result_json)
     sp = result.speedup
     print(
         f"  [forge-rewrite] DONE: flydsl_best={result.flydsl_best_ms} ms "
         f"vs source={source_ms} ms -> speedup={f'{sp:.3f}x' if sp else 'unknown'}",
         flush=True,
     )
-    print(f"{report.SENTINEL}{payload}{report.SENTINEL}", flush=True)
-    return result.to_dict()
+    return _emit_final(result, result_json)

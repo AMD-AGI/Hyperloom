@@ -12,9 +12,15 @@ runtime acquisition, which would invert the layering.
 
 from __future__ import annotations
 
+# vLLM 0.30 moved the serve parser from ``entrypoints.openai`` to ``entrypoints.launchers``.
 _VLLM_PARSER_SOURCE = (
     "def _build_parser():\n"
-    "    from vllm.entrypoints.openai.cli_args import make_arg_parser\n"
+    "    try:\n"
+    "        from vllm.entrypoints.launchers.cli_args import make_arg_parser\n"
+    "    except ModuleNotFoundError as exc:\n"
+    "        if exc.name not in ('vllm.entrypoints.launchers', 'vllm.entrypoints.launchers.cli_args'):\n"
+    "            raise\n"
+    "        from vllm.entrypoints.openai.cli_args import make_arg_parser\n"
     "    try:\n"
     "        from vllm.utils.argparse_utils import FlexibleArgumentParser\n"
     "    except ImportError:\n"

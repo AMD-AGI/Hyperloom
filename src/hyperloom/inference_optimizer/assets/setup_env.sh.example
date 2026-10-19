@@ -13,8 +13,6 @@
 
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
 export REPO_ROOT
-export HYPERLOOM_KERNEL_AGENT_ROOT="$REPO_ROOT/src/hyperloom/agents/kernel"
-export KERNEL_AGENT_ROOT="$HYPERLOOM_KERNEL_AGENT_ROOT"
 export USER_DATA_PATH="${USER_DATA_PATH:-/workspace/hyperloom}"
 # TRACELENS_ROOT: leave unset to let install.sh clone AMD-AGI/TraceLens to
 # ${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/TraceLens@<sha> (per revision)
@@ -31,9 +29,8 @@ export PYTHON="${PYTHON:-$(command -v python3)}"
 export PATH="$(dirname "$PYTHON"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 
 # install.sh (IR-2) regenerates kernel-agent.env.sh under
-# $USER_DATA_PATH/runtime/ — there is no static "env.sh" under
-# $HYPERLOOM_KERNEL_AGENT_ROOT post tree-reform. Run install, then source
-# the generated file (both idempotent).
+# $USER_DATA_PATH/runtime/. Run install, then source the generated file
+# (both idempotent).
 bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"
 . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH}/runtime/kernel-agent.env.sh}"
 

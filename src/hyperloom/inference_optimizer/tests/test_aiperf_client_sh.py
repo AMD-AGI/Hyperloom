@@ -89,12 +89,18 @@ for a in "$@"; do
       printf '%s\n' start_profile >> "${AGENTX_PROFILE_EVENTS:-/dev/null}"
       if [ -n "${FAKE_TRACE_SOURCE:-}" ]; then
         mkdir -p "$FAKE_TRACE_DEST"
-        cp "$FAKE_TRACE_SOURCE"/* "$FAKE_TRACE_DEST/"
+        # A rank that starts recording late writes its trace after start_profile has returned.
+        (sleep "${FAKE_TRACE_DELAY_S:-0}"; cp "$FAKE_TRACE_SOURCE"/* "$FAKE_TRACE_DEST/") &
+        [ -n "${FAKE_TRACE_DELAY_S:-}" ] || wait
       fi
       exit "${FAKE_START_PROFILE_RC:-0}";;
     *stop_profile*)
       printf '%s\n' "$@" > "${AGENTX_CURL_STOP_MARKER:-/dev/null}"
       printf '%s\n' stop_profile >> "${AGENTX_PROFILE_EVENTS:-/dev/null}"
+      # A server that ignored its step bound writes its traces once it is told to stop.
+      if [ -n "${FAKE_STOP_TRACE_SOURCE:-}" ]; then
+        cp "$FAKE_STOP_TRACE_SOURCE"/* "$FAKE_TRACE_DEST/"
+      fi
       exit "${FAKE_STOP_PROFILE_RC:-0}";;
   esac
 done
@@ -125,7 +131,7 @@ if sys.argv[1] == "traces-complete" and "FAKE_TRACE_CHECK_RC" in os.environ:
     elapsed = float(clock.read_text()) + float(os.environ.get("FAKE_TRACE_CHECK_ADVANCE_SECONDS", "0"))
     clock.write_text(str(elapsed), encoding="utf-8")
     raise SystemExit(int(os.environ["FAKE_TRACE_CHECK_RC"]))
-if sys.argv[1] in {"is-auto-bounded", "snapshot-traces", "trace-stat", "traces-complete"}:
+if sys.argv[1] in {"is-auto-bounded", "snapshot-traces", "trace-stat", "traces-complete", "wait-bounded-capture"}:
     runpy.run_path(str(Path(__file__).with_name("real_phase_gate.py")), run_name="__main__")
 if sys.argv[1] == "pick-port":
     print("19090")
@@ -428,6 +434,18 @@ def test_no_pidfile_fail_loud_exit_3(tmp_path):
     r = _run(bench, bind, res, tmp_path)
     assert r.returncode == 3
     assert not (res / "inferencex_result.json").exists()
+
+
+def test_agentic_recipe_is_refused_before_it_runs(tmp_path):
+    bench, bind, res = _sandbox(tmp_path, make_builtin=False)
+    recipe = bench / "single_node" / "agentic" / "recipe.sh"
+    recipe.parent.mkdir(parents=True)
+    marker = tmp_path / "ran.txt"
+    _write_exec(recipe, f"#!/usr/bin/env bash\ntouch {marker}\n")
+    r = _run(bench, bind, res, tmp_path, AGENTX_SERVER_SCRIPT="single_node/agentic/recipe.sh")
+    assert r.returncode == 2
+    assert "is an agentic recipe" in r.stdout + r.stderr
+    assert not marker.exists()
 
 
 def test_aiperf_failure_not_mapped(tmp_path):
@@ -944,20 +962,30 @@ def test_client_only_profiles_measured_phase_without_server_cleanup(tmp_path, st
         assert capture["decision"]["stop_reason"] == "phase_complete"
 
 
+_SGLANG_BOUND = '{"num_steps":8}'
+_VLLM_BOUND = "--profiler-config.max_iterations 8"
+
+
 @pytest.mark.parametrize(
-    "framework,body,case,stop_rc,reason,stop_called",
+    "framework,body,vllm_args,case,stop_rc,reason,stop_called",
     [
-        ("sglang", '{"num_steps":8}', "complete", "22", "capture_complete", False),
-        ("sglang", '{"num_steps":8}', "stale", "0", "trace_files_missing", True),
-        ("sglang", '{"num_steps":8}', "partial_ranks", "0", "trace_flush_timeout", True),
-        ("sglang", '{"num_steps":8}', "bad_gzip", "0", "trace_flush_timeout", True),
-        ("sglang", '{"num_steps":8}', "empty", "22", "stop_profile_failed", True),
-        ("vllm", '{"num_steps":8}', "complete", "22", "stop_profile_failed", True),
-        ("sglang", '{"num_steps":true}', "complete", "22", "stop_profile_failed", True),
+        ("sglang", _SGLANG_BOUND, "", "complete", "22", "capture_complete", False),
+        ("sglang", _SGLANG_BOUND, "", "late_ranks", "22", "capture_complete", False),
+        ("sglang", _SGLANG_BOUND, "", "stale", "0", "trace_files_missing", False),
+        ("sglang", _SGLANG_BOUND, "", "partial_ranks", "0", "bounded_capture_incomplete", False),
+        ("sglang", _SGLANG_BOUND, "", "bad_gzip", "0", "bounded_capture_incomplete", False),
+        ("sglang", _SGLANG_BOUND, "", "empty", "22", "trace_files_missing", False),
+        ("vllm", "{}", _VLLM_BOUND, "complete", "22", "capture_complete", False),
+        ("vllm", "{}", "--profiler-config.max_iterations=8", "late_ranks", "22", "capture_complete", False),
+        ("vllm", "{}", _VLLM_BOUND, "partial_ranks", "0", "bounded_capture_incomplete", False),
+        ("vllm", "{}", "--profiler-config.max_iterations 0", "complete", "22", "stop_profile_failed", True),
+        ("vllm", _SGLANG_BOUND, "", "complete", "22", "stop_profile_failed", True),
+        ("atom", "{}", _VLLM_BOUND, "complete", "22", "stop_profile_failed", True),
+        ("sglang", '{"num_steps":true}', "", "complete", "22", "stop_profile_failed", True),
     ],
 )
-def test_stop_is_skipped_only_for_proven_current_native_completion(
-    tmp_path, framework, body, case, stop_rc, reason, stop_called
+def test_capture_end_follows_the_server_side_bound(
+    tmp_path, framework, body, vllm_args, case, stop_rc, reason, stop_called
 ):
     bench, bind, res = _sandbox(tmp_path, write_pid=False)
     trace = res / "torch_trace"
@@ -982,10 +1010,12 @@ def test_stop_is_skipped_only_for_proven_current_native_completion(
         TP="2",
         FRAMEWORK=framework,
         PROFILE_EXTRA_BODY=body,
+        EXTRA_VLLM_ARGS=vllm_args,
         AGENTX_CURL_STOP_MARKER=str(stop_marker),
         FAKE_STOP_PROFILE_RC=stop_rc,
         FAKE_TRACE_SOURCE=str(source) if case not in {"empty", "stale"} else "",
         FAKE_TRACE_DEST=str(trace),
+        FAKE_TRACE_DELAY_S="2" if case == "late_ranks" else None,
         AGENTX_TRACE_FLUSH_TIMEOUT_S="75",
         **_fast_trace_poll_env(bind, tmp_path),
     )
@@ -994,10 +1024,85 @@ def test_stop_is_skipped_only_for_proven_current_native_completion(
     capture = json.loads(_capture_status_path(res).read_text())
     assert capture["reason"] == reason
     assert capture["status"] == ("succeeded" if reason == "capture_complete" else "failed")
+    if not stop_called:
+        expected_stop = "traces_complete" if reason == "capture_complete" else "aiperf_exited"
+        assert capture["decision"]["stop_reason"] == expected_stop
     argv = (tmp_path / "curl.txt").read_text().splitlines()
-    assert argv[argv.index("-d") + 1] == body
+    if body == "{}":
+        assert "-d" not in argv
+    else:
+        assert argv[argv.index("-d") + 1] == body
     assert capture["requested_window_seconds"] == 0
     _assert_external_server_untouched(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "stop_rc,traces_after_stop,reason",
+    [
+        ("0", False, "trace_files_missing"),
+        ("22", True, "capture_complete"),
+    ],
+)
+def test_bounded_capture_that_overruns_the_safety_deadline_is_stopped_once(
+    tmp_path, stop_rc, traces_after_stop, reason
+):
+    bench, bind, res = _sandbox(tmp_path, write_pid=False)
+    trace = res / "torch_trace"
+    source = tmp_path / "trace-source"
+    trace.mkdir()
+    source.mkdir()
+    for rank in range(2):
+        with gzip.open(source / f"177-TP-{rank}-DECODE.trace.json.gz", "wt", encoding="utf-8") as handle:
+            json.dump({"traceEvents": [{"cat": "kernel", "ph": "X", "ts": 1, "dur": 2}]}, handle)
+    events = tmp_path / "profile-events.txt"
+    r = _run_profile(
+        bench,
+        bind,
+        res,
+        tmp_path,
+        TP="2",
+        FRAMEWORK="sglang",
+        PROFILE_EXTRA_BODY=_SGLANG_BOUND,
+        AGENTX_PROFILE_EVENTS=str(events),
+        AGENTX_CURL_STOP_MARKER=str(tmp_path / "stop.txt"),
+        AGENTX_TRACE_FIRST_FILE_TIMEOUT_S="1",
+        AGENTX_TRACE_FLUSH_TIMEOUT_S="75",
+        FAKE_STOP_PROFILE_RC=stop_rc,
+        FAKE_STOP_TRACE_SOURCE=str(source) if traces_after_stop else None,
+        FAKE_TRACE_DEST=str(trace),
+        **_fast_trace_poll_env(bind, tmp_path),
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert events.read_text().splitlines() == ["start_profile", "stop_profile"]
+    capture = json.loads(_capture_status_path(res).read_text())
+    assert capture["reason"] == reason
+    assert capture["status"] == ("succeeded" if reason == "capture_complete" else "failed")
+    assert capture["decision"]["stop_reason"] == "safety_deadline"
+    assert capture["decision"]["stop_profile"] == ("accepted" if stop_rc == "0" else "rejected")
+    _assert_external_server_untouched(tmp_path)
+
+
+def test_bounded_capture_without_profiler_output_is_not_waited_on(tmp_path):
+    bench, bind, res = _sandbox(tmp_path, write_pid=False)
+    stop_marker = tmp_path / "stop.txt"
+    r = _run_profile(
+        bench,
+        bind,
+        res,
+        tmp_path,
+        FRAMEWORK="sglang",
+        PROFILE_EXTRA_BODY=_SGLANG_BOUND,
+        SGLANG_TORCH_PROFILER_DIR="",
+        VLLM_TORCH_PROFILER_DIR="",
+        AGENTX_CURL_STOP_MARKER=str(stop_marker),
+        **_client_only_env(bind, tmp_path),
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "no profiler output directory is configured" in r.stdout
+    assert not stop_marker.exists()
+    capture = json.loads(_capture_status_path(res).read_text())
+    assert capture["status"] == "failed"
+    assert capture["reason"] == "profiler_output_unconfigured"
 
 
 def test_profile_forwards_capture_bounds_to_start_profile(tmp_path):
@@ -1049,13 +1154,6 @@ def test_profile_phase_wait_has_bounded_fallback(tmp_path):
     assert r.returncode == 0, r.stderr
     argv = json.loads(marker.read_text())
     assert argv[argv.index("--timeout-seconds") + 1] == "3618"
-
-
-def test_legacy_profile_warmup_delay_is_ignored(tmp_path):
-    bench, bind, res = _sandbox(tmp_path)
-    r = _run_profile(bench, bind, res, tmp_path, AGENTX_PROFILE_WARMUP_S="not-a-duration")
-    assert r.returncode == 0, r.stderr
-    assert "AGENTX_PROFILE_WARMUP_S is ignored" in (r.stdout + r.stderr)
 
 
 def test_phase_gate_failure_keeps_measurement_but_skips_capture(tmp_path):
@@ -1479,8 +1577,7 @@ def test_tp1_vllm_gzip_flushes_after_manual_stop(tmp_path, stop_rc, cpu_frontend
     _assert_external_server_untouched(tmp_path)
 
 
-@pytest.mark.parametrize("auto_bounded", [False, True])
-def test_trace_checks_reuse_capture_cache_and_remaining_flush_budget(tmp_path, auto_bounded):
+def test_trace_checks_reuse_capture_cache_and_remaining_flush_budget(tmp_path):
     bench, bind, res = _sandbox(tmp_path, write_pid=False)
     trace = res / "torch_trace"
     source = tmp_path / "trace-source"
@@ -1502,8 +1599,8 @@ def test_trace_checks_reuse_capture_cache_and_remaining_flush_budget(tmp_path, a
         res,
         tmp_path,
         TP="2",
-        FRAMEWORK="sglang" if auto_bounded else "vllm",
-        PROFILE_EXTRA_BODY='{"num_steps":8}' if auto_bounded else "{}",
+        FRAMEWORK="vllm",
+        PROFILE_EXTRA_BODY="{}",
         SGLANG_TORCH_PROFILER_DIR="",
         VLLM_TORCH_PROFILER_DIR="",
         AGENTX_TRACE_FLUSH_TIMEOUT_S=str(budget),
@@ -1541,9 +1638,8 @@ def test_trace_checks_reuse_capture_cache_and_remaining_flush_budget(tmp_path, a
     _assert_external_server_untouched(tmp_path)
 
 
-@pytest.mark.parametrize("auto_bounded", [False, True])
 @pytest.mark.parametrize("budget", [0, 5, 40])
-def test_trace_flush_never_scans_without_remaining_budget(tmp_path, auto_bounded, budget):
+def test_trace_flush_never_scans_without_remaining_budget(tmp_path, budget):
     bench, bind, res = _sandbox(tmp_path, write_pid=False)
     trace = res / "torch_trace"
     source = tmp_path / "trace-source"
@@ -1560,8 +1656,8 @@ def test_trace_flush_never_scans_without_remaining_budget(tmp_path, auto_bounded
         bind,
         res,
         tmp_path,
-        FRAMEWORK="sglang" if auto_bounded else "vllm",
-        PROFILE_EXTRA_BODY='{"num_steps":8}' if auto_bounded else "{}",
+        FRAMEWORK="vllm",
+        PROFILE_EXTRA_BODY="{}",
         SGLANG_TORCH_PROFILER_DIR="",
         VLLM_TORCH_PROFILER_DIR="",
         AGENTX_TRACE_FLUSH_TIMEOUT_S=str(budget),
@@ -1574,7 +1670,7 @@ def test_trace_flush_never_scans_without_remaining_budget(tmp_path, auto_bounded
     )
     assert r.returncode == 0, r.stdout + r.stderr
     checks = [json.loads(line) for line in checks_marker.read_text().splitlines()] if checks_marker.exists() else []
-    assert len(checks) == (1 if auto_bounded and budget else 0)
+    assert not checks
     for check in checks:
         argv = check["argv"]
         assert 0 < float(argv[argv.index("--timeout-seconds") + 1]) <= budget - check["elapsed"]
@@ -1587,9 +1683,8 @@ def test_trace_flush_never_scans_without_remaining_budget(tmp_path, auto_bounded
     _assert_external_server_untouched(tmp_path)
 
 
-@pytest.mark.parametrize("auto_bounded", [False, True])
 @pytest.mark.parametrize("overrun", [0, 1])
-def test_trace_check_success_at_or_after_deadline_is_rejected(tmp_path, auto_bounded, overrun):
+def test_trace_check_success_at_or_after_deadline_is_rejected(tmp_path, overrun):
     bench, bind, res = _sandbox(tmp_path, write_pid=False)
     trace = res / "torch_trace"
     source = tmp_path / "trace-source"
@@ -1601,14 +1696,14 @@ def test_trace_check_success_at_or_after_deadline_is_rejected(tmp_path, auto_bou
     checks_marker = tmp_path / "trace-checks.jsonl"
     stop_marker = tmp_path / "stop.txt"
     env = _fast_trace_poll_env(bind, tmp_path)
-    budget = 1 if auto_bounded else 41
+    budget = 41
     r = _run_profile(
         bench,
         bind,
         res,
         tmp_path,
-        FRAMEWORK="sglang" if auto_bounded else "vllm",
-        PROFILE_EXTRA_BODY='{"num_steps":8}' if auto_bounded else "{}",
+        FRAMEWORK="vllm",
+        PROFILE_EXTRA_BODY="{}",
         SGLANG_TORCH_PROFILER_DIR="",
         VLLM_TORCH_PROFILER_DIR="",
         AGENTX_TRACE_FLUSH_TIMEOUT_S=str(budget),
@@ -1631,39 +1726,6 @@ def test_trace_check_success_at_or_after_deadline_is_rejected(tmp_path, auto_bou
     assert capture["reason"] == "trace_flush_timeout"
     assert "trace flush complete" not in r.stdout
     assert stop_marker.exists()
-    assert (res / "inferencex_result.json").exists()
-    _assert_external_server_untouched(tmp_path)
-
-
-def test_pre_stop_check_consumes_the_same_flush_budget(tmp_path):
-    bench, bind, res = _sandbox(tmp_path, write_pid=False)
-    (res / "torch_trace").mkdir()
-    checks_marker = tmp_path / "trace-checks.jsonl"
-    env = _fast_trace_poll_env(bind, tmp_path)
-    r = _run_profile(
-        bench,
-        bind,
-        res,
-        tmp_path,
-        FRAMEWORK="sglang",
-        PROFILE_EXTRA_BODY='{"num_steps":8}',
-        SGLANG_TORCH_PROFILER_DIR="",
-        VLLM_TORCH_PROFILER_DIR="",
-        AGENTX_TRACE_FLUSH_TIMEOUT_S="1",
-        AGENTX_TRACE_CHECKS_MARKER=str(checks_marker),
-        FAKE_TRACE_CHECK_RC="1",
-        FAKE_TRACE_CHECK_ADVANCE_SECONDS="0.25",
-        **env,
-    )
-    assert r.returncode == 0, r.stdout + r.stderr
-    checks = [json.loads(line) for line in checks_marker.read_text().splitlines()]
-    assert len(checks) == 1
-    argv = checks[0]["argv"]
-    assert 0 < float(argv[argv.index("--timeout-seconds") + 1]) <= 1
-    assert float(Path(env["AGENTX_TEST_TRACE_CLOCK"]).read_text()) == 1
-    capture = json.loads(_capture_status_path(res).read_text())
-    assert capture["status"] == "failed"
-    assert capture["reason"] == "trace_files_missing"
     assert (res / "inferencex_result.json").exists()
     _assert_external_server_untouched(tmp_path)
 

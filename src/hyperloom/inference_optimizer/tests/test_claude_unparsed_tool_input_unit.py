@@ -235,6 +235,5 @@ async def test_handler_reports_malformed_wrapped_raw() -> None:
 def test_registered_schema_offers_both_shapes() -> None:
     """The declared schema is what the model reads, so the wrapper alternative has to survive into it and say it is internal."""
     schema = _registered_emit_intent_tool().input_schema
-    assert {"required": ["intent_type", "payload"]} in schema["anyOf"]
-    assert {"required": ["__unparsedToolInput"]} in schema["anyOf"]
+    assert set(schema["properties"]) == {"intent_type", "payload", "__unparsedToolInput"}
     assert "Never emit this deliberately" in schema["properties"]["__unparsedToolInput"]["description"]

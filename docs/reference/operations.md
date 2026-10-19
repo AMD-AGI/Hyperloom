@@ -141,7 +141,7 @@ The following table describes the key lifecycle events for a Hyperloom session.
 | Session start   | API call / Job creation                            | Coordinator creates `$SESSION_DIR` and writes `manifest.json`, `state.json`. |
 | Heartbeat       | Every Coordinator tick (`--tick-interval-sec`, default `0` = no sleep) | Coordinator atomically rewrites `state.json` (temp `.state.json.*.tmp` + `os.replace`) inside `$SESSION_DIR`. |
 | Session end     | `target_reached` / `time_exhausted` / `global_converged` | Coordinator writes `session_breakdown.json`, exits 0. |
-| Crash recovery  | Pod OOM / preemption                               | Re-launch with `--resume-from "$SESSION_DIR"`; reads `manifest.json` + `state.json`. |
+| Crash recovery  | Pod OOM / preemption                               | Re-launch with `--resume-from "$SESSION_DIR"`; reads `manifest.json` + `state.json`. If the resume is refused because the lost pod's execution ownership cannot be established, confirm that pod is gone with `hyperloom recover --confirm-scope-gone` first ([Scenario A](#scenario-a-pod-was-oom-killed-mid-session)). |
 
 ---
 
@@ -188,12 +188,42 @@ Operational checks:
 ```bash
 test -n "${OPENAI_API_KEY:-${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-}}}"
 test -n "${OPENAI_BASE_URL:-${ANTHROPIC_BASE_URL:-}}"
-bash "$REPO_ROOT/hyperloom/agents/kernel/scripts/install.sh" --check-only
+bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install.sh" --check-only
 ```
 
 Child processes inherit the gateway settings prepared by preflight; keep
 operator-facing gateway configuration in `OPENAI_API_KEY` / `OPENAI_BASE_URL`
 or the split Anthropic/OpenAI credentials.
+
+---
+
+## Launcher contract
+
+Launchers can rely on these outputs of `hyperloom optimize`.
+
+**Exit codes**
+
+| Code | Meaning |
+|---|---|
+| 0 | The run finished with a completed outcome |
+| 1 | The run failed or was aborted, including by a signal |
+| 2 | Invalid arguments or a startup check failed (topology, resume, model gate, credentials) |
+| 3 | The session lock is held by another optimizer |
+| 4 | The `--quantize` prelude failed; the run refuses to optimize the unquantized model |
+
+`hyperloom recover` exits 0 on success (including a cleanup confirmation that found nothing to confirm), 1 when the breakdown
+rebuild fails, and 2 on invalid arguments or when a `--confirm-stopped` / `--confirm-scope-gone` confirmation is refused.
+
+**Launch line**
+
+Once the session directory exists, stdout carries one line
+
+```text
+HYPERLOOM_LAUNCH event=launch pid=... session_dir=... session_id=... run_log=... manifest=... gpu_type=... framework=... model=...
+```
+
+with shell-quoted values, and `--launch-info-file PATH` writes the same keys as JSON. A skipped quantization prelude prints a line starting
+with `QUANTIZATION_SKIPPED:`.
 
 ---
 
@@ -225,7 +255,7 @@ ingest it whole on session end.
    `ls "$SESSION_DIR/state.json"`.
 2. Relaunch with `--resume-from`:
    ```bash
-   python3 -m hyperloom.inference_optimizer.cli optimize --resume-from "$SESSION_DIR"
+   python3 -m hyperloom optimize --resume-from "$SESSION_DIR"
    ```
 3. Coordinator reads `manifest.json` + `state.json`, re-enters the
    loop at the last completed action. The current in-flight action
@@ -235,19 +265,75 @@ and inspect the failure before relaunching. SIGHUP follows normal terminal drain
 `--max-hours` is cooperative and cannot guarantee termination of a frozen
 Coordinator. Historical stop reasons remain readable but do not trigger a restart.
 
+**When the resume is refused.** A relaunch in a new pod (or a restarted
+container) is a different execution environment, so it cannot observe whether
+the tasks the lost pod was running have exited. The resume then exits 2 with
+`resume blocked: prior execution exit cannot be established in this
+environment`, lists the blocking tasks, and names the owner scopes recorded in
+the session on an `other owner scopes:` line. An owner scope identifies one
+execution environment: a boot, a PID namespace and a container start. Nothing is
+cleared, and the resume stays refused until the ownership is confirmed.
+
+Once you have verified that the environment named by an owner scope no longer
+exists (its pod, container or machine is gone, so nothing it started can still
+be running), record that once for the whole scope, then relaunch:
+
+```bash
+  python3 -m hyperloom recover --session-dir "$SESSION_DIR" \
+    --confirm-scope-gone "$OWNER_SCOPE" --confirmation-reason "pod OOM-killed; pod deleted"
+  python3 -m hyperloom optimize --resume-from "$SESSION_DIR"
+```
+
+Pass the scope exactly as printed, without the surrounding quotes. The
+confirmation cancels the unfinished tasks recorded under that scope, so the
+resumed run redoes them instead of counting their results; releases their
+execution and GPU ownership records; and appends the confirmation to
+`runtime/pod_history.jsonl` (if that append fails, the confirmation still stands
+and a warning is printed). It does not stop any process and does not resume
+the run. When nothing is recorded under the named scope it changes no task or
+lease record, reports `cancelled_tasks=0 released_leases=0` and exits 0; check
+those counts. It is refused, with exit code 2 and no task or lease record
+changed, when:
+
+* the named scope is the current environment's, or the current environment's
+  scope cannot be read;
+* an execution lease held by any other scope has not yet expired (another
+  environment may still be writing the session);
+* a task under the named scope also holds a lease recorded under a different
+  scope;
+* the scope is an older two-part one recorded for this same boot and PID
+  namespace and one of its recorded holder processes still runs here;
+* the session lock is held (an optimizer is still running on the session), or
+  POSIX session locking is unavailable;
+* the session's ownership database predates owner scopes; use `--confirm-stopped`;
+* `--confirmation-reason` is missing or empty, or the option is combined with
+  `--confirm-stopped` or `--force`.
+
+If the relaunch is still refused after the scope confirmation for tasks that
+name no owner scope, confirm each of them with `--confirm-stopped TASK_ID`, then
+relaunch. Such a task holds no ownership record under any owner scope, so
+`--confirm-scope-gone` releases nothing for it; a CLOSE-phase step, for example,
+runs without a lane and so is recorded without one. The refusal names owner
+scopes only on its `other owner scopes:` line, not per task, so let
+`--confirm-stopped` check: it refuses, with exit code 2 and nothing changed, a
+task recorded under a nonempty owner scope. It confirms one task at a time,
+after you have verified that task's whole process tree and any remote workers
+or Ray actors have stopped.
+
 To rebuild only the `session_breakdown` (and push it to Langfuse) for a run
 that exited abnormally — without re-running the optimization loop — use the
 dedicated subcommand instead of `--resume-from`:
 
 ```bash
-  python3 -m hyperloom.inference_optimizer.cli recover-session --session-dir "$SESSION_DIR" [--force] [--backfill-trace]
+  python3 -m hyperloom recover --session-dir "$SESSION_DIR" [--force]
 ```
 
-`--force` re-runs even when the session already looks complete;
-`--backfill-trace` replays `reports/trace/llm_calls.jsonl` as Langfuse
-generations (use only when the live emitter never ran, or it duplicates
-generations). `--resume-from` = keep optimizing; `recover-session` = rebuild
-the breakdown artifact.
+`--force` re-runs even when the session already looks complete. To replay
+`reports/trace/llm_calls.jsonl` as Langfuse generations (only when the live
+emitter never ran), use `hyperloom session backfill --session-dir "$SESSION_DIR"`.
+`--resume-from` = keep optimizing; `recover` = rebuild the breakdown artifact,
+or, with `--confirm-scope-gone` / `--confirm-stopped`, record a cleanup
+confirmation that lets a refused resume proceed.
 
 ### Scenario B: PV lost or corrupted
 
@@ -260,7 +346,7 @@ the breakdown artifact.
 
 1. Confirm the pod has a current key and base URL (`OPENAI_API_KEY` /
    `OPENAI_BASE_URL`, or split Anthropic/OpenAI credentials).
-2. Re-run `bash "$REPO_ROOT/hyperloom/agents/kernel/scripts/install.sh" --check-only`
+2. Re-run `bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install.sh" --check-only`
    and then without `--check-only` if it reports missing aliases.
 3. Inspect `~/.claude/config.json`; `customApiUrl` must point at the upstream
    gateway.

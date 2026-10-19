@@ -40,7 +40,8 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 
 #: The AgentX axes a measured round carries, on the keys grading itself reads them from. ``duration_seconds`` and
 #: ``request_error_rate`` are members because the verdict is: a pair is refused outright on a window that drifted
-#: or a candidate that dropped more requests, so they are published with the axes they can veto.
+#: or a candidate that dropped more requests than ``ERROR_RATE_SLACK_PCT`` allows, so they are published with the
+#: axes they can veto.
 AGENTX_AXES: dict[str, Any] = {
     GRADED_INTVTY: 41.2,
     "e2e_norm_intvty_p50": 78.9,

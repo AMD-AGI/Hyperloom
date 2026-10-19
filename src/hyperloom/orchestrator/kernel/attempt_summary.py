@@ -12,7 +12,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from kernelforge.knowledge.implementation_identity import normalize_operator_name
+from kernelforge.knowledge.kb_store.identity.implementation import normalize_operator_name
 
 from hyperloom.common.coerce import to_float
 
@@ -585,7 +585,7 @@ def build_kernel_optimization_summary(
         previous = attempts_map.get(current_kernel_id)
         if previous is None or str(attempt.get("last_ts") or "") >= str(previous.get("last_ts") or ""):
             attempts_map[current_kernel_id] = attempt
-    rejected_ids: set[str] = set(str(x) for x in (getattr(state, "rejected_kernel_ids", []) or []))
+    rejected_ids: set[str] = {str(x) for x in (getattr(state, "rejected_kernel_ids", []) or [])}
     integrated_ids: set[str] = set()
     for entry in getattr(state, "optimization_stack", []) or []:
         if not isinstance(entry, dict):
@@ -607,7 +607,7 @@ def build_kernel_optimization_summary(
             keep_pending_kid = cand_kid
 
     by_kernel: list[dict[str, Any]] = []
-    rejection_breakdown: dict[str, int] = {r: 0 for r in KNOWN_REJECTION_REASONS}
+    rejection_breakdown: dict[str, int] = dict.fromkeys(KNOWN_REJECTION_REASONS, 0)
     rejection_breakdown["other"] = 0
     counts = {
         "top_candidates": len(top15),
@@ -739,6 +739,13 @@ def build_kernel_optimization_summary(
         overall_outcome = _overall_lane_outcome(lane_totals)
         if counts["attempted"] and lane_totals["source_level"]["attempted"] == 0:
             top_takeaways[0] = "No source-level kernel rewrites were attempted; other kernel lanes did run."
+    geak_result = getattr(state, "geak_result", None)
+    absent_backends = geak_result.get("absent_backends") if isinstance(geak_result, dict) else None
+    if isinstance(absent_backends, dict) and absent_backends:
+        top_takeaways.append(
+            f"GEAK ran without these backends (unavailable): {', '.join(sorted(absent_backends))}; "
+            "any no-win it reports did not try them."
+        )
 
     summary = {
         "schema_version": schema_version,

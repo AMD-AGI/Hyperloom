@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import json
 import os
 import shlex
@@ -613,8 +614,8 @@ def _log_rank0_post_spawn(log_dir: Path, rank0_pid: int | None) -> None:
     _emit_rank0_log_tail(log_dir)
 
 
-def main() -> int:
-    """Parse CLI arguments and launch the multi-node server group(s)."""
+def _build_parser() -> argparse.ArgumentParser:
+    """The launcher's command line."""
     p = argparse.ArgumentParser(
         prog="launch_multinode.py",
         description="Spawn one sglang/vllm rank per RayJob node via ray actors.",
@@ -696,142 +697,79 @@ def main() -> int:
         default=_PD_DEFAULT_BOOTSTRAP_PORT,
         help=f"sglang PD bootstrap rendezvous port (default {_PD_DEFAULT_BOOTSTRAP_PORT})",
     )
-    args = p.parse_args()
+    return p
 
-    if args.nnodes < 2:
+
+@dataclass(frozen=True)
+class _PdPlan:
+    """How one launch divides its nodes, aggregated or split into prefill/decode groups."""
+
+    mode: str
+    prefill_nodes: int
+    decode_nodes: int
+    prefill_tp: int
+    decode_tp: int
+    ib_device: str
+
+    @property
+    def disaggregated(self) -> bool:
+        """Whether this launch fronts two server groups with a router."""
+        return self.mode == "disaggregated"
+
+
+def _resolve_pd_plan(args: argparse.Namespace) -> _PdPlan | None:
+    """The node/TP split this launch uses, or None when the arguments do not describe one."""
+    mode = (args.pd_mode or "aggregated").lower()
+    if mode != "disaggregated":
+        return _PdPlan(mode, args.nnodes, 0, args.tp, 0, "")
+    prefill_nodes = int(args.pd_prefill_nodes or 0)
+    decode_nodes = int(args.pd_decode_nodes or 0)
+    if prefill_nodes <= 0 or decode_nodes <= 0 or prefill_nodes + decode_nodes != args.nnodes:
         _log(
-            f"nnodes={args.nnodes} < 2; this script is for multi-node only. "
-            f"Use launch_server.sh for single-pod restarts."
+            f"PD invalid split: pd_prefill_nodes={prefill_nodes} pd_decode_nodes={decode_nodes} "
+            f"nnodes={args.nnodes}; require pn+dn==nnodes and both >0"
         )
-        return 2
+        return None
+    prefill_tp = int(args.pd_prefill_tp or args.tp)
+    decode_tp = int(args.pd_decode_tp or args.tp)
+    if prefill_tp <= 0 or decode_tp <= 0:
+        _log(f"PD invalid TP: pd_prefill_tp={prefill_tp} pd_decode_tp={decode_tp}")
+        return None
+    return _PdPlan(
+        mode,
+        prefill_nodes,
+        decode_nodes,
+        prefill_tp,
+        decode_tp,
+        (args.pd_ib_device or os.environ.get("NCCL_IB_HCA", "")).strip(),
+    )
 
-    # Validate PD args; populate defaults.
-    pd_mode = (args.pd_mode or "aggregated").lower()
-    if pd_mode == "disaggregated":
-        pn = int(args.pd_prefill_nodes or 0)
-        dn = int(args.pd_decode_nodes or 0)
-        if pn <= 0 or dn <= 0 or pn + dn != args.nnodes:
-            _log(
-                f"PD invalid split: pd_prefill_nodes={pn} pd_decode_nodes={dn} "
-                f"nnodes={args.nnodes}; require pn+dn==nnodes and both >0"
-            )
-            return 2
-        ptp = int(args.pd_prefill_tp or args.tp)
-        dtp = int(args.pd_decode_tp or args.tp)
-        if ptp <= 0 or dtp <= 0:
-            _log(f"PD invalid TP: pd_prefill_tp={ptp} pd_decode_tp={dtp}")
-            return 2
-        ib_dev = args.pd_ib_device or os.environ.get("NCCL_IB_HCA", "")
-        ib_dev = ib_dev.strip()
-    else:
-        pn = args.nnodes
-        dn = 0
-        ptp = args.tp
-        dtp = 0
-        ib_dev = ""
 
-    extra_args = shlex.split(args.extra_args) if args.extra_args else []
-    denied = find_denied_flags(args.extra_args) + find_unsafe_flag_values(args.extra_args)
-    if denied:
-        _log(f"ERROR denied server flags in --extra-args: {denied}")
-        return 2
+def _on_node(spawn_actor, node: dict):
+    """Pin one spawn actor to the node whose GPUs its rank will use."""
+    return spawn_actor.options(
+        scheduling_strategy=NodeAffinitySchedulingStrategy(node_id=node["NodeID"], soft=False),
+    )
 
-    _log(f"framework={args.framework} model={args.model} tp={args.tp} nnodes={args.nnodes}")
 
-    ray.init(ignore_reinit_error=True, log_to_driver=True)
-    nodes = _wait_for_nodes(args.nnodes, _NODES_DISCOVERY_TIMEOUT_SEC)
-    nodes = _pick_head_first(nodes)
-    nodes = nodes[: args.nnodes]
-    head_ip = ray.util.get_node_ip_address()
-    _log(f"discovered {len(nodes)} GPU nodes; head_ip={head_ip}; rank order:")
-    for k, n in enumerate(nodes):
-        _log(
-            f"  rank {k}: node_id={n.get('NodeID', '?')[:16]}... "
-            f"addr={n.get('NodeManagerAddress', '?')} "
-            f"gpu={n.get('Resources', {}).get('GPU', 0)}"
-        )
+def _spawn_rank_actors(
+    args: argparse.Namespace,
+    *,
+    nodes: list,
+    head_ip: str,
+    plan: _PdPlan,
+    extra_args: list[str],
+) -> tuple[list, str, str]:
+    """Spawn one actor per rank, and say which address each server group rendezvous on.
 
-    # Spawn one actor per rank (num_gpus=0; the framework reserves GPUs itself).
-    SpawnActor = ray.remote(num_cpus=1, num_gpus=0)(_spawn_remote)
-    # tag -> (node_id, real PID).
-    pids: dict[str, tuple[str, int]] = {}
-    refs: list[tuple[str, str, Any]] = []  # (tag, node_id, actor_ref)
-
-    if pd_mode == "disaggregated":
-        # Group A: prefill — nodes[0:pn], TP=ptp; rank-0 binds the prefill port.
-        prefill_head_ip = nodes[0].get("NodeManagerAddress", head_ip)
-        for grp_rank in range(pn):
-            node = nodes[grp_rank]
-            actor_ref = SpawnActor.options(
-                scheduling_strategy=NodeAffinitySchedulingStrategy(
-                    node_id=node["NodeID"],
-                    soft=False,
-                ),
-            ).remote(
-                framework=args.framework,
-                model=args.model,
-                tp=ptp,
-                nnodes=pn,
-                node_rank=grp_rank,
-                head_ip=prefill_head_ip,
-                dist_init_port=args.dist_init_port,
-                pid_dir=args.pid_dir,
-                log_dir=args.log_dir,
-                extra_args=extra_args,
-                torch_profiler_dir=args.torch_profiler_dir,
-                ep=int(args.ep or 1),
-                pd_role="prefill",
-                pd_port=_PD_PREFILL_PORT,
-                pd_transfer_backend=args.pd_transfer_backend,
-                pd_ib_device=ib_dev,
-                pd_bootstrap_port=args.pd_bootstrap_port,
-                pd_kv_rank=0,  # vllm-only; sglang ignores
-                pd_kv_parallel_size=2,
-                pid_file_name=f"prefill_{grp_rank}.pid",
-            )
-            refs.append((f"prefill_{grp_rank}", node["NodeID"], actor_ref))
-
-        # Group B: decode — nodes[pn:pn+dn]; dist-init port = prefill + 1.
-        decode_head_ip = nodes[pn].get("NodeManagerAddress", head_ip)
-        for grp_rank in range(dn):
-            node = nodes[pn + grp_rank]
-            actor_ref = SpawnActor.options(
-                scheduling_strategy=NodeAffinitySchedulingStrategy(
-                    node_id=node["NodeID"],
-                    soft=False,
-                ),
-            ).remote(
-                framework=args.framework,
-                model=args.model,
-                tp=dtp,
-                nnodes=dn,
-                node_rank=grp_rank,
-                head_ip=decode_head_ip,
-                dist_init_port=_pd_decode_dist_init_port(args.dist_init_port),
-                pid_dir=args.pid_dir,
-                log_dir=args.log_dir,
-                extra_args=extra_args,
-                torch_profiler_dir=args.torch_profiler_dir,
-                ep=int(args.ep or 1),
-                pd_role="decode",
-                pd_port=_PD_DECODE_PORT,
-                pd_transfer_backend=args.pd_transfer_backend,
-                pd_ib_device=ib_dev,
-                pd_bootstrap_port=args.pd_bootstrap_port,
-                pd_kv_rank=1,
-                pd_kv_parallel_size=2,
-                pid_file_name=f"decode_{grp_rank}.pid",
-            )
-            refs.append((f"decode_{grp_rank}", node["NodeID"], actor_ref))
-    else:
+    ``num_gpus=0`` on the actors: the framework process reserves the GPUs itself.
+    """
+    spawn_actor = ray.remote(num_cpus=1, num_gpus=0)(_spawn_remote)
+    refs: list = []
+    if not plan.disaggregated:
         # Aggregated: single server group spans all nodes.
         for rank, node in enumerate(nodes):
-            actor_ref = SpawnActor.options(
-                scheduling_strategy=NodeAffinitySchedulingStrategy(
-                    node_id=node["NodeID"],
-                    soft=False,
-                ),
-            ).remote(
+            actor_ref = _on_node(spawn_actor, node).remote(
                 framework=args.framework,
                 model=args.model,
                 tp=args.tp,
@@ -846,46 +784,219 @@ def main() -> int:
                 ep=int(args.ep or 1),
             )
             refs.append((f"rank_{rank}", node["NodeID"], actor_ref))
+        return refs, head_ip, head_ip
 
-    RollbackActor = ray.remote(num_cpus=0, num_gpus=0)(_rollback_remote)
+    # Group A: prefill -- nodes[0:pn], TP=ptp; rank-0 binds the prefill port.
+    prefill_head_ip = nodes[0].get("NodeManagerAddress", head_ip)
+    for grp_rank in range(plan.prefill_nodes):
+        node = nodes[grp_rank]
+        actor_ref = _on_node(spawn_actor, node).remote(
+            framework=args.framework,
+            model=args.model,
+            tp=plan.prefill_tp,
+            nnodes=plan.prefill_nodes,
+            node_rank=grp_rank,
+            head_ip=prefill_head_ip,
+            dist_init_port=args.dist_init_port,
+            pid_dir=args.pid_dir,
+            log_dir=args.log_dir,
+            extra_args=extra_args,
+            torch_profiler_dir=args.torch_profiler_dir,
+            ep=int(args.ep or 1),
+            pd_role="prefill",
+            pd_port=_PD_PREFILL_PORT,
+            pd_transfer_backend=args.pd_transfer_backend,
+            pd_ib_device=plan.ib_device,
+            pd_bootstrap_port=args.pd_bootstrap_port,
+            pd_kv_rank=0,  # vllm-only; sglang ignores
+            pd_kv_parallel_size=2,
+            pid_file_name=f"prefill_{grp_rank}.pid",
+        )
+        refs.append((f"prefill_{grp_rank}", node["NodeID"], actor_ref))
+
+    # Group B: decode -- nodes[pn:pn+dn]; dist-init port = prefill + 1.
+    decode_head_ip = nodes[plan.prefill_nodes].get("NodeManagerAddress", head_ip)
+    for grp_rank in range(plan.decode_nodes):
+        node = nodes[plan.prefill_nodes + grp_rank]
+        actor_ref = _on_node(spawn_actor, node).remote(
+            framework=args.framework,
+            model=args.model,
+            tp=plan.decode_tp,
+            nnodes=plan.decode_nodes,
+            node_rank=grp_rank,
+            head_ip=decode_head_ip,
+            dist_init_port=_pd_decode_dist_init_port(args.dist_init_port),
+            pid_dir=args.pid_dir,
+            log_dir=args.log_dir,
+            extra_args=extra_args,
+            torch_profiler_dir=args.torch_profiler_dir,
+            ep=int(args.ep or 1),
+            pd_role="decode",
+            pd_port=_PD_DECODE_PORT,
+            pd_transfer_backend=args.pd_transfer_backend,
+            pd_ib_device=plan.ib_device,
+            pd_bootstrap_port=args.pd_bootstrap_port,
+            pd_kv_rank=1,
+            pd_kv_parallel_size=2,
+            pid_file_name=f"decode_{grp_rank}.pid",
+        )
+        refs.append((f"decode_{grp_rank}", node["NodeID"], actor_ref))
+    return refs, prefill_head_ip, decode_head_ip
+
+
+def _rollback_spawned(pids: dict[str, tuple[str, int]]) -> None:
+    """Tear down the ranks that did start, so no half-started servers leak."""
+    rollback_actor = ray.remote(num_cpus=0, num_gpus=0)(_rollback_remote)
+    for tag, (node_id, pid) in pids.items():
+        if pid <= 0:
+            _log(f"rolling back {tag}: sentinel pid={pid} (no process); skipped")
+            continue
+        try:
+            outcome = ray.get(
+                rollback_actor.options(
+                    scheduling_strategy=NodeAffinitySchedulingStrategy(node_id=node_id, soft=False),
+                ).remote(pid),
+                timeout=_ROLLBACK_TIMEOUT_SEC,
+            )
+            _log(f"rolling back {tag} pid={pid} on node={node_id[:16]}...: {outcome}")
+        except Exception as rb_exc:  # noqa: BLE001
+            # An unreachable rank keeps its GPUs until the platform reclaims the cluster, so it is reported
+            # rather than dropped.
+            _log(
+                f"WARN rollback of {tag} pid={pid} on node={node_id[:16]}... "
+                f"FAILED: {type(rb_exc).__name__}: {rb_exc}; that rank may "
+                f"still hold GPU memory"
+            )
+
+
+def _collect_spawned_pids(refs: list) -> dict[str, tuple[str, int]] | None:
+    """The PID each rank reported, or None once a failure has rolled the launch back."""
+    pids: dict[str, tuple[str, int]] = {}
     for tag, node_id, ref in refs:
         try:
             pid = ray.get(ref, timeout=120)
-            pids[tag] = (node_id, pid)
-            _log(f"{tag}: spawned pid={pid}")
         except Exception as exc:  # noqa: BLE001
             _log(f"{tag}: spawn FAILED: {type(exc).__name__}: {exc}")
-            # Roll back already-spawned ranks so no half-started servers leak.
-            for tag2, (node_id2, p2) in pids.items():
-                if p2 <= 0:
-                    _log(f"rolling back {tag2}: sentinel pid={p2} (no process); skipped")
-                    continue
-                try:
-                    outcome = ray.get(
-                        RollbackActor.options(
-                            scheduling_strategy=NodeAffinitySchedulingStrategy(
-                                node_id=node_id2,
-                                soft=False,
-                            ),
-                        ).remote(p2),
-                        timeout=_ROLLBACK_TIMEOUT_SEC,
-                    )
-                    _log(f"rolling back {tag2} pid={p2} on node={node_id2[:16]}...: {outcome}")
-                except Exception as rb_exc:  # noqa: BLE001
-                    # An unreachable rank keeps its GPUs until the platform reclaims the cluster, so it is reported
-                    # rather than dropped.
-                    _log(
-                        f"WARN rollback of {tag2} pid={p2} on node={node_id2[:16]}... "
-                        f"FAILED: {type(rb_exc).__name__}: {rb_exc}; that rank may "
-                        f"still hold GPU memory"
-                    )
-            return 1
+            _rollback_spawned(pids)
+            return None
+        pids[tag] = (node_id, pid)
+        _log(f"{tag}: spawned pid={pid}")
+    return pids
 
-    # Health-tail probe targets the leader: rank_0 (aggregated) / prefill_0 (PD).
-    leader_tag = "rank_0" if pd_mode == "aggregated" else "prefill_0"
-    _leader_entry = pids.get(leader_tag)
-    _log_rank0_post_spawn(Path(args.log_dir), _leader_entry[1] if _leader_entry else None)
 
+def _rank0_liveness(rank0_pid: int | None) -> bool | None:
+    """Whether rank 0 is still running: True, False, or None when that cannot be told."""
+    if rank0_pid is None or rank0_pid <= 0:
+        return None
+    try:
+        os.kill(rank0_pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # pid exists, owned by another uid -> treat as alive
+        return True
+    except OSError:
+        return None
+    return True
+
+
+def _probe_pd_health(args: argparse.Namespace, summary: dict) -> int:
+    """Wait on both PD legs, since the router that owns 8888 does not exist yet.
+
+    The caller submits the router once this driver returns.
+    """
+    _log(f"polling both PD legs' /health for up to {_HEALTH_PROBE_TIMEOUT_SEC}s")
+    legs_ready = _wait_pd_legs_health(
+        summary["pd_prefill_url"],
+        summary["pd_decode_url"],
+        _HEALTH_PROBE_TIMEOUT_SEC,
+        log_dir=args.log_dir,
+    )
+    if legs_ready:
+        _log("both PD legs /health OK")
+        return 0
+    # PD has no rank_0.log; tail each leg's own log so the caller sees why.
+    _emit_log_tail(Path(args.log_dir) / "prefill_0.log")
+    _emit_log_tail(Path(args.log_dir) / "decode_0.log")
+    if legs_ready is False:
+        _log("ERROR a PD leg logged a fatal crash before serving; marking the launch failed")
+        return 2
+    # Undetermined, as for rank 0: warn rather than fail a slow-but-live boot.
+    _log("WARN PD legs unconfirmed; the caller's serving probe decides from here")
+    return 0
+
+
+def _probe_rank0_health(args: argparse.Namespace) -> int:
+    """Wait on rank 0, and read the log when it does not answer."""
+    _log(f"polling rank 0 /health for up to {_HEALTH_PROBE_TIMEOUT_SEC}s")
+    rank0_pid = _rank0_pid_from_log(args.pid_dir)
+    if _wait_health(_HEALTH_PROBE_TIMEOUT_SEC, rank0_pid=rank0_pid, log_dir=args.log_dir):
+        _log("rank 0 /health OK")
+        return 0
+    # Tail the log (timeout or early rank-0 death) for the framework's last words.
+    _emit_rank0_log_tail(Path(args.log_dir))
+    rank0_alive = _rank0_liveness(rank0_pid)
+    if rank0_alive is False:
+        _emit_failure_snapshot(
+            {
+                "kind": "framework_early_exit",
+                "rank0_pid": rank0_pid,
+                "hint": "framework process exited before /health flipped; "
+                "common causes: unrecognized launcher flag, kernel "
+                "ABI assert (e.g. aiter MLA num_qo_heads%16), OOM "
+                "during cuda graph capture, RCCL init failure. See "
+                "rank_0.log tail above.",
+            }
+        )
+        _log(
+            f"ERROR rank 0 pid={rank0_pid} dead before /health; returning 2 "
+            f"so the Ray Dashboard job reports FAILED and hyperloom "
+            f"surfaces ServerRestartFailed immediately (was: silent "
+            f"1800s /health stall)."
+        )
+        return 2
+    # A fatal traceback in rank_0.log proves a crash even when the nohup wrapper PID lingers.
+    fatal_line = _scan_rank0_log_for_fatal(args.log_dir)
+    if fatal_line:
+        _emit_failure_snapshot(
+            {
+                "kind": "framework_error",
+                "rank0_pid": rank0_pid,
+                "rank0_alive": rank0_alive,
+                "hint": f"rank_0.log contains fatal: {fatal_line[:500]}",
+            }
+        )
+        _log(
+            f"ERROR rank 0 framework error in rank_0.log (pid={rank0_pid} "
+            f"alive={rank0_alive}); returning 2 so Ray Dashboard job reports "
+            f"FAILED in seconds instead of 1800s silent stall."
+        )
+        return 2
+    _log(
+        f"WARN rank 0 /health did not pass within {_HEALTH_PROBE_TIMEOUT_SEC}s; "
+        f"rank-0 pid={rank0_pid} alive={rank0_alive} (None=pid unknown) — "
+        f"server likely still loading weights; the caller's external poll "
+        f"will catch up."
+    )
+    return 0  # Don't fail; caller polls health from sandbox
+
+
+def _emit_failure_snapshot(snapshot: dict) -> None:
+    """Hand the caller a machine-readable reason the launch failed."""
+    sys.stderr.write(f"MULTI_NODE_FAILURE_SNAPSHOT={json.dumps(snapshot)}\n")
+    sys.stderr.flush()
+
+
+def _launch_summary(
+    args: argparse.Namespace,
+    *,
+    plan: _PdPlan,
+    head_ip: str,
+    pids: dict[str, tuple[str, int]],
+    prefill_head_ip: str,
+    decode_head_ip: str,
+) -> dict:
+    """What the caller needs to reach and manage the servers this launch started."""
     summary: dict[str, Any] = {
         "framework": args.framework,
         "model": args.model,
@@ -894,122 +1005,100 @@ def main() -> int:
         "nnodes": args.nnodes,
         "head_ip": head_ip,
         "dist_init_port": args.dist_init_port,
-        "ranks": [{"tag": r, "node_id": pids[r][0], "pid": pids[r][1]} for r in sorted(pids)],
+        "ranks": [{"tag": tag, "node_id": pids[tag][0], "pid": pids[tag][1]} for tag in sorted(pids)],
         "pid_dir": args.pid_dir,
         "log_dir": args.log_dir,
         "inference_port": _INFERENCE_PORT,
-        "pd_mode": pd_mode,
+        "pd_mode": plan.mode,
     }
-    if pd_mode == "disaggregated":
-        # Emit internal endpoints + bootstrap port so the CLI can submit the router without re-discovering nodes.
-        summary["pd_prefill_nodes"] = pn
-        summary["pd_decode_nodes"] = dn
-        summary["pd_prefill_tp"] = ptp
-        summary["pd_decode_tp"] = dtp
-        summary["pd_transfer_backend"] = args.pd_transfer_backend or (
-            "NixlConnector" if args.framework.lower() == "vllm" else "mooncake"
+    if not plan.disaggregated:
+        return summary
+    # Emit internal endpoints + bootstrap port so the CLI can submit the router without re-discovering nodes.
+    summary["pd_prefill_nodes"] = plan.prefill_nodes
+    summary["pd_decode_nodes"] = plan.decode_nodes
+    summary["pd_prefill_tp"] = plan.prefill_tp
+    summary["pd_decode_tp"] = plan.decode_tp
+    summary["pd_transfer_backend"] = args.pd_transfer_backend or (
+        "NixlConnector" if args.framework.lower() == "vllm" else "mooncake"
+    )
+    summary["pd_ib_device"] = plan.ib_device
+    summary["pd_bootstrap_port"] = args.pd_bootstrap_port
+    summary["pd_prefill_url"] = f"http://{prefill_head_ip}:{_PD_PREFILL_PORT}"
+    summary["pd_decode_url"] = f"http://{decode_head_ip}:{_PD_DECODE_PORT}"
+    return summary
+
+
+def _discover_ranked_nodes(nnodes: int) -> tuple[list, str]:
+    """The GPU nodes this launch uses, in rank order, and the head address."""
+    nodes = _pick_head_first(_wait_for_nodes(nnodes, _NODES_DISCOVERY_TIMEOUT_SEC))[:nnodes]
+    head_ip = ray.util.get_node_ip_address()
+    _log(f"discovered {len(nodes)} GPU nodes; head_ip={head_ip}; rank order:")
+    for rank, node in enumerate(nodes):
+        _log(
+            f"  rank {rank}: node_id={node.get('NodeID', '?')[:16]}... "
+            f"addr={node.get('NodeManagerAddress', '?')} "
+            f"gpu={node.get('Resources', {}).get('GPU', 0)}"
         )
-        summary["pd_ib_device"] = ib_dev
-        summary["pd_bootstrap_port"] = args.pd_bootstrap_port
-        summary["pd_prefill_url"] = f"http://{prefill_head_ip}:{_PD_PREFILL_PORT}"
-        summary["pd_decode_url"] = f"http://{decode_head_ip}:{_PD_DECODE_PORT}"
+    return nodes, head_ip
+
+
+def main() -> int:
+    """Parse CLI arguments and launch the multi-node server group(s)."""
+    args = _build_parser().parse_args()
+
+    if args.nnodes < 2:
+        _log(
+            f"nnodes={args.nnodes} < 2; this script is for multi-node only. "
+            f"Use launch_server.sh for single-pod restarts."
+        )
+        return 2
+
+    plan = _resolve_pd_plan(args)
+    if plan is None:
+        return 2
+
+    extra_args = shlex.split(args.extra_args) if args.extra_args else []
+    denied = find_denied_flags(args.extra_args) + find_unsafe_flag_values(args.extra_args)
+    if denied:
+        _log(f"ERROR denied server flags in --extra-args: {denied}")
+        return 2
+
+    _log(f"framework={args.framework} model={args.model} tp={args.tp} nnodes={args.nnodes}")
+
+    ray.init(ignore_reinit_error=True, log_to_driver=True)
+    nodes, head_ip = _discover_ranked_nodes(args.nnodes)
+    refs, prefill_head_ip, decode_head_ip = _spawn_rank_actors(
+        args,
+        nodes=nodes,
+        head_ip=head_ip,
+        plan=plan,
+        extra_args=extra_args,
+    )
+    pids = _collect_spawned_pids(refs)
+    if pids is None:
+        return 1
+
+    # Health-tail probe targets the leader: rank_0 (aggregated) / prefill_0 (PD).
+    leader_entry = pids.get("prefill_0" if plan.disaggregated else "rank_0")
+    _log_rank0_post_spawn(Path(args.log_dir), leader_entry[1] if leader_entry else None)
+
+    summary = _launch_summary(
+        args,
+        plan=plan,
+        head_ip=head_ip,
+        pids=pids,
+        prefill_head_ip=prefill_head_ip,
+        decode_head_ip=decode_head_ip,
+    )
     sys.stdout.write(json.dumps(summary, indent=2) + "\n")
     sys.stdout.flush()
 
     if args.no_wait_health:
         _log("--no-wait-health set; not probing /health")
         return 0
-
-    # PD: the router that owns 8888 does not exist yet (the caller submits it once this driver returns), so wait on
-    # the legs themselves.
-    if pd_mode == "disaggregated":
-        _log(f"polling both PD legs' /health for up to {_HEALTH_PROBE_TIMEOUT_SEC}s")
-        _legs_ready = _wait_pd_legs_health(
-            summary["pd_prefill_url"],
-            summary["pd_decode_url"],
-            _HEALTH_PROBE_TIMEOUT_SEC,
-            log_dir=args.log_dir,
-        )
-        if _legs_ready:
-            _log("both PD legs /health OK")
-            return 0
-        # PD has no rank_0.log; tail each leg's own log so the caller sees why.
-        _emit_log_tail(Path(args.log_dir) / "prefill_0.log")
-        _emit_log_tail(Path(args.log_dir) / "decode_0.log")
-        if _legs_ready is False:
-            _log("ERROR a PD leg logged a fatal crash before serving; marking the launch failed")
-            return 2
-        # Undetermined, as for rank 0: warn rather than fail a slow-but-live boot.
-        _log("WARN PD legs unconfirmed; the caller's serving probe decides from here")
-        return 0
-
-    _log(f"polling rank 0 /health for up to {_HEALTH_PROBE_TIMEOUT_SEC}s")
-    _r0_pid = _rank0_pid_from_log(args.pid_dir)
-    if _wait_health(
-        _HEALTH_PROBE_TIMEOUT_SEC,
-        rank0_pid=_r0_pid,
-        log_dir=args.log_dir,
-    ):
-        _log("rank 0 /health OK")
-        return 0
-    # Tail the log (timeout or early rank-0 death) for the framework's last words.
-    _emit_rank0_log_tail(Path(args.log_dir))
-    # Tri-state liveness: True=alive, False=confirmed dead, None=unknown.
-    _r0_alive: bool | None = None
-    if _r0_pid is not None and _r0_pid > 0:
-        try:
-            os.kill(_r0_pid, 0)
-            _r0_alive = True
-        except ProcessLookupError:
-            _r0_alive = False
-        except PermissionError:
-            # pid exists, owned by another uid -> treat as alive
-            _r0_alive = True
-        except OSError:
-            _r0_alive = None
-    if _r0_alive is False:
-        snap = {
-            "kind": "framework_early_exit",
-            "rank0_pid": _r0_pid,
-            "hint": "framework process exited before /health flipped; "
-            "common causes: unrecognized launcher flag, kernel "
-            "ABI assert (e.g. aiter MLA num_qo_heads%16), OOM "
-            "during cuda graph capture, RCCL init failure. See "
-            "rank_0.log tail above.",
-        }
-        sys.stderr.write(f"MULTI_NODE_FAILURE_SNAPSHOT={json.dumps(snap)}\n")
-        sys.stderr.flush()
-        _log(
-            f"ERROR rank 0 pid={_r0_pid} dead before /health; returning 2 "
-            f"so the Ray Dashboard job reports FAILED and hyperloom "
-            f"surfaces ServerRestartFailed immediately (was: silent "
-            f"1800s /health stall)."
-        )
-        return 2
-    # A fatal traceback in rank_0.log proves a crash even when the nohup wrapper PID lingers.
-    _fatal_line = _scan_rank0_log_for_fatal(args.log_dir)
-    if _fatal_line:
-        snap = {
-            "kind": "framework_error",
-            "rank0_pid": _r0_pid,
-            "rank0_alive": _r0_alive,
-            "hint": f"rank_0.log contains fatal: {_fatal_line[:500]}",
-        }
-        sys.stderr.write(f"MULTI_NODE_FAILURE_SNAPSHOT={json.dumps(snap)}\n")
-        sys.stderr.flush()
-        _log(
-            f"ERROR rank 0 framework error in rank_0.log (pid={_r0_pid} "
-            f"alive={_r0_alive}); returning 2 so Ray Dashboard job reports "
-            f"FAILED in seconds instead of 1800s silent stall."
-        )
-        return 2
-    _log(
-        f"WARN rank 0 /health did not pass within {_HEALTH_PROBE_TIMEOUT_SEC}s; "
-        f"rank-0 pid={_r0_pid} alive={_r0_alive} (None=pid unknown) — "
-        f"server likely still loading weights; the caller's external poll "
-        f"will catch up."
-    )
-    return 0  # Don't fail; caller polls health from sandbox
+    if plan.disaggregated:
+        return _probe_pd_health(args, summary)
+    return _probe_rank0_health(args)
 
 
 if __name__ == "__main__":

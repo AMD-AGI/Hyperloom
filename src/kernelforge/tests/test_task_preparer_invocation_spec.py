@@ -13,6 +13,8 @@ from click.testing import CliRunner
 from kernelforge.agent_backends.base import AgentRuntimeConfig
 from kernelforge.cli import main
 from kernelforge.loop import task_preparer
+from kernelforge.loop import task_preparer_prompts
+from kernelforge.loop import task_preflight
 
 
 @pytest.mark.asyncio
@@ -42,12 +44,12 @@ async def test_preflight_requires_complete_profiling_contract(
         captured["driver"] = path
         return True, "verified"
 
-    monkeypatch.setattr(task_preparer, "test_correctness", fake_correctness)
-    monkeypatch.setattr(task_preparer, "bench_wallclock", fake_bench)
-    monkeypatch.setattr(task_preparer, "_count_graph_replays", fake_graph)
-    monkeypatch.setattr(task_preparer, "_check_profile_contract", fake_profile)
+    monkeypatch.setattr(task_preflight, "test_correctness", fake_correctness)
+    monkeypatch.setattr(task_preflight, "bench_wallclock", fake_bench)
+    monkeypatch.setattr(task_preflight, "_count_graph_replays", fake_graph)
+    monkeypatch.setattr(task_preflight, "_check_profile_contract", fake_profile)
 
-    result = await task_preparer._preflight_async(
+    result = await task_preflight._preflight_async(
         str(driver),
         30.0,
         3,
@@ -75,8 +77,8 @@ def _passing_stages(monkeypatch, case_times: dict[str, float]):
             "case_times": dict(case_times),
         }
 
-    monkeypatch.setattr(task_preparer, "test_correctness", fake_correctness)
-    monkeypatch.setattr(task_preparer, "bench_wallclock", fake_bench)
+    monkeypatch.setattr(task_preflight, "test_correctness", fake_correctness)
+    monkeypatch.setattr(task_preflight, "bench_wallclock", fake_bench)
 
 
 @pytest.mark.asyncio
@@ -89,7 +91,7 @@ async def test_preflight_rejects_driver_that_skips_declared_cases(
     driver.write_text("# driver\n", encoding="utf-8")
     _passing_stages(monkeypatch, {"case_001": 1.0})
 
-    result = await task_preparer._preflight_async(
+    result = await task_preflight._preflight_async(
         str(driver),
         30.0,
         3,
@@ -113,7 +115,7 @@ async def test_preflight_rejects_driver_that_benchmarks_undeclared_cases(
     driver.write_text("# driver\n", encoding="utf-8")
     _passing_stages(monkeypatch, {"case_001": 1.0, "case_002": 2.0, "case_099": 3.0})
 
-    result = await task_preparer._preflight_async(
+    result = await task_preflight._preflight_async(
         str(driver),
         30.0,
         3,
@@ -133,7 +135,7 @@ async def test_preflight_accepts_the_complete_declared_suite(tmp_path, monkeypat
     driver.write_text("# driver\n", encoding="utf-8")
     _passing_stages(monkeypatch, {"case_001": 1.0, "case_002": 2.0})
 
-    result = await task_preparer._preflight_async(
+    result = await task_preflight._preflight_async(
         str(driver),
         30.0,
         3,
@@ -394,7 +396,7 @@ def test_required_git_workspace_reports_setup_failures(
 
 def test_a_conforming_driver_still_gets_its_spec_beside_it(tmp_path):
     """Persist the declared spec even when preparation is skipped."""
-    from kernelforge.cli import _persist_declared_spec
+    from kernelforge.cli.forge_loop_command import _persist_declared_spec
 
     driver_dir = tmp_path / "artifacts"
     driver_dir.mkdir()
@@ -411,7 +413,7 @@ def test_a_conforming_driver_still_gets_its_spec_beside_it(tmp_path):
 
 def test_a_refused_destination_is_reported_and_not_fatal(tmp_path, capsys):
     """Say so and carry on: the driver conformed without the spec beside it."""
-    from kernelforge.cli import _persist_declared_spec
+    from kernelforge.cli.forge_loop_command import _persist_declared_spec
 
     driver_dir = tmp_path / "artifacts"
     driver_dir.mkdir()
@@ -430,7 +432,7 @@ def test_a_refused_destination_is_reported_and_not_fatal(tmp_path, capsys):
 
 def test_persisting_the_spec_is_optional_when_none_was_supplied(tmp_path):
     """Do nothing at all when the operator named no spec."""
-    from kernelforge.cli import _persist_declared_spec
+    from kernelforge.cli.forge_loop_command import _persist_declared_spec
 
     driver = tmp_path / "driver.py"
     driver.write_text("# already conforms\n", encoding="utf-8")
@@ -575,7 +577,7 @@ def test_prepare_agent_gets_the_spec_inline_and_it_is_restored(tmp_path, monkeyp
     async def fake_preflight(*_args, **kwargs):
         captured["expected_case_ids"] = kwargs.get("expected_case_ids")
         assert json.loads(materialized.read_text(encoding="utf-8")) == payload
-        return task_preparer.PreflightResult(
+        return task_preflight.PreflightResult(
             ok=True,
             correctness_ok=True,
             bench_ok=True,
@@ -611,7 +613,7 @@ def test_prepare_agent_gets_the_spec_inline_and_it_is_restored(tmp_path, monkeyp
             program_md="# Task",
             target_functions=[],
             source_files=[str(kernel)],
-            preflight=task_preparer.PreflightResult(
+            preflight=task_preflight.PreflightResult(
                 ok=False,
                 correctness_ok=False,
                 bench_ok=False,
@@ -672,7 +674,7 @@ def test_failed_external_preparation_rolls_back_driver_helpers_and_source(
         return "attempted"
 
     async def failed_preflight(*_args, **_kwargs):
-        return task_preparer.PreflightResult(
+        return task_preflight.PreflightResult(
             ok=False,
             correctness_ok=False,
             bench_ok=False,
@@ -753,7 +755,7 @@ def test_external_driver_uses_add_dir_without_kernel_repo_commit(tmp_path, monke
         else:
             assert checked_driver == captured["workspace"] / "driver.py"
             assert driver.read_text(encoding="utf-8") == "BROKEN_DRIVER\n"
-        return task_preparer.PreflightResult(
+        return task_preflight.PreflightResult(
             ok=True,
             correctness_ok=True,
             bench_ok=True,
@@ -870,7 +872,7 @@ def test_timeout_salvages_driver_when_preflight_passes(tmp_path, monkeypatch):
         assert "VALID_DRIVER" in checked_driver.read_text(encoding="utf-8")
         if checked_driver != driver:
             assert driver.read_text(encoding="utf-8") == "BROKEN_DRIVER\n"
-        return task_preparer.PreflightResult(
+        return task_preflight.PreflightResult(
             ok=True,
             correctness_ok=True,
             bench_ok=True,
@@ -916,7 +918,7 @@ def test_the_note_carries_the_specification_verbatim(tmp_path):
     spec_path = tmp_path / "invocation_spec_gemm.json"
     spec_path.write_text(json.dumps(spec, indent=2), encoding="utf-8")
 
-    note = task_preparer._invocation_spec_note(spec_path, tmp_path)
+    note = task_preparer_prompts._invocation_spec_note(spec_path, tmp_path)
 
     assert "### The specification, verbatim" in note
     # Every field reaches the agent, including ones no extractor selected for.
@@ -930,7 +932,7 @@ def test_the_note_demands_the_deployment_shapes_not_a_toy_size(tmp_path):
     spec_path = tmp_path / "invocation_spec.json"
     spec_path.write_text(json.dumps({"invocation": {"arguments": []}}), encoding="utf-8")
 
-    note = task_preparer._invocation_spec_note(spec_path, tmp_path)
+    note = task_preparer_prompts._invocation_spec_note(spec_path, tmp_path)
 
     assert "BUILD THE DRIVER FROM THIS" in note
     assert "A toy size is not a smaller version of the real measurement" in note
@@ -945,7 +947,7 @@ def test_an_absent_field_is_shown_as_absent_rather_than_as_an_empty_one(tmp_path
         encoding="utf-8",
     )
 
-    note = task_preparer._invocation_spec_note(spec_path, tmp_path)
+    note = task_preparer_prompts._invocation_spec_note(spec_path, tmp_path)
 
     assert '"missing_fields"' in note
     assert "Arguments (call order):" not in note
@@ -955,11 +957,11 @@ def test_an_oversized_spec_is_referenced_rather_than_inlined(tmp_path):
     """A prompt is the wrong place to discover a producer grew without warning."""
     spec_path = tmp_path / "invocation_spec.json"
     spec_path.write_text(
-        json.dumps({"pad": "x" * (task_preparer._SPEC_INLINE_MAX_BYTES + 1)}),
+        json.dumps({"pad": "x" * (task_preparer_prompts._SPEC_INLINE_MAX_BYTES + 1)}),
         encoding="utf-8",
     )
 
-    note = task_preparer._invocation_spec_note(spec_path, tmp_path)
+    note = task_preparer_prompts._invocation_spec_note(spec_path, tmp_path)
 
     assert "larger than the 64 KB inline limit" in note
     assert "Use `Read` on it before you touch the driver." in note
@@ -971,7 +973,7 @@ def test_an_empty_spec_says_it_is_empty_rather_than_too_large(tmp_path):
     spec_path = tmp_path / "invocation_spec.json"
     spec_path.write_text("", encoding="utf-8")
 
-    note = task_preparer._invocation_spec_note(spec_path, tmp_path)
+    note = task_preparer_prompts._invocation_spec_note(spec_path, tmp_path)
 
     assert "is empty, so it declares no invocation evidence at all" in note
     assert "inline limit" not in note, "an empty file is not an oversized one"
@@ -983,7 +985,7 @@ def test_a_whitespace_only_spec_counts_as_empty(tmp_path):
     spec_path = tmp_path / "invocation_spec.json"
     spec_path.write_text("   \n\t\n  ", encoding="utf-8")
 
-    note = task_preparer._invocation_spec_note(spec_path, tmp_path)
+    note = task_preparer_prompts._invocation_spec_note(spec_path, tmp_path)
 
     assert "is empty" in note
     assert "inline limit" not in note
@@ -994,7 +996,7 @@ def test_a_malformed_spec_is_inlined_verbatim_rather_than_dropped(tmp_path):
     spec_path = tmp_path / "invocation_spec.json"
     spec_path.write_text('{"invocation": {"arguments": [', encoding="utf-8")
 
-    note = task_preparer._invocation_spec_note(spec_path, tmp_path)
+    note = task_preparer_prompts._invocation_spec_note(spec_path, tmp_path)
 
     assert '{"invocation": {"arguments": [' in note
     assert "The specification, verbatim" in note
@@ -1007,7 +1009,7 @@ def test_an_unreadable_spec_still_produces_a_usable_note(tmp_path):
     """The document is evidence, not a precondition; losing it must not take the instruction with it."""
     missing = tmp_path / "gone.json"
 
-    note = task_preparer._invocation_spec_note(missing, tmp_path)
+    note = task_preparer_prompts._invocation_spec_note(missing, tmp_path)
 
     assert "BUILD THE DRIVER FROM THIS" in note
     assert "could not be read (FileNotFoundError)" in note
@@ -1016,4 +1018,4 @@ def test_an_unreadable_spec_still_produces_a_usable_note(tmp_path):
 
 
 def test_no_spec_at_all_yields_no_note(tmp_path):
-    assert task_preparer._invocation_spec_note(None, tmp_path) == ""
+    assert task_preparer_prompts._invocation_spec_note(None, tmp_path) == ""

@@ -22,6 +22,7 @@ import hyperloom
 _GUARDED = (
     "common/deadline.py",
     "orchestrator/loop/*.py",
+    "orchestrator/phases/*.py",
     "orchestrator/specialists/*.py",
     "orchestrator/state/shared_state.py",
     "orchestrator/enablement/*.py",

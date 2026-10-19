@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import os
 import gzip
@@ -184,6 +185,12 @@ def _framework_site_packages(env: Mapping[str, str], component: str) -> list[str
     if not exe_path.is_absolute():
         return None
     venv_root = exe_path.parent.parent
+    if (venv_root / "pyvenv.cfg").is_file():
+        # A real venv's own sys.path also holds what the glob misses: ``.pth`` entries (a ``setup.py develop``
+        # checkout) and the host site-packages a ``--system-site-packages`` overlay inherits.
+        resolved = _interpreter_sys_path(python_exe)
+        if resolved:
+            return list(resolved)
     try:
         hits = [str(p) for p in sorted(venv_root.glob("lib/python*/site-packages"))]
     except OSError:
@@ -191,6 +198,21 @@ def _framework_site_packages(env: Mapping[str, str], component: str) -> list[str
     # No match means the prefix is not venv-shaped (a system prefix keeps its packages in ``dist-packages``), so the
     # derivation failed and this process is the better answer.
     return hits or None
+
+
+@functools.lru_cache(maxsize=None)
+def _interpreter_sys_path(python_exe: str) -> tuple[str, ...]:
+    """The import path ``python_exe`` starts with."""
+    proc = subprocess.run(  # nosec B603 - fixed argv, no shell.
+        [python_exe, "-c", "import sys; print('\\n'.join(sys.path))"], capture_output=True, text=True
+    )
+    return tuple(entry for entry in proc.stdout.splitlines() if entry)
+
+
+def framework_distribution_version(env: Mapping[str, str], framework: str) -> str:
+    """Installed version of ``framework`` in the interpreter preflight resolved to serve it, or ``""``."""
+    site_packages = _framework_site_packages(env, framework)
+    return _probe_pkg_version(framework, site_packages) if site_packages is not None else ""
 
 
 #: Kineto names its GPU backend in the trace's top-level metadata, which PyTorch writes ahead of ``traceEvents``, so
@@ -363,6 +385,7 @@ __all__ = [
     "detect_gfx_arch",
     "detect_graph_mode",
     "detect_stack_fingerprint",
+    "framework_distribution_version",
     "detect_code_revision",
     "detect_image",
 ]

@@ -19,19 +19,9 @@
 #       upstream, so no benchmarker.py rewrite is applied here.
 #   3. InferenceX checkout: clone from upstream pinned to INFERENCEX_REF
 #      (a commit SHA), sets INFERENCEX_PATH for runtime
-#   4. Delegates to src/hyperloom/agents/kernel/scripts/install.sh for ray, ray-head
-#      bring-up, TraceLens, GEAK and LLM gateway env setup.
-#      kernel-agent itself is the canonical owner of those — we just
-#      chain to it so users have a single entry point.
-#
-# kernel-agent's install.sh owns Ray + ray start, TraceLens, GEAK and
-# LLM gateway env. inference_optimizer's install.sh owns Magpie /
-# InferenceX / the inference_optimizer Python package itself. The two
-# are composable: kernel-agent works standalone; inference_optimizer
-# drags kernel-agent in via this script.
-#
-# Open-source deps (InferenceX / TraceLens) are cloned here or by the
-# chained kernel-agent installer.
+#   4. Kernel-agent tools: ray + ray-head bring-up, TraceLens, GEAK, the
+#      Claude CLI and the LLM gateway env, from the steps in the sibling
+#      install_kernel_tools.sh (sourced, not run on its own).
 
 set -euo pipefail
 
@@ -45,8 +35,9 @@ export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:
 # $VIRTUAL_ENV; otherwise the system-bins prepend shadows the venv python3
 # with /usr/bin/python3, whose apt-managed packages (e.g. packaging) have no
 # RECORD file and break `pip install`/uninstall. Probe the activated venv
-# first, then the common ROCm image locations (/opt/venv, /venv).
-for _venv_bin in "${VIRTUAL_ENV:+${VIRTUAL_ENV}/bin}" /opt/venv/bin /venv/bin; do
+# first, then the common ROCm image locations (/opt/venv, /venv, and
+# /opt/python on the ROCm 10 vLLM images).
+for _venv_bin in "${VIRTUAL_ENV:+${VIRTUAL_ENV}/bin}" /opt/venv/bin /venv/bin /opt/python/bin; do
   if [ -n "${_venv_bin}" ] && [ -x "${_venv_bin}/python" ]; then
     export PATH="${_venv_bin}:$PATH"
     break
@@ -134,15 +125,14 @@ HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors}"
 # $REPO_ROOT/.cache, cloned per revision (<name>@<sha>). Not /tmp (a reaper can
 # wipe it mid-run, leaving TRACELENS_ROOT dangling — #722).
 _open_source_root="${HYPERLOOM_CACHE_DIR:-${REPO_ROOT}/.cache}"
-# kernel-agent and other sub-agents live under the hyperloom package tree.
+# The kernel tools ship inside the hyperloom package tree.
 # A missing pyproject at REPO_ROOT means setup is running from a pip --target
 # workspace rather than a source checkout, so the editable self-install step below is skipped.
 _hyperloom_pkg_root="$(cd "${_script_dir}/../.." && pwd)"
 HYPERLOOM_PACKAGED_INSTALL=0
-if [ ! -f "${REPO_ROOT}/pyproject.toml" ] && [ -d "${_hyperloom_pkg_root}/agents/kernel" ]; then
+if [ ! -f "${REPO_ROOT}/pyproject.toml" ] && [ -d "${_hyperloom_pkg_root}/orchestrator/trace_analysis" ]; then
   HYPERLOOM_PACKAGED_INSTALL=1
 fi
-KERNEL_AGENT_ROOT="${KERNEL_AGENT_ROOT:-${_hyperloom_pkg_root}/agents/kernel}"
 # Resolve a git ref to a commit SHA: 7-40 hex passes through; branch/tag via
 # ls-remote (falls back to the raw ref). The SHA keys the per-revision cache.
 _resolve_ref_sha() {
@@ -233,11 +223,10 @@ INFERENCEX_DEFAULT_DIR="${INFERENCEX_DEFAULT_DIR:-${_open_source_root}/Inference
 
 DRY_RUN=0
 CHECK_ONLY=0
-SKIP_KERNEL_AGENT=0
 # `--only-aiperf`: run ensure_aiperf and nothing else. The runtime repair path
 # (src/hyperloom/inference_optimizer/agentx/repair.py) needs the pinned aiperf
-# install without re-cloning Magpie/InferenceX or chaining the kernel-agent
-# installer, which is what a full run would do mid-session.
+# install without re-cloning Magpie/InferenceX or re-running the kernel-agent
+# steps, which is what a full run would do mid-session.
 ONLY_AIPERF=0
 # 1 when the caller explicitly asked for AgentX, which makes a failed aiperf
 # install fatal instead of fail-soft. Set by the opt-in gate and by
@@ -255,14 +244,12 @@ Installs:
     environment / .env (opt-in live trace push; skipped otherwise)
   - Magpie (pip-installed from MAGPIE_PACKAGE_SPEC)
   - Clones InferenceX pinned to INFERENCEX_REF and exports INFERENCEX_PATH
-  - Chains to src/hyperloom/agents/kernel/scripts/install.sh for Ray + ray-head start,
-    TraceLens, GEAK, and LLM gateway env.
+  - Ray + ray-head start, TraceLens, GEAK, and LLM gateway env for the kernel agent.
   - src/hyperloom/agents/framework/ is part of this editable install (PR discovery, isolation helpers).
 
 Options:
   --check-only           Verify only, do not install
   --dry-run              Print actions without running them
-  --skip-kernel-agent    Skip the chained kernel-agent installer
   --only-aiperf          Install ONLY the pinned aiperf (AgentX client) and
                          exit. Treats a failed install as fatal. Used by the
                          runtime AgentX preflight to supply a dependency the
@@ -271,7 +258,7 @@ Options:
   -h, --help             Show this help
 
 Env overrides:
-  REPO_ROOT, KERNEL_AGENT_ROOT, MAGPIE_REPO,
+  REPO_ROOT, MAGPIE_REPO,
   MAGPIE_REF (commit SHA / tag / branch the Magpie package is pinned to;
     default is a commit that already copies benchmark scripts atomically),
   MAGPIE_PACKAGE_SPEC, MAGPIE_PATH, INFERENCEX_REPO,
@@ -296,7 +283,6 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --check-only) CHECK_ONLY=1 ;;
     --dry-run) DRY_RUN=1 ;;
-    --skip-kernel-agent) SKIP_KERNEL_AGENT=1 ;;
     --only-aiperf) ONLY_AIPERF=1; AIPERF_REQUIRED=1 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "[inference-optimizer] ERROR: unknown option '$1'" >&2; usage >&2; exit 2 ;;
@@ -327,7 +313,7 @@ run() {
 }
 
 # Clone a dependency pinned to $ref into $dir, mirroring the GEAK pin in
-# src/hyperloom/agents/kernel/scripts/install.sh. `git clone --branch` only accepts
+# install_kernel_tools.sh. `git clone --branch` only accepts
 # tags/branches, not raw SHAs, so a 7-40 hex char ref triggers a shallow
 # fetch-checkout dance instead (GitHub serves shallow SHA fetches via
 # uploadpack.allowReachableSHA1InWant=true). DRY_RUN / CHECK_ONLY are honoured
@@ -555,25 +541,16 @@ persist_vllm_image_source_env() {
 }
 
 # Serialize concurrent installs that share one open-source checkout root
-# (Magpie / InferenceX, plus GEAK / TraceLens via the chained
-# kernel-agent installer). With no lock, two installs race and corrupt each
+# (Magpie / InferenceX, plus GEAK / TraceLens for the kernel agent). With no lock, two installs race and corrupt each
 # other's half-cloned checkouts (observed: GEAK src/minisweagent/... missing,
 # repeated install failures). The lock lives in $_open_source_root (pod-local)
-# so it tracks exactly what it guards; the chained kernel-agent installer uses
-# the same $_open_source_root default, keeping parent/child on one lock path.
+# so it tracks exactly what it guards.
 # We hold an flock on $_open_source_root/.install.lock via fd 9 from the first
 # mirror-mutating step until this process exits (fd closes on exit), so it
 # guards every clone/build below and releases automatically at the end.
 # Skipped under --check-only / --dry-run (introspection only, no mutation).
-# When we chain to kernel-agent's installer we export
-# HYPERLOOM_INSTALL_LOCK_HELD=1 so that child does not deadlock re-acquiring
-# the same lock on a second open file description.
 acquire_install_lock() {
   if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
-    return 0
-  fi
-  if [ "${HYPERLOOM_INSTALL_LOCK_HELD:-0}" = "1" ]; then
-    log "install lock already held by parent installer; not re-locking"
     return 0
   fi
   mkdir -p "${_open_source_root}"
@@ -582,15 +559,14 @@ acquire_install_lock() {
     log "waiting for install lock: ${_open_source_root}/.install.lock"
     flock 9
     log "acquired install lock"
-    export HYPERLOOM_INSTALL_LOCK_HELD=1
   else
     warn "flock not available; concurrent installs may race on dependency checkouts"
   fi
 }
 
-# Preflight credential validation. Mirrors src/hyperloom/agents/kernel/scripts/install.sh:
-# a usable setup needs at least one self-consistent provider side. A
-# dual-protocol gateway such as DeepSeek configures both sides on one host.
+# Preflight credential validation: a usable setup needs at least one
+# self-consistent provider side. A dual-protocol gateway such as DeepSeek
+# configures both sides on one host.
 #
 # Loader (env wins; never overwrites a key that is already set):
 #   env > $REPO_ROOT/.env
@@ -724,7 +700,7 @@ preflight_validate_credentials() {
   if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
     warn "missing credential(s): ${missing[*]} (.env=${env_file_status}); " \
          "continuing because --check-only / --dry-run is active. The " \
-         "chained kernel-agent installer will still fail later unless " \
+         "kernel-agent steps will still fail later unless " \
          "these are set before a real install."
     return 0
   fi
@@ -822,8 +798,8 @@ resolve_python() {
 
 resolve_python
 log "PYTHON=${PYTHON}"
-# Export PYTHON + prepend its bin dir so the chained kernel-agent installer's
-# bare `python3 -m pip ...` calls (src/hyperloom/agents/kernel/scripts/install.sh) land in
+# Export PYTHON + prepend its bin dir so the kernel-agent steps'
+# bare `python3 -m pip ...` calls (install_kernel_tools.sh) land in
 # the same interpreter. Otherwise PATH-only resolution can split the
 # installation across two different pythons.
 export PYTHON
@@ -836,7 +812,7 @@ export PATH
 #   1. torch missing entirely on a ROCm pod -- letting pip install proceed
 #      will pull the NVIDIA CUDA wheel from PyPI (default `torch`).
 #   2. torch present but built against CUDA (torch.version.hip is None)
-#      -- the chained RAG-index step auto-detects device=cuda and crashes
+#      -- the kernel-agent RAG-index step auto-detects device=cuda and crashes
 #      at torch._C._cuda_init() with "Found no NVIDIA driver".
 ensure_torch_compatible_with_gpu() {
   # Same reasoning as the credential preflight: aiperf is a benchmark client
@@ -946,16 +922,14 @@ log "USER_DATA_PATH=${USER_DATA_PATH}"
 log "HYPERLOOM_RUNTIME_DIR=${HYPERLOOM_RUNTIME_DIR}"
 log "HYPERLOOM_ROOT=${HYPERLOOM_ROOT}"
 log "open_source_root=${_open_source_root}"
-log "KERNEL_AGENT_ROOT=${KERNEL_AGENT_ROOT}"
 log "KERNEL_AGENT_ENV=${KERNEL_AGENT_ENV}"
 log "MAGPIE_PATH=${MAGPIE_PATH}"
 log "INFERENCEX_REPO=${INFERENCEX_REPO}"
 log "INFERENCEX_DEFAULT_DIR=${INFERENCEX_DEFAULT_DIR}"
 export USER_DATA_PATH HYPERLOOM_RUNTIME_DIR KERNEL_AGENT_ENV
-export HYPERLOOM_KERNEL_AGENT_ROOT="${HYPERLOOM_KERNEL_AGENT_ROOT:-${KERNEL_AGENT_ROOT}}"
-# Pre-create the writable runtime root so ensure_magpie / chain_kernel_agent
+# Pre-create the writable runtime root so ensure_magpie / install_kernel_agent_tools
 # never race on missing parents (Magpie's pip install -e writes egg-info
-# under MAGPIE_PATH; kernel-agent install.sh writes kernel-agent.env.sh into
+# under MAGPIE_PATH; the kernel-agent steps write kernel-agent.env.sh into
 # HYPERLOOM_RUNTIME_DIR).
 if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
   mkdir -p "${HYPERLOOM_RUNTIME_DIR}" "${_open_source_root}"
@@ -1318,7 +1292,7 @@ _ensure_pandas_lt3_for_rocpc() {
 
   # rc==1 (pandas>=3) OR rc==3 (pandas absent): pin pandas<3 in the interpreter
   # that runs rocprof-compute. This runs LAST in install.sh (after
-  # chain_kernel_agent — the final pip-installing step), so no later step can
+  # install_kernel_agent_tools — the final pip-installing step), so no later step can
   # re-pull pandas>=3, and the re-check below is the final, truthful state.
   if [ "$rc" -eq 3 ]; then
     why="pandas not yet installed"
@@ -2120,33 +2094,22 @@ ensure_framework_deps() {
     || die "framework deps for '${FRAMEWORK}' failed fatally; see the error above"
 }
 
-# --- 5. Chain to kernel-agent ---
-chain_kernel_agent() {
-  if [ "$SKIP_KERNEL_AGENT" -eq 1 ]; then
-    log "skipping kernel-agent installer (--skip-kernel-agent)"
-    return 0
-  fi
-  local script="${KERNEL_AGENT_ROOT}/scripts/install.sh"
-  if [ ! -f "$script" ]; then
-    warn "kernel-agent installer not found at $script"
-    return 0
-  fi
-  log "delegating ray + TraceLens + GEAK + LLM gateway env to ${script}"
-  export REPO_ROOT KERNEL_AGENT_ROOT MAGPIE_PATH HYPERLOOM_ROOT
-  export USER_DATA_PATH HYPERLOOM_RUNTIME_DIR KERNEL_AGENT_ENV
-  export HYPERLOOM_KERNEL_AGENT_ROOT="${HYPERLOOM_KERNEL_AGENT_ROOT:-${KERNEL_AGENT_ROOT}}"
-  [ -n "${INFERENCEX_PATH:-}" ] && export INFERENCEX_PATH
-  # Forward the optional internal extension path when provided; unset =>
-  # kernel-agent installer stays open-source-only (no separate toggle).
-  [ -n "${TRACELENS_INTERNAL_ROOT:-}" ] && export TRACELENS_INTERNAL_ROOT
-  local args=()
-  [ "$CHECK_ONLY" -eq 1 ] && args+=(--check-only)
-  [ "$DRY_RUN" -eq 1 ] && args+=(--dry-run)
+# --- 5. Kernel-agent tools ---
+install_kernel_agent_tools() {
   if [ "$DRY_RUN" -eq 1 ]; then
-    log "would run: bash '$script' ${args[*]}"
+    log "would install ray + TraceLens + GEAK + LLM gateway env"
     return 0
   fi
-  bash "$script" "${args[@]}"
+  log "installing ray + TraceLens + GEAK + LLM gateway env"
+  # A subshell keeps the steps' variables and PATH out of the steps that follow.
+  (
+    export REPO_ROOT MAGPIE_PATH HYPERLOOM_ROOT
+    [ -n "${INFERENCEX_PATH:-}" ] && export INFERENCEX_PATH
+    [ -n "${TRACELENS_INTERNAL_ROOT:-}" ] && export TRACELENS_INTERNAL_ROOT
+    # shellcheck source=install_kernel_tools.sh
+    . "${_script_dir}/install_kernel_tools.sh"
+    install_kernel_tools
+  )
 }
 
 # --- targeted entry point: aiperf only -------------------------------------
@@ -2163,7 +2126,7 @@ ensure_inference_optimizer
 ensure_forge_gemm_tune
 ensure_langfuse_when_enabled
 # Hold the install lock for the whole mirror-mutating region (Magpie /
-# InferenceX clones + the chained kernel-agent GEAK/TraceLens clones).
+# InferenceX clones + the kernel-agent GEAK/TraceLens clones).
 acquire_install_lock
 # Magpie is only needed when the Magpie benchmark backend is active. The
 # bypass backend drives InferenceX directly (see benchmark_backend.py), so
@@ -2245,10 +2208,10 @@ ensure_bench_serving_deps
 ensure_scriptable_quality_deps
 activate_vllm_image_source
 ensure_framework_deps
-chain_kernel_agent
+install_kernel_agent_tools
 persist_vllm_image_source_env
 # rocprof-compute + pandas<3 pin runs LAST — strictly AFTER every pip-installing
-# step (chain_kernel_agent included; nothing below installs packages). This makes
+# step (install_kernel_agent_tools included; nothing below installs packages). This makes
 # the pandas<3 pin the final word (no later `pip install` can re-pull pandas>=3)
 # and its own re-check the truthful end state, not a premature false-positive.
 # Unconditional (not gated on the backend): the default-geak install a later
@@ -2319,17 +2282,7 @@ _probe_framework_source_roots
 _prune_dep_cache "InferenceX" "Magpie"
 log "install complete"
 log "kernel-agent env file written: ${KERNEL_AGENT_ENV}"
-log "  HYPERLOOM_KERNEL_AGENT_ROOT=${HYPERLOOM_KERNEL_AGENT_ROOT}"
 log ""
-log "next steps — pick ONE:"
-log "  (a) source ${KERNEL_AGENT_ENV}, then run hyperloom.inference_optimizer.cli"
-log "  (b) just launch hyperloom.inference_optimizer.cli — preflight will auto-source"
-log "      \$KERNEL_AGENT_ENV (or \$USER_DATA_PATH/runtime/kernel-agent.env.sh)"
-log "      via _load_kernel_agent_env_fallback() if HYPERLOOM_KERNEL_AGENT_ROOT"
-log "      is unset."
-log ""
-log "If you skip BOTH and HYPERLOOM_KERNEL_AGENT_ROOT stays unset, the"
-log "roofline composite action's trace_analyze sub-step will fail with"
-log "  'HYPERLOOM_KERNEL_AGENT_ROOT is not set'"
-log "and the whole optimisation loop stalls (PolicyGate blocks every"
-log "downstream action on a missing TraceLens snapshot)."
+log "next step: launch python3 -m hyperloom optimize. Its preflight loads"
+log "  \$KERNEL_AGENT_ENV (or \$USER_DATA_PATH/runtime/kernel-agent.env.sh)"
+log "  and stops before the optimisation loop if that file is missing or stale."

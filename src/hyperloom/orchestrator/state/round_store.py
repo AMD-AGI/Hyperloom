@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Any
 
@@ -257,73 +257,60 @@ class RoundStore:
             RoundResult: ``ok`` when the round was acquired; otherwise
             ``reason`` is :data:`EXCLUDED` or :data:`ALREADY_EXISTS`.
         """
-        now = float(now_unix)
-        expires = now + max(0.0, float(lease_sec))
+        attempt = _Attempt(
+            round_id=round_id,
+            request_id=request_id,
+            op="open",
+            actor_task_id=holder_task_id,
+            fence=0,
+            outcome="",
+            evidence=evidence,
+            now_unix=now_unix,
+        )
+        opened = Round(
+            round_id=round_id,
+            state=OPEN,
+            outcome="",
+            holder_task_id=holder_task_id,
+            fence=1,
+            opened_unix=now_unix,
+            renewed_unix=now_unix,
+            expires_unix=now_unix + lease_sec,
+            settled_unix=None,
+        )
         async with self.db.transaction() as cur:
             cur.execute(
                 "INSERT INTO bringup_rounds ("
                 "  round_id, state, outcome, holder_task_id, fence,"
                 "  opened_unix, renewed_unix, expires_unix, settled_unix"
-                ") SELECT ?, ?, '', ?, 1, ?, ?, ?, NULL"
+                ") SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?"
                 f" WHERE NOT EXISTS (SELECT 1 FROM bringup_rounds WHERE {_LIVE_EXCLUSION})"  # nosec B608 - a fixed predicate constant, no caller input.
                 "   AND NOT EXISTS (SELECT 1 FROM bringup_rounds WHERE round_id = ?)",
                 (
-                    round_id,
-                    OPEN,
-                    holder_task_id,
-                    now,
-                    now,
-                    expires,
+                    opened.round_id,
+                    opened.state,
+                    opened.outcome,
+                    opened.holder_task_id,
+                    opened.fence,
+                    opened.opened_unix,
+                    opened.renewed_unix,
+                    opened.expires_unix,
+                    opened.settled_unix,
                     round_id,
                 ),
             )
             if cur.rowcount != 1:
                 cur.execute("SELECT 1 FROM bringup_rounds WHERE round_id = ?", (round_id,))
-                reason = ALREADY_EXISTS if cur.fetchone() is not None else EXCLUDED
-                event_id = _record(
-                    cur,
-                    round_id=round_id,
-                    request_id=request_id,
-                    op="open",
-                    result="rejected",
-                    outcome="",
-                    fence=0,
-                    actor_task_id=holder_task_id,
-                    reason=reason,
-                    evidence=evidence,
-                    now_unix=now,
-                )
-                return RoundResult(ok=False, round_id=round_id, reason=reason, event_id=event_id)
-            hold_round_lane(
-                cur,
-                round_id=round_id,
-                holder_task_id=holder_task_id,
-                expires_unix=expires,
-                now_unix=now,
-            )
+                return attempt.reject(cur, None, ALREADY_EXISTS if cur.fetchone() is not None else EXCLUDED)
+            _place_lane(cur, opened)
             if join is not None:
                 join(cur)
-            event_id = _record(
-                cur,
-                round_id=round_id,
-                request_id=request_id,
-                op="open",
-                result="applied",
-                outcome="",
-                fence=1,
-                actor_task_id=holder_task_id,
-                reason="",
-                evidence=evidence,
-                now_unix=now,
-            )
-        return RoundResult(ok=True, round_id=round_id, fence=1, state=OPEN, event_id=event_id)
+            return attempt.applied(cur, opened)
 
     async def renew(
         self,
-        round_id: str,
+        held: Round,
         *,
-        holder_task_id: str,
-        fence: int,
         lease_sec: float,
         now_unix: float,
         request_id: str,
@@ -332,9 +319,7 @@ class RoundStore:
         """Extend an open round's lease without changing who holds it.
 
         Args:
-            round_id: The round to renew.
-            holder_task_id: The task claiming to hold it.
-            fence: The fence the holder acquired under.
+            held: The round as its holder last read it.
             lease_sec: How much longer the lease is good for, from ``now_unix``.
             now_unix: Current wall time.
             request_id: The caller's id for this attempt.
@@ -343,48 +328,19 @@ class RoundStore:
         Returns:
             RoundResult: ``ok`` when the lease moved; otherwise ``reason``.
         """
-        now = float(now_unix)
-        expires = now + max(0.0, float(lease_sec))
-        async with self.db.transaction() as cur:
-            round_row = _load(cur, round_id)
-            reason = _cas_reason(round_row, holder_task_id=holder_task_id, fence=fence)
-            if reason:
-                return _reject(
-                    cur, round_row, round_id, request_id, "renew", "", fence, holder_task_id, reason, evidence, now
-                )
-            cur.execute(
-                "UPDATE bringup_rounds SET renewed_unix = ?, expires_unix = ?"
-                " WHERE round_id = ? AND holder_task_id = ? AND fence = ? AND state = ?",
-                (now, expires, round_id, holder_task_id, int(fence), OPEN),
-            )
-            hold_round_lane(
-                cur,
-                round_id=round_id,
-                holder_task_id=holder_task_id,
-                expires_unix=expires,
-                now_unix=now,
-            )
-            event_id = _record(
-                cur,
-                round_id=round_id,
-                request_id=request_id,
-                op="renew",
-                result="applied",
-                outcome="",
-                fence=int(fence),
-                actor_task_id=holder_task_id,
-                reason="",
-                evidence=evidence,
-                now_unix=now,
-            )
-        return RoundResult(ok=True, round_id=round_id, fence=int(fence), state=OPEN, event_id=event_id)
+        return await self._swap(
+            held,
+            "renew",
+            lambda current: replace(current, renewed_unix=now_unix, expires_unix=now_unix + lease_sec),
+            request_id=request_id,
+            now_unix=now_unix,
+            evidence=evidence,
+        )
 
     async def handoff(
         self,
-        round_id: str,
+        held: Round,
         *,
-        holder_task_id: str,
-        fence: int,
         new_holder_task_id: str,
         lease_sec: float,
         now_unix: float,
@@ -394,9 +350,7 @@ class RoundStore:
         """Move an open round to a new holder, advancing the fence.
 
         Args:
-            round_id: The round to hand off.
-            holder_task_id: The task currently holding it.
-            fence: The fence the current holder acquired under.
+            held: The round as its current holder last read it.
             new_holder_task_id: The task taking it over.
             lease_sec: The new holder's lease, from ``now_unix``.
             now_unix: Current wall time.
@@ -407,59 +361,25 @@ class RoundStore:
             RoundResult: ``ok`` with the advanced ``fence``; otherwise
             ``reason``.
         """
-        now = float(now_unix)
-        expires = now + max(0.0, float(lease_sec))
-        next_fence = int(fence) + 1
-        async with self.db.transaction() as cur:
-            round_row = _load(cur, round_id)
-            reason = _cas_reason(round_row, holder_task_id=holder_task_id, fence=fence)
-            if reason:
-                return _reject(
-                    cur, round_row, round_id, request_id, "handoff", "", fence, holder_task_id, reason, evidence, now
-                )
-            cur.execute(
-                "UPDATE bringup_rounds SET holder_task_id = ?, fence = ?, renewed_unix = ?,"
-                "  expires_unix = ?"
-                " WHERE round_id = ? AND holder_task_id = ? AND fence = ? AND state = ?",
-                (
-                    new_holder_task_id,
-                    next_fence,
-                    now,
-                    expires,
-                    round_id,
-                    holder_task_id,
-                    int(fence),
-                    OPEN,
-                ),
-            )
-            hold_round_lane(
-                cur,
-                round_id=round_id,
+        return await self._swap(
+            held,
+            "handoff",
+            lambda current: replace(
+                current,
                 holder_task_id=new_holder_task_id,
-                expires_unix=expires,
-                now_unix=now,
-            )
-            event_id = _record(
-                cur,
-                round_id=round_id,
-                request_id=request_id,
-                op="handoff",
-                result="applied",
-                outcome="",
-                fence=next_fence,
-                actor_task_id=new_holder_task_id,
-                reason="",
-                evidence=evidence,
-                now_unix=now,
-            )
-        return RoundResult(ok=True, round_id=round_id, fence=next_fence, state=OPEN, event_id=event_id)
+                fence=current.fence + 1,
+                renewed_unix=now_unix,
+                expires_unix=now_unix + lease_sec,
+            ),
+            request_id=request_id,
+            now_unix=now_unix,
+            evidence=evidence,
+        )
 
     async def settle(
         self,
-        round_id: str,
+        held: Round,
         *,
-        holder_task_id: str,
-        fence: int,
         outcome: str,
         now_unix: float,
         request_id: str,
@@ -468,9 +388,7 @@ class RoundStore:
         """End the round, releasing the machine.
 
         Args:
-            round_id: The round to settle.
-            holder_task_id: The task claiming to hold it.
-            fence: The fence the holder acquired under.
+            held: The round as its holder last read it.
             outcome: One of :data:`OUTCOMES`.
             now_unix: Current wall time.
             request_id: The caller's id for this attempt.
@@ -485,100 +403,75 @@ class RoundStore:
         """
         if outcome not in OUTCOMES:
             raise ValueError(f"unknown round outcome {outcome!r}; expected one of {sorted(OUTCOMES)}")
-        now = float(now_unix)
+        return await self._swap(
+            held,
+            "settle",
+            lambda current: replace(current, state=SETTLED, outcome=outcome, settled_unix=now_unix),
+            request_id=request_id,
+            now_unix=now_unix,
+            evidence=evidence,
+            outcome=outcome,
+        )
+
+    async def _swap(
+        self,
+        held: Round,
+        op: str,
+        advance: Callable[[Round], Round],
+        *,
+        request_id: str,
+        now_unix: float,
+        evidence: Mapping[str, Any],
+        outcome: str = "",
+    ) -> RoundResult:
+        """Replace the round with ``advance(current)`` while ``held`` still names its holder and fence.
+
+        Only a settle can replay: any other attempt on a settled round is :data:`NOT_OPEN`.
+        """
+        attempt = _Attempt(
+            round_id=held.round_id,
+            request_id=request_id,
+            op=op,
+            actor_task_id=held.holder_task_id,
+            fence=held.fence,
+            outcome=outcome,
+            evidence=evidence,
+            now_unix=now_unix,
+        )
         async with self.db.transaction() as cur:
-            round_row = _load(cur, round_id)
-            if round_row is not None and round_row.state == SETTLED:
+            current = _load(cur, held.round_id)
+            if current is None:
+                return attempt.reject(cur, None, UNKNOWN_ROUND)
+            if op == "settle" and current.state == SETTLED:
                 if (
-                    round_row.outcome == outcome
-                    and round_row.holder_task_id == holder_task_id
-                    and round_row.fence == int(fence)
+                    current.outcome == outcome
+                    and current.holder_task_id == held.holder_task_id
+                    and current.fence == held.fence
                 ):
-                    event_id = _record(
-                        cur,
-                        round_id=round_id,
-                        request_id=request_id,
-                        op="settle",
-                        result="duplicate",
-                        outcome=outcome,
-                        fence=int(fence),
-                        actor_task_id=holder_task_id,
-                        reason="",
-                        evidence=evidence,
-                        now_unix=now,
-                    )
-                    return RoundResult(
-                        ok=True,
-                        round_id=round_id,
-                        fence=round_row.fence,
-                        state=SETTLED,
-                        outcome=round_row.outcome,
-                        duplicate=True,
-                        event_id=event_id,
-                    )
-                return _reject(
-                    cur,
-                    round_row,
-                    round_id,
-                    request_id,
-                    "settle",
-                    outcome,
-                    fence,
-                    holder_task_id,
-                    ALREADY_SETTLED,
-                    evidence,
-                    now,
-                )
-            reason = _cas_reason(round_row, holder_task_id=holder_task_id, fence=fence)
+                    return attempt.applied(cur, current, duplicate=True)
+                return attempt.reject(cur, current, ALREADY_SETTLED)
+            reason = _cas_reason(current, held)
             if reason:
-                return _reject(
-                    cur,
-                    round_row,
-                    round_id,
-                    request_id,
-                    "settle",
-                    outcome,
-                    fence,
-                    holder_task_id,
-                    reason,
-                    evidence,
-                    now,
-                )
+                return attempt.reject(cur, current, reason)
+            after = advance(current)
+            # The transaction is BEGIN IMMEDIATE, so the check above and this write are one step.
             cur.execute(
-                "UPDATE bringup_rounds SET state = ?, outcome = ?, settled_unix = ?"
-                " WHERE round_id = ? AND holder_task_id = ? AND fence = ? AND state = ?",
+                "UPDATE bringup_rounds SET state = ?, outcome = ?, holder_task_id = ?, fence = ?,"
+                "  renewed_unix = ?, expires_unix = ?, settled_unix = ?"
+                " WHERE round_id = ?",
                 (
-                    SETTLED,
-                    outcome,
-                    now,
-                    round_id,
-                    holder_task_id,
-                    int(fence),
-                    OPEN,
+                    after.state,
+                    after.outcome,
+                    after.holder_task_id,
+                    after.fence,
+                    after.renewed_unix,
+                    after.expires_unix,
+                    after.settled_unix,
+                    after.round_id,
                 ),
             )
-            drop_round_lane(cur, round_id=round_id)
-            event_id = _record(
-                cur,
-                round_id=round_id,
-                request_id=request_id,
-                op="settle",
-                result="applied",
-                outcome=outcome,
-                fence=int(fence),
-                actor_task_id=holder_task_id,
-                reason="",
-                evidence=evidence,
-                now_unix=now,
-            )
-        return RoundResult(
-            ok=True,
-            round_id=round_id,
-            fence=int(fence),
-            state=SETTLED,
-            outcome=outcome,
-            event_id=event_id,
-        )
+            _place_lane(cur, after)
+            return attempt.applied(cur, after)
 
     async def held(self) -> Round | None:
         """Return the newest open round, or ``None``.
@@ -658,91 +551,106 @@ def _load(cur: sqlite3.Cursor, round_id: str) -> Round | None:
     return None if row is None else Round.from_row(row)
 
 
-def _cas_reason(round_row: Round | None, *, holder_task_id: str, fence: int) -> str:
-    """Return why a compare-and-swap must be refused, or ``""`` when it may proceed."""
-    if round_row is None:
-        return UNKNOWN_ROUND
-    if round_row.state != OPEN:
+def _cas_reason(current: Round, held: Round) -> str:
+    """Return why a compare-and-swap on ``current`` must be refused, or ``""`` when ``held`` still names it."""
+    if current.state != OPEN:
         return NOT_OPEN
-    if round_row.holder_task_id != holder_task_id:
+    if current.holder_task_id != held.holder_task_id:
         return NOT_OWNER
-    if round_row.fence != int(fence):
+    if current.fence != held.fence:
         return STALE_FENCE
     return ""
 
 
-def _reject(
-    cur: sqlite3.Cursor,
-    round_row: Round | None,
-    round_id: str,
-    request_id: str,
-    op: str,
-    outcome: str,
-    fence: int,
-    actor_task_id: str,
-    reason: str,
-    evidence: Mapping[str, Any],
-    now_unix: float,
-) -> RoundResult:
-    """Record a refused attempt on the outbox and describe it to the caller."""
-    event_id = _record(
-        cur,
-        round_id=round_id,
-        request_id=request_id,
-        op=op,
-        result="rejected",
-        outcome=outcome,
-        fence=int(fence),
-        actor_task_id=actor_task_id,
-        reason=reason,
-        evidence=evidence,
-        now_unix=now_unix,
-    )
-    return RoundResult(
-        ok=False,
-        round_id=round_id,
-        fence=0 if round_row is None else round_row.fence,
-        state="" if round_row is None else round_row.state,
-        outcome="" if round_row is None else round_row.outcome,
-        reason=reason,
-        event_id=event_id,
-    )
+def _place_lane(cur: sqlite3.Cursor, after: Round) -> None:
+    """Make the round's lane row match ``after``: held to its lease while open, gone once settled."""
+    if after.state == OPEN:
+        hold_round_lane(
+            cur,
+            round_id=after.round_id,
+            holder_task_id=after.holder_task_id,
+            expires_unix=after.expires_unix,
+            now_unix=after.renewed_unix,
+        )
+    else:
+        drop_round_lane(cur, round_id=after.round_id)
 
 
-def _record(
-    cur: sqlite3.Cursor,
-    *,
-    round_id: str,
-    request_id: str,
-    op: str,
-    result: str,
-    outcome: str,
-    fence: int,
-    actor_task_id: str,
-    reason: str,
-    evidence: Mapping[str, Any],
-    now_unix: float,
-) -> int:
-    """Append one attempt to the outbox and return its ``event_id``."""
-    cur.execute(
-        "INSERT INTO round_events ("
-        "  round_id, request_id, op, result, outcome, fence,"
-        "  actor_task_id, reason, evidence, recorded_unix"
-        ") VALUES (?,?,?,?,?,?,?,?,?,?)",
-        (
-            round_id,
-            request_id,
-            op,
-            result,
-            outcome,
-            int(fence),
-            actor_task_id,
-            reason,
-            json.dumps(dict(evidence), sort_keys=True),
-            float(now_unix),
-        ),
-    )
-    event_id = cur.lastrowid
-    if event_id is None:
-        raise sqlite3.DatabaseError("the round_events insert reported no row id")
-    return int(event_id)
+@dataclass(frozen=True, kw_only=True)
+class _Attempt:
+    """One caller request against a round, as the outbox records it."""
+
+    round_id: str
+    request_id: str
+    op: str
+    actor_task_id: str
+    fence: int
+    outcome: str
+    evidence: Mapping[str, Any]
+    now_unix: float
+
+    def applied(self, cur: sqlite3.Cursor, after: Round, *, duplicate: bool = False) -> RoundResult:
+        """Record this attempt as having left the round at ``after``, and describe ``after`` to the caller.
+
+        The outbox row carries ``after``'s fence and holder, so an open or a handoff records the ones it put in place.
+        """
+        event_id = self._append(
+            cur,
+            result="duplicate" if duplicate else "applied",
+            fence=after.fence,
+            actor_task_id=after.holder_task_id,
+            reason="",
+        )
+        return RoundResult(
+            ok=True,
+            round_id=after.round_id,
+            fence=after.fence,
+            state=after.state,
+            outcome=after.outcome,
+            duplicate=duplicate,
+            event_id=event_id,
+        )
+
+    def reject(self, cur: sqlite3.Cursor, current: Round | None, reason: str) -> RoundResult:
+        """Record this attempt as refused with what it presented, and describe the round as it stands to the caller."""
+        event_id = self._append(
+            cur,
+            result="rejected",
+            fence=self.fence,
+            actor_task_id=self.actor_task_id,
+            reason=reason,
+        )
+        return RoundResult(
+            ok=False,
+            round_id=self.round_id,
+            fence=0 if current is None else current.fence,
+            state="" if current is None else current.state,
+            outcome="" if current is None else current.outcome,
+            reason=reason,
+            event_id=event_id,
+        )
+
+    def _append(self, cur: sqlite3.Cursor, *, result: str, fence: int, actor_task_id: str, reason: str) -> int:
+        """Append this attempt to the outbox and return its ``event_id``."""
+        cur.execute(
+            "INSERT INTO round_events ("
+            "  round_id, request_id, op, result, outcome, fence,"
+            "  actor_task_id, reason, evidence, recorded_unix"
+            ") VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (
+                self.round_id,
+                self.request_id,
+                self.op,
+                result,
+                self.outcome,
+                fence,
+                actor_task_id,
+                reason,
+                json.dumps(dict(self.evidence), sort_keys=True),
+                self.now_unix,
+            ),
+        )
+        event_id = cur.lastrowid
+        if event_id is None:
+            raise sqlite3.DatabaseError("the round_events insert reported no row id")
+        return event_id

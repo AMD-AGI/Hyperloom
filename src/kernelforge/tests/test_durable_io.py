@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import stat
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -27,6 +28,25 @@ def _tree(root: Path) -> Path:
     return root
 
 
+def _opened_under(root: Path, walk: Callable[[Path], None]) -> set[str]:
+    """The paths under ``root`` that ``walk(root)`` opened.
+
+    ``os.open`` is patched for the whole process, so a finalizer or thread left over from another test can open its own
+    paths while the walk runs; only the paths under ``root`` are the walk's.
+    """
+    opened: list[str] = []
+    real_open = os.open
+
+    def _record(path, flags, *args, **kwargs):
+        opened.append(str(path))
+        return real_open(path, flags, *args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(os, "open", _record)
+        walk(root)
+    return {path for path in opened if Path(path).is_relative_to(root)}
+
+
 def test_atomic_write_replaces_prior_content_in_one_step(tmp_path):
     target = tmp_path / "out" / "result.json"
     atomic_write_text(target, '{"a": 1}')
@@ -37,19 +57,9 @@ def test_atomic_write_replaces_prior_content_in_one_step(tmp_path):
 
 
 def test_fsync_tree_visits_every_file_and_directory(tmp_path):
-    visited: list[str] = []
-    real_open = os.open
-
-    def _record(path, flags, *args, **kwargs):
-        visited.append(str(path))
-        return real_open(path, flags, *args, **kwargs)
-
     root = _tree(tmp_path / "bundle")
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(os, "open", _record)
-        fsync_tree(root)
 
-    assert set(visited) == {
+    assert _opened_under(root, fsync_tree) == {
         str(root),
         str(root / "top.json"),
         str(root / "nested"),
@@ -60,19 +70,9 @@ def test_fsync_tree_visits_every_file_and_directory(tmp_path):
 
 
 def test_fsync_tree_directories_skips_the_files(tmp_path):
-    visited: list[str] = []
-    real_open = os.open
-
-    def _record(path, flags, *args, **kwargs):
-        visited.append(str(path))
-        return real_open(path, flags, *args, **kwargs)
-
     root = _tree(tmp_path / "bundle")
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(os, "open", _record)
-        fsync_tree_directories(root)
 
-    assert set(visited) == {
+    assert _opened_under(root, fsync_tree_directories) == {
         str(root),
         str(root / "nested"),
         str(root / "nested" / "deeper"),

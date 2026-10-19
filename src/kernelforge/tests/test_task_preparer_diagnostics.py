@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 from dataclasses import asdict
 
-from kernelforge.loop import task_preparer
+from kernelforge.loop import task_preparer_prompts
+from kernelforge.loop import task_preflight
 
 
 _TRACEBACK = (
@@ -26,9 +27,9 @@ def _run_preflight(monkeypatch, tmp_path, *, correctness, bench):
     async def _fake_bench(**kwargs):
         return bench
 
-    monkeypatch.setattr(task_preparer, "test_correctness", _fake_correctness)
-    monkeypatch.setattr(task_preparer, "bench_wallclock", _fake_bench)
-    return asyncio.run(task_preparer._preflight_async(driver.as_posix(), 30.0, 1, 2))
+    monkeypatch.setattr(task_preflight, "test_correctness", _fake_correctness)
+    monkeypatch.setattr(task_preflight, "bench_wallclock", _fake_bench)
+    return asyncio.run(task_preflight._preflight_async(driver.as_posix(), 30.0, 1, 2))
 
 
 def test_crash_tail_reaches_result_and_audit(monkeypatch, tmp_path):
@@ -64,12 +65,12 @@ def test_tail_is_truncated(monkeypatch, tmp_path):
         correctness={
             "passed": False,
             "message": "DRIVER CRASHED (exit 1)",
-            "output": "x" * (task_preparer.DIAG_TAIL_CHARS + 500),
+            "output": "x" * (task_preflight.DIAG_TAIL_CHARS + 500),
         },
         bench={"success": True, "median_ms": 1.0, "message": "ok"},
     )
 
-    assert len(result.diagnostics["correctness"]) == task_preparer.DIAG_TAIL_CHARS
+    assert len(result.diagnostics["correctness"]) == task_preflight.DIAG_TAIL_CHARS
     assert "bench" not in result.diagnostics
 
 
@@ -92,14 +93,14 @@ def test_passing_stage_records_nothing(monkeypatch, tmp_path):
 
 
 def test_retry_prompt_shows_the_traceback():
-    failed = task_preparer.PreflightResult(
+    failed = task_preflight.PreflightResult(
         ok=False,
         correctness_ok=False,
         bench_ok=False,
         reasons=["correctness mode produced no SNR/allclose metric (DRIVER CRASHED (exit 1))"],
         diagnostics={"correctness": _TRACEBACK},
     )
-    prompt = task_preparer._build_prompt(
+    prompt = task_preparer_prompts._build_prompt(
         evidence="## Task metadata",
         driver_rel=".forge_driver_x.py",
         reference_note="",

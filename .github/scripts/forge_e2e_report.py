@@ -109,7 +109,6 @@ def render_report(
     max_hours: str,
     max_iters: str,
     gpus: str,
-    workspace: str,
     head_ref: str,
     head_sha: str,
     session_id: str,
@@ -127,7 +126,6 @@ def render_report(
         ("result", result_label),
         ("example", f"`triton-softmax-forge-loop` (max_hours={max_hours}, max_iters={max_iters})"),
         ("resources", f"{gpus}× GPU"),
-        ("workspace", f"`{workspace}`"),
         ("PR branch", f"`{head_ref}`"),
         ("commit", f"`{head_sha}`"),
         ("session_id", f"`{session_id}`"),
@@ -198,7 +196,6 @@ def main() -> int:
     render.add_argument("--max-hours", required=True)
     render.add_argument("--max-iters", required=True)
     render.add_argument("--gpus", required=True)
-    render.add_argument("--workspace", required=True)
     render.add_argument("--head-ref", required=True)
     render.add_argument("--head-sha", required=True)
     render.add_argument("--session-id", required=True)
@@ -227,7 +224,6 @@ def main() -> int:
             max_hours=args.max_hours,
             max_iters=args.max_iters,
             gpus=args.gpus,
-            workspace=args.workspace,
             head_ref=args.head_ref,
             head_sha=args.head_sha,
             session_id=args.session_id,

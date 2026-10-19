@@ -13,11 +13,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from hyperloom.inference_optimizer.protocol.intent import (
-    Intent,
-)
+from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
 from hyperloom.orchestrator.policy.gate import SPECIALIST_FROM_AGENT_PREFIX
+from hyperloom.orchestrator.specialists.dispatch import SpecialistDispatchCollaborator
 from hyperloom.orchestrator.state.shared_state import SharedState
+from ._dispatch_helpers import pump_until_settled
+from .conftest import use_fake_specialist_cli
 
 
 @dataclass
@@ -35,7 +36,6 @@ class _StubSharedState(SharedState):
     def __init__(self):
         super().__init__()
         self.specialist_rounds: list[dict[str, Any]] = []
-        self.last_specialist: dict[str, Any] = {}
         self.saved: int = 0
 
     def record_specialist_round(self, entry: dict[str, Any]) -> None:
@@ -47,9 +47,6 @@ class _StubSharedState(SharedState):
                     self.specialist_rounds[i] = dict(entry)
                     return
         self.specialist_rounds.append(dict(entry))
-
-    def update_last_specialist(self, snapshot: dict[str, Any]) -> None:
-        self.last_specialist = dict(snapshot)
 
     def save(self, _session_dir) -> None:
         self.saved += 1
@@ -77,14 +74,14 @@ class _StubTaskRegistry:
 def coord(tmp_path: Path):
     """Build a Coordinator via ``__new__`` with just enough attributes for specialist lifecycle methods."""
     from hyperloom.orchestrator.loop.coordinator import Coordinator
-    from hyperloom.orchestrator.phases.framework import FrameworkPhase
 
     c = Coordinator.__new__(Coordinator)
-    c.phase_framework = FrameworkPhase(c)
     c.session_dir = tmp_path
     c.shared_state = _StubSharedState()
     c.tasks = _StubTaskRegistry()
-    c._record_observation = AsyncMock()  # type: ignore[method-assign]
+    c.knowledge_plane = None
+    c.knowledge_plane = KnowledgePlane(recipe_kb=None)
+    c.bus = SimpleNamespace(record_observation=AsyncMock())
     return c
 
 
@@ -121,15 +118,15 @@ def _done_payload(
     }
 
 
-# 1. _record_specialist_result — direct bookkeeping unit tests
+# 1. record_specialist_result — direct bookkeeping unit tests
 @pytest.mark.asyncio
 async def test_record_specialist_result_non_empty_proposal_set(coord):
-    """Non-empty proposal_set: ledger +1 row, last_specialist mirrored, save called."""
+    """Non-empty proposal_set: ledger +1 row, save called."""
     task = _StubTask(task_id="task-1", params={})
     coord.tasks.register(task)
 
     payload = _done_payload(domain="serving_specialist")
-    await coord._record_specialist_result(
+    await coord.specialist_dispatch.record_specialist_result(
         task=task,
         done_payload=payload,
         source=f"{SPECIALIST_FROM_AGENT_PREFIX}task-1",
@@ -143,9 +140,6 @@ async def test_record_specialist_result_non_empty_proposal_set(coord):
     assert row["gap_canonical_id"] == "gap.attention.fp8_kv"
     assert row["proposals_total"] == 1
     assert row["round_id"] == "task-1"
-    assert state.last_specialist["task_id"] == "task-1"
-    assert state.last_specialist["proposals_total"] == 1
-    assert state.last_specialist["domain"] == "serving_specialist"
     assert state.saved == 1
 
 
@@ -153,7 +147,7 @@ async def test_record_specialist_result_non_empty_proposal_set(coord):
 async def test_record_specialist_result_enqueues_build_request(coord):
     task = _StubTask(task_id="build-spec", params={"enablement": True})
     coord.tasks.register(task)
-    coord._maybe_enqueue_specialist_requested_build = AsyncMock()
+    coord.enablement_build.maybe_enqueue_specialist_requested_build = AsyncMock()
     payload = _done_payload(no_proposals=True)
     payload["needs_targeted_build"] = {
         "component": "aiter",
@@ -161,13 +155,13 @@ async def test_record_specialist_result_enqueues_build_request(coord):
         "ref": "v0.1.15.post2",
     }
 
-    await coord._record_specialist_result(
+    await coord.specialist_dispatch.record_specialist_result(
         task=task,
         done_payload=payload,
         source=f"{SPECIALIST_FROM_AGENT_PREFIX}build-spec",
     )
 
-    coord._maybe_enqueue_specialist_requested_build.assert_awaited_once_with(
+    coord.enablement_build.maybe_enqueue_specialist_requested_build.assert_awaited_once_with(
         task_id="build-spec",
         payload=payload,
     )
@@ -180,7 +174,7 @@ async def test_record_specialist_result_empty_proposal_set(coord):
     coord.tasks.register(task)
 
     payload = _done_payload(no_proposals=True, domain="kernel_switch_specialist")
-    await coord._record_specialist_result(
+    await coord.specialist_dispatch.record_specialist_result(
         task=task,
         done_payload=payload,
         source=f"{SPECIALIST_FROM_AGENT_PREFIX}task-empty-1",
@@ -189,7 +183,6 @@ async def test_record_specialist_result_empty_proposal_set(coord):
     state: _StubSharedState = coord.shared_state
     assert len(state.specialist_rounds) == 1
     assert state.specialist_rounds[0]["proposals_total"] == 0
-    assert state.last_specialist["proposals_total"] == 0
 
 
 @pytest.mark.asyncio
@@ -201,12 +194,12 @@ async def test_record_specialist_result_idempotent_on_round_id(coord):
     )
     coord.tasks.register(task)
 
-    await coord._record_specialist_result(
+    await coord.specialist_dispatch.record_specialist_result(
         task=task,
         done_payload=_done_payload(),
         source=f"{SPECIALIST_FROM_AGENT_PREFIX}t-resume",
     )
-    await coord._record_specialist_result(
+    await coord.specialist_dispatch.record_specialist_result(
         task=task,
         done_payload=_done_payload(proposals=[]),
         source=f"{SPECIALIST_FROM_AGENT_PREFIX}t-resume",
@@ -218,32 +211,7 @@ async def test_record_specialist_result_idempotent_on_round_id(coord):
     assert state.specialist_rounds[0]["round_id"] == "round-7"
 
 
-# 3. _task_id_from_specialist_source helper
-def test_task_id_from_specialist_source_extracts_prefix():
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
-
-    assert (
-        Coordinator._task_id_from_specialist_source(
-            "specialist:abc-123",
-        )
-        == "abc-123"
-    )
-
-
-def test_task_id_from_specialist_source_returns_empty_for_bad():
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
-
-    assert Coordinator._task_id_from_specialist_source("orchestration") == ""
-    assert Coordinator._task_id_from_specialist_source("") == ""
-    assert (
-        Coordinator._task_id_from_specialist_source(
-            "unknown",
-        )
-        == ""
-    )
-
-
-# 4. _build_specialist_round_entry — output shape
+# 4. build_specialist_round_entry — output shape
 @pytest.mark.asyncio
 async def test_build_specialist_round_entry_carries_full_payload(coord):
     """The entry carries the full field set the timeline round product expects."""
@@ -262,7 +230,7 @@ async def test_build_specialist_round_entry_carries_full_payload(coord):
         ],
         confidence=0.62,
     )
-    entry = coord_obj._build_specialist_round_entry(
+    entry = coord_obj.specialist_dispatch.build_specialist_round_entry(
         task=task,
         done_payload=payload,
         source=f"{SPECIALIST_FROM_AGENT_PREFIX}t-build",
@@ -298,7 +266,7 @@ async def test_build_specialist_round_entry_round_id_falls_back_to_task_id(coord
 
     coord_obj = Coordinator.__new__(Coordinator)
     task = _StubTask(task_id="task-no-round", params={})
-    entry = coord_obj._build_specialist_round_entry(
+    entry = coord_obj.specialist_dispatch.build_specialist_round_entry(
         task=task,
         done_payload=_done_payload(),
         source=f"{SPECIALIST_FROM_AGENT_PREFIX}task-no-round",
@@ -310,20 +278,20 @@ async def test_build_specialist_round_entry_round_id_falls_back_to_task_id(coord
 @pytest.mark.asyncio
 async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """End-to-end via the dispatcher exit hook: one specialist task lands the four bookkeeping mutations."""
+    import argparse
+
     from hyperloom.inference_optimizer.cli.executors import _build_specialist_executor
     from hyperloom.orchestrator.roles.mock_backend import (
-        MockBackend,
+        MockBackend as MockOrchBackend,
         MockTurn,
         ScriptedPlan,
     )
     from hyperloom.orchestrator.loop.coordinator import Coordinator
-    from hyperloom.inference_optimizer.protocol.intent import IntentType
-    from hyperloom.orchestrator.roles.mock_backend import (
-        MockBackend as MockOrchBackend,
-    )
     from hyperloom.orchestrator.roles.agent_role import default_role_registry
+    from hyperloom.orchestrator.state.task_registry import Task
 
     done_payload = _done_payload(
         domain="serving_specialist",
@@ -335,78 +303,56 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
             },
         ],
     )
-    plan = ScriptedPlan(
-        turns=[
-            MockTurn(
-                intents=[
-                    Intent(type=IntentType.SPECIALIST_DONE, payload=done_payload),
-                ]
-            )
-        ]
+    use_fake_specialist_cli(tmp_path, monkeypatch, behavior="done_only", payload=done_payload)
+    spec_args = argparse.Namespace(
+        claude_model="claude-3-5-sonnet-latest",
+        specialist_model=None,
+        specialist_max_turns=4,
+        research_lane_capacity=1,
+        specialist_mcp_config=None,
     )
+    idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
+    backends = {
+        "orchestration": MockOrchBackend(idle_plan),
+        "critic": MockOrchBackend(idle_plan),
+    }
 
-    import hyperloom.inference_optimizer.cli.executors as cli_mod
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    coord = Coordinator(
+        session_dir=session_dir,
+        backends=backends,
+        role_registry=default_role_registry(),
+        knowledge_plane=None,
+    )
+    executor = _build_specialist_executor(
+        spec_args,
+        session_dir=session_dir,
+        knowledge_plane=None,
+    )
+    coord.sub.register_executor("specialist", executor)
 
-    real_claude_cls = cli_mod.ClaudeBackend
-    cli_mod.ClaudeBackend = lambda **_kw: MockBackend(plan, name="spec-mock")
-    try:
-        import argparse
-
-        spec_args = argparse.Namespace(
-            claude_model="claude-3-5-sonnet-latest",
-            specialist_model=None,
-            specialist_max_turns=4,
-            specialist_per_turn_max_seconds=300.0,
-            research_lane_capacity=1,
-            # In-process dispatch so the mocked ClaudeBackend is used.
-            specialist_dispatch_mode="inprocess",
-            specialist_mcp_config=None,
-        )
-        idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
-        backends = {
-            "orchestration": MockOrchBackend(idle_plan),
-            "critic": MockOrchBackend(idle_plan),
-        }
-
-        session_dir = tmp_path / "session"
-        session_dir.mkdir()
-        coord = Coordinator(
-            session_dir=session_dir,
-            backends=backends,
-            role_registry=default_role_registry(),
-            recipe_kb=None,
-            knowledge_plane=None,
-        )
-        executor = _build_specialist_executor(
-            spec_args,
-            session_dir=session_dir,
-            knowledge_plane=None,
-        )
-        coord.sub.register_executor("specialist", executor)
-
-        # Enqueue directly through TaskRegistry to test the dispatcher hook, not the upstream intent flow.
-        from hyperloom.orchestrator.state.task_registry import Task
-
-        task = Task(
-            task_id="t-e2e-1",
-            kind="specialist",
-            state="queued",
-            params={
-                "domain": "serving_specialist",
-                "gap_canonical_id": "gap.attention.fp8_kv",
-                "max_turns": 4,
-            },
-            idempotency_key="t-e2e-1",
-            requires_lanes=tuple(),
-        )
-        await coord.tasks.create_or_return_existing(
-            kind=task.kind,
-            params=task.params,
-            idempotency_key=task.idempotency_key,
-        )
-        await coord.tick(n=1)
-    finally:
-        cli_mod.ClaudeBackend = real_claude_cls
+    # Enqueue directly through TaskRegistry to test the dispatcher hook, not the upstream intent flow.
+    task = Task(
+        task_id="t-e2e-1",
+        kind="specialist",
+        state="queued",
+        params={
+            "domain": "serving_specialist",
+            "framework": "sglang",
+            "gap_canonical_id": "gap.attention.fp8_kv",
+            "max_turns": 4,
+        },
+        idempotency_key="t-e2e-1",
+        requires_lanes=tuple(),
+    )
+    await coord.tasks.create_or_return_existing(
+        kind=task.kind,
+        params=task.params,
+        idempotency_key=task.idempotency_key,
+    )
+    await coord.tick(n=1)
+    await pump_until_settled(coord.dispatcher)
 
     assert len(coord.shared_state.specialist_rounds) == 1, (
         "dispatcher hook should have triggered record_specialist_round"
@@ -414,7 +360,6 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
     row = coord.shared_state.specialist_rounds[0]
     assert row["domain"] == "serving_specialist"
     assert row["proposals_total"] == 1
-    assert coord.shared_state.last_specialist.get("domain") == "serving_specialist"
     workspace = session_dir / "runs" / "specialist"
     assert workspace.exists()
     assert any(workspace.iterdir()), "specialist workspace should be non-empty"
@@ -423,9 +368,8 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
 # 7. Point 2 — stalled-domain hard-trigger
 @pytest.fixture
 def force_coord(tmp_path: Path, monkeypatch):
-    """Coordinator stand-in with a real SharedState + mocked _handle_intent."""
+    """Coordinator stand-in with a real SharedState + mocked handle_intent."""
     from hyperloom.orchestrator.loop.coordinator import Coordinator
-    from hyperloom.orchestrator.specialists.dispatch import SpecialistDispatchCollaborator
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     c = Coordinator.__new__(Coordinator)
@@ -435,9 +379,18 @@ def force_coord(tmp_path: Path, monkeypatch):
     source_root = tmp_path / "framework"
     (source_root / ".git").mkdir(parents=True)
     c.shared_state.framework_repo_path = str(source_root)
-    c.tasks = SimpleNamespace(find_by_idempotency_key=AsyncMock(return_value=None))
-    monkeypatch.setattr(SpecialistDispatchCollaborator, "_warm_specialist_params", AsyncMock())
-    c._handle_intent = AsyncMock()  # type: ignore[method-assign]
+    c.tasks = SimpleNamespace(
+        find_by_idempotency_key=AsyncMock(return_value=None),
+        queued=AsyncMock(return_value=[]),
+        running=AsyncMock(return_value=[]),
+    )
+    # The real warmup stamps the session's framework onto every dispatch.
+    monkeypatch.setattr(
+        SpecialistDispatchCollaborator,
+        "warm_specialist_params",
+        AsyncMock(side_effect=lambda params: params.setdefault("framework", "sglang")),
+    )
+    c.router.handle_intent = AsyncMock()  # type: ignore[assignment]
     return c
 
 
@@ -455,10 +408,10 @@ async def test_force_stalled_domain_dispatches_when_gap_pending(force_coord):
         }
     )
 
-    await force_coord._maybe_force_stalled_domain_specialist()
+    await force_coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
 
-    force_coord._handle_intent.assert_awaited_once()
-    src, intent = force_coord._handle_intent.call_args.args
+    force_coord.router.handle_intent.assert_awaited_once()
+    src, intent = force_coord.router.handle_intent.call_args.args
     assert src == "orchestration"
     params = intent.payload["params"]
     assert params["domain"] == "serving_specialist"
@@ -467,8 +420,6 @@ async def test_force_stalled_domain_dispatches_when_gap_pending(force_coord):
     assert "forced-stalled-framework" in intent.payload["idempotency_key"]
     # Cycle 0 → no cycle suffix.
     assert not intent.payload["idempotency_key"].endswith("-c0")
-    # Counter is zeroed up-front so it can't re-fire next tick.
-    assert state.rounds_since_last_specialist["framework"] == 0
 
 
 @pytest.mark.asyncio
@@ -487,9 +438,9 @@ async def test_force_stalled_idempotency_key_is_cycle_scoped(force_coord):
         }
     )
 
-    await force_coord._maybe_force_stalled_domain_specialist()
+    await force_coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
 
-    _, intent = force_coord._handle_intent.call_args.args
+    _, intent = force_coord.router.handle_intent.call_args.args
     assert intent.payload["idempotency_key"].endswith("-c2")
 
 
@@ -508,9 +459,9 @@ async def test_force_stalled_domain_does_not_resubmit_existing_round(force_coord
     )
     force_coord.tasks.find_by_idempotency_key.return_value = SimpleNamespace(state=task_state)
 
-    await force_coord._maybe_force_stalled_domain_specialist()
+    await force_coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
 
-    force_coord._handle_intent.assert_not_awaited()
+    force_coord.router.handle_intent.assert_not_awaited()
     force_coord.tasks.find_by_idempotency_key.assert_awaited_once_with("forced-stalled-framework-round0")
 
 
@@ -528,10 +479,10 @@ async def test_force_stalled_source_patch_without_git_root_is_pruned_once(force_
         }
     )
 
-    await force_coord._maybe_force_stalled_domain_specialist()
-    await force_coord._maybe_force_stalled_domain_specialist()
+    await force_coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
+    await force_coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
 
-    force_coord._handle_intent.assert_not_awaited()
+    force_coord.router.handle_intent.assert_not_awaited()
     assert state.pruned_families == ["source_patch"]
     failures = [
         (row["action"], row["task_id"], row["error_class"], row["error_excerpt"]) for row in state.last_action_failures
@@ -546,6 +497,22 @@ async def test_force_stalled_source_patch_without_git_root_is_pruned_once(force_
     ]
 
 
+async def test_force_stalled_skips_a_domain_with_a_specialist_in_flight(force_coord):
+    state = force_coord.shared_state
+    for _ in range(10):
+        state.bump_domain_round_counters()
+    state.upsert_gap(
+        {"canonical_id": "gap.framework.scheduler.s1", "domain_hint": "serving_specialist", "severity": "high"}
+    )
+    force_coord.tasks.running.return_value = [
+        SimpleNamespace(kind="specialist", params={"domain": "serving_specialist"})
+    ]
+
+    await force_coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
+
+    force_coord.router.handle_intent.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 async def test_force_stalled_research_specialist_ignores_source_patch_prune(force_coord):
     state = force_coord.shared_state
@@ -554,10 +521,10 @@ async def test_force_stalled_research_specialist_ignores_source_patch_prune(forc
     state.stalled_domains = lambda **_kwargs: ["pr_intelligence"]
     state.best_gap_for_anchor = lambda _anchor: "gap.framework.discovery.s1"
 
-    await force_coord._maybe_force_stalled_domain_specialist()
+    await force_coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
 
-    force_coord._handle_intent.assert_awaited_once()
-    _, intent = force_coord._handle_intent.call_args.args
+    force_coord.router.handle_intent.assert_awaited_once()
+    _, intent = force_coord.router.handle_intent.call_args.args
     assert intent.payload["params"]["domain"] == "candidate_discovery_specialist"
 
 
@@ -567,8 +534,8 @@ async def test_force_stalled_domain_noop_without_pending_gap(force_coord):
     for _ in range(10):
         state.bump_domain_round_counters()
     # No gap in the ledger -> nothing to force even though counters are high.
-    await force_coord._maybe_force_stalled_domain_specialist()
-    force_coord._handle_intent.assert_not_awaited()
+    await force_coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
+    force_coord.router.handle_intent.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -584,5 +551,5 @@ async def test_force_stalled_domain_noop_outside_explore(force_coord):
             "severity": "high",
         }
     )
-    await force_coord._maybe_force_stalled_domain_specialist()
-    force_coord._handle_intent.assert_not_awaited()
+    await force_coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
+    force_coord.router.handle_intent.assert_not_awaited()

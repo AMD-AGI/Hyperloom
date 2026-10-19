@@ -670,6 +670,34 @@ async def test_an_unprofitable_bundle_is_kept_inert_with_levers_registered(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_an_inert_keep_is_committed_so_the_next_revert_keeps_it(tmp_path, monkeypatch):
+    """Revert is a reset to HEAD; uncommitted inert code would be stashed as user changes."""
+    import subprocess
+
+    result, repo, _, _ = await _run_rewrite_integrate(tmp_path, monkeypatch, delta_pct=0.2)
+    assert result["status"] == "kept_inert"
+    status = subprocess.run(["git", "-C", str(repo), "status", "--porcelain"], capture_output=True, text=True)
+    assert status.stdout.strip() == ""
+    head_src = subprocess.run(["git", "-C", str(repo), "show", "HEAD:src.py"], capture_output=True, text=True)
+    assert head_src.stdout.endswith("return 2\n")
+
+
+@pytest.mark.asyncio
+async def test_without_a_base_an_unprofitable_bundle_reverts_instead_of_keeping_inert(tmp_path, monkeypatch):
+    """Before anything boots there is no base, so inertness cannot be shown and the code must not stay."""
+    result, repo, _, legs = await _run_rewrite_integrate(
+        tmp_path,
+        monkeypatch,
+        delta_pct=0.2,
+        extra_params={"base_tput": 0.0},
+    )
+    assert result["status"] == "reverted"
+    assert result["error_class"] == "switch_off_parity_inconclusive"
+    assert not [leg for leg in legs if leg.get("unset_envs")]
+    assert (repo / "src.py").read_text().endswith("return 1\n")
+
+
+@pytest.mark.asyncio
 async def test_an_incorrect_switched_rewrite_is_kept_inert_and_flagged(tmp_path, monkeypatch):
     """A correctness failure on a bundle names the bundle, not a switch."""
     result, repo, _, _ = await _run_rewrite_integrate(
@@ -702,22 +730,21 @@ async def test_a_patch_without_a_manifest_still_reverts_on_a_miss(tmp_path, monk
 @pytest.mark.asyncio
 async def test_inert_keep_flows_into_the_lever_ledger(tmp_path, monkeypatch):
     """The writeback registers inert levers without lifting current_best."""
-    from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
+    from hyperloom.inference_optimizer.session.optimization_journal import Verdict
+    from hyperloom.orchestrator.loop.writeback import _PromoteOutcome
+
+    from .conftest import make_coordinator
 
     result, _, _, _ = await _run_rewrite_integrate(tmp_path, monkeypatch, delta_pct=0.2)
     state = _state()
     state.baseline_tput = 100.0
-    collaborator = WritebackCollaborator.__new__(WritebackCollaborator)
-    collaborator.shared_state = state
+    state.save(tmp_path)
+    coord = make_coordinator(tmp_path)
+    state = coord.shared_state
 
-    class _Outcome:
-        changed = False
-        audit_decision = None
-        audit_extras: dict[str, Any] = {}
-
-    outcome = _Outcome()
-    await collaborator._promote_integrate_patch(result, None, outcome)
-    assert outcome.audit_decision == "kept_inert"
+    outcome = _PromoteOutcome(verdict=Verdict.RECORDED)
+    await coord.writeback._promote_integrate_patch(result, None, outcome)
+    assert outcome.verdict is Verdict.RECORDED
     assert [row["switch"] for row in state.authored_framework_levers] == ["HL_HOIST", "HL_CACHE"]
     assert all(row["default_on"] is False for row in state.authored_framework_levers)
     assert not state.current_best

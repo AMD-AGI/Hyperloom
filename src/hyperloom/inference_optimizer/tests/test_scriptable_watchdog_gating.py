@@ -49,7 +49,7 @@ def _count_scans(monkeypatch) -> dict[str, int]:
 
     def _death(path):
         calls["death"] += 1
-        return None
+        return
 
     monkeypatch.setattr(sk, "_scan_logs_increment", _scan)
     monkeypatch.setattr(sk, "_server_log_shows_death", _death)

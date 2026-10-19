@@ -15,13 +15,14 @@ from pathlib import Path
 from typing import Any, Callable
 
 from hyperloom.common.llm_config import (
+    DEFAULT_CLAUDE_MODEL,
     LLMConfigError,
     apply_reasoning_effort,
     astream_chat_completion_text,
     get_async_openai_client,
 )
 from ..roles.base import parse_call_timeout_env
-from ..loop.coordinator_helpers import format_exc_brief
+from hyperloom.common.timeutil import format_exc_brief
 from hyperloom.inference_optimizer.trace.conversation_trace import ConversationRecord, append_conversation
 from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, append_llm_call, new_call_id
 from hyperloom.inference_optimizer.trace.parse_usage import reasoning_output_tokens
@@ -30,7 +31,7 @@ log = logging.getLogger(__name__)
 
 
 DEFAULT_SCORER_MODELS: tuple[str, ...] = (
-    "claude-opus-5",
+    DEFAULT_CLAUDE_MODEL,
     "gpt-5.6-sol",
     # Gemini MUST carry the ``gemini/`` prefix (bare slug routes to a broken Vertex ADC path).
     "dvue-aoai-005-Kimi-K2.6",

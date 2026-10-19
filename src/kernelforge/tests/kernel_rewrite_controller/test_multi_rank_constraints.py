@@ -26,7 +26,7 @@ from kernelforge.kernel_rewrite_controller.contracts import TASK_STATUS_SKIPPED,
 from kernelforge.kernel_rewrite_controller.paths import ControllerLayout
 from kernelforge.kernel_rewrite_controller.paths import operator_directory_name
 from kernelforge.kernel_rewrite_controller.task import parse_task_payload
-from kernelforge.knowledge.kernel_identity import KernelRecipeIdentity, kernel_recipe_canonical_id
+from kernelforge.knowledge.kb_store.identity.kernel_recipe import KernelRecipeIdentity, kernel_recipe_canonical_id
 
 BASE_COMMIT = "a" * 40
 

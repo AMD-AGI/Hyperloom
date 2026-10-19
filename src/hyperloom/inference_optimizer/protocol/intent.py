@@ -23,7 +23,6 @@ class IntentType(str, Enum):
     SEND_MESSAGE = "send_message"
     DELEGATE = "delegate"
     PROPOSE_ACTION = "propose_action"
-    UPDATE_STATE = "update_state"
     ALERT = "alert"
     # Agent-to-agent request; the handler answers inline on the ``response`` topic.
     REQUEST = "request"
@@ -49,7 +48,6 @@ _PAYLOAD_REQUIRED: dict[IntentType, tuple[str, ...]] = {
     IntentType.SEND_MESSAGE: ("topic",),
     IntentType.DELEGATE: ("action_name",),
     IntentType.PROPOSE_ACTION: ("action_name", "predicted_gain_pct"),
-    IntentType.UPDATE_STATE: ("changes",),
     IntentType.ALERT: ("severity", "summary"),
     IntentType.REQUEST: ("target_agent", "kind"),
     # verdict/verdict_map mutual exclusion enforced by _validate_review_verdict_payload.

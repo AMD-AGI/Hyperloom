@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import gzip
+import hashlib
 import json
 import logging
 import os
@@ -45,9 +46,11 @@ from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
     make_baseline_recorder,
 )
 from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
+from hyperloom.inference_optimizer.grid_server_args import with_capture_disabled
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...loop.sub_agent_runner import RunnerContext
 from ...measurement.integrate_performance import assess_integrate_performance
+from ...measurement.runtime_findings import persist_runtime_findings, scan_server_log
 from hyperloom.inference_optimizer.trace.task_progress import heartbeat_while_output_flows, report_progress
 from ...phases import machine_state as _phase_state
 from ..stop_attribution import (
@@ -95,8 +98,8 @@ from ._agentx_timeouts import (
     agentx_warmup_grace_conc as agentx_warmup_grace_conc,
     agentx_warmup_grace_sec as agentx_warmup_grace_sec,
 )
-from ._recipe_script import RecipeLeverUnavailableError
 from ._workload_envs import (
+    VLLM_SOURCE_ROOT_ENVS,
     _client_tokenizer_mode,
     _remove_moe_runner_backend_arg,
     FrameworkScriptMismatchError,
@@ -115,6 +118,7 @@ from ._inferencex_patcher import (
     failed_patch_anchors_in,
 )
 from ._git import _git_head_sha
+from ._agentx_prefix_cache import refuse_cacheless_agentx_baseline
 from ._magpie_patcher import ensure_client_tokenizer_hook, ensure_eval_concurrency_compat
 from ._patch_snapshot import (
     _create_patch_snapshot,
@@ -122,6 +126,7 @@ from ._patch_snapshot import (
     _restore_patch_snapshot,
 )
 from .benchmark_result import (
+    double_run_requested,
     extract_benchmark_measurement,
     harvest_leaked_artifacts,
     select_run_workspace,
@@ -183,6 +188,8 @@ _MOE_SCHEME_CONTEXT_MARKERS = (
 
 # Fast-exit arg errors (vLLM/sglang exits in <30s on bad CLI args) should not consume the slow-baseline retry budget.
 FAST_EXIT_THRESHOLD_SEC = 30.0
+# The error class of a subprocess that exited nonzero for no recognised cause.
+_SUBPROCESS_NONZERO = "subprocess_nonzero"
 _ARG_ERROR_PATTERNS = (
     "unrecognized arguments",
     "invalid choice",
@@ -481,31 +488,16 @@ def _is_cuda_graph_capture_failure(*texts: str) -> bool:
     return bool(_classify_cuda_graph_capture_failure(*texts)[0])
 
 
-# Startup-time "the GPUs are already occupied" refusals.
-_GPU_PREOCCUPIED_MARKERS: tuple[str, ...] = (
-    # vLLM: "Free memory on device cuda:0 (84.11/287.98 GiB) on startup is less than desired GPU memory utilization
-    # (0.95, 273.59 GiB).
-    "on startup is less than desired gpu memory utilization",
-    "reduce gpu memory used by other processes",
-    # sglang: "Not enough memory. Please try to increase --mem-fraction-static."
-    "not enough memory. please try to increase --mem-fraction-static",
-)
-
-
-def _is_insufficient_gpu_memory(*texts: str) -> bool:
-    """True when a server refused to boot because VRAM was already occupied."""
-    blob = "\n".join(t for t in texts if t).lower()
-    return any(m in blob for m in _GPU_PREOCCUPIED_MARKERS)
-
-
-# Disable cuda-graph capture per framework: sglang uses --disable-cuda-graph, vllm uses --enforce-eager.
+# Disable cuda-graph capture per framework: sglang uses --disable-cuda-graph, vllm uses the dotted
+# --compilation-config.cudagraph_mode NONE (which keeps inductor), atom still uses --enforce-eager.
 _DISABLE_CUDA_GRAPH_FLAGS = {
     "sglang": "--disable-cuda-graph",
-    "vllm": "--enforce-eager",
+    "vllm": "--compilation-config.cudagraph_mode NONE",
+    "atom": "--enforce-eager",
 }
 
 
-async def _prepare_aiter_serving_so(extra_envs: dict[str, Any], output_dir: Path) -> None:
+async def _prepare_aiter_serving_so(extra_envs: dict[str, Any]) -> None:
     """Rebuild the serving ``.so`` before boot when the CSVs it loads name kernels it lacks.
 
     sglang starts against whatever ``get_config_file`` resolves each ``AITER_CONFIG_*`` to,
@@ -518,10 +510,12 @@ async def _prepare_aiter_serving_so(extra_envs: dict[str, Any], output_dir: Path
     unset is exactly the case where aiter merges the model overlays, which is where the
     kernel that fails the boot comes from.
 
+    Nothing restores what this drops, so it is parked on the cache's own filesystem (the
+    preflight's default) rather than copied into the run directory, which sits on shared NFS.
+
     Args:
         extra_envs: The round's environment, whose ``AITER_CONFIG_*`` values decide which
             branch of aiter's resolution each table takes.
-        output_dir: Where to back up selected serving modules and build staging for recompilation.
     """
     csv_envs = {
         str(key): str(value)
@@ -531,11 +525,7 @@ async def _prepare_aiter_serving_so(extra_envs: dict[str, Any], output_dir: Path
     from ._aiter_jit import prepare_serving_so_for_csvs
 
     try:
-        outcome = await asyncio.to_thread(
-            prepare_serving_so_for_csvs,
-            csv_envs,
-            backup_dir=output_dir / "aiter_jit_backup",
-        )
+        outcome = await asyncio.to_thread(prepare_serving_so_for_csvs, csv_envs)
     except OSError as exc:
         # A jit directory this cannot read is not a reason to lose the measurement.
         log.warning("baseline_executor: aiter serving .so preflight failed: %s", exc)
@@ -578,6 +568,9 @@ def _attach_baseline_launch_evidence(
     )
     result["launch_evidence"] = evidence
     result["launch_evidence_path"] = persist_launch_evidence(evidence, slot=output_dir)
+    declared_env = evidence["requested_server_env"].keys() - set(VLLM_SOURCE_ROOT_ENVS)
+    report = scan_server_log(actual_log, evidence["framework"], declared_env=declared_env)
+    persist_runtime_findings(report, slot=output_dir)
 
 
 def _watchdog_server_log_path(output_dir: Path, framework: str) -> str | None:
@@ -695,11 +688,8 @@ def _disable_cuda_graph_flag(framework: str) -> str:
 
 
 def _with_cuda_graph_disabled(extra_server_args: str, framework: str) -> str:
-    """Append the framework-correct disable-cuda-graph flag once (idempotent)."""
-    flag = _disable_cuda_graph_flag(framework)
-    if flag in (extra_server_args or "").split():
-        return extra_server_args or ""
-    return f"{extra_server_args} {flag}".strip()
+    """Apply the framework-correct disable-cuda-graph flag once (idempotent)."""
+    return with_capture_disabled(extra_server_args or "", _disable_cuda_graph_flag(framework))
 
 
 def _classify_subprocess_error(
@@ -726,12 +716,45 @@ def _classify_subprocess_error(
     if any(m in tail for m in _KV_CACHE_OOM_MARKERS):
         return "kv_cache_oom"
     if elapsed_sec >= FAST_EXIT_THRESHOLD_SEC:
-        return "subprocess_nonzero"
+        return _SUBPROCESS_NONZERO
     if any(p.lower() in tail for p in _ARG_ERROR_PATTERNS):
         return "fast_exit_arg_error"
     if "valueerror:" in tail and any(p in tail for p in _ARG_ERROR_CONTEXT_PATTERNS):
         return "fast_exit_arg_error"
-    return "subprocess_nonzero"
+    return _SUBPROCESS_NONZERO
+
+
+_SIGNATURE_VOLATILE_RE = re.compile(r"0x[0-9a-f]+|[0-9a-f]{8,}|\d+")
+
+
+def nonzero_output_signature(err_class: str, proc_stdout: str | None, proc_stderr: str | None) -> str:
+    """Identify a ``subprocess_nonzero`` failure by the process's whole output, ignoring numbers.
+
+    The result's ``error`` is only the last 2000 characters of one stream, and two
+    different causes (a HIP OOM, an NCCL timeout) can end in the same engine-death
+    traceback that long, or differ only in the stream ``error`` leaves out, so the
+    signature is taken from both full, redacted streams instead. Numbers (pids,
+    ports, timestamps, durations) and hex ids differ between two attempts that failed
+    for the same reason, so they are folded away.
+
+    Args:
+        err_class: The class the failure was given; only ``subprocess_nonzero`` gets a
+            signature, because other classes carry a fixed sentence that unrelated
+            failures share.
+        proc_stdout: The process's whole stdout.
+        proc_stderr: The process's whole stderr.
+
+    Returns:
+        ``"<class>|<sha256>"``, or ``""`` when there is no signature (another class, or
+        no output: two failures that said nothing are not known to be the same failure).
+    """
+    if err_class != _SUBPROCESS_NONZERO:
+        return ""
+    text = redact_secret_values(f"{proc_stderr or ''}\n{proc_stdout or ''}").strip().lower()
+    if not text:
+        return ""
+    text = " ".join(_SIGNATURE_VOLATILE_RE.sub("#", text).split())
+    return f"{err_class}|{hashlib.sha256(text.encode('utf-8')).hexdigest()}"
 
 
 # Cold-start settings and probes live in ``_aiter_jit`` and are re-exported above for callers/tests that import them
@@ -2371,7 +2394,7 @@ class BenchmarkRunExecutor:
         )
         if force_disable_eval or is_truthy(params.get("disable_run_eval")) or eval_disabled:
             base_extra_envs["RUN_EVAL"] = "false"
-        await _prepare_aiter_serving_so(base_extra_envs, output_dir)
+        await _prepare_aiter_serving_so(base_extra_envs)
         try:
             config_path = materialize_config_with_envs(
                 config_path,
@@ -2395,13 +2418,6 @@ class BenchmarkRunExecutor:
             return {
                 "status": "failed",
                 "error_class": "framework_script_mismatch",
-                "error": str(exc),
-                "output_dir": str(output_dir),
-            }
-        except RecipeLeverUnavailableError as exc:
-            return {
-                "status": "failed",
-                "error_class": "recipe_lever_unavailable",
                 "error": str(exc),
                 "output_dir": str(output_dir),
             }
@@ -2476,11 +2492,8 @@ class BenchmarkRunExecutor:
         # Cold-start "warmup artifact" guard: the freshly-booted server's first benchmark window pays one-time cold
         # costs that inflate later gains into fictitious "improvements".
         lifecycle = _lifecycle.resolve_lifecycle_params(materialized_config_path)
-        double_run_requested = self._double_run_enabled(
-            params=params,
-            ctx_extra=extra,
-        )
-        double_run = double_run_requested and lifecycle["eligible"]
+        double_run_wanted = double_run_requested(params)
+        double_run = double_run_wanted and lifecycle["eligible"]
         if defer_accuracy_until_after_measure and double_run:
             # Only the lifecycle path can reuse the hot server for a staged accuracy round.
             _set_materialized_run_eval(
@@ -2701,7 +2714,7 @@ class BenchmarkRunExecutor:
         }
 
         if not double_run:
-            if double_run_requested and not lifecycle["eligible"]:
+            if double_run_wanted and not lifecycle["eligible"]:
                 log.info(
                     "baseline_executor: cold-start double-run not eligible (%s); running single round.",
                     lifecycle["reason"],
@@ -2724,6 +2737,7 @@ class BenchmarkRunExecutor:
                 # reverting here handed prelude a clean tree and silently lost the replay.
                 if applied_patches and not isinstance(patch_application, dict):
                     _revert_legacy_warm_patch_trees(params)
+                _lifecycle.stop_agentx_servers(output_dir)
                 if bench_lease is not None:
                     bench_lease.close()
 
@@ -3070,35 +3084,6 @@ class BenchmarkRunExecutor:
             **evidence,
         }
         return headroom_sec >= cost, priced
-
-    def _double_run_enabled(
-        self,
-        *,
-        params: dict[str, Any] | None = None,
-        ctx_extra: dict[str, Any] | None = None,
-    ) -> bool:
-        """Whether baseline double-run is enabled."""
-        params = params or {}
-        if "baseline_double_run" in params:
-            return is_truthy(params.get("baseline_double_run"))
-
-        extra = ctx_extra or {}
-        state = extra.get("shared_state") or self.shared_state
-        if state is not None:
-            return bool(getattr(state, "baseline_double_run", False))
-
-        try:
-            from ...state.shared_state import SharedState
-
-            session_dir = Path(str(extra.get("session_dir") or self.session_dir))
-            state = SharedState.load_or_init(session_dir)
-            return bool(getattr(state, "baseline_double_run", False))
-        except Exception:
-            log.debug(
-                "baseline_executor: could not resolve baseline_double_run from session state",
-                exc_info=True,
-            )
-            return True
 
     def _write_lifecycle_config(
         self,
@@ -3551,7 +3536,9 @@ class BenchmarkRunExecutor:
             """
             from ...bringup import observe_bringup, write_boot_observation
 
-            read = read_bringup_log(server_log)
+            # Magpie writes the server log into the workspace it creates, not to $SERVER_LOG.
+            workspace = select_run_workspace(output_dir, known_before=workspaces_before)
+            read = read_bringup_log(workspace / "server.log" if workspace is not None else server_log)
             verdict = observe_bringup(
                 server_log=read.text,
                 server_elapsed_sec=server_child_elapsed_sec(read.text),
@@ -3813,6 +3800,7 @@ class BenchmarkRunExecutor:
                     "returncode": proc_returncode,
                     "subprocess_runtime_sec": round(subprocess_runtime_sec, 2),
                     "error": tail,
+                    "output_signature": nonzero_output_signature(err_class, proc_stdout, proc_stderr),
                     **failure_extras,
                 }
             return {
@@ -3870,6 +3858,7 @@ class BenchmarkRunExecutor:
                 "error_class": error_class,
                 "returncode": proc_returncode,
                 "error": error,
+                "output_signature": nonzero_output_signature(error_class, proc_stdout, proc_stderr),
                 "output_dir": str(output_dir),
                 "workspace": str(workspace),
                 "report_path": str(report_path) if report_path.exists() else None,
@@ -3934,7 +3923,8 @@ class BenchmarkRunExecutor:
             "boot_observation_path": boot_observation_ref,
             "boot_observation_degraded": capture_meta.get("boot_observation_degraded", ""),
         }
-        _attach_baseline_launch_evidence(
+        await asyncio.to_thread(
+            _attach_baseline_launch_evidence,
             result,
             config_path=materialized_config_path,
             output_dir=output_dir,
@@ -3981,9 +3971,10 @@ class BenchmarkRunExecutor:
                 log.warning("baseline_executor: %s", eval_probe_summary(eval_probe))
 
         log.info(
-            "baseline_executor: %s %s (output) e2el=%.1fms",
+            "baseline_executor: %s %.1f %s (output) e2el=%.1fms",
             "success_with_warning" if warnings else "success",
-            framework_registry.format_primary_metric(eval_framework, result["output_throughput"]),
+            result["output_throughput"],
+            framework_registry.throughput_unit(eval_framework),
             result["e2el_mean_ms"] or 0.0,
         )
         return result
@@ -4218,6 +4209,9 @@ class BaselineExecutor(BenchmarkRunExecutor):
         )
         try:
             result = await self._run_retrying(ctx, recorder=recorder)
+            shared_state = (getattr(ctx, "extra", None) or {}).get("shared_state")
+            if _should_establish_quality_ref(getattr(ctx.task, "kind", ""), params) and agentx_active(shared_state):
+                refuse_cacheless_agentx_baseline(result)
         except BaseException as exc:
             if recorder is not None:
                 recorder.finish_crashed(exc)

@@ -31,7 +31,6 @@ from hyperloom.inference_optimizer.breakdown.recorder.close_out import (
     record_baseline_progress,
     record_close_step,
     record_final_recipe,
-    record_geak_candidate,
     record_roofline_progress,
     record_write_back_opened,
     record_write_back_settled,
@@ -544,48 +543,6 @@ def test_a_close_that_never_snapshotted_the_tally_omits_the_key(sd: Path) -> Non
     record_close_settled(sd, stop_reason="time_exhausted")
 
     assert "baseline_progress" not in _close(sd)
-
-
-def test_a_candidate_dropped_at_the_close_says_what_was_dropped(sd: Path) -> None:
-    record_close_opened(sd)
-    record_geak_candidate(
-        sd,
-        pending={
-            "status": "rebench_cancelled",
-            "revalidation_error": "close_sequence",
-            "self_reported_gain_pct": 12.5,
-            "self_reported_tput": 16800.0,
-            "self_reported_basis": "geak_internal_bench",
-        },
-        revalidation_pending=False,
-    )
-
-    candidate = _close(sd)["geak_candidate"]
-    assert candidate["status"] == "rebench_cancelled"
-    assert candidate["revalidation_error"] == "close_sequence"
-    assert candidate["self_reported_gain_pct"] == pytest.approx(12.5)
-    assert candidate["self_reported_tput"] == pytest.approx(16800.0)
-    assert candidate["self_reported_basis"] == "geak_internal_bench"
-
-
-def test_a_candidate_still_waiting_is_not_a_candidate_that_was_judged(sd: Path) -> None:
-    record_close_opened(sd)
-    record_geak_candidate(sd, pending={"status": "awaiting_rebench"}, revalidation_pending=True)
-
-    candidate = _close(sd)["geak_candidate"]
-    assert candidate["status"] == "awaiting_rebench"
-    assert candidate["revalidation_pending"] is True
-    assert candidate["revalidation_error"] is None
-
-
-def test_a_session_with_no_candidate_records_an_empty_verdict(sd: Path) -> None:
-    record_close_opened(sd)
-    record_geak_candidate(sd)
-
-    candidate = _close(sd)["geak_candidate"]
-    assert candidate["status"] == ""
-    assert candidate["revalidation_pending"] is False
-    assert candidate["self_reported_gain_pct"] is None
 
 
 def test_a_close_that_never_drained_omits_the_candidate(sd: Path) -> None:

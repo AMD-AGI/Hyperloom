@@ -139,7 +139,6 @@ def test_grid_runner_emits_expected_error_class_labels():
     src = inspect.getsource(_grid_runner)
     expected = {
         "yaml_build_error",
-        "recipe_lever_unavailable",
         "mn_server_restart_failed",
         "magpie_timeout",
         "no_benchmark_workspace",
@@ -172,6 +171,37 @@ def test_grid_evidence_skips_prelaunch_failure(tmp_path: Path) -> None:
 
     assert result.launch_evidence == {}
     assert not (output_root / "variant_00_unsupported" / "launch_evidence.json").exists()
+    assert not (output_root / "variant_00_unsupported" / "runtime_findings.json").exists()
+
+
+def test_grid_evidence_writes_runtime_findings_next_to_launch_evidence(tmp_path: Path) -> None:
+    output_root = tmp_path / "runs"
+    slot = output_root / "variant_00_v"
+    slot.mkdir(parents=True)
+    (slot / "config.yaml").write_text(
+        yaml.safe_dump({"benchmark": {"framework": "vllm", "envs": {"VLLM_FOO": "1", "VLLM_REPO_PATH": "/opt/vllm"}}}),
+        encoding="utf-8",
+    )
+    (slot / "server.log").write_text(
+        "WARNING [interface.py:1461] Unknown vLLM environment variable detected: VLLM_FOO\n"
+        "WARNING [interface.py:1461] Unknown vLLM environment variable detected: VLLM_PYTHON\n"
+        "WARNING [interface.py:1461] Unknown vLLM environment variable detected: VLLM_REPO_PATH\n",
+        encoding="utf-8",
+    )
+    result = _grid_runner.VariantResult(name="v", extra_server_args="", extra_envs={}, status="succeeded")
+
+    _grid_runner._attach_grid_launch_evidence(
+        [result],
+        grid=[_grid_runner.GridVariant("v")],
+        output_root=output_root,
+        caller_reused_ready_server=False,
+    )
+
+    report = json.loads((slot / "runtime_findings.json").read_text(encoding="utf-8"))
+    assert report["log_path"] == str(slot / "server.log")
+    assert [(f["rule_id"], f["subject"]) for f in report["findings"] if f["status"] == "detected"] == [
+        ("vllm.unknown_env", "VLLM_FOO")
+    ]
 
 
 def test_variant_result_carries_error_class_field():
@@ -706,6 +736,47 @@ async def test_run_grid_reused_ready_server_records_warmup_log_evidence(tmp_path
     }
     persisted = json.loads(Path(result.launch_evidence_path).read_text(encoding="utf-8"))
     assert persisted == result.launch_evidence
+
+
+@pytest.mark.asyncio
+async def test_run_grid_scans_the_ready_server_log_named_by_the_caller(tmp_path):
+    """Explore's warmup grid lives beside the decision slot; the caller passes its log."""
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml_mtime(base)
+    output_root = tmp_path / "v02_kv_cache_fp8"
+    warm_log = output_root / "warmup_round" / "variant_00_kv" / "benchmark_vllm_1" / "server.log"
+    warm_log.parent.mkdir(parents=True)
+    warm_log.write_text(
+        "[aiter] shape is M:8192, N:7168, K:5120, not found tuned config in /tmp/a.csv, will use default config!\n",
+        encoding="utf-8",
+    )
+
+    def fake_run(cmd, *args, **kwargs):
+        _fake_workspace(Path(cmd[cmd.index("--output-dir") + 1]))
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        results = await run_grid(
+            base_yaml_path=base,
+            base_extra_args="",
+            grid=[GridVariant("kv")],
+            output_root=output_root,
+            server_already_ready=True,
+            ready_server_log=str(warm_log),
+            warmup_before_measure=False,
+        )
+
+    result = results[0]
+    assert result.server_log_path == str(warm_log)
+    assert result.launch_evidence["warm_reuse"]["source_server_log_path"] == str(warm_log)
+    report = json.loads((output_root / "variant_00_kv" / "runtime_findings.json").read_text(encoding="utf-8"))
+    assert report["log_path"] == str(warm_log)
+    assert [(f["rule_id"], f["status"], f["count"]) for f in report["findings"] if f["status"] != "not_detected"] == [
+        ("aiter.tuned_miss", "detected", 1)
+    ]
 
 
 @pytest.mark.asyncio
@@ -1248,7 +1319,7 @@ async def test_exported_reference_controls_reimport_requires_static_settings(tmp
             _resolve_reference_recipe(SimpleNamespace(reference_script=str(session / "current_setting.sh")))
         assert exc.value.code == 2
         return
-    args, envs, model, source, controls = _resolve_reference_recipe(
+    args, envs, model, controls = _resolve_reference_recipe(
         SimpleNamespace(reference_script=str(session / "current_setting.sh"))
     )
     assert "PYTHONPATH" not in envs
@@ -1258,7 +1329,6 @@ async def test_exported_reference_controls_reimport_requires_static_settings(tmp
         reference_server_args=args,
         reference_envs=envs,
         reference_model=model,
-        reference_source=source,
         reference_launch_controls=controls,
     )
     imported.save(session)
@@ -2486,7 +2556,7 @@ async def test_report_read_does_not_wait_when_the_process_already_failed(tmp_pat
 
 
 class TestServerArgTokenizerOnTheSyntheticPath:
-    """``strip_benchmark_harness_flags`` runs for every variant, AgentX or not."""
+    """Every variant's args go through the JSON-preserving tokenizer, AgentX or not, and normalizing them drops no flag."""
 
     def _off(self, monkeypatch):
         monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
@@ -2496,11 +2566,11 @@ class TestServerArgTokenizerOnTheSyntheticPath:
         args = "--tensor-parallel-size 8 --gpu-memory-utilization 0.9 --max-num-seqs 512"
         assert _grid_runner.compose_server_args(base_extra_args=args) == args
 
-    def test_the_denylisted_flag_is_still_dropped(self, monkeypatch):
+    def test_the_harness_flag_reaches_the_launch(self, monkeypatch):
+        """The baseline keeps the operator's flags, so a variant must launch with them too."""
         self._off(monkeypatch)
         out = _grid_runner.compose_server_args(base_extra_args="--no-enable-prefix-caching --max-num-seqs 512")
-        assert "--no-enable-prefix-caching" not in out
-        assert "--max-num-seqs 512" in out
+        assert out == "--no-enable-prefix-caching --max-num-seqs 512"
 
     def test_quoted_operands_do_not_keep_their_wrappers(self, monkeypatch):
         """Magpie expands EXTRA_*_ARGS unquoted, so a wrapper reaches argv literally."""
@@ -2530,7 +2600,8 @@ def test_the_json_tripwire_sees_damage_from_the_removal_pass(caplog):
 
     def _lossy(server_args, remove_args):
         out = real(server_args, remove_args)
-        return out.replace('{"mode":3}', "{mode:3}")
+        # A wildcard is damage normalization cannot repair, unlike a bareword key.
+        return out.replace('{"mode":3}', '{"ignore":[*.mlp.gate]}')
 
     args = '--compilation-config {"mode":3} --max-num-seqs 512'
     with patch.object(gsa, "remove_server_args", side_effect=_lossy):

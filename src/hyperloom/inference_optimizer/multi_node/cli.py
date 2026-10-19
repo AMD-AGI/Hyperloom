@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""``hyperloom.inference_optimizer.multi_node`` — single-entry sandbox CLI driving one handed-over cluster."""
+"""``hyperloom multi-node`` — single-entry sandbox CLI driving one handed-over cluster."""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ import base64
 import json
 import os
 import shlex
-import sys
 import tempfile
 import time
 from collections.abc import Callable
@@ -373,7 +372,7 @@ def install_geak_on_pods_best_effort() -> int:
         return 0
 
 
-# Subcommand: bootstrap
+# Subcommand `bootstrap`
 def cmd_bootstrap(args: argparse.Namespace) -> int:
     """Run the BYOI bootstrap script inside the RayJob via Ray Dashboard REST."""
     # Only head_pod_ip: the Ray Dashboard client addresses the head pod directly, and a cluster the platform
@@ -424,7 +423,7 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
     return 0
 
 
-# Subcommand: verify
+# Subcommand `verify`
 def cmd_verify(args: argparse.Namespace) -> int:
     """Sanity-check the toolchain bootstrap installed inside the RayJob."""
     state = _require_state("head_pod_ip")
@@ -469,7 +468,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
     return 0
 
 
-# Subcommand: restart-server
+# Subcommand `restart-server`
 _SCRIPTS_DIR = Path(__file__).parent / "scripts"
 
 
@@ -540,7 +539,7 @@ def _build_restart_entrypoint(
 
     wait_flag = "--no-wait-health" if args.no_wait_health else "--wait-health"
 
-    entrypoint = (
+    return (
         "set -euo pipefail; "
         f'WORK_DIR=/tmp/multi_node_pod_scripts; mkdir -p "$WORK_DIR"; '
         f"cat > \"$WORK_DIR/kill_server.sh\" <<'__MN_KILL_EOF__'\n"
@@ -556,7 +555,6 @@ def _build_restart_entrypoint(
         f"{shlex.quote(str(pid_file))} {shlex.quote(str(log_file))} "
         f"{wait_flag} -- {safe_extra_args}"
     )
-    return entrypoint
 
 
 # Common entrypoint preamble: sources the bootstrap env file so PATH points at /opt/venv/bin (no-op when bootstrap was
@@ -832,12 +830,15 @@ def _build_multinode_finalize_patch_entrypoint(
 def _build_multinode_apply_tracelens_patch_entrypoint(
     tracelens_root: str,
     sglang_version_pin: str,
+    patch_set: str = "",
 ) -> str:
     """Compose the head-pod entrypoint fanning out the TraceLens patch set via heredoc-embedded apply_tracelens_patch_multinode.py."""
     py = _read_pod_script("apply_tracelens_patch_multinode.py")
-    pin_arg = ""
+    extra_args = ""
     if sglang_version_pin:
-        pin_arg = f" --sglang-version-pin {shlex.quote(str(sglang_version_pin))}"
+        extra_args += f" --sglang-version-pin {shlex.quote(str(sglang_version_pin))}"
+    if patch_set:
+        extra_args += f" --patch-set {shlex.quote(str(patch_set))}"
     return (
         f"{_MN_ENTRYPOINT_PREAMBLE}"
         f'cat > "$WORK_DIR/apply_tracelens_patch_multinode.py" '
@@ -845,7 +846,7 @@ def _build_multinode_apply_tracelens_patch_entrypoint(
         f"{py}__MN_TLPATCH_PY_EOF__\n"
         f'python3 "$WORK_DIR/apply_tracelens_patch_multinode.py" '
         f"--tracelens-root {shlex.quote(str(tracelens_root))}"
-        f"{pin_arg}"
+        f"{extra_args}"
     )
 
 
@@ -1122,7 +1123,7 @@ def cmd_finalize_patch(args: argparse.Namespace) -> int:
         args.records_json,
         args.timeout_sec,
     )
-    rc, parsed, _logs = _submit_and_collect_pod_json(
+    rc, parsed, logs = _submit_and_collect_pod_json(
         state,
         entrypoint,
         label="finalize-patch",
@@ -1130,6 +1131,9 @@ def cmd_finalize_patch(args: argparse.Namespace) -> int:
         poll_timeout=_poll_timeout_from_args(args),
     )
     if parsed is None:
+        err("finalize-patch: could not parse per-pod JSON from dashboard logs")
+        if args.print_logs:
+            print(logs)
         return EXIT_TRANSIENT
     print(json.dumps(parsed, indent=2, sort_keys=True))
     return rc
@@ -1156,11 +1160,16 @@ def cmd_apply_tracelens_patch(args: argparse.Namespace) -> int:
         )
         return EXIT_CONFIG_ERROR
 
-    info(f"apply-tracelens-patch: tracelens_root={tracelens_root!r} version_pin={args.sglang_version_pin!r}")
+    patch_set = getattr(args, "patch_set", None) or ""
+    info(
+        f"apply-tracelens-patch: tracelens_root={tracelens_root!r} version_pin={args.sglang_version_pin!r} "
+        f"patch_set={patch_set or 'pod-gated'!r}"
+    )
 
     entrypoint = _build_multinode_apply_tracelens_patch_entrypoint(
         tracelens_root,
         args.sglang_version_pin or "",
+        patch_set,
     )
     rc, parsed, logs = _submit_and_collect_pod_json(
         state,
@@ -1271,244 +1280,280 @@ def _rayjob_topology_fingerprint(
     return fingerprint
 
 
-def cmd_restart_server(args: argparse.Namespace) -> int:
-    """Kill any prior vllm/sglang server and launch a new one."""
-    if _load_state().get("backend") == "infera":
-        return _infera_restart_server(args)
+def _reject_unsupported_restart_args(args: argparse.Namespace) -> int:
+    """The exit code for a restart whose arguments this backend cannot honour, else 0."""
     try:
-        validate_server_args(
-            getattr(args, "extra_args", "") or "",
-            context="restart-server --extra-args",
-        )
+        validate_server_args(getattr(args, "extra_args", "") or "", context="restart-server --extra-args")
     except ServerArgsRejected as exc:
         err(str(exc))
         return EXIT_CONFIG_ERROR
-    state = _require_state("head_pod_ip")
-    nnodes = int(state.get("nodes") or 1)
-
-    if nnodes >= 2:
-        # Multi-node: dir-based PID/log layout (one file per rank).
-        pid_dir = (
-            args.pid_file or state.get("last_server_pid_dir") or str(Path(tempfile.gettempdir()) / "multi_node_pids")
+    if (getattr(args, "pd_mode", "") or "").lower() != "disaggregated":
+        return 0
+    # launch_multinode.py has no per-role EP or server args; only the infera launcher does.
+    per_role = [
+        flag
+        for flag, value in (
+            ("--pd-prefill-ep", getattr(args, "pd_prefill_ep", 0)),
+            ("--pd-decode-ep", getattr(args, "pd_decode_ep", 0)),
+            ("--pd-prefill-extra-args", getattr(args, "pd_prefill_extra_args", "")),
+            ("--pd-decode-extra-args", getattr(args, "pd_decode_extra_args", "")),
         )
-        log_dir = args.log_file or state.get("last_server_log_dir") or _multinode_server_log_dir()
-        info(f"restart-server (multi-node): framework={args.framework} model={args.model} tp={args.tp} nnodes={nnodes}")
+        if value
+    ]
+    if per_role:
+        err(f"restart-server: {', '.join(per_role)} are supported on the infera backend only, not rayjob")
+        return EXIT_CONFIG_ERROR
+    return 0
 
-        kill_ep = _build_multinode_kill_entrypoint(pid_dir)
-        launch_ep = _build_multinode_launch_entrypoint(args, nnodes, pid_dir, log_dir)
 
-        # Resume fast path: if the prior launch had identical framework/model/tp/ep/pd_mode and is still RUNNING, skip
-        # KILL+LAUNCH and resume polling.
-        launch_sub: str = ""
-        # Set only when a resume was granted because the cluster is serving, which in PD means its router is already
-        # up and must not be rebuilt.
-        resumed_serving = False
-        resume_enabled = os.environ.get("MULTI_NODE_RESTART_RESUME_RUNNING", "1").lower() not in (
-            "0",
-            "false",
-            "no",
-            "off",
+def _resume_prior_launch(args: argparse.Namespace, state: dict, *, topology, prev_sub: str) -> tuple[str, bool]:
+    """Reuse a prior launch when the whole topology record matches and it is still good.
+
+    Returns the submission id to keep polling, and whether the resume was granted
+    because the cluster is already serving -- which in PD means its router is up
+    and must not be rebuilt. ``("", False)`` asks for a full KILL+LAUNCH.
+    """
+    resume_enabled = os.environ.get("MULTI_NODE_RESTART_RESUME_RUNNING", "1").lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+    if not resume_enabled or not prev_sub or state.get("last_restart_topology") != topology:
+        return "", False
+    prev_status = ""
+    try:
+        with _ray_dashboard_client(state) as probe:
+            prev_status = str(probe.get_job(prev_sub).get("status", "")).upper()
+    except Exception as exc:  # noqa: BLE001
+        info(f"resume probe failed: {exc!r}; falling back to KILL+LAUNCH")
+    if prev_status == "RUNNING":
+        info(
+            f"resume: reusing launch_sub={prev_sub} "
+            f"(framework={args.framework} model={args.model} "
+            f"tp={args.tp} ep={getattr(args, 'ep', 1)}) "
+            f"— skipping KILL+LAUNCH, just polling"
         )
-        prev_sub = str(state.get("last_restart_submission_id") or "").strip()
-        # The whole topology record must match. extra_args is normalized on both sides so whitespace alone does not
-        # miss the fast path, and it is part of the record because it carries every variant flag.
-        # Collected once: the same runtime_env decides both whether the prior launch can be resumed and what the
-        # launch below actually sends.
-        runtime_env = _forward_runtime_env(per_round_forward_overrides())
-        topology = _rayjob_topology_fingerprint(args, nnodes, dict((runtime_env or {}).get("env_vars") or {}))
-        prev_match = bool(prev_sub) and state.get("last_restart_topology") == topology
-        if resume_enabled and prev_match:
-            _prev_status = ""
-            try:
-                with _ray_dashboard_client(state) as _probe:
-                    _job = _probe.get_job(prev_sub)
-                    _prev_status = str(_job.get("status", "")).upper()
-            except Exception as _exc:  # noqa: BLE001
-                info(f"resume probe failed: {_exc!r}; falling back to KILL+LAUNCH")
-            if _prev_status == "RUNNING":
-                info(
-                    f"resume: reusing launch_sub={prev_sub} "
-                    f"(framework={args.framework} model={args.model} "
-                    f"tp={args.tp} ep={getattr(args, 'ep', 1)}) "
-                    f"— skipping KILL+LAUNCH, just polling"
-                )
-                launch_sub = prev_sub
-            elif _prev_status in _TERMINAL_OK_STATUSES and not getattr(args, "no_wait_health", False):
-                # The driver waits for the servers it spawned before exiting, so a terminal-OK status means this
-                # cluster served once.
-                if cluster_is_serving(
-                    state,
-                    pd_mode=(getattr(args, "pd_mode", "") or "aggregated").lower(),
-                    timeout_s=_resume_probe_timeout_s(),
-                ):
-                    resumed_serving = True
-                    launch_sub = prev_sub
-                    info(
-                        f"resume: prior launch_sub={prev_sub} SUCCEEDED and every leg serves generated "
-                        f"tokens; skipping KILL+LAUNCH"
-                    )
-                else:
-                    info(
-                        f"resume: prior launch_sub={prev_sub} SUCCEEDED but the cluster no longer serves; "
-                        f"doing a full KILL+LAUNCH"
-                    )
+        return prev_sub, False
+    if prev_status not in _TERMINAL_OK_STATUSES or getattr(args, "no_wait_health", False):
+        return "", False
+    # The driver waits for the servers it spawned before exiting, so a terminal-OK status means this
+    # cluster served once.
+    if cluster_is_serving(
+        state,
+        pd_mode=(getattr(args, "pd_mode", "") or "aggregated").lower(),
+        timeout_s=_resume_probe_timeout_s(),
+    ):
+        info(
+            f"resume: prior launch_sub={prev_sub} SUCCEEDED and every leg serves generated tokens; skipping KILL+LAUNCH"
+        )
+        return prev_sub, True
+    info(f"resume: prior launch_sub={prev_sub} SUCCEEDED but the cluster no longer serves; doing a full KILL+LAUNCH")
+    return "", False
 
-        kill_sub = ""
+
+def _start_pd_router(
+    ray,
+    args: argparse.Namespace,
+    *,
+    launch_sub: str,
+    pid_dir: str,
+    log_dir: str,
+) -> tuple[str, dict, int]:
+    """Submit the router that binds 8888 in front of the two PD legs.
+
+    Returns ``(submission_id, leg_urls, exit_code)``; a non-zero exit code is
+    fatal -- a PD cluster with no router has no public port.
+    """
+    router_state = _extract_launcher_summary(ray.get_job_logs(launch_sub))
+    prefill_url = str(router_state.get("pd_prefill_url") or "").strip()
+    decode_url = str(router_state.get("pd_decode_url") or "").strip()
+    if not prefill_url or not decode_url:
+        info("ERROR PD launcher summary missing prefill/decode URL; cannot start router. Inspect launch logs above.")
+        return "", router_state, 1
+
+    info(f"PD launcher summary: prefill={prefill_url} decode={decode_url}; submitting router entrypoint")
+    router_ep = _build_multinode_router_entrypoint(args, prefill_url, decode_url, pid_dir, log_dir)
+    router_sub = ray.submit_job(router_ep)
+    info(f"router submission_id={router_sub} (detaches launch_router.py; dashboard exits when router is alive)")
+
+    def _fetch_router():
+        """Fetch the router job status for the poll loop."""
+        job = ray.get_job(router_sub)
+        return job, f"router status={job.get('status', '?')}"
+
+    router_result = _short_poll(
+        label=f"router {router_sub}",
+        fetch=_fetch_router,
+        is_ok=lambda j: str(j.get("status", "")).upper() in _TERMINAL_OK_STATUSES,
+        is_fail=lambda j: str(j.get("status", "")).upper() in _TERMINAL_FAIL_STATUSES,
+        interval_s=args.poll_interval,
+        timeout_s=_poll_timeout_from_args(args),
+    )
+    router_status = str(router_result.get("status", "")).upper()
+    if args.print_logs or router_status in _TERMINAL_FAIL_STATUSES:
+        print(ray.get_job_logs(router_sub))
+    if router_status in _TERMINAL_FAIL_STATUSES:
+        info(f"ERROR router job ended {router_status}; PD restart failed")
+        return router_sub, router_state, 1
+    return router_sub, router_state, 0
+
+
+def _persist_multinode_restart(
+    state: dict,
+    args: argparse.Namespace,
+    *,
+    pid_dir: str,
+    log_dir: str,
+    kill_sub: str,
+    launch_sub: str,
+    topology,
+    router_sub: str,
+    router_state: dict,
+) -> None:
+    """Record what this restart launched, so a later invocation can resume or fall back to it."""
+    state["last_server_pid_dir"] = pid_dir
+    state["last_server_log_dir"] = log_dir
+    state["last_kill_submission_id"] = kill_sub
+    state["last_restart_submission_id"] = launch_sub
+    state["last_restart_framework"] = args.framework
+    state["last_restart_model"] = args.model
+    state["last_restart_tp"] = args.tp
+    state["last_restart_ep"] = int(getattr(args, "ep", 1) or 1)
+    state["last_restart_topology"] = topology
+    # Persist PD state so later invocations can fall back when a flag is omitted.
+    pd_mode = (getattr(args, "pd_mode", "") or "aggregated").lower()
+    state["last_restart_pd_mode"] = pd_mode
+    if pd_mode == "disaggregated":
+        state["last_restart_pd_prefill_nodes"] = int(getattr(args, "pd_prefill_nodes", 0) or 0)
+        state["last_restart_pd_decode_nodes"] = int(getattr(args, "pd_decode_nodes", 0) or 0)
+        state["last_restart_pd_prefill_tp"] = int(getattr(args, "pd_prefill_tp", 0) or 0)
+        state["last_restart_pd_decode_tp"] = int(getattr(args, "pd_decode_tp", 0) or 0)
+        state["last_restart_pd_transfer_backend"] = getattr(args, "pd_transfer_backend", "") or ""
+        state["last_restart_pd_ib_device"] = getattr(args, "pd_ib_device", "") or ""
+        state["last_router_submission_id"] = router_sub
+        state["pd_prefill_url"] = router_state.get("pd_prefill_url", "")
+        state["pd_decode_url"] = router_state.get("pd_decode_url", "")
+    _save_state(state)
+
+
+def _restart_multinode(args: argparse.Namespace, state: dict, nnodes: int) -> int:
+    """Restart the server group across every node, with a dir-based PID/log layout (one file per rank)."""
+    pid_dir = args.pid_file or state.get("last_server_pid_dir") or str(Path(tempfile.gettempdir()) / "multi_node_pids")
+    log_dir = args.log_file or state.get("last_server_log_dir") or _multinode_server_log_dir()
+    info(f"restart-server (multi-node): framework={args.framework} model={args.model} tp={args.tp} nnodes={nnodes}")
+
+    kill_ep = _build_multinode_kill_entrypoint(pid_dir)
+    launch_ep = _build_multinode_launch_entrypoint(args, nnodes, pid_dir, log_dir)
+
+    # Collected once: the same runtime_env decides both whether the prior launch can be resumed and what the
+    # launch below actually sends. extra_args is normalized on both sides so whitespace alone does not miss the
+    # fast path, and it is part of the record because it carries every variant flag.
+    runtime_env = _forward_runtime_env(per_round_forward_overrides())
+    topology = _rayjob_topology_fingerprint(args, nnodes, dict((runtime_env or {}).get("env_vars") or {}))
+    launch_sub, resumed_serving = _resume_prior_launch(
+        args,
+        state,
+        topology=topology,
+        prev_sub=str(state.get("last_restart_submission_id") or "").strip(),
+    )
+
+    kill_sub = ""
+    if not launch_sub:
+        kill_sub = _exec_kill_submission(state, kill_ep, label="restart kill", args=args)
+
+    with _ray_dashboard_client(state) as ray:
+        # Launch new servers (skipped when resuming a RUNNING launch).
         if not launch_sub:
-            kill_sub = _exec_kill_submission(
-                state,
-                kill_ep,
-                label="restart kill",
-                args=args,
-            )
+            launch_sub = ray.submit_job(launch_ep, runtime_env=runtime_env)
+            info(f"launch submission_id={launch_sub} (driver waits for actors, then returns; servers detached)")
 
-        with _ray_dashboard_client(state) as ray:
-            # Launch new servers (skipped when resuming a RUNNING launch).
-            if not launch_sub:
-                launch_sub = ray.submit_job(launch_ep, runtime_env=runtime_env)
-                info(f"launch submission_id={launch_sub} (driver waits for actors, then returns; servers detached)")
-
-            # Early checkpoint: persist the launch identity + config before the (potentially long) _short_poll, so a
-            # poll-timeout retry can hit the resume fast path instead of restarting the bootstrap from zero.
-            state["last_server_pid_dir"] = pid_dir
-            state["last_server_log_dir"] = log_dir
-            if kill_sub:
-                state["last_kill_submission_id"] = kill_sub
-            state["last_restart_submission_id"] = launch_sub
-            state["last_restart_framework"] = args.framework
-            state["last_restart_model"] = args.model
-            state["last_restart_tp"] = int(args.tp)
-            state["last_restart_ep"] = int(getattr(args, "ep", 1) or 1)
-            state["last_restart_pd_mode"] = (getattr(args, "pd_mode", "") or "aggregated").lower()
-            state["last_restart_extra_args"] = _normalize_extra_args(getattr(args, "extra_args", ""))
-            # A poll-timeout retry resumes from this checkpoint, so it carries the topology record as well; the
-            # per-field pd_* keys below are written only once the poll returns.
-            state["last_restart_topology"] = topology
-            _save_state(state)
-
-            def _fetch_launch():
-                """Fetch the launch job status for the poll loop."""
-                j = ray.get_job(launch_sub)
-                return j, f"launch status={j.get('status', '?')}"
-
-            result = _short_poll(
-                label=f"launch {launch_sub}",
-                fetch=_fetch_launch,
-                is_ok=lambda j: str(j.get("status", "")).upper() in _TERMINAL_OK_STATUSES,
-                is_fail=lambda j: str(j.get("status", "")).upper() in _TERMINAL_FAIL_STATUSES,
-                interval_s=args.poll_interval,
-                timeout_s=_poll_timeout_from_args(args),
-            )
-            launch_status = str(result.get("status", "")).upper()
-            if args.print_logs or launch_status in _TERMINAL_FAIL_STATUSES:
-                logs = ray.get_job_logs(launch_sub)
-                print(logs)
-
-            # Fail-fast on a terminal launch status instead of burning the health wait.
-            if launch_status in _TERMINAL_FAIL_STATUSES:
-                info(
-                    f"ERROR launch driver terminal status={launch_status}; "
-                    f"multi-node restart failed (sub_id={launch_sub}). "
-                    f"Check stderr above for MULTI_NODE_FAILURE_SNAPSHOT."
-                )
-                return 1
-
-            # PD disaggregated: read prefill/decode URLs and submit a separate router entrypoint binding 8888 (fatal
-            # if it fails).
-            pd_mode = (getattr(args, "pd_mode", "") or "aggregated").lower()
-            router_sub = ""
-            router_state: dict = {}
-            if pd_mode == "disaggregated" and resumed_serving:
-                # The serving probe just drove a completion through this cluster's public port, which in PD is the
-                # router: it is up and routing.
-                router_sub = str(state.get("last_router_submission_id") or "")
-                router_state = {
-                    "pd_prefill_url": str(state.get("pd_prefill_url") or ""),
-                    "pd_decode_url": str(state.get("pd_decode_url") or ""),
-                }
-                info("resume: keeping the router that is already serving")
-            elif pd_mode == "disaggregated":
-                launch_logs = ray.get_job_logs(launch_sub)
-                router_state = _extract_launcher_summary(launch_logs)
-                prefill_url = str(router_state.get("pd_prefill_url") or "").strip()
-                decode_url = str(router_state.get("pd_decode_url") or "").strip()
-                if not prefill_url or not decode_url:
-                    info(
-                        "ERROR PD launcher summary missing prefill/decode URL; "
-                        "cannot start router. Inspect launch logs above."
-                    )
-                    return 1
-
-                info(f"PD launcher summary: prefill={prefill_url} decode={decode_url}; submitting router entrypoint")
-                router_ep = _build_multinode_router_entrypoint(
-                    args,
-                    prefill_url,
-                    decode_url,
-                    pid_dir,
-                    log_dir,
-                )
-                router_sub = ray.submit_job(router_ep)
-                info(
-                    f"router submission_id={router_sub} "
-                    f"(detaches launch_router.py; dashboard exits when router is alive)"
-                )
-
-                def _fetch_router():
-                    """Fetch the router job status for the poll loop."""
-                    j = ray.get_job(router_sub)
-                    return j, f"router status={j.get('status', '?')}"
-
-                router_result = _short_poll(
-                    label=f"router {router_sub}",
-                    fetch=_fetch_router,
-                    is_ok=lambda j: str(j.get("status", "")).upper() in _TERMINAL_OK_STATUSES,
-                    is_fail=lambda j: str(j.get("status", "")).upper() in _TERMINAL_FAIL_STATUSES,
-                    interval_s=args.poll_interval,
-                    timeout_s=_poll_timeout_from_args(args),
-                )
-                router_status = str(router_result.get("status", "")).upper()
-                if args.print_logs or router_status in _TERMINAL_FAIL_STATUSES:
-                    print(ray.get_job_logs(router_sub))
-                if router_status in _TERMINAL_FAIL_STATUSES:
-                    info(f"ERROR router job ended {router_status}; PD restart failed")
-                    return 1
-
+        # Early checkpoint: persist the launch identity + config before the (potentially long) _short_poll, so a
+        # poll-timeout retry can hit the resume fast path instead of restarting the bootstrap from zero.
         state["last_server_pid_dir"] = pid_dir
         state["last_server_log_dir"] = log_dir
-        state["last_kill_submission_id"] = kill_sub
+        if kill_sub:
+            state["last_kill_submission_id"] = kill_sub
         state["last_restart_submission_id"] = launch_sub
         state["last_restart_framework"] = args.framework
         state["last_restart_model"] = args.model
-        state["last_restart_tp"] = args.tp
+        state["last_restart_tp"] = int(args.tp)
         state["last_restart_ep"] = int(getattr(args, "ep", 1) or 1)
+        state["last_restart_pd_mode"] = (getattr(args, "pd_mode", "") or "aggregated").lower()
+        state["last_restart_extra_args"] = _normalize_extra_args(getattr(args, "extra_args", ""))
+        # A poll-timeout retry resumes from this checkpoint, so it carries the topology record as well; the
+        # per-field pd_* keys below are written only once the poll returns.
         state["last_restart_topology"] = topology
-        # Persist PD state so later invocations can fall back when a flag is omitted.
-        pd_mode_persist = (getattr(args, "pd_mode", "") or "aggregated").lower()
-        state["last_restart_pd_mode"] = pd_mode_persist
-        if pd_mode_persist == "disaggregated":
-            state["last_restart_pd_prefill_nodes"] = int(
-                getattr(args, "pd_prefill_nodes", 0) or 0,
-            )
-            state["last_restart_pd_decode_nodes"] = int(
-                getattr(args, "pd_decode_nodes", 0) or 0,
-            )
-            state["last_restart_pd_prefill_tp"] = int(
-                getattr(args, "pd_prefill_tp", 0) or 0,
-            )
-            state["last_restart_pd_decode_tp"] = int(
-                getattr(args, "pd_decode_tp", 0) or 0,
-            )
-            state["last_restart_pd_transfer_backend"] = getattr(args, "pd_transfer_backend", "") or ""
-            state["last_restart_pd_ib_device"] = getattr(args, "pd_ib_device", "") or ""
-            state["last_router_submission_id"] = router_sub
-            state["pd_prefill_url"] = router_state.get("pd_prefill_url", "")
-            state["pd_decode_url"] = router_state.get("pd_decode_url", "")
         _save_state(state)
-        info("multi-node servers launched; benchmarks should target $service_url")
-        return 0
 
-    # Single-node path. PD is meaningless on one pod; fail loudly.
+        def _fetch_launch():
+            """Fetch the launch job status for the poll loop."""
+            job = ray.get_job(launch_sub)
+            return job, f"launch status={job.get('status', '?')}"
+
+        result = _short_poll(
+            label=f"launch {launch_sub}",
+            fetch=_fetch_launch,
+            is_ok=lambda j: str(j.get("status", "")).upper() in _TERMINAL_OK_STATUSES,
+            is_fail=lambda j: str(j.get("status", "")).upper() in _TERMINAL_FAIL_STATUSES,
+            interval_s=args.poll_interval,
+            timeout_s=_poll_timeout_from_args(args),
+        )
+        launch_status = str(result.get("status", "")).upper()
+        if args.print_logs or launch_status in _TERMINAL_FAIL_STATUSES:
+            print(ray.get_job_logs(launch_sub))
+
+        # Fail-fast on a terminal launch status instead of burning the health wait.
+        if launch_status in _TERMINAL_FAIL_STATUSES:
+            info(
+                f"ERROR launch driver terminal status={launch_status}; "
+                f"multi-node restart failed (sub_id={launch_sub}). "
+                f"Check stderr above for MULTI_NODE_FAILURE_SNAPSHOT."
+            )
+            return 1
+
+        pd_mode = (getattr(args, "pd_mode", "") or "aggregated").lower()
+        router_sub = ""
+        router_state: dict = {}
+        if pd_mode == "disaggregated" and resumed_serving:
+            # The serving probe just drove a completion through this cluster's public port, which in PD is the
+            # router: it is up and routing.
+            router_sub = str(state.get("last_router_submission_id") or "")
+            router_state = {
+                "pd_prefill_url": str(state.get("pd_prefill_url") or ""),
+                "pd_decode_url": str(state.get("pd_decode_url") or ""),
+            }
+            info("resume: keeping the router that is already serving")
+        elif pd_mode == "disaggregated":
+            router_sub, router_state, router_rc = _start_pd_router(
+                ray,
+                args,
+                launch_sub=launch_sub,
+                pid_dir=pid_dir,
+                log_dir=log_dir,
+            )
+            if router_rc:
+                return router_rc
+
+    _persist_multinode_restart(
+        state,
+        args,
+        pid_dir=pid_dir,
+        log_dir=log_dir,
+        kill_sub=kill_sub,
+        launch_sub=launch_sub,
+        topology=topology,
+        router_sub=router_sub,
+        router_state=router_state,
+    )
+    info("multi-node servers launched; benchmarks should target $service_url")
+    return 0
+
+
+def _restart_single_node(args: argparse.Namespace, state: dict) -> int:
+    """Restart the one server this pod runs."""
     if (getattr(args, "pd_mode", "") or "aggregated").lower() == "disaggregated":
+        # PD is meaningless on one pod; fail loudly.
         info(
             "ERROR --pd-mode disaggregated is not supported in single-node "
             "mode (state.json says nodes=1). PD requires >=2 nodes so "
@@ -1529,8 +1574,8 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
 
         def _fetch():
             """Fetch the restart job status for the poll loop."""
-            j = ray.get_job(sub_id)
-            return j, f"status={j.get('status', '?')}"
+            job = ray.get_job(sub_id)
+            return job, f"status={job.get('status', '?')}"
 
         result = _short_poll(
             label=f"restart {sub_id}",
@@ -1541,8 +1586,7 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
             timeout_s=_poll_timeout_from_args(args),
         )
         if args.print_logs or str(result.get("status", "")).upper() in _TERMINAL_FAIL_STATUSES:
-            logs = ray.get_job_logs(sub_id)
-            print(logs)
+            print(ray.get_job_logs(sub_id))
 
     state["last_server_pid_file"] = pid_file
     state["last_server_log_file"] = log_file
@@ -1553,6 +1597,20 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
     _save_state(state)
     info("server launch acknowledged; subsequent benchmark jobs can target $service_url")
     return 0
+
+
+def cmd_restart_server(args: argparse.Namespace) -> int:
+    """Kill any prior vllm/sglang server and launch a new one."""
+    if _load_state().get("backend") == "infera":
+        return _infera_restart_server(args)
+    rejected = _reject_unsupported_restart_args(args)
+    if rejected:
+        return rejected
+    state = _require_state("head_pod_ip")
+    nnodes = int(state.get("nodes") or 1)
+    if nnodes >= 2:
+        return _restart_multinode(args, state, nnodes)
+    return _restart_single_node(args, state)
 
 
 def _record_kill_and_invalidate_launch(state: dict, kill_sub: str) -> None:
@@ -1637,7 +1695,7 @@ def _add_common_poll_flags(p: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     """Build the top-level argparse parser with every subcommand."""
     p = argparse.ArgumentParser(
-        prog="python3 -m hyperloom.inference_optimizer.multi_node",
+        prog="hyperloom multi-node",
         description=(
             "Drive the multi-node cluster the platform provisioned and handed over "
             "via HYPERLOOM_MN_EXT_*. State persists in $MULTI_NODE_STATE_FILE."
@@ -1843,6 +1901,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp.add_argument("--records-json", required=True)
     sp.add_argument("--timeout-sec", type=int, default=60)
+    sp.add_argument("--print-logs", action="store_true", help="dump full dashboard job_logs on parse failure")
     _add_common_poll_flags(sp)
     sp.set_defaults(func=cmd_finalize_patch)
 
@@ -1867,6 +1926,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--sglang-version-pin",
         default=None,
         help=("advisory pin (e.g. '0.5.11'); logged on mismatch with the sglang installed in the pod. Optional."),
+    )
+    sp.add_argument(
+        "--patch-set",
+        choices=("roofline", "graph-capture"),
+        default=None,
+        help=(
+            "patch set every pod applies (the controller's resolved SGLang shape mode). "
+            "Optional; when omitted each pod gates on its own SGLang version."
+        ),
     )
     sp.add_argument("--print-logs", action="store_true", help="dump full dashboard job_logs on parse failure")
     _add_common_poll_flags(sp)
@@ -1954,7 +2022,3 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:  # noqa: BLE001
         err(f"{type(exc).__name__}: {exc}")
         return EXIT_TRANSIENT
-
-
-if __name__ == "__main__":
-    sys.exit(main())

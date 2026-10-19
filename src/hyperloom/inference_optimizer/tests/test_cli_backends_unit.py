@@ -373,3 +373,11 @@ def test_proposal_scorer_models_without_enable_stays_off(monkeypatch) -> None:
     assert args.proposal_scorer_models == "m1,m2"
     assert args.proposal_scoring is False
     assert clib._build_proposal_scorer(args) is None
+
+
+def test_orchestration_follows_the_openai_only_intent_after_preflight_fills_anthropic(monkeypatch):
+    """Preflight may publish ANTHROPIC_BASE_URL; the intent captured before it still puts orchestration on Codex."""
+    monkeypatch.setattr(llm_config, "preferred_agent_backend", lambda: llm_config.AGENT_BACKEND_CLAUDE)
+    assert clib.orchestration_runs_on_codex(codex_follows_claude=False, claude_follows_codex=True) is True
+    assert clib.orchestration_runs_on_codex(codex_follows_claude=False, claude_follows_codex=False) is False
+    assert clib.orchestration_runs_on_codex(codex_follows_claude=True, claude_follows_codex=True) is False

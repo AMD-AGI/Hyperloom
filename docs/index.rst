@@ -42,8 +42,10 @@ The Hyperloom source code is hosted on GitHub at `https://github.com/AMD-AGI/Hyp
     * :doc:`Upgrade guide </reference/upgrade>`
     * :doc:`Session output schema </reference/session-breakdown>`
     * :doc:`Knowledge base integration </reference/integrate-kb>`
+    * :doc:`Experience KB service </reference/experience-kb>`
     * :doc:`Operator scripts </reference/operator-scripts>`
     * :doc:`Multi-node inference optimization </reference/multi-node>`
+    * :doc:`PrimaTune predictor </reference/primatune-predictor>`
     * :doc:`Troubleshooting </reference/troubleshooting>`
 
 To contribute to the documentation, see `Contributing to Hyperloom <https://github.com/AMD-AGI/Hyperloom/blob/main/CONTRIBUTING.md>`_.

@@ -201,6 +201,7 @@ async def _integrate(
     session_dir: Path,
     shared_state: SharedState,
     validator,
+    **options,
 ):
     """Integrate through the production KEEP recorder bound to *shared_state*.
 
@@ -213,8 +214,9 @@ async def _integrate(
         patches_root=patches_root,
         session_dir=session_dir,
         shared_state=shared_state,
-        record_keep=coordinator._record_integrate_keep,
+        record_keep=coordinator.writeback.record_integrate_keep,
         validator=validator,
+        **options,
     )
 
 
@@ -265,6 +267,48 @@ async def test_multiple_patches_are_kept_and_committed_one_by_one(tmp_path: Path
     assert int(_git(repo, "rev-list", "--count", "HEAD")) == 3
     assert len(state.optimization_stack) == 2
     assert state.current_best["tput"] == 112.0
+
+
+@pytest.mark.asyncio
+async def test_a_patch_whose_round_the_phase_cannot_fit_is_left_unapplied(tmp_path: Path, monkeypatch) -> None:
+    """The Controller's reserve pays for the first round; a later one the KERNEL budget cannot fit never starts."""
+    from hyperloom.orchestrator.phases import machine_state
+    from hyperloom.orchestrator.phases.kernel_round_budget import controller_round_stop
+
+    repo, base = _repo(tmp_path)
+    patches = tmp_path / "cycle" / "result" / "patches"
+    for name, value in (("first", 2), ("second", 3)):
+        _publish(
+            patches,
+            repo,
+            base,
+            kernel_name=name,
+            kernel_path=f"{name}.py",
+            patch=_patch(repo, f"{name}.py", f"VALUE = {value}\n"),
+        )
+    seen: list[str] = []
+
+    async def _validate(publication):
+        seen.append(publication.identity["kernel_name"])
+        return {"decision": "KEEP", "new_tput": 110.0, "gain_pct": 10.0}
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    state = _state(session_dir, repo)
+    state.baseline_runtime_sec = 600.0
+    monkeypatch.setattr(machine_state, "phase_budget_remaining_seconds", lambda _state, **_kw: 60.0)
+    summary = await _integrate(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=state,
+        validator=_validate,
+        admit_round=lambda rounds_run: controller_round_stop(state, rounds_run),
+    )
+
+    assert seen == ["first"]
+    assert [result.status for result in summary.results] == ["kept", "phase_time_exhausted"]
+    assert (repo / "second.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert summary.status == "completed"
 
 
 @pytest.mark.asyncio
@@ -1193,7 +1237,8 @@ async def test_controller_entry_uses_session_writeback_for_every_mode(tmp_path, 
     session_dir.mkdir()
     coordinator = _coordinator(session_dir, repo)
     coordinator.shared_state.benchmark_mode = mode
-    monkeypatch.setattr(coordinator, "_kernel_rewrite_controller_timeouts", lambda: (60, 90))
+    phase = coordinator.phase_kernel
+    monkeypatch.setattr(phase, "_kernel_rewrite_controller_timeouts", lambda: (60, 90))
     monkeypatch.setattr(controller_submit, "run_controller_subprocess", lambda **kwargs: {"patch_count": 1})
     monkeypatch.setattr(controller_submit, "record_controller_llm_usage", lambda **kwargs: None)
     callbacks = []
@@ -1203,10 +1248,10 @@ async def test_controller_entry_uses_session_writeback_for_every_mode(tmp_path, 
         return integration.ControllerIntegrationSummary("completed", (), 0, 0, 0, "")
 
     monkeypatch.setattr(integration, "integrate_controller_patches", capture_callback)
-    await coordinator._run_kernel_rewrite_controller(tmp_path / "handoff", tmp_path / "output")
+    await phase._run_kernel_rewrite_controller(tmp_path / "handoff", tmp_path / "output")
 
     assert len(callbacks) == 1
-    assert callbacks[0].__func__ is WritebackCollaborator._record_integrate_keep
+    assert callbacks[0].__func__ is WritebackCollaborator.record_integrate_keep
     assert callbacks[0].__self__.shared_state is coordinator.shared_state
 
 
@@ -1270,7 +1315,7 @@ async def test_synthetic_controller_keep_updates_state_and_stack_ledger(tmp_path
             patches_root=patches,
             session_dir=session_dir,
             shared_state=state,
-            record_keep=coordinator._record_integrate_keep,
+            record_keep=coordinator.writeback.record_integrate_keep,
             validator=_validate,
         )
         ledger, _status = stack_event.assemble_stack_ext(

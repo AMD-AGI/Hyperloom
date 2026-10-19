@@ -13,13 +13,10 @@ import pytest
 from click.testing import CliRunner
 
 from kernelforge.fusion import command as cli
-from kernelforge.fusion.command import (
-    _discard_failed_attempt,
-    _live_file_restored,
-    _needs_discard,
-    _snapshot_fusion_source,
-)
-from kernelforge.fusion.command import main as cli_main
+from kernelforge.fusion import compile_pass_claim
+from kernelforge.fusion.compile_pass_claim import _live_file_restored
+from kernelforge.fusion.source_snapshot import _discard_failed_attempt, _needs_discard, _snapshot_fusion_source
+from kernelforge.fusion.command import run as cli_main
 from kernelforge.fusion.loop import LoopResult
 from kernelforge.fusion.models import ValidationResult
 
@@ -171,7 +168,7 @@ def test_without_a_recorded_inventory_nothing_is_deleted(tmp_path):
 
 def test_no_inventory_means_nothing_is_claimed_as_author_created(tmp_path):
     """Deleting from site-packages on a guess is not worth risking."""
-    from kernelforge.fusion.command import _author_created_modules
+    from kernelforge.fusion.source_snapshot import _author_created_modules
 
     root = tmp_path / "site-packages"
     models = root / "pkg"
@@ -275,7 +272,7 @@ def test_a_kept_run_restores_the_framework(tmp_path, monkeypatch):
 
     monkeypatch.setattr(cli, "run_fusion_loop", fake_run_fusion_loop)
     monkeypatch.setattr(cli, "_author_baseline_harness", lambda *a, **k: (True, ""))
-    monkeypatch.setattr(cli, "serving_smoke", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(compile_pass_claim, "serving_smoke", lambda *a, **k: (True, ""))
 
     out = tmp_path / "out"
     result = CliRunner().invoke(

@@ -627,9 +627,7 @@ def test_classify_root_cause_prefers_kv_cache_oom_over_generic_oom():
 @pytest.mark.parametrize("objective", [GRADED_INTVTY_P50, GRADED_INTVTY])
 def test_composite_section_names_the_interactivity_mode_for_either_percentile(objective):
     """The renderer reads the family: the graded axis is the median, the session marker still names the tail."""
-    lines: list[str] = []
-    rp._append_composite_perf_section(
-        lines,
+    lines = rp._format_composite_perf_section(
         {
             "performance_comparison": {
                 "objective": objective,
@@ -642,7 +640,7 @@ def test_composite_section_names_the_interactivity_mode_for_either_percentile(ob
                 "tput_reference": 1000.0,
                 "tput_candidate": 1200.0,
             }
-        },
+        }
     )
     body = "\n".join(lines)
     assert "- grading mode        : `intvty_v1`" in body

@@ -88,12 +88,17 @@ def gap_actionability_key(gap: dict[str, Any]) -> tuple[int, int, str]:
 
 
 class _PhaseStateMixin:
-    def record_specialist_round(self, entry: dict[str, Any]) -> None:
-        """Append one round summary to ``specialist_rounds``; idempotent on ``round_id`` (re-record overwrites)."""
+    def record_specialist_round(self, entry: dict[str, Any]) -> dict[str, Any] | None:
+        """Append one round summary to ``specialist_rounds``; idempotent on ``round_id`` (re-record overwrites).
+
+        A producer that stamps no ``completed_at`` is stamped now, since the
+        phase counts a round as its work by that time. Returns the stored row.
+        """
         if not isinstance(entry, dict) or not entry:
-            return
+            return None
         entry = dict(entry)
         entry.setdefault("cycle", int(getattr(self, "macro_cycle", 0) or 0))
+        entry.setdefault("completed_at", now_iso())
         round_id = str(entry.get("round_id") or "").strip()
         if not round_id:
             self.specialist_rounds.append(entry)
@@ -108,6 +113,7 @@ class _PhaseStateMixin:
             if not matched:
                 existing.append(entry)
         self._trim_specialist_rounds()
+        return entry
 
     def _trim_specialist_rounds(self) -> None:
         """Bound the specialist-round ledger for multi-day runs (keep most recent)."""
@@ -250,16 +256,35 @@ class _PhaseStateMixin:
         self.params_no_promote_streak = 0
 
     def reset_per_cycle_plateau_state(self) -> None:
-        """Reset transient plateau and dispatch state for a macro-cycle, plus any stale escalate hint."""
+        """Reset transient plateau and dispatch state for a macro-cycle."""
         self.params_no_promote_streak = 0
         self.framework_agent_phase_done = False
         self.framework_agent_discover_failures = 0
         self.framework_agent_empty_discoveries = 0
-        self.specialist_domain_empty_streak = {}
         self.rounds_since_last_specialist = {}
         self.rounds_since_last_keep = {}
         self.last_conc_sweep = {}
-        self.discard_pending_escalate_hint()
+        self.conc_sweep_granted_until_unix = 0.0
+
+    def open_macro_cycle(self, *, no_gain_cycle_streak: int | None = None) -> int:
+        """Finish the current macro-cycle's strategy row, start the next cycle, and reset its per-cycle state.
+
+        Returns:
+            int: The new ``macro_cycle``.
+        """
+        finished = self.macro_cycle
+        gain_delta = round(self.cumulative_gain_validated - self.gain_at_cycle_start, 6)
+        rows = [r for r in self.cycle_strategy_log if isinstance(r, dict)]
+        for row in rows:
+            if row.get("cycle") == finished and row.get("gain_delta") is None:
+                row["gain_delta"] = gain_delta
+        self.cycle_strategy_log = rows[-50:]
+        self.macro_cycle = finished + 1
+        if no_gain_cycle_streak is not None:
+            self.no_gain_cycle_streak = no_gain_cycle_streak
+        self.gain_at_cycle_start = self.cumulative_gain_validated
+        self.reset_per_cycle_plateau_state()
+        return self.macro_cycle
 
     def note_explore_outcome(self, *, promoted: bool) -> None:
         """Update the plateau proxy after one explore task (KEEP resets, no-promote increments)."""
@@ -292,11 +317,6 @@ class _PhaseStateMixin:
         if not sid:
             return ""
         return self.specialist_patch_verdicts.get(sid, "") or ""
-
-    def update_last_specialist(self, snapshot: dict[str, Any]) -> None:
-        """Snapshot the most recent specialist task (parity with last_*)."""
-        if isinstance(snapshot, dict):
-            self.last_specialist = dict(snapshot)
 
     def apply_explore_search_update(self, update: dict[str, Any]) -> None:
         """Merge an ExploreExecutor search update into persistent state; :meth:`record_explore_accepted` is the single writer for the ``accepted`` bucket."""

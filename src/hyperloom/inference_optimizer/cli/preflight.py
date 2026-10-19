@@ -20,7 +20,7 @@ import sys
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, NoReturn
 
 from hyperloom.common import provenance
 from hyperloom.common.env import is_truthy
@@ -38,8 +38,10 @@ from hyperloom.common.llm_config import (
     deepseek_compat_env,
     has_anthropic_credential,
     provider_model_defaults,
+    with_synthesized_anthropic_keys,
 )
 from hyperloom.common.fs_utils import is_network_fs
+from hyperloom.common.llm_headers import expand_env_refs
 from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.common.platform_probe import probe_cpu_platform
 from hyperloom.common.pr_monitor_urls import kb_store_url
@@ -49,6 +51,7 @@ from hyperloom.common.provenance import (
     detect_gfx_arch,
 )
 from hyperloom.common.timeutil import now_iso
+from hyperloom.common.visible_devices import hip_mask_within_rocr
 
 from .credentials import (
     _is_stale_proxy_url,
@@ -157,6 +160,34 @@ def _normalize_legacy_deepseek_env() -> dict[str, Any]:
         "skip_reason": skip_reason,
         "detail": {"keys_set": changed},
     }
+
+
+#: What a custom header may reference. Every child inherits the expanded header, so expanding any other name would
+#: hand a child the value of a secret its environment allowlist strips, such as ``${GITHUB_TOKEN}``.
+_HEADER_REF_ALLOWLIST = frozenset({"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY"})
+
+
+def _expand_custom_header_env_refs() -> None:
+    """Resolve the credential ``${VAR}`` references in the ``*_CUSTOM_HEADERS`` settings in place.
+
+    Child processes (specialists, the Critic, GEAK on Ray) forward these verbatim, and an agent CLI sends them
+    verbatim, so an unexpanded ``${ANTHROPIC_API_KEY}`` reaches the gateway as literal text and is rejected.
+    References resolve against the same view ``claude_sdk_env_options`` uses, so a key it would fill in from the
+    other Anthropic credential is not erased here. A reference outside ``_HEADER_REF_ALLOWLIST`` is left as
+    written, which is what children received before this expansion existed.
+    """
+    source = with_synthesized_anthropic_keys(os.environ)
+    for key in ("ANTHROPIC_CUSTOM_HEADERS", "OPENAI_CUSTOM_HEADERS"):
+        raw = os.environ.get(key)
+        if not raw or "${" not in raw:
+            continue
+        os.environ[key] = expand_env_refs(raw, source, only=_HEADER_REF_ALLOWLIST)
+        if "${" in os.environ[key]:
+            log.warning(
+                "%s references a variable outside %s; child processes receive that reference unexpanded",
+                key,
+                ", ".join(sorted(_HEADER_REF_ALLOWLIST)),
+            )
 
 
 def _restore_provider_only_mode(provider_mode: str, snapshot: dict[str, str | None]) -> None:
@@ -387,17 +418,9 @@ def _load_kernel_agent_env_fallback() -> dict[str, Any]:
         if user_data:
             candidate = str(Path(user_data).expanduser() / "runtime" / "kernel-agent.env.sh")
 
-    if os.environ.get("HYPERLOOM_KERNEL_AGENT_ROOT") and not candidate:
-        return {
-            "status": "already_present",
-            "skip_reason": None,
-            "detail": {"vars_loaded": 0, "env_file": None},
-        }
-
     if not candidate:
         print(
-            "Preflight: ERROR — neither $HYPERLOOM_KERNEL_AGENT_ROOT "
-            "nor $KERNEL_AGENT_ENV nor $USER_DATA_PATH is set. Cannot "
+            "Preflight: ERROR — neither $KERNEL_AGENT_ENV nor $USER_DATA_PATH is set. Cannot "
             "resolve kernel-agent.env.sh. Run "
             "src/hyperloom/inference_optimizer/assets/install.sh and export "
             "USER_DATA_PATH=/path/to/sessions first.",
@@ -412,10 +435,9 @@ def _load_kernel_agent_env_fallback() -> dict[str, Any]:
             f"(parent of <model>/<ts>/ per-session subdirs); runtime/ "
             f"is workspace-shared, not per-session. Either "
             f"(a) re-run src/hyperloom/inference_optimizer/assets/install.sh under "
-            f"USER_DATA_PATH={os.environ.get('USER_DATA_PATH', '?')}, "
-            f"(b) set $KERNEL_AGENT_ENV to point at an existing file, or "
-            f"(c) set $HYPERLOOM_KERNEL_AGENT_ROOT directly to skip this "
-            f"fallback entirely. Aborting now (was: silently warning and "
+            f"USER_DATA_PATH={os.environ.get('USER_DATA_PATH', '?')}, or "
+            f"(b) set $KERNEL_AGENT_ENV to point at an existing file. "
+            f"Aborting now (was: silently warning and "
             f"letting trace_analyze fail 10h in).",
             file=sys.stderr,
         )
@@ -440,22 +462,17 @@ def _load_kernel_agent_env_fallback() -> dict[str, Any]:
             f"Preflight: WARNING — ignoring unsupported kernel-agent env key {key} from {env_path}",
             file=sys.stderr,
         )
-    loaded = _load_missing_env_vars(file_vars)
-    corrected = _correct_kernel_agent_path_vars(file_vars, env_path)
-    if "HYPERLOOM_KERNEL_AGENT_ROOT" not in os.environ:
+    if not file_vars:
         print(
-            f"Preflight: ERROR — sourced {env_path} ({loaded} vars) but "
-            f"HYPERLOOM_KERNEL_AGENT_ROOT is still unset. The env file is "
-            f"malformed or stale. Re-run src/hyperloom/inference_optimizer/assets/"
-            f"install.sh to regenerate it.",
+            f"Preflight: ERROR — {env_path} sets no supported kernel-agent "
+            f"variables. The env file is malformed or stale. Re-run "
+            f"src/hyperloom/inference_optimizer/assets/install.sh to regenerate it.",
             file=sys.stderr,
         )
         sys.exit(2)
-    print(
-        f"Preflight: loaded {loaded} kernel-agent var(s) from "
-        f"{env_path} (env wins, HYPERLOOM_KERNEL_AGENT_ROOT="
-        f"{os.environ['HYPERLOOM_KERNEL_AGENT_ROOT']})"
-    )
+    loaded = _load_missing_env_vars(file_vars)
+    corrected = _correct_kernel_agent_path_vars(file_vars, env_path)
+    print(f"Preflight: loaded {loaded} kernel-agent var(s) from {env_path} (env wins)")
     return {
         "status": "applied" if loaded or corrected else "already_present",
         "skip_reason": None,
@@ -760,10 +777,7 @@ _SETUP_INSTALLABLE_FRAMEWORKS = frozenset({"sglang", "vllm", "atom"})
 def _setup_install_command(framework: str) -> str:
     """The documented setup invocation for ``framework``, verbatim in shape."""
     extra = " --framework-env isolated" if framework == "vllm" else ""
-    return (
-        'PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- '
-        f"--install-framework {framework}{extra} --yes"
-    )
+    return f'PYTHONPATH="$REPO_ROOT" python3 -m hyperloom setup -- --install-framework {framework}{extra} --yes'
 
 
 # Rootfs markers the runtimes drop: Docker writes the first, podman the second.
@@ -1221,19 +1235,117 @@ def _install_pinned_lm_eval(python_exe: str, pip_extra: list[str]) -> None:
         print(f"Preflight: WARNING — pinned lm_eval via {source} failed; falling back")
 
 
+def _resumed_session_state(args: argparse.Namespace | None) -> dict[str, Any] | None:
+    """The persisted ``state.json`` of the session ``--resume-from`` names, or ``None``.
+
+    Preflight runs before the resume block loads the session, so anything preflight decides from a session-pinned
+    setting has to read it here. ``None`` (no session named, or no readable state) leaves the decision to the flags;
+    the resume block reports a missing or unreadable state itself.
+    """
+    raw = str(getattr(args, "resume_from", "") or "").strip()
+    if not raw:
+        return None
+    try:
+        state = json.loads((Path(raw).expanduser() / "state.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return state if isinstance(state, dict) else None
+
+
 def _resolved_eval_disabled(args: argparse.Namespace) -> bool:
     """Effective ``--no-eval`` for this launch, flag or persisted."""
     if bool(getattr(args, "no_eval", False)):
         return True
+    state = _resumed_session_state(args)
+    return bool(state and state.get("eval_disabled"))
+
+
+def _supported_framework_names() -> tuple[str, ...]:
+    """The framework names ``--framework`` accepts (the framework registry)."""
+    from hyperloom.inference_optimizer import framework_registry
+
+    return tuple(framework_registry.names())
+
+
+def _refuse_resume_without_state(args: argparse.Namespace) -> None:
+    """Refuse, before any install step, a resume of a session whose first launch never wrote ``state.json``.
+
+    The resume block refuses such a session ("Coordinator never wrote SharedState"), but it runs after preflight, which
+    would otherwise check the default framework and fail on that instead of on the real reason. The framework the
+    session was created with is read from ``manifest.json`` only to name it in the refusal, and only if it is a
+    registered framework name (the manifest lives on shared storage too). A missing session directory or manifest is
+    left to the resume block, which reports those itself.
+    """
     raw = str(getattr(args, "resume_from", "") or "").strip()
     if not raw:
-        return False
-    resumed = Path(raw).expanduser()
+        return
+    session_dir = Path(raw).expanduser()
+    if not (session_dir / "manifest.json").is_file() or (session_dir / "state.json").exists():
+        return
     try:
-        state = json.loads((resumed / "state.json").read_text(encoding="utf-8"))
+        manifest = json.loads((session_dir / "manifest.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return False
-    return bool(state.get("eval_disabled"))
+        manifest = None
+    raw_framework = manifest.get("framework") if isinstance(manifest, dict) else None
+    framework = raw_framework.strip().lower() if isinstance(raw_framework, str) else ""
+    supported = _supported_framework_names()
+    if framework in supported:
+        hint = f"Start a fresh session with --framework {framework} instead."
+    elif raw_framework not in (None, ""):
+        hint = (
+            f"Its manifest.json records --framework {raw_framework!r}, which is not a supported framework "
+            f"({', '.join(supported)}). Start a fresh session instead."
+        )
+    else:
+        hint = "Start a fresh session instead."
+    print(
+        f"ERROR: cannot resume this session -- {session_dir}/state.json missing (manifest exists but Coordinator "
+        f"never wrote SharedState; the first launch stopped before the session had any state to resume). {hint}",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
+
+def _pin_resumed_session_args(args: argparse.Namespace | None) -> None:
+    """Apply the resumed session's pinned settings to ``args`` before any preflight check reads them.
+
+    A session's framework is fixed at creation, and the resume block re-exports the persisted one; without this, a
+    resume that does not re-pass ``--framework`` would have preflight install and probe the default framework instead
+    of the session's. An explicit ``--framework`` that differs from the persisted one is refused: the resume would
+    otherwise check one framework and run another. A kernel phase disabled at creation stays disabled, as the resume
+    block also enforces, so the TraceLens requirement is judged on the same setting the run uses.
+    """
+    if args is None:
+        return
+    state = _resumed_session_state(args)
+    if not state:
+        _refuse_resume_without_state(args)
+        return
+    raw_persisted = state.get("framework")
+    persisted = raw_persisted.strip().lower() if isinstance(raw_persisted, str) else ""
+    if raw_persisted not in (None, "") and persisted not in _supported_framework_names():
+        # state.json lives on shared storage; the framework name later becomes a manifest path that preflight
+        # pip-installs from, so only a registered framework name may be pinned.
+        print(
+            f"ERROR: cannot resume this session -- its state.json records --framework {raw_persisted!r}, which is "
+            f"not a supported framework ({', '.join(_supported_framework_names())}). The session state is invalid; "
+            "start a fresh session.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    if persisted:
+        requested = str(getattr(args, "framework", None) or "").strip().lower()
+        if requested and requested != persisted:
+            print(
+                f"ERROR: cannot resume this session -- it was created with --framework {persisted} and this resume "
+                f"passes --framework {requested}; a session's framework cannot change. Drop --framework (or pass "
+                f"--framework {persisted}) to resume it, or start a fresh session for {requested}.",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+        args.framework = persisted
+    if state.get("kernel_enabled") is False:
+        args.no_kernel = True
 
 
 def _ensure_lm_eval_dep(
@@ -1329,10 +1441,9 @@ def _ensure_lm_eval_dep(
 
 def _normalize_hip_visible_devices() -> None:
     """Re-index HIP within the device view selected by ROCR."""
-    visible = [part for part in os.environ.get("ROCR_VISIBLE_DEVICES", "").split(",") if part.strip()]
-    if not visible:
+    value = hip_mask_within_rocr(os.environ)
+    if value is None:
         return
-    value = ",".join(str(index) for index in range(len(visible)))
     previous = os.environ.get("HIP_VISIBLE_DEVICES")
     if previous == value:
         return
@@ -1510,14 +1621,13 @@ def _check_tracelens_cli() -> dict[str, Any]:
     print(
         f"ERROR: TraceLens CLI(s) not on PATH: {missing}. The pod-local "
         f"/opt/venv/bin/TraceLens_* console_scripts are installed by "
-        f"src/hyperloom/agents/kernel/scripts/install.sh (chained from "
-        f"src/hyperloom/inference_optimizer/assets/install.sh) and do NOT persist "
+        f"src/hyperloom/inference_optimizer/assets/install.sh and do NOT persist "
         f"across pod restarts. SKILL IR-2 requires running install.sh "
         f"before every launch (carve-out applies only to --resume-from in "
         f"the same shell that earlier ran install.sh). Re-run:\n"
         f"  bash $REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh\n"
         f"  . {session_dir}/runtime/kernel-agent.env.sh\n"
-        f"then retry `python -m hyperloom.inference_optimizer.cli optimize`. Refusing to start.",
+        f"then retry `python -m hyperloom optimize`. Refusing to start.",
         file=sys.stderr,
     )
     raise SystemExit(2)
@@ -1543,6 +1653,27 @@ def _check_tracelens_root_exists() -> dict[str, Any]:
     sys.exit(2)
 
 
+_KERNEL_TUNING_CLIS: dict[str, str] = {
+    "hipblaslt-bench": "offline hipBLASLt GEMM solution tuning",
+    "ckProfiler": "the Composable Kernel GEMM/attention instance sweep",
+}
+
+
+def _check_kernel_tuning_clis() -> dict[str, Any]:
+    """WARN-only presence check for the GEMM tuning CLIs the kernel phase's backends call."""
+    missing = [name for name in _KERNEL_TUNING_CLIS if shutil.which(name) is None]
+    for name in missing:
+        print(
+            f"Preflight: WARNING — {name} not on PATH; {_KERNEL_TUNING_CLIS[name]} is unavailable to the kernel "
+            "phase. To use it, build it for this ROCm and put it on PATH."
+        )
+    return {
+        "status": "warned" if missing else "applied",
+        "skip_reason": None,
+        "detail": {"missing": missing},
+    }
+
+
 def _check_node_claude_cli() -> None:
     """WARN-only presence check for bundled agent CLIs (node/claude/codex)."""
     missing = [t for t in ("node", "claude", "codex") if shutil.which(t) is None]
@@ -1550,7 +1681,7 @@ def _check_node_claude_cli() -> None:
         print(
             f"Preflight: WARNING — CLI(s) not on PATH: {missing}. "
             f"ClaudeBackend / CodexBackend may fall back to direct HTTP. "
-            f"Run src/hyperloom/agents/kernel/scripts/install.sh to bring them in."
+            f"Run src/hyperloom/inference_optimizer/assets/install.sh to bring them in."
         )
 
 
@@ -1676,7 +1807,7 @@ def _print_recipe_kb_queue_status() -> dict[str, Any]:
     }
 
 
-_INFERENCEX_REPO_DEFAULT = "https://github.com/SemiAnalysisAI/InferenceX.git"
+INFERENCEX_REPO_DEFAULT = "https://github.com/SemiAnalysisAI/InferenceX.git"
 # MUST stay in lockstep with INFERENCEX_REF in assets/install.sh.
 _INFERENCEX_REF_DEFAULT = "3d5581562f643f9bdeb8410cd924e2c70906c966"
 
@@ -1800,7 +1931,7 @@ def _ensure_client_trust_compat(magpie_path: str) -> bool:
 
 def _clone_inferencex(dest: Path) -> str | None:
     """Clone InferenceX into ``dest`` (writable), pinned to INFERENCEX_REF."""
-    repo = os.environ.get("INFERENCEX_REPO") or _INFERENCEX_REPO_DEFAULT
+    repo = os.environ.get("INFERENCEX_REPO") or INFERENCEX_REPO_DEFAULT
     ref = os.environ.get("INFERENCEX_REF") or _INFERENCEX_REF_DEFAULT
     dest_str = str(dest)
     try:
@@ -2023,13 +2154,356 @@ def _persist_install_event(args: argparse.Namespace | None, session_dir: Path) -
         exc = RuntimeError("pending install event is unavailable")
         log.warning("failed to persist SBD V6 install event: %s", exc)
         if not record_write_warning(session_dir, component="install.event", exc=exc):
-            log.debug("failed to persist SBD V6 install-event write warning", exc_info=True)
+            log.debug("failed to persist SBD V6 install-event write warning", exc_info=exc)
+
+
+def _export_llm_endpoints() -> tuple[str, str] | None:
+    """Resolve and export the Anthropic and OpenAI base URLs, or None when neither is configured.
+
+    Explicit operator values on each side are preserved; a missing side falls
+    back to the other.
+    """
+    anthropic_url, openai_url = _resolve_llm_endpoints()
+    if not anthropic_url and not openai_url:
+        print("Preflight: WARNING — no LLM base URL set; Claude/Codex SDKs will fail at first call")
+        return None
+    # A subscription token needs no endpoint: the Claude CLI knows where to go.
+    skip_anthropic_export = (
+        not os.environ.get("ANTHROPIC_BASE_URL", "").strip()
+        and not anthropic_synthesizable_key()
+        and bool(os.environ.get(CLAUDE_OAUTH_TOKEN_ENV, "").strip())
+    )
+    for var, want in (("ANTHROPIC_BASE_URL", anthropic_url), ("OPENAI_BASE_URL", openai_url)):
+        if not want:
+            continue
+        if var == "ANTHROPIC_BASE_URL" and skip_anthropic_export:
+            continue
+        prev = os.environ.get(var, "")
+        if prev != want:
+            os.environ[var] = want
+            print(f"Preflight: {var} {prev or '<unset>'} -> {want} (resolved endpoint)")
+    # Claude CLI primary key: Anthropic-side credentials only, and only the synthesizable subset so a subscription
+    # token never lands in config.json.
+    _reset_claude_config_to_upstream(anthropic_synthesizable_key(), anthropic_url)
+    if anthropic_url and not openai_url and not os.environ.get("GEAK_CLAUDE_MODEL"):
+        geak_claude_model = os.environ.get("CLAUDE_MODEL", "").strip() or DEFAULT_CLAUDE_MODEL
+        os.environ["GEAK_CLAUDE_MODEL"] = geak_claude_model
+        print(f"Preflight: GEAK_CLAUDE_MODEL <unset> -> {geak_claude_model} (GEAKv4 Claude workflow)")
+    _export_gateway_alias(openai_url)
+    _sync_geak_config_endpoint()
+    return anthropic_url, openai_url
+
+
+def _export_gateway_alias(gateway_url: str) -> None:
+    """Point ``LLM_API_BASE`` at the gateway.
+
+    It addresses an OpenAI-protocol endpoint, so it defaults to the resolved
+    OpenAI-side URL and stays unset when that side is not configured.
+    """
+    if not gateway_url:
+        return
+    for alias in ("LLM_API_BASE",):
+        current = os.environ.get(alias, "").strip()
+        if current and current != gateway_url:
+            # A genuine operator override is preserved, but a leftover install-time proxy is unreachable and
+            # force-rewritten.
+            if _is_stale_proxy_url(current):
+                os.environ[alias] = gateway_url
+                print(
+                    f"Preflight: {alias} {current} -> {gateway_url} "
+                    "(stale install-time proxy; force-rewritten to gateway)"
+                )
+                continue
+            print(f"Preflight: {alias} kept at {current} (operator override; not forced to gateway)")
+            continue
+        if os.environ.get(alias) != gateway_url:
+            prev = os.environ.get(alias, "")
+            os.environ[alias] = gateway_url
+            print(f"Preflight: {alias} {prev or '<unset>'} -> {gateway_url} (direct to gateway)")
+
+
+def _sync_geak_config_endpoint() -> None:
+    """A supplied GEAK_CONFIG yaml may carry its own endpoint; sync it so an override reaches GEAK."""
+    geak_cfg = os.environ.get("GEAK_CONFIG", "").strip()
+    geak_url = os.environ.get("GEAK_BASE_URL", "").strip()
+    if geak_cfg and geak_url and _sync_geak_config_base_url(geak_cfg, geak_url):
+        print(f"Preflight: synced GEAK config base_url -> {geak_url} ({geak_cfg})")
+
+
+def _ensure_magpie(
+    install_event: Any,
+    *,
+    magpie_python: str,
+    benchmark_backend: str,
+    magpie_active: bool,
+    pip_extra: list[str],
+) -> None:
+    """Install Magpie and resolve MAGPIE_PATH, unless another benchmark backend is active."""
+    magpie_installed = False
+    magpie_spec: str | None = None
+    try:
+        if not magpie_active:
+            print(f"Preflight: benchmark backend is {benchmark_backend!r}; skipping Magpie install/import")
+        else:
+            check = subprocess.run([magpie_python, "-c", "import Magpie"], capture_output=True)
+            if check.returncode != 0:
+                magpie_repo = os.environ.get("MAGPIE_REPO", "https://github.com/AMD-AGI/Magpie.git")
+                magpie_ref = os.environ.get("MAGPIE_REF", "e6833b8183c6c41adf6038252337550876ca0433")
+                magpie_spec = os.environ.get("MAGPIE_PACKAGE_SPEC", f"magpie-eval @ git+{magpie_repo}@{magpie_ref}")
+                print(f"Preflight: Magpie not importable; installing {magpie_spec} ...")
+                subprocess.run(
+                    [magpie_python, "-m", "pip", "install", "--quiet", *pip_extra, magpie_spec],
+                    check=True,
+                )
+                magpie_installed = True
+                print("Preflight: Magpie installed OK")
+        if magpie_active and not os.environ.get("MAGPIE_PATH", "").strip():
+            magpie_root = subprocess.run(
+                [
+                    magpie_python,
+                    "-c",
+                    "from pathlib import Path; import Magpie; print(Path(Magpie.__file__).resolve().parent.parent)",
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            if magpie_root:
+                os.environ["MAGPIE_PATH"] = magpie_root
+                print(f"Preflight: MAGPIE_PATH resolved from installed package: {magpie_root}")
+    except BaseException as exc:
+        _fail_install_step(install_event, step_id="ensure_magpie", category="install", exc=exc)
+        raise
+    _record_install_step(
+        install_event,
+        step_id="ensure_magpie",
+        category="install",
+        status=("skipped" if not magpie_active else "applied" if magpie_installed else "already_present"),
+        skip_reason=None if magpie_active else "benchmark_backend_not_magpie",
+        message=(
+            f"installed {magpie_spec}"
+            if magpie_installed
+            else f"benchmark backend is {benchmark_backend!r}"
+            if not magpie_active
+            else None
+        ),
+        target="magpie-eval",
+        interpreter=magpie_python,
+    )
+
+
+def _detect_inferencex_checkout() -> str:
+    """A writable InferenceX checkout at the pinned revision, or "" when there is none.
+
+    Detection order: the Magpie submodule (canonical post-install.sh), then the
+    installer's per-revision cache checkout (resolved via ``resolve_dep_dir`` so
+    a process that did not inherit INFERENCEX_PATH still finds it), then the
+    bare dir. A complete checkout at the wrong revision is refused rather than
+    accepted silently.
+    """
+    from ..session.paths import magpie_dir as _magpie_default, resolve_dep_dir as _resolve_dep_dir
+
+    magpie_env = os.environ.get("MAGPIE_PATH")
+    magpie_root = Path(magpie_env) if magpie_env else _magpie_default()
+    want_ref = os.environ.get("INFERENCEX_REF") or _INFERENCEX_REF_DEFAULT
+    for candidate in (
+        magpie_root / "InferenceX",
+        _resolve_dep_dir(_inferencex_dest_name(want_ref)),
+        _resolve_dep_dir("InferenceX"),
+    ):
+        if _inferencex_checkout_ok(candidate):
+            if os.access(candidate, os.W_OK):
+                return str(candidate)
+            print(
+                "Preflight: skipping non-writable auto-detected "
+                f"InferenceX checkout at {candidate}; cloning a "
+                "writable checkout instead."
+            )
+        elif (Path(candidate) / "benchmarks" / "benchmark_lib.sh").is_file():
+            print(
+                f"Preflight: ignoring InferenceX at {candidate}: it is at "
+                f"{_inferencex_head_sha(candidate)[:12] or 'an unreadable ref'}, "
+                f"not the pinned {want_ref[:12]}."
+            )
+    return ""
+
+
+def _fail_inferencex(install_event: Any, message: str) -> NoReturn:
+    """Record a fatal InferenceX problem and stop: baseline cannot run without a usable checkout."""
+    print(message, file=sys.stderr)
+    exc = SystemExit(2)
+    _fail_install_step(install_event, step_id="clone_inferencex", category="install", exc=exc)
+    raise exc
+
+
+def _ensure_inferencex(install_event: Any) -> str:
+    """The InferenceX checkout this run uses, cloning one when no writable checkout at the pin exists.
+
+    Required for the GSM8K accuracy eval; lm-eval deps auto-install at runtime
+    via ``benchmark_lib.sh``.
+    """
+    inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip() or _detect_inferencex_checkout()
+    inferencex_cloned = False
+    if not (inferencex_path and _inferencex_checkout_ok(inferencex_path)):
+        from ..session.paths import deps_cache_root as _open_source_default
+
+        ref = os.environ.get("INFERENCEX_REF") or _INFERENCEX_REF_DEFAULT
+        # Per-revision dir, matching install.sh: a shared name is what allowed a pre-bump clone to be reused forever.
+        dest = _open_source_default() / _inferencex_dest_name(ref)
+        print(f"Preflight: no InferenceX checkout at {ref[:12]}; cloning into {dest} ...")
+        inferencex_path = _clone_inferencex(dest)
+        inferencex_cloned = bool(inferencex_path)
+        if not (inferencex_path and _inferencex_checkout_ok(inferencex_path)):
+            _fail_inferencex(
+                install_event,
+                "Preflight: ERROR — InferenceX checkout missing and clone "
+                "failed. baseline cannot run without it. Set INFERENCEX_PATH "
+                "to a writable checkout or re-run "
+                "src/hyperloom/inference_optimizer/assets/install.sh.",
+            )
+    # Magpie stages benchmark scripts into this tree, so a non-writable one fails the run before server boot.
+    if not os.access(inferencex_path, os.W_OK):
+        _fail_inferencex(
+            install_event,
+            f"Preflight: ERROR — INFERENCEX_PATH={inferencex_path} is not "
+            f"writable. Magpie stages benchmark scripts into it and will "
+            f"fail with [Errno 30] Read-only file system. Point "
+            f"INFERENCEX_PATH at a writable checkout (unset it to let "
+            f"Hyperloom clone a fresh one).",
+        )
+    # Always overwrite (not setdefault): a stale/broken INFERENCEX_PATH must not survive into the child env.
+    os.environ["INFERENCEX_PATH"] = inferencex_path
+    # A round cd's into this checkout and bash reads the benchmark script off it for the whole run, so a revocable
+    # mount that flaps fails the round on an exit code the measurement had nothing to do with. Recording it here is
+    # what tells that apart from a variant that genuinely cannot serve.
+    inferencex_network_fs = is_network_fs(inferencex_path)
+    if inferencex_network_fs:
+        print(
+            f"Preflight: WARNING — INFERENCEX_PATH={inferencex_path} is on a network filesystem. A mount flap "
+            f"mid-round exits the benchmark non-zero after it has already run. A round that served its whole "
+            f"protocol is kept, but one the flap cut short is recorded as "
+            f"magpie_nonzero_after_valid_measurement. Point INFERENCEX_PATH at local disk, or unset it and put "
+            f"HYPERLOOM_CACHE_DIR on local disk.",
+            file=sys.stderr,
+        )
+    _record_install_step(
+        install_event,
+        step_id="clone_inferencex",
+        category="install",
+        status="applied" if inferencex_cloned else "already_present",
+        skip_reason=None,
+        target="InferenceX",
+        version_after=_inferencex_head_sha(inferencex_path) or None,
+        detail={
+            "ref": os.environ.get("INFERENCEX_REF") or _INFERENCEX_REF_DEFAULT,
+            "dest": inferencex_path,
+            "writable": os.access(inferencex_path, os.W_OK),
+            "network_fs": inferencex_network_fs,
+            "exit_code": 0,
+        },
+    )
+    return inferencex_path
+
+
+def _patch_magpie_compat(install_event: Any, inferencex_path: str, *, magpie_active: bool) -> None:
+    """Apply the Magpie script patches install.sh would have.
+
+    Preflight installs Magpie and clones InferenceX itself, entirely outside
+    install.sh, so those patches are applied here as well. Trust patch first,
+    mirroring install.sh: the eval-concurrency strip removes the very
+    ``run_eval ... --concurrent-requests`` line the legacy MI300X trust patcher
+    matches on, so the reverse order would leave a tree permanently unpatchable
+    by that path.
+    """
+    try:
+        if magpie_active:
+            trust_ok = _ensure_client_trust_compat(os.environ.get("MAGPIE_PATH", ""))
+            concurrency_ok = _ensure_eval_concurrency_compat(os.environ.get("MAGPIE_PATH", ""), inferencex_path)
+        else:
+            trust_ok = True
+            concurrency_ok = True
+        anchors_ok = _report_inferencex_patch_anchors(inferencex_path)
+    except BaseException as exc:
+        _fail_install_step(install_event, step_id="patch_magpie_eval_concurrency", category="patch", exc=exc)
+        raise
+    patch_ok = trust_ok and concurrency_ok and anchors_ok
+    _record_install_step(
+        install_event,
+        step_id="patch_magpie_eval_concurrency",
+        category="patch",
+        status=("skipped" if not magpie_active else "applied" if patch_ok else "warned"),
+        skip_reason=None if magpie_active else "benchmark_backend_not_magpie",
+        detail={
+            "client_trust_compatible": trust_ok,
+            "eval_concurrency_compatible": concurrency_ok,
+            "inferencex_patch_anchors_ok": anchors_ok,
+        },
+    )
+
+
+def _check_kernel_and_tracelens_clis(install_event: Any, args: argparse.Namespace | None) -> None:
+    """Check the kernel-tuning and TraceLens CLIs before the Coordinator starts.
+
+    A hard failure here catches launchers that skip install.sh, rather than
+    letting a missing CLI surface mid-run -- or, for a stale TRACELENS_ROOT,
+    ten hours later in trace_analyze. Both are skipped when the run asks for
+    neither kernel work nor roofline.
+    """
+    no_kernel = getattr(args, "no_kernel", False) if args else False
+    enable_roofline = getattr(args, "enable_roofline", True) if args else True
+    if no_kernel:
+        _record_install_step(
+            install_event,
+            step_id="check_kernel_tuning_clis",
+            category="check",
+            status="skipped",
+            skip_reason="no_kernel",
+        )
+    else:
+        _run_install_step(
+            install_event,
+            step_id="check_kernel_tuning_clis",
+            category="check",
+            action=_check_kernel_tuning_clis,
+        )
+    if _tracelens_required_at_preflight(no_kernel, enable_roofline):
+        _run_install_step(install_event, step_id="check_tracelens_cli", category="check", action=_check_tracelens_cli)
+        _run_install_step(
+            install_event,
+            step_id="check_tracelens_root",
+            category="check",
+            action=_check_tracelens_root_exists,
+        )
+        return
+    missing = [name for name in _TRACELENS_REQUIRED_CLIS if shutil.which(name) is None]
+    if missing:
+        print(
+            f"Preflight: WARNING — TraceLens CLI(s) not on PATH: {missing} (skipped; --no-kernel + roofline disabled)"
+        )
+    _record_install_step(
+        install_event,
+        step_id="check_tracelens_cli",
+        category="check",
+        status="skipped",
+        skip_reason="no_kernel_and_roofline_disabled",
+        target="TraceLens",
+        message=f"missing CLIs: {missing}" if missing else None,
+    )
+    _record_install_step(
+        install_event,
+        step_id="check_tracelens_root",
+        category="check",
+        status="skipped",
+        skip_reason="tracelens_not_required",
+        target="TRACELENS_ROOT",
+    )
 
 
 def _preflight(
     args: argparse.Namespace | None = None,
 ) -> tuple[str, str] | None:
     """Auto-install missing runtime deps and export auth aliases."""
+    _pin_resumed_session_args(args)
     install_event = _begin_install_event(args)
     _run_install_step(
         install_event,
@@ -2057,6 +2531,8 @@ def _preflight(
         category="normalize",
         action=_normalize_legacy_deepseek_env,
     )
+    # After the legacy normalization, which can create the credentials a header references.
+    _expand_custom_header_env_refs()
 
     # Fail fast on missing credentials after the fallback loaders.
     _run_install_step(
@@ -2123,68 +2599,7 @@ def _preflight(
 
     # --- Resolve Anthropic + OpenAI base URLs (split entrypoints) --- Explicit operator values on each side are
     # preserved; a missing side falls back to the other.
-    resolved_urls: tuple[str, str] | None = None
-    anthropic_url, openai_url = _resolve_llm_endpoints()
-    # A subscription token needs no endpoint: the Claude CLI knows where to go.
-    skip_anthropic_export = (
-        not os.environ.get("ANTHROPIC_BASE_URL", "").strip()
-        and not anthropic_synthesizable_key()
-        and bool(os.environ.get(CLAUDE_OAUTH_TOKEN_ENV, "").strip())
-    )
-    if anthropic_url or openai_url:
-        for var, want in (
-            ("ANTHROPIC_BASE_URL", anthropic_url),
-            ("OPENAI_BASE_URL", openai_url),
-        ):
-            if not want:
-                continue
-            if var == "ANTHROPIC_BASE_URL" and skip_anthropic_export:
-                continue
-            prev = os.environ.get(var, "")
-            if prev != want:
-                os.environ[var] = want
-                print(f"Preflight: {var} {prev or '<unset>'} -> {want} (resolved endpoint)")
-        # Claude CLI primary key: Anthropic-side credentials only, and only the synthesizable subset so a subscription
-        # token never lands in config.json.
-        claude_primary_key = anthropic_synthesizable_key()
-        _reset_claude_config_to_upstream(claude_primary_key, anthropic_url)
-        if anthropic_url and not openai_url and not os.environ.get("GEAK_CLAUDE_MODEL"):
-            geak_claude_model = os.environ.get("CLAUDE_MODEL", "").strip() or DEFAULT_CLAUDE_MODEL
-            os.environ["GEAK_CLAUDE_MODEL"] = geak_claude_model
-            print(f"Preflight: GEAK_CLAUDE_MODEL <unset> -> {geak_claude_model} (GEAKv4 Claude workflow)")
-        resolved_urls = (anthropic_url, openai_url)
-
-        # LLM_API_BASE addresses an OpenAI-protocol endpoint, so it defaults to the resolved OpenAI-side URL and stays
-        # unset when that side is not configured.
-        gateway_url = openai_url
-        if gateway_url:
-            for alias in ("LLM_API_BASE",):
-                current = os.environ.get(alias, "").strip()
-                if current and current != gateway_url:
-                    # A genuine operator override is preserved, but a leftover install-time proxy is unreachable and
-                    # force-rewritten.
-                    if _is_stale_proxy_url(current):
-                        os.environ[alias] = gateway_url
-                        print(
-                            f"Preflight: {alias} {current} -> {gateway_url} "
-                            "(stale install-time proxy; force-rewritten to gateway)"
-                        )
-                        continue
-                    print(f"Preflight: {alias} kept at {current} (operator override; not forced to gateway)")
-                    continue
-                if os.environ.get(alias) != gateway_url:
-                    prev = os.environ.get(alias, "")
-                    os.environ[alias] = gateway_url
-                    print(f"Preflight: {alias} {prev or '<unset>'} -> {gateway_url} (direct to gateway)")
-
-        # A supplied GEAK_CONFIG yaml may carry its own endpoint; sync it so an operator GEAK_BASE_URL override
-        # reaches GEAK.
-        geak_cfg = os.environ.get("GEAK_CONFIG", "").strip()
-        geak_url = os.environ.get("GEAK_BASE_URL", "").strip()
-        if geak_cfg and geak_url and _sync_geak_config_base_url(geak_cfg, geak_url):
-            print(f"Preflight: synced GEAK config base_url -> {geak_url} ({geak_cfg})")
-    else:
-        print("Preflight: WARNING — no LLM base URL set; Claude/Codex SDKs will fail at first call")
+    resolved_urls = _export_llm_endpoints()
 
     # --- ROCm env hygiene + GPU/shm sanity (defensive WARN-only) ---
     _normalize_hip_visible_devices()
@@ -2253,266 +2668,22 @@ def _preflight(
 
     # 2.
     magpie_python = benchmark_python
-    magpie_installed = False
-    magpie_spec: str | None = None
-    try:
-        if not _magpie_backend_active:
-            print(f"Preflight: benchmark backend is {benchmark_backend!r}; skipping Magpie install/import")
-            check = None
-        else:
-            check = subprocess.run([magpie_python, "-c", "import Magpie"], capture_output=True)
-        if _magpie_backend_active and check is not None and check.returncode != 0:
-            magpie_repo = os.environ.get("MAGPIE_REPO", "https://github.com/AMD-AGI/Magpie.git")
-            magpie_ref = os.environ.get("MAGPIE_REF", "e6833b8183c6c41adf6038252337550876ca0433")
-            magpie_spec = os.environ.get(
-                "MAGPIE_PACKAGE_SPEC",
-                f"magpie-eval @ git+{magpie_repo}@{magpie_ref}",
-            )
-            print(f"Preflight: Magpie not importable; installing {magpie_spec} ...")
-            subprocess.run(
-                [magpie_python, "-m", "pip", "install", "--quiet", *pip_extra, magpie_spec],
-                check=True,
-            )
-            magpie_installed = True
-            print("Preflight: Magpie installed OK")
-        if _magpie_backend_active and not os.environ.get("MAGPIE_PATH", "").strip():
-            magpie_root = subprocess.run(
-                [
-                    magpie_python,
-                    "-c",
-                    "from pathlib import Path; import Magpie; print(Path(Magpie.__file__).resolve().parent.parent)",
-                ],
-                capture_output=True,
-                text=True,
-                check=True,
-            ).stdout.strip()
-            if magpie_root:
-                os.environ["MAGPIE_PATH"] = magpie_root
-                print(f"Preflight: MAGPIE_PATH resolved from installed package: {magpie_root}")
-    except BaseException as exc:
-        _fail_install_step(
-            install_event,
-            step_id="ensure_magpie",
-            category="install",
-            exc=exc,
-        )
-        raise
-    _record_install_step(
+    _ensure_magpie(
         install_event,
-        step_id="ensure_magpie",
-        category="install",
-        status=("skipped" if not _magpie_backend_active else "applied" if magpie_installed else "already_present"),
-        skip_reason=None if _magpie_backend_active else "benchmark_backend_not_magpie",
-        message=(
-            f"installed {magpie_spec}"
-            if magpie_installed
-            else f"benchmark backend is {benchmark_backend!r}"
-            if not _magpie_backend_active
-            else None
-        ),
-        target="magpie-eval",
-        interpreter=magpie_python,
+        magpie_python=magpie_python,
+        benchmark_backend=benchmark_backend,
+        magpie_active=_magpie_backend_active,
+        pip_extra=pip_extra,
     )
 
-    # 3. InferenceX — required for GSM8K accuracy eval; lm-eval deps auto-install at runtime via benchmark_lib.sh.
-    inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
-    inferencex_cloned = False
-    if not inferencex_path:
-        from ..session.paths import (
-            magpie_dir as _magpie_default,
-            resolve_dep_dir as _resolve_dep_dir,
-        )
+    inferencex_path = _ensure_inferencex(install_event)
 
-        _magpie_env = os.environ.get("MAGPIE_PATH")
-        magpie_root = Path(_magpie_env) if _magpie_env else _magpie_default()
-        # InferenceX detection order: Magpie submodule (canonical post-install.sh) → installer's per-revision cache
-        # checkout (InferenceX@<sha>, resolved via resolve_dep_dir so a process that did not inherit INFERENCEX_PATH
-        # still finds it; falls back to the bare dir).
-        _want_ref = os.environ.get("INFERENCEX_REF") or _INFERENCEX_REF_DEFAULT
-        for candidate in (
-            magpie_root / "InferenceX",
-            _resolve_dep_dir(_inferencex_dest_name(_want_ref)),
-            _resolve_dep_dir("InferenceX"),
-        ):
-            if _inferencex_checkout_ok(candidate):
-                if os.access(candidate, os.W_OK):
-                    inferencex_path = str(candidate)
-                    break
-                print(
-                    "Preflight: skipping non-writable auto-detected "
-                    f"InferenceX checkout at {candidate}; cloning a "
-                    "writable checkout instead."
-                )
-            elif (Path(candidate) / "benchmarks" / "benchmark_lib.sh").is_file():
-                # Complete but at the wrong revision: refused, never accepted silently.
-                print(
-                    f"Preflight: ignoring InferenceX at {candidate}: it is at "
-                    f"{_inferencex_head_sha(candidate)[:12] or 'an unreadable ref'}, "
-                    f"not the pinned {_want_ref[:12]}."
-                )
-    # When no writable checkout at the pin was found, clone one ourselves. baseline cannot run without InferenceX, so
-    # a clone failure is a hard error.
-    if not (inferencex_path and _inferencex_checkout_ok(inferencex_path)):
-        from ..session.paths import deps_cache_root as _open_source_default
-
-        _ref = os.environ.get("INFERENCEX_REF") or _INFERENCEX_REF_DEFAULT
-        # Per-revision dir, matching install.sh: a shared name is what allowed a pre-bump clone to be reused forever.
-        dest = _open_source_default() / _inferencex_dest_name(_ref)
-        print(f"Preflight: no InferenceX checkout at {_ref[:12]}; cloning into {dest} ...")
-        inferencex_path = _clone_inferencex(dest)
-        inferencex_cloned = bool(inferencex_path)
-        if not (inferencex_path and _inferencex_checkout_ok(inferencex_path)):
-            print(
-                "Preflight: ERROR — InferenceX checkout missing and clone "
-                "failed. baseline cannot run without it. Set INFERENCEX_PATH "
-                "to a writable checkout or re-run "
-                "src/hyperloom/inference_optimizer/assets/install.sh.",
-                file=sys.stderr,
-            )
-            exc = SystemExit(2)
-            _fail_install_step(
-                install_event,
-                step_id="clone_inferencex",
-                category="install",
-                exc=exc,
-            )
-            raise exc
-    # Guard against a read-only INFERENCEX_PATH: Magpie stages benchmark scripts there, so a non-writable tree fails
-    # the run before server boot.
-    if not os.access(inferencex_path, os.W_OK):
-        print(
-            f"Preflight: ERROR — INFERENCEX_PATH={inferencex_path} is not "
-            f"writable. Magpie stages benchmark scripts into it and will "
-            f"fail with [Errno 30] Read-only file system. Point "
-            f"INFERENCEX_PATH at a writable checkout (unset it to let "
-            f"Hyperloom clone a fresh one).",
-            file=sys.stderr,
-        )
-        exc = SystemExit(2)
-        _fail_install_step(
-            install_event,
-            step_id="clone_inferencex",
-            category="install",
-            exc=exc,
-        )
-        raise exc
-    # Always overwrite (not setdefault): a stale/broken INFERENCEX_PATH must not survive into the child env.
-    os.environ["INFERENCEX_PATH"] = inferencex_path
-    # A round cd's into this checkout and bash reads the benchmark script off it for the whole run, so a revocable
-    # mount that flaps fails the round on an exit code the measurement had nothing to do with. Recording it here is
-    # what tells that apart from a variant that genuinely cannot serve.
-    inferencex_network_fs = is_network_fs(inferencex_path)
-    if inferencex_network_fs:
-        print(
-            f"Preflight: WARNING — INFERENCEX_PATH={inferencex_path} is on a network filesystem. A mount flap "
-            f"mid-round exits the benchmark non-zero after it has already run. A round that served its whole "
-            f"protocol is kept, but one the flap cut short is recorded as "
-            f"magpie_nonzero_after_valid_measurement. Point INFERENCEX_PATH at local disk, or unset it and put "
-            f"HYPERLOOM_CACHE_DIR on local disk.",
-            file=sys.stderr,
-        )
-    _record_install_step(
-        install_event,
-        step_id="clone_inferencex",
-        category="install",
-        status="applied" if inferencex_cloned else "already_present",
-        skip_reason=None,
-        target="InferenceX",
-        version_after=_inferencex_head_sha(inferencex_path) or None,
-        detail={
-            "ref": os.environ.get("INFERENCEX_REF") or _INFERENCEX_REF_DEFAULT,
-            "dest": inferencex_path,
-            "writable": os.access(inferencex_path, os.W_OK),
-            "network_fs": inferencex_network_fs,
-            "exit_code": 0,
-        },
-    )
-
-    # --- Magpie/InferenceX eval-concurrency compatibility ------------------- Preflight installs Magpie and clones
-    # InferenceX itself (above), entirely outside install.sh, so the Magpie script patches install.sh applies are
-    # applied here as well.
-    try:
-        if _magpie_backend_active:
-            # Trust patch first, mirroring install.sh: the eval-concurrency strip removes the very `run_eval ...
-            # --concurrent-requests` line the legacy MI300X trust patcher matches on, so the reverse order would leave
-            # a tree permanently unpatchable by that path.
-            trust_ok = _ensure_client_trust_compat(os.environ.get("MAGPIE_PATH", ""))
-            concurrency_ok = _ensure_eval_concurrency_compat(
-                os.environ.get("MAGPIE_PATH", ""),
-                inferencex_path,
-            )
-        else:
-            trust_ok = True
-            concurrency_ok = True
-        anchors_ok = _report_inferencex_patch_anchors(inferencex_path)
-    except BaseException as exc:
-        _fail_install_step(
-            install_event,
-            step_id="patch_magpie_eval_concurrency",
-            category="patch",
-            exc=exc,
-        )
-        raise
-    patch_ok = trust_ok and concurrency_ok and anchors_ok
-    _record_install_step(
-        install_event,
-        step_id="patch_magpie_eval_concurrency",
-        category="patch",
-        status=("skipped" if not _magpie_backend_active else "applied" if patch_ok else "warned"),
-        skip_reason=None if _magpie_backend_active else "benchmark_backend_not_magpie",
-        detail={
-            "client_trust_compatible": trust_ok,
-            "eval_concurrency_compatible": concurrency_ok,
-            "inferencex_patch_anchors_ok": anchors_ok,
-        },
-    )
+    _patch_magpie_compat(install_event, inferencex_path, magpie_active=_magpie_backend_active)
 
     # --- node / claude / codex CLI presence (WARN-only) ---
     _check_node_claude_cli()
 
-    # --- TraceLens CLI presence (HARD-FAIL unless --no-kernel AND roofline off) --- Catches launchers that skip
-    # install.sh before a missing CLI surfaces mid-run.
-    no_kernel = getattr(args, "no_kernel", False) if args else False
-    enable_roofline = getattr(args, "enable_roofline", True) if args else True
-    if _tracelens_required_at_preflight(no_kernel, enable_roofline):
-        _run_install_step(
-            install_event,
-            step_id="check_tracelens_cli",
-            category="check",
-            action=_check_tracelens_cli,
-        )
-        # Fail fast on a stale/placeholder TRACELENS_ROOT before the Coordinator starts, rather than ~10h later in
-        # trace_analyze.
-        _run_install_step(
-            install_event,
-            step_id="check_tracelens_root",
-            category="check",
-            action=_check_tracelens_root_exists,
-        )
-    else:
-        _missing_tl = [n for n in _TRACELENS_REQUIRED_CLIS if shutil.which(n) is None]
-        if _missing_tl:
-            print(
-                f"Preflight: WARNING — TraceLens CLI(s) not on PATH: {_missing_tl} "
-                f"(skipped; --no-kernel + roofline disabled)"
-            )
-        _record_install_step(
-            install_event,
-            step_id="check_tracelens_cli",
-            category="check",
-            status="skipped",
-            skip_reason="no_kernel_and_roofline_disabled",
-            target="TraceLens",
-            message=f"missing CLIs: {_missing_tl}" if _missing_tl else None,
-        )
-        _record_install_step(
-            install_event,
-            step_id="check_tracelens_root",
-            category="check",
-            status="skipped",
-            skip_reason="tracelens_not_required",
-            target="TRACELENS_ROOT",
-        )
+    _check_kernel_and_tracelens_clis(install_event, args)
 
     # --- IR-3: PR Monitor reachability probe (soft degrade) ---
     if args is not None:

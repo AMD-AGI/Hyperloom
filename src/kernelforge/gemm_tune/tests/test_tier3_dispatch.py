@@ -110,7 +110,7 @@ class _FakeCuda:
         class _Ctx:
             def __enter__(self_inner):
                 outer.captured += 1
-                return None
+                return
 
             def __exit__(self_inner, *_a):
                 return False

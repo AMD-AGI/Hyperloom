@@ -16,10 +16,10 @@ from typing import Any, Mapping
 
 import yaml
 
-from hyperloom.agents.kernel.tools._capture_shapes import (
+from hyperloom.orchestrator.trace_analysis._capture_shapes import (
     is_capture_fragment as _shared_is_capture_fragment,
 )
-from hyperloom.agents.kernel.tools._trace_rank import (
+from hyperloom.orchestrator.trace_analysis._trace_rank import (
     select_primary_trace,
     trace_rank as _trace_rank,
 )
@@ -27,6 +27,7 @@ from hyperloom.common.io import atomic_write_json, safe_mtime
 from hyperloom.common.profile_args import sanitize_profile_server_args as _sanitize_profile_server_args
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.paths import asset_root, mn_profile_trace_root
+from hyperloom.inference_optimizer import framework_registry
 from ._inferencex_patcher import (
     benchmark_serving_path_in,
     ensure_benchmark_lib_patched,
@@ -251,23 +252,6 @@ def _probe_check_rows(certificate: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
-def _steady_state_forecast(certificate: dict[str, Any]) -> dict[str, Any]:
-    """Project the modes the splitter would survive, off the resolved rank."""
-    ranks = [row for row in (certificate.get("rank_level") or []) if isinstance(row, dict)]
-    if not ranks:
-        return {}
-    forecast = ranks[0].get("split_forecast") or {}
-    return {
-        "viable_modes": forecast.get("viable_modes"),
-        "viable_consumer_modes": forecast.get("viable_consumer_modes"),
-        "candidate_window_count": forecast.get("candidate_window_count"),
-        "candidate_windows_with_prefill": forecast.get("candidate_windows_with_prefill"),
-        "step_count": forecast.get("step_count"),
-        "prefill_step_count": forecast.get("prefill_step_count"),
-        "num_steps_effective": forecast.get("num_steps_effective"),
-    }
-
-
 def _build_trace_validate(
     health: dict[str, Any],
     *,
@@ -300,7 +284,6 @@ def _build_trace_validate(
         "trace_dir": str(trace_dir),
         "framework": str(framework or ""),
         "verdict": certificate.get("verdict") or {},
-        "steady_state_forecast": _steady_state_forecast(certificate),
         "trace_dir_level": certificate.get("trace_dir_level") or {},
         "rank_level": certificate.get("rank_level") or [],
         "chunk_level": [],
@@ -329,26 +312,11 @@ def _write_trace_certificate(trace_dir: Path, validate: dict[str, Any]) -> str:
 
 def _certify_trace_dir(trace_dir: Path, framework: str) -> dict[str, Any]:
     """Run the capture-time self-certification probe over a profile trace."""
-    import sys
+    from hyperloom.orchestrator.trace_analysis import trace_selfcert
 
-    from hyperloom.agents.kernel.tools import _capture_shapes
-
-    tools_dir = str(Path(_capture_shapes.__file__).resolve().parent)
-    if tools_dir not in sys.path:
-        sys.path.insert(0, tools_dir)
-
-    from hyperloom.agents.kernel.tools import trace_selfcert
-
-    # The workload parameters shape the split forecast, and reading them from the benchmark config keeps the
-    # certificate independent of any analysis having run -- the point of certifying at capture time.
-    params = trace_selfcert.read_workload_params(trace_dir)
     return trace_selfcert.certify_trace_dir(
         trace_dir,
-        framework=framework or str(params.get("framework") or ""),
-        num_steps=params.get("num_steps", trace_selfcert.DEFAULT_NUM_STEPS),
-        conc=params.get("conc"),
-        osl=params.get("osl"),
-        r=params.get("r", trace_selfcert.DEFAULT_R),
+        framework=framework or trace_selfcert.read_framework(trace_dir),
     )
 
 
@@ -700,8 +668,6 @@ def _validate_trace_structure(
     }
 
 
-# sglang profile yaml, used by tests/fixtures; runtime selection goes through `_default_profile_config()`.
-PROFILE_DEFAULT_CONFIG = asset_root() / "assets" / "configs" / "profile_sglang.yaml"
 PROFILE_DEFAULT_TIMEOUT_SEC = 14400  # 4 h wall cap
 
 
@@ -784,21 +750,9 @@ def _candidate_trace_dirs(workspace: Path) -> list[Path]:
 
 
 def _default_profile_config() -> Path:
-    """Resolve default profile YAML from $FRAMEWORK (atom / vllm / sglang; unknown falls back to
-    ``profile_sglang.yaml``).
-    """
-    fw = os.environ.get("FRAMEWORK", "sglang").strip().lower()
-    if fw == "atom":
-        name = "profile_atom.yaml"
-    elif fw == "vllm":
-        name = "profile_vllm.yaml"
-    elif fw == "xdit":
-        name = "profile_xdit.yaml"
-    elif fw == "custom":
-        name = "profile_custom.yaml"
-    else:
-        name = "profile_sglang.yaml"
-    return asset_root() / "assets" / "configs" / name
+    """Resolve the shipped profile YAML for ``$FRAMEWORK``, or for the default framework when it is unset."""
+    fw = os.environ.get("FRAMEWORK") or framework_registry.DEFAULT_FRAMEWORK
+    return asset_root() / "assets" / "configs" / framework_registry.shipped_config_name("profile", fw)
 
 
 class ProfileExecutor(BenchmarkRunExecutor):
@@ -862,37 +816,27 @@ class ProfileExecutor(BenchmarkRunExecutor):
         return str(scoped)
 
     def _inject_host_probe(self, config_path: Path, output_dir: Path) -> str:
-        """Arm the host-side evidence probe in the materialized profile config."""
-        from . import _framework_rewrite_evidence as _evidence
+        """Put the profile start-up shim on the materialized config's ``PYTHONPATH`` and arm the host probe.
 
-        if not _evidence.probe_enabled():
-            return ""
+        The shim always goes in, since it keeps GPU events in the traces of spawned engines; the
+        probe's environment only when the probe is enabled. Returns the probe's report directory,
+        or ``""`` when the probe is not armed.
+        """
+        from . import _framework_rewrite_evidence as _evidence
+        from ._workload_envs import prepend_launch_path
+
         asset_dir = _evidence.probe_asset_dir()
         if not asset_dir.is_dir():
             log.warning(
-                "profile_executor: host-probe assets missing at %s; host-side rewrite evidence disabled",
+                "profile_executor: start-up shim assets missing at %s; host-side rewrite evidence disabled",
                 asset_dir,
             )
             return ""
-        probe_dir = output_dir / _evidence.PROBE_SUBDIR
-        try:
-            probe_dir.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            log.warning("profile_executor: cannot create host-probe dir %s: %s", probe_dir, exc)
-            return ""
-
-        from hyperloom.inference_optimizer.framework_paths import resolve_kernel_search_roots
-
-        roots = list(resolve_kernel_search_roots())
-        probe_env = _evidence.build_probe_env(
-            probe_dir=probe_dir,
-            source_roots=roots,
-            deep=_evidence.deep_probe_enabled(),
-        )
+        probe_env = self._host_probe_env(output_dir) if _evidence.probe_enabled() else {}
         try:
             cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
         except (OSError, yaml.YAMLError) as exc:
-            log.warning("profile_executor: cannot read %s to arm the host probe: %s", config_path, exc)
+            log.warning("profile_executor: cannot read %s to arm the start-up shim: %s", config_path, exc)
             return ""
         bench = cfg.get("benchmark") if isinstance(cfg, dict) else None
         if not isinstance(bench, dict):
@@ -900,23 +844,43 @@ class ProfileExecutor(BenchmarkRunExecutor):
         envs = bench.setdefault("envs", {})
         if not isinstance(envs, dict):
             return ""
-        current = str(envs.get("PYTHONPATH", "") or "").strip()
-        entry = str(asset_dir)
-        if entry not in current.split(os.pathsep):
-            envs["PYTHONPATH"] = f"{entry}{os.pathsep}{current}" if current else entry
+        # First on the path even when already present: Python imports only the first sitecustomize, and the
+        # shim's chains to the next one.
+        prepend_launch_path(envs, "PYTHONPATH", str(asset_dir))
         for key, value in probe_env.items():
             envs[key] = value
         try:
             config_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
         except OSError as exc:
-            log.warning("profile_executor: cannot write %s after arming the host probe: %s", config_path, exc)
+            log.warning("profile_executor: cannot write %s after arming the start-up shim: %s", config_path, exc)
+            return ""
+        if not probe_env:
             return ""
         log.info(
             "profile_executor: host-side rewrite evidence probe armed (deep=%s), reports -> %s",
             bool(probe_env.get("HYPERLOOM_HOST_PROBE_DEEP")),
-            probe_dir,
+            probe_env["HYPERLOOM_HOST_PROBE_DIR"],
         )
-        return str(probe_dir)
+        return probe_env["HYPERLOOM_HOST_PROBE_DIR"]
+
+    def _host_probe_env(self, output_dir: Path) -> dict[str, str]:
+        """Return the environment that arms the host probe, or ``{}`` when its report directory cannot be made."""
+        from . import _framework_rewrite_evidence as _evidence
+
+        probe_dir = output_dir / _evidence.PROBE_SUBDIR
+        try:
+            probe_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            log.warning("profile_executor: cannot create host-probe dir %s: %s", probe_dir, exc)
+            return {}
+
+        from hyperloom.inference_optimizer.framework_paths import resolve_kernel_search_roots
+
+        return _evidence.build_probe_env(
+            probe_dir=probe_dir,
+            source_roots=list(resolve_kernel_search_roots()),
+            deep=_evidence.deep_probe_enabled(),
+        )
 
     def _after_materialize_config(
         self,
@@ -1595,7 +1559,6 @@ profile_executor = ProfileExecutor()
 
 
 __all__ = [
-    "PROFILE_DEFAULT_CONFIG",
     "PROFILE_DEFAULT_TIMEOUT_SEC",
     "ProfileExecutor",
     "profile_executor",

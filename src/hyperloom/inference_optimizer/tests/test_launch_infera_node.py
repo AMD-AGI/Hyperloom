@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import subprocess
 import sys
 import types
@@ -167,3 +168,62 @@ def test_build_sglang_cmd_no_dp_size_without_dp_attention():
     )()
     cmd = mod._build_sglang_cmd(ns, node_rank=0, leader="10.0.0.1", advertise_host="10.0.0.2")
     assert "--dp-size" not in cmd
+
+
+def test_ray_start_runs_detached_from_the_launcher(monkeypatch):
+    """``ray start`` gets its own session and no pipe of the launcher's, so its daemons neither pin the launcher's
+    process group nor hold a pipe a reader waits on."""
+    mod = _load_module()
+    seen: list[tuple[list[str], dict]] = []
+
+    def _fake_run(cmd, **kwargs):
+        seen.append((cmd, kwargs))
+        kwargs["stderr"].write("started head\n")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    logged: list[str] = []
+    monkeypatch.setattr(mod.subprocess, "run", _fake_run)
+    monkeypatch.setattr(mod, "_log", logged.append)
+
+    mod._ray_start("head", "10.0.0.1", {"PATH": "/usr/bin"})
+
+    ((cmd, kwargs),) = seen
+    assert cmd[:2] == ["/bin/bash", "-lc"] and cmd[2].startswith("ray start --head ")
+    assert kwargs["start_new_session"] is True
+    assert kwargs["stdin"] is subprocess.DEVNULL
+    assert "capture_output" not in kwargs
+    assert kwargs["stdout"] is not subprocess.PIPE and kwargs["stderr"] is not subprocess.PIPE
+    assert logged == ["ray start (head) rc=0 started head"]
+
+
+def test_ray_start_real_daemon_leaves_the_launcher_group(monkeypatch, tmp_path):
+    """With the launcher's real kwargs, a stand-in daemon lands outside its group and does not block the call."""
+    import os
+    import signal
+    import threading
+
+    mod = _load_module()
+    pid_file = tmp_path / "daemon.pid"
+    real_run = subprocess.run
+
+    def _stand_in(cmd, **kwargs):
+        # Same kwargs the launcher passes; only the command is a harmless stand-in for `ray start`.
+        script = f"sleep 60 & echo $! > {pid_file}; echo stand-in >&2"
+        return real_run(["/bin/bash", "-c", script], **kwargs)
+
+    monkeypatch.setattr(mod.subprocess, "run", _stand_in)
+    monkeypatch.setattr(mod, "_log", lambda msg: None)
+    worker = threading.Thread(target=mod._ray_start, args=("head", "10.0.0.1", dict(os.environ)), daemon=True)
+    worker.start()
+    try:
+        worker.join(timeout=20)
+        assert not worker.is_alive(), "_ray_start blocked on a pipe the daemon inherited"
+        pid = int(pid_file.read_text(encoding="utf-8").strip())
+        assert os.getpgid(pid) != os.getpgid(0)
+        assert os.getsid(pid) != os.getsid(0)
+    finally:
+        if pid_file.is_file():
+            # The stand-in daemon may already have exited; only a live one needs killing.
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(int(pid_file.read_text(encoding="utf-8").strip()), signal.SIGKILL)
+        worker.join(timeout=5)

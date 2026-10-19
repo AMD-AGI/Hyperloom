@@ -599,9 +599,9 @@ async def apply_patch_resolving_conflicts(
         has been restored to HEAD, which carries every KEEP landed so far.
     """
     touched = _patch_touched_paths(repo, [patch_path])
-    applies, strict_error = _git_apply(repo, patch_path, three_way=False, check_only=True)
+    applies, strict_error = _git_apply(repo, patch_path, check_only=True)
     if applies:
-        applied, error = _git_apply(repo, patch_path, three_way=False, check_only=False)
+        applied, error = _git_apply(repo, patch_path, check_only=False)
         if applied:
             return PatchMergeOutcome(applied=True, strategy=STRATEGY_STRICT)
         _abandon_attempt(repo, touched)

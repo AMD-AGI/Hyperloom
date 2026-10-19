@@ -229,7 +229,6 @@ def test_untried_hot_kernels_reproduces_log1_session_164910Z(state: SharedState)
     assert set(untried) == {"k001", "k002", "k004"}
     assert "k003" not in untried  # 1.3% sits below the 5% gate
     assert "k006" not in untried  # non-reusable despite 15.6%
-    assert untried[0] == "k002"  # strongest-first
 
 
 def test_untried_hot_kernels_vendor_playbook_group_gated_on_aggregate(state: SharedState):
@@ -372,7 +371,32 @@ def test_untried_hot_kernels_collapses_by_task_group(state: SharedState):
     )
     untried = state.untried_hot_reusable_kernels()
     assert len(untried) == 1  # shared task_group -> one slot
-    assert untried[0] == "k002"  # highest-gpu_pct member
+
+
+def test_untried_hot_kernels_rank_on_tracelens_order_via_real_projection(state: SharedState):
+    """TraceLens' task priority beats a hotter kernel, its group slot goes to the highest-impact member, and an
+    unranked collective keeps a slot of its own past the cap."""
+    hot = [
+        {"kernel_id": kid, "gpu_pct": pct, "tracelens_pitem_rank": rank, "impact_score": score}
+        for kid, pct, rank, score in [
+            ("k001", 20.0, 2, 7.6),
+            ("k002", 5.5, 1, 3.3),
+            ("k003", 5.2, 1, 3.6),
+            ("k004", 15.0, 0, 0.0),
+        ]
+    ]
+    for row in hot:
+        row.update(reusable_native_kernel=True, source_file=f"/p/{row['kernel_id']}.py")
+    state.record_trace_analyze(
+        {"trace_input": "/tmp/trace.json"},
+        {
+            "status": "ok",
+            "hot_kernels": hot,
+            "task_groups": [{"primary_kernel_id": "k002", "kernel_ids": ["k002", "k003"]}],
+        },
+    )
+    assert state.untried_hot_reusable_kernels() == ["k003", "k001", "k004"]
+    assert state.untried_hot_reusable_kernels(top_n=1) == ["k003", "k004"]
 
 
 def test_untried_hot_kernels_skips_when_any_group_member_attempted(state: SharedState):

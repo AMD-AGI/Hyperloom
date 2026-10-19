@@ -116,16 +116,18 @@ def test_agentx_keep_verdict_when_intvty_clears_threshold(monkeypatch):
         state, _full_measurement(total=25984.0, output=183.0, intvty=24.8), keep_threshold_pct=2.0
     )
     assert graded.verdict == VERDICT_KEEP
+    assert graded.refused_by == ""
 
 
 def test_agentx_revert_when_both_axes_worse(monkeypatch):
-    """Both interactivity AND tput regressed beyond the noise band -> REVERT."""
+    """Both interactivity AND tput regressed beyond the noise band -> REVERT, naming every gate that failed."""
     _agentx(monkeypatch)
     state = _State(current_best=_ANCHOR, baseline_tput=180.0)
     graded = resolve_graded_comparison(
         state, _full_measurement(total=20000.0, output=130.0, intvty=15.0), keep_threshold_pct=2.0
     )
     assert graded.verdict == VERDICT_REVERT
+    assert graded.refused_by == "p50_gain_below_threshold,p90_regressed,output_regressed"
 
 
 def test_agentx_revert_when_median_gain_is_below_threshold(monkeypatch):
@@ -137,6 +139,7 @@ def test_agentx_revert_when_median_gain_is_below_threshold(monkeypatch):
         state, _full_measurement(total=25984.0, output=183.0, intvty=22.79), keep_threshold_pct=2.0
     )
     assert graded.verdict == VERDICT_REVERT
+    assert graded.refused_by == "p50_gain_below_threshold"
 
 
 def test_agentx_revert_when_the_slow_tail_guard_fails(monkeypatch):
@@ -149,6 +152,7 @@ def test_agentx_revert_when_the_slow_tail_guard_fails(monkeypatch):
         keep_threshold_pct=2.0,
     )
     assert graded.verdict == VERDICT_REVERT
+    assert graded.refused_by == "p90_regressed"
 
 
 def test_agentx_revert_when_the_output_guard_fails(monkeypatch):
@@ -161,6 +165,7 @@ def test_agentx_revert_when_the_output_guard_fails(monkeypatch):
         keep_threshold_pct=2.0,
     )
     assert graded.verdict == VERDICT_REVERT
+    assert graded.refused_by == "output_regressed"
 
 
 def test_a_degraded_pair_never_reports_a_keep_verdict(monkeypatch):
@@ -488,18 +493,19 @@ def test_a_synthetic_session_is_untouched_by_the_marker_check(monkeypatch):
 
 @pytest.fixture
 def baseline_writer(monkeypatch, tmp_path):
-    from hyperloom.orchestrator.loop.writeback import WritebackCollaborator, _PromoteOutcome
-    from hyperloom.orchestrator.state.shared_state import SharedState
+    from hyperloom.inference_optimizer.session.optimization_journal import Verdict
+    from hyperloom.orchestrator.loop.writeback import _PromoteOutcome
+
+    from .conftest import make_coordinator
 
     _agentx(monkeypatch)
-    state = SharedState(framework="vllm", benchmark_mode="agentx")
-    writer = WritebackCollaborator()
-    vars(writer).update(shared_state=state, session_dir=tmp_path)
-    monkeypatch.setattr(writer, "_refresh_gaps", AsyncMock(), raising=False)
-    monkeypatch.setattr(writer, "_drain_queued_baselines", AsyncMock())
+    coord = make_coordinator(tmp_path, shared_state_overrides={"framework": "vllm", "benchmark_mode": "agentx"})
+    writer = coord.writeback
+    monkeypatch.setattr(coord.gap_refresh, "refresh_gaps", AsyncMock())
+    monkeypatch.setattr(writer, "drain_queued_baselines", AsyncMock())
     monkeypatch.setattr(writer, "_should_run_prelude_bootstrap", lambda _tput: False)
-    monkeypatch.setattr(state, "record_baseline_roofline_ceiling", Mock())
-    return writer, _PromoteOutcome()
+    monkeypatch.setattr(coord.shared_state, "record_baseline_roofline_ceiling", Mock())
+    return writer, _PromoteOutcome(verdict=Verdict.RECORDED)
 
 
 @pytest.mark.parametrize("baseline_enablement", [True, False], ids=["enablement", "validated-layer"])
@@ -695,6 +701,7 @@ def test_agentx_revert_when_the_windows_differ(monkeypatch):
         keep_threshold_pct=2.0,
     )
     assert graded.verdict == VERDICT_REVERT
+    assert graded.refused_by == "duration_drift"
 
 
 def test_agentx_keeps_when_the_window_drifts_inside_the_allowance(monkeypatch):
@@ -719,6 +726,19 @@ def test_agentx_revert_when_more_requests_failed_than_the_anchor(monkeypatch):
         keep_threshold_pct=2.0,
     )
     assert graded.verdict == VERDICT_REVERT
+    assert graded.refused_by == "extra_failed_requests"
+
+
+def test_agentx_keeps_through_one_extra_failure_inside_the_slack(monkeypatch):
+    """One extra failure in a full round cannot carry the gain: it moves the median's rank by a fraction of a point."""
+    _agentx(monkeypatch)
+    state = _State(current_best=dict(_ANCHOR))
+    graded = resolve_graded_comparison(
+        state,
+        _full_measurement(total=25984.0, output=183.0, intvty=24.8, error_rate=0.18),
+        keep_threshold_pct=2.0,
+    )
+    assert graded.verdict == VERDICT_KEEP
 
 
 def test_agentx_revert_when_a_comparability_input_is_unreported(monkeypatch):
@@ -729,3 +749,13 @@ def test_agentx_revert_when_a_comparability_input_is_unreported(monkeypatch):
     measurement.pop("duration_seconds")
     graded = resolve_graded_comparison(state, measurement, keep_threshold_pct=2.0)
     assert graded.verdict == VERDICT_REVERT
+    assert graded.refused_by == "comparability_inputs_missing"
+
+
+def test_the_mlperf_backend_grades_on_output(monkeypatch):
+    """The harness has no per-request interactivity series, so asking for it would degrade every round."""
+    from hyperloom.common.perf_metric import INTVTY_V1, intvty_grading_enabled
+
+    monkeypatch.setenv("HYPERLOOM_AGENTIC_BACKEND", "mlperf")
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", INTVTY_V1)
+    assert intvty_grading_enabled(benchmark_mode="agentx") is False

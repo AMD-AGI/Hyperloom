@@ -15,6 +15,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Collection, Final, Mapping
 
+from hyperloom.inference_optimizer.grid_server_args import (
+    compose_server_args,
+    dedupe_extra_server_args,
+    strip_benchmark_harness_flags,
+)
 from hyperloom.orchestrator.lever import (
     LEVER_CONFIG,
     LEVER_ENABLEMENT,
@@ -367,18 +372,18 @@ def _apply_recipe_delta(
     config: dict[str, Any],
     delta: Mapping[str, Any],
 ) -> dict[str, Any]:
-    from hyperloom.inference_optimizer.grid_server_args import compose_server_args
-    from ...loop.coordinator_helpers import _dedupe_extra_server_args
-
     mode = str(delta.get("args_mode") or "append").strip().lower()
     if mode not in {"append", "replace"}:
         raise RemoteRecipeValidationError(f"unsupported recipe args_mode: {mode!r}")
-    args = compose_server_args(
-        inherited_args="",
-        base_extra_args=str(config.get("extra_server_args") or ""),
-        variant_extra_args=str(delta.get("extra_server_args") or ""),
-        remove_args=delta.get("remove_args"),
-        args_mode=mode,
+    # A persisted recipe never carries a harness flag; composition itself no longer strips them.
+    args = strip_benchmark_harness_flags(
+        compose_server_args(
+            inherited_args="",
+            base_extra_args=str(config.get("extra_server_args") or ""),
+            variant_extra_args=str(delta.get("extra_server_args") or ""),
+            remove_args=delta.get("remove_args"),
+            args_mode=mode,
+        )
     )
     envs = dict(_mapping(config.get("extra_envs")))
     for key in delta.get("unset_envs") or []:
@@ -391,7 +396,7 @@ def _apply_recipe_delta(
         )
     envs.update(raw_envs)
     return {
-        "extra_server_args": _dedupe_extra_server_args(args),
+        "extra_server_args": dedupe_extra_server_args(args),
         "extra_envs": envs,
     }
 
@@ -883,7 +888,7 @@ def _adopt_replayed_prior(
     if adopted_roots:
         node = _mapping(value.get(PATCH_SECTION))
         rows = [dict(row) for row in (node.get("provenance") or []) if isinstance(row, Mapping)]
-        row = next((r for r in rows if int(r.get("stack_index") or -1) == replay_index), None)
+        row = next((r for r in rows if r.get("stack_index") == replay_index), None)
         if row is None:
             row = {
                 "stack_index": replay_index,

@@ -16,8 +16,7 @@ from typing import Any
 #: unaffected).
 SOURCE_RESOLUTION_SCHEMA_VERSION = "1.1.0"
 
-#: Canonical artifact name, relative to the analysis run directory. Mirrored by
-#: ``tracelens_analysis._SOURCE_RESOLUTION_NAME`` for the standalone path.
+#: Canonical artifact name, relative to the analysis run directory.
 SOURCE_RESOLUTION_FILENAME = "kernel_source_resolution.json"
 
 #: How a location was decided, as emitted by TraceLens' ``resolve_kernel_source``.
@@ -226,14 +225,62 @@ def make_document(
     }
 
 
+def _entry_problems(index: int, entry: Any, seen_ids: set[str]) -> list[str]:
+    """Contract violations in one entry; ``seen_ids`` collects the kernel ids already claimed."""
+    if not isinstance(entry, dict):
+        return [f"entries[{index}] is {type(entry).__name__}, expected dict"]
+    problems = [f"entries[{index}] missing required key {key!r}" for key in REQUIRED_ENTRY_KEYS if key not in entry]
+    kernel_id = str(entry.get("kernel_id") or "")
+    if not kernel_id:
+        problems.append(f"entries[{index}] has empty kernel_id")
+    elif kernel_id in seen_ids:
+        problems.append(f"entries[{index}] has duplicate kernel_id {kernel_id!r}")
+    else:
+        seen_ids.add(kernel_id)
+    gpu_pct = entry.get("gpu_pct")
+    if gpu_pct is not None and not _is_finite_number(gpu_pct):
+        problems.append(f"entries[{index}] has invalid gpu_pct {gpu_pct!r}; expected a finite number")
+    source_line = entry.get("source_line")
+    if source_line is not None and not isinstance(source_line, int):
+        problems.append(f"entries[{index}] has invalid source_line {source_line!r}; expected int or null")
+    method = str(entry.get("method") or "")
+    if method and method not in KNOWN_METHODS:
+        problems.append(f"entries[{index}] has unknown method {method!r}")
+    reason_class = str(entry.get("reason_class") or "")
+    if reason_class and reason_class not in KNOWN_REASON_CLASSES:
+        problems.append(f"entries[{index}] has unknown reason_class {reason_class!r}")
+    problems.extend(_source_file_problems(index, entry, method))
+    confidence = entry.get("confidence")
+    if confidence is not None and not (_is_finite_number(confidence) and 0.0 <= float(confidence) <= 1.0):
+        problems.append(f"entries[{index}] has invalid confidence {confidence!r}; expected a finite number in [0, 1]")
+    return problems
+
+
+def _is_finite_number(value: Any) -> bool:
+    """Whether a value is a real finite number, which ``True`` and ``False`` are not."""
+    return not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(float(value))
+
+
+def _source_file_problems(index: int, entry: dict, method: str) -> list[str]:
+    """Whether this entry's source_file agrees with the method that produced it.
+
+    ``gate_non_patchable`` may or may not carry a source -- a vendor GEMM
+    resolves its dispatcher, a bare symbol does not -- so it is exempt from
+    both rules.
+    """
+    src = str(entry.get("source_file") or "")
+    if src and method == METHOD_UNRESOLVED:
+        return [f"entries[{index}] has a source_file but method is {method}"]
+    if not src and method not in {METHOD_UNRESOLVED, METHOD_GATE_NON_PATCHABLE}:
+        return [f"entries[{index}] has method {method!r} but no source_file"]
+    return []
+
+
 def validate_document(doc: Any) -> list[str]:
     """Return a list of contract violations; empty means the document is valid."""
-    problems: list[str] = []
     if not isinstance(doc, dict):
         return [f"document is {type(doc).__name__}, expected dict"]
-    for key in REQUIRED_DOCUMENT_KEYS:
-        if key not in doc:
-            problems.append(f"document missing required key {key!r}")
+    problems = [f"document missing required key {key!r}" for key in REQUIRED_DOCUMENT_KEYS if key not in doc]
     version = str(doc.get("schema_version") or "")
     if version and version.split(".")[0] != SOURCE_RESOLUTION_SCHEMA_VERSION.split(".")[0]:
         problems.append(f"schema_version {version!r} has a different major than {SOURCE_RESOLUTION_SCHEMA_VERSION!r}")
@@ -242,51 +289,8 @@ def validate_document(doc: Any) -> list[str]:
         problems.append(f"entries is {type(entries).__name__}, expected list")
         return problems
     seen_ids: set[str] = set()
-    for i, entry in enumerate(entries):
-        if not isinstance(entry, dict):
-            problems.append(f"entries[{i}] is {type(entry).__name__}, expected dict")
-            continue
-        for key in REQUIRED_ENTRY_KEYS:
-            if key not in entry:
-                problems.append(f"entries[{i}] missing required key {key!r}")
-        kernel_id = str(entry.get("kernel_id") or "")
-        if not kernel_id:
-            problems.append(f"entries[{i}] has empty kernel_id")
-        elif kernel_id in seen_ids:
-            problems.append(f"entries[{i}] has duplicate kernel_id {kernel_id!r}")
-        else:
-            seen_ids.add(kernel_id)
-        gpu_pct = entry.get("gpu_pct")
-        if gpu_pct is not None:
-            if isinstance(gpu_pct, bool) or not isinstance(gpu_pct, (int, float)) or not math.isfinite(float(gpu_pct)):
-                problems.append(f"entries[{i}] has invalid gpu_pct {gpu_pct!r}; expected a finite number")
-        source_line = entry.get("source_line")
-        if source_line is not None and not isinstance(source_line, int):
-            problems.append(f"entries[{i}] has invalid source_line {source_line!r}; expected int or null")
-        method = str(entry.get("method") or "")
-        if method and method not in KNOWN_METHODS:
-            problems.append(f"entries[{i}] has unknown method {method!r}")
-        reason_class = str(entry.get("reason_class") or "")
-        if reason_class and reason_class not in KNOWN_REASON_CLASSES:
-            problems.append(f"entries[{i}] has unknown reason_class {reason_class!r}")
-        src = str(entry.get("source_file") or "")
-        if src and method == METHOD_UNRESOLVED:
-            problems.append(f"entries[{i}] has a source_file but method is {method}")
-        # gate_non_patchable may or may not carry a source (a vendor GEMM resolves
-        # its dispatcher; a bare symbol does not), so it is exempt from both rules.
-        if not src and method not in {METHOD_UNRESOLVED, METHOD_GATE_NON_PATCHABLE}:
-            problems.append(f"entries[{i}] has method {method!r} but no source_file")
-        confidence = entry.get("confidence")
-        if confidence is not None:
-            if (
-                isinstance(confidence, bool)
-                or not isinstance(confidence, (int, float))
-                or not math.isfinite(float(confidence))
-                or not 0.0 <= float(confidence) <= 1.0
-            ):
-                problems.append(
-                    f"entries[{i}] has invalid confidence {confidence!r}; expected a finite number in [0, 1]"
-                )
+    for index, entry in enumerate(entries):
+        problems.extend(_entry_problems(index, entry, seen_ids))
     return problems
 
 

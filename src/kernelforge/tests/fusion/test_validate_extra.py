@@ -437,12 +437,12 @@ def test_apply_serving_gate_env_boot_failure_keeps_micro_keep(tmp_path, monkeypa
     """A MiniMax-style KV boot failure is not a fused-kernel loss."""
     from types import SimpleNamespace
 
-    from kernelforge.fusion import command as cli_module
+    from kernelforge.fusion import serving_gate
     from kernelforge.fusion.models import ValidationResult
 
     from kernelforge.fusion.validate import SMOKE_STAGE_STARTUP_CRASH, SmokeVerdict
 
-    monkeypatch.setattr(cli_module, "_serving_check_enabled", lambda: True)
+    monkeypatch.setattr(serving_gate, "_serving_check_enabled", lambda: True)
     captured = {}
 
     def fake_smoke(*a, **k):
@@ -454,7 +454,7 @@ def test_apply_serving_gate_env_boot_failure_keeps_micro_keep(tmp_path, monkeypa
             blames_kernel=False,
         )
 
-    monkeypatch.setattr(cli_module, "serving_smoke_verdict", fake_smoke)
+    monkeypatch.setattr(serving_gate, "serving_smoke_verdict", fake_smoke)
     vr = ValidationResult(
         correctness_passed=True,
         max_abs_err=0.0,
@@ -475,7 +475,7 @@ def test_apply_serving_gate_env_boot_failure_keeps_micro_keep(tmp_path, monkeypa
         ),
         termination_reason="",
     )
-    cli_module.apply_serving_gate(
+    serving_gate.apply_serving_gate(
         result,
         framework="vllm",
         out=tmp_path,
@@ -498,14 +498,14 @@ def test_apply_serving_gate_env_boot_failure_keeps_micro_keep(tmp_path, monkeypa
 def test_apply_serving_gate_cuda_graph_crash_clears_keep(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
-    from kernelforge.fusion import command as cli_module
+    from kernelforge.fusion import serving_gate
     from kernelforge.fusion.models import ValidationResult
 
     from kernelforge.fusion.validate import SMOKE_STAGE_DECODE_CRASH, SmokeVerdict
 
-    monkeypatch.setattr(cli_module, "_serving_check_enabled", lambda: True)
+    monkeypatch.setattr(serving_gate, "_serving_check_enabled", lambda: True)
     monkeypatch.setattr(
-        cli_module,
+        serving_gate,
         "serving_smoke_verdict",
         lambda *a, **k: SmokeVerdict(
             ok=False,
@@ -534,7 +534,7 @@ def test_apply_serving_gate_cuda_graph_crash_clears_keep(tmp_path, monkeypatch):
         ),
         termination_reason="",
     )
-    cli_module.apply_serving_gate(
+    serving_gate.apply_serving_gate(
         result,
         framework="sglang",
         out=tmp_path,

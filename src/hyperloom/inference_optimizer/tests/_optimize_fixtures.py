@@ -60,18 +60,3 @@ def optimize_state(
     for key, value in overrides.items():
         setattr(state, key, value)
     return state
-
-
-def fake_coordinator(cls: type[Any], session_dir: Any, **state: Any) -> Any:
-    """A Coordinator built without ``__init__`` that holds only the given state; the rest resolves for real."""
-    from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
-    from hyperloom.orchestrator.phases.framework import FrameworkPhase
-
-    coord = cls.__new__(cls)
-    coord.session_dir = session_dir
-    # The real catalogue: a stubbed one can only ever agree with the test.
-    coord.action_registry = ACTION_CATALOGUE
-    coord.phase_framework = FrameworkPhase(coord)
-    for key, value in state.items():
-        setattr(coord, key, value)
-    return coord

@@ -51,7 +51,6 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Mapping
-from contextvars import ContextVar, Token
 from typing import Any
 
 from .assembler import EVENT_SECTIONS, event_parts
@@ -130,8 +129,6 @@ ROW_GEAK_DISCOVERY = "geak_discovery"
 ROW_GEAK_ACCEPTANCE = "geak_acceptance"
 ROW_DISCOVERED = "discovered"
 ROW_INTEGRATE = "integrate"
-
-_ACTIVE: ContextVar["KernelEventRecorder | None"] = ContextVar("kernel_event_active", default=None)
 
 ROUTE_GEAK = "geak"
 ROUTE_FORGE = "forge"
@@ -239,7 +236,6 @@ __all__ = [
     "VERDICT_IMPROVED",
     "VERDICT_NO_IMPROVEMENT",
     "KernelEventRecorder",
-    "active_kernel_recorder",
     "assemble_kernel_ext",
     "kernel_event_id",
     "make_kernel_recorder",
@@ -248,11 +244,6 @@ __all__ = [
     "reject_geak_attempts",
     "record_trace_analyze_request",
 ]
-
-
-def active_kernel_recorder() -> "KernelEventRecorder | None":
-    """Return the KERNEL visit recorder currently open in this context, if any."""
-    return _ACTIVE.get()
 
 
 def kernel_event_id(macro_cycle: Any) -> str:
@@ -1129,7 +1120,6 @@ class KernelEventRecorder:
         route: str = "",
         route_reason: str = "",
         resumed: bool = False,
-        code_revision: str = "",
     ):
         """Bind a recorder to the event of one KERNEL entry."""
         self._event_id = kernel_event_id(macro_cycle)
@@ -1140,7 +1130,6 @@ class KernelEventRecorder:
         self._sequence: int | None = None
         self._closed = False
         self._faulted = False
-        self._active_token: Token | None = None
         self._route = str(route or "")
         self._stage = "entry"
         self._sink.record(
@@ -1153,7 +1142,6 @@ class KernelEventRecorder:
                     "route": self._route,
                     "route_reason": str(route_reason or ""),
                     "resumed": bool(resumed),
-                    "code_revision": _text(code_revision),
                 },
             },
         )
@@ -1205,14 +1193,6 @@ class KernelEventRecorder:
             start_time=self._start_time,
             ext={"route": self._route, "in_flight_stage": self._stage},
         )
-        self._active_token = _ACTIVE.set(self)
-
-    def _clear_active(self) -> None:
-        """Drop this recorder from the attribution window."""
-        token = self._active_token
-        if token is not None:
-            _ACTIVE.reset(token)
-            self._active_token = None
 
     def record_discovered_kernels(
         self,
@@ -1786,7 +1766,6 @@ class KernelEventRecorder:
             )
         except RECORDING_ERRORS as exc:
             note_failure(section=SECTION_EVENT, error=exc, detail=f"closing kernel event {self._event_id}")
-        self._clear_active()
 
     def record_fault(
         self,
@@ -2330,7 +2309,6 @@ def make_kernel_recorder(
     route: str = "",
     route_reason: str = "",
     resumed: bool = False,
-    code_revision: str = "",
 ) -> KernelEventRecorder | None:
     """Build a recorder, or ``None`` when no session is bound.
 
@@ -2346,5 +2324,4 @@ def make_kernel_recorder(
         route=route,
         route_reason=route_reason,
         resumed=resumed,
-        code_revision=code_revision,
     )

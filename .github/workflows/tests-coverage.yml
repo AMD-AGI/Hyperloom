@@ -98,6 +98,21 @@ jobs:
         # pyproject.toml ([tool.hyperloom.tests_coverage]). GitHub matrices
         # cannot read that value dynamically, so it is mirrored here.
         shard: [1, 2, 3, 4, 5, 6]
+    # The Experience KB tests keep their databases in SQLite, as a workspace's service does, and on Python 3.11 on this
+    # PostgreSQL server instead, as a global KB served by several processes does, so both databases are tested.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      HYPERLOOM_KB_TEST_DATABASE_URL: ${{ matrix.python-version == '3.11' && 'postgresql://postgres@localhost:5432/postgres' || '' }}
     steps:
       - uses: actions/checkout@v7
 
@@ -121,13 +136,13 @@ jobs:
             echo "::notice::OOB/ not in checkout (no pyproject.toml); skipping editable OOB install."
           fi
 
-      # Kernel-agent tests import TraceLens as a module, so it must be importable for
-      # collection. It is not on PyPI: derive the repo+SHA from install.sh so the pod
-      # installer stays the single pin owner. kernel_source pulls itanium-demangler.
+      # Kernel tool tests import TraceLens as a module, so it must be importable for
+      # collection. It is not on PyPI: derive the repo+SHA from install_kernel_tools.sh
+      # so the pod installer stays the single pin owner. kernel_source pulls itanium-demangler.
       - name: Install TraceLens (pinned, kernel_source extra)
         run: |
           set -euo pipefail
-          INSTALL_SH="src/hyperloom/agents/kernel/scripts/install.sh"
+          INSTALL_SH="src/hyperloom/inference_optimizer/assets/install_kernel_tools.sh"
           TL_REPO="$(sed -n 's/^TRACELENS_REPO="\(.*\)"$/\1/p' "$INSTALL_SH" | head -n1)"
           TL_REF="$(sed -n 's/^TRACELENS_REF="\(.*\)"$/\1/p' "$INSTALL_SH" | head -n1)"
           if [ -z "$TL_REPO" ] || [ -z "$TL_REF" ]; then
@@ -449,6 +464,10 @@ jobs:
         python-version: ["3.10", "3.11"]
     steps:
       - uses: actions/checkout@v7
+        with:
+          # The PR merge commit plus both parents: ``HEAD^1`` is the base the
+          # diff-coverage step compares against.
+          fetch-depth: 2
 
       - uses: actions/setup-python@v7
         with:
@@ -631,6 +650,38 @@ jobs:
           COVERAGE_RELAX_FAIL_UNDER: ${{ vars.COVERAGE_RELAX_FAIL_UNDER }}
           REPORT_EXIT_CODE: ${{ steps.coverage_report.outputs.report_exit_code }}
         run: python3 scripts/ci_coverage_report.py gate
+
+      # New-code coverage: on pull requests, the lines the PR adds or changes
+      # (``HEAD^1..HEAD`` of the merge commit) must be at least 80% covered.
+      # One leg is enough -- both run the same suite. Runs after the total
+      # gate under always() so both verdicts show; skipped on a failed or
+      # incomplete suite, which the shard-results gate already reds.
+      # Files excluded by ``[tool.coverage.run].omit`` (scripts/*, tests, CLI
+      # drivers, ...) are not in the XML, so diff-cover does not count their
+      # lines: that omit list is this gate's exemption surface.
+      - name: Diff coverage (changed lines >= 80%)
+        if: always() && github.event_name == 'pull_request' && matrix.python-version == '3.10' && steps.outcomes.outputs.complete == 'true' && steps.outcomes.outputs.tests_ok == 'true'
+        run: |
+          set -euo pipefail
+          if [ "$(git rev-list --parents -n 1 HEAD | wc -w)" -ne 3 ]; then
+            echo "::error title=diff-coverage::HEAD is not the PR merge commit; cannot compute the PR diff."
+            exit 1
+          fi
+          python -m pip install "diff-cover==9.7.1"
+          # A PR's .gitattributes could mark *.py ``-diff`` (binary), hiding its
+          # lines from diff-cover; info/attributes takes precedence over it.
+          attrs="$(git rev-parse --git-path info/attributes)"; mkdir -p "$(dirname "$attrs")"; echo '*.py diff' >> "$attrs"
+          # fail_under is the total gate's job; the XML is only diff-cover's input.
+          coverage xml -o coverage.xml --fail-under=0
+          set +e
+          diff-cover coverage.xml --compare-branch="$(git rev-parse HEAD^1)" --fail-under=80 --format markdown:diff-cover.md
+          rc=$?
+          set -e
+          { echo "## Diff coverage (lines changed by this PR)"; cat diff-cover.md 2>/dev/null || echo "diff-cover wrote no report (exit $rc)."; } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error title=diff-coverage::Lines changed by this PR are below 80% covered (diff-cover exit $rc); see this job's Summary for the uncovered lines."
+          fi
+          exit "$rc"
 
       # Single fail-closed gate for BOTH failure modes: a shard's tests failed
       # (tests_ok != true) OR a shard never fully reported (complete != true).

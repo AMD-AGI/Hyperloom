@@ -18,15 +18,10 @@ from types import ModuleType
 
 import pytest
 
+from kernelforge.resources import resource_path
 
-SCRIPT = (
-    Path(__file__).resolve().parents[1]
-    / "data"
-    / "local_knowledge"
-    / "common_methodology"
-    / "profiling"
-    / "rocpc_profile.py"
-)
+
+SCRIPT = resource_path("local_knowledge") / "common_methodology" / "profiling" / "rocpc_profile.py"
 
 
 @pytest.fixture(scope="module")

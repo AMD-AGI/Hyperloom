@@ -11,7 +11,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import click
 
@@ -268,6 +268,187 @@ def _normalize_inline_shapes_json(value: str, output_dir: Path) -> str:
         return ""
 
 
+def _exit_failed(output_dir: Path, *, error: str, error_class: str) -> NoReturn:
+    """Record a failed run where every consumer looks for it, then leave.
+
+    Both the on-disk ``result.json`` and the sentinel-wrapped stdout copy are
+    written, because a caller reading one and not the other would otherwise see
+    a run that never reported at all.
+    """
+    from .utils import emit_result_json
+
+    report_dict = {
+        "status": "failed",
+        "micro_decision": "failed",
+        "error": error,
+        "error_class": error_class,
+    }
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "result.json").write_text(json.dumps(report_dict, indent=2), encoding="utf-8")
+    emit_result_json(report_dict)
+    raise SystemExit(2)
+
+
+# Named once because both commands declare them and the path check names them back.
+OPT_UNTUNED_CSV = "--untuned-csv"
+OPT_SHAPES_MANIFEST = "--shapes-manifest"
+OPT_DEMAND = "--demand"
+
+
+def _existing_file_or_blank(value: str, option: str) -> str:
+    """A path option's value, or blank when it does not name an existing file."""
+    if value and not _safe_is_file(value):
+        log.warning("%s is not an existing file; ignoring it", option)
+        return ""
+    return value
+
+
+def _write_gpu_check(output_dir: Path) -> None:
+    """Record what the GPUs are doing before tuning starts, and warn when they are busy."""
+    from .utils import check_gpu_status
+
+    gpus = check_gpu_status()
+    if not gpus:
+        return
+    (output_dir / "gpu_check.json").write_text(
+        json.dumps([{"gpu_id": g.gpu_id, "utilization": g.utilization, "busy": g.busy} for g in gpus], indent=2),
+        encoding="utf-8",
+    )
+    busy = [g for g in gpus if g.busy]
+    if busy:
+        log.warning("GPUs appear busy: %s. Tuning may conflict with running workloads.", [g.gpu_id for g in busy])
+
+
+def _aiter_preflight_problems(output_dir: Path) -> list[str]:
+    """Record the aiter tune/serve alignment check and return the problems that block tuning."""
+    try:
+        from .aiter_preflight import collect as _aiter_collect
+
+        preflight = _aiter_collect()
+    except Exception as exc:  # noqa: BLE001 - unavailable diagnostics remain best-effort
+        log.debug("aiter preflight skipped: %s", exc)
+        return []
+    (output_dir / "aiter_preflight.json").write_text(json.dumps(preflight, indent=2), encoding="utf-8")
+    for message in preflight["soft"]:
+        log.warning("aiter preflight: %s", message)
+    for message in preflight["hard"]:
+        log.warning("aiter preflight PROBLEM: %s", message)
+    if preflight["aligned"]:
+        log.info("aiter preflight: serve aiter aligned with tuner root")
+    return list(preflight["hard"])
+
+
+def _explicit_token_list(tokens: str) -> list[int] | None:
+    """The token counts ``--tokens`` named, or None when it named none."""
+    cleaned = tokens.strip().strip("[](){}") if tokens else ""
+    if not cleaned:
+        return None
+    return [int(part.strip().strip("'\"")) for part in cleaned.split(",") if part.strip().strip("'\"")]
+
+
+def _cap_tuner_count(tuner_specs: list, max_tuners: int) -> list:
+    """Cut the routed set to what the caller's share pays for, in priority order.
+
+    A tuner the router skipped books no time, so it is not what the share buys:
+    it keeps its place in the plan for its skip reason but never displaces a
+    tuner that could have run.
+    """
+    kept: list = []
+    dropped: list = []
+    runnable_so_far = 0
+    for spec in tuner_specs:
+        if spec.should_run:
+            runnable_so_far += 1
+        over_ceiling = spec.should_run and runnable_so_far > max_tuners
+        (dropped if over_ceiling else kept).append(spec)
+    if dropped:
+        log.info(
+            "gemm-tune: lane ceiling of %d tuner(s); dropping %s",
+            max_tuners,
+            ", ".join(spec.name for spec in dropped),
+        )
+    return kept
+
+
+def _tuner_context_for(ctx: Any, spec: Any, effective_timeout: int) -> Any:
+    """A per-tuner context copy, so one tuner's bounds cannot leak into the next."""
+    import dataclasses
+
+    tuner_ctx = dataclasses.replace(ctx, timeout_s=effective_timeout)
+    if not spec.token_hint:
+        return tuner_ctx
+    log.info(
+        "%s: tuning the %d token count(s) the log shows it serving (%s), not the run's full coverage",
+        spec.name,
+        len(spec.token_hint),
+        spec.token_hint[:8],
+    )
+    # ``tokens`` bounds the sweep; ``token_hint`` marks the observed allowed set.
+    return dataclasses.replace(tuner_ctx, tokens=list(spec.token_hint), token_hint=list(spec.token_hint))
+
+
+def _execute_tuners(
+    tuner_specs: list,
+    ctx: Any,
+    *,
+    timeout: int,
+    global_timeout: int,
+    global_deadline: float,
+) -> tuple[list, list[tuple[str, str]]]:
+    """Run each tuner that still earns its place, and say why the others did not."""
+    from .candidates import is_candidate
+
+    results: list = []
+    skipped: list[tuple[str, str]] = []
+    for spec in tuner_specs:
+        if not spec.should_run:
+            skipped.append((spec.name, spec.skip_reason or "unknown"))
+            log.info("SKIP %s: %s", spec.name, spec.skip_reason)
+            continue
+        # A fallback tuner runs only when no earlier non-fallback tuner produced a deployable candidate.
+        if spec.fallback and any(is_candidate(result) for result in results):
+            skipped.append((spec.name, "fallback not needed: an earlier tuner produced a candidate"))
+            log.info("SKIP %s: an earlier tuner already produced a candidate", spec.name)
+            continue
+        remaining = global_deadline - time.time()
+        if remaining <= 0:
+            skipped.append((spec.name, "global timeout exceeded"))
+            log.warning("SKIP %s: global timeout exceeded", spec.name)
+            continue
+        # Cap per-tuner timeout to remaining global budget.
+        effective_timeout = min(timeout, int(remaining)) if global_timeout > 0 else timeout
+        log.info("Running tuner: %s (timeout=%ds)", spec.name, effective_timeout)
+        tuner_instance = _create_tuner(spec.name, _tuner_context_for(ctx, spec, effective_timeout))
+        if tuner_instance is None:
+            log.error("Unknown tuner: %s", spec.name)
+            continue
+        result = tuner_instance.execute()
+        results.append(result)
+        log.info(
+            "Tuner %s finished: status=%s, improved=%s/%d, best_speedup=%s, elapsed=%.1fs",
+            spec.name,
+            result.status,
+            "unmeasured" if result.improved_shapes is None else result.improved_shapes,
+            result.total_shapes,
+            "unmeasured" if result.best_micro_speedup is None else f"{result.best_micro_speedup:.3f}x",
+            result.elapsed_s,
+        )
+    return results, skipped
+
+
+def _write_artifact_manifest(report: Any, results: list, output_dir: Path, **provenance: Any) -> None:
+    """Ship a TuningArtifactManifest beside the tuned CSV, so a consumer can decide reuse-vs-stale."""
+    try:
+        from .artifact_manifest import write_artifact_manifest
+
+        manifest_path = write_artifact_manifest(report, results, output_dir, **provenance)
+    except Exception as exc:  # noqa: BLE001 — manifest must never break tuning
+        log.warning("artifact manifest write failed (non-fatal): %s", exc)
+        return
+    report.artifacts["tuning_artifact_manifest"] = str(manifest_path)
+    log.info("Tuning artifact manifest written to %s", manifest_path)
+
+
 @click.group("gemm-tune")
 def gemm_tune():
     """Deterministic GEMM tuning for AMD GPUs."""
@@ -315,7 +496,7 @@ def gemm_tune():
     type=int,
     help="Run at most this many of the routed tuners, in priority order. 0 means uncapped.",
 )
-@click.option("--untuned-csv", default="", help="Input untuned CSV for dense aiter tuners")
+@click.option(OPT_UNTUNED_CSV, default="", help="Input untuned CSV for dense aiter tuners")
 @click.option(
     "--moe-untuned-csv",
     default="",
@@ -323,12 +504,12 @@ def gemm_tune():
 )
 @click.option("--shapes-json", default="", help="Input shapes JSON from TraceLens/Hyperloom")
 @click.option(
-    "--shapes-manifest",
+    OPT_SHAPES_MANIFEST,
     default="",
     help="Weighted TraceShapeManifest JSON (Hyperloom WP-1); preferred dense-shape source when set",
 )
 @click.option(
-    "--demand",
+    OPT_DEMAND,
     "demand_json",
     default="",
     help="demand.json from a serving log (kernelforge gemm-tune evidence); the highest-priority shape source",
@@ -374,10 +555,9 @@ def run(
     from .model_analyzer import analyze_model
     from .router import resolve_gpu_type, select_tuners
     from .shapes import compute_token_coverage
-    from .utils import check_gpu_status, emit_result_json
+    from .utils import emit_result_json
     from .tuners.base import TuneContext
     from .report import build_report, write_report
-    from .candidates import is_candidate
 
     output_path = Path(output_dir)
     _setup_logging(output_path, verbose)
@@ -391,18 +571,10 @@ def run(
 
     # Defensive input normalization: callers sometimes pass inline JSON content instead of a file path.
     shapes_json = _normalize_inline_shapes_json(shapes_json, output_path)
-    if untuned_csv and not _safe_is_file(untuned_csv):
-        log.warning("--untuned-csv is not an existing file; ignoring it")
-        untuned_csv = ""
-    if moe_untuned_csv and not _safe_is_file(moe_untuned_csv):
-        log.warning("--moe-untuned-csv is not an existing file; ignoring it")
-        moe_untuned_csv = ""
-    if shapes_manifest and not _safe_is_file(shapes_manifest):
-        log.warning("--shapes-manifest is not an existing file; ignoring it")
-        shapes_manifest = ""
-    if demand_json and not _safe_is_file(demand_json):
-        log.warning("--demand is not an existing file; ignoring it")
-        demand_json = ""
+    untuned_csv = _existing_file_or_blank(untuned_csv, OPT_UNTUNED_CSV)
+    moe_untuned_csv = _existing_file_or_blank(moe_untuned_csv, "--moe-untuned-csv")
+    shapes_manifest = _existing_file_or_blank(shapes_manifest, OPT_SHAPES_MANIFEST)
+    demand_json = _existing_file_or_blank(demand_json, OPT_DEMAND)
 
     # The serving log is already handed to us for MoE stage detection, and it is the same log the demand parser reads.
     if not demand_json and kernel_signature_log and _safe_is_file(kernel_signature_log):
@@ -411,40 +583,10 @@ def run(
     log.info("kernelforge gemm-tune starting (artifact layout v%s)", __version__)
     log.info("Model: %s, Framework: %s, Precision: %s", model_path, framework, precision)
 
-    # GPU preflight
     if not skip_gpu_check:
-        gpus = check_gpu_status()
-        if gpus:
-            gpu_check_path = output_path / "gpu_check.json"
-            gpu_check_path.write_text(
-                json.dumps(
-                    [{"gpu_id": g.gpu_id, "utilization": g.utilization, "busy": g.busy} for g in gpus], indent=2
-                ),
-                encoding="utf-8",
-            )
-            busy = [g for g in gpus if g.busy]
-            if busy:
-                log.warning(
-                    "GPUs appear busy: %s. Tuning may conflict with running workloads.",
-                    [g.gpu_id for g in busy],
-                )
+        _write_gpu_check(output_path)
 
-    # aiter tune/serve alignment preflight.
-    preflight_hard: list[str] = []
-    try:
-        from .aiter_preflight import collect as _aiter_collect
-
-        _pf = _aiter_collect()
-        (output_path / "aiter_preflight.json").write_text(json.dumps(_pf, indent=2), encoding="utf-8")
-        for _m in _pf["soft"]:
-            log.warning("aiter preflight: %s", _m)
-        for _m in _pf["hard"]:
-            log.warning("aiter preflight PROBLEM: %s", _m)
-        preflight_hard = list(_pf["hard"])
-        if _pf["aligned"]:
-            log.info("aiter preflight: serve aiter aligned with tuner root")
-    except Exception as _exc:  # noqa: BLE001 - unavailable diagnostics remain best-effort
-        log.debug("aiter preflight skipped: %s", _exc)
+    preflight_hard = _aiter_preflight_problems(output_path)
     if preflight_hard:
         raise click.ClickException("aiter preflight failed: " + "; ".join(preflight_hard))
 
@@ -453,36 +595,13 @@ def run(
         profile = analyze_model(model_path)
     except Exception as exc:  # noqa: BLE001 - model analysis is third-party
         log.error("Model analysis failed: %s", exc)
-        report_dict = {
-            "status": "failed",
-            "micro_decision": "failed",
-            "error": str(exc),
-            "error_class": type(exc).__name__,
-        }
-        output_path.mkdir(parents=True, exist_ok=True)
-        (output_path / "result.json").write_text(json.dumps(report_dict, indent=2), encoding="utf-8")
-        emit_result_json(report_dict)
-        raise SystemExit(2)
+        _exit_failed(output_path, error=str(exc), error_class=type(exc).__name__)
 
     # Compute token coverage.
     try:
-        tokens_clean = tokens.strip().strip("[](){}") if tokens else ""
-        explicit_tokens = (
-            [int(t.strip().strip("'\"")) for t in tokens_clean.split(",") if t.strip().strip("'\"")]
-            if tokens_clean
-            else None
-        )
+        explicit_tokens = _explicit_token_list(tokens)
     except ValueError as exc:
-        report_dict = {
-            "status": "failed",
-            "micro_decision": "failed",
-            "error": f"Invalid --tokens value: {exc}",
-            "error_class": "invalid_tokens",
-        }
-        output_path.mkdir(parents=True, exist_ok=True)
-        (output_path / "result.json").write_text(json.dumps(report_dict, indent=2), encoding="utf-8")
-        emit_result_json(report_dict)
-        raise SystemExit(2)
+        _exit_failed(output_path, error=f"Invalid --tokens value: {exc}", error_class="invalid_tokens")
     token_list = compute_token_coverage(conc=conc, explicit_tokens=explicit_tokens)
     log.info("Token coverage: %s", token_list)
 
@@ -525,36 +644,15 @@ def run(
         tuner_specs = selected
         if not tuner_specs:
             log.error("Requested tuner %r not applicable for this model/framework", tuner)
-            report_dict = {
-                "status": "failed",
-                "micro_decision": "failed",
-                "error": f"Tuner {tuner!r} not applicable",
-                "error_class": "tuner_not_applicable",
-            }
-            output_path.mkdir(parents=True, exist_ok=True)
-            (output_path / "result.json").write_text(json.dumps(report_dict, indent=2), encoding="utf-8")
-            emit_result_json(report_dict)
-            raise SystemExit(2)
-
-    # Cut the routed set to what the caller's share pays for, in priority order so the dropped ones rank last. A
-    # tuner the router skipped books no time, so it is not what the share buys: it keeps its place in the plan for
-    # its skip reason but never displaces a tuner that could have run. 0 means no ceiling was supplied.
-    if max_tuners > 0:
-        kept = []
-        dropped = []
-        runnable_so_far = 0
-        for spec in tuner_specs:
-            if spec.should_run:
-                runnable_so_far += 1
-            over_ceiling = spec.should_run and runnable_so_far > max_tuners
-            (dropped if over_ceiling else kept).append(spec)
-        if dropped:
-            log.info(
-                "gemm-tune: lane ceiling of %d tuner(s); dropping %s",
-                max_tuners,
-                ", ".join(spec.name for spec in dropped),
+            _exit_failed(
+                output_path,
+                error=f"Tuner {tuner!r} not applicable",
+                error_class="tuner_not_applicable",
             )
-        tuner_specs = kept
+
+    # 0 means no ceiling was supplied.
+    if max_tuners > 0:
+        tuner_specs = _cap_tuner_count(tuner_specs, max_tuners)
 
     # Write plan
     plan = {
@@ -625,68 +723,14 @@ def run(
         gpu_ids=gpu_ids,
     )
 
-    # Execute tuners
-    results = []
-    skipped = []
     global_deadline = (start_time + global_timeout) if global_timeout > 0 else float("inf")
-
-    for spec in tuner_specs:
-        if not spec.should_run:
-            skipped.append((spec.name, spec.skip_reason or "unknown"))
-            log.info("SKIP %s: %s", spec.name, spec.skip_reason)
-            continue
-
-        # A fallback tuner runs only when no earlier non-fallback tuner produced a deployable candidate.
-        if spec.fallback and any(is_candidate(r) for r in results):
-            skipped.append((spec.name, "fallback not needed: an earlier tuner produced a candidate"))
-            log.info("SKIP %s: an earlier tuner already produced a candidate", spec.name)
-            continue
-
-        # Check global timeout
-        remaining = global_deadline - time.time()
-        if remaining <= 0:
-            skipped.append((spec.name, "global timeout exceeded"))
-            log.warning("SKIP %s: global timeout exceeded", spec.name)
-            continue
-
-        # Cap per-tuner timeout to remaining global budget
-        effective_timeout = min(timeout, int(remaining)) if global_timeout > 0 else timeout
-
-        # Create per-tuner context copy to avoid shared state mutation.
-        import dataclasses
-
-        tuner_ctx = dataclasses.replace(ctx, timeout_s=effective_timeout)
-        if spec.token_hint:
-            log.info(
-                "%s: tuning the %d token count(s) the log shows it serving (%s), not the run's full coverage",
-                spec.name,
-                len(spec.token_hint),
-                spec.token_hint[:8],
-            )
-            # ``tokens`` bounds the sweep; ``token_hint`` marks the observed allowed set.
-            tuner_ctx = dataclasses.replace(
-                tuner_ctx,
-                tokens=list(spec.token_hint),
-                token_hint=list(spec.token_hint),
-            )
-
-        log.info("Running tuner: %s (timeout=%ds)", spec.name, effective_timeout)
-        tuner_instance = _create_tuner(spec.name, tuner_ctx)
-        if tuner_instance is None:
-            log.error("Unknown tuner: %s", spec.name)
-            continue
-
-        result = tuner_instance.execute()
-        results.append(result)
-        log.info(
-            "Tuner %s finished: status=%s, improved=%s/%d, best_speedup=%s, elapsed=%.1fs",
-            spec.name,
-            result.status,
-            "unmeasured" if result.improved_shapes is None else result.improved_shapes,
-            result.total_shapes,
-            "unmeasured" if result.best_micro_speedup is None else f"{result.best_micro_speedup:.3f}x",
-            result.elapsed_s,
-        )
+    results, skipped = _execute_tuners(
+        tuner_specs,
+        ctx,
+        timeout=timeout,
+        global_timeout=global_timeout,
+        global_deadline=global_deadline,
+    )
 
     # Last, and only on what the selected tuners left behind: by now they have
     # all run, so a generated tuner cannot take time from one that would have
@@ -725,29 +769,22 @@ def run(
     report_path = write_report(report, output_path)
     log.info("Report written to %s", report_path)
 
-    # Ship a TuningArtifactManifest alongside the tuned CSV when a candidate was produced (provenance + trace linkage
-    # + weighted coverage + CSV hash so a consumer can decide reuse-vs-stale).
+    # Only when a candidate was produced: the manifest carries provenance + trace linkage + weighted coverage + the
+    # CSV hash, none of which mean anything without a tuned CSV to describe.
     if report.recommended_env:
-        try:
-            from .artifact_manifest import write_artifact_manifest
-
-            am_path = write_artifact_manifest(
-                report,
-                results,
-                output_path,
-                shape_manifest_path=shapes_manifest or None,
-                gpu_type=gpu_type,
-                framework=framework,
-                precision=precision,
-                quant_type=quant_type,
-                tp=tp,
-                tuner_lib_version=kb_current_lib,
-                generated_at=report.finished_at,
-            )
-            report.artifacts["tuning_artifact_manifest"] = str(am_path)
-            log.info("Tuning artifact manifest written to %s", am_path)
-        except Exception as exc:  # noqa: BLE001 — manifest must never break tuning
-            log.warning("artifact manifest write failed (non-fatal): %s", exc)
+        _write_artifact_manifest(
+            report,
+            results,
+            output_path,
+            shape_manifest_path=shapes_manifest or None,
+            gpu_type=gpu_type,
+            framework=framework,
+            precision=precision,
+            quant_type=quant_type,
+            tp=tp,
+            tuner_lib_version=kb_current_lib,
+            generated_at=report.finished_at,
+        )
 
     # Emit sentinel-wrapped JSON to stdout
     emit_result_json(report.to_dict())
@@ -798,10 +835,10 @@ def evidence(logs: tuple[str, ...], out: str, verbose: bool):
 @click.option("--quant-type", default="auto")
 @click.option("--gpu-type", default="auto", help="GPU type: auto (detect via rocminfo), mi300x, mi355x, gfx942, ...")
 @click.option("--kernel-signature-log", default="")
-@click.option("--untuned-csv", default="")
+@click.option(OPT_UNTUNED_CSV, default="")
 @click.option("--shapes-json", default="")
-@click.option("--shapes-manifest", default="", help="Weighted TraceShapeManifest JSON (Hyperloom WP-1)")
-@click.option("--demand", "demand_json", default="", help="demand.json from `evidence`")
+@click.option(OPT_SHAPES_MANIFEST, default="", help="Weighted TraceShapeManifest JSON (Hyperloom WP-1)")
+@click.option(OPT_DEMAND, "demand_json", default="", help="demand.json from `evidence`")
 @click.option("--tunableop-input", default="")
 def plan(
     model_path: str,

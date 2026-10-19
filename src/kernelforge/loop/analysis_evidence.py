@@ -560,6 +560,8 @@ class AnalysisEvidenceMixin:
             and self._active_analysis_context.analysis_commit == context.analysis_commit
         ):
             context = self._active_analysis_context
+        # After the bundle is applied, which rebuilds the context: the roofline standing is the planner's view too.
+        context = self._with_ceiling_standing(context)
         orchestration_root = Path(self.ic.workspace_dir).resolve() / "forge_experiments" / "orchestration"
         latest_lesson_path = ""
         if getattr(self, "lessons", None) is not None:

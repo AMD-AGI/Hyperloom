@@ -246,6 +246,29 @@ def test_parse_sglang_entrypoint(tmp_path):
     assert r.envs.get("SGLANG_USE_AITER") == "1"
 
 
+def test_parse_sglang_serve_entrypoint_as_the_cookbook_writes_it(tmp_path):
+    text = (
+        "export SGLANG_OPT_USE_TOPK_V2=1\n"
+        "sglang serve \\\n"
+        "  --trust-remote-code \\\n"
+        "  --model-path amd/GLM-5.2-MXFP4 \\\n"
+        "  --tp 4 \\\n"
+        "  --kv-cache-dtype fp8_e4m3 \\\n"
+        "  --host 0.0.0.0 \\\n"
+        "  --port 30000\n"
+    )
+    r = parse_reference_script(_write(tmp_path, text), framework="sglang")
+    assert r.server_args == "--trust-remote-code --tp 4 --kv-cache-dtype fp8_e4m3"
+    assert r.model == "GLM-5.2-MXFP4"
+    assert r.envs == {"SGLANG_OPT_USE_TOPK_V2": "1"}
+
+
+def test_parse_serve_entrypoint_does_not_take_the_cli_name_for_the_model(tmp_path):
+    r = parse_reference_script(_write(tmp_path, "sglang serve --model-path=$MODEL --tp 8\n"), framework="sglang")
+    assert r.server_args == "--tp 8"
+    assert r.model is None
+
+
 def test_render_round_trip(tmp_path):
     src = _write(tmp_path, _M3_RECIPE)
     r = parse_reference_script(src, framework="vllm")
@@ -358,26 +381,10 @@ def test_render_no_model_no_export():
     assert "export MODEL=" not in text
 
 
-def test_render_enablement_has_strict_mode():
-    text = render_reference_script(
-        framework="sglang",
-        server_args="",
-        setup_commands=["pip install vllm==0.24"],
-    )
+def test_render_enablement_runs_its_setup_script_under_strict_mode():
+    text = render_reference_script(framework="sglang", server_args="", setup_script="enablement_setup.sh")
     assert "set -euo pipefail" in text
-    assert "pip install vllm==0.24" in text
-
-
-def test_render_patches_emit_apply_function():
-    text = render_reference_script(
-        framework="sglang",
-        server_args="",
-        rounds=[{"patches": ["patches/001_fix.patch"], "artifacts": []}],
-        framework_root="/sgl-workspace/sglang",
-    )
-    assert "export FRAMEWORK_ROOT=/sgl-workspace/sglang" in text
-    assert "apply_patch patches/001_fix.patch" in text
-    assert "for lvl in 1 0 2" in text
+    assert 'bash "$SCRIPT_DIR"/enablement_setup.sh' in text
 
 
 def test_render_enablement_script_is_valid_bash(tmp_path):
@@ -386,25 +393,12 @@ def test_render_enablement_script_is_valid_bash(tmp_path):
         server_args="--tp 8",
         envs={"VLLM_ROCM_USE_AITER": "1"},
         model="/models/M",
-        setup_commands=["pip install aiter==0.1.4"],
-        rounds=[{"patches": ["patches/001.patch"], "artifacts": []}],
-        framework_root="/sgl-workspace/sglang",
-        runtime="/session/enablement/stacks/sglang/s1/venv",
+        setup_script="enablement_setup.sh",
     )
     sh = tmp_path / "enablement_setting.sh"
     sh.write_text(text, encoding="utf-8")
     proc = subprocess.run(["bash", "-n", str(sh)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr
-
-
-def test_render_runtime_note_emitted():
-    text = render_reference_script(
-        framework="vllm",
-        server_args="",
-        runtime="/session/enablement/stacks/vllm/spec-1/venv",
-    )
-    assert "isolated attempt venv" in text
-    assert "/session/enablement/stacks/vllm/spec-1/venv" in text
 
 
 def test_render_base_params_unchanged_without_enablement():
@@ -417,22 +411,20 @@ def test_render_base_params_unchanged_without_enablement():
         gpu_type="mi300x",
     )
     assert "set -euo pipefail" not in text
-    assert "apply_patch" not in text
+    assert "enablement_setup.sh" not in text
     assert "export TP=8" in text
     assert "vllm serve $MODEL" in text
     assert "VLLM_ROCM_USE_AITER" in text
 
 
 def test_render_round_trip_with_enablement_params(tmp_path):
-    """Inserting setup/patch lines does not confuse parse_reference_script."""
+    """The setup call does not confuse parse_reference_script, so the script still re-feeds."""
     text = render_reference_script(
         framework="sglang",
         server_args="--tp 8",
         envs={"VLLM_ROCM_USE_AITER": "1"},
         model="/models/M",
-        setup_commands=["pip install vllm==0.24"],
-        rounds=[{"patches": ["patches/fix.patch"], "artifacts": []}],
-        framework_root="/sgl-workspace/sglang",
+        setup_script="enablement_setup.sh",
     )
     sh = tmp_path / "enablement_setting.sh"
     sh.write_text(text, encoding="utf-8")
@@ -448,16 +440,15 @@ def test_resolve_no_flag_returns_empty(monkeypatch):
     """No --reference-script → empty tuple, nothing attempted."""
     monkeypatch.setenv("FRAMEWORK", "vllm")
     args = SimpleNamespace(reference_script=None)
-    assert _resolve_reference_recipe(args) == ("", {}, "", "", {})
+    assert _resolve_reference_recipe(args) == ("", {}, "", {})
 
 
 def test_resolve_valid_flag_is_used(tmp_path, monkeypatch):
     monkeypatch.setenv("FRAMEWORK", "vllm")
     src = _write(tmp_path, _M3_RECIPE, "explicit.sh")
     args = SimpleNamespace(reference_script=src)
-    server_args, envs, model, source, controls = _resolve_reference_recipe(args)
+    server_args, envs, model, controls = _resolve_reference_recipe(args)
     assert "--block-size 128" in server_args
-    assert source == src
 
 
 def test_resolve_unreadable_flag_raises_system_exit(monkeypatch):

@@ -38,14 +38,6 @@ class TestRegistryEntry:
 
 
 class TestConfigResolution:
-    def test_baseline_and_profile_resolve_to_the_custom_yamls(self, monkeypatch):
-        from hyperloom.orchestrator.actions.executors._workload_envs import default_baseline_config
-        from hyperloom.orchestrator.actions.executors.profile import _default_profile_config
-
-        monkeypatch.setenv("FRAMEWORK", "custom")
-        assert default_baseline_config().name == "baseline_custom.yaml"
-        assert _default_profile_config().name == "profile_custom.yaml"
-
     @pytest.mark.parametrize("stem", ["baseline", "profile"])
     def test_the_custom_configs_declare_the_scriptable_contract(self, stem):
         """A serving default here would boot a server for a server-less run."""

@@ -17,8 +17,6 @@ from typing import Any
 
 from ._kernel_agent_tool import (
     HandlerResult,
-    _kernel_agent_root_error,
-    _kernel_agent_tool_path,
     _run_subprocess,
     _shape_tool_result,
 )
@@ -87,13 +85,13 @@ def _tracelens_root_error(root: Path) -> str | None:
     if not root.is_dir():
         return (
             f"TraceLens root not found: {root}; run "
-            "src/hyperloom/agents/kernel/scripts/install.sh "
+            "src/hyperloom/inference_optimizer/assets/install.sh "
             "or set TRACELENS_ROOT to an existing checkout"
         )
     if not (root / ".git").exists():
         return (
             f"TraceLens root incomplete (not a git checkout): {root}; "
-            "run src/hyperloom/agents/kernel/scripts/install.sh "
+            "run src/hyperloom/inference_optimizer/assets/install.sh "
             "or set TRACELENS_ROOT to a valid checkout"
         )
     return None
@@ -122,11 +120,7 @@ def _maybe_selfheal_tracelens_root(root: Path, *, log: Any = None) -> None:
     if not is_default:
         return  # explicit non-default override: never auto-clone
     try:
-        tool = _kernel_agent_tool_path("tracelens_analysis.py")
-        tools_dir = str(tool.parent)
-        if tools_dir not in sys.path:
-            sys.path.insert(0, tools_dir)
-        import tracelens_analysis as _tla  # type: ignore[import-not-found]
+        from hyperloom.orchestrator.trace_analysis import tracelens_analysis as _tla
 
         heal_log = getattr(log, "warning", None) or (lambda *_a, **_k: None)
         heal_log("trace_analyze: TraceLens root %s missing; attempting self-heal", root)
@@ -369,6 +363,10 @@ def _enrich_candidates_artifact(
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+_TRACELENS_ANALYSIS_MODULE = "hyperloom.orchestrator.trace_analysis.tracelens_analysis"
+_BYPASS_TRACE_ANALYSIS_MODULE = "hyperloom.orchestrator.trace_analysis.bypass_trace_analysis"
+
+
 def _build_trace_analyze_cmd(
     payload: dict,
     *,
@@ -388,10 +386,10 @@ def _build_trace_analyze_cmd(
     """Assemble the trace-analysis tool argv (TraceLens or bypass); returns
     ``(cmd, steady_state_mode)`` so the caller can record discovery provenance."""
     # Both tools share the CLI surface below except ``--tracelens-root``.
-    tool_name = "bypass_trace_analysis.py" if is_bypass else "tracelens_analysis.py"
     cmd = [
-        "python3" if is_bypass else sys.executable,
-        str(_kernel_agent_tool_path(tool_name)),
+        sys.executable,
+        "-m",
+        _BYPASS_TRACE_ANALYSIS_MODULE if is_bypass else _TRACELENS_ANALYSIS_MODULE,
         "--trace-input",
         str(trace_input),
         "--session-id",
@@ -413,19 +411,15 @@ def _build_trace_analyze_cmd(
             state_tp = 0
         if state_tp > 0:
             cmd += ["--tensor-parallel-size", str(state_tp)]
-    if model_name:
-        cmd += ["--model-name", str(model_name)]
-    if framework:
-        cmd += ["--framework", str(framework)]
-    if target_platform:
-        cmd += ["--target-platform", str(target_platform)]
-    if analysis_mode:
-        cmd += ["--analysis-mode", str(analysis_mode)]
+    for flag, val in (
+        ("--model-name", model_name),
+        ("--framework", framework),
+        ("--target-platform", target_platform),
+        ("--analysis-mode", analysis_mode),
+    ):
+        if val:
+            cmd += [flag, str(val)]
 
-    # Model identity informs source resolution for every framework, not only the
-    # diffusion roofline. Keep the standard payload > state > environment
-    # precedence so ordinary sglang/vLLM production requests carry config.json
-    # selectors into the bounded model context.
     model_path = str(
         payload.get("model_path") or getattr(state, "model_path", "") or os.environ.get("MODEL_PATH") or ""
     ).strip()
@@ -438,11 +432,6 @@ def _build_trace_analyze_cmd(
         cmd += ["--precision", precision]
 
     if scriptable:
-        # --skip-split is TraceLens-only; the bypass backend has its own windowing.
-        if not is_bypass:
-            cmd += ["--skip-split"]
-        # Forward the denoise-step count for per-step roofline timings.
-        # Priority: payload override > baseline workload metadata.
         num_denoise = payload.get("num_denoise_steps") or workload.get("num_inference_steps")
         if num_denoise not in (None, ""):
             try:
@@ -450,9 +439,9 @@ def _build_trace_analyze_cmd(
                     cmd += ["--num-denoise-steps", str(int(num_denoise))]
             except (TypeError, ValueError):
                 pass
-    else:
-        # Splitter workload hints. Priority: payload override > baseline metadata
-        # > drop the flag.
+
+    if not scriptable and not is_bypass:
+        cmd += ["--split-llm-inference"]
         split_conc = payload.get("split_conc") or workload.get("conc")
         if split_conc not in (None, ""):
             cmd += ["--split-conc", str(split_conc).strip()]
@@ -468,13 +457,14 @@ def _build_trace_analyze_cmd(
     )
     if capture_folder:
         cmd += ["--capture-folder", str(capture_folder)]
-    # Forward TraceLens splitter steady-state mode via payload or env.
-    steady_state_mode = payload.get("steady_state_mode") or os.environ.get("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "")
-    steady_state_mode = str(steady_state_mode).strip()
+    if scriptable and not is_bypass:
+        steady_state_mode = "generic"
+    else:
+        steady_state_mode = str(
+            payload.get("steady_state_mode") or os.environ.get("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "")
+        ).strip()
     if steady_state_mode:
         cmd += ["--steady-state-mode", steady_state_mode]
-    # Post-kernel-opt roofline writes a separate report so it never overwrites
-    # the baseline kernel_roofline.json.
     roofline_output_name = str(payload.get("roofline_output_name") or "").strip()
     if roofline_output_name:
         cmd += ["--roofline-output-name", roofline_output_name]
@@ -601,9 +591,6 @@ async def trace_analyze_handler(
     trace_input = payload.get("trace_input") or payload.get("trace_dir")
     if not trace_input:
         return {"status": "failed", "error": "missing 'trace_input' in payload"}
-    root_err = _kernel_agent_root_error()
-    if root_err:
-        return {"status": "failed", "error_class": "kernel_agent_root_missing", "error": root_err}
     # Backfill workload context from SharedState when Orchestration omits it.
     from ...state.shared_state import SharedState
 

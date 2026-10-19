@@ -15,6 +15,7 @@ from hyperloom.inference_optimizer.canonical_fingerprint import canonical_finger
 
 __all__ = [
     "coerce_args",
+    "content_fingerprint",
     "controls_of",
     "effective_fingerprint",
     "is_executable",
@@ -106,3 +107,9 @@ def effective_fingerprint(
     if _args_mode_of(base_args_mode) == "replace":
         identity["args_mode"] = "replace"
     return canonical_fingerprint(extra_args, extra_envs, **identity)
+
+
+def content_fingerprint(proposal: Mapping[str, Any]) -> str:
+    """Fingerprint the change a ``proposal_set`` entry or grid row asks for, independent of its name and stack."""
+    fields = normalize_proposal(proposal)
+    return effective_fingerprint(fields["extra_args"], fields["extra_envs"], controls=controls_of(fields))

@@ -12,6 +12,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.env_safety import redact_secret_env_values
+
 from ...session.sbd_v6 import read_timeline_events
 from ..recorder.baseline_event import anchoring_eval_from_timeline
 from ..session_facts import architecture_block, grading_block, workload_signature
@@ -91,6 +93,8 @@ def collect_v6_metadata(
         "framework_version": str(workload.get("framework_version") or ""),
         "gpu_type": str(workload.get("gpu_type") or ""),
         "tp": workload.get("tp"),
+        "ep": state.get("ep"),
+        "compute_partition": dict(state.get("compute_partition") or {}),
         "conc": workload.get("conc"),
         "isl": workload.get("isl"),
         "osl": workload.get("osl"),
@@ -147,7 +151,22 @@ def collect_v6_metadata(
     if grading:
         projected["grading"] = grading
     metadata = _overlay_recorded(projected, recorded)
+    _mask_launch_env(metadata)
     return {"exported_at_utc": exported_at_utc, **metadata, "warnings": list(warnings)}
+
+
+def _mask_launch_env(metadata: dict[str, Any]) -> None:
+    """Mask credentials in the final ``task_config.launch_env``, in place.
+
+    Runs after the recorded overlay, because a fragment recorded before the
+    recorder masked its values still holds them in plaintext. A value that is
+    not a mapping cannot be masked key by key, so it is dropped.
+    """
+    task_config = metadata.get("task_config")
+    if not isinstance(task_config, dict) or "launch_env" not in task_config:
+        return
+    launch_env = task_config["launch_env"]
+    task_config["launch_env"] = redact_secret_env_values(launch_env) if isinstance(launch_env, dict) else {}
 
 
 def _projected_total_elapsed_minutes(session: dict[str, Any], state: dict[str, Any]) -> float:
@@ -487,6 +506,8 @@ def _validation_from_timeline(timeline: list[dict[str, Any]], source_ids: list[s
         # ``current_best``: a revalidation moves the cumulative figure without re-promoting the recipe.
         "perf": _graded_axes(settled.get("perf")),
         "attributed_gain_pct": _optional_float(ledger.get("attributed_gain_pct")) or 0.0,
+        "attributed_gain_pct_excluding_fixes": _optional_float(ledger.get("attributed_gain_pct_excluding_fixes")),
+        "by_keep_reason": dict(_mapping(_mapping(ledger.get("adoptions")).get("by_keep_reason"))),
         "unattributed_gain_pct": _optional_float(ledger.get("unattributed_gain_pct")) or 0.0,
         "reconciliation_gap_pct": _optional_float(ledger.get("reconciliation_gap_pct")),
         "validated_total_gain_pct": _optional_float(ledger.get("validated_total_gain_pct")),

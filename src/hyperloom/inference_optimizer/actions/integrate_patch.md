@@ -12,7 +12,7 @@ for this orchestration.
 `integrate_patch` is a **deterministic Python executor**, not an LLM
 sub-agent. It is the orchestrator's serving-lane-locked integration
 point — only this action is allowed to mutate
-`INFERENCEX_PATH` / `framework_source_roots`. Specialists produce
+`framework_source_roots`. Specialists produce
 patch *files*; this action produces *outcomes*.
 
 ## When to delegate
@@ -61,10 +61,12 @@ delegate{
    `patches_written` (when params.patches omitted).
 2. Acquire `server_lifecycle + workspace_mutation + benchmark_lane`
    triple-lock.
-3. `git apply -p1` each patch against the framework source roots
-   (`INFERENCEX_PATH` or `framework_source_roots[0]`). On conflict,
-   retry once with `git apply -3 -p1`. On second failure, mark the
-   patch as REVERT-immediate (record `apply_failed`).
+3. `git apply` each patch against the framework source roots
+   (`framework_source_roots[0]`), at the first `-p` level that checks
+   cleanly. A patch that does not apply, and is not already in the tree,
+   is REVERT-immediate (record `apply_failed`); a failed apply leaves the
+   tree untouched, and the revert resets it to the HEAD recorded before
+   the attempt.
 4. Layer `config_changes` onto the server-launch env.
 5. Stop the server this session launched, by the pid and process group it
    recorded; wait for VRAM to drain. No pattern-based kill runs.

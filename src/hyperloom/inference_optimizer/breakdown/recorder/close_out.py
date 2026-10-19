@@ -254,38 +254,6 @@ def record_final_recipe(
     )
 
 
-def record_geak_candidate(
-    session_dir: Path | str | None,
-    *,
-    pending: Mapping[str, Any] | None = None,
-    revalidation_pending: Any = None,
-) -> None:
-    """Record where the GEAK candidate stood when the session wound down.
-
-    A slot awaiting a rebench settles after the kernel event that ran its
-    attempts has closed. ``pending`` is empty both when the session had no
-    candidate and when the slot was released; ``status`` tells the two apart.
-    """
-    if not session_dir:
-        trace_skip(reason="no session_dir", section=SECTION)
-        return
-    slot = dict(pending or {})
-    _write(
-        session_dir,
-        {
-            "geak_candidate": {
-                "revalidation_pending": bool(revalidation_pending),
-                "status": str(slot.get("status") or ""),
-                "revalidation_error": str(slot.get("revalidation_error") or "") or None,
-                "revalidation_error_class": str(slot.get("revalidation_error_class") or "") or None,
-                "self_reported_gain_pct": to_float(slot.get("self_reported_gain_pct")),
-                "self_reported_tput": to_float(slot.get("self_reported_tput")),
-                "self_reported_basis": str(slot.get("self_reported_basis") or ""),
-            }
-        },
-    )
-
-
 def record_roofline_progress(
     session_dir: Path | str | None,
     *,
@@ -633,7 +601,6 @@ __all__ = [
     "record_close_safety_net",
     "record_close_settled",
     "record_close_step",
-    "record_geak_candidate",
     "record_roofline_progress",
     "record_write_back_opened",
     "record_write_back_settled",

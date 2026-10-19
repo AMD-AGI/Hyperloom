@@ -567,7 +567,7 @@ class CodexBackend:
         """Map the generic runtime sandbox into a Codex SDK preset."""
         if self.runtime.sandbox_mode == "bypass" or self.bypass_sandbox:
             return sdk.Sandbox.full_access
-        elif spec.writable and self.runtime.sandbox_mode != "read-only":
+        if spec.writable and self.runtime.sandbox_mode != "read-only":
             return sdk.Sandbox.workspace_write
         return sdk.Sandbox.read_only
 

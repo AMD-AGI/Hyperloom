@@ -25,7 +25,7 @@ Blocking means one of three things, and the repo treats them as equal:
 |---|---|
 | Wrong behaviour | correctness, crash, data or precision error, compatibility break, security, performance regression |
 | Desync | an operator-observable change the PR description never states; PR title or description does not match the diff at the current head |
-| Contract violation | the diff breaks a rule `AGENTS.md` states outright, and the finding names both the bullet it breaks and the module in this repo that already owns the concern |
+| Contract violation | the diff breaks a rule `AGENTS.md` states outright, and the finding names the bullet it breaks plus, where that bullet is about ownership, the module in this repo that already owns the concern |
 
 The third kind is the narrow one. "This could be simpler", "I would have put it elsewhere" and
 "consider extracting a helper" are reviewer taste and are deleted like anything else. What
@@ -78,15 +78,15 @@ Keep the `$WORK` it prints. Read `diff.txt` and `body.txt` before going on.
 | `comments.txt` | existing review and issue comments — do not repeat a point already made (Step 7) |
 | `testfiles.txt` | changed paths under a `tests/` directory |
 | `docfiles.txt` | changed docs, prompts and `.md`/`.rst` paths — empty beside a `src/` change is X3's shape |
-| `openprs.txt` | other open PRs touching the same files — conflicting in-flight work |
+| `openprs.txt` | other open PRs touching the same files — conflicting in-flight work; a `# PARTIAL:` line names what was never compared, reported as `SKIPPED: V4` (rule V4) |
 
 ## Step 1b — Select the rules
 
 Open the index at the top of [`rules.md`](rules.md) and take every row whose trigger matches
 `files.txt` and a skim of `diff.txt`. Write the union of their rule ids into `$WORK/rules.txt`, one
-per line, then read only those bodies. **Never read `rules.md` whole** — it holds 53 rules across 9
+per line, then read only those bodies. **Never read `rules.md` whole** — it holds 75 rules across 10
 families, and a reviewer told to attend to all of them attends to none. Match rows generously: a row
-you are unsure about is taken, never dropped. V1-V6 and X2 are on every list.
+you are unsure about is taken, never dropped. V1-V8 and X2 are on every list.
 
 ## Step 2 — Semantic understanding
 
@@ -128,10 +128,10 @@ A docs-, CI- or test-only diff touches nothing under `src/`: write one
 `NONE -- <reason naming what it does touch>` line.
 
 Tiers come from [`references/tiers.md`](references/tiers.md): a table of the backbone files, and
-Q1–Q4 for anything not in it, including new files. Q1b is the one that bites —
-`KERNEL_REQUEST_HANDLERS` and the action catalogue route by string, so a renamed kind or action
-passes every import check, passes lint, passes collection, and fails only hours into a session
-when that request arrives. Grep the string, not the symbol.
+Q1–Q4 for anything not in it, including new files. Q1b is the one that bites — `Coordinator`
+holds 24 collaborators as explicit attributes, so a rename passes every import check, passes
+lint, passes collection, and fails only hours into a session when that phase is entered.
+Grep the class name, not just the symbol.
 
 ## Step 4 — Rule checklist
 
@@ -159,8 +159,8 @@ a diff that reads well hides its defects. One line per check into `$WORK/ai_diag
 "clean" alone is not an answer; a reason that names nothing in the diff is not one either.
 
 1. `wiring` — **both directions.** Every first-party import the diff adds resolves against the merge
-   base. Every name-resolved entry (`KERNEL_REQUEST_HANDLERS`, `ACTION_CATALOGUE`,
-   action-surface names) has a module and class that exist. Then the inverse:
+   base. Every name-resolved entry (`KERNEL_REQUEST_HANDLERS`,
+   `ACTION_CATALOGUE`, action-surface names) has a module and class that exist. Then the inverse:
    an added identifier whose head-tree occurrence count is 1 is a writer with no reader; a removed
    caller whose helper survives is a reader with no writer. Both are blocking.
 2. `twins` — **Twin divergence.** Mirrored code half-adapted: sibling executors, per-framework patchers

@@ -118,6 +118,7 @@ def _validate_restore_record(record: Mapping[str, Any]) -> None:
     if backup is not None and (not isinstance(backup, str) or not backup or not Path(backup).is_absolute()):
         raise ValueError(f"invalid backup path: {target}")
     action = record.get("revert_action")
+    # ``restore_old`` is no longer written; a ledger an older build left behind still has to restore.
     if action not in (None, "restore", "restore_old", "delete"):
         raise ValueError(f"invalid restore action: {target}")
     if (action == "delete" and existed) or (action in ("restore", "restore_old") and not existed):

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
@@ -10,7 +9,6 @@ import argparse
 import json
 import logging
 import os
-import sys
 from pathlib import Path
 
 from hyperloom.inference_optimizer.breakdown.reporters import render_session_report
@@ -22,6 +20,7 @@ log = logging.getLogger("dump_session_report")
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse command-line arguments for the session-report CLI."""
     p = argparse.ArgumentParser(
+        prog="hyperloom session report",
         description="Render a Hyperloom session_breakdown.json to markdown.",
     )
     p.add_argument("--input", "-i", required=True, type=Path, help="Path to session_breakdown.json")
@@ -78,7 +77,3 @@ def main(argv: list[str] | None = None) -> int:
         (out_path.parent / "session_report_llm_raw.txt").write_text(result.llm_raw_response or "")
         log.info("wrote debug dumps next to %s", out_path)
     return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

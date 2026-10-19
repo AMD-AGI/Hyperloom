@@ -12,9 +12,10 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable
 
 from hyperloom.common.llm_attribution import sdk_env_overlay
+from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL
 
 
-DEFAULT_MODEL = "claude-opus-5"
+DEFAULT_MODEL = DEFAULT_CLAUDE_MODEL
 DEFAULT_ALLOWED_TOOLS = ["Read", "Write", "Edit", "Bash"]
 DEFAULT_MAX_TURNS = 240  # Quark workflow has 4 STOPs + validator + eval
 

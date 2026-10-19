@@ -10,16 +10,57 @@ which is what registers them with pytest.
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 
 @pytest.fixture(autouse=True)
 def _isolate_session_layout_env(monkeypatch, tmp_path_factory):
-    """Drop the session-dir pin and point MULTI_NODE_STATE_FILE at a missing sentinel so tests run single-node."""
+    """Isolate a test from the host: no session-dir pin, single-node, no live GPU power sampling, and a sandbox aiter.
+
+    Sampling follows ``amd-smi``, so on a GPU host every watchdog-driven test would otherwise query the real cards.
+    Tests of the sampler turn it back on themselves.
+
+    The serving-.so preflight and the kernel lane's cache invalidation move aiter's compiled modules aside, so inside
+    an image that ships aiter they would strip the host install. Every discovery route (``find_spec``, the env
+    overrides, the probe paths) is pointed at a sandbox; tests that model an install plant their own on top of it.
+    """
     monkeypatch.delenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", raising=False)
+    monkeypatch.setenv("HYPERLOOM_GPU_POWER_SAMPLING", "0")
     mn_state_sentinel = tmp_path_factory.mktemp("mn_state") / "missing_state.json"
     monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(mn_state_sentinel))
     monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
+
+    aiter_sandbox = tmp_path_factory.mktemp("aiter_sandbox")
+    (aiter_sandbox / "aiter" / "jit").mkdir(parents=True)
+    (aiter_sandbox / "aiter" / "__init__.py").write_text(
+        "raise ImportError('tests resolve aiter to a sandbox and must not import it')\n", encoding="utf-8"
+    )
+    monkeypatch.delitem(sys.modules, "aiter", raising=False)
+    monkeypatch.syspath_prepend(str(aiter_sandbox))
+    for name in ("AITER_JIT_DIR", "INFERENCE_OPTIMIZER_AITER_JIT_DIR", "VLLM_VENV_ROOT"):
+        monkeypatch.delenv(name, raising=False)
+    # Not imported here: that would pull the executors (and their third-party deps) into every test, including the
+    # packaging lint that runs on bare pytest. A test that reaches the module has imported it by collection time, and
+    # the sandbox already wins over the probe paths for discovery.
+    aiter_jit = sys.modules.get("hyperloom.orchestrator.actions.executors._aiter_jit")
+    if aiter_jit is not None:
+        monkeypatch.setattr(aiter_jit, "AITER_JIT_PROBE_PATHS", ())
+    _isolate_framework_trees(monkeypatch)
+
+
+def _isolate_framework_trees(monkeypatch) -> None:
+    """Leave a test no host framework checkout to stash, reset or seal unless it names one itself.
+
+    The CLI writes ``FRAMEWORK`` and ``FRAMEWORK_REPO_PATH`` into ``os.environ``, so one CLI test
+    would otherwise point every later test at the host's live tree.
+    """
+    from hyperloom.orchestrator.kernel import campaign_baseline
+
+    monkeypatch.setattr(campaign_baseline, "_package_repository", lambda _name: None)
+    for name in ("FRAMEWORK", "FRAMEWORK_REPO_PATH", "INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS"):
+        monkeypatch.delenv(name, raising=False)
 
 
 class NoLaunchBackendInstalled(BaseException):

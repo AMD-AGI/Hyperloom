@@ -159,7 +159,7 @@ export. Five blocks: `session`, `task_config`, `grading`, `versions` and
 | `tick_count`       | int     | Number of Coordinator ticks.                                                                  |
 | `image`            | string \| null | Container image fully-qualified, if configured.                                       |
 | `image_id`         | string \| null | The image reference without its registry path.                                        |
-| `recovery`         | object  | Crash / interruption / resume history: `recovered`, `crash_count`, `crash_timestamps`, `degraded_mode`, `resume_pending_revalidation`, `last_tick_exception`. |
+| `recovery`         | object  | Crash / interruption / resume history: `recovered`, `crash_count`, `crash_timestamps`, `degraded_mode`, `resume_pending_revalidation` (true while the optimization stack holds entries no validation has covered yet), `last_tick_exception`. |
 
 Why the run ended is an outcome rather than an identity, and lives on
 `outcome.stop_reason`.
@@ -169,7 +169,14 @@ GPU type, shape, precision, launch overrides, and the optimization objective
 (gain %, target throughput, baseline-relative, or time-only). Consumers should
 treat the `objective.kind` enum as the canonical optimisation goal. Its
 `architecture` sub-object is the structural model summary parsed from the
-model's own `config.json`, and is empty on non-transformers models.
+model's own `config.json`, and is empty on non-transformers models. Its
+`launch_env` keeps every operator-supplied variable name, but a credential's
+value (an API key, secret, password, passphrase, private or access key, auth,
+signature or header variable, or a name with a `TOKEN` segment) is written as
+`[REDACTED]`. Tuning knobs such as `MAX_NUM_BATCHED_TOKENS` or `*_PER_TOKEN`
+keep their values, with any recognizable credential inside a value masked.
+Replaying a session takes credentials from its own environment, never from the
+breakdown.
 
 `metadata.grading` — which axis this session was configured to grade on:
 `benchmark_mode` (`agentx` or `synthetic`), `objective`, and the `tput_guard`
@@ -237,9 +244,9 @@ publishing projections read, and it is grouped as:
   `e2e_norm_intvty_p90`, `output_tput_per_gpu`;
 * the comparability inputs a candidate/anchor pair is refused on —
   `duration_seconds`, `request_error_rate`. A pair is graded only when both
-  replayed a window of the same length and the candidate dropped no more
-  requests than its anchor, so a verdict published without them could not be
-  re-derived from the record;
+  replayed a window of the same length and the candidate's error rate exceeds
+  its anchor's by no more than `ERROR_RATE_SLACK_PCT` percentage points, so a
+  verdict published without them could not be re-derived from the record;
 * the latency detail — `ttft_p50_ms`, `ttft_p90_ms`, `tpot_p50_ms`,
   `tpot_p90_ms`;
 * reported for continuity and part of no verdict — `total_throughput`,
@@ -374,7 +381,7 @@ The following example shows a complete `session_breakdown.json` for a finished G
       "schema_version": "hyperloom.session_breakdown.v6.0",
       "hyperloom": "a1b2c3d",
       "framework": "sglang",
-      "framework_version": "0.5.20",
+      "framework_version": "0.5.21",
       "tools": {
         "geak": { "tool": "geak", "root_dir": "/opt/geak", "commit": "9f8e7d6", "version": "0.4.2" }
       }
@@ -394,8 +401,8 @@ The following example shows a complete `session_breakdown.json` for a finished G
       "session_dir": "/workspace/hyperloom/GLM-5-FP8/20260517T113000Z",
       "user_data_path": "/workspace",
       "tick_count": 89,
-      "image": "lmsysorg/sglang-rocm:v0.5.20-rocm10-mi30x-20260920",
-      "image_id": "sglang-rocm:v0.5.20-rocm10-mi30x-20260920",
+      "image": "lmsysorg/sglang-rocm:v0.5.21-rocm10-mi30x-20261008",
+      "image_id": "sglang-rocm:v0.5.21-rocm10-mi30x-20261008",
       "recovery": {
         "recovered": false,
         "crash_count": 0,
@@ -407,7 +414,7 @@ The following example shows a complete `session_breakdown.json` for a finished G
     },
     "task_config": {
       "framework_name": "sglang",
-      "framework_version": "0.5.20",
+      "framework_version": "0.5.21",
       "model_name": "GLM-5-FP8",
       "model_path": "/models/GLM-5-FP8",
       "gpu_type": "mi355x",
@@ -589,7 +596,7 @@ The following example shows a complete `session_breakdown.json` for a finished G
 * **Offline and historical**: See
   [Hyperloom operator scripts](operator-scripts.md):
   ```bash
-  python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \
+  python -m hyperloom session breakdown \
       --session-dir /path/to/session \
       [--output /tmp/breakdown.json]
   ```

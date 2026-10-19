@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .build_actions import BuildResult, FrameworkRuntime, TargetedBuildAction
+from .build_utils import ROCM_CONSTRAINTS_FILE
 
 log = logging.getLogger(__name__)
 
@@ -254,7 +255,7 @@ def run_aiter_build(
         probe_torch_abi,
         run_argv,
         sort_tags_desc,
-        write_rocm_torch_constraints,
+        write_rocm_constraints,
     )
 
     root = Path(attempt_root)
@@ -339,14 +340,14 @@ def run_aiter_build(
     except Exception as exc:  # noqa: BLE001
         return _fail("compile_error", f"workspace preparation failed: {exc!r}")
 
-    # 4. ROCm torch constraint file -------------------------------------------
-    constraint_path = root / "torch_constraints.txt"
+    # 4. ROCm constraint file -------------------------------------------------
+    constraint_path = root / ROCM_CONSTRAINTS_FILE
     try:
-        write_rocm_torch_constraints(attempt_py, str(constraint_path), run=_run)
+        write_rocm_constraints(attempt_py, str(constraint_path), replacing="amd-aiter", run=_run)
     except AbiMismatchError as exc:
         return _fail("abi_mismatch", str(exc))
     except Exception as exc:  # noqa: BLE001
-        return _fail("preflight_toolchain", f"torch constraint probe failed: {exc!r}")
+        return _fail("preflight_toolchain", f"ROCm constraint probe failed: {exc!r}")
 
     # 5. pip install (pinned ref or tag-desc autoselect) ----------------------
     gpu_arch = str(action.gpu_arch or "").strip()
@@ -498,7 +499,7 @@ def run_sgl_kernel_build(
         check_rocm_toolchain_alignment,
         probe_torch_abi,
         run_argv,
-        write_rocm_torch_constraints,
+        write_rocm_constraints,
     )
 
     root = Path(attempt_root)
@@ -569,13 +570,13 @@ def run_sgl_kernel_build(
     except Exception as exc:  # noqa: BLE001
         return _fail("compile_error", f"workspace preparation failed: {exc!r}")
 
-    constraint_path = root / "torch_constraints.txt"
+    constraint_path = root / ROCM_CONSTRAINTS_FILE
     try:
-        write_rocm_torch_constraints(attempt_py, str(constraint_path), run=_run)
+        write_rocm_constraints(attempt_py, str(constraint_path), replacing="sglang-kernel", run=_run)
     except AbiMismatchError as exc:
         return _fail("abi_mismatch", str(exc))
     except Exception as exc:  # noqa: BLE001
-        return _fail("preflight_toolchain", f"torch constraint probe failed: {exc!r}")
+        return _fail("preflight_toolchain", f"ROCm constraint probe failed: {exc!r}")
 
     sgl_kernel_dir = worktree_dir / "sgl-kernel"
 
@@ -715,7 +716,7 @@ def run_vllm_source_build(
         check_rocm_toolchain_alignment,
         probe_torch_abi,
         run_argv,
-        write_rocm_torch_constraints,
+        write_rocm_constraints,
     )
 
     root = Path(attempt_root)
@@ -800,13 +801,13 @@ def run_vllm_source_build(
     except Exception as exc:  # noqa: BLE001
         return _fail("compile_error", f"workspace preparation failed: {exc!r}")
 
-    constraint_path = root / "torch_constraints.txt"
+    constraint_path = root / ROCM_CONSTRAINTS_FILE
     try:
-        write_rocm_torch_constraints(attempt_py, str(constraint_path), run=_run)
+        write_rocm_constraints(attempt_py, str(constraint_path), replacing="vllm", run=_run)
     except AbiMismatchError as exc:
         return _fail("abi_mismatch", str(exc))
     except Exception as exc:  # noqa: BLE001
-        return _fail("preflight_toolchain", f"torch constraint probe failed: {exc!r}")
+        return _fail("preflight_toolchain", f"ROCm constraint probe failed: {exc!r}")
 
     # vLLM's ROCm setup.py asserts ``CUDA_HOME is not set`` and reuses it as the toolchain root even on ROCm.
     _rocm_root = (
@@ -860,11 +861,17 @@ def run_vllm_source_build(
         build_log.write_text(pip_res.stderr_tail or pip_res.stdout_tail, encoding="utf-8")
         return _fail("compile_error", f"vLLM source pip install failed (rc={pip_res.returncode})")
 
+    # The probes import vllm the way the runtime will: the editable finder runs
+    # after sys.path, where the base image's system-site vllm would otherwise win.
+    pythonpath_prefixes = (str(worktree_dir),)
+    pythonpath = _os.pathsep.join(p for p in (*pythonpath_prefixes, _os.environ.get("PYTHONPATH", "")) if p)
+    probe_env = {**_os.environ, "PYTHONPATH": pythonpath}
+
     # ROCm platform verify (port of verify_vllm_rocm from installer)
     vllm_verify = run_argv(
         [attempt_py, "-c", _VERIFY_VLLM_ROCM_SCRIPT],
         cwd=str(root),
-        env=dict(_os.environ),
+        env=probe_env,
         timeout_sec=120,
         run=_run,
     )
@@ -879,7 +886,7 @@ def run_vllm_source_build(
     load_probe = run_argv(
         [attempt_py, "-c", load_probe_script],
         cwd=str(root),
-        env=dict(_os.environ),
+        env=probe_env,
         timeout_sec=60,
         run=_run,
     )
@@ -911,7 +918,7 @@ def run_vllm_source_build(
 
     # vLLM source overlay: prepend the worktree so the attempt venv's vllm wins.
     runtime = FrameworkRuntime(
-        pythonpath_prefixes=(str(worktree_dir),),
+        pythonpath_prefixes=pythonpath_prefixes,
         entrypoint_bin_dir=str(venv_dir / "bin") if venv_dir else "",
         runtime_python_exe=attempt_py,
         runtime_env={"PYTORCH_ROCM_ARCH": gpu_arch},

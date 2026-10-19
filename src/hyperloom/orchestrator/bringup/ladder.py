@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
 from typing import Any
 
 from hyperloom.common import failure_signature as rules
@@ -17,6 +18,7 @@ from hyperloom.common.bringup import (
     TerminalFrame,
     failure_digest,
     normalise_file_rel,
+    redact,
     render_excerpt,
 )
 from hyperloom.orchestrator.bringup.trees import TreeIdentity, tree_roots
@@ -86,7 +88,28 @@ _LADDER: tuple[LadderStage, ...] = tuple(LadderStage)
 # Traceback structure, not failure classification: keying a failure needs the
 # frame's line number, which the enablement table's frame regex does not capture.
 _TB_FRAME = re.compile(r'File "([^"]+)", line (\d+), in (\S+)')
-_EXC_LINE = re.compile(r"^([A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception|Exit|Interrupt))\b", re.MULTILINE)
+_TB_HEADER = "Traceback (most recent call last):"
+_EXC_LINE = re.compile(r"^([A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception|Exit|Interrupt))\b")
+# Multi-process servers tag every child line with its role and pid and route
+# tracebacks through their logger, interleaving several processes' tracebacks.
+_LOG_LINE = re.compile(
+    r"^(?:\((?P<proc>[^()\s]+ pid=\d+)\)[ \t]?)?"
+    r"(?:(?P<level>DEBUG|INFO|WARNING|ERROR|CRITICAL) [\d-]+ [\d:.,]+ \[[^\]\n]*\] ?)?"
+    r"(?P<body>.*)$",
+    re.MULTILINE,
+)
+# A traceback logged at these levels was caught, and the process carried on.
+_CAUGHT_LEVELS = frozenset({"DEBUG", "INFO", "WARNING"})
+
+
+@dataclass(frozen=True)
+class _Traceback:
+    """One printed traceback: its innermost frame, where that frame starts, its exception."""
+
+    anchor: int
+    frame: tuple[str, str] | None = None
+    exc_type: str = ""
+    exc_line: str = ""
 
 
 def _next_stage(stage: LadderStage) -> LadderStage:
@@ -118,14 +141,49 @@ def _witness_progress(text: str) -> tuple[LadderStage | None, dict[str, str]]:
     return deepest, witness
 
 
-def _terminal_frame(text: str, roots: Sequence[str]) -> TerminalFrame | None:
-    """Extract the innermost traceback frame and its exception type."""
-    frames = _TB_FRAME.findall(text)
-    exc_matches = _EXC_LINE.findall(text)
-    exc_type = exc_matches[-1] if exc_matches else ""
-    if not frames:
-        return TerminalFrame(exc_type=exc_type) if exc_type else None
-    path, line, _func = frames[-1]
+def _root_traceback(text: str) -> _Traceback | None:
+    """Return the traceback the failure started from.
+
+    Python prints a chained cause before the exception it caused, and a
+    multi-process server prints a child's traceback before the parent's re-raise,
+    so the root is the first traceback that names a frame, even one whose header
+    was cut off. A bare exception line counts only when no traceback names a frame.
+    Lines logged below ERROR are skipped.
+    """
+    open_by_proc: dict[str, _Traceback] = {}
+    bare: _Traceback | None = None
+    for line in _LOG_LINE.finditer(text):
+        if line.group("level") in _CAUGHT_LEVELS:
+            continue
+        start, proc, body = line.start(), line.group("proc") or "", line.group("body").rstrip()
+        if body.startswith(_TB_HEADER):
+            open_by_proc[proc] = _Traceback(anchor=start)
+            continue
+        frame = _TB_FRAME.search(body)
+        if frame is not None:
+            block = open_by_proc.get(proc) or _Traceback(anchor=start)
+            open_by_proc[proc] = replace(block, anchor=start, frame=(frame.group(1), frame.group(2)))
+            continue
+        exc = _EXC_LINE.match(body)
+        if exc is None:
+            continue
+        block = open_by_proc.pop(proc, None)
+        if block is not None and block.frame is not None:
+            return replace(block, exc_type=exc.group(1), exc_line=body)
+        bare = _Traceback(anchor=start, exc_type=exc.group(1), exc_line=body)
+    unterminated = [block for block in open_by_proc.values() if block.frame is not None]
+    if unterminated:
+        return min(unterminated, key=lambda block: block.anchor)
+    return bare
+
+
+def _terminal_frame(root: _Traceback | None, roots: Sequence[str]) -> TerminalFrame | None:
+    """Return the root traceback's innermost frame and its exception type."""
+    if root is None:
+        return None
+    if root.frame is None:
+        return TerminalFrame(exc_type=root.exc_type)
+    path, line = root.frame
     file_rel = normalise_file_rel(path, roots)
     module = file_rel
     if module.endswith(".py"):
@@ -133,11 +191,15 @@ def _terminal_frame(text: str, roots: Sequence[str]) -> TerminalFrame | None:
     if module.endswith("/__init__"):
         module = module[: -len("/__init__")]
     module = module.replace("/", ".").lstrip(".")
-    return TerminalFrame(exc_type=exc_type, module=module, file_rel=file_rel, line=int(line))
+    return TerminalFrame(exc_type=root.exc_type, module=module, file_rel=file_rel, line=int(line))
 
 
-def _anchor_for(text: str, signature: rules.FailureSignature) -> int:
-    """Return the character offset the excerpt window should be anchored at."""
+def _failure_site(text: str, signature: rules.FailureSignature, root: _Traceback | None) -> tuple[int, str]:
+    """Return where the excerpt is anchored and the line that states the failure.
+
+    The anchor keeps the frames above a rule match in the excerpt, where the
+    offending file is read from; the line alone keys which failure it is.
+    """
     head = signature.raw_excerpt.strip()[:40] if signature.is_actionable else ""
     if head:
         # ``raw_excerpt`` is whitespace-collapsed; match it back with a
@@ -145,11 +207,10 @@ def _anchor_for(text: str, signature: rules.FailureSignature) -> int:
         pattern = r"\s+".join(re.escape(tok) for tok in head.split())
         found = re.search(pattern, text)
         if found is not None:
-            return found.start()
-    frames = list(_TB_FRAME.finditer(text))
-    if frames:
-        return frames[-1].start()
-    return len(text)
+            return found.start(), text[found.start() :].partition("\n")[0].strip()
+    if root is None:
+        return len(text), ""
+    return root.anchor, root.exc_line
 
 
 def _classified_streams(
@@ -229,7 +290,8 @@ def classify(
         )
 
     stream_name, text, signature = chosen
-    frame = _terminal_frame(text, roots)
+    root = _root_traceback(text)
+    frame = _terminal_frame(root, roots)
     has_failure = signature.is_actionable or frame is not None
 
     if not has_failure:
@@ -251,9 +313,10 @@ def classify(
         # the rule is normally placed.
         mapped = _next_stage(witnessed)
 
+    anchor, failure_line = _failure_site(text, signature, root)
     excerpt: Excerpt = render_excerpt(
         text,
-        anchor=_anchor_for(text, signature),
+        anchor=anchor,
         width=EXCERPT_WIDTH,
         stream=stream_name,
         redact_roots=redact_roots,
@@ -266,6 +329,7 @@ def classify(
         progress_witness=progress_witness or None,
         terminal_frame=frame,
         matched_marker=signature.kind if signature.is_actionable else "",
+        failure_text=redact(failure_line, roots=redact_roots),
         excerpt=excerpt,
         evidence_ref=stream_name,
         server_elapsed_sec=server_elapsed_sec,

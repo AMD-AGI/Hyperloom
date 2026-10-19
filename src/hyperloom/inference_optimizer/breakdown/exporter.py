@@ -192,7 +192,7 @@ def build(session_dir: Path | str) -> dict[str, Any]:
     if isinstance(metadata, dict):
         metadata["warnings"] = list(warnings)
 
-    breakdown = {
+    return {
         "schema_version": schema_version,
         "exported_at_utc": exported_at,
         "exporter_version": EXPORTER_VERSION,
@@ -203,7 +203,6 @@ def build(session_dir: Path | str) -> dict[str, Any]:
         "critic": v6_critic,
         "robustness": v6_robustness,
     }
-    return breakdown
 
 
 def _load_assembled(
@@ -296,6 +295,9 @@ def write_breakdown_json(
     payload = json.dumps(breakdown, indent=2, sort_keys=True, default=_json_default)
     atomic_write_text(target, payload)
     log.info("session_breakdown: wrote %s (%d bytes)", target, len(payload))
+    from ..experience_collect import collect_session
+
+    collect_session(sd, breakdown)
     return target
 
 
@@ -469,7 +471,7 @@ def write_minimal_final_report(
     current_best = state.get("current_best") or {}
     cb_action = current_best.get("action") or "-"
     cb_tput = current_best.get("tput")
-    # Framework-aware primary metric: serving shows tok/s/GPU, scriptable xDiT shows per-image latency e2el_mean_ms
+    # Framework-aware primary metric: serving shows tok/s, scriptable xDiT shows per-image latency e2el_mean_ms
     # (ms).
     baseline_metric_s = framework_registry.format_primary_metric(framework, baseline_tput, precision=2)
     cb_metric_s = (

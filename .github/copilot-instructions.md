@@ -15,10 +15,12 @@ Advisory review. Flag only what static gates can't.
   exists. Point to the existing one and ask to extend it.
 - **Size and complexity**: a unit past a trigger in the style guide's
   [Size and complexity](../docs/contributing/style-guide.md#size-and-complexity), which
-  owns the numbers and the exceptions. No linter covers this (Ruff runs `E`/`F`/`W`;
-  Pylint is `--errors-only`), so review is the only place it surfaces. Name the seam to
-  split on, not just the line count, and don't ask for cleanup of an already oversized
-  function merely because the change edits it — but do flag a newly crossed threshold, or
+  owns the numbers and the exceptions. The `code-metrics` CI job fails the gated limits on
+  the files a change touches — including the one case that blocks, a unit the change adds or
+  whose complexity it raises past 20 — so review covers the triggers below them, and a
+  `baseline-raise` override, which needs the reason in the PR description. Name
+  the seam to split on, not just the line count, and don't ask for cleanup of an already
+  oversized function merely because the change edits it — but do flag a newly crossed threshold, or
   branches and responsibilities added to a unit already over.
 - **Cohesion and coupling**: a module that has acquired a second job, a responsibility
   moved to the wrong layer, a dependency pointing back up the layers, a new import cycle,
@@ -33,6 +35,11 @@ Advisory review. Flag only what static gates can't.
   blocking calls on the event loop.
 - **Unused abstraction**: a flag, strategy, or generic helper added for a single caller,
   or a parameter always passed the same value.
+- **Code shape**: a private name or `_internal` module used across packages, a
+  per-framework branch at a consumer instead of a field on the owner's spec, a raw string
+  compared where an Enum exists, a flag argument, a positional tuple or dict bag returned
+  instead of a named type, or a query-named function with a side effect. `AGENTS.md`
+  *Code shape* states the principles.
 - **Contract & cache invariants**: a change that silently alters an external contract
   or breaks a documented rule.
 - **Test strategy**: exported behaviour — a CLI flag, public function, persisted schema,

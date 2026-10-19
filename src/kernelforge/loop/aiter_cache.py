@@ -85,7 +85,6 @@ def configure_aiter_cache_isolation(
     _atomic_write_json(
         owner_file,
         {
-            "schema_version": 1,
             "owner_pid": owner_pid,
             "created_unix": time.time(),
             "aiter_root_dir": str(aiter_root_dir),
@@ -295,7 +294,6 @@ def activate_aiter_cache_for_sources(
     _atomic_write_json(
         owner_file,
         {
-            "schema_version": 1,
             "owner_pid": owner_pid,
             "created_unix": existing_owner.get("created_unix", now),
             "last_used_unix": now,

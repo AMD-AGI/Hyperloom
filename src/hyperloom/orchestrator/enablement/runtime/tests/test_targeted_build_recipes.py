@@ -139,10 +139,8 @@ def _make_aiter_run(
             return _completed(stdout=str(root) + "\n")
         if "sys.exit(0" in cmd:
             return _completed(returncode=0 if hip_ok else 2)
-        if "argv[1]" in cmd:
-            if argv and argv[-1] == "triton":
-                return _completed(stdout=triton_ver + "\n" if triton_ver else "")
-            return _completed(stdout=torch_ver + "\n")
+        if "named={'torch'" in cmd:
+            return _completed(stdout=f"torch=={torch_ver}\n" + (f"triton=={triton_ver}\n" if triton_ver else ""))
         if "pip" in cmd and "install" in cmd:
             return _completed(returncode=0 if pip_ok else 1, stderr="" if pip_ok else "error: compile failed")
         if "import aiter" in cmd:
@@ -230,10 +228,8 @@ def _make_rocm_run(
             return _completed(stdout="/opt/rocm\n")
         if "sys.exit(0" in cmd:
             return _completed(returncode=0 if hip_ok else 2)
-        if "argv[1]" in cmd:
-            if argv and argv[-1] == "triton":
-                return _completed(stdout=triton_ver + "\n" if triton_ver else "")
-            return _completed(stdout=torch_ver + "\n")
+        if "named={'torch'" in cmd:
+            return _completed(stdout=f"torch=={torch_ver}\n" + (f"triton=={triton_ver}\n" if triton_ver else ""))
         if "pip" in cmd and "install" in cmd:
             return _completed(returncode=0 if pip_ok else 1, stderr="" if pip_ok else "error: compile failed\n")
         if "setup_rocm.py" in cmd:
@@ -249,7 +245,7 @@ def _make_rocm_run(
     return _run
 
 
-# AITER: success
+# AITER success
 
 
 def test_run_aiter_build_success_pinned_ref(monkeypatch, tmp_path):
@@ -690,10 +686,17 @@ def test_vllm_source_build_success(monkeypatch, tmp_path):
     (venv / "bin").mkdir(parents=True)
     _patch_isolation(monkeypatch, wt, venv)
 
+    calls: list[list[str]] = []
+    rocm_run = _make_rocm_run()
+
+    def _run(argv, **kw):
+        calls.append([str(a) for a in argv])
+        return rocm_run(argv, **kw)
+
     result = run_vllm_source_build(
         _vllm_action(),
         str(tmp_path / "attempt"),
-        run=_make_rocm_run(),
+        run=_run,
         disk_preflight_fn=_noop_disk,
     )
     assert result.ok is True
@@ -701,6 +704,11 @@ def test_vllm_source_build_success(monkeypatch, tmp_path):
     assert result.installed_versions.get("arch") == "gfx950"
     assert result.runtime.pythonpath_prefixes
     assert result.runtime.entrypoint_bin_dir
+    # The image's vLLM carries a ROCm label; pinning it would forbid the build it is replaced by.
+    (pin_probe,) = [c for c in calls if any("named={'torch'" in a for a in c)]
+    assert pin_probe[-1] == "vllm"
+    install = next(c for c in calls if "pip" in c and "install" in c)
+    assert str(tmp_path / "attempt" / "rocm_constraints.txt") in install
 
 
 def test_vllm_source_build_missing_gpu_arch_fails(monkeypatch, tmp_path):
@@ -862,6 +870,33 @@ def test_vllm_source_load_probe_failure_returns_boot_failed(monkeypatch, tmp_pat
     assert result.ok is False
     assert result.failure_class == "boot_failed"
     assert "load probe" in result.failure_summary
+
+
+def test_vllm_source_probes_import_vllm_the_way_the_runtime_does(monkeypatch, tmp_path):
+    """The probes lead PYTHONPATH with the runtime's prefix, so a system-site vllm cannot shadow the build."""
+    wt = tmp_path / "wt"
+    (wt / "vllm").mkdir(parents=True)
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    _patch_isolation(monkeypatch, wt, venv)
+    monkeypatch.setenv("PYTHONPATH", "/site/fix")
+    probe_envs = []
+
+    def _run(argv, **kw):
+        if "import vllm" in " ".join(str(a) for a in argv):
+            probe_envs.append(kw["env"])
+        return _make_rocm_run()(argv, **kw)
+
+    result = run_vllm_source_build(
+        _vllm_action(),
+        str(tmp_path / "attempt"),
+        run=_run,
+        disk_preflight_fn=_noop_disk,
+    )
+    assert result.ok is True
+    assert len(probe_envs) == 2
+    expected = os.pathsep.join([*result.runtime.pythonpath_prefixes, "/site/fix"])
+    assert all(env["PYTHONPATH"] == expected for env in probe_envs)
 
 
 def test_vllm_source_pr_url_in_installed_versions(monkeypatch, tmp_path):

@@ -19,7 +19,6 @@ import sys
 from typing import Any
 
 from kernelforge.llm.workspace_policy import (
-    PROTECTED_DIRS,
     PROTECTED_GLOBS,
     is_protected_path,
     protected_path_inventory,
@@ -42,9 +41,6 @@ from kernelforge.mcp_server.tools.bench import (
 
 # Files the agent must NOT modify: the test harness / driver that MEASURES the kernel.
 _DEFAULT_PROTECTED_GLOBS = list(PROTECTED_GLOBS)
-
-# Directories that belong to the benchmark harness rather than the kernel implementation.
-_DEFAULT_PROTECTED_DIRS = set(PROTECTED_DIRS)
 
 # Tools that modify files on disk (subject to the protected-file deny + counted as edits when they target the kernel).
 _EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
@@ -95,11 +91,15 @@ _INLINE_WRITE_INTENT = re.compile(
     r"|\bPath\s*\([^)]*\)\.(?:rename|replace)\s*\(",
     re.IGNORECASE,
 )
+# ``shutil`` helpers that write their path arguments; ``rmtree`` writes only the first.
+_SHUTIL_WRITE_CALLS = frozenset({"copy", "copy2", "copyfile", "move", "rmtree"})
 _BASH_REDIRECT_TARGET = re.compile(r"(?:^|\s)(?<!<)(?:\d*>>?|\d*>\||&>>?)\s*([^\s;&|]+)")
 _PYTHON_HEREDOC = re.compile(
     r"<<\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?\s*\n(.*?)\n\1(?:\s|$)",
     re.DOTALL,
 )
+# The interpreter a heredoc is fed to, as it appears on the line that opens the document.
+_HEREDOC_PYTHON_VERB = re.compile(r"(?:^|\s)(?:[A-Za-z0-9_./-]*/)?python(?:\d+(?:\.\d+)*)?(?:\s|$)")
 _PYTHON_COMMAND_PREFIX = re.compile(
     r"(?<![A-Za-z0-9_])(?:[A-Za-z0-9_./-]*/)?python"
     r"(?:\d+(?:\.\d+)*)?\s+"
@@ -226,6 +226,61 @@ def _python_command_payloads(command: str) -> list[tuple[str, int, int]]:
     return payloads
 
 
+def _heredoc_payloads(command: str) -> list[tuple[str, int, int]]:
+    """Extract every heredoc body with its span, as ``(source, start, end)``.
+
+    A heredoc the surrounding line does not feed to an interpreter yields an
+    empty source: there is no program to parse, but its span is still reported
+    so the caller blanks the document instead of scanning it as shell text.
+    """
+    payloads: list[tuple[str, int, int]] = []
+    for match in _PYTHON_HEREDOC.finditer(command):
+        line_start = command.rfind("\n", 0, match.start()) + 1
+        prefix = command[line_start : match.start()]
+        source = match.group(2) if _HEREDOC_PYTHON_VERB.search(prefix) else ""
+        payloads.append((source, match.start(), match.end()))
+    return payloads
+
+
+def _blank_heredocs(text: str, spans: Sequence[tuple[int, int]]) -> str:
+    """Blank heredoc bodies, keeping their newlines.
+
+    A heredoc body occupies whole lines of the command, so the newlines around
+    it are the command's own: dropping them would join the line before the
+    ``<<`` to the line after the terminator.
+    """
+    if not spans:
+        return text
+    chars = list(text)
+    for start, end in spans:
+        for index in range(start, end):
+            if chars[index] != "\n":
+                chars[index] = " "
+    return "".join(chars)
+
+
+def _blank_quoted_payloads(text: str, spans: Sequence[tuple[int, int]]) -> str:
+    """Blank quoted payloads whole, newlines included.
+
+    A ``python -c`` program sits inside one quoted word, so its newlines belong
+    to the program, not to the shell. Keeping them would split the rest of the
+    command across lines and leave each half with an unmatched quote -- which is
+    how a write verb gets separated from the protected path it names.
+    """
+    if not spans:
+        return text
+    chars = list(text)
+    for start, end in spans:
+        chars[start:end] = " " * (end - start)
+    return "".join(chars)
+
+
+def _is_disposable_redirect_target(raw: str) -> bool:
+    """Whether a redirect destination is a scratch sink that no protected file can hide behind."""
+    target = raw.strip().strip("'\"")
+    return not target or target == "/dev/null" or target.startswith(("/tmp/", "$tmp", "${tmp"))
+
+
 # Max times the Stop hook will BLOCK a stop for an unrestored protected-harness change before it gives up, allows the
 # stop, and hands off to the outer loop's force-REVERT.
 _MAX_STOP_BLOCKS = 3
@@ -243,6 +298,131 @@ class _ProtectedFileState:
     error: str = ""
 
 
+def _fold_literal_path(node: ast.AST | None, constants: dict[str, str]) -> str | None:
+    """Fold an expression into the literal path it names, or None when it names none.
+
+    ``constants`` carries the names already bound to a literal path earlier in
+    the same module, so a script that assigns its output path once and writes
+    through the name still resolves.
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.Name):
+        return constants.get(node.id)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        left = _fold_literal_path(node.left, constants)
+        right = _fold_literal_path(node.right, constants)
+        return str(Path(left) / right) if left is not None and right is not None else None
+    if isinstance(node, ast.Call):
+        return _fold_literal_path_call(node, constants)
+    return None
+
+
+def _fold_literal_path_call(node: ast.Call, constants: dict[str, str]) -> str | None:
+    """Fold the call shapes that still name a literal path: ``Path``, ``.resolve``, ``os.path.join``."""
+    if isinstance(node.func, ast.Name):
+        if node.func.id == "Path" and node.args:
+            return _fold_literal_path(node.args[0], constants)
+        return None
+    if not isinstance(node.func, ast.Attribute):
+        return None
+    if node.func.attr in {"resolve", "absolute"}:
+        return _fold_literal_path(node.func.value, constants)
+    if _is_os_path_join(node.func):
+        parts = [_fold_literal_path(arg, constants) for arg in node.args]
+        if parts and all(part is not None for part in parts):
+            return os.path.join(*(part for part in parts if part is not None))
+    return None
+
+
+def _is_os_path_join(func: ast.Attribute) -> bool:
+    """Whether an attribute call target is literally ``os.path.join``."""
+    return (
+        func.attr == "join"
+        and isinstance(func.value, ast.Attribute)
+        and func.value.attr == "path"
+        and isinstance(func.value.value, ast.Name)
+        and func.value.value.id == "os"
+    )
+
+
+def _bind_literal_path(node: ast.Assign | ast.AnnAssign, constants: dict[str, str]) -> None:
+    """Bind each name this assignment targets to the literal path it was given."""
+    value = _fold_literal_path(node.value, constants)
+    if value is None:
+        return
+    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+    for target in targets:
+        if isinstance(target, ast.Name):
+            constants[target.id] = value
+
+
+def _open_write_targets(node: ast.Call, constants: dict[str, str]) -> list[ast.AST | None] | None:
+    """Nodes naming what an ``open``-family call writes, or None when it opens nothing for writing.
+
+    A ``[None]`` return says the call writes somewhere the analysis could not
+    name -- the mode itself did not resolve, so the path cannot be cleared.
+    """
+    is_builtin_open = isinstance(node.func, ast.Name) and node.func.id == "open"
+    is_io_open = (
+        isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "io"
+        and node.func.attr == "open"
+    )
+    is_path_open = isinstance(node.func, ast.Attribute) and node.func.attr == "open" and not is_io_open
+    if not (is_builtin_open or is_io_open or is_path_open):
+        return None
+    positional_mode_index = 0 if is_path_open else 1
+    mode_node = (
+        node.args[positional_mode_index]
+        if len(node.args) > positional_mode_index
+        else next((keyword.value for keyword in node.keywords if keyword.arg == "mode"), None)
+    )
+    mode = _fold_literal_path(mode_node, constants) if mode_node is not None else "r"
+    if mode is None:
+        return [None]
+    if not any(flag in mode for flag in "wax+"):
+        return None
+    return [node.func.value if is_path_open else (node.args[0] if node.args else None)]
+
+
+def _method_write_targets(node: ast.Call) -> list[ast.AST] | None:
+    """Nodes naming what a write method or ``shutil``/``os`` helper writes, or None when it writes nothing."""
+    if not isinstance(node.func, ast.Attribute):
+        return None
+    attribute = node.func.attr
+    receiver = node.func.value
+    if attribute in {"write_text", "write_bytes", "unlink", "rmdir"}:
+        return [receiver]
+    if isinstance(receiver, ast.Name) and receiver.id == "shutil" and attribute in _SHUTIL_WRITE_CALLS:
+        return list(node.args[:1] if attribute == "rmtree" else node.args[:2])
+    if isinstance(receiver, ast.Name) and receiver.id == "os" and attribute in {"rename", "replace"}:
+        return list(node.args[:2])
+    if attribute in {"rename", "replace"}:
+        return [receiver, *node.args[:1]]
+    return None
+
+
+class _WriteTargetSet:
+    """The paths one script writes, and whether any write stayed unresolved."""
+
+    def __init__(self) -> None:
+        self.paths: set[str] = set()
+        self.ambiguous = False
+        self.found_write = False
+
+    def record(self, nodes: Sequence[ast.AST | None], constants: dict[str, str]) -> None:
+        """Book one write call: its targets when they resolve, ambiguity when they do not."""
+        self.found_write = True
+        for node in nodes:
+            resolved = _fold_literal_path(node, constants)
+            if resolved is None:
+                self.ambiguous = True
+            else:
+                self.paths.add(resolved)
+
+
 def _python_write_targets(source: str) -> tuple[set[str], bool, bool]:
     """Return resolved write targets, ambiguity, and whether writes were found."""
     try:
@@ -251,127 +431,18 @@ def _python_write_targets(source: str) -> tuple[set[str], bool, bool]:
         return set(), True, bool(_INLINE_WRITE_INTENT.search(source))
 
     constants: dict[str, str] = {}
-    targets: set[str] = set()
-    ambiguous = False
-    found_write = False
-
-    def resolve(node: ast.AST | None) -> str | None:
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            return node.value
-        if isinstance(node, ast.Name):
-            return constants.get(node.id)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "Path" and node.args:
-            return resolve(node.args[0])
-        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
-            left = resolve(node.left)
-            right = resolve(node.right)
-            if left is not None and right is not None:
-                return str(Path(left) / right)
-        if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr in {"resolve", "absolute"}
-        ):
-            return resolve(node.func.value)
-        if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and isinstance(node.func.value, ast.Attribute)
-            and isinstance(node.func.value.value, ast.Name)
-            and node.func.value.value.id == "os"
-            and node.func.value.attr == "path"
-            and node.func.attr == "join"
-        ):
-            parts = [resolve(arg) for arg in node.args]
-            if parts and all(part is not None for part in parts):
-                return os.path.join(*(part for part in parts if part is not None))
-        return None
-
+    written = _WriteTargetSet()
     for node in ast.walk(tree):
         if isinstance(node, (ast.Assign, ast.AnnAssign)):
-            value = resolve(node.value)
-            names = node.targets if isinstance(node, ast.Assign) else [node.target]
-            if value is not None:
-                for target in names:
-                    if isinstance(target, ast.Name):
-                        constants[target.id] = value
+            _bind_literal_path(node, constants)
         if not isinstance(node, ast.Call):
             continue
-        is_builtin_open = isinstance(node.func, ast.Name) and node.func.id == "open"
-        is_io_open = (
-            isinstance(node.func, ast.Attribute)
-            and isinstance(node.func.value, ast.Name)
-            and node.func.value.id == "io"
-            and node.func.attr == "open"
-        )
-        is_path_open = isinstance(node.func, ast.Attribute) and node.func.attr == "open" and not is_io_open
-        if is_builtin_open or is_io_open or is_path_open:
-            positional_mode_index = 0 if is_path_open else 1
-            mode_node = (
-                node.args[positional_mode_index]
-                if len(node.args) > positional_mode_index
-                else next(
-                    (keyword.value for keyword in node.keywords if keyword.arg == "mode"),
-                    None,
-                )
-            )
-            mode = resolve(mode_node) if mode_node is not None else "r"
-            if mode is None:
-                found_write = True
-                ambiguous = True
-                continue
-            if not any(flag in mode for flag in "wax+"):
-                continue
-            found_write = True
-            target = resolve(node.func.value if is_path_open else (node.args[0] if node.args else None))
-            if target is None:
-                ambiguous = True
-            else:
-                targets.add(target)
-            continue
-        if isinstance(node.func, ast.Attribute):
-            attribute = node.func.attr
-            if attribute in {"write_text", "write_bytes", "unlink", "rmdir"}:
-                found_write = True
-                target = resolve(node.func.value)
-                if target is None:
-                    ambiguous = True
-                else:
-                    targets.add(target)
-            elif (
-                isinstance(node.func.value, ast.Name)
-                and node.func.value.id == "shutil"
-                and attribute in {"copy", "copy2", "copyfile", "move", "rmtree"}
-            ):
-                found_write = True
-                target_nodes = node.args[:1] if attribute == "rmtree" else node.args[:2]
-                for target_node in target_nodes:
-                    target = resolve(target_node)
-                    if target is None:
-                        ambiguous = True
-                    else:
-                        targets.add(target)
-            elif (
-                isinstance(node.func.value, ast.Name)
-                and node.func.value.id == "os"
-                and attribute in {"rename", "replace"}
-            ):
-                found_write = True
-                for target_node in node.args[:2]:
-                    target = resolve(target_node)
-                    if target is None:
-                        ambiguous = True
-                    else:
-                        targets.add(target)
-            elif attribute in {"rename", "replace"}:
-                found_write = True
-                for target_node in (node.func.value, *node.args[:1]):
-                    target = resolve(target_node)
-                    if target is None:
-                        ambiguous = True
-                    else:
-                        targets.add(target)
-    return targets, ambiguous, found_write
+        targets = _open_write_targets(node, constants)
+        if targets is None:
+            targets = _method_write_targets(node)
+        if targets is not None:
+            written.record(targets, constants)
+    return written.paths, written.ambiguous, written.found_write
 
 
 class InSessionGate:
@@ -566,19 +637,6 @@ class InSessionGate:
             exact_paths=self.protected_abs,
             extra_globs=self.protected_globs,
         )
-
-    def _is_protected_dir_path(self, fp: str) -> bool:
-        """Back-compatible directory-only protected-path probe."""
-
-        if not fp:
-            return False
-        path = Path(fp)
-        if self.workspace_root and path.is_absolute():
-            try:
-                path = path.resolve().relative_to(self.workspace_root)
-            except ValueError:
-                path = path.resolve()
-        return any(part.lower() in _DEFAULT_PROTECTED_DIRS for part in path.parts[:-1])
 
     def _iter_snapshot_paths(self) -> list[Path]:
         root = self.workspace_root
@@ -813,117 +871,100 @@ class InSessionGate:
         if remaining:
             raise RuntimeError(f"protected files remain inconsistent after restoration: {remaining}")
 
+    def _protected_basenames(self) -> set[str]:
+        """Basenames of every protected file.
+
+        Agents ``cd`` into the workspace, so a command's path arguments are
+        usually relative and would never resolve to the protected ABSPATH.
+        """
+        return {os.path.basename(path) for path in self.protected_abs} | {
+            Path(relative).name for relative in self._protected_snapshot
+        }
+
+    def _names_protected(self, raw: str) -> bool:
+        """Whether a command argument names a protected file, by path or by basename."""
+        path = _unquote(raw)
+        if not path:
+            return False
+        return self._is_protected(path) or os.path.basename(path) in self._protected_basenames()
+
+    def _protected_mention(self, text: str) -> str:
+        """Basename of the first protected file this text mentions anywhere, or \"\"."""
+        lowered = text.lower()
+        for path in (*self.protected_abs, *self._protected_snapshot):
+            if path.lower() in lowered or Path(path).name.lower() in lowered:
+                return Path(path).name
+        return ""
+
+    def _python_write_deny_reason(self, source: str) -> str:
+        """WHY an inline Python payload writes a protected file, or \"\"."""
+        targets, ambiguous, found_write = _python_write_targets(source)
+        if not found_write:
+            return ""
+        for target in targets:
+            if self._names_protected(target):
+                return f"inline write targets protected file '{os.path.basename(_unquote(target))}'"
+        if not ambiguous:
+            return ""
+        mentioned = self._protected_mention(source)
+        return f"inline write may modify protected file '{mentioned}'" if mentioned else ""
+
+    def _redirect_deny_reason(self, text: str) -> str:
+        """WHY an output redirection in this command writes a protected file, or \"\"."""
+        for match in _BASH_REDIRECT_TARGET.finditer(text):
+            target = match.group(1)
+            if _is_disposable_redirect_target(target):
+                continue
+            if self._names_protected(target):
+                return f"redirect writes protected path '{_unquote(target)}'"
+        return ""
+
+    def _write_verb_deny_reason(self, text: str) -> str:
+        """WHY a shell write verb in this command takes a protected file as a path argument, or \"\"."""
+        for verb, args in _simple_commands(text):
+            inplace_edit = verb in ("sed", "perl") and any(arg == "-i" or arg.startswith("-i") for arg in args)
+            if verb not in _BASH_WRITE_VERBS and not inplace_edit:
+                continue
+            for arg in args:
+                if arg.startswith("-"):
+                    continue
+                if self._names_protected(arg):
+                    return f"`{verb}` writes protected file '{os.path.basename(_unquote(arg))}'"
+        return ""
+
+    def _inline_write_deny_reason(self, text: str) -> str:
+        """WHY a non-Python in-process write may touch a protected file, or \"\".
+
+        The conservative textual backstop for the write APIs no shell verb and no
+        Python parse can reach.
+        """
+        if not _INLINE_WRITE_INTENT.search(text):
+            return ""
+        mentioned = self._protected_mention(text)
+        return f"inline write may modify protected file '{mentioned}'" if mentioned else ""
+
     def _bash_deny_reason(self, command: str) -> str:
         """WHY a Bash command is denied (a short trigger reason), or \"\" to allow."""
         if not command:
             return ""
-
-        def _safe_redirect_target(raw: str) -> bool:
-            target = raw.strip().strip("'\"")
-            return (
-                not target
-                or target == "/dev/null"
-                or target.startswith("/tmp/")
-                or target.startswith("$tmp")
-                or target.startswith("${tmp")
-            )
-
-        # A path names a protected file if it resolves to one OR shares a basename with one (agents `cd` into the
-        # workspace, so args are often relative and would not resolve to the protected ABSPATH).
-        protected_bases = {os.path.basename(p) for p in self.protected_abs}
-        protected_bases |= {Path(k).name for k in self._protected_snapshot}
-
-        def _names_protected(raw: str) -> bool:
-            p = _unquote(raw)
-            if not p:
-                return False
-            return self._is_protected(p) or os.path.basename(p) in protected_bases
-
-        def _protected_mention(source: str) -> str:
-            lowered = source.lower()
-            for path in self.protected_abs:
-                if path.lower() in lowered or Path(path).name.lower() in lowered:
-                    return Path(path).name
-            for relative in self._protected_snapshot:
-                if relative.lower() in lowered or Path(relative).name.lower() in lowered:
-                    return Path(relative).name
-            return ""
-
-        def _inspect_python(source: str) -> str:
-            targets, ambiguous, found_write = _python_write_targets(source)
-            if not found_write:
-                return ""
-            for target in targets:
-                if _names_protected(target):
-                    return f"inline write targets protected file '{os.path.basename(_unquote(target))}'"
-            if ambiguous:
-                mentioned = _protected_mention(source)
-                if mentioned:
-                    return f"inline write may modify protected file '{mentioned}'"
-            return ""
-
-        # Parse every Python payload independently.
+        # Every inline Python payload is parsed on its own, then blanked out so the
+        # textual scans below never read a quoted program as shell text.
         remainder = command
-        heredoc_matches = list(_PYTHON_HEREDOC.finditer(command))
-        for match in heredoc_matches:
-            line_start = command.rfind("\n", 0, match.start()) + 1
-            prefix = command[line_start : match.start()]
-            if re.search(
-                r"(?:^|\s)(?:[A-Za-z0-9_./-]*/)?python"
-                r"(?:\d+(?:\.\d+)*)?(?:\s|$)",
-                prefix,
-            ):
-                reason = _inspect_python(match.group(2))
+        for find_payloads, blank in (
+            (_heredoc_payloads, _blank_heredocs),
+            (_python_command_payloads, _blank_quoted_payloads),
+        ):
+            payloads = find_payloads(remainder)
+            for source, _start, _end in payloads:
+                reason = self._python_write_deny_reason(source)
                 if reason:
                     return reason
-        if heredoc_matches:
-            chars = list(remainder)
-            for match in heredoc_matches:
-                for index in range(match.start(), match.end()):
-                    if chars[index] != "\n":
-                        chars[index] = " "
-            remainder = "".join(chars)
-
-        python_c_payloads = _python_command_payloads(remainder)
-        for source, _start, _end in python_c_payloads:
-            reason = _inspect_python(source)
-            if reason:
-                return reason
-        if python_c_payloads:
-            chars = list(remainder)
-            for _source, start, end in python_c_payloads:
-                chars[start:end] = " " * (end - start)
-            remainder = "".join(chars)
-
-        # (1) Output redirection whose DESTINATION is a protected file.
-        for match in _BASH_REDIRECT_TARGET.finditer(remainder):
-            target = match.group(1)
-            if _safe_redirect_target(target):
-                continue
-            if _names_protected(target):
-                return f"redirect writes protected path '{_unquote(target)}'"
-
-        # (2) A shell write verb whose PATH ARGUMENT is a protected file.
-        for verb, args in _simple_commands(remainder):
-            inplace_edit = verb in ("sed", "perl") and any(a == "-i" or a.startswith("-i") for a in args)
-            if verb not in _BASH_WRITE_VERBS and not inplace_edit:
-                continue
-            for a in args:
-                if a.startswith("-"):
-                    continue
-                if _names_protected(a):
-                    return f"`{verb}` writes protected file '{os.path.basename(_unquote(a))}'"
-
-        # (3) Non-Python in-process writes still need a conservative textual backstop.
-        if _INLINE_WRITE_INTENT.search(remainder):
-            mentioned = _protected_mention(remainder)
-            if mentioned:
-                return f"inline write may modify protected file '{mentioned}'"
-        return ""
-
-    def _bash_may_modify_protected(self, command: str) -> bool:
-        """Back-compat boolean wrapper around :meth:`_bash_deny_reason`."""
-        return bool(self._bash_deny_reason(command))
+            remainder = blank(remainder, [(start, end) for _source, start, end in payloads])
+        return (
+            self._redirect_deny_reason(remainder)
+            or self._write_verb_deny_reason(remainder)
+            or self._inline_write_deny_reason(remainder)
+        )
 
     def _bash_bypass_reason(self, command: str) -> str:
         """WHY a Bash command reaches the driver around its wrapper, or \"\"."""

@@ -225,3 +225,114 @@ def test_log_line_scan_is_capped(tmp_path: Path, lines: int) -> None:
 
 def test_missing_log_is_unavailable(tmp_path: Path) -> None:
     assert evidence.observed_sglang_server_identity_from_log(str(tmp_path / "missing.log")) == {}
+
+
+def test_the_config_read_keeps_the_settings_identity_discards(tmp_path: Path) -> None:
+    """The filter needs the tuned knobs, which SGLang's identity allowlist drops.
+
+    Both engines, one record each. A value that is not a literal (an object
+    repr, which vLLM prints routinely) costs its own key and not the record.
+    vLLM's record holds only non-default settings, every one of them asked for,
+    so its identity is the whole record.
+    """
+    cases = {
+        "sglang": (
+            "[2026-09-17 00:00:00] server_args={record}",
+            {"tp_size": 8, "enable_hierarchical_cache": True, "cuda_graph_bs": [1, 2, 4]},
+            {"tp_size": 8},
+        ),
+        "vllm": (
+            "INFO 09-17 00:00:00 non-default args: {record}",
+            {"tensor_parallel_size": 8, "enable_prefix_caching": True, "moe_backend": "aiter"},
+            {"tensor_parallel_size": 8, "enable_prefix_caching": True, "moe_backend": "aiter"},
+        ),
+    }
+    for framework, (line, record, identity) in cases.items():
+        log = tmp_path / f"{framework}.log"
+        # ``Config(x=1)`` is spliced in after repr: it is not a literal.
+        text = repr(record)[:-1] + ", 'sampling': Config(x=1)}"
+        log.write_text(line.format(record=text) + "\n", encoding="utf-8")
+
+        assert evidence.observed_server_config_from_log(str(log), framework) == record, framework
+        # The same record through the identity read keeps only what that engine's identity names.
+        assert evidence.observed_server_identity_from_log(str(log), framework) == identity, framework
+
+
+def test_flag_spellings_fold_to_the_name_the_engine_reports() -> None:
+    """chaojhou 1: parallelism is compared, so ``--dp`` must meet ``dp_size`` and not slip past it.
+
+    One flag, two keys: SGLang reports ``tp_size`` and vLLM ``tensor_parallel_size``,
+    so folding to SGLang's name would hide the setting from a vLLM record.
+    """
+    for flag in ("--dp", "--dp-size", "--data-parallel-size"):
+        assert evidence.launch_flag_setting_name(flag, "sglang") == "dp_size", flag
+    assert evidence.launch_flag_setting_name("--tensor-parallel-size", "sglang") == "tp_size"
+    assert evidence.launch_flag_setting_name("--tensor-parallel-size", "vllm") == "tensor_parallel_size"
+
+
+def _write_recipe_run(run_dir: Path, command: str, trace: str) -> str:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "server.log").write_text("", encoding="utf-8")
+    (run_dir / "server_command.txt").write_text(command, encoding="utf-8")
+    (run_dir / "benchmark_stderr.log").write_text(trace, encoding="utf-8")
+    return str(run_dir / "server.log")
+
+
+def test_recipe_server_launch_keeps_scalar_flags_and_drops_run_specific_ones(tmp_path: Path) -> None:
+    command = (
+        "python -m atom.entrypoints.openai_server --model /m --served-model-name /m --host 0.0.0.0"
+        " --server-port 8000 --port 9000 --tensor-parallel-size 4 --block-size 128 --enable_prefix_caching"
+        r" --cudagraph-capture-sizes \[1\,2\] --online_quant_config \{\"q\":\"ptpc_fp8\"\}"
+        " --method eagle3 --draft-model org/draft --num-speculative-tokens 3\n"
+    )
+    launch = evidence.recipe_server_launch(_write_recipe_run(tmp_path, command, ""))
+
+    assert launch.flags == (
+        "--block-size 128 --enable_prefix_caching --method eagle3 --draft-model org/draft --num-speculative-tokens 3"
+    )
+
+
+def test_recipe_server_launch_env_is_the_trace_exported_before_the_launch(tmp_path: Path) -> None:
+    trace = (
+        "++ export PYTHONDONTWRITEBYTECODE=1\n"
+        "+ export ROCR_VISIBLE_DEVICES=0,1\n"
+        "+ export AIPERF_HTTP_TCP_USER_TIMEOUT=900000\n"
+        "+ export AITER_LOG_LEVEL\n"
+        "+ export 'SPACED=a b'\n"
+        "+ export ATOM_FORCE_ATTN_TRITON=1\n"
+        "+ write_command /run/server_command.txt python -m atom.entrypoints.openai_server\n"
+        "+ export AFTER_LAUNCH=1\n"
+    )
+    launch = evidence.recipe_server_launch(_write_recipe_run(tmp_path, "", trace))
+
+    assert launch.env == {"PYTHONDONTWRITEBYTECODE": "1", "SPACED": "a b", "ATOM_FORCE_ATTN_TRITON": "1"}
+
+
+def test_recipe_server_launch_env_rejects_credentials_and_loader_variables(tmp_path: Path) -> None:
+    # A recipe trace may export anything, but credential- and loader/path-shaped names are the one
+    # policy env_safety owns: a recipe that exports HF_TOKEN would otherwise write it verbatim into
+    # geak/handoff.json, and an exported PYTHONPATH/LD_PRELOAD would displace the overlay the env spec
+    # carries. Only the launch-relevant tuning knob survives.
+    trace = (
+        "+ export HF_TOKEN=secret\n"
+        "+ export OPENAI_API_KEY=sk-secret\n"
+        "+ export PYTHONPATH=/evil\n"
+        "+ export LD_PRELOAD=/evil.so\n"
+        "+ export PATH=/evil/bin\n"
+        "+ export ATOM_FORCE_ATTN_TRITON=1\n"
+        "+ write_command /run/server_command.txt python -m atom.entrypoints.openai_server\n"
+    )
+    launch = evidence.recipe_server_launch(_write_recipe_run(tmp_path, "", trace))
+
+    assert launch.env == {"ATOM_FORCE_ATTN_TRITON": "1"}
+
+
+def test_recipe_server_launch_without_a_launch_marker_has_no_env(tmp_path: Path) -> None:
+    launch = evidence.recipe_server_launch(_write_recipe_run(tmp_path, "", "+ export ATOM_FORCE_ATTN_TRITON=1\n"))
+
+    assert launch.env == {}
+
+
+@pytest.mark.parametrize("server_log", ["", "/nonexistent/run/server.log"])
+def test_recipe_server_launch_without_artifacts_is_empty(server_log: str) -> None:
+    assert evidence.recipe_server_launch(server_log) == evidence.RecipeServerLaunch("", {})

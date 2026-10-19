@@ -29,15 +29,13 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 def _excluded_package_patterns(cfg: dict) -> list[str]:
     """The packages.find exclude patterns that keep a tree out of the wheel.
 
-    Patterns naming a shipped package-data *subtree* are dropped.
-    ``kernelforge.data`` is excluded from *package* discovery -- its resource
-    trees contain .py sample kernels that must not be handed out as importable
-    modules -- but its files do ship, declared as ``kernelforge =
-    ["data/**/*"]``, so matching wheel entries against it would flag the whole
-    resource tree as a leak.
+    Patterns naming a shipped package-data *subtree* are dropped. KernelForge's
+    example and local-wiki trees contain .py reference files that must not
+    become importable modules, but those files still ship as package data.
 
-    The skip is keyed on the subtree the globs actually name (``kernelforge`` +
-    ``data/**/*`` -> ``kernelforge.data``), not on the package-data key alone.
+    The skip is keyed on the subtree the globs actually name (for example,
+    ``kernelforge`` + ``examples/**/*`` -> ``kernelforge.examples``), not on
+    the package-data key alone.
     A bare ``startswith("kernelforge.")`` would also swallow a future
     ``kernelforge.tests`` exclusion, narrowing this check while the exclude
     list widened.
@@ -112,17 +110,10 @@ def _check_data_files_are_present(cfg: dict, names: list[str]) -> list[str]:
 #: an empty knowledge base produces no error, just worse kernels. Absorbed from
 #: KernelForge's deleted ``test_wheel_content.py``, which built its own wheel.
 _NON_EMPTY_TREES = {
-    # kernelforge/data/knowledge_base/ used to be listed here with a floor of 100.
-    "kernelforge/data/local_knowledge/": 120,
-    "kernelforge/data/examples/": 40,
-    # 1, not 3.
-    "kernelforge/data/serving_patches/": 1,
+    "kernelforge/examples/": 40,
+    "kernelforge/knowledge/local_wiki/resources/": 120,
+    "kernelforge/roofline_ceiling/resources/": 1,
 }
-
-#: Individual resources whose absence is a packaging bug rather than a smaller
-#: tree. A count floor cannot express "this specific file", and for a tree of
-#: three files the distinction is the whole guard.
-_REQUIRED_FILES = ("kernelforge/data/serving_patches/sglang/sglang_0_5_12/fp8_blockscale_ck_routing.patch",)
 
 
 def _check_resource_trees_are_populated(names: list[str]) -> list[str]:
@@ -131,10 +122,6 @@ def _check_resource_trees_are_populated(names: list[str]) -> list[str]:
         count = sum(1 for n in names if n.startswith(prefix) and not n.endswith("/"))
         if count < floor:
             errors.append(f"{prefix} ships {count} files, below the floor of {floor}")
-    present = set(names)
-    errors.extend(
-        f"{required} is declared but missing from the wheel" for required in _REQUIRED_FILES if required not in present
-    )
     return errors
 
 

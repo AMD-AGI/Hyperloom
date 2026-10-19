@@ -337,9 +337,11 @@ class TestTheCliActuallyReachesTier3:
 
         from kernelforge.gemm_tune import cli
 
+        # The selected tuners run in their own function; it is still the thing tier3 has to follow.
+        assert "tuner_instance.execute()" in inspect.getsource(cli._execute_tuners)
         # click wraps the command, so reach the function it decorated.
         source = inspect.getsource(cli.run.callback)
-        assert source.index("tuner_instance.execute()") < source.index("_attempt_tier3(")
+        assert source.index("_execute_tuners(") < source.index("_attempt_tier3(")
 
     def test_a_table_with_no_adapter_is_refused_rather_than_approximated(self):
         from kernelforge.gemm_tune.tier3.dispatch import adapters_for
@@ -364,9 +366,10 @@ class TestTheCliActuallyReachesTier3:
 
         from kernelforge.gemm_tune import cli
 
+        assert "tuner_instance.execute()" in inspect.getsource(cli._execute_tuners)
         source = inspect.getsource(cli.run.callback)
         recompute = source.index("_coverage_gaps(demand_report, tuner_specs, output_path, results)")
-        assert source.index("tuner_instance.execute()") < recompute < source.index("_attempt_tier3(")
+        assert source.index("_execute_tuners(") < recompute < source.index("_attempt_tier3(")
 
 
 class TestAVerifiedGeneratedTunerBecomesAnOrdinaryResult:

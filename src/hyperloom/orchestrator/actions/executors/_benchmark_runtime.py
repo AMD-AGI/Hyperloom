@@ -8,7 +8,13 @@ from __future__ import annotations
 import os
 from typing import Any, Mapping
 
-from ._workload_envs import apply_agentx_switch, apply_scriptable_runtime_defaults
+from hyperloom.common.agentx_workload import is_agentx_client_script
+
+from ._workload_envs import (
+    apply_agentx_switch,
+    apply_scriptable_runtime_defaults,
+    pin_mlperf_round_concurrency,
+)
 
 
 def apply_runtime_benchmark_overrides(
@@ -22,7 +28,7 @@ def apply_runtime_benchmark_overrides(
     grading: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Apply runtime env/CLI overrides to a Magpie benchmark YAML."""
-    if agentx_mode is None and str(bench.get("benchmark_script") or "") == "aiperf_client.sh":
+    if agentx_mode is None and is_agentx_client_script(str(bench.get("benchmark_script") or "")):
         agentx_mode = True
 
     if model_path:
@@ -69,6 +75,8 @@ def apply_runtime_benchmark_overrides(
             if yaml_tp not in (None, 0, "", "0"):
                 continue
         envs[env_key] = int(val)
+
+    pin_mlperf_round_concurrency(envs)
 
     explicit_rocr = os.environ.get("ROCR_VISIBLE_DEVICES", "").strip()
     if explicit_rocr:

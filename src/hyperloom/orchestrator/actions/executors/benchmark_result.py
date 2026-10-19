@@ -13,12 +13,12 @@ import time
 import re
 import shutil
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from hyperloom.common.coerce import first_float, first_int, to_float, to_int
 from hyperloom.common.jsonio import read_json
 
-from ._gpu_metrics import write_gpu_metrics
+from ._gpu_metrics import gpu_metrics_from_report, write_gpu_metrics
 
 log = logging.getLogger(__name__)
 
@@ -483,6 +483,31 @@ def harvest_mn_gpu_metrics(
     return out
 
 
+#: ``(measurement field, raw keys in preference order, coercion)`` for every field a raw InferenceX result can fill.
+#: Row order is the order these fields are created in, which is the key order of a measurement written unsorted.
+_RAW_RESULT_FIELDS: tuple[tuple[str, tuple[str, ...], Callable[..., Any]], ...] = (
+    ("output_throughput", ("output_throughput",), first_float),
+    ("request_throughput", ("request_throughput",), first_float),
+    ("total_token_throughput", ("total_token_throughput",), first_float),
+    ("completed_requests", ("completed_requests", "completed"), first_int),
+    ("duration_seconds", ("duration_seconds", "duration"), first_float),
+    ("ttft_mean_ms", ("mean_ttft_ms",), first_float),
+    ("ttft_p99_ms", ("p99_ttft_ms",), first_float),
+    ("tpot_mean_ms", ("mean_tpot_ms",), first_float),
+    ("input_throughput", ("input_throughput",), first_float),
+    ("tpot_p90_ms", ("p90_tpot_ms",), first_float),
+    ("ttft_p50_ms", ("median_ttft_ms",), first_float),
+    ("ttft_p90_ms", ("p90_ttft_ms",), first_float),
+    ("tpot_p50_ms", ("median_tpot_ms",), first_float),
+    ("e2e_norm_intvty_p90", ("e2e_norm_intvty_p90",), first_float),
+    ("e2e_norm_intvty_p50", ("e2e_norm_intvty_p50",), first_float),
+    ("request_error_rate", ("request_error_rate",), first_float),
+    ("e2el_mean_ms", ("mean_e2el_ms", "mean_latency_ms"), first_float),
+    ("e2el_p99_ms", ("p99_e2el_ms", "p99_latency_ms"), first_float),
+    ("requested_requests", ("num_prompts",), first_int),
+)
+
+
 def _merge_raw_result(
     measurement: dict[str, Any],
     raw: dict[str, Any],
@@ -490,56 +515,9 @@ def _merge_raw_result(
     source_path: Path,
 ) -> None:
     """Fill missing measurement fields from a raw InferenceX result."""
-    if measurement.get("output_throughput") is None:
-        measurement["output_throughput"] = to_float(raw.get("output_throughput"))
-    if measurement.get("request_throughput") is None:
-        measurement["request_throughput"] = to_float(raw.get("request_throughput"))
-    if measurement.get("total_token_throughput") is None:
-        measurement["total_token_throughput"] = to_float(raw.get("total_token_throughput"))
-    if measurement.get("completed_requests") is None:
-        measurement["completed_requests"] = first_int(
-            raw.get("completed_requests"),
-            raw.get("completed"),
-        )
-    if measurement.get("duration_seconds") is None:
-        measurement["duration_seconds"] = first_float(
-            raw.get("duration_seconds"),
-            raw.get("duration"),
-        )
-    if measurement.get("ttft_mean_ms") is None:
-        measurement["ttft_mean_ms"] = to_float(raw.get("mean_ttft_ms"))
-    if measurement.get("ttft_p99_ms") is None:
-        measurement["ttft_p99_ms"] = to_float(raw.get("p99_ttft_ms"))
-    if measurement.get("tpot_mean_ms") is None:
-        measurement["tpot_mean_ms"] = to_float(raw.get("mean_tpot_ms"))
-    if measurement.get("input_throughput") is None:
-        measurement["input_throughput"] = to_float(raw.get("input_throughput"))
-    if measurement.get("tpot_p90_ms") is None:
-        measurement["tpot_p90_ms"] = to_float(raw.get("p90_tpot_ms"))
-    if measurement.get("ttft_p50_ms") is None:
-        measurement["ttft_p50_ms"] = to_float(raw.get("median_ttft_ms"))
-    if measurement.get("ttft_p90_ms") is None:
-        measurement["ttft_p90_ms"] = to_float(raw.get("p90_ttft_ms"))
-    if measurement.get("tpot_p50_ms") is None:
-        measurement["tpot_p50_ms"] = to_float(raw.get("median_tpot_ms"))
-    if measurement.get("e2e_norm_intvty_p90") is None:
-        measurement["e2e_norm_intvty_p90"] = to_float(raw.get("e2e_norm_intvty_p90"))
-    if measurement.get("e2e_norm_intvty_p50") is None:
-        measurement["e2e_norm_intvty_p50"] = to_float(raw.get("e2e_norm_intvty_p50"))
-    if measurement.get("request_error_rate") is None:
-        measurement["request_error_rate"] = to_float(raw.get("request_error_rate"))
-    if measurement.get("e2el_mean_ms") is None:
-        measurement["e2el_mean_ms"] = first_float(
-            raw.get("mean_e2el_ms"),
-            raw.get("mean_latency_ms"),
-        )
-    if measurement.get("e2el_p99_ms") is None:
-        measurement["e2el_p99_ms"] = first_float(
-            raw.get("p99_e2el_ms"),
-            raw.get("p99_latency_ms"),
-        )
-    if measurement.get("requested_requests") is None:
-        measurement["requested_requests"] = first_int(raw.get("num_prompts"))
+    for field, raw_keys, parse in _RAW_RESULT_FIELDS:
+        if measurement.get(field) is None:
+            measurement[field] = parse(*(raw.get(key) for key in raw_keys))
     if measurement.get("raw_result_path") is None:
         measurement["raw_result_path"] = str(source_path)
     # AgentX scenario verdict.
@@ -603,6 +581,28 @@ def _tag_latency_origins(
             origins[field] = label
 
 
+def _round_gpu_power(
+    report: dict[str, Any], workspace: Path | None, subprocess_started_unix: float | None
+) -> dict[str, Any]:
+    """The round's measured-phase power: ``gpu_power_avg_w`` (mean per serving card) and ``gpu_power_by_gpu_w``.
+
+    Hyperloom's own ``gpu_power.json`` wins whenever this round wrote one, including one with no reading: that round
+    was sampled and measured nothing, and substituting the report's figure would replace "unmeasured" with a number
+    from a different window. The report's ``gpu_monitor`` block -- one card, whole-process window on a single node --
+    is the fallback for the mean on rounds no recorder ran on; it reads one card, so such a round has no per-card
+    figure and any per-card or total budget treats it as unmeasured.
+    """
+    from ._gpu_power import read_measured_gpu_power, read_measured_gpu_power_by_gpu
+
+    found, watts = read_measured_gpu_power(workspace, subprocess_started_unix=subprocess_started_unix)
+    return {
+        "gpu_power_avg_w": watts if found else gpu_metrics_from_report(report).get("avg_power_w"),
+        "gpu_power_by_gpu_w": read_measured_gpu_power_by_gpu(
+            workspace, subprocess_started_unix=subprocess_started_unix
+        )[1],
+    }
+
+
 def extract_benchmark_measurement(
     report: dict[str, Any] | None,
     *,
@@ -664,6 +664,7 @@ def extract_benchmark_measurement(
         "tpot_mean_ms": to_float(tpot.get("mean_ms")),
         "e2el_mean_ms": to_float(e2el.get("mean_ms")),
         "e2el_p99_ms": to_float(e2el.get("p99_ms")),
+        **_round_gpu_power(report, workspace, subprocess_started_unix),
         "raw_result_path": None,
         "nonfatal_warnings": [],
     }
@@ -936,6 +937,15 @@ def estimate_killed_variant_throughput(
     return None
 
 
+def double_run_requested(params: dict | None) -> bool:
+    """Whether baseline double-run is enabled; defaults to True when not in params."""
+    from hyperloom.common.env import is_truthy
+
+    if params and "baseline_double_run" in params:
+        return is_truthy(params["baseline_double_run"])
+    return True
+
+
 __all__ = [
     "LATENCY_DERIVED",
     "LATENCY_FROM_RAW",
@@ -947,6 +957,7 @@ __all__ = [
     "estimate_output_throughput_from_server_log",
     "extract_benchmark_measurement",
     "harvest_leaked_artifacts",
+    "double_run_requested",
     "is_valid_measurement",
     "served_complete_protocol",
     "_materialize_rescue_into_workspace",

@@ -44,9 +44,6 @@ from hyperloom.orchestrator.bus.message_bus import Message
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    # Point HYPERLOOM_KERNEL_AGENT_ROOT at the kernel-agent tree so the handler resolves apply_kernel_patch.py.
-    kernel_agent_root = Path(__file__).resolve().parents[4] / "src" / "hyperloom" / "agents" / "kernel"
-    monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(kernel_agent_root))
     # Stub the interpreter resolver so the unit test never spawns a real probe.
     monkeypatch.setenv("MAGPIE_PYTHON", "/usr/bin/python3")
     from hyperloom.orchestrator.actions.executors import _benchmark_interpreter
@@ -229,7 +226,6 @@ async def test_integrate_handler_materializes_persisted_agentx_mode(session_dir,
     state = SharedState.load_or_init(session_dir)
     state.framework = "sglang"
     state.benchmark_mode = "agentx"
-    state.baseline_double_run = False
     state.baseline_tput = 100.0
     state.baseline_accuracy = 0.80
     state.baseline_perf = {
@@ -322,7 +318,6 @@ def integrate_recipe_case(session_dir, tmp_path, monkeypatch):
     state = SharedState.load_or_init(session_dir)
     state.framework = "sglang"
     state.benchmark_mode = "agentx"
-    state.baseline_double_run = False
     state.baseline_tput = 100.0
     state.baseline_config_path = str(base_yaml)
     state.baseline_perf = {
@@ -399,7 +394,7 @@ async def test_integrate_handler_materializes_recipe_controls(
 
     result = await krh.integrate_handler(payload, session_dir=session_dir)
 
-    assert result["status"] == "ok", result
+    assert result["status"] == "ok"
     assert len(benchmarks) == 1
     envs = benchmarks[0]["envs"]
     args = envs["EXTRA_SGLANG_ARGS"]
@@ -439,7 +434,7 @@ async def test_integrate_handler_explicit_empty_controls_keep_inherited_recipe(s
         session_dir=session_dir,
     )
 
-    assert result["status"] == "ok", result
+    assert result["status"] == "ok"
     assert len(benchmarks) == 1
     envs = benchmarks[0]["envs"]
     for arg in (
@@ -473,7 +468,7 @@ async def test_integrate_handler_requested_unset_wins_over_current_and_explicit_
         session_dir=session_dir,
     )
 
-    assert result["status"] == "ok", result
+    assert result["status"] == "ok"
     assert len(benchmarks) == 1
     envs = benchmarks[0]["envs"]
     assert "CURRENT_ONLY" not in envs
@@ -506,7 +501,7 @@ async def test_integrate_handler_unsetting_last_current_env_still_materializes_r
         session_dir=session_dir,
     )
 
-    assert result["status"] == "ok", result
+    assert result["status"] == "ok"
     assert len(benchmarks) == 1
     assert "CURRENT_ONLY" not in benchmarks[0]["envs"]
     assert result["new_tput"] == 110.0
@@ -632,7 +627,6 @@ async def test_integrate_handler_double_run_schedules_accuracy_on_graded_keep(
     state = SharedState.load_or_init(session_dir)
     state.framework = "sglang"
     state.benchmark_mode = "agentx"
-    state.baseline_double_run = True
     state.baseline_tput = 100.0
     state.baseline_accuracy = 0.80
     state.baseline_perf = {
@@ -659,7 +653,6 @@ async def test_integrate_handler_double_run_schedules_accuracy_on_graded_keep(
     measured = {}
 
     async def _benchmark(executor, *, config_path, output_dir, **_kwargs):
-        assert executor.shared_state.baseline_double_run is True
         assert target.read_text(encoding="utf-8") == patch_file.read_text(encoding="utf-8")
         bench = yaml.safe_load(config_path.read_text(encoding="utf-8"))["benchmark"]
         rounds.append((output_dir.name, bench))
@@ -2304,7 +2297,7 @@ async def test_coordinator_integrate_request_emits_keep_response(session_dir, tm
         }
         c.shared_state.save(session_dir)
         with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
-            await c._handle_intent(
+            await c.router.handle_intent(
                 "orchestration",
                 Intent(
                     type=IntentType.REQUEST,
@@ -2393,7 +2386,7 @@ async def test_coordinator_stops_repeating_same_kernel_integrate_after_cap(
         }
         with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
             for _ in range(4):
-                await c._handle_intent(
+                await c.router.handle_intent(
                     "orchestration",
                     Intent(type=IntentType.REQUEST, payload=payload),
                 )
@@ -2450,17 +2443,18 @@ async def test_report_executor_writes_md_and_json(session_dir, record_alert):
 
     c = Coordinator(session_dir, backends=_backends_silent())
     try:
-        await c._handle_intent(
+        await c.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.PROPOSE_ACTION,
                 payload={"action_name": "baseline", "predicted_gain_pct": 0.0},
             ),
         )
-        # The real baseline action would have set this on completion; explore requires baseline_tput > 0
-        # (execution_order) to be proposable next.
+        # The real baseline action would have set this on completion, and PRELUDE would have handed over to
+        # FRAMEWORK_AGENT, where explore is proposable.
         c.shared_state.baseline_tput = 800.0
-        await c._handle_intent(
+        c.shared_state.phase = "FRAMEWORK_AGENT"
+        await c.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.PROPOSE_ACTION,

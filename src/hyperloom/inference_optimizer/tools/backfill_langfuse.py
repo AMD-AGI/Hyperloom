@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
@@ -51,14 +50,14 @@ Usage
 ::
 
     # Dry run: parse + print the plan, no SDK / no network needed.
-    python -m hyperloom.inference_optimizer.tools.backfill_langfuse \\
+    hyperloom session backfill \\
         --session-dir <SD> --dry-run
 
     # Real backfill (needs the langfuse SDK + env keys).
     export LANGFUSE_HOST=https://langfuse.<your-domain>
     export LANGFUSE_PUBLIC_KEY=pk-...
     export LANGFUSE_SECRET_KEY=sk-...
-    python -m hyperloom.inference_optimizer.tools.backfill_langfuse --session-dir <SD>
+    hyperloom session backfill --session-dir <SD>
 
 Notes
 -----
@@ -85,6 +84,7 @@ from hyperloom.common.jsonio import read_json, read_jsonl
 from hyperloom.inference_optimizer.session.optimization_journal import (
     OUTCOME_KEEP,
     OUTCOME_NO_PROMOTE,
+    OUTCOME_RECORDED,
     OUTCOME_REVERT,
     OUTCOME_SKIP,
 )
@@ -218,10 +218,11 @@ def print_plan(plan: dict[str, Any]) -> None:
     rev = outcomes.count(OUTCOME_REVERT)
     nop = outcomes.count(OUTCOME_NO_PROMOTE)
     skipped = outcomes.count(OUTCOME_SKIP)
+    recorded = outcomes.count(OUTCOME_RECORDED)
     gainful = sum(1 for d in plan["decisions"] if (d.get("decision") or {}).get("gain_pct") is not None)
     print(
         f"  Scores: {len(plan['decisions'])} decisions "
-        f"(KEEP={keep} REVERT={rev} no_promote={nop} skipped={skipped}; gain_pct set={gainful})"
+        f"(KEEP={keep} REVERT={rev} no_promote={nop} skipped={skipped} recorded={recorded}; gain_pct set={gainful})"
     )
     recipe_rows = plan.get("recipe_audit") or []
     recipe_writes = sum(1 for r in recipe_rows if lfmap.recipe_audit_is_write(r))
@@ -232,7 +233,7 @@ def print_plan(plan: dict[str, Any]) -> None:
 def ingest(plan: dict[str, Any]) -> int:
     """Emit a backfill plan to Langfuse as a full trace tree."""
     try:
-        from langfuse import get_client  # type: ignore
+        from langfuse import get_client  # type: ignore[import-not-found]
     except Exception as exc:  # noqa: BLE001
         print(
             "ERROR: langfuse SDK not importable. Install it first:\n"
@@ -383,7 +384,7 @@ def ingest(plan: dict[str, Any]) -> int:
 def _build_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser."""
     p = argparse.ArgumentParser(
-        prog="backfill_langfuse",
+        prog="hyperloom session backfill",
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -412,7 +413,3 @@ def main(argv: list[str] | None = None) -> int:
         print_plan(plan)
         return 0
     return ingest(plan)
-
-
-if __name__ == "__main__":
-    sys.exit(main())

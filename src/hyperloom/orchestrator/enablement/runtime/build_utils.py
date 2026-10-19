@@ -56,7 +56,9 @@ def run_argv(
         return RunResult(returncode=-1, timed_out=True, command=list(argv), cwd=str(cwd))
 
 
-# ROCm torch constraint file
+# ROCm constraint file
+
+ROCM_CONSTRAINTS_FILE = "rocm_constraints.txt"
 
 _TORCH_HIP_PROBE = (
     "import sys, importlib.metadata; "
@@ -64,21 +66,42 @@ _TORCH_HIP_PROBE = (
     "hip = getattr(torch.version, 'hip', None); "
     "sys.exit(0 if hip else 2); "
 )
-_VERSION_PROBE = "import sys, importlib.metadata; pkg=sys.argv[1]; print(importlib.metadata.version(pkg))"
+_ROCM_STACK_PROBE = (
+    "import re,sys\n"
+    "import importlib.metadata as m\n"
+    "norm=lambda n: re.sub(r'[-_.]+','-',n).lower()\n"
+    "free=norm(sys.argv[1])\n"
+    "named={'torch','torchvision','torchaudio','triton'}\n"
+    "pins={}\n"
+    # Distributions come in sys.path order, so the first of a name is the one imported.
+    "for d in m.distributions():\n"
+    "    name=norm(d.metadata['Name'] or '')\n"
+    "    if name and name!=free and (name in named or 'rocm' in (d.version or '').lower()):\n"
+    "        pins.setdefault(name, d.version)\n"
+    "print('\\n'.join(f'{n}=={v}' for n,v in sorted(pins.items())))\n"
+)
 
 
 class AbiMismatchError(RuntimeError):
     """Raised when the detected torch is not a ROCm build."""
 
 
-def write_rocm_torch_constraints(
+def write_rocm_constraints(
     python_exe: str,
     constraint_path: str | Path,
     *,
+    replacing: str,
     run: _RunCallable = subprocess.run,
 ) -> str:
-    """Write a pip constraint file pinning the installed ROCm torch (and triton)."""
-    # Check ROCm
+    """Write a pip constraint file pinning the ROCm stack ``python_exe`` imports.
+
+    torch and its companions by name, and every other distribution whose
+    version carries a ROCm build label: PyPI serves no ROCm build of any of
+    them, so a resolver free to move one swaps the GPU stack. ``replacing`` is
+    the distribution the install is there to change. Distributions built for
+    ROCm without saying so in their version (amd-aiter, sglang-kernel) cannot
+    be told apart and stay unpinned.
+    """
     hip_res = run(
         [python_exe, "-c", _TORCH_HIP_PROBE],
         capture_output=True,
@@ -88,28 +111,16 @@ def write_rocm_torch_constraints(
     rc = int(getattr(hip_res, "returncode", -1))
     if rc != 0:
         raise AbiMismatchError(f"installed torch at {python_exe!r} is not a ROCm build (probe rc={rc})")
-    # torch version
-    tv_res = run(
-        [python_exe, "-c", _VERSION_PROBE, "torch"],
+    pins_res = run(
+        [python_exe, "-c", _ROCM_STACK_PROBE, replacing],
         capture_output=True,
         text=True,
         timeout=30,
     )
-    torch_ver = (getattr(tv_res, "stdout", "") or "").strip()
-    if not torch_ver:
+    pins = (getattr(pins_res, "stdout", "") or "").split()
+    if not any(p.startswith("torch==") for p in pins):
         raise RuntimeError(f"could not determine torch version from {python_exe!r}")
-    lines = [f"torch=={torch_ver}"]
-    # triton version (optional)
-    tri_res = run(
-        [python_exe, "-c", _VERSION_PROBE, "triton"],
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    triton_ver = (getattr(tri_res, "stdout", "") or "").strip()
-    if triton_ver:
-        lines.append(f"triton=={triton_ver}")
-    Path(constraint_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    Path(constraint_path).write_text("\n".join(pins) + "\n", encoding="utf-8")
     return str(constraint_path)
 
 
@@ -220,11 +231,12 @@ def sort_tags_desc(tags: list[str] | tuple[str, ...]) -> list[str]:
 
 
 __all__ = [
+    "ROCM_CONSTRAINTS_FILE",
     "AbiMismatchError",
     "RunResult",
     "check_rocm_toolchain_alignment",
     "probe_torch_abi",
     "run_argv",
     "sort_tags_desc",
-    "write_rocm_torch_constraints",
+    "write_rocm_constraints",
 ]

@@ -12,9 +12,9 @@ import sys as _sys
 import uuid
 
 from hyperloom.inference_optimizer.session.session_paths import enablement_builds_dir
+from ..collaborator import CoordinatorCollaborator
 
 from ..enablement.runtime.build_actions import TargetedBuildAction, build_novelty_key
-from ..collaborator import CoordinatorCollaborator
 
 _BUILD_KIND = "targeted_build"
 _LEASE_GRACE_SEC = 300  # added to build budget for the lease TTL reclaim backstop
@@ -30,7 +30,7 @@ def _novelty_idempotency_key(action: TargetedBuildAction) -> str:
 
 
 class BuildLifecycleCollaborator(CoordinatorCollaborator):
-    """Coordinator mixin; its methods run with the Coordinator as ``self``."""
+    """Manages targeted build lifecycle: enqueue, track, and resolve build tasks."""
 
     async def enqueue_targeted_build(self, action: TargetedBuildAction) -> str:
         """Enqueue a ``targeted_build`` row (idempotent by novelty key)."""

@@ -9,7 +9,6 @@ import argparse
 import json
 import subprocess
 import sys
-from concurrent.futures import TimeoutError as FuturesTimeoutError
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -329,15 +328,15 @@ def test_recover_session_status_and_run_paths(tmp_path: Path, monkeypatch: pytes
     )
     monkeypatch.setattr(emitter, "flush_session", lambda s: calls.append("flush"))
     monkeypatch.setattr(emitter, "record_session_breakdown", lambda s: calls.append("record"))
-    rc = recover._run_recover_session(argparse.Namespace(session_dir=session, force=True, backfill_trace=False))
+    rc = recover._run_recover_session(argparse.Namespace(session_dir=session, force=True))
     assert rc == 0
     assert calls == ["write", "flush", "patch", "record", "package"]
 
     monkeypatch.setattr(breakdown_mod, "write_breakdown_json", lambda _s: (_ for _ in ()).throw(RuntimeError("boom")))
-    assert recover._run_recover_session(argparse.Namespace(session_dir=session, force=True, backfill_trace=False)) == 1
+    assert recover._run_recover_session(argparse.Namespace(session_dir=session, force=True)) == 1
 
 
-def test_recover_session_nonfatal_backfill_and_package_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_recover_session_nonfatal_langfuse_and_package_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.inference_optimizer.cli import recover
     import hyperloom.inference_optimizer.breakdown as breakdown_mod
     import hyperloom.inference_optimizer.trace.langfuse_emitter as emitter
@@ -364,17 +363,9 @@ def test_recover_session_nonfatal_backfill_and_package_errors(tmp_path: Path, mo
         breakdown_mod, "package_session_artifacts", lambda _s: (_ for _ in ()).throw(RuntimeError("zip failed"))
     )
 
-    fake_backfill = SimpleNamespace(
-        build_plan=lambda s: calls.append("plan") or {"session": str(s)},
-        ingest=lambda plan: calls.append("ingest") or 0,
-    )
-    monkeypatch.setitem(
-        __import__("sys").modules, "hyperloom.inference_optimizer.tools.backfill_langfuse", fake_backfill
-    )
-
-    rc = recover._run_recover_session(argparse.Namespace(session_dir=session, force=True, backfill_trace=True))
+    rc = recover._run_recover_session(argparse.Namespace(session_dir=session, force=True))
     assert rc == 0
-    assert calls == ["write", "plan", "ingest"]
+    assert calls == ["write"]
 
 
 def test_recover_looks_complete_requires_breakdown_on_disk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -410,7 +401,7 @@ def test_recover_looks_complete_requires_breakdown_on_disk(tmp_path: Path, monke
     monkeypatch.setattr(emitter, "flush_session", lambda _s: None)
     monkeypatch.setattr(emitter, "record_session_breakdown", lambda _s: None)
 
-    assert recover._run_recover_session(argparse.Namespace(session_dir=session, force=False, backfill_trace=False)) == 0
+    assert recover._run_recover_session(argparse.Namespace(session_dir=session, force=False)) == 0
     assert rebuilt == [session]
 
 
@@ -449,7 +440,7 @@ def test_cli_multi_node_gc_backend_and_replay(tmp_path: Path, monkeypatch: pytes
     monkeypatch.setattr(mn, "_session_dir_resolve", lambda: session)
     monkeypatch.setattr(mn.subprocess, "run", lambda cmd, **kw: calls.append(cmd) or _Completed(returncode=0))
     mn._replay_kernel_patches_for_multi_node(argparse.Namespace(nodes=2))
-    assert calls and calls[0][2:4] == ["hyperloom.inference_optimizer.multi_node", "apply-patch"]
+    assert calls and calls[0][1:5] == ["-m", "hyperloom", "multi-node", "apply-patch"]
 
 
 def _patch_infera_state(monkeypatch: pytest.MonkeyPatch, state: dict) -> list[dict]:
@@ -1117,8 +1108,8 @@ def test_framework_isolation_helpers(tmp_path: Path, monkeypatch: pytest.MonkeyP
     repo_url = "https://github.com/sgl-project/sglang.git"
     candidate = Candidate(ref="PR:42", repo=repo_url)
     assert isolation._repo_cache_dir(repo_url, tmp_path).name == "https---github-com-sgl-project-sglang-git"
-    assert isolation._worktree_ref(candidate) == "refs/pull/42/head"
-    assert isolation._worktree_ref(Candidate(ref="main", repo=repo_url)) == "main"
+    assert isolation.checkout_ref(candidate.ref) == "refs/pull/42/head"
+    assert isolation.checkout_ref("main") == "main"
 
     usage = SimpleNamespace(free=2 * 1024**3)
     monkeypatch.setattr(isolation.shutil, "disk_usage", lambda _p: usage)
@@ -1408,75 +1399,6 @@ def test_paths_helpers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     assert paths.workspace_root() == tmp_path / "does_not_exist"
 
 
-# orchestrator.loop.dispatcher
-
-
-def test_dispatcher_inline_whitelist_filters_denied_unregistered_and_lane_holding(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
-
-    disp = DispatcherCollaborator()
-    vars(disp).update(
-        action_registry={name: object() for name in ("report", "missing", "lane_action", "ok_action")},
-        sub=SimpleNamespace(executor_registry={"lane_action": object(), "ok_action": object()}),
-        _INLINE_ACTION_DENY=frozenset({"report"}),
-    )
-    monkeypatch.setattr(disp, "_registry_lanes_ttl", lambda name: (["gpu"] if name == "lane_action" else [], 60))
-    # report is denied, missing has no executor, lane_action holds a lane.
-    assert disp._inline_action_whitelist() == frozenset({"ok_action"})
-
-    disp.action_registry = {}
-    assert disp._inline_action_whitelist() == frozenset()
-
-
-def test_dispatcher_run_action_now_sync_edge_returns(monkeypatch: pytest.MonkeyPatch) -> None:
-    from hyperloom.orchestrator.loop import dispatcher as dispatcher_mod
-    from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
-
-    disp = DispatcherCollaborator()
-    vars(disp).update(
-        _inline_fast_actions_enabled=True,
-        _coordinator_loop=None,
-        _INLINE_ACTION_DENY=frozenset(),
-        action_registry=None,
-        sub=SimpleNamespace(executor_registry={}),
-    )
-    assert "action_name required" in disp._run_action_now_sync("  ", {})
-
-    monkeypatch.setattr(disp, "_inline_action_whitelist", lambda: frozenset({"probe"}))
-    assert "coordinator loop not running" in disp._run_action_now_sync("probe", {})
-
-    disp._coordinator_loop = SimpleNamespace(is_closed=lambda: False)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_INLINE_ACTION_TIMEOUT_S", "not-a-float")
-    monkeypatch.setattr(disp, "_run_action_now", lambda _name, _params: object())
-
-    class _TimeoutFuture:
-        def result(self, timeout):
-            assert timeout == 120.0
-            raise FuturesTimeoutError()
-
-    monkeypatch.setattr(dispatcher_mod.asyncio, "run_coroutine_threadsafe", lambda _coro, _loop: _TimeoutFuture())
-    assert "still running after 120s" in disp._run_action_now_sync("probe", {})
-
-    class _ErrorFuture:
-        def result(self, timeout):
-            raise RuntimeError("boom")
-
-    monkeypatch.setattr(dispatcher_mod.asyncio, "run_coroutine_threadsafe", lambda _coro, _loop: _ErrorFuture())
-    assert "errored" in disp._run_action_now_sync("probe", {})
-
-    monkeypatch.setattr(
-        dispatcher_mod.asyncio,
-        "run_coroutine_threadsafe",
-        lambda _coro, _loop: (_ for _ in ()).throw(RuntimeError("closed")),
-    )
-    assert "could not schedule" in disp._run_action_now_sync("probe", {})
-
-
-# inference_optimizer.multi_node.state_paths
-
-
 def test_multi_node_state_paths_resolution_and_binding(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from hyperloom.inference_optimizer.multi_node import state_paths
     from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
@@ -1565,7 +1487,7 @@ def test_gpu_type_autodetect_rocm_and_torch_fallback(monkeypatch: pytest.MonkeyP
     assert gpu_types._autodetect_gpu_type() is None
 
 
-# breakdown.recorder.section_shape / breakdown.reporters
+# Tests for breakdown.recorder.section_shape / breakdown.reporters
 
 
 def test_section_shape_unknown_is_none() -> None:

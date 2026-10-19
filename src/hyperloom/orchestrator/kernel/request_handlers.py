@@ -28,19 +28,18 @@ import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
 
-from hyperloom.agents.kernel.tools._capture_shapes import (
+from hyperloom.orchestrator.trace_analysis._capture_shapes import (
     is_capture_fragment as _shared_is_capture_fragment,
 )
 from hyperloom.common import codex_session, llm_config
+from hyperloom.common.checkpoint_quant import checkpoint_format
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env import env_bool, forge_explicitly_enabled, is_truthy
 from hyperloom.common.gpu_identity import is_gfx_arch
 from hyperloom.common.io import append_jsonl
+from hyperloom.common.unified_diff import PatchOp, repo_relative_manifest
 from ..actions.executors._kernel_agent_tool import (
     HandlerResult,
-    _kernel_agent_root_error,
-    _kernel_agent_tool_path,
-    _load_apply_tool,
     _maybe_apply_kernel_patch,
     _maybe_finalize_kernel_patch,
     _maybe_revert_kernel_patch,
@@ -49,9 +48,13 @@ from ..actions.executors._kernel_agent_tool import (
 )
 from ..actions.executors.trace_analyze import trace_analyze_handler
 from ..actions.stop_attribution import stopped_by_the_run_class
+from . import apply_kernel_patch, forge_fusion, forge_gemm_tuning
+from .gemm_shape_coverage import canonical_dtype, traced_gemm_shapes
 from .lane_budget import (
+    INSUFFICIENT_BUDGET,
     LANE_FUSION,
     LANE_GEMM,
+    LaneAllocation,
     allocate as _allocate_lane_budgets,
     gemm_per_tuner_timeout_sec,
 )
@@ -243,11 +246,10 @@ def _reusable_source_roots() -> tuple[str, ...]:
 # whole-pipeline GEAK delegate (``geak``); per-kernel selection is opt-in via
 # KERNEL_OPT_BACKEND_ORDER=forge.
 _DEFAULT_KERNEL_PHASE_BACKEND_ORDER = ("geak",)
-# Outer subprocess cap for the whole GEMM-tuning run (all shapes/tuners); sized
-# for large models with many GEMM shapes. Independent of the session --max-hours
-# budget; override via HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC (or payload timeout_sec).
+# Outer subprocess cap for the whole GEMM-tuning run (all shapes/tuners) when there is
+# no lane share to take, as in an unbounded session; sized for large models with many
+# GEMM shapes. Override via HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC (or payload timeout_sec).
 _DEFAULT_GEMM_TUNING_TIMEOUT_SEC = 5 * 60 * 60
-_FORGE_FUSION_WRAPPER_TIMEOUT_GRACE_SEC = 30
 
 
 def _preapplied_snapshot_payload(payload: dict) -> dict:
@@ -273,12 +275,11 @@ def _preapplied_snapshot_payload(payload: dict) -> dict:
     repo_root = Path(str(payload.get("repo") or payload.get("kernel_repo") or ""))
     if not repo_root.is_dir():
         raise RuntimeError(f"pre-applied patch needs its repo root, got {repo_root!s:.200}")
-    descriptors = _load_apply_tool().parse_patch_manifest(patch_path.read_text(encoding="utf-8", errors="replace"))
     snapshot = patch_path.parent / "preapplied_snapshot"
-    for descriptor in descriptors:
-        if descriptor.get("op") != "write":
+    for target in repo_relative_manifest(patch_path.read_text(encoding="utf-8", errors="replace")):
+        if target.op is not PatchOp.WRITE:
             continue
-        relative = str(descriptor.get("path") or "")
+        relative = target.path
         source = repo_root / relative
         if not source.is_file():
             raise RuntimeError(f"pre-applied patch writes {relative}, which is absent from {repo_root}")
@@ -707,12 +708,7 @@ def _normalize_precision(value: Any) -> str:
     return str(value or "").strip().lower()
 
 
-def _lane_budget(
-    state: Any,
-    lane: str,
-    *,
-    gemm_target_costs_sec: tuple[int, ...] = (),
-):
+def _lane_budget(state: Any, lane: str, *, gemm_target_costs_sec: tuple[int, ...] = ()) -> LaneAllocation | None:
     """Derive one lane's share of the phase's remaining time.
 
     Wraps :func:`lane_budget.allocate`, which divides the remaining time between
@@ -727,12 +723,23 @@ def _lane_budget(
             only the gemm lane's target ceiling consumes them.
 
     Returns:
-        That lane's ``LaneAllocation``. An unbounded session yields a zero budget
-        and thus ``max_targets == 0`` (``is_fundable`` False), which the caller
+        That lane's ``LaneAllocation``, or ``None`` when the session is bounded and
+        the share cannot fund one target, so the lane must not start. An unbounded
+        session yields a zero budget and ``max_targets == 0``, which the caller
         reads as "no allocation to make".
     """
     remaining = _lane_remaining_minutes(state)
-    return _allocate_lane_budgets(remaining, gemm_target_costs_sec=gemm_target_costs_sec)[lane]
+    allocation = _allocate_lane_budgets(remaining, gemm_target_costs_sec=gemm_target_costs_sec)[lane]
+    if remaining is not None and not allocation.is_fundable:
+        return None
+    return allocation
+
+
+def _unfunded_lane_skip(lane: str) -> HandlerResult:
+    """What a forge lane returns instead of starting when the phase cannot fund it: a skip, not a verdict."""
+    reason = f"what is left of the KERNEL phase time budget cannot fund one {lane} target"
+    log.info("forge %s lane skipped: %s", lane, reason)
+    return {"status": "skipped", "error_class": INSUFFICIENT_BUDGET, "skip_reason": reason, "backend": "forge"}
 
 
 def _lane_remaining_minutes(state: Any) -> float | None:
@@ -770,9 +777,9 @@ def _gemm_tuning_timeout_sec(payload: dict, *, lane_budget_sec: int = 0) -> int:
 
     Args:
         payload (dict): Request payload that may carry ``timeout_sec``.
-        lane_budget_sec (int): The gemm lane's share of the phase. ``0`` means no
-            allocation could be derived, which keeps the module default rather
-            than collapsing an unattended lane to a zero-second timeout.
+        lane_budget_sec (int): The gemm lane's share of the phase. ``0`` means there
+            is no share to take, as in an unbounded session, and keeps the module
+            default rather than collapsing an unattended lane to a zero-second timeout.
 
     Returns:
         int: The resolved timeout in seconds (>= 60).
@@ -842,14 +849,20 @@ def _gemm_router_targets(
     return tuple((str(spec.name), max(0, int(spec.estimated_minutes * 60))) for spec in specs if spec.should_run)
 
 
+async def _priced_gemm_lane(state: Any, **router_inputs: Any) -> LaneAllocation | None:
+    """The gemm lane's share, priced on the router's own per-tuner estimates for ``_gemm_router_targets`` inputs."""
+    targets = await asyncio.to_thread(_gemm_router_targets, **router_inputs)
+    return _lane_budget(state, LANE_GEMM, gemm_target_costs_sec=tuple(cost for _, cost in targets))
+
+
 def _forge_fusion_timeout_sec(payload: dict, *, lane_budget_sec: int = 0) -> int:
     """Resolve the forge-fusion subprocess timeout in seconds.
 
     Args:
         payload (dict): Request payload that may carry ``timeout``/``timeout_sec``.
-        lane_budget_sec (int): The fusion lane's share of the phase. ``0`` means no
-            allocation could be derived, which keeps the module default rather
-            than collapsing an unattended lane to a one-second timeout.
+        lane_budget_sec (int): The fusion lane's share of the phase. ``0`` means there
+            is no share to take, as in an unbounded session, and keeps the module
+            default rather than collapsing an unattended lane to a one-second timeout.
 
     Returns:
         int: The resolved timeout in seconds (>= 1).
@@ -867,11 +880,6 @@ def _forge_fusion_timeout_sec(payload: dict, *, lane_budget_sec: int = 0) -> int
     except (OverflowError, TypeError, ValueError):
         value = lane_budget_sec if lane_budget_sec > 0 else 7200
     return max(1, value)
-
-
-def _forge_fusion_wrapper_timeout_sec(timeout_sec: int) -> int:
-    """Give the wrapper time to reap its child tree and emit the timeout sentinel."""
-    return max(1, int(timeout_sec)) + _FORGE_FUSION_WRAPPER_TIMEOUT_GRACE_SEC
 
 
 def _positive_int(value: object) -> int:
@@ -1022,7 +1030,7 @@ exec {shlex.quote(runner)}
     return path
 
 
-def _resolve_gemm_tuning_backend(payload: dict) -> str:
+def resolve_gemm_tuning_backend(payload: dict) -> str:
     """Resolve GEMM tuning backend under the forge-explicit-only invariant."""
     return "forge" if forge_explicitly_enabled() else "geak"
 
@@ -1180,12 +1188,7 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
 
     # Resolve from actual server args (baseline yaml + current_best overlay).
     current_best = getattr(state, "current_best", None) or {}
-    try:
-        server_args = resolve_runtime_workload(state, arm="current_best").server_args
-    except Exception:  # noqa: BLE001 - best-effort fallback for partial state/test doubles
-        server_args = ""
-        if isinstance(current_best, dict):
-            server_args = str(current_best.get("extra_server_args") or "")
+    server_args = resolve_runtime_workload(state, arm="current_best").server_args
     extra_envs = dict(current_best.get("extra_envs") or {}) if isinstance(current_best, dict) else {}
     ref_envs = dict(getattr(state, "reference_envs", None) or {})
     per_token_signal = is_truthy(extra_envs.get("SGLANG_USE_AITER_FP8_PER_TOKEN")) or is_truthy(
@@ -1209,13 +1212,17 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
     if quantization_arg in ("fp4", "mxfp4"):
         return quantization_arg, "fp4"
 
-    # Fall back to session precision.
+    # Fall back to session precision. When that is just the format a Quark or compressed-tensors checkpoint nests, it
+    # is one label for layers the checkpoint can store differently (MXFP4 experts, fp8 attention), and forge can tell
+    # them apart only when it is left to route each lane itself.
     precision = _normalize_precision(state.precision)
+    quant_type = str(payload.get("quant_type") or "auto").strip()
+    model_path = str(payload.get("model_path") or getattr(state, "model_path", "") or "").strip()
+    if precision and precision == checkpoint_format((_read_model_config(model_path) or {}).get("quantization_config")):
+        return "auto", quant_type
     if not precision:
         precision = "bf16"
-    quant_type = str(payload.get("quant_type") or "auto").strip()
     if precision == "fp8" and quant_type.lower() == "auto":
-        model_path = str(payload.get("model_path") or getattr(state, "model_path", "") or "").strip()
         gpu_type = str(payload.get("gpu_type") or getattr(state, "gpu_type", "") or "").strip()
         quant_type = _resolve_fp8_quant_type(model_path, gpu_type, framework)
     return precision, quant_type
@@ -1572,7 +1579,7 @@ def _resolve_forge_shapes(
             precision=precision,
         )
 
-    if _canonical_dtype(precision):
+    if canonical_dtype(precision):
         scoped = _extracted()
         if scoped:
             return scoped
@@ -1583,36 +1590,6 @@ def _resolve_forge_shapes(
             return str(p)
 
     return _extracted()
-
-
-# TraceLens has spelled the tensor separator <br>, <br/> and <BR/> over time.
-_BR_SPLIT_RE = re.compile(r"<\s*br\s*/?\s*>", re.IGNORECASE)
-
-
-def _canonical_dtype(raw: str) -> str:
-    """Fold a precision name or traced dtype token onto one canonical family.
-
-    Both sides of the comparison spell the same dtype many ways: a tuning
-    precision arrives as ``fp8`` / ``mxfp4``, while TraceLens renders whatever
-    the framework reported -- ``fp8_e4m3``, ``e4m3fnuz``, ``fp4x2``, and
-    ``_TRACE_DTYPE_SUFFIX`` in this repo emits ``f16`` for float16. Matching the
-    raw strings drops shapes that do belong to the tuned precision, so both are
-    folded onto a family first.
-
-    Returns "" for anything unrecognised, which callers treat as "do not scope".
-    """
-    token = str(raw or "").strip().lower().removeprefix("torch.")
-    if not token:
-        return ""
-    if token.startswith(("fp4", "mxfp4", "float4")) or "e2m1" in token:
-        return "fp4"
-    if token.startswith(("fp8", "float8")) or token == "f8" or "e4m3" in token or "e5m2" in token:
-        return "fp8"
-    if token.startswith(("bf16", "bfloat16")) or token == "b16":
-        return "bf16"
-    if token.startswith(("fp16", "float16")) or token in {"f16", "half"}:
-        return "fp16"
-    return ""
 
 
 def _extract_gemm_shapes_from_candidates(candidates_path_str: str, session_dir: Path, *, precision: str = "") -> str:
@@ -1628,7 +1605,6 @@ def _extract_gemm_shapes_from_candidates(candidates_path_str: str, session_dir: 
     dtype (historical behaviour).
     """
     import json as _json
-    import re as _re
 
     if not candidates_path_str:
         return ""
@@ -1645,41 +1621,6 @@ def _extract_gemm_shapes_from_candidates(candidates_path_str: str, session_dir: 
     if not isinstance(hot_kernels, list):
         return ""
 
-    # Tolerate whitespace after the comma ("(1024, 5120)") and any leading token
-    # before the tuple; TraceLens formats vary. .search() rather than .match() so
-    # a leading dtype/name does not defeat it.
-    dim_pattern = _re.compile(r"\((\d+)\s*,\s*(\d+)\)")
-    # TraceLens renders the dtype right after the dims: "(64,3072) fp8".
-    # Dots are allowed so a fully-qualified spelling ("torch.float8_e4m3fn") is
-    # captured whole rather than truncated at "torch".
-    dtype_pattern = _re.compile(r"\)\s*([A-Za-z][A-Za-z0-9_.]*)")
-    wanted_dtype = _canonical_dtype(precision)
-
-    def _dtype_matches(a_text: str) -> bool:
-        """Whether the A tensor's traced dtype is the family being tuned."""
-        if not wanted_dtype:
-            return True
-        found = dtype_pattern.search(a_text)
-        return bool(found) and _canonical_dtype(found.group(1)) == wanted_dtype
-
-    def _mnk(a_text: str, b_text: str) -> tuple[int, int, int] | None:
-        """Derive (M, N, K) from the A ``(M,K)`` and B tensor texts."""
-        if not _dtype_matches(a_text):
-            return None
-        m0 = dim_pattern.search(a_text)
-        m1 = dim_pattern.search(b_text)
-        if not m0 or not m1:
-            return None
-        M, K = int(m0.group(1)), int(m0.group(2))
-        b0, b1 = int(m1.group(1)), int(m1.group(2))
-        # B is stored either (N,K) or (K,N); pick the orientation whose
-        # contracted dim matches K, else keep the legacy first-dim reading.
-        N = b0 if b1 == K else (b1 if b0 == K else b0)
-        # ``N == 1`` is a matrix-vector head (e.g. a scalar projection), not a
-        # tunable GEMM tile; it would otherwise sort first on call count and
-        # burn a tuning slot.
-        return (M, N, K) if min(M, K) > 0 and N > 1 else None
-
     # ``weight`` is the observed call count: decode GEMMs are invoked far more
     # often than prefill ones, so ordering by it puts the throughput-dominant
     # shapes first and they still get tuned when the tuner runs out of budget.
@@ -1688,37 +1629,11 @@ def _extract_gemm_shapes_from_candidates(candidates_path_str: str, session_dir: 
     weights: dict[tuple[int, int, int], int] = {}
     order: dict[tuple[int, int, int], int] = {}
 
-    def _record(key: tuple[int, int, int] | None, weight: int) -> None:
-        if key is None:
-            return
-        if key not in order:
-            order[key] = len(order)
-        weights[key] = max(weights.get(key, 0), weight)
-
     for kernel in hot_kernels:
-        name = str(kernel.get("name", ""))
-        if "gemm" not in name.lower():
-            continue
-        input_shapes = kernel.get("input_shapes", [])
-        if not isinstance(input_shapes, list):
-            continue
-        entries = [e for e in input_shapes if isinstance(e, dict) and e.get("shape")]
-
-        # Legacy format: one entry carries every tensor, "<br>"-joined. The tag
-        # is spelled several ways across TraceLens versions (<br>, <br/>, <BR/>).
-        matched_joined = False
-        for entry in entries:
-            parts = [p.strip() for p in _BR_SPLIT_RE.split(str(entry["shape"])) if p.strip()]
-            if len(parts) < 2:
-                continue
-            matched_joined = True
-            _record(_mnk(parts[0], parts[1]), int(entry.get("call_num") or 0))
-        if matched_joined or len(entries) < 2:
-            continue
-
-        # Current format: one entry per tensor, so A and B are the first two.
-        weight = max(int(e.get("call_num") or 0) for e in entries[:2])
-        _record(_mnk(str(entries[0]["shape"]), str(entries[1]["shape"])), weight)
+        for key, weight in traced_gemm_shapes(kernel, precision=precision):
+            if key not in order:
+                order[key] = len(order)
+            weights[key] = max(weights.get(key, 0), weight)
 
     if not weights:
         return ""
@@ -2017,7 +1932,7 @@ def _normalize_tokens(value: Any) -> str:
         text = str(value).strip().strip("[](){}")
         if not text:
             return ""
-        items = [p for p in text.split(",")]
+        items = list(text.split(","))
     out: list[str] = []
     for it in items:
         s = str(it).strip().strip("'\"")
@@ -2177,49 +2092,12 @@ _AITER_SERVING_MARKERS = {
     "fused_moe": ("[aiter] [fused_moe]", "Mxfp4 MoE backend"),
 }
 
-#: aiter logs every fused-MoE problem it dispatches as a 14-field tuple. The
-#: wording before it varies -- measured across 2948 real lines there are three
-#: forms, and one of them interposes its own parenthesised kernel names:
-#:
-#:   [fused_moe] using 2stage default for ('gfx950', 256, 256, 4096, ...)
-#:   [fused_moe] no tuned FlyDSL config for ('gfx950', 256, 256, 4096, ...)
-#:   [fused_moe] using 2stage (kernelName1='...', kernelName2='...') for ('gfx950', ...)
-#:
-#: so the tuple is anchored on `` for (`` rather than on the wording. The field
-#: order matches aiter's untuned CSV columns after dropping gfx and cu_num, which
-#: the runtime supplies itself.
-_AITER_FUSED_MOE_TUPLE_RE = re.compile(
-    r"\[fused_moe\].*? for \("
-    r"'(?P<gfx>[^']*)', "
-    r"(?P<cu_num>\d+), (?P<token>\d+), (?P<model_dim>\d+), (?P<inter_dim>\d+), "
-    r"(?P<expert>\d+), (?P<topk>\d+), "
-    r"'(?P<act_type>[^']*)', '(?P<dtype>[^']*)', "
-    r"'(?P<q_dtype_a>[^']*)', '(?P<q_dtype_w>[^']*)', '(?P<q_type>[^']*)', "
-    r"(?P<use_g1u1>True|False), (?P<doweight_stage1>True|False)\)"
-)
-
 #: Which dtypes fall in each of aiter's width buckets. Mirrors ``bit16_list`` /
 #: ``bit8_list`` / ``bit4_list`` in
 #: ``csrc/ck_gemm_moe_2stages_codegen/gemm_moe_ck2stages_common.py``.
 _AITER_BIT16_DTYPES = frozenset({"bfloat16", "float16"})
 _AITER_BIT8_DTYPES = frozenset({"float8_e4m3fn", "float8_e4m3fnuz", "int8"})
 _AITER_BIT4_DTYPES = frozenset({"float4_e2m1fn_x2", "uint32", "int4"})
-
-#: The fields that identify one MoE problem, ignoring the token count (which the
-#: tuner sweeps) and cu_num/gfx (which the runtime supplies).
-_FMOE_SHAPE_FIELDS = (
-    "model_dim",
-    "inter_dim",
-    "expert",
-    "topk",
-    "act_type",
-    "dtype",
-    "q_dtype_a",
-    "q_dtype_w",
-    "q_type",
-    "use_g1u1",
-    "doweight_stage1",
-)
 
 
 def _aiter_moe_dtype_pair_supported(q_dtype_a: str, q_dtype_w: str) -> bool:
@@ -2243,29 +2121,21 @@ def _aiter_moe_dtype_pair_supported(q_dtype_a: str, q_dtype_w: str) -> bool:
     return act in _AITER_BIT4_DTYPES and weight in _AITER_BIT4_DTYPES
 
 
-def _aiter_fused_moe_dispatch_keys(server_log: str) -> list[dict[str, str]]:
+def _aiter_fused_moe_dispatch_keys(server_log: str) -> list[dict[str, Any]]:
     """Return the distinct MoE problems a server log shows aiter dispatching.
 
-    Deduplicated on everything but the token count, preserving first-seen order.
-    One model routinely yields several problems -- the same checkpoint dispatches
-    both a BF16-activation and an FP8-activation variant, and the EP path appends
-    a masked fake-expert slot so ``expert``/``topk`` arrive one higher than the
+    Deduplicated on everything but the token count, most-missed first. One model
+    routinely yields several problems -- the same checkpoint dispatches both a
+    BF16-activation and an FP8-activation variant, and the EP path appends a
+    masked fake-expert slot so ``expert``/``topk`` arrive one higher than the
     model config states. Neither is derivable from the config, which is why the
     log is the authoritative source for what to tune.
     """
     if not server_log:
         return []
-    try:
-        text = Path(server_log).read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return []
-    seen: dict[tuple[str, ...], dict[str, str]] = {}
-    for match in _AITER_FUSED_MOE_TUPLE_RE.finditer(text):
-        fields = match.groupdict()
-        identity = tuple(fields[name] for name in _FMOE_SHAPE_FIELDS)
-        if identity not in seen:
-            seen[identity] = fields
-    return list(seen.values())
+    from kernelforge.gemm_tune.evidence import moe_dispatch_keys, parse_log_file
+
+    return moe_dispatch_keys(parse_log_file(server_log))
 
 
 def _aiter_ck_moe_tuner_supports(server_log: str) -> bool:
@@ -2290,11 +2160,6 @@ def _aiter_ck_moe_tuner_supports(server_log: str) -> bool:
         return True
     return any(_aiter_moe_dtype_pair_supported(key["q_dtype_a"], key["q_dtype_w"]) for key in keys)
 
-
-#: Header aiter's MoE tuner expects for its untuned input CSV.
-_FMOE_UNTUNED_CSV_HEADER = (
-    "token,model_dim,inter_dim,expert,topk,act_type,dtype,q_dtype_a,q_dtype_w,q_type,use_g1u1,doweight_stage1"
-)
 
 #: forge wordings that carry nothing deployable, each distinct from an honest
 #: ``no_improvement``. ``build_report`` checks ``has_candidate`` first, so a run
@@ -2355,6 +2220,8 @@ def _write_fmoe_untuned_csv_from_log(
     Problems whose dtype pair aiter's codegen rejects are dropped rather than
     passed through, because one unsupported row aborts the whole tuner run.
     """
+    from kernelforge.gemm_tune.evidence import MOE_SHAPE_FIELDS, moe_untuned_csv_text
+
     report: dict[str, Any] = {
         "observed": 0,
         "tunable": 0,
@@ -2366,12 +2233,12 @@ def _write_fmoe_untuned_csv_from_log(
     if not keys:
         return "", report
 
-    tunable: list[dict[str, str]] = []
+    tunable: list[dict[str, Any]] = []
     for key in keys:
         pair = (key["q_dtype_a"], key["q_dtype_w"])
         if _aiter_moe_dtype_pair_supported(*pair):
             tunable.append(key)
-            report["keys"].append({name: key[name] for name in _FMOE_SHAPE_FIELDS})
+            report["keys"].append({name: key[name] for name in MOE_SHAPE_FIELDS})
         else:
             combo = f"{pair[0]}/{pair[1]}"
             if combo not in report["dropped_unsupported"]:
@@ -2381,16 +2248,8 @@ def _write_fmoe_untuned_csv_from_log(
         return "", report
 
     token_list = _fmoe_token_list(tokens)
-    lines = [_FMOE_UNTUNED_CSV_HEADER]
-    for key in tunable:
-        for token in token_list:
-            lines.append(
-                f"{token},{key['model_dim']},{key['inter_dim']},"
-                f"{key['expert']},{key['topk']},{key['act_type']},{key['dtype']},"
-                f"{key['q_dtype_a']},{key['q_dtype_w']},{key['q_type']},"
-                f"{1 if key['use_g1u1'] == 'True' else 0},"
-                f"{1 if key['doweight_stage1'] == 'True' else 0}"
-            )
+    rendered = [moe_untuned_csv_text(key, tokens=token_list).splitlines() for key in tunable]
+    lines = rendered[0][:1] + [row for key_lines in rendered for row in key_lines[1:]]
 
     csv_path = workspace / "untuned_fmoe_from_runtime.csv"
     try:
@@ -2794,7 +2653,7 @@ def _resolve_shape_capture_port(value: Any) -> int:
 def _is_tunableop_untuned_row(line: str) -> bool:
     """Recognize a native PyTorch TunableOp offline-input row."""
     stripped = line.strip()
-    if not stripped or stripped.startswith("#") or stripped.startswith("Validator"):
+    if not stripped or stripped.startswith(("#", "Validator")):
         return False
     fields = [field.strip() for field in stripped.split(",")]
     if len(fields) < 2 or "TunableOp" not in fields[0] or not fields[1]:
@@ -2949,18 +2808,10 @@ async def _capture_vllm_tunableop_shapes(
     else:
         capture_unset_envs = [str(key) for key in inherited_unset]
     if not profile_mode:
-        capture_unset_envs.extend(
-            [
-                "HL_TUNABLEOP_MODE",
-                "HL_TUNABLEOP_FILE",
-                "HL_TUNABLEOP_VERBOSE",
-                "PYTORCH_TUNABLEOP_ENABLED",
-                "PYTORCH_TUNABLEOP_TUNING",
-                "PYTORCH_TUNABLEOP_RECORD_UNTUNED",
-                "PYTORCH_TUNABLEOP_UNTUNED_FILENAME",
-                "PYTORCH_TUNABLEOP_FILENAME",
-            ]
-        )
+        # unset_envs is applied after extra_envs, so any PYTORCH_TUNABLEOP_* name left here (hard-coded or
+        # inherited from the payload or current best) strips the recording and the capture records nothing.
+        capture_unset_envs = [name for name in capture_unset_envs if not name.startswith("PYTORCH_TUNABLEOP_")]
+        capture_unset_envs.extend(["HL_TUNABLEOP_MODE", "HL_TUNABLEOP_FILE", "HL_TUNABLEOP_VERBOSE"])
     inherited_remove = payload.get("remove_args", current_best.get("remove_args")) or []
     if isinstance(inherited_remove, str):
         capture_remove_args = [inherited_remove]
@@ -3106,6 +2957,34 @@ async def _capture_vllm_tunableop_shapes(
         "shape_capture_workspace": str(capture_dir),
         "shape_count": row_count,
     }
+
+
+async def _invoke_forge_gemm_tune(input_payload: dict[str, Any], timeout: int) -> dict[str, Any]:
+    """Run ``kernelforge gemm-tune`` for ``input_payload`` and return its result, or a failed result."""
+    try:
+        cmd = forge_gemm_tuning.build_command(input_payload)
+    except ValueError as exc:
+        return {
+            "status": "failed",
+            "micro_decision": "failed",
+            "error_class": exc.__class__.__name__,
+            "error": repr(exc),
+        }
+    aiter_root = _resolve_aiter_root_for_forge()
+    if aiter_root:
+        cmd = ["env", f"AITER_ROOT_DIR={aiter_root}", *cmd]
+    try:
+        rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout, label="forge_gemm_tuning")
+    except subprocess.TimeoutExpired as exc:
+        # Reaped by the process-group kill in _run_subprocess; shape a failed result.
+        cmd_repr = " ".join(str(c) for c in (getattr(exc, "cmd", None) or cmd))
+        return {
+            "status": "failed",
+            "error_class": "subprocess_timeout",
+            "error": f"TimeoutExpired after {timeout}s: {cmd_repr[:1500]}",
+        }
+    result = _parse_forge_gemm_sentinel(stdout)
+    return result if result is not None else _shape_tool_result(rc, stdout, stderr)
 
 
 async def _run_forge_gemm_tuning(
@@ -3317,7 +3196,25 @@ async def _run_forge_gemm_tuning(
         )
         and not block_fp8_profile_capture
     )
+    priced_gemm_lane = functools.partial(
+        _priced_gemm_lane,
+        state,
+        model_path=resolved_model_path,
+        framework=forge_framework,
+        precision=precision,
+        quant_type=quant_type,
+        gpu_type=gpu_type,
+        kernel_signature_log=kernel_sig_log,
+    )
     if block_fp8_profile_capture or tunableop_capture:
+        # A capture costs a full extra server boot, wasted on a lane the phase cannot fund once it has the shapes.
+        lane_after_capture = await priced_gemm_lane(
+            has_untuned_csv=tunableop_capture and bool(untuned_csv),
+            has_shapes_json=block_fp8_profile_capture,
+            has_tunableop_input=tunableop_capture,
+        )
+        if lane_after_capture is None:
+            return _unfunded_lane_skip(LANE_GEMM)
         capture_payload = dict(payload)
         if block_fp8_profile_capture:
             capture_payload["_shape_capture_mode"] = "block_fp8_profile"
@@ -3374,33 +3271,15 @@ async def _run_forge_gemm_tuning(
     if demand_json and not _path_is_existing_file(demand_json):
         demand_json = ""
 
-    # The lane's share, priced on the router's own per-tuner estimates. A share
-    # funding none of them degrades to the module default, not to a doomed run.
-    gemm_targets = await asyncio.to_thread(
-        _gemm_router_targets,
-        model_path=resolved_model_path,
-        framework=forge_framework,
-        precision=precision,
-        quant_type=quant_type,
-        gpu_type=gpu_type,
-        kernel_signature_log=kernel_sig_log,
+    gemm_lane = await priced_gemm_lane(
         has_untuned_csv=bool(untuned_csv),
         has_shapes_json=bool(shapes_json or shapes_manifest or demand_json),
         has_tunableop_input=bool(tunableop_input),
     )
-    gemm_lane = _lane_budget(
-        state,
-        LANE_GEMM,
-        gemm_target_costs_sec=tuple(cost for _, cost in gemm_targets),
-    )
-    timeout = _gemm_tuning_timeout_sec(
-        payload,
-        lane_budget_sec=gemm_lane.budget_sec if gemm_lane.is_fundable else 0,
-    )
-    try:
-        requested_tuners = int(payload.get("max_tuners") or 0)
-    except (TypeError, ValueError):
-        requested_tuners = 0
+    if gemm_lane is None:
+        return _unfunded_lane_skip(LANE_GEMM)
+    timeout = _gemm_tuning_timeout_sec(payload, lane_budget_sec=gemm_lane.budget_sec)
+    requested_tuners = _positive_int(payload.get("max_tuners"))
     # An explicit payload value stays an operator/test escape hatch; a named
     # ``tuner`` already narrows the set to one, so no ceiling is needed then.
     if str(payload.get("tuner") or "").strip():
@@ -3451,31 +3330,7 @@ async def _run_forge_gemm_tuning(
         # Exhaustive search when budget allows (>= 24h) and mp >= 4.
         "thorough": bool(session_max_min >= 1440 and mp >= 4),
     }
-    input_json = workspace / "forge_gemm_tuning_input.json"
-    input_json.write_text(json.dumps(input_payload, indent=2, sort_keys=True), encoding="utf-8")
-    cmd = [
-        sys.executable,
-        str(_kernel_agent_tool_path("forge_gemm_tuning.py")),
-        "--input-json",
-        str(input_json),
-    ]
-    aiter_root = _resolve_aiter_root_for_forge()
-    if aiter_root:
-        cmd = ["env", f"AITER_ROOT_DIR={aiter_root}", *cmd]
-
-    try:
-        rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout)
-        result = _parse_forge_gemm_sentinel(stdout)
-        if result is None:
-            result = _shape_tool_result(rc, stdout, stderr)
-    except subprocess.TimeoutExpired as exc:
-        # Reaped by the process-group kill in _run_subprocess; shape a failed result.
-        cmd_repr = " ".join(str(c) for c in (getattr(exc, "cmd", None) or cmd))
-        result = {
-            "status": "failed",
-            "error_class": "subprocess_timeout",
-            "error": f"TimeoutExpired after {timeout}s: {cmd_repr[:1500]}",
-        }
+    result = await _invoke_forge_gemm_tune(input_payload, timeout)
 
     result.setdefault("backend", "forge")
     # Tag the tuning engine so the breakdown attributes this run to forge.
@@ -3698,6 +3553,9 @@ def _persist_forge_gemm_csv_durably(extra_envs: dict, *, model_path: str, sessio
     return updated, snap_dir
 
 
+_GEMM_TUNING_MODULE = "hyperloom.orchestrator.kernel.gemm_tuning"
+
+
 async def _run_geak_gemm_tuning(
     payload: dict,
     *,
@@ -3713,9 +3571,6 @@ async def _run_geak_gemm_tuning(
     state = SharedState.load_or_init(session_dir)
     precision = _normalize_precision(payload.get("precision") or state.precision)
     framework = str(payload.get("framework") or state.framework or "sglang").strip().lower()
-    root_err = _kernel_agent_root_error()
-    if root_err:
-        return {"status": "failed", "error_class": "kernel_agent_root_missing", "error": root_err}
 
     workspace = _gemm_tuning_workspace(payload, session_dir=session_dir)
     workspace.mkdir(parents=True, exist_ok=True)
@@ -3751,12 +3606,9 @@ async def _run_geak_gemm_tuning(
     if baseline_tput is None:
         baseline_tput = state.baseline_tput
 
-    from hyperloom.orchestrator.actions.executors._workload_envs import geak_metric_axis
+    from hyperloom.orchestrator.actions.executors._workload_envs import GEAK_METRIC_OUTPUT
 
-    _geak_e2e_metric, _ = geak_metric_axis(
-        benchmark_mode=str(getattr(state, "benchmark_mode", "") or ""),
-        grading=getattr(state, "grading", None),
-    )
+    _geak_e2e_metric, _ = GEAK_METRIC_OUTPUT
 
     input_json = workspace / "gemm_tuning_input.json"
     input_payload = {
@@ -3771,10 +3623,9 @@ async def _run_geak_gemm_tuning(
         "isl": isl,
         "osl": osl,
         "baseline_tput": float(baseline_tput or 0.0),
-        # Same axis Hyperloom grades this session on; ``baseline_tput`` above is
-        # read on that axis too, so a pinned "output" here would price every
-        # tuned GEMM against a reference measured differently. Synthetic runs
-        # resolve to "output" and are unaffected.
+        # Output on every session, interactivity-graded ones included: ``baseline_tput``
+        # above is output throughput, and the fixed ISL/OSL benchmark written above is
+        # not an AgentX replay, so it has no interactivity median for GEAK to tune on.
         "env": {"E2E_METRIC": _geak_e2e_metric},
     }
     if geak_config:
@@ -3803,8 +3654,9 @@ async def _run_geak_gemm_tuning(
     cmd = [
         "env",
         f"E2E_METRIC={_geak_e2e_metric}",
-        "python3",
-        str(_kernel_agent_tool_path("gemm_tuning.py")),
+        sys.executable,
+        "-m",
+        _GEMM_TUNING_MODULE,
         "--input-json",
         str(input_json),
     ]
@@ -3848,7 +3700,7 @@ async def run_gemm_tuning_handler(
     Returns:
         A ``HandlerResult`` describing the tuning outcome.
     """
-    backend = _resolve_gemm_tuning_backend(payload)
+    backend = resolve_gemm_tuning_backend(payload)
     log.info("run_gemm_tuning: backend=%s", backend)
 
     if backend == "forge":
@@ -3862,9 +3714,6 @@ async def run_gemm_tuning_handler(
 
 
 # forge-fusion (autonomous kernel fusion)
-_FORGE_FUSION_RESULT_RE = re.compile(r"FORGE_FUSION_RESULT_BEGIN\s*\n(.*?)\nFORGE_FUSION_RESULT_END", re.DOTALL)
-
-
 def _forge_fusion_available() -> bool:
     """Check that KernelForge's fusion pipeline is importable.
 
@@ -3877,17 +3726,6 @@ def _forge_fusion_available() -> bool:
         return importlib.util.find_spec("kernelforge.fusion") is not None
     except (ModuleNotFoundError, ValueError):
         return False
-
-
-def _parse_forge_fusion_sentinel(stdout: str) -> dict[str, Any] | None:
-    """Parse the FORGE_FUSION_RESULT_BEGIN/END sentinel block from stdout."""
-    m = _FORGE_FUSION_RESULT_RE.search(stdout)
-    if not m:
-        return None
-    try:
-        return json.loads(m.group(1))
-    except (json.JSONDecodeError, ValueError):
-        return None
 
 
 def _resolve_fusion_decode_trace(state) -> str:
@@ -4035,9 +3873,9 @@ def _resolve_forge_fusion_sandbox_mode(
 async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResult:
     """Autonomous kernel fusion via the forge-fusion CLI.
 
-    Builds an input-json with one provider-compatible agent backend, model, and
-    validated sandbox policy, shells out to the ``forge_fusion.py`` wrapper, and
-    parses the result sentinel. A KEPT fusion carries a source patch + env flags
+    Resolves one provider-compatible agent backend, model, and validated sandbox
+    policy, then runs forge-fuse through :func:`forge_fusion.run_forge_fusion`,
+    which returns the fusion contract result. A KEPT fusion carries a source patch + env flags
     and ``requires_e2e_validation`` so the integrate gate confirms the
     end-to-end gain. Reuses the PRELUDE decode trace (no re-profiling).
     """
@@ -4132,14 +3970,11 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
             "kept": False,
         }
     max_turns = int(payload.get("max_turns") or os.environ.get("FORGE_FUSION_MAX_TURNS") or 100)
-    # The lane's share of the phase; a zero share means none could be derived, and
-    # the module default is safer for an unattended lane than a one-second session.
     fusion_lane = _lane_budget(state, LANE_FUSION)
+    if fusion_lane is None:
+        return {**_unfunded_lane_skip(LANE_FUSION), "engine": "forge_fusion"}
     timeout = _forge_fusion_timeout_sec(payload, lane_budget_sec=fusion_lane.budget_sec)
-    try:
-        requested_recipes = int(payload.get("max_recipes") or 0)
-    except (TypeError, ValueError):
-        requested_recipes = 0
+    requested_recipes = _positive_int(payload.get("max_recipes"))
     # An explicit payload value stays an operator/test escape hatch.
     fusion_recipe_ceiling = requested_recipes if requested_recipes > 0 else fusion_lane.max_targets
 
@@ -4167,41 +4002,7 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
         "verbose": bool(payload.get("verbose", False)),
         **_fusion_session_serve_args(state, payload, framework=framework, model_path=model_path),
     }
-    input_json = workspace / "forge_fusion_input.json"
-    input_json.write_text(json.dumps(input_payload, indent=2, sort_keys=True), encoding="utf-8")
-
-    cmd = ["python3", str(_kernel_agent_tool_path("forge_fusion.py")), "--input-json", str(input_json)]
-
-    wrapper_timeout = _forge_fusion_wrapper_timeout_sec(timeout)
-    try:
-        rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=wrapper_timeout)
-        result = _parse_forge_fusion_sentinel(stdout)
-        if result is None:
-            result = _shape_tool_result(rc, stdout, stderr)
-    except subprocess.TimeoutExpired as exc:
-        from hyperloom.agents.kernel.tools.forge_fusion import (
-            salvage_forge_fusion_from_workspace,
-        )
-
-        cmd_repr = " ".join(str(c) for c in (getattr(exc, "cmd", None) or cmd))
-        timeout_error = f"TimeoutExpired after {wrapper_timeout}s: {cmd_repr[:1500]}"
-        salvaged = salvage_forge_fusion_from_workspace(str(workspace))
-        if salvaged:
-            result = {
-                **salvaged,
-                "error_class": "subprocess_timeout",
-                "error": timeout_error,
-            }
-        else:
-            result = {
-                "status": "failed",
-                "backend": "forge",
-                "engine": "forge_fusion",
-                "error_class": "subprocess_timeout",
-                "error": timeout_error,
-                "decision": "REVERT",
-                "kept": False,
-            }
+    result = await forge_fusion.run_forge_fusion(input_payload)
 
     result.setdefault("backend", "forge")
     result.setdefault("engine", "forge_fusion")
@@ -5099,7 +4900,7 @@ async def integrate_handler(
     # cpp_itfs path, so this gate is a strict no-op there.
     rebuild_check: HandlerResult = {"verified": True, "status": "skipped"}
     if force_aiter_rebuild and not is_multi_node():
-        rebuild_check = _load_apply_tool().verify_cpp_itfs_rebuilt(cpp_itfs_backup)
+        rebuild_check = apply_kernel_patch.verify_cpp_itfs_rebuilt(cpp_itfs_backup)
         if not rebuild_check.get("verified", True):
             revert_result = _maybe_revert_kernel_patch(apply_result)
             return {

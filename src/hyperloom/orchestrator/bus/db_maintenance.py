@@ -78,8 +78,7 @@ async def prune_events(
             """,
             (delete_below,),
         )
-        deleted = int(cur.rowcount or 0)
-    return deleted
+        return int(cur.rowcount or 0)
 
 
 async def prune_tasks(
@@ -99,8 +98,7 @@ async def prune_tasks(
             f")",
             (*_PRUNABLE_TASK_STATES, *_PRUNABLE_TASK_STATES, keep_done),
         )
-        deleted = int(cur.rowcount or 0)
-    return deleted
+        return int(cur.rowcount or 0)
 
 
 async def run_db_retention(

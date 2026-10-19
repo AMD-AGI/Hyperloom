@@ -11,12 +11,10 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.inference_optimizer.reference_script import render_reference_script
 from hyperloom.orchestrator.actions.executors._nogit_patch import (
     _apply_patch_no_git,
     _reverse_applies_cleanly,
 )
-from hyperloom.orchestrator.bringup.trees import VCS_GIT, VCS_NONE
 from hyperloom.orchestrator.delivery import file_digest, ledger
 from hyperloom.orchestrator.specialists.subprocess_ import (
     SpecialistSubprocessDispatcher,
@@ -117,28 +115,6 @@ def test_a_near_miss_is_not_accepted_as_already_applied(tmp_path: Path) -> None:
     # willing ``patch`` is to match it one line down.
     target.write_text("extra\nctx\ntwo\nctx2\n", encoding="utf-8")
     assert not _reverse_applies_cleanly(root, patch), "an offset-only match is not the post-image"
-
-
-@pytest.mark.skipif(shutil.which("patch") is None, reason="POSIX patch is not installed")
-def test_the_replay_script_matches_the_tree_kind() -> None:
-    rounds = [{"patches": ["patches/001_fix.patch"], "artifacts": []}]
-    common = {
-        "framework": "sglang",
-        "server_args": "",
-        "framework_root": "/opt/sglang",
-        "rounds": rounds,
-    }
-
-    git_script = render_reference_script(**common, framework_root_vcs=VCS_GIT)
-    assert 'git -C "$FRAMEWORK_ROOT" apply' in git_script
-    assert "patch -p" not in git_script
-
-    nogit_script = render_reference_script(**common, framework_root_vcs=VCS_NONE)
-    # Under ``set -e`` a git ladder against a wheel aborts before the launch line.
-    assert "set -euo pipefail" in nogit_script
-    assert "git -C" not in nogit_script
-    assert 'patch -p"$lvl" --fuzz=0 -d "$FRAMEWORK_ROOT"' in nogit_script
-    assert nogit_script.rstrip().endswith("python3 -m sglang.launch_server --model-path=$MODEL")
 
 
 def test_a_revert_that_leaves_a_patched_file_behind_is_named(tmp_path: Path) -> None:

@@ -25,15 +25,18 @@ def test_backend_resolution_controls_magpie_need(monkeypatch):
 
 def test_preflight_gates_magpie_on_backend():
     src = inspect.getsource(preflight_mod._preflight)
-    # The Magpie import/install must be guarded by the active backend.
+    # Preflight resolves the active backend and hands the gate to the Magpie step.
     assert "resolve_backend_name" in src
     assert "_magpie_backend_active" in src
+    assert "magpie_active=_magpie_backend_active" in src
     # The gate wraps the import check and the clone/install branch.
-    assert "import Magpie" in src
-    assert "if _magpie_backend_active and" in src
-    # InferenceX must NOT be gated away (bypass still needs it): the InferenceX section marker exists and is not
-    # inside the magpie-only branch.
-    assert "3. InferenceX" in src
+    magpie_src = inspect.getsource(preflight_mod._ensure_magpie)
+    assert "import Magpie" in magpie_src
+    assert "if magpie_active and" in magpie_src
+    # InferenceX must NOT be gated away: bypass still needs it, so preflight resolves it unconditionally rather
+    # than inside the Magpie-only branch.
+    assert "_ensure_inferencex(install_event)" in src
+    assert "_ensure_inferencex" not in magpie_src
 
 
 def test_preflight_resolves_interpreter_via_backend_not_magpie():
@@ -83,7 +86,7 @@ def test_install_sh_gates_magpie_calls():
 
 
 def test_kernel_install_validates_ray_cli_and_serving_slot():
-    install_sh = Path(preflight_mod.__file__).resolve().parents[2] / "agents" / "kernel" / "scripts" / "install.sh"
+    install_sh = Path(preflight_mod.__file__).resolve().parents[1] / "assets" / "install_kernel_tools.sh"
     text = install_sh.read_text(encoding="utf-8")
 
     assert 'RAY_VERSION="${RAY_VERSION:-2.44.1}"' in text

@@ -173,8 +173,7 @@ def test_record_replaces_directory_with_malformed_completion_marker(tmp_path):
     (partial / "meta.json").write_text(
         json.dumps(
             {
-                "archive_format": "invalid",
-                "complete": True,
+                "complete": "invalid",
                 "iteration": 1,
                 "decision": "KEEP",
                 "kept": True,

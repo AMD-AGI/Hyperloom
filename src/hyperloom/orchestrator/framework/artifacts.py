@@ -31,7 +31,7 @@ def summarize_candidate_outcomes(
     for r in rows:
         st = str(r.get("status") or "")
         by_status[st] = by_status.get(st, 0) + 1
-        if bool(r.get("kept")) or st == "kept":
+        if bool(r.get("kept")):
             keeps += 1
         if st in _TESTED_STATUSES:
             tested += 1

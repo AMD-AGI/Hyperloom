@@ -118,6 +118,36 @@ def test_before_and_after_are_recorded_not_derived():
     assert row["contribution_pct"] == 37.5
 
 
+def test_a_correctness_fix_adoption_names_its_keep_reason():
+    _adopt(0, "integrate", 100.0, 110.0)
+    _adopt(1, "integrate", 110.0, 108.0, keep_reason="correctness_fix", attribution_eligible=False)
+
+    assert [(row["keep_reason"], row["attribution_eligible"]) for row in _rows()] == [
+        (None, None),
+        ("correctness_fix", False),
+    ]
+
+
+def test_the_ledger_reports_gain_with_and_without_correctness_fixes():
+    _adopt(0, "integrate", 100.0, 110.0)
+    _adopt(1, "integrate", 110.0, 108.0, keep_reason="correctness_fix", attribution_eligible=False)
+    _adopt(2, "explore", 108.0, 120.0)
+
+    ext = _ext()
+    assert ext["adoptions"]["by_keep_reason"] == {
+        "correctness_fix": {"count": 1, "total_gain_pct": -2.0, "unmeasured": 0}
+    }
+    assert (ext["attributed_gain_pct"], ext["attributed_gain_pct_excluding_fixes"]) == (20.0, 22.0)
+
+
+def test_a_ledger_without_fixes_reports_one_caliber_twice():
+    _adopt(0, "explore", 100.0, 110.0)
+
+    ext = _ext()
+    assert ext["adoptions"]["by_keep_reason"] == {}
+    assert ext["attributed_gain_pct_excluding_fixes"] == ext["attributed_gain_pct"] == 10.0
+
+
 def test_local_gain_and_contribution_diverge_once_the_anchor_leaves_the_baseline():
     _adopt(0, "explore", 100.0, 200.0)
     _adopt(1, "explore", 200.0, 300.0)
@@ -257,10 +287,10 @@ def test_the_ledger_is_one_event_however_many_phases_adopt_onto_it(tmp_path):
     assert [row["stack_index"] for row in events[0]["ext"]["adoptions"]["rows"]] == [0, 1, 2, 3]
 
 
-def test_rows_are_ordered_by_stack_position_not_by_arrival():
-    _adopt(2, "integrate", 120.0, 130.0)
-    _adopt(0, "explore", 100.0, 110.0)
-    _adopt(1, "explore", 110.0, 120.0)
+def test_rows_are_ordered_by_when_they_were_stacked_not_by_arrival():
+    _adopt(2, "integrate", 120.0, 130.0, ts="2026-01-01T00:00:03.000000+00:00")
+    _adopt(0, "explore", 100.0, 110.0, ts="2026-01-01T00:00:01.000000+00:00")
+    _adopt(1, "explore", 110.0, 120.0, ts="2026-01-01T00:00:02.000000+00:00")
 
     assert [row["stack_index"] for row in _rows()] == [0, 1, 2]
 
@@ -326,6 +356,15 @@ def test_outcome_validation_reads_the_ledger_rather_than_a_legacy_projection(tmp
     assert by_source["warm_replay"] == {"total_gain_pct": 10.0, "keep_count": 1, "unmeasured_keep_count": 0}
     assert by_source["kernel"]["by_backend"]["geak"]["total_gain_pct"] == 20.0
     assert by_source["kernel"]["by_backend"]["forge"]["keep_count"] == 0
+
+
+def test_outcome_carries_both_gain_calibers(tmp_path):
+    _adopt(0, "integrate", 100.0, 110.0)
+    _adopt(1, "integrate", 110.0, 108.0, keep_reason="correctness_fix", attribution_eligible=False)
+
+    validation = _outcome(tmp_path)
+    assert (validation["attributed_gain_pct"], validation["attributed_gain_pct_excluding_fixes"]) == (8.0, 10.0)
+    assert validation["by_keep_reason"] == {"correctness_fix": {"count": 1, "total_gain_pct": -2.0, "unmeasured": 0}}
 
 
 def test_outcome_folds_explore_into_framework_agent(tmp_path):

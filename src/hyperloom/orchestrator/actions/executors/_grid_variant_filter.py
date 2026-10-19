@@ -137,14 +137,9 @@ _RE_AITER_MOE_RUNNER = re.compile(r"--moe[-_]runner[-_]backend[= ]+aiter\b")
 
 def _operator_pinned_envs() -> dict[str, str]:
     """Return the operator's ``--extra-env`` pins from the CLI handoff env."""
-    raw = os.environ.get("INFERENCE_OPTIMIZER_EXTRA_ENV", "").strip()
-    if not raw:
-        return {}
-    try:
-        data = json.loads(raw)
-    except (ValueError, TypeError):
-        return {}
-    return {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
+    from hyperloom.common.env_safety import operator_extra_env
+
+    return operator_extra_env()
 
 
 def apply_aiter_moe_pin_filter(

@@ -4,10 +4,7 @@
 
 from __future__ import annotations
 
-import argparse
 import os
-import subprocess  # nosec B404 - guarded rocm-smi probe only
-import sys
 from pathlib import Path
 from typing import Mapping
 
@@ -74,23 +71,6 @@ def _installed_aiter_version() -> str | None:
     return None
 
 
-def _gpu_idle(gpu: str) -> bool:
-    """Best-effort: True if rocm-smi shows GPU[gpu] <=5% (or is unavailable)."""
-    try:
-        out = subprocess.run(  # nosec B603 B607
-            ["rocm-smi", "--showuse"], capture_output=True, text=True, timeout=20
-        ).stdout
-    except (OSError, subprocess.SubprocessError):
-        return True
-    for line in out.splitlines():
-        if f"GPU[{gpu}]" in line and "use (%)" in line:
-            try:
-                return int(line.rsplit(":", 1)[1].strip()) <= 5
-            except (ValueError, IndexError):
-                continue
-    return True
-
-
 def _resolve_root(env: Mapping[str, str]) -> str | None:
     root = env.get("AITER_ROOT_DIR")
     if not root:
@@ -117,39 +97,3 @@ def collect(env: Mapping[str, str] | None = None) -> dict:
         "hard": hard,
         "soft": soft,
     }
-
-
-def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="aiter tune/serve alignment preflight")
-    ap.add_argument("--strict", action="store_true", help="exit non-zero on any hard problem")
-    ap.add_argument("--check-gpu", metavar="GPU", default=None, help="also assert this GPU id is idle")
-    args = ap.parse_args(argv)
-
-    st = collect(os.environ)
-    serve, root, commit = st["serve_aiter"], st["tuner_root"], st["aiter_commit"]
-    hard, soft = list(st["hard"]), list(st["soft"])
-
-    print("== aiter alignment preflight ==")
-    print(f"  serve aiter : {serve or '<not importable>'}")
-    print(f"  tuner root  : {root or '<AITER_ROOT_DIR unset / not a dir>'}")
-    print(f"  AITER_COMMIT: {commit or '<unset>'}")
-
-    if st["aligned"]:
-        print("  [ok] serve aiter == tuner root (aligned)")
-    if args.check_gpu is not None and not _gpu_idle(args.check_gpu):
-        hard.append(f"GPU[{args.check_gpu}] is busy")
-
-    for m in soft:
-        print(f"  [WARN] {m}")
-    for m in hard:
-        print(f"  [PROBLEM] {m}")
-
-    if hard and args.strict:
-        print("== FAIL (strict) ==")
-        return 1
-    print("== ok ==" if not hard else "== warnings only (non-strict) ==")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

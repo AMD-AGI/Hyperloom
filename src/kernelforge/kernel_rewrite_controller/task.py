@@ -28,13 +28,13 @@ from kernelforge.kernel_rewrite_controller.paths import (
     operator_directory_name,
     safe_relative_path,
 )
-from kernelforge.knowledge.implementation_identity import normalize_operator_name
-from kernelforge.knowledge.kernel_identity import (
+from kernelforge.knowledge.kb_store.identity.implementation import normalize_operator_name
+from kernelforge.knowledge.kb_store.identity.kernel_recipe import (
     KERNEL_CANONICAL_DIMENSIONS,
     KernelRecipeIdentity,
     kernel_recipe_canonical_id,
 )
-from kernelforge.knowledge.loop_identity import LOOP_PRODUCER
+from kernelforge.knowledge.kb_store.identity.run import LOOP_PRODUCER
 
 log = logging.getLogger(__name__)
 

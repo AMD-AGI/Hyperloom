@@ -44,13 +44,22 @@ GRADED_ERROR_RATE = "request_error_rate"
 # same work. Sized to catch a truncated round, not the few percent a full round drifts by.
 DURATION_DRIFT_PCT = 5.0
 
+# Extra failed requests a candidate may report over its anchor, in the rate's percentage points. aiperf counts a reply
+# that carries no content as failed, and a corpus turn answered with a single token comes back with content under one
+# configuration and without it under another, so with no slack that one turn refuses a real gain. Being a rate, the
+# slack admits more failures in a longer or more concurrent round and none in a round of fewer than 200 requests (an
+# MLPerf smoke run issues 150 samples). Percentiles are read over the same round's successful requests, so dropping a
+# fraction f of them moves any percentile by at most f in rank, and the slack cannot buy a median gain anywhere near
+# AGENTX_KEEP_P50_THRESHOLD_PCT.
+ERROR_RATE_SLACK_PCT = 0.5
+
 # The axes ``graded_axes_of`` can carry, for a consumer that must publish all of them including the ones a
 # measurement did not supply. Absent and null are not the same fact: a recorder that omits an axis leaves a reader
 # unable to tell an unmeasured axis from one the framework failed to report, and zero reads as "measured, and it
 # was zero".
 #
-# Duration and error rate are members because they are decision inputs, not decoration: ``rounds_are_comparable``
-# refuses a pair whose windows differ by more than ``DURATION_DRIFT_PCT`` or whose candidate dropped more requests,
+# Duration and error rate are members because they are decision inputs, not decoration: ``incomparability_reason``
+# refuses a pair whose windows differ by more than ``DURATION_DRIFT_PCT`` or whose candidate dropped too many requests,
 # and a published verdict that omits them cannot be re-derived from the record. The objective and its two guards
 # are here for the same reason -- every input the verdict reads is recoverable from one block.
 GRADED_AXIS_KEYS = (
@@ -97,6 +106,13 @@ def intvty_grading_enabled(*, benchmark_mode: str = "") -> bool:
     """True when interactivity grading applies; ``benchmark_mode`` is a parameter to keep this module a leaf."""
     # Passing the mode matters: the env var describes only the shell that happens to be running, so a re-baseline or
     # integrate round in a subprocess would otherwise grade an agentic measurement on the synthetic axis.
+    # The MLPerf harness publishes no per-request OSL/E2EL series, so its sessions grade on output throughput;
+    # asking for interactivity there would only degrade every round. Adding that series upstream in
+    # mlcommons/endpoints is future work, if MLPerf mandates grading on interactivity.
+    from hyperloom.common.agentx_workload import is_mlperf_backend
+
+    if is_mlperf_backend():
+        return False
     raw = env_str("HYPERLOOM_PERF_METRIC").strip().lower()
     if raw:
         return raw == INTVTY_V1
@@ -277,21 +293,23 @@ def stamp_output_per_gpu(measurement: Any, tp: Any) -> None:
     measurement[GRADED_OUTPUT_PER_GPU] = out / chips
 
 
-def rounds_are_comparable(candidate: Mapping[str, float], anchor: Mapping[str, float]) -> bool:
-    """Whether the pair measured the same work: equal-length windows and no extra failed requests.
+def incomparability_reason(candidate: Mapping[str, float], anchor: Mapping[str, float]) -> str:
+    """Why the pair did not measure the same work, or "" when it did: equal-length windows, failures within the slack.
 
     Fails closed on an unreported input. A truncated round still publishes plausible rates, so treating "no
     evidence" as "comparable" is what lets one KEEP on a window it never ran.
     """
     for side in (candidate, anchor):
         if not all(key in side for key in (GRADED_DURATION, GRADED_ERROR_RATE)):
-            return False
+            return "comparability_inputs_missing"
     ref_duration = axis_of(anchor, GRADED_DURATION)
     if ref_duration <= 0:
-        return False
+        return "comparability_inputs_missing"
     if abs(axis_of(candidate, GRADED_DURATION) / ref_duration - 1.0) * 100.0 > DURATION_DRIFT_PCT:
-        return False
-    return axis_of(candidate, GRADED_ERROR_RATE) <= axis_of(anchor, GRADED_ERROR_RATE)
+        return "duration_drift"
+    if axis_of(candidate, GRADED_ERROR_RATE) > axis_of(anchor, GRADED_ERROR_RATE) + ERROR_RATE_SLACK_PCT:
+        return "extra_failed_requests"
+    return ""
 
 
 def holds_within_band(
@@ -306,26 +324,93 @@ def holds_within_band(
     return _within_band(axis_of(candidate, key), axis_of(anchor, key), band)
 
 
+def _ceiling_veto(observed: Any, ceiling: float | None, *, exceeded: str, unmeasured: str) -> str:
+    """``exceeded`` over the ceiling, ``unmeasured`` without a usable reading, else ""; "" when no ceiling is set.
+
+    Fails closed on an unmeasured candidate: a constraint nobody measured is not one anybody satisfied.
+    """
+    if not ceiling or ceiling <= 0:
+        return ""
+    if isinstance(observed, bool) or not isinstance(observed, (int, float)):
+        return unmeasured
+    value = float(observed)
+    if not isfinite(value) or value <= 0:
+        return unmeasured
+    return exceeded if value > float(ceiling) else ""
+
+
 def latency_veto_reason(observed_ms: Any, budget_ms: float) -> str:
     """Why the latency budget refuses this candidate, or "" when it does not.
 
     The budget is a ceiling on mean end-to-end latency, so unlike the gain gates
     it refuses a candidate whose throughput won: a lever that buys throughput by
     making each stream slower is exactly the case a throughput-only comparison
-    selects for. Off entirely when *budget_ms* is not positive.
-
-    Fails closed on an unmeasured candidate — a constraint nobody measured is not
-    one anybody satisfied — which is why every lane copies ``e2el_mean_ms`` onto
-    the dict it promotes.
+    selects for. Off entirely when *budget_ms* is not positive. Every lane copies
+    ``e2el_mean_ms`` onto the dict it promotes.
     """
-    if not budget_ms or budget_ms <= 0:
+    return _ceiling_veto(observed_ms, budget_ms, exceeded="latency_budget_exceeded", unmeasured="latency_unmeasured")
+
+
+_POWER_UNMEASURED = "power_unmeasured"
+_POWER_BUDGET_EXCEEDED = "power_budget_exceeded"
+_GPU_POWER_BUDGET_EXCEEDED = "gpu_power_budget_exceeded"
+_POWER_VETO_REASONS = frozenset({_POWER_UNMEASURED, _POWER_BUDGET_EXCEEDED, _GPU_POWER_BUDGET_EXCEEDED})
+
+
+def power_veto_reason(
+    by_gpu_w: Any,
+    *,
+    total_budget_w: float = 0.0,
+    per_gpu_budget_w: Mapping[str, float] | None = None,
+) -> str:
+    """Why the power budgets refuse this candidate, or "" when they do not.
+
+    *by_gpu_w* is each serving card's mean power over the measured round, keyed by physical GPU id. *total_budget_w*
+    caps their sum (``--max-power-w``); *per_gpu_budget_w* caps individual cards (``--max-per-gpu-power-w``). A card
+    with no limit of its own is bound only by the total, and a limited card that did not serve this round is not
+    judged on it. Off entirely when neither budget is set. Fails closed on a candidate with no per-card reading: a
+    constraint nobody measured is not one anybody satisfied.
+    """
+    limits = {str(gpu): float(watts) for gpu, watts in (per_gpu_budget_w or {}).items() if watts and watts > 0}
+    total = float(total_budget_w or 0.0)
+    if total <= 0 and not limits:
         return ""
-    if isinstance(observed_ms, bool) or not isinstance(observed_ms, (int, float)):
-        return "latency_unmeasured"
-    observed = float(observed_ms)
-    if not isfinite(observed) or observed <= 0:
-        return "latency_unmeasured"
-    return "latency_budget_exceeded" if observed > float(budget_ms) else ""
+    if not isinstance(by_gpu_w, Mapping) or not by_gpu_w:
+        return _POWER_UNMEASURED
+    readings: dict[str, float] = {}
+    for gpu, watts in by_gpu_w.items():
+        if isinstance(watts, bool) or not isinstance(watts, (int, float)) or not isfinite(watts) or watts <= 0:
+            return _POWER_UNMEASURED
+        readings[str(gpu)] = float(watts)
+    if any(gpu in readings and readings[gpu] > limit for gpu, limit in limits.items()):
+        return _GPU_POWER_BUDGET_EXCEEDED
+    if total > 0 and sum(readings.values()) > total:
+        return _POWER_BUDGET_EXCEEDED
+    return ""
+
+
+def constraint_veto_reason(measurement: Any, state: Any) -> str:
+    """The first session constraint *measurement* breaks, or ""; the one reader every KEEP decision uses."""
+    source = measurement if isinstance(measurement, Mapping) else {}
+    return latency_veto_reason(
+        source.get("e2el_mean_ms"), float(getattr(state, "latency_budget_ms", 0.0) or 0.0)
+    ) or power_veto_reason(
+        source.get("gpu_power_by_gpu_w"),
+        total_budget_w=float(getattr(state, "power_budget_w", 0.0) or 0.0),
+        per_gpu_budget_w=getattr(state, "power_budget_per_gpu_w", None),
+    )
+
+
+#: Every measurement field a session constraint reads, with the mean power reported beside the per-card figures. A
+#: carrier that hands a measurement to a KEEP decision copies them together, so no lane drops one.
+CONSTRAINT_FIELDS = ("e2el_mean_ms", "gpu_power_avg_w", "gpu_power_by_gpu_w")
+
+
+def constraint_fields(source: Any) -> dict[str, Any]:
+    """:data:`CONSTRAINT_FIELDS` read off a mapping or an object; an absent field is ``None``."""
+    if isinstance(source, Mapping):
+        return {name: source.get(name) for name in CONSTRAINT_FIELDS}
+    return {name: getattr(source, name, None) for name in CONSTRAINT_FIELDS}
 
 
 @dataclass(frozen=True)
@@ -335,6 +420,7 @@ class GradedComparison:
     ``candidate`` and ``reference`` are both read on ``objective``. ``tput_*`` carry total throughput and are 0.0 off
     AgentX. ``degrade_reason`` names why the interactivity axis did not apply on a session that asked for it.
     ``veto_reason`` names a constraint that refused a candidate its throughput would otherwise have kept.
+    ``refused_by`` names, comma-joined, every interactivity gate the candidate failed.
     """
 
     objective: str
@@ -345,6 +431,7 @@ class GradedComparison:
     tput_reference: float = 0.0
     degrade_reason: str = ""
     veto_reason: str = ""
+    refused_by: str = ""
 
     @property
     def comparable(self) -> bool:
@@ -357,6 +444,13 @@ class GradedComparison:
         return not self.degrade_reason
 
     @property
+    def vetoed_by(self) -> str:
+        """The session constraint behind ``veto_reason``: ``power_budget`` or ``latency_budget``; ``""`` when none."""
+        if not self.veto_reason:
+            return ""
+        return "power_budget" if self.veto_reason in _POWER_VETO_REASONS else "latency_budget"
+
+    @property
     def graded_on_intvty(self) -> bool:
         """Whether the interactivity objective actually applied."""
         return self.objective in INTVTY_OBJECTIVES
@@ -364,7 +458,9 @@ class GradedComparison:
 
 __all__ = [
     "AGENTX_KEEP_P50_THRESHOLD_PCT",
+    "CONSTRAINT_FIELDS",
     "DURATION_DRIFT_PCT",
+    "ERROR_RATE_SLACK_PCT",
     "GradedComparison",
     "GRADED_AXIS_KEYS",
     "GRADED_DURATION",
@@ -383,16 +479,19 @@ __all__ = [
     "graded_axes_of",
     "graded_metric_key",
     "holds_within_band",
+    "incomparability_reason",
     "intvty_grading_enabled",
     "intvty_of",
     "intvty_serving_grading_enabled",
     "is_agentx_mode",
+    "constraint_fields",
+    "constraint_veto_reason",
     "latency_veto_reason",
+    "power_veto_reason",
     "output_tput_of",
     "parse_intvty_noise_pct",
     "perf_snapshot_from_mapping",
     "resolve_grading_anchor_perf",
-    "rounds_are_comparable",
     "stamp_output_per_gpu",
     "total_tput_of",
 ]

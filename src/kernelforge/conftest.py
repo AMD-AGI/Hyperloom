@@ -165,7 +165,7 @@ def kb_store_run_config(tmp_path: Path, token: str) -> "object":
     guardrails above are installed.
     """
     from kernelforge.config import Config
-    from kernelforge.knowledge.experience_store import KnowledgeConfig
+    from kernelforge.knowledge.kb_store.config import KnowledgeConfig
 
     knowledge = KnowledgeConfig.from_env(
         {},

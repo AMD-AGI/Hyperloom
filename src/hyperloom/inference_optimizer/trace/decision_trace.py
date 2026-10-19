@@ -12,6 +12,7 @@ readers, so a breakdown reader is not left looking for the key it feeds.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,7 @@ from hyperloom.inference_optimizer.breakdown.collectors._common import (
 )
 from hyperloom.inference_optimizer.breakdown.recorder.phase_event import is_phase_transition_row
 from hyperloom.inference_optimizer.session.optimization_journal import (
+    JournalEntry,
     operation_kind_for,
     proposer_for,
 )
@@ -227,6 +229,11 @@ def _decision_key(task_id: str, dyn_id: str) -> str | None:
     return None
 
 
+def _decision_id(kind: str, *facts: Any) -> str:
+    """Name one decision by the facts its source records once, so the id survives every rewrite of the trace."""
+    return hashlib.sha256(json.dumps([kind, *facts]).encode("utf-8")).hexdigest()[:16]
+
+
 def _token_convenience(bucket: dict[str, Any] | None) -> dict[str, Any]:
     """Copy a token bucket and add ``total_in_out``, ``grand_total`` and ``cache_hit_rate``."""
     b = dict(bucket or {})
@@ -287,6 +294,10 @@ def write_decision_trace(
     dynamic_action ``dispatch_history.jsonl``), then attaches each decision's
     LLM calls by the shared ``task_id`` / ``dyn_id`` key, with a ``ts``-window
     phase fallback for calls that carry neither.
+
+    Every row carries a ``decision_id`` that stays the same across rewrites:
+    the journal entry's ``dedupe_key`` for a KEEP/REVERT row, the dispatch's
+    ``dyn_id`` / ``event`` / ``ts`` for a dynamic_action row.
 
     Writes an empty file when no trace files exist, so a session that ran before
     the trace subsystem landed degrades cleanly. Best-effort: an OSError lands
@@ -353,6 +364,7 @@ def write_decision_trace(
         decisions.append(
             {
                 "kind": "keep_revert",
+                "decision_id": _decision_id("keep_revert", *JournalEntry.from_dict(e).dedupe_key()),
                 "key": key,
                 "phase": phase,
                 "tick": e.get("tick"),
@@ -365,9 +377,11 @@ def write_decision_trace(
         key = _decision_key(str(row.get("task_id") or ""), dyn_id)
         ts = iso_z(row.get("ts"))
         phase = _phase_at(ts, phase_windows)
+        event = str(row.get("event") or "")
         decisions.append(
             {
                 "kind": "dynamic_action",
+                "decision_id": _decision_id("dynamic_action", dyn_id, event, ts),
                 "key": key,
                 "phase": phase,
                 "tick": row.get("tick"),
@@ -375,7 +389,7 @@ def write_decision_trace(
                 "decision": {
                     "component": "dynamic_action",
                     "operation_kind": "dynamic_action",
-                    "event": str(row.get("event") or ""),
+                    "event": event,
                     "dyn_id": dyn_id,
                     "verdict": row.get("verdict"),
                     "outcome": str(row.get("integrate_status") or row.get("terminal_state") or ""),
@@ -402,6 +416,7 @@ def write_decision_trace(
             _fold_call_into_bucket(agg, call)
         decision_trace.append(
             {
+                "decision_id": dec["decision_id"],
                 "phase": dec.get("phase") or "",
                 "tick": dec.get("tick"),
                 "ts": dec.get("ts") or "",

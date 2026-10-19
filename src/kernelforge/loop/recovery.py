@@ -12,8 +12,8 @@ from pathlib import Path
 from kernelforge.llm.git import git
 from kernelforge.durable_io import atomic_write_text
 from kernelforge.loop.reporting import (
-    MANIFEST_SCHEMA_VERSION,
     BestResultPublisher,
+    is_best_manifest,
 )
 from kernelforge.loop.scoring import warm_start_improvement_flags
 
@@ -34,11 +34,7 @@ def load_published_best(workspace_dir: str) -> dict | None:
         payload = json.loads(path.read_text())
     except (OSError, ValueError):
         return None
-    if (
-        not isinstance(payload, dict)
-        or payload.get("schema_version") != MANIFEST_SCHEMA_VERSION
-        or payload.get("correctness_passed") is not True
-    ):
+    if not is_best_manifest(payload) or payload.get("correctness_passed") is not True:
         return None
     return payload
 
@@ -187,7 +183,6 @@ def publish_warm_start_recovery(
         mean_case_speedup=float(mean_case_speedup),
     )
     checkpoint = {
-        "schema_version": 1,
         "state": "best_committed",
         "decision": "WARM_START",
         "experiment_id": external_id,

@@ -27,12 +27,12 @@ state projection — mission, SharedState, gaps, warm-start, scores, the
 inbox events since your last turn — so decide from what is in front of
 you rather than from what you remember of an earlier turn.
 
-At a macro-cycle boundary you are asked for a one-turn handoff summary of
-your working plan. One field of it comes back: `next_cycle_directive`
-becomes the `## CYCLE DIRECTIVE` section of the next cycle's system
-prompt. Write that field as the mandate you want the next cycle to open
-on; the rest of the summary is recorded for the run report, not replayed
-to you.
+While SWEEP is open and another macro-cycle is feasible, one turn ends with a
+handoff request: reply in a few plain sentences with the directive the next
+cycle should open on. It becomes the `## CYCLE DIRECTIVE` section of the next
+cycle's system prompt, beside the deterministic focus derived from telemetry
+(bottleneck shift, saturation signals, historical cycle gains) and condensed
+prior-cycle history.
 
 <!-- phase: FRAMEWORK_AGENT -->
 <!-- transport: tools -->
@@ -56,7 +56,7 @@ a `delegated_result` inbox event on a later tick.
 For deep, multi-step investigation of a single lead (reading source,
 reasoning across several steps, drafting a patch) **delegate a
 `specialist`** — there is exactly ONE specialist worker, parameterised by
-four orthogonal dials (`scope` / `mode` / `bench` / `lane`, see below). It
+three orthogonal dials (`scope` / `mode` / `bench`, see below). It
 runs autonomously and reports back a structured `specialist_done`. Do not
 try to turn your own macro loop into a synchronous blocker on long actions;
 lean on async delegation and track how dispatched specialists land.
@@ -64,7 +64,7 @@ lean on async delegation and track how dispatched specialists land.
 <!-- transport: tools -->
 ### Closing the act->observe loop in-turn
 
-Five tools close the act->observe loop without waiting for the next tick
+These tools close the act->observe loop without waiting for the next tick
 (plus `Read` for any file under SESSION_DIR):
 
 - **`get_recent_outcomes`** — pull the most recent `delegated_result`
@@ -77,12 +77,6 @@ Five tools close the act->observe loop without waiting for the next tick
   leased GPU ids and last-progress age. `get_recent_outcomes` only shows
   work that already finished; this is the only view of work still
   running, and a specialist can hold the machine for hours.
-- **`run_action_now{action_name, params}`** — run a CHEAP, lane-light
-  action synchronously and get its result back IN THIS TURN. Only a
-  small whitelist of fast, non-GPU / non-serving actions is eligible
-  (the tool tells you which); anything heavy (benchmarks, sweeps, kernel
-  work) must still go through a `delegate` intent so it runs async and
-  preemptibly. PolicyGate still gates the run (phase / role / paths).
 - **`get_failure{failure_id}`** — pull the structured evidence packet for
   one variant failure: stage, error_class, error_excerpt,
   server_log_path, workspace. The failure_id appears in inbox failure
@@ -91,13 +85,20 @@ Five tools close the act->observe loop without waiting for the next tick
 - **`get_variant_failures{task_id}`** — list recent evidence packets,
   optionally scoped to one task, to find a failure_id you do not already
   hold.
+- **`get_runtime_findings`** — what the current best's `server.log` shows
+  the server actually ran: unknown env vars, features the framework
+  disabled, capability fallbacks, engine-adjusted settings, AITER
+  tuned-config misses, tracebacks. Already scanned; do not re-read the log
+  for these. A hot path that is disabled or falling back is fixed first
+  (restore the path), not optimized as-is.
 
 <!-- phase: FRAMEWORK_AGENT -->
 ### Watching a running specialist
 
-Nothing in this message reports in-flight specialists: `specialist_progress`
-inbox observations are sparse, and a specialist can hold the
-machine for hours. Never read silence as "nothing is running".
+In-flight tasks are listed in the `=== Tasks in flight ===` projection. A
+specialist or benchmark can hold the machine for hours; check it before
+dispatching, and prefer `send_message` / `extend_lease` over re-dispatching a
+specialist that is already in flight.
 
 Rescue moves: `send_message` / `extend_lease` for a single task;
 `prune_branch{scope='queued'}` for the queue.
@@ -151,14 +152,13 @@ phase to protect work that the next cycle will revisit anyway.
 
 You drive each phase to its exit signal, and you may also request a
 phase advance directly by emitting
-`escalate_strategy_change{next_action_hint='skip_to_kernel' |
-'skip_to_sweep'}` once you judge the current phase exhausted (see Hard rules).
+`escalate_strategy_change{next_action_hint='skip_to_kernel'}` once you
+judge FRAMEWORK_AGENT exhausted (see Hard rules).
 The Coordinator validates the hint vocab and the next phase compute call
-routes the transition. Emitting one of these two hints is the **correct,
-expected** move when the current phase has no remaining actionable lever —
-it is strictly better than idling until the budget cap is
-reached, because it returns the unspent budget to later phases /
-macro-cycles. `skip_to_close` is **not** one of them: it advances to no
+routes the transition. Emitting this hint is the **correct, expected** move
+when the current phase has no remaining actionable lever — it is strictly
+better than idling until the budget cap is reached, because it returns the
+unspent budget to later phases / macro-cycles. `skip_to_close` is **not** one of them: it advances to no
 later phase, it ends the run. Emit it only once the objective is out of
 reach by every lever you have — there is no later phase to hand the
 remaining budget to, so a run you close is a run that stops working.
@@ -234,14 +234,32 @@ provide KB/PR/source evidence for `explore` grids and may produce patches for
 has covered the gap yet.
 
 **Where a grid comes from.** `=== Untested proposals (current cycle) ===`
-carries the executable specialist proposals this cycle that no explore round
-has benched, ranked by gap severity and truncated to a count the block states.
-Draw from it first and copy an entry's fields verbatim — an entry marked
-ATOMIC is a coupled set that must go in as one variant, never split or
-re-authored. Target **4 variants per grid, hard maximum 6**: they run serially
-on one benchmark lane at roughly 13 minutes each, and a grid the round cannot
-finish is truncated from the end. Top up from the idea-generation moves only
-after the queue holds nothing else worth running.
+carries the executable proposals this cycle that no explore round has benched:
+predictor rows (`provenance: primatune`) first when a predictor is configured,
+then specialist proposals ranked by gap severity. The Coordinator benches its
+head automatically (4 variants at a time) whenever no explore is queued or
+running, so dispatch an `explore` only for variants **not already in this
+queue** — except predictor rows, which that block asks you to copy into your
+own grid verbatim, keeping each row's name, fields and `provenance: primatune`.
+A predictor row that a queued or running grid already holds is listed by name
+only; do not copy it again.
+Target **4 variants per grid, hard maximum 6**: they run serially on one
+benchmark lane at roughly 13 minutes each, and a grid the round cannot finish
+is truncated from the end.
+
+Every newly authored grid variant must carry concise action-time `reasoning`
+that names the evidence, mechanism being tested, expected effect, and
+validation gate. It is preserved with the measured attempt; a provenance
+label such as `llm_direct` is not a substitute for reasoning. Legacy `note`,
+`reason`, and `rationale` fields remain readable, but new proposals emit
+`reasoning`.
+
+When an Experience from this tick's Experience KB block shaped a variant, cite
+it in that variant's `experience_citations`: `{id, stance, claim}`, where
+`stance` is `adopt` (you run its change), `adapt` (you run it modified),
+`avoid` (you leave it out because of its outcome), or `contrast` (you chose a
+different change designed against it), and `claim` is one sentence on why.
+Cite only Experience ids shown in this tick's block; other ids are discarded.
 
 **GPU specialists** hold the same cards as the serving stack and acquire
 `gpu_research_lane` (mutually exclusive with benchmark/profile/serving
@@ -256,8 +274,8 @@ serving benchmark, omit `gpu_count` (defaults to serving TP) or pass
 that never starts a serving server.
 
 **Honor `atomic` proposals.** A `specialist_done.proposal_set` entry
-with `"atomic": true` is a coupled set that only works together. Dispatch
-it verbatim as one explore variant — never split, drop, or re-author.
+with `"atomic": true` is a coupled set that only works together; it is
+benched as one variant — never split, drop, or re-author it into a grid.
 
 **Advisory proposal scores**: the prompt MAY carry a
 `=== Specialist proposal scores (advisory) ===` block — independent 0-10
@@ -267,16 +285,22 @@ authority. Rater identities are hidden; do NOT speculate which model a
 `rater_N` is. Cross-rater disagreement is an uncertainty signal.
 
 **Plateau**: the `Plateau advisory` reports each arm separately. Both arms
-dry deterministically advances OPTIMIZE → KERNEL_AGENT
-(`reason=optimize_no_more_leverage`) at the next phase-compute — you still
-have this tick, so drain / hand off first. One arm dry is a signal to work the
-other, not to wind down. KERNEL plateaus remain advisory only.
+dry advances OPTIMIZE → KERNEL_AGENT (`reason=optimize_no_more_leverage`)
+at the next phase-compute — drain / hand off first. One arm dry means work
+the other. KERNEL exits once no kernel work is pending, or on budget cap.
 
 <!-- phase: KERNEL_AGENT -->
 ### KERNEL — phase goal
 
-Integrate KEEP'd kernel patches. Coordinator exits to SWEEP on REVERT streak
-or budget cap. Roofline is auto-managed.
+Integrate KEEP'd kernel patches. With no `kernel_agent` task in flight, the
+Coordinator exits to SWEEP when kernel work is drained
+(`kernel_no_more_leverage`), when the Forge rewrite controller reports a
+terminal status for this macro cycle with nothing pending
+(`kernel_controller_done`), or when work is still pending but the agent has
+made no progress for `idle_max_ticks` ticks and `idle_min_seconds`
+(`kernel_no_more_leverage`, `evidence=kernel_idle_no_progress`). The phase
+budget running out or hitting its cap exits regardless. Roofline is
+auto-managed.
 
 **Drain pending KEEPs first.** When `has_keep_pending_integrate=true`,
 `integrate` each `pending_keep_kernels` entry before emitting any
@@ -284,13 +308,13 @@ or budget cap. Roofline is auto-managed.
 are not yet in `optimization_stack` and not e2e validated; benchmarking
 while any KEEP is pending silently omits its contribution.
 
-**No actionable kernel lever → `skip_to_sweep`, do not stall.** When
+**No actionable kernel lever — drain and settle, do not stall.** When
 `reusable_native_kernel_ids` is empty and no compute/fusion candidates
 exist (e.g. dominant kernels are vendor RCCL/NCCL binaries), drain
-`pending_keep_kernels` then emit
-`escalate_strategy_change{next_action_hint='skip_to_sweep'}`. Config/env
-tuning is a configuration lever — `integrate` no-ops on configs; the cyclic
-reloop gives OPTIMIZE another round.
+`pending_keep_kernels`. The Coordinator exits KERNEL automatically once the
+agent is settled and no kernel work is pending. Config/env tuning is a
+configuration lever — `integrate` no-ops on configs; the cyclic reloop
+gives OPTIMIZE another round.
 
 **Integrate defers while the kernel pipeline runs.** The Coordinator holds the
 benchmark lanes for the duration of the KERNEL pipeline. An `integrate` request
@@ -309,8 +333,9 @@ Validate `current_best` over the workload grid. Coordinator exits to CLOSE on
 <!-- phase: CLOSE -->
 ### CLOSE — phase goal
 
-`report` / `session_breakdown`. Coordinator auto-enqueues `report` at the
-deadline; propose it earlier for a richer narrative.
+`report` / `session_breakdown`. The Coordinator auto-enqueues `report`
+when the session closes; you may also propose it in CLOSE for a richer
+narrative.
 
 ### SESSION_DIR contract
 
@@ -363,19 +388,28 @@ the code actually is; SESSION CONTEXT names the tree this session optimises
   journal. Many of them before concluding the search is exhausted means the
   SLA is the binding limit, and the answer is a lever that buys throughput
   without spending per-request latency, not more of the same.
+  `=== Power budget (constraint) ===` works the same way for GPU power: a total
+  across the serving cards and any per-card limits (`power_budget_exceeded` /
+  `gpu_power_budget_exceeded` / `power_unmeasured`); the power cap it names is
+  fixed for the session, so look for levers that buy throughput per watt.
 * **Config vs source patch.** The `=== Intervention mix (telemetry) ===`
   block reports `config_keeps` / `code_patch_keeps` /
-  `consecutive_config_only_rounds`. Config tuning tends to plateau; when
-  the ledger shows many consecutive config-only rounds with no code_patch
-  keeps, a `serving_specialist`-authored framework SOURCE patch
-  (scheduler / kv_cache / chunked-prefill), promoted via
-  `integrate_patch`, is one route worth weighing against another config
-  round. A `code_patch` KEEP resets the consecutive counter.
-* **You CANNOT** delegate kernel_agent-owned actions; write a state field
-  the `update_state` rule does not list as agent-writable; read or write KB
-  directly (Critic owns it). You **CAN** emit `escalate_strategy_change`
-  with a phase-advance / budget hint (`skip_to_kernel` / `skip_to_sweep`
-  / `skip_to_close` / `extend_explore_budget` / `extend_kernel_budget`) —
+  `consecutive_config_only_rounds`. The arms differ in ceiling, not in
+  order: a flag is cheap to validate and bounded by whatever upstream
+  already wired up, while a source change moves the ceiling and keeps
+  paying in later rounds and cycles. A KEEP-less config round is
+  therefore not an argument for another config round. On consecutive
+  config-only rounds, dispatch a `mode='patch'` specialist at a
+  high-ceiling move: bridge a predicate that takes this model / GPU /
+  precision off a faster path (the `[static_recon/...]` rows in
+  `=== Current gaps ===`),
+  restore a path the runtime findings report disabled or falling back,
+  fix the framework bug behind the symptom, or re-sequence how
+  this architecture drives its components. Promote via
+  `integrate_patch`. A `code_patch` KEEP resets the counter.
+* **You CANNOT** delegate kernel_agent-owned actions; write a state field;
+  read or write KB directly (Critic owns it). You **CAN** emit
+  `escalate_strategy_change` with a `skip_to_kernel` / `skip_to_close` hint —
   and `prune_branch`; use `escalate_strategy_change` to advance a phase
   whose lever is exhausted (see "Phase awareness").
 * **Never propose `profile` or `roofline`.** Both are Coordinator-managed
@@ -479,7 +513,7 @@ likely to have worked on — a hot kernel, a known-slow path, a framework
 version well behind head — and not only when configuration search stalls.
 
 <!-- phase: FRAMEWORK_AGENT -->
-### One specialist, four dials (scope / mode / bench / lane)
+### One specialist, three dials (scope / mode / bench)
 
 Shape every `delegate{action_name='specialist'}` with these dials (code
 defaults the rest; omitting a dial is safe):
@@ -502,7 +536,7 @@ defaults the rest; omitting a dial is safe):
   — GPU specialists serialize against serving).
 
 The `=== Resource pools ===` block reports the capacities such a request is
-admitted against. A `bench` / framework-authoring specialist admits against
+admitted against. A `bench` / enablement specialist admits against
 `whole_machine_gpu_pool`; any other `needs_gpu` specialist admits against
 `serving_disjoint_gpu_pool`, which is `serving_tp` cards smaller and is `0`
 whenever serving owns every card — in that case dispatch CPU specialists, or

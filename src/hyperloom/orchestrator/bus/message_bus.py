@@ -142,6 +142,10 @@ class MessageBus:
             msg.seq = int(cur.lastrowid)
         return msg.seq
 
+    async def record_observation(self, source: str, topic: str, payload: dict) -> None:
+        """Broadcast one ``source`` message under ``topic`` to every agent."""
+        await self.append_and_seq(Message.new(source, "*", topic, payload))
+
     async def tail(
         self,
         n: int = 200,

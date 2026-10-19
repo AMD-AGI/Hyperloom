@@ -21,6 +21,8 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.common.llm_config import ANTHROPIC_SYNTHESIZABLE_KEY_ENVS
+
 
 PKG_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -173,8 +175,7 @@ def test_atom_first_launch_runs_in_selected_context(tmp_path: Path, mode: str) -
     runtime.mkdir(parents=True)
     (runtime / "kernel-agent.env.sh").write_text(
         "export FRAMEWORK=vllm\nexport KERNEL_OPT_BACKEND_ORDER=stale\nexport PYTHON=/stale/python\n"
-        "export USER_DATA_PATH=/stale/data\nexport HYPERLOOM_KERNEL_AGENT_ROOT=/installed/kernel\n"
-        "export MAGPIE_PATH=/installed/Magpie\n",
+        "export USER_DATA_PATH=/stale/data\nexport MAGPIE_PATH=/installed/Magpie\n",
         encoding="utf-8",
     )
     model = workspace / "model files"
@@ -265,7 +266,7 @@ docker() {
     )
     record = json.loads((workspace / "launch.json").read_text(encoding="utf-8"))
     argv = record["argv"]
-    assert argv[:4] == ["-m", "hyperloom.inference_optimizer.cli", "--verbose", "optimize"]
+    assert argv[:4] == ["-m", "hyperloom", "optimize", "--verbose"]
     expected_flags = {
         "--model": model.as_posix(),
         "--framework": "atom",
@@ -276,8 +277,8 @@ docker() {
         "--precision": "fp8",
         "--target-gain": "50",
         "--max-hours": "12",
-        "--max-minutes-framework-pct": "0.43",
-        "--max-minutes-kernel-pct": "0.42",
+        "--phase-budget-framework-pct": "0.43",
+        "--phase-budget-kernel-pct": "0.42",
         "--launch-info-file": launch_info.as_posix(),
     }
     assert len(argv[4:]) == 2 * len(expected_flags)
@@ -451,7 +452,8 @@ def test_atom_docker_recipe_passes_selected_python_to_setup(tmp_path: Path, doc:
         assert result["INFERENCE_OPTIMIZER_FORCE_PYTHON"] == "1"
         assert (tmp_path / "setup-argv").read_text().splitlines() == [
             "-m",
-            "hyperloom.inference_optimizer.setup",
+            "hyperloom",
+            "setup",
             "--check-only",
             "--",
             "--install-framework",
@@ -501,7 +503,7 @@ def test_atom_recipe_provides_direct_setup_commands(tmp_path: Path, doc: Path) -
     setup_blocks = [
         "\n".join(block)
         for block in blocks
-        if any("hyperloom.inference_optimizer.setup" in line for line in block)
+        if any("-m hyperloom setup" in line for line in block)
         and not any("docker" in line for line in block)
         and any("--install-framework none" in line for line in block)
         and (doc == ATOM_DOC or any("--frameworks atom" in line for line in block))
@@ -517,7 +519,7 @@ export PYTHON=python_probe
         fragment, tmp_path, {"USER_DATA_PATH": "/selected/data"}, observed=("CHECK_ARGS", "INSTALL_ARGS")
     )
     for key, args in result.items():
-        assert "-m hyperloom.inference_optimizer.setup" in args
+        assert "-m hyperloom setup" in args
         assert "--install-framework none" in args
         assert "--frameworks atom" in args
         assert "--require-frameworks" in args
@@ -532,7 +534,7 @@ def test_atom_recipe_provides_an_approved_atom_install_command(tmp_path: Path) -
     install_blocks = [
         "\n".join(block)
         for block in blocks
-        if any("hyperloom.inference_optimizer.setup" in line for line in block)
+        if any("-m hyperloom setup" in line for line in block)
         and any("--install-framework atom" in line for line in block)
     ]
     assert len(install_blocks) == 1
@@ -545,7 +547,7 @@ export PYTHON=python_probe
     result = _run_recipe(fragment, tmp_path, {"USER_DATA_PATH": "/selected/data"}, observed=("INSTALL_ARGS",))
 
     args = result["INSTALL_ARGS"]
-    assert "-m hyperloom.inference_optimizer.setup" in args
+    assert "-m hyperloom setup" in args
     assert "--install-framework atom" in args
     assert "--user-data-path /selected/data" in args
     assert "--yes" in args
@@ -618,3 +620,14 @@ def test_credential_only_recipe_keeps_the_callers_key(tmp_path: Path) -> None:
     assert kept["OPENAI_API_KEY"] == "key-from-caller"
     filled = _run_recipe(fragment, tmp_path, {})
     assert filled["OPENAI_API_KEY"] == "key-from-dotenv"
+
+
+def test_setup_skill_offers_the_claude_subscription_token_path() -> None:
+    """A subscription user is told how to get the token, where it goes, and what would shadow it."""
+    setup = SETUP_DOC.read_text(encoding="utf-8")
+    assert "`Claude subscription (Pro/Max)`" in setup
+    assert "claude setup-token" in setup
+    assert "CLAUDE_CODE_OAUTH_TOKEN=<PLEASE_FILL_IN>" in setup
+    assert "`ANTHROPIC_BASE_URL=https://api.anthropic.com`" in setup
+    for shadowing in ANTHROPIC_SYNTHESIZABLE_KEY_ENVS:
+        assert f"`{shadowing}`" in setup, f"setup skill does not warn that {shadowing} outranks the subscription token"

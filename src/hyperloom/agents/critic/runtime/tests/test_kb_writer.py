@@ -160,41 +160,6 @@ def test_list_priors_uses_session_memory_cache(writer, packet_context):
     assert second["priors"] == first["priors"]
 
 
-def test_add_contradiction_writes_edge(writer, packet_context):
-    w, kb, _, _ = writer
-    a = kb.upsert(
-        {
-            "scope": {
-                "org": "hyperloom",
-                **{k: packet_context[k] for k in ("framework", "model", "model_family", "workload", "precision")},
-            },
-            "kind": "pitfall",
-            "slug": "abcdef-1",
-            "importance": 0.5,
-        }
-    )["row"]["id"]
-    b = kb.upsert(
-        {
-            "scope": {
-                "org": "hyperloom",
-                **{k: packet_context[k] for k in ("framework", "model", "model_family", "workload", "precision")},
-            },
-            "kind": "pitfall",
-            "slug": "abcdef-2",
-            "importance": 0.5,
-        }
-    )["row"]["id"]
-    res = w.add_contradiction(
-        new_id=a,
-        old_ids=[b],
-        ctx=WriteContext(session_id="s1"),
-    )
-    assert res.status == "ok"
-    rows = {r["id"]: r for r in kb.all_rows()}
-    assert b in rows[a]["edges"]["contradicts"]
-    assert a in rows[b]["edges"]["contradicts"]
-
-
 def test_write_verdict_with_missing_critical_scope_skipped(writer):
     w, kb, _, _ = writer
     res = w.write_verdict(
@@ -481,44 +446,6 @@ def test_write_kb_drafts_dead_letters_on_validation_error(writer, packet_context
     assert res.status == "dead_lettered"
     assert res.detail["reason"] == "validation_error"
     assert dlq.files()
-
-
-def test_add_contradiction_skipped_on_missing_ids(writer):
-    w, _, _, _ = writer
-    res = w.add_contradiction(new_id="", old_ids=["kb_1"], ctx=WriteContext(session_id="s"))
-    assert res.status == "skipped"
-    assert res.detail["reason"] == "missing_ids"
-
-    res2 = w.add_contradiction(new_id="kb_1", old_ids=[], ctx=WriteContext(session_id="s"))
-    assert res2.status == "skipped"
-
-
-def test_add_contradiction_disabled_when_breaker_open(breaker_writer):
-    w, _, _, _ = breaker_writer
-    w._unreachable_until = w._time_fn() + w._breaker_cooldown
-    res = w.add_contradiction(new_id="kb_a", old_ids=["kb_b"], ctx=WriteContext(session_id="s"))
-    assert res.status == "disabled"
-    assert res.detail["reason"] == "kb_unreachable"
-
-
-def test_add_contradiction_edge_write_transport_failure_is_skipped(breaker_writer):
-    w, kb, _, _ = breaker_writer
-    kb.fail_next("edges/add", times=1)
-    res = w.add_contradiction(new_id="kb_a", old_ids=["kb_b"], ctx=WriteContext(session_id="s"))
-    assert res.status == "skipped"
-    assert res.detail["reason"] == "edge_write_failed"
-
-
-def test_add_contradiction_edge_write_validation_failure_is_skipped(writer):
-    w, kb, _, _ = writer
-
-    def boom(edges):
-        raise KBValidationError("422 bad edge")
-
-    kb.add_edges = boom  # type: ignore[method-assign]
-    res = w.add_contradiction(new_id="kb_a", old_ids=["kb_b"], ctx=WriteContext(session_id="s"))
-    assert res.status == "skipped"
-    assert res.detail["reason"] == "edge_write_failed"
 
 
 def test_write_verdict_dead_letters_on_generic_kb_error(writer, packet_context):

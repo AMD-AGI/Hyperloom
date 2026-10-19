@@ -107,6 +107,20 @@ def anthropic_synthesizable_key(env: Mapping[str, str] | None = None) -> str:
     )
 
 
+def with_synthesized_anthropic_keys(env: Mapping[str, str]) -> dict[str, str]:
+    """Copy of *env* whose missing Anthropic API key or auth token is filled from the other one.
+
+    Only the synthesizable subset: an OAuth token copied into either API-key var would drop the CLI out of
+    subscription mode and 401 the run.
+    """
+    source = dict(env)
+    fallback_key = anthropic_synthesizable_key(source)
+    if fallback_key:
+        source.setdefault("ANTHROPIC_API_KEY", fallback_key)
+        source.setdefault("ANTHROPIC_AUTH_TOKEN", fallback_key)
+    return source
+
+
 CLAUDE_GATEWAY_SIGNAL_KEYS: tuple[str, ...] = (
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_API_KEY",
@@ -149,7 +163,7 @@ AGENT_BACKEND_CODEX = "codex"
 
 # The model each backend runs when neither the operator nor a known gateway host names one. This is the last rung of
 # every model ladder in both packages, so it lives beside the backend names it is keyed by.
-DEFAULT_CLAUDE_MODEL = "claude-opus-5"
+DEFAULT_CLAUDE_MODEL = "claude-opus-5-5"
 # The gateway publishes both ``gpt-5.6`` and ``gpt-5.6-sol`` in ``/v1/models``, but only the latter has a deployment
 # behind it: a bare ``gpt-5.6`` answers 400 "Deployment ... is not found" on both ChatCompletions and Responses.
 DEFAULT_CODEX_MODEL = "gpt-5.6-sol"
@@ -612,12 +626,7 @@ def claude_sdk_env_options(
     if not any((source.get(key) or "").strip() for key in CLAUDE_GATEWAY_SIGNAL_KEYS):
         return {}
 
-    # Anthropic-side credentials only, and only the synthesizable subset: an OAuth token copied into either API-key
-    # var would drop the CLI out of subscription mode and 401 the run.
-    fallback_key = anthropic_synthesizable_key(source)
-    if fallback_key:
-        source.setdefault("ANTHROPIC_API_KEY", fallback_key)
-        source.setdefault("ANTHROPIC_AUTH_TOKEN", fallback_key)
+    source = with_synthesized_anthropic_keys(source)
     # Claude/Anthropic side reads only ANTHROPIC_CUSTOM_HEADERS.
     if source.get("ANTHROPIC_CUSTOM_HEADERS"):
         source["ANTHROPIC_CUSTOM_HEADERS"] = expand_env_refs(source["ANTHROPIC_CUSTOM_HEADERS"], source)
@@ -1029,7 +1038,7 @@ def anthropic_completion(
         )
     if not transport:
         raise LLMConfigError(_ANTHROPIC_NO_CREDENTIAL)
-    http_client = get_anthropic_client(env=dict(env) if env is not None else None, timeout=timeout)
+    http_client = get_anthropic_client(env=dict(env) if env is not None else None, timeout=timeout or timeout_s)
     with http_client:  # type: ignore[attr-defined]
         return anthropic_messages(
             http_client,
@@ -1070,7 +1079,7 @@ async def aanthropic_completion(
         )
     if not transport:
         raise LLMConfigError(_ANTHROPIC_NO_CREDENTIAL)
-    http_client = get_async_anthropic_client(env=dict(env) if env is not None else None, timeout=timeout)
+    http_client = get_async_anthropic_client(env=dict(env) if env is not None else None, timeout=timeout or timeout_s)
     async with http_client:  # type: ignore[attr-defined]
         return await aanthropic_messages(
             http_client,
@@ -1222,4 +1231,5 @@ __all__ = [
     "resolve_forge_llm_model",
     "resolve_openai_client_config",
     "stream_chat_completion_text",
+    "with_synthesized_anthropic_keys",
 ]

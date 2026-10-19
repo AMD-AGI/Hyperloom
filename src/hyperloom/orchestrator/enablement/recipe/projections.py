@@ -18,6 +18,7 @@ from typing import Any, Mapping
 from hyperloom.common.env_safety import is_secret_shaped_env_name
 
 from .credentials import classify_credential_value, strip_url_userinfo
+from .launch_flags import requested_setting_names
 
 #: ``accepted_config`` keys Hyperloom's own revalidation applies. Two of the five
 #: are subtractive, so a projection that drops them replays a *superset* of the
@@ -50,8 +51,9 @@ _LAUNCH_EVIDENCE_KEYS: tuple[str, ...] = (
 #: differently walks straight through a filter that looks correct; both
 #: spellings belong here or the published recipe carries the operator's private
 #: model path.
+#: ``model_tag`` is vLLM's positional ``serve <model>`` operand.
 _IDENTITY_PATH_FIELDS: frozenset[str] = frozenset(
-    {"model_path", "tokenizer_path", "served_model_name", "model", "tokenizer"}
+    {"model_path", "tokenizer_path", "served_model_name", "model", "tokenizer", "model_tag"}
 )
 
 _BUILD_INPUT_KEYS: tuple[str, ...] = (
@@ -105,7 +107,7 @@ def project_accepted_config(accepted_config: Mapping[str, Any] | None) -> dict[s
 
 def _is_filesystem_path(value: str) -> bool:
     text = str(value or "")
-    return text.startswith("/") or text.startswith("~/")
+    return text.startswith(("/", "~/"))
 
 
 def _is_attempt_row(entry: Any) -> bool:
@@ -246,7 +248,11 @@ def project_launch_evidence(evidence: Mapping[str, Any] | None) -> tuple[dict[st
     """
     if not isinstance(evidence, Mapping) or not evidence:
         return None, False
-    from ...knowledge.remote_recipe.sanitize import sanitize_publish_server_args
+    from ...knowledge.remote_recipe.sanitize import (
+        HOST_ORIGIN_KEY,
+        sanitize_publish_server_args,
+        sanitize_shared_knowledge,
+    )
 
     out: dict[str, Any] = {}
     argv_refused = False
@@ -260,7 +266,17 @@ def project_launch_evidence(evidence: Mapping[str, Any] | None) -> tuple[dict[st
             except ValueError:
                 argv_refused = True
         elif key == "observed_server_identity" and isinstance(value, Mapping):
-            out[key] = {str(k): v for k, v in value.items() if str(k) not in _IDENTITY_PATH_FIELDS}
+            identity = {str(k): v for k, v in value.items() if str(k) not in _IDENTITY_PATH_FIELDS}
+            if str(evidence.get("framework") or "").strip().lower() == "vllm":
+                # vLLM's identity is its whole record, which can carry any
+                # setting the engine resolved. Only the settings the launch
+                # asked for are published: they are what the verdict confirms,
+                # and they disclose no more than the requested argv itself.
+                asked = requested_setting_names(str(evidence.get("requested_server_args") or ""))
+                identity = {k: v for k, v in identity.items() if k in asked}
+            # The sanitizer exempts a ``host_origin`` subtree from path removal;
+            # nothing in an engine's record is that, so it is dropped first.
+            out[key] = sanitize_shared_knowledge(_without_key(identity, HOST_ORIGIN_KEY))
         else:
             out[key] = dict(value) if isinstance(value, Mapping) else value
     requested_env = evidence.get("requested_server_env")
@@ -273,6 +289,15 @@ def project_launch_evidence(evidence: Mapping[str, Any] | None) -> tuple[dict[st
             "provenance": str(warm.get("provenance") or ""),
         }
     return out, argv_refused
+
+
+def _without_key(value: Any, name: str) -> Any:
+    """``value`` with every mapping entry keyed ``name`` removed, at any depth."""
+    if isinstance(value, Mapping):
+        return {k: _without_key(v, name) for k, v in value.items() if str(k) != name}
+    if isinstance(value, (list, tuple)):
+        return [_without_key(v, name) for v in value]
+    return value
 
 
 def project_roots(roots: Any) -> list[dict[str, Any]]:
