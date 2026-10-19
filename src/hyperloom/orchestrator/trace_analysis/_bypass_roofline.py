@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import Any
 
 from ._roofline_source import ANALYTICAL as _RL_ANALYTICAL
@@ -235,17 +236,24 @@ def _estimate_flops_bytes(
     return None
 
 
-def compute_roofline(
-    *,
-    category: str,
-    shape_str: str,
-    gpu_time_us: float,
-    call_count: int = 1,
-    gpu_type: str = "",
-    dtype: str = "",
-) -> dict[str, Any] | None:
+@dataclass(frozen=True)
+class KernelAggregate:
+    """One kernel's measured launches: its category, operand shape and dtype, and total GPU time."""
+
+    category: str
+    shape_str: str
+    gpu_time_us: float
+    call_count: int = 1
+    dtype: str = ""
+
+
+def compute_roofline(aggregate: KernelAggregate, *, gpu_type: str = "") -> dict[str, Any] | None:
     """Analytical roofline for one kernel aggregate, or ``None`` when unestimable."""
-    operands = _parse_operands(shape_str)
+    category = aggregate.category
+    gpu_time_us = aggregate.gpu_time_us
+    call_count = aggregate.call_count
+    dtype = aggregate.dtype
+    operands = _parse_operands(aggregate.shape_str)
     if not operands:
         return None
     op_dtype = (dtype or operands[0][1] or "bf16").strip().lower()
@@ -303,4 +311,4 @@ def compute_roofline(
     return out
 
 
-__all__ = ["compute_roofline"]
+__all__ = ["KernelAggregate", "compute_roofline"]

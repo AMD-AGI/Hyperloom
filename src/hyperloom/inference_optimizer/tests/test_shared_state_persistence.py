@@ -114,9 +114,7 @@ def test_tick_exception_round_trip(tmp_path):
         tick=7,
         stage="tick_body",
         agent="orchestration",
-        exc_type="RuntimeError",
-        message="boom",
-        traceback_text="Traceback...\nRuntimeError: boom",
+        exc=RuntimeError("boom"),
     )
     s.save(tmp_path)
 
