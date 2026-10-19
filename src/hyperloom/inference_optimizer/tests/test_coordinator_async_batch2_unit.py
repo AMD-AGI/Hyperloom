@@ -51,11 +51,11 @@ async def test_resume_rolls_back_recipe_checkout_and_kernel(
 ) -> None:
     restores: list[tuple[str, str]] = []
     kernel_restores: list[dict] = []
-    import hyperloom.orchestrator.actions.executors.baseline as baseline_module
+    import hyperloom.orchestrator.actions.executors._warm_patch_apply as warm_patch_apply
     import hyperloom.orchestrator.actions.executors._kernel_agent_tool as kernel_agent_tool
 
     monkeypatch.setattr(
-        baseline_module,
+        warm_patch_apply,
         "_revert_patches",
         lambda target, sha, manifest=None: restores.append((target, sha)) or {"ok": True, "errors": []},
     )
@@ -124,10 +124,10 @@ async def test_resume_retains_pending_when_any_restore_fails(
     coord: Coordinator,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import hyperloom.orchestrator.actions.executors.baseline as baseline_module
+    import hyperloom.orchestrator.actions.executors._warm_patch_apply as warm_patch_apply
 
     monkeypatch.setattr(
-        baseline_module,
+        warm_patch_apply,
         "_revert_patches",
         lambda *_args: {"ok": False, "errors": ["restore failed"]},
     )

@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.orchestrator.actions.executors.baseline import (
+from hyperloom.orchestrator.actions.executors._warm_patch_apply import (
     restore_warm_kernel_snapshots,
     revert_warm_kernel_patches,
 )

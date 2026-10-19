@@ -15,7 +15,7 @@ import pytest
 
 from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
 from hyperloom.inference_optimizer.breakdown.recorder.phase_event import is_phase_transition_row
-from hyperloom.orchestrator.actions.executors.baseline import restore_warm_kernel_snapshots
+from hyperloom.orchestrator.actions.executors._warm_patch_apply import restore_warm_kernel_snapshots
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.phases import prelude as prelude_mod
 from hyperloom.orchestrator.phases.prelude import PRELUDE_ARM_DROPPED
@@ -2061,10 +2061,10 @@ def test_combined_replay_revert_rolls_back_recipe_and_kernel(tmp_path, monkeypat
     recipe_rollbacks: list[tuple[str, str]] = []
     kernel_rollbacks: list[list[dict]] = []
 
-    import hyperloom.orchestrator.actions.executors.baseline as baseline_module
+    import hyperloom.orchestrator.actions.executors._warm_patch_apply as warm_patch_apply
 
     monkeypatch.setattr(
-        baseline_module,
+        warm_patch_apply,
         "_revert_patches",
         lambda target, sha, manifest=None: recipe_rollbacks.append((target, sha)) or {"ok": True, "errors": []},
     )
@@ -2350,10 +2350,10 @@ def test_checkout_promotion_failure_rejects_keep_and_rolls_kernel(tmp_path, monk
         "revert_warm_kernel_patches",
         lambda applied, snapshots=None: kernel_rollbacks.append(applied) or {"ok": True, "errors": []},
     )
-    import hyperloom.orchestrator.actions.executors.baseline as baseline_module
+    import hyperloom.orchestrator.actions.executors._warm_patch_apply as warm_patch_apply
 
     monkeypatch.setattr(
-        baseline_module,
+        warm_patch_apply,
         "_revert_patches",
         lambda *_args: {"ok": True, "errors": []},
     )
@@ -2629,11 +2629,11 @@ def test_an_unmutated_tree_promotes_because_it_already_carries_the_overlay(tmp_p
 
 def test_rollback_restores_every_tree_the_replay_patched(tmp_path, monkeypatch):
     """Leaving one tree patched would bank a mutation from a rejected replay."""
-    import hyperloom.orchestrator.actions.executors.baseline as baseline_module
+    import hyperloom.orchestrator.actions.executors._warm_patch_apply as warm_patch_apply
 
     reverted: list[str] = []
     monkeypatch.setattr(
-        baseline_module,
+        warm_patch_apply,
         "_revert_patches",
         lambda root, *_args: reverted.append(root) or {"ok": True, "errors": []},
     )
