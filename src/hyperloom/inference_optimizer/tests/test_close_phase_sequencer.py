@@ -738,6 +738,54 @@ async def test_close_sequencer_records_degraded_when_a_step_fails(
     ]
 
 
+_CLOSE_RECORD_STEPS = [
+    ("roofline_progress", "_record_close_roofline_progress", "close_out.record_roofline_progress"),
+    ("baseline_progress", "_record_close_baseline_progress", "close_out.record_baseline_progress"),
+    ("stack_ledger", "_close_stack_ledger", "stack_event.finish"),
+    ("final_recipe", "_record_close_final_recipe", "close_out.record_final_recipe"),
+]
+_CLOSE_RECORD_TARGETS = {
+    "close_out": "hyperloom.inference_optimizer.breakdown.recorder.close_out",
+    "stack_event": "hyperloom.inference_optimizer.breakdown.recorder.stack_event",
+}
+
+
+def _fail_close_recorder(monkeypatch: pytest.MonkeyPatch, target: str) -> None:
+    module, attr = target.split(".")
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError(f"{attr} boom")
+
+    monkeypatch.setattr(f"{_CLOSE_RECORD_TARGETS[module]}.{attr}", _boom)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("step", "helper", "target"), _CLOSE_RECORD_STEPS)
+async def test_close_record_helper_lets_a_recorder_failure_propagate(coord, monkeypatch, step, helper, target):
+    _fail_close_recorder(monkeypatch, target)
+
+    with pytest.raises(RuntimeError, match=f"{target.split('.')[1]} boom"):
+        await getattr(coord.phase_close, helper)()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("step", "helper", "target"), _CLOSE_RECORD_STEPS)
+async def test_close_sequencer_records_a_failed_record_step_and_carries_on(
+    coord, tmp_path, monkeypatch, step, helper, target
+):
+    monkeypatch.setenv("HYPERLOOM_SESSION_PACKAGE_DEST", str(tmp_path / "session-packages"))
+    coord.shared_state.phase_history = [_close_phase_history_row()]
+    _fail_close_recorder(monkeypatch, target)
+
+    await coord.phase_close.on_enter_close(Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}))
+
+    rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
+    failed = [(row["step"], row["detail"]) for row in rows if row["status"] == "failed"]
+    assert failed == [(step, repr(RuntimeError(f"{target.split('.')[1]} boom")))]
+    assert rows[-1]["step"] == "done"
+    assert coord.shared_state.close_sequence_done is True
+
+
 @pytest.mark.asyncio
 async def test_close_sequencer_surfaces_remote_finalize_failure(
     coord,
