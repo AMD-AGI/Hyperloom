@@ -60,6 +60,21 @@ _ORDER_BY_KEYS: dict[str, tuple[str, bool]] = {
 }
 
 
+@dataclass(frozen=True)
+class RecipeFilters:
+    """Metric, recency and ordering terms of a recipe search, beside its label match.
+
+    Attributes:
+        metric_filters: Per-metric ``min`` / ``max`` bounds a row must satisfy.
+        updated_since: ISO timestamp a row must have been updated at or after.
+        order_by: One of the ``_ORDER_BY_KEYS`` spellings.
+    """
+
+    metric_filters: dict[str, Any] | None = None
+    updated_since: str | None = None
+    order_by: str = "updated_at DESC"
+
+
 # Errors
 class LocalRecipeStoreError(RuntimeError):
     """Raised on unrecoverable failures inside the local KB store."""
@@ -358,19 +373,15 @@ class LocalRecipeStore:
         self,
         *,
         label_match: dict[str, Any] | None = None,
-        metric_filters: dict[str, Any] | None = None,
-        updated_since: str | None = None,
-        order_by: str = "updated_at DESC",
         limit: int = 50,
-        prefer: dict[str, Any] | None = None,
+        filters: RecipeFilters = RecipeFilters(),
     ) -> list[dict[str, Any]]:
         """Filter live recipes by labels / metrics / updated_at."""
-        del prefer  # client-side rerank lives in RecipeKB
-        if order_by not in _ORDER_BY_KEYS:
+        if filters.order_by not in _ORDER_BY_KEYS:
             raise ValueError(
-                f"order_by must be one of {sorted(_ORDER_BY_KEYS)!r}, got {order_by!r}",
+                f"order_by must be one of {sorted(_ORDER_BY_KEYS)!r}, got {filters.order_by!r}",
             )
-        sort_key, descending = _ORDER_BY_KEYS[order_by]
+        sort_key, descending = _ORDER_BY_KEYS[filters.order_by]
         clamped_limit = max(1, min(1000, int(limit) if limit else 50))
 
         rows: list[dict[str, Any]] = []
@@ -394,9 +405,9 @@ class LocalRecipeStore:
             payload.setdefault("canonical_id", cid)
             if not _matches_labels(payload, label_match or {}):
                 continue
-            if not _matches_metrics(payload, metric_filters or {}):
+            if not _matches_metrics(payload, filters.metric_filters or {}):
                 continue
-            if not _matches_updated_since(payload, updated_since):
+            if not _matches_updated_since(payload, filters.updated_since):
                 continue
             rows.append(payload)
 

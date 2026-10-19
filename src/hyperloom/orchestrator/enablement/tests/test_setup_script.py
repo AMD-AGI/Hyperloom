@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.inference_optimizer.reference_script import ServingTarget
 from hyperloom.orchestrator.enablement.artifacts import write_setting_script
 from hyperloom.orchestrator.enablement.recipe.keep_probe import probe_environment_closure
 from hyperloom.orchestrator.enablement.recipe.keep_records import build_root_records, capture_root_snapshots
@@ -97,7 +98,7 @@ class _Stack:
         (self.site / "ops" / "launch.sh").unlink(missing_ok=True)
 
     def write(self) -> Path:
-        write_setting_script(self.session, self.en, "sglang", model="/models/M", tp=8)
+        write_setting_script(self.session, self.en, "sglang", target=ServingTarget(model="/models/M", tp=8))
         return self.session / "reports" / "enablement"
 
 
@@ -395,7 +396,7 @@ def test_the_setting_script_demands_a_model_when_none_is_known(tmp_path):
 
 def test_the_setting_script_exports_the_accepted_launch(tmp_path):
     en = EnablementRound(accepted_config={"extra_envs": {"VLLM_ROCM_USE_AITER": "1"}, "extra_server_args": "--tp 4"})
-    rel = write_setting_script(tmp_path, en, "vllm", model="/models/M", tp=8)
+    rel = write_setting_script(tmp_path, en, "vllm", target=ServingTarget(model="/models/M", tp=8))
     text = (tmp_path / rel).read_text(encoding="utf-8")
     assert "export VLLM_ROCM_USE_AITER=1" in text
     assert text.index('bash "$SCRIPT_DIR"/enablement_setup.sh') < text.index("export VLLM_ROCM_USE_AITER=1")
@@ -409,7 +410,7 @@ def test_the_setting_script_serve_line_carries_no_repeated_flag(tmp_path):
         {"extra_server_args": "--reasoning-parser glm47 --reasoning-parser glm47"},
         source="kept_bench",
     )
-    rel = write_setting_script(tmp_path, en, "vllm", model="/models/M")
+    rel = write_setting_script(tmp_path, en, "vllm", target=ServingTarget(model="/models/M"))
 
     text = (tmp_path / rel).read_text(encoding="utf-8")
 

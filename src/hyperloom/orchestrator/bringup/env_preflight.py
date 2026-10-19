@@ -21,11 +21,11 @@ from hyperloom.orchestrator.bringup.argv_preflight import (
     SERVING_PYTHON_ENV,
     UNAVAILABLE,
     ProbeFn,
+    ProbeTarget,
     _clip,
     resolve_serving_interpreter,
     run_probe_json,
 )
-
 
 #: Names this module's observations in downstream artifacts.
 PRODUCER = "preflight.environment"
@@ -205,12 +205,10 @@ def _import_verdict(
             detail=f"nothing proves which interpreter would serve {framework or 'this framework'}",
         )
     result = run_probe_json(
-        interpreter,
+        ProbeTarget(interpreter, launch_env, probe),
         _IMPORT_PROGRAM,
         [framework],
-        env=launch_env,
         timeout_sec=_IMPORT_TIMEOUT_SEC,
-        probe=probe,
     )
     if not result.ok or result.payload is None:
         return EnvVerdict(status=UNAVAILABLE, fault=PROBE_FAILED, detail=_clip(result.detail))

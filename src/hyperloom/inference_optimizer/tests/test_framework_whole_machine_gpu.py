@@ -27,7 +27,7 @@ def _build_coord(
         MockTurn,
         ScriptedPlan,
     )
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     for _var in (
@@ -56,7 +56,7 @@ def _build_coord(
         session_dir=tmp_path,
         backends=backends,
         role_registry=default_role_registry(),
-        knowledge_plane=None,
+        advisory=AdvisoryServices(knowledge_plane=None),
     )
 
 
