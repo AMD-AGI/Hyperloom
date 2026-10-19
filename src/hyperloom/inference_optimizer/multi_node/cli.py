@@ -304,7 +304,7 @@ def _short_poll(
 
 
 def install_geak_on_pods_best_effort() -> int:
-    """Best-effort GEAK install on the Infera GPU pods (provisioner hook)."""
+    """Install GEAK on the Infera GPU pods (provisioner hook); install errors propagate."""
     if _load_state().get("backend") != "infera":
         return 0
     ns = argparse.Namespace(
@@ -313,11 +313,7 @@ def install_geak_on_pods_best_effort() -> int:
         poll_interval=_DEFAULT_POLL_INTERVAL_S,
         poll_timeout=_resolve_poll_timeout_s(),
     )
-    try:
-        return cmd_install_geak(ns)
-    except Exception as exc:  # noqa: BLE001
-        warn(f"install-geak skipped: {type(exc).__name__}: {exc}")
-        return 0
+    return cmd_install_geak(ns)
 
 
 # Subcommand `bootstrap`
@@ -1530,17 +1526,14 @@ def cmd_kill_inference(args: argparse.Namespace) -> int:
 
 
 def kill_inference_for_kernel_agent_best_effort() -> None:
-    """Best-effort inference teardown before kernel-agent Ray GPU tasks (swallows errors)."""
+    """Inference teardown before kernel-agent Ray GPU tasks; kill errors propagate."""
     ns = argparse.Namespace(
         pid_file=None,
         print_logs=False,
         poll_interval=_DEFAULT_POLL_INTERVAL_S,
         poll_timeout=_resolve_poll_timeout_s(),
     )
-    try:
-        cmd_kill_inference(ns)
-    except Exception as exc:  # noqa: BLE001
-        warn(f"kill-inference skipped: {type(exc).__name__}: {exc}")
+    cmd_kill_inference(ns)
 
 
 def _add_common_poll_flags(p: argparse.ArgumentParser) -> None:
