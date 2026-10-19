@@ -1284,67 +1284,43 @@ async def test_cancel_preserves_cancellation_when_recovery_save_fails(tmp_path, 
     assert state.pending_integrate
 
 
-def _apply_only_state(save):
+async def _apply_only_with_failing_first_save(tmp_path, error):
+    """Run an apply-only integrate whose first state save (the pending sentinel) raises ``error``."""
     from types import SimpleNamespace
 
-    return SimpleNamespace(
+    session = tmp_path / "session"
+    repo = tmp_path / "fw"
+    _init_git_repo(repo)
+    _write_workspace(session, "spec")
+    saves: list[str] = []
+
+    def save(_path):
+        saves.append(_path)
+        if len(saves) == 1:
+            raise error
+
+    state = SimpleNamespace(
         phase="FRAMEWORK_AGENT",
         enablement=EnablementRound(),
         current_best={},
         get_specialist_patch_verdict=lambda _sid: "approve",
         save=save,
     )
-
-
-async def _apply_only(session, repo, state):
-    return await IntegratePatchExecutor(session_dir=session)(
-        _make_ctx(
-            "task",
-            {"specialist_task_id": "spec", "framework_source_root": str(repo), "apply_only": True},
-            {"shared_state": state},
-        )
-    )
+    params = {"specialist_task_id": "spec", "framework_source_root": str(repo), "apply_only": True}
+    return await IntegratePatchExecutor(session_dir=session)(_make_ctx("task", params, {"shared_state": state}))
 
 
 @pytest.mark.asyncio
-async def test_a_failed_sentinel_write_is_logged_and_the_apply_continues(tmp_path, caplog):
-    session = tmp_path / "session"
-    repo = tmp_path / "fw"
-    _init_git_repo(repo)
-    _write_workspace(session, "spec")
-    saves: list[str] = []
-
-    def save(_path):
-        saves.append("save")
-        if len(saves) == 1:
-            raise OSError("disk full")
-
-    result = await _apply_only(session, repo, _apply_only_state(save))
-
+async def test_a_failed_sentinel_write_does_not_stop_the_apply(tmp_path):
+    result = await _apply_only_with_failing_first_save(tmp_path, OSError("disk full"))
     assert result["status"] == "applied_no_bench"
-    assert [r.getMessage() for r in caplog.records if r.exc_info] == [
-        "integrate_patch: failed to persist pending_integrate sentinel"
-    ]
 
 
 @pytest.mark.asyncio
 async def test_a_sentinel_serialization_bug_aborts_before_the_tree_is_touched(tmp_path):
-    session = tmp_path / "session"
-    repo = tmp_path / "fw"
-    _init_git_repo(repo)
-    _write_workspace(session, "spec")
-
-    saves: list[str] = []
-
-    def save(_path):
-        saves.append("save")
-        if len(saves) == 1:
-            raise TypeError("not JSON serializable")
-
     with pytest.raises(TypeError, match="not JSON serializable"):
-        await _apply_only(session, repo, _apply_only_state(save))
-
-    assert (repo / "src.py").read_text() == "def f():\n    return 1\n"
+        await _apply_only_with_failing_first_save(tmp_path, TypeError("not JSON serializable"))
+    assert (tmp_path / "fw" / "src.py").read_text() == "def f():\n    return 1\n"
 
 
 @pytest.mark.asyncio

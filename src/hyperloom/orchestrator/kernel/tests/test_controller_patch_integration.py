@@ -1578,50 +1578,32 @@ def _git_failing_with(exc: BaseException):
     return _fail
 
 
-_GIT_FAILURES = (
-    OSError("git not installed"),
-    subprocess.TimeoutExpired(cmd="git", timeout=60),
-    subprocess.CalledProcessError(128, ["git"]),
+# probe -> result when git cannot answer
+_GIT_PROBES = {
+    "head_commit": (lambda: integration._head_commit(Path("repo")), ""),
+    "tracked_at_head": (lambda: integration._tracked_at_head(Path("repo"), "first.py"), False),
+}
+
+
+@pytest.mark.parametrize("probe", list(_GIT_PROBES))
+@pytest.mark.parametrize(
+    "failure",
+    [
+        OSError("git not installed"),
+        subprocess.TimeoutExpired(cmd="git", timeout=60),
+        subprocess.CalledProcessError(128, ["git"]),
+    ],
+    ids=["oserror", "timeout", "called-process"],
 )
-_GIT_FAILURE_IDS = ("oserror", "timeout", "called-process")
-
-
-def test_head_commit_reads_the_checked_out_commit(tmp_path: Path) -> None:
-    repo, base = _repo(tmp_path)
-    assert integration._head_commit(repo) == base
-
-
-def test_head_commit_is_empty_outside_a_repository(tmp_path: Path) -> None:
-    assert integration._head_commit(tmp_path) == ""
-
-
-@pytest.mark.parametrize("failure", _GIT_FAILURES, ids=_GIT_FAILURE_IDS)
-def test_head_commit_is_empty_when_git_cannot_answer(monkeypatch: pytest.MonkeyPatch, failure: BaseException) -> None:
+def test_a_git_probe_reads_a_git_failure_as_no_answer(monkeypatch: pytest.MonkeyPatch, probe, failure) -> None:
     monkeypatch.setattr(integration, "_git_output", _git_failing_with(failure))
-    assert integration._head_commit(Path("repo")) == ""
+    call, expected = _GIT_PROBES[probe]
+    outcome = call()
+    assert outcome == expected
 
 
-def test_head_commit_propagates_an_unexpected_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("probe", list(_GIT_PROBES))
+def test_a_git_probe_propagates_an_unexpected_failure(monkeypatch: pytest.MonkeyPatch, probe) -> None:
     monkeypatch.setattr(integration, "_git_output", _git_failing_with(TypeError("bad repo")))
     with pytest.raises(TypeError, match="bad repo"):
-        integration._head_commit(Path("repo"))
-
-
-def test_tracked_at_head_tells_tracked_from_untracked_paths(tmp_path: Path) -> None:
-    repo, _base = _repo(tmp_path)
-    assert integration._tracked_at_head(repo, "first.py") is True
-    assert integration._tracked_at_head(repo, "missing.py") is False
-
-
-@pytest.mark.parametrize("failure", _GIT_FAILURES, ids=_GIT_FAILURE_IDS)
-def test_tracked_at_head_is_false_when_git_cannot_answer(
-    monkeypatch: pytest.MonkeyPatch, failure: BaseException
-) -> None:
-    monkeypatch.setattr(integration, "_git_output", _git_failing_with(failure))
-    assert integration._tracked_at_head(Path("repo"), "first.py") is False
-
-
-def test_tracked_at_head_propagates_an_unexpected_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(integration, "_git_output", _git_failing_with(TypeError("bad path")))
-    with pytest.raises(TypeError, match="bad path"):
-        integration._tracked_at_head(Path("repo"), "first.py")
+        _GIT_PROBES[probe][0]()

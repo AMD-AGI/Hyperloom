@@ -276,56 +276,43 @@ def test_verify_vllm_rocm_true_false():
     assert ad.verify_vllm_rocm("/py", run=_FakeRun(default_rc=1)) is False
 
 
-def _raising_run(exc: BaseException):
-    def run(argv, env, cwd):
+def _raiser(exc: BaseException):
+    def raise_it(*_args, **_kwargs):
         raise exc
 
-    return run
+    return raise_it
 
 
-_PROBE_FAILURES = (
-    OSError("no such interpreter"),
-    subprocess.TimeoutExpired(cmd="probe", timeout=1),
-)
+_VERIFIERS = {"torch": ad.verify_torch_is_rocm, "vllm": ad.verify_vllm_rocm}
+_ADAPTERS = {"vllm_provision": VllmRocmAdapter, "sglang_provision": SglangAdapter}
 
 
-@pytest.mark.parametrize("verify", [ad.verify_torch_is_rocm, ad.verify_vllm_rocm])
-@pytest.mark.parametrize("failure", _PROBE_FAILURES, ids=["oserror", "timeout"])
-def test_a_probe_that_cannot_run_is_not_verified(verify, failure):
-    assert verify("/py", run=_raising_run(failure)) is False
+def _outcome(site, failure, tmp_path, monkeypatch):
+    """Run ``site`` with ``failure`` raised underneath it."""
+    if site in _VERIFIERS:
+        return _VERIFIERS[site]("/py", run=_raiser(failure))
+    monkeypatch.setattr(ad, "create_venv", _raiser(failure))
+    result = _ADAPTERS[site](run=_FakeRun()).provision(_wheel_action(), tmp_path / "attempt")
+    return result.ok, result.error
 
 
-@pytest.mark.parametrize("verify", [ad.verify_torch_is_rocm, ad.verify_vllm_rocm])
-def test_an_unexpected_probe_failure_propagates(verify):
-    with pytest.raises(TypeError, match="bad shim"):
-        verify("/py", run=_raising_run(TypeError("bad shim")))
-
-
-@pytest.mark.parametrize("adapter_cls", [VllmRocmAdapter, SglangAdapter])
+@pytest.mark.parametrize("site", [*_VERIFIERS, *_ADAPTERS])
 @pytest.mark.parametrize(
     "failure",
     [
-        OSError("disk full"),
+        OSError("no such interpreter"),
         subprocess.CalledProcessError(1, ["python", "-m", "venv"]),
-        subprocess.TimeoutExpired(cmd="venv", timeout=600),
+        subprocess.TimeoutExpired(cmd="probe", timeout=1),
     ],
     ids=["oserror", "called-process", "timeout"],
 )
-def test_a_venv_that_cannot_be_created_fails_the_provision(tmp_path, monkeypatch, adapter_cls, failure):
-    def failing_create_venv(venv_dir):
-        raise failure
-
-    monkeypatch.setattr(ad, "create_venv", failing_create_venv)
-    result = adapter_cls(run=_FakeRun()).provision(_wheel_action(), tmp_path / "attempt")
-    assert result.ok is False
-    assert result.error == f"venv setup failed: {failure!r}"
+def test_an_expected_probe_or_venv_failure_is_absorbed(tmp_path, monkeypatch, site, failure):
+    expected = False if site in _VERIFIERS else (False, f"venv setup failed: {failure!r}")
+    outcome = _outcome(site, failure, tmp_path, monkeypatch)
+    assert outcome == expected
 
 
-@pytest.mark.parametrize("adapter_cls", [VllmRocmAdapter, SglangAdapter])
-def test_an_unexpected_venv_failure_propagates_from_provision(tmp_path, monkeypatch, adapter_cls):
-    def broken_create_venv(venv_dir):
-        raise TypeError("bad venv path")
-
-    monkeypatch.setattr(ad, "create_venv", broken_create_venv)
-    with pytest.raises(TypeError, match="bad venv path"):
-        adapter_cls(run=_FakeRun()).provision(_wheel_action(), tmp_path / "attempt")
+@pytest.mark.parametrize("site", [*_VERIFIERS, *_ADAPTERS])
+def test_an_unexpected_probe_or_venv_failure_propagates(tmp_path, monkeypatch, site):
+    with pytest.raises(TypeError, match="unexpected failure"):
+        _outcome(site, TypeError("unexpected failure"), tmp_path, monkeypatch)
