@@ -13,10 +13,13 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from pathlib import Path
+
 from hyperloom.contracts.measurement import AccuracyValue, RoundValue, TestResult
+from hyperloom.measure.decode import OUTPUTS_PATH, DecodePassError, parse_outputs
 from hyperloom.measure.manifest import ResultManifest
 
-__all__ = ["first_hash_difference", "first_value_difference", "first_warning_difference"]
+__all__ = ["first_decode_difference", "first_hash_difference", "first_value_difference", "first_warning_difference"]
 
 _ROUND_FIELDS = ("phase", "concurrency", "completed_requests", "failed_requests")
 _HASH_FIELDS = ("spec_fingerprint", "surface_sha256")
@@ -35,6 +38,28 @@ def first_value_difference(
 ) -> str | None:
     """The first round or accuracy field that differs between the record and the values derived from the bundle."""
     return _round_difference(recorded.rounds, tuple(rounds)) or _accuracy_difference(recorded.accuracy, tuple(accuracy))
+
+
+def first_decode_difference(recorded: TestResult, manifest: ResultManifest, landed: Path) -> str | None:
+    """The decode fields of the record when they are not what the signed bundle holds.
+
+    The bundle holds a pass when its manifest lists ``decode/outputs.jsonl``; the record must then name that file and
+    the identity of the header the signature covers, and a record that names a pass the bundle does not hold is refused.
+    """
+    listed = any(f.path == OUTPUTS_PATH for f in manifest.files)
+    if not listed:
+        if recorded.decode_outputs or recorded.decode_identity:
+            return f"decode_outputs: recorded {recorded.decode_outputs!r}, the bundle lists no {OUTPUTS_PATH}"
+        return None
+    if recorded.decode_outputs != OUTPUTS_PATH:
+        return f"decode_outputs: recorded {recorded.decode_outputs!r}, the bundle holds {OUTPUTS_PATH!r}"
+    try:
+        signed = parse_outputs((Path(landed) / OUTPUTS_PATH).read_text(encoding="utf-8"))
+    except (DecodePassError, OSError, ValueError) as exc:
+        return f"decode_outputs: {exc}"
+    if recorded.decode_identity != signed.identity:
+        return f"decode_identity: recorded {recorded.decode_identity!r}, the bundle says {signed.identity!r}"
+    return None
 
 
 def first_warning_difference(recorded: TestResult, derived: Sequence[str]) -> str | None:

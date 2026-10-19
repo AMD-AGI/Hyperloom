@@ -199,6 +199,7 @@ def _call(ctx: _Context, spec: MeasurementSpec, points: list[Path], inferencex: 
         unset_envs=spec.unset_envs,
         session_facts=SessionFacts((), str(inferencex), spec.tools.magpie),
         attachments=_case_attachments(spec),
+        decode_pass=p.decode_pass,
     )
 
 

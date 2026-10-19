@@ -38,6 +38,7 @@ from hyperloom.contracts.measurement import SandboxFacts
 from hyperloom.measure.attachments import AttachmentError, place_attachments, substitute
 from hyperloom.measure.accuracy import read_accuracy
 from hyperloom.measure.compile import CompiledEnvironment, LocalBlobStore
+from hyperloom.measure.decode import DecodePassError, plan_pass, run_pass, vocab_size_of, write_outputs
 from hyperloom.measure.farm import FarmError, build_farm, prepend_pythonpath, verify_farm
 from hyperloom.measure.profile_traces import PROFILE_DIR, collect_traces
 from hyperloom.measure.repro import ReproError, find_case, run_case
@@ -86,7 +87,13 @@ _GRID = "grid"
 #: end as its own failure, with time left to sign the result, not as a timeout of the whole test.
 _CASE_TIMEOUT_SEC = 600.0
 _CASE_TIME_SHARE = 0.8
-_SUPPORTED_KINDS = ("test", _ACCURACY, _PROFILE, _REPRO)
+#: The decode pass runs on a server of its own, booted after the measured round; the share of the test's time left it.
+_DECODE_SERVER = "decode_server"
+_DECODE_TIMEOUT_SEC = 900.0
+_DECODE_WARNING = "decode_pass_failed"
+_TEST = "test"
+_DECODE_KINDS = (_TEST, _ACCURACY)
+_SUPPORTED_KINDS = (_TEST, _ACCURACY, _PROFILE, _REPRO)
 #: The kinds of ``TestCall`` this backend runs; a toolbox refuses any other at acceptance.
 SUPPORTED_KINDS = _SUPPORTED_KINDS
 
@@ -156,6 +163,8 @@ def _validate(call: TestCall) -> None:
         raise TestCallRefused(f"the local backend runs kinds {_SUPPORTED_KINDS}, not {call.kind!r}")
     if not call.points:
         raise TestCallRefused("a test needs at least one measurement point")
+    if call.decode_pass and (call.kind not in _DECODE_KINDS or call.prep != _GRID):
+        raise TestCallRefused("the decode pass belongs to a single-point test or accuracy test")
     if call.prep == _GRID and len(call.points) != 1:
         raise TestCallRefused(f"a single-point test has exactly one point, got {len(call.points)}")
     if call.kind == _ACCURACY and not call.accuracy:
@@ -362,7 +371,62 @@ async def _single(run: _Run) -> None:
     # A profiled round is not a statistic: it runs once, with no warmup before it.
     warmup = 0 if run.call.kind == _PROFILE else run.call.rounds.warmup_rounds
     result = await _grid(run, 0, "test", warmup_before_measure=None if warmup is None else bool(warmup))
-    run.add(0, result)
+    if run.add(0, result) and run.call.decode_pass and not _is_failure(result):
+        await _decode_pass(run, result)
+
+
+async def _decode_pass(run: _Run, measured: VariantResult) -> None:
+    """Decode the fixed prompt set on a server booted for it; a pass that cannot run is a warning on the measurement.
+
+    ``run_grid`` boots, warms up, measures, evaluates and reclaims its server in one call, so the pass cannot share
+    that server without changing the old flow; it boots another one the way a repro test does (same point, same
+    recipe), after the measured round, and tears it down.
+    """
+    lifecycle = _Lifecycle(run)
+    try:
+        await _decode_on_new_server(run, lifecycle)
+    except DecodePassError as exc:
+        measured.nonfatal_warnings.append(f"{_DECODE_WARNING}:{exc}")
+    except OSError as exc:
+        measured.nonfatal_warnings.append(f"{_DECODE_WARNING}:write_failed_{type(exc).__name__}")
+    finally:
+        lifecycle.teardown()
+
+
+def _positive_env(envs: dict[str, Any], name: str) -> int:
+    try:
+        return max(0, int(str(envs.get(name) or 0)))
+    except ValueError:
+        return 0
+
+
+async def _decode_on_new_server(run: _Run, lifecycle: _Lifecycle) -> None:
+    call = run.call
+    benchmark = _point_config(call.points[0]).get("benchmark") or {}
+    envs = dict(benchmark.get("envs") or {})
+    plan = plan_pass(
+        _positive_env(envs, "ISL"), _positive_env(envs, "OSL"), vocab_size_of(str(benchmark.get("model") or ""))
+    )
+    concurrency = _positive_env(envs, "CONC")
+    if not lifecycle.eligible:
+        raise DecodePassError("server_cannot_be_held_up")
+    if concurrency < 1:
+        raise DecodePassError("point_has_no_conc")
+    boot = await _boot_server(run, lifecycle, 0, _DECODE_SERVER)
+    if boot.error_class in _STOP_RETURNCODES:
+        run.add(0, boot)  # the run itself was stopped: that ends the test, it is not a failed pass
+    if _is_failure(boot):
+        raise DecodePassError("server_did_not_boot")
+    left = call.timeout_sec - (time.monotonic() - run.started)
+    outputs = await asyncio.to_thread(
+        run_pass,
+        plan,
+        base_url=f"http://127.0.0.1:{lifecycle.port}",
+        model=str(benchmark.get("model") or ""),
+        concurrency=concurrency,
+        request_timeout_sec=max(1.0, min(_DECODE_TIMEOUT_SEC, left * _CASE_TIME_SHARE)),
+    )
+    write_outputs(Path(call.output_dir), plan, outputs)
 
 
 def _runner_of(call: TestCall) -> Callable[[_Run], Awaitable[None]]:

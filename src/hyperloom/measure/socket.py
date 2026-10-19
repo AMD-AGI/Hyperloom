@@ -129,6 +129,9 @@ class TestCall:
     #: What the request ships with it (a ``repro`` test's case). The sheet carries them; whoever runs the call has
     #: unpacked each under ``<cwd>/attach/<id>/`` (a file attachment is the file ``<cwd>/attach/<id>``).
     attachments: tuple[AttachmentRef, ...] = ()
+    #: Run the greedy decode pass (``hyperloom.measure.decode``) on a fresh server after the measured round and leave
+    #: its outputs below ``<output_dir>/decode``; only a single-point ``test`` or ``accuracy`` call may ask for it.
+    decode_pass: bool = False
 
 
 @dataclass(frozen=True)

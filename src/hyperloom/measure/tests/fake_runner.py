@@ -17,6 +17,7 @@ with that score (``none``: a round that holds no score). ``fake_trace: true`` ad
 test leaves (``profile/torch_trace/...``); ``fake_report: false`` leaves out the benchmark report, as a profiled round
 that printed no readable measurement. ``fake_repro: true`` runs the repro case the sheet carries for real (the shipped
 attachment placement and ``run_case``) against no server, and lists the verdict and log it leaves in the manifest.
+``fake_decode: true`` lists the decode pass's outputs (``decode/outputs.jsonl``) the runner would leave.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ import json
 import os
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +35,7 @@ import yaml
 
 from hyperloom.measure import signing
 from hyperloom.measure.attachments import place_attachments
+from hyperloom.measure.decode import OUTPUTS_PATH, plan_pass, write_outputs
 from hyperloom.measure.repro import REPRO_DIR, find_case, run_case
 from hyperloom.measure.manifest import RESULT_SCHEMA, encode_manifest
 from hyperloom.measure.spec import MeasurementSpec, fingerprint, spec_sha256
@@ -108,6 +111,10 @@ def _write_files(out: Path, config: dict[str, Any], mode: str) -> dict[str, byte
         rounds[0]["nonfatal_warnings"] = list(config["fake_warnings"])
     if config.get("fake_rounds") or "fake_accuracy" in config or "fake_warnings" in config:
         files["rounds.json"] = json.dumps(rounds).encode()
+    if config.get("fake_decode"):
+        files[OUTPUTS_PATH] = write_outputs(
+            out / "files", replace(plan_pass(8, 4, 1000), prompts=2), ((1, 2), (3,))
+        ).read_bytes()
     for relative, data in files.items():
         _atomic(out / "files" / relative, data)
     return files

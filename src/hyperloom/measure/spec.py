@@ -39,6 +39,7 @@ _UPSERT = "upsert"
 _RUNTIME = "runtime"
 _ACCURACY = "accuracy"
 _RESULT_DIR = "result_dir"
+_DECODE_PASS = "decode_pass"
 KINDS = ("test", "profile", _ACCURACY, "repro")
 PURPOSES = tuple(purpose.value for purpose in Purpose)
 DEFAULT_MAX_TOTAL_BYTES = 4 * 1024**3
@@ -354,6 +355,7 @@ class Procedure:
     timeout_sec: float
     silence_timeout_sec: float
     deadline_unix: float
+    decode_pass: bool = False
 
     @classmethod
     def parse(cls, value: Any, path: str) -> "Procedure":
@@ -370,12 +372,13 @@ class Procedure:
             timeout_sec=r.number("timeout_sec", minimum=1) or 1.0,
             silence_timeout_sec=r.number("silence_timeout_sec", minimum=1) or 1.0,
             deadline_unix=r.number("deadline_unix", minimum=0) or 0.0,
+            decode_pass=_optional_flag(r, _DECODE_PASS),
         )
         r.done()
         return procedure
 
     def to_document(self) -> dict[str, Any]:
-        return {
+        document = {
             "prep": self.prep,
             "benchmark_backend": self.benchmark_backend,
             "rounds": {"warmup": self.warmup_rounds, "measure": self.measure_rounds},
@@ -384,6 +387,16 @@ class Procedure:
             "silence_timeout_sec": self.silence_timeout_sec,
             "deadline_unix": self.deadline_unix,
         }
+        if self.decode_pass:  # absent when off, so a sheet that never asked keeps its fingerprint
+            document[_DECODE_PASS] = True
+        return document
+
+
+def _optional_flag(reader: Reader, key: str) -> bool:
+    value = reader.optional(key)
+    if value is not None and not isinstance(value, bool):
+        raise DocumentError(f"{reader.at(key)}: expected a boolean")
+    return bool(value)
 
 
 @dataclass(frozen=True)

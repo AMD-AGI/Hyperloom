@@ -500,6 +500,9 @@
         "deadline_unix": {
           "type": "number",
           "minimum": 0
+        },
+        "decode_pass": {
+          "type": "boolean"
         }
       }
     },

@@ -374,6 +374,7 @@ def build_spec(call: TestCall, *, request_id: str, ctx: SpecContext, deadline_un
             "timeout_sec": float(call.timeout_sec),
             "silence_timeout_sec": float(call.silence_timeout_sec or call.timeout_sec),
             "deadline_unix": float(deadline_unix),
+            **({"decode_pass": True} if call.decode_pass else {}),
         },
         "outputs": {"result_dir": split_result_dir(call)[0], **_max_bytes(ctx)},
     }
