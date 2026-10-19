@@ -4,7 +4,9 @@
 """Measurement points: the YAML each test is run from, generated from the canonical configuration (design 4.17).
 
 A point is the canonical measurement configuration with the recipe's launch settings, the concurrency level and the
-``RUN_EVAL`` switch the request names, rendered by the same function the single-lineage flow materializes with. The
+``RUN_EVAL`` switch the request names, rendered by the same function the single-lineage flow materializes with. An
+AgentX canonical (``benchmark.agentx`` enabled) is rendered as that flow renders it: the launch goes into
+``agentx.launch_overrides``, the concurrency into ``benchmark.envs.CONC``, and there is no evaluation round. The
 result is read back and held to the request before it is handed out: a launch variable the renderer dropped, a
 ``RUN_EVAL`` or concurrency that is not the requested one, or a surface that differs from the canonical one refuses
 the request instead of measuring something else.
@@ -21,6 +23,8 @@ from typing import Any
 
 import yaml
 
+from hyperloom.common.benchmark_config import is_magpie_agentx
+from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
 from hyperloom.contracts.measurement import TestKind, TestRequest
 from hyperloom.contracts.recipe import LaunchConfig, Recipe, RecipeError
 from hyperloom.inference_optimizer import framework_registry
@@ -36,8 +40,9 @@ from hyperloom.measure.surface import (
 )
 from hyperloom.orchestrator.actions.executors import (
     default_baseline_config,
-    materialize_config_with_envs,
+    materialize_benchmark_config,
 )
+from hyperloom.orchestrator.actions.executors.magpie_agentx import native_config
 
 
 class PointError(RecipeError):
@@ -57,13 +62,35 @@ class CanonicalMeasurement:
     primary_concurrency: int
     materialize: Mapping[str, Any] = field(default_factory=dict)
 
+    @property
+    def agentx(self) -> bool:
+        """Whether the base configuration is a Magpie AgentX benchmark, the main flow's own test for its workload."""
+
+        return native_config(self.config_path)
+
 
 def _render(canonical: CanonicalMeasurement, out_dir: Path, name: str, **overrides: Any) -> dict[str, Any]:
-    path = materialize_config_with_envs(
-        canonical.config_path, out_dir, out_name=name, **{**canonical.materialize, **overrides}
-    )
+    """The base configuration rendered as the single-lineage flow renders it, at the ``CONC`` the pins name.
+
+    An AgentX benchmark carries its concurrency in ``benchmark.envs``, not in the server environment the pins feed, so
+    ``CONC`` is taken out of them and written there. The AgentX materializer hands every variable it is given to the
+    server, so the variables are held to the allowlist the InferenceX renderer applies first; one that does not pass
+    is missing from the point, and :func:`_check_launch_present` refuses it.
+    """
+
+    options = {**canonical.materialize, **overrides}
+    concurrency = None
+    if canonical.agentx:
+        pins = dict(options.get("extra_envs") or {})
+        concurrency = pins.pop("CONC")
+        options["extra_envs"], _ = filter_untrusted_env_mapping(pins, allow_predicate=is_allowed_variant_env_key)
+    path = materialize_benchmark_config(canonical.config_path, out_dir, out_name=name, **options)
     with path.open(encoding="utf-8") as handle:
-        return yaml.safe_load(handle) or {}
+        config = yaml.safe_load(handle) or {}
+    if concurrency is not None:
+        config["benchmark"]["envs"]["CONC"] = int(concurrency)
+        path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    return config
 
 
 def _reference(canonical: CanonicalMeasurement, pins: Mapping[str, str]) -> dict[str, Any]:
@@ -79,13 +106,16 @@ def _reference(canonical: CanonicalMeasurement, pins: Mapping[str, str]) -> dict
 def default_canonical(
     out_dir: Path, *, primary_concurrency: int, config_path: Path | None = None, **materialize: Any
 ) -> CanonicalMeasurement:
-    """Render the shipped baseline configuration at the primary operating point and take its surface."""
+    """Render the shipped baseline configuration at the primary operating point and take its surface.
+
+    The evaluation settings are part of the surface, so an InferenceX canonical is rendered with ``RUN_EVAL`` on; an
+    AgentX one has no evaluation round, and the main flow refuses it.
+    """
 
     base = config_path or default_baseline_config()
     canonical = CanonicalMeasurement(base, MeasurementSurface({}), primary_concurrency, materialize)
-    config = _render(
-        canonical, out_dir, "canonical.yaml", extra_envs={"CONC": str(primary_concurrency), "RUN_EVAL": "true"}
-    )
+    evaluation = {} if canonical.agentx else {"RUN_EVAL": "true"}
+    config = _render(canonical, out_dir, "canonical.yaml", extra_envs={"CONC": str(primary_concurrency), **evaluation})
     return CanonicalMeasurement(base, extract_surface(config), primary_concurrency, materialize)
 
 
@@ -96,18 +126,31 @@ def _concurrencies(requested: Sequence[int], canonical: CanonicalMeasurement) ->
     return levels
 
 
+def _launch_carriers(config: Mapping[str, Any]) -> tuple[Mapping[str, Any], str | None]:
+    """Where a rendered point carries the recipe's launch: the variables, and the text holding its server arguments.
+
+    The text is ``None`` for a framework the registry does not know. An AgentX point carries both in
+    ``agentx.launch_overrides``; any other in ``benchmark.envs``.
+    """
+
+    benchmark = config.get("benchmark") or {}
+    if is_magpie_agentx(benchmark):
+        overrides = benchmark["agentx"]["launch_overrides"]
+        return overrides.get("env") or {}, " ".join(overrides.get("append_args") or [])
+    present = benchmark_envs(config)
+    spec = framework_registry.FRAMEWORKS.get(str(benchmark.get("framework") or "").lower())
+    return present, None if spec is None else str(present.get(spec.extra_args_env, ""))
+
+
 def _check_launch_present(config: Mapping[str, Any], launch: LaunchConfig, envs: Mapping[str, str]) -> None:
     """Every variable and argument the recipe launches with must be in the YAML, or the test would not use it."""
 
-    present = benchmark_envs(config)
+    present, carried = _launch_carriers(config)
     missing = sorted(name for name, value in {**launch.envs, **envs}.items() if str(present.get(name)) != value)
     if missing:
         raise PointError(f"the renderer dropped or changed launch variables {', '.join(missing)}")
-    framework = str(config.get("benchmark", {}).get("framework") or "").lower()
-    spec = framework_registry.FRAMEWORKS.get(framework)
-    if spec is None:
+    if carried is None:
         return
-    carried = str(present.get(spec.extra_args_env, ""))
     flags = {token.split("=", 1)[0] for token in launch.server_args.split() if token.startswith("--")}
     absent = sorted(flag for flag in flags if flag not in carried)
     if absent:
@@ -128,6 +171,8 @@ def generate_points(
     measurement surface, and :class:`PointError` when the rendered point does not carry the recipe's launch settings.
     """
 
+    if accuracy and canonical.agentx:
+        raise PointError("an AgentX workload has no accuracy test: Magpie's replay validity is its check")
     launch = environment.recipe.launch
     check_launch_envs([*launch.envs, *environment.envs])
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -180,6 +225,10 @@ def generate_profile_point(
     must still be the canonical one.
     """
 
+    if canonical.agentx:
+        raise PointError(
+            "a profile test of an AgentX workload is not supported: its profiler is the InferenceX client's"
+        )
     launch = environment.recipe.launch
     check_launch_envs([*launch.envs, *environment.envs])
     out_dir.mkdir(parents=True, exist_ok=True)

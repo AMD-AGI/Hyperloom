@@ -9,12 +9,15 @@ from pathlib import Path
 
 import pytest
 
+import yaml
+
 from hyperloom.contracts.recipe import ComponentChange, ConfigDelta, RecipeDelta
+from hyperloom.inference_optimizer.cli.benchmark_config import AgentXWorkload, write_agentx_benchmark
 from hyperloom.measure.compile import EnvironmentCompiler, LocalBlobStore, PackageBase
 from hyperloom.measure.points import AcceptedMeasurement, default_canonical
 from hyperloom.measure.tests._recipes import IMAGE, recipe_with
 from hyperloom.orchestrator.actions.executors._workload_envs import default_baseline_config
-from hyperloom_multibranch.contracts.toolbox import RequestRejected
+from hyperloom_multibranch.contracts.toolbox import RequestRejected, WorkloadKind
 from hyperloom_multibranch.toolbox.planner import HostedPlanner
 from hyperloom_multibranch.toolbox.tests.helpers import FakeRepo, build, req
 
@@ -82,3 +85,36 @@ async def test_a_component_that_cannot_be_applied_is_refused_by_acceptance(tmp_p
     with pytest.raises(RequestRejected) as refused:
         await rig.toolbox.submit_test(req(change=change))
     assert refused.value.code == "delta_not_applicable"
+
+
+async def test_an_agentx_session_plans_points_through_the_agentx_launch_overrides(tmp_path: Path) -> None:
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text("{}")
+    source = tmp_path / "benchmark.yaml"
+    write_agentx_benchmark(
+        source, AgentXWorkload(framework="sglang", model="Qwen/Qwen3-8B", precision="fp8", tp=2, ep=1, conc=32)
+    )
+    canonical = default_canonical(
+        tmp_path / "canonical", primary_concurrency=32, config_path=source, model_path=str(model)
+    )
+    base = PackageBase("sglang", tmp_path, None, None)
+    compiler = EnvironmentCompiler(LocalBlobStore(tmp_path / "blobs"), IMAGE, lambda _layout: base)
+    rig = build(
+        tmp_path,
+        repo=FakeRepo(recipe_with()),
+        planner=HostedPlanner(compiler, canonical, tmp_path / "points"),
+        workload_kind=WorkloadKind.AGENTX,
+    )
+
+    await rig.toolbox.submit_test(req(server_args="--max-running-requests 77", concurrency=(8, 64)))
+    await rig.toolbox.drain()
+
+    points = [yaml.safe_load(path.read_text()) for path in rig.executor.jobs[0].environment.points]
+    assert [point["benchmark"]["envs"]["CONC"] for point in points] == [8, 64]
+    for point in points:
+        bench = point["benchmark"]
+        assert bench["agentx"]["launch_overrides"]["append_args"] == ["--max-running-requests", "77"]
+        assert bench["envs"]["RUN_EVAL"] == "false"
+        assert not {"benchmark_script", "workload_spec"} & bench.keys()
+        assert not {"NUM_PROMPTS", "NUM_WARMUPS", "EXTRA_SGLANG_ARGS"} & bench["envs"].keys()

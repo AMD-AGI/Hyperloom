@@ -352,7 +352,10 @@ async def test_an_agentx_session_measures_the_agentx_benchmark_its_prelude_child
         assert benchmark_config_path() == (toolbox / "benchmark.yaml").resolve()
         canonical = yaml.safe_load((toolbox / "canonical" / "canonical.yaml").read_text())["benchmark"]
         assert is_magpie_agentx(canonical) and canonical["agentx"]["mode"] == "canonical"
-        assert canonical["model"] == str(tmp_path / "models" / "Llama-3-8B")
+        assert (canonical["model"], canonical["envs"]["MODEL_PATH"]) == (
+            workload.model,
+            str(tmp_path / "models" / "Llama-3-8B"),
+        )
         assert (str(canonical["envs"]["TP"]), str(canonical["envs"]["CONC"])) == (str(workload.tp), str(workload.conc))
         argv = prelude_argv(workload, 1.0, built.layout.prelude_launch)
         args = _build_parser().parse_args(list(argv[argv.index("optimize") :]))

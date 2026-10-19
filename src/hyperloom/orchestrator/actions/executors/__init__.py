@@ -16,7 +16,7 @@ from .conc_sweep import ConcSweepExecutor, conc_sweep_executor
 from .report import ReportExecutor, report_executor
 from .session_breakdown import SessionBreakdownExecutor, session_breakdown_executor
 from .target_analysis import TargetAnalysisExecutor
-from ._workload_envs import default_baseline_config, materialize_config_with_envs
+from ._workload_envs import default_baseline_config, materialize_benchmark_config, materialize_config_with_envs
 from ._grid_base import GridVariant, VariantResult
 from ._grid_runner import _num_gpus_for_config as num_gpus_for_config
 from ._grid_runner import run_grid, sync_benchmark_timeout
@@ -63,6 +63,7 @@ __all__ = [
     "default_baseline_config",
     "explore_executor",
     "harvest_leaked_artifacts",
+    "materialize_benchmark_config",
     "materialize_config_with_envs",
     "num_gpus_for_config",
     "refuse_cacheless_agentx_baseline",

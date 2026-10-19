@@ -126,7 +126,11 @@ def benchmark_envs(config: Mapping[str, Any]) -> Mapping[str, Any]:
 
 
 def extract_surface(config: Mapping[str, Any]) -> MeasurementSurface:
-    """The surface fields of a materialized Magpie configuration, with the script and model files hashed."""
+    """The surface fields of a materialized Magpie configuration, with the script and model files hashed.
+
+    The model files are those of the directory the server loads: an AgentX configuration names it in ``envs.MODEL_PATH``
+    and keeps the model's identity in ``benchmark.model``; any other names the directory in ``benchmark.model``.
+    """
 
     bench, envs = _benchmark(config), benchmark_envs(config)
     fields: dict[str, str | None] = {f"benchmark.{key}": _text(bench.get(key)) for key in SURFACE_BENCH_KEYS}
@@ -134,7 +138,7 @@ def extract_surface(config: Mapping[str, Any]) -> MeasurementSurface:
     script, root = _text(bench.get("benchmark_script")), _text(bench.get("inferencex_path"))
     script_path = Path(root) / "benchmarks" / script if script and root else None
     fields[_SCRIPT_FIELD] = _sha256_file(script_path) if script_path and script_path.is_file() else None
-    model = _text(bench.get("model"))
+    model = _text(envs.get("MODEL_PATH")) or _text(bench.get("model"))
     model_files = hash_model_files(Path(model)) if model and Path(model).is_dir() else None
     fields[_MODEL_FILES_FIELD] = json.dumps(model_files, sort_keys=True) if model_files is not None else None
     return MeasurementSurface(fields)

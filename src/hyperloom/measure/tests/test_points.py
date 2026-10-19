@@ -11,6 +11,7 @@ import yaml
 
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import ConfigDelta, KernelArtifact, KernelKind, RecipeDelta
+from hyperloom.inference_optimizer.cli.benchmark_config import AgentXWorkload, write_agentx_benchmark
 from hyperloom.measure.compile import (
     BaseImageMismatchError,
     EnvironmentCompiler,
@@ -27,7 +28,11 @@ from hyperloom.measure.points import (
 )
 from hyperloom.measure.surface import SurfaceViolation
 from hyperloom.measure.tests._recipes import IMAGE, recipe_with, sha
-from hyperloom.orchestrator.actions.executors._workload_envs import default_baseline_config
+from hyperloom.orchestrator.actions.executors._workload_envs import (
+    default_baseline_config,
+    materialize_benchmark_config,
+    materialize_config_with_envs,
+)
 
 SERVER_ARGS = "--max-running-requests 77 --enable-dp-attention"
 
@@ -62,10 +67,15 @@ def clean_process_env(monkeypatch, tmp_path):
 
 
 @pytest.fixture()
-def canonical(tmp_path):
-    model = tmp_path / "model"
-    model.mkdir()
-    (model / "config.json").write_text("{}")
+def model(tmp_path):
+    path = tmp_path / "model"
+    path.mkdir()
+    (path / "config.json").write_text("{}")
+    return path
+
+
+@pytest.fixture()
+def canonical(tmp_path, model):
     return default_canonical(
         tmp_path / "canonical", primary_concurrency=32, config_path=default_baseline_config(), model_path=str(model)
     )
@@ -74,6 +84,17 @@ def canonical(tmp_path):
 @pytest.fixture()
 def blobs(tmp_path):
     return LocalBlobStore(tmp_path / "blobs")
+
+
+def agentx_source(path: Path, conc: int) -> Path:
+    """The benchmark YAML an AgentX session at ``conc`` binds, written as ``hyperloom optimize`` writes it."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_agentx_benchmark(
+        path,
+        AgentXWorkload(framework="sglang", model="Qwen/Qwen3-8B", precision="fp8", tp=2, ep=1, conc=conc),
+    )
+    return path
 
 
 def environment(blobs, tmp_path, recipe=None, delta=None):
@@ -234,3 +255,98 @@ def test_acceptance_generates_the_profile_point_for_a_profile_request(canonical,
 
     assert len(accepted.points) == 1
     assert load(accepted.points[0])["benchmark"]["envs"]["PROFILE"] == "1"
+
+
+# --- AgentX points -------------------------------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def agentx_canonical(tmp_path, model):
+    return default_canonical(
+        tmp_path / "canonical",
+        primary_concurrency=32,
+        config_path=agentx_source(tmp_path / "bench" / "benchmark.yaml", 32),
+        model_path=str(model),
+    )
+
+
+def test_an_agentx_canonical_is_what_the_main_flow_renders_for_the_workload(tmp_path, model, agentx_canonical):
+    source = agentx_source(tmp_path / "single" / "benchmark.yaml", 32)
+
+    main_flow = materialize_benchmark_config(source, tmp_path / "main", model_path=str(model))
+
+    rendered = load(tmp_path / "canonical" / "canonical.yaml")
+    assert rendered == load(main_flow)
+    bench = rendered["benchmark"]
+    assert bench["envs"]["RUN_EVAL"] == "false"
+    assert not {"benchmark_script", "workload_spec"} & bench.keys()
+    assert agentx_canonical.surface.fields["benchmark.benchmark_script"] is None
+    assert json.loads(agentx_canonical.surface.fields["model_files"]) == {"config.json": sha(b"{}")}
+
+
+@pytest.mark.parametrize("level", [8, 64])
+def test_an_agentx_point_is_what_the_main_flow_hands_magpie_for_the_recipe_and_concurrency(
+    agentx_canonical, blobs, tmp_path, model, level
+):
+    delta = RecipeDelta(config=ConfigDelta(server_args=SERVER_ARGS, envs={"HSA_FORCE_FINE_GRAIN_PCIE": "1"}))
+    env = environment(blobs, tmp_path, delta=delta)
+    source = agentx_source(tmp_path / "single" / "benchmark.yaml", level)
+
+    (point,) = generate_points(env, agentx_canonical, tmp_path / "points", concurrency=(level,))
+
+    main_flow = materialize_benchmark_config(
+        source,
+        tmp_path / "main",
+        extra_server_args=SERVER_ARGS,
+        extra_envs={"HSA_FORCE_FINE_GRAIN_PCIE": "1", "RUN_EVAL": "false"},
+        model_path=str(model),
+    )
+    rendered = load(point)
+    assert rendered == load(main_flow)
+    envs = rendered["benchmark"]["envs"]
+    assert (envs["CONC"], envs["RUN_EVAL"]) == (level, "false")
+    assert not {"NUM_PROMPTS", "NUM_WARMUPS", "EXTRA_SGLANG_ARGS", "HSA_FORCE_FINE_GRAIN_PCIE"} & envs.keys()
+    launch = rendered["benchmark"]["agentx"]["launch_overrides"]
+    assert launch["append_args"] == SERVER_ARGS.split()
+    assert launch["env"] == {"HSA_FORCE_FINE_GRAIN_PCIE": "1"}
+
+
+def test_an_agentx_workload_has_no_accuracy_test(agentx_canonical, blobs, tmp_path):
+    with pytest.raises(PointError, match="no accuracy test"):
+        generate_points(environment(blobs, tmp_path), agentx_canonical, tmp_path / "points", accuracy=True)
+    assert not (tmp_path / "points").exists()
+
+
+@pytest.mark.parametrize("name", ["LD_PRELOAD", "PYTHONPATH"])
+def test_an_agentx_launch_variable_a_variant_may_not_set_is_refused_as_on_the_inferencex_path(
+    agentx_canonical, blobs, tmp_path, name
+):
+    delta = RecipeDelta(config=ConfigDelta(envs={name: "/x.so"}))
+    env = environment(blobs, tmp_path, delta=delta)
+
+    with pytest.raises(PointError, match=f"dropped or changed launch variables {name}"):
+        generate_points(env, agentx_canonical, tmp_path / "points")
+
+
+def test_an_agentx_workload_has_no_profile_point(agentx_canonical, blobs, tmp_path):
+    with pytest.raises(PointError, match="profile test of an AgentX workload"):
+        generate_profile_point(environment(blobs, tmp_path), agentx_canonical, tmp_path / "points")
+    assert not (tmp_path / "points").exists()
+
+
+def test_an_inferencex_point_is_what_the_inferencex_renderer_hands_magpie(canonical, blobs, tmp_path, model):
+    delta = RecipeDelta(config=ConfigDelta(server_args=SERVER_ARGS, envs={"HSA_FORCE_FINE_GRAIN_PCIE": "1"}))
+    env = environment(blobs, tmp_path, delta=delta)
+
+    (point,) = generate_points(env, canonical, tmp_path / "points", concurrency=(8,), accuracy=True)
+
+    expected = materialize_config_with_envs(
+        default_baseline_config(),
+        tmp_path / "direct",
+        extra_server_args=SERVER_ARGS,
+        extra_envs={"HSA_FORCE_FINE_GRAIN_PCIE": "1", "CONC": "8", "RUN_EVAL": "true"},
+        model_path=str(model),
+    )
+    rendered = load(point)
+    assert rendered == load(expected)
+    assert rendered["benchmark"]["envs"]["RUN_EVAL"] == "true" and "NUM_PROMPTS" in rendered["benchmark"]["envs"]
