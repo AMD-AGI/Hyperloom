@@ -471,7 +471,7 @@ def run_optimize(
                 return published_commit
             try:
                 on_new_best(payload)
-            except Exception as error:  # noqa: BLE001 - publishing never breaks OPTIMIZE
+            except (OSError, subprocess.SubprocessError) as error:
                 log.warning(
                     "optimize: new-best callback failed (%s: %s)",
                     type(error).__name__,
@@ -499,10 +499,9 @@ def run_optimize(
         # The loop may have recorded a KEEP between the last poll and its exit,
         # including one it produced while being terminated for the deadline.
         published_commit = _publish_new_best()
-    except Exception as e:  # noqa: BLE001 - a launch/stream failure must not crash the whole rewrite pipeline
-        # Honor this function's contract ("Returns {} when forge-loop cannot be launched"): a missing kernelforge on
-        # PATH, a bad interpreter, or a malformed command must NOT propagate a traceback out of run_rewrite (which
-        # would skip the final result + sentinel).
+    except (OSError, ValueError) as e:
+        # A missing executable, a bad interpreter or a malformed command is a launch failure: the contract is to
+        # return what was recovered rather than raise out of run_rewrite, which would skip the final result.
         log.warning("optimize: forge-loop could not be launched/run (%s: %s)", type(e).__name__, e)
         print(
             f"  [forge-rewrite] OPTIMIZE launch failed ({type(e).__name__}: {e}); keeping the port-only result",
