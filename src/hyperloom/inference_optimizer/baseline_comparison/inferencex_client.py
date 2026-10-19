@@ -201,29 +201,34 @@ def fetch_agentic_interactivity(benchmark_ids: list[str | int]) -> dict[str, flo
     return result
 
 
+def _is_single_node_on(row: object, hw: str) -> bool:
+    """Whether ``row`` is a single-node, non-disaggregated benchmark measured on hardware ``hw``."""
+    return (
+        isinstance(row, dict)
+        and str(row.get("hardware") or "").strip().casefold() == hw
+        and not bool(row.get("is_multinode"))
+        and not bool(row.get("disagg"))
+    )
+
+
+def _has_query_shape(row: dict, query: BaselineQuery) -> bool:
+    """Whether ``row`` was measured at the query's fixed ISL/OSL."""
+    return (
+        query.isl is not None
+        and query.osl is not None
+        and _to_int(row.get("isl")) == int(query.isl)
+        and _to_int(row.get("osl")) == int(query.osl)
+    )
+
+
 def find_reference_rows(rows: list[dict], query: BaselineQuery) -> list[dict]:
     """Filter single-node rows matching ``query`` without treating agentic lengths as fixed shapes."""
-    isl, osl = query.isl, query.osl
     hw = str(query.gpu or "").strip().casefold()
-    matched = [
-        r
-        for r in rows
-        if isinstance(r, dict)
-        and str(r.get("hardware") or "").strip().casefold() == hw
-        and not bool(r.get("is_multinode"))
-        and not bool(r.get("disagg"))
-    ]
+    matched = [r for r in rows if _is_single_node_on(r, hw)]
     if query.benchmark_mode == "agentx":
         matched = [r for r in matched if r.get("benchmark_type") == "agentic_traces"]
     else:
-        matched = [
-            r
-            for r in matched
-            if isl is not None
-            and osl is not None
-            and _to_int(r.get("isl")) == int(isl)
-            and _to_int(r.get("osl")) == int(osl)
-        ]
+        matched = [r for r in matched if _has_query_shape(r, query)]
     prec = str(query.precision or "").strip().casefold()
     if prec:
         matched = [r for r in matched if str(r.get("precision") or "").strip().casefold() == prec]

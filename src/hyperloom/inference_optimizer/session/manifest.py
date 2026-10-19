@@ -15,7 +15,7 @@ import subprocess
 import tempfile
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from hyperloom.common.provenance import build_provenance
 from hyperloom.common.timeutil import now_iso, utc_now_compact
@@ -198,25 +198,17 @@ def _gpu_specialist_capacity_from_args(args: argparse.Namespace | None) -> int:
     return detect_gpu_count()
 
 
-def build_manifest(
-    session_dir: Path,
-    *,
-    args: argparse.Namespace | None = None,
-    session_id: str | None = None,
-) -> dict[str, Any]:
-    """Assemble the session manifest dictionary (schema ``SCHEMA_VERSION``)."""
-    from ..breakdown.workflow_contract import CURRENT_WORKFLOW_CONTRACT_VERSION, workflow_contract_digest
+def _env_digits(name: str) -> int | None:
+    """The integer ``$name`` spells when it is all digits, else ``None``."""
+    return int(os.environ[name]) if os.environ.get(name, "").strip().isdigit() else None
 
-    model_path = ""
-    model_name = ""
-    framework = os.environ.get("FRAMEWORK", "")
-    gpu_type = os.environ.get("GPU_TYPE", "")
+
+def _workload(args: argparse.Namespace | None) -> dict[str, Any]:
+    """The manifest's workload block: the environment's request shape, overridden by the CLI's."""
     workload: dict[str, Any] = {
-        "max_model_len": int(os.environ["MAX_MODEL_LEN"])
-        if os.environ.get("MAX_MODEL_LEN", "").strip().isdigit()
-        else None,
+        "max_model_len": _env_digits("MAX_MODEL_LEN"),
         "precision": os.environ.get("PRECISION", "") or None,
-        "conc": int(os.environ["CONC"]) if os.environ.get("CONC", "").strip().isdigit() else None,
+        "conc": _env_digits("CONC"),
     }
     # An agentic replay takes its request shape from the corpus, so $ISL/$OSL
     # are inert. The Critic reads this block, so it carries the distribution.
@@ -227,9 +219,34 @@ def build_manifest(
     if _agentx_on:
         workload.update(benchmark_mode="agentx", benchmark_config=str(benchmark_config_path() or ""))
     else:
-        workload["isl"] = int(os.environ["ISL"]) if os.environ.get("ISL", "").strip().isdigit() else None
-        workload["osl"] = int(os.environ["OSL"]) if os.environ.get("OSL", "").strip().isdigit() else None
-    tp = int(os.environ["TP"]) if os.environ.get("TP", "").strip().isdigit() else None
+        workload["isl"] = _env_digits("ISL")
+        workload["osl"] = _env_digits("OSL")
+    if args is not None:
+        if not _agentx_on:
+            if getattr(args, "isl", None) is not None:
+                workload["isl"] = int(args.isl)
+            if getattr(args, "osl", None) is not None:
+                workload["osl"] = int(args.osl)
+        if getattr(args, "precision", None):
+            workload["precision"] = str(args.precision)
+    return workload
+
+
+class _RunIdentity(NamedTuple):
+    """The model, framework and GPU type a session runs on."""
+
+    model_path: str
+    model_name: str
+    framework: str
+    gpu_type: str
+
+
+def _run_identity(args: argparse.Namespace | None) -> _RunIdentity:
+    """The CLI's model, framework and GPU type, the latter two falling back to ``$FRAMEWORK`` / ``$GPU_TYPE``."""
+    model_path = ""
+    model_name = ""
+    framework = os.environ.get("FRAMEWORK", "")
+    gpu_type = os.environ.get("GPU_TYPE", "")
     if args is not None:
         if getattr(args, "model", None):
             model_path = str(args.model)
@@ -239,13 +256,21 @@ def build_manifest(
             framework = str(args.framework)
         if getattr(args, "gpu_type", None):
             gpu_type = str(args.gpu_type)
-        if not _agentx_on:
-            if getattr(args, "isl", None) is not None:
-                workload["isl"] = int(args.isl)
-            if getattr(args, "osl", None) is not None:
-                workload["osl"] = int(args.osl)
-        if getattr(args, "precision", None):
-            workload["precision"] = str(args.precision)
+    return _RunIdentity(model_path, model_name, framework, gpu_type)
+
+
+def build_manifest(
+    session_dir: Path,
+    *,
+    args: argparse.Namespace | None = None,
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    """Assemble the session manifest dictionary (schema ``SCHEMA_VERSION``)."""
+    from ..breakdown.workflow_contract import CURRENT_WORKFLOW_CONTRACT_VERSION, workflow_contract_digest
+
+    workload = _workload(args)
+    tp = _env_digits("TP")
+    run = _run_identity(args)
     claw_session_id = (os.environ.get("CLAW_SESSION_ID") or "").strip() or None
     sandbox_user_id = (os.environ.get("SANDBOX_USER_ID") or "").strip() or None
     # Shared provenance builder (WP-0): single source of truth for gfx/EP/ graph-mode/server-args, kept in lockstep
@@ -253,17 +278,17 @@ def build_manifest(
     _prov = build_provenance(args, env=os.environ)
     return {
         "schema_version": SCHEMA_VERSION,
-        "session_id": session_id or build_session_id(model_name),
+        "session_id": session_id or build_session_id(run.model_name),
         "claw_session_id": claw_session_id,
         "sandbox_user_id": sandbox_user_id,
         "created_at_utc": now_iso(timespec="seconds"),
         "session_dir": str(session_dir),
         # USER_DATA_PATH root snapshotted so a trace-based consumer can locate the on-disk artifacts.
         "user_data_path": str(_paths.workspace_root()),
-        "model_path": model_path,
-        "model_name": model_name,
-        "framework": framework or "sglang",
-        "gpu_type": gpu_type,
+        "model_path": run.model_path,
+        "model_name": run.model_name,
+        "framework": run.framework or "sglang",
+        "gpu_type": run.gpu_type,
         "tp": tp,
         # Added provenance (schema v4) via the shared WP-0 builder so a trace consumer can pin gfx arch /
         # expert-parallel / graph mode / server args.
@@ -274,7 +299,7 @@ def build_manifest(
         "server_args_hash": _prov.get("server_args_hash"),
         "workload": workload,
         "objective": _objective_summary(args) if args is not None else {"kind": "time_only", "value": None},
-        "max_minutes": int((getattr(args, "max_hours", 0) or 0) * 60) if args is not None else 0,
+        "max_minutes": int((getattr(args, "max_hours", 0) or 0) * 60),
         "code_revision": _git_revision(),
         "dependencies": _build_dependencies(),
         "pid": os.getpid(),
@@ -283,25 +308,23 @@ def build_manifest(
         # Snapshotted so resume-after-redeploy can detect drift.
         "stack_fingerprint": _prov.get("stack_fingerprint") or {},
         # Locked at session start; resume reads it back so a restart can't change concurrency semantics.
-        "research_lane_capacity": int(getattr(args, "research_lane_capacity", 1) or 1) if args is not None else 1,
+        "research_lane_capacity": int(getattr(args, "research_lane_capacity", 1) or 1),
         "gpu_specialist_capacity": _gpu_specialist_capacity_from_args(args),
         # Workflow identity is stamped only on a fresh manifest. Resumed
         # pre-contract sessions therefore remain honestly legacy.
         "workflow_contract_version": CURRENT_WORKFLOW_CONTRACT_VERSION,
         "workflow_contract_digest": workflow_contract_digest(),
         "workflow_flags": {
-            "kernel_enabled": not bool(getattr(args, "no_kernel", False)) if args is not None else True,
-            "framework_agent_enabled": not bool(getattr(args, "no_framework_agent", False))
-            if args is not None
-            else True,
-            "enablement_mode": str(getattr(args, "enablement", "all") or "all") if args is not None else "all",
+            "kernel_enabled": not bool(getattr(args, "no_kernel", False)),
+            "framework_agent_enabled": not bool(getattr(args, "no_framework_agent", False)),
+            "enablement_mode": str(getattr(args, "enablement", "all") or "all"),
         },
         # IR-3 soft-degrade audit.
-        "kb_degraded_reason": (getattr(args, "kb_degraded_reason", None) if args is not None else None),
-        "pr_degraded_reason": (getattr(args, "pr_degraded_reason", None) if args is not None else None),
+        "kb_degraded_reason": getattr(args, "kb_degraded_reason", None),
+        "pr_degraded_reason": getattr(args, "pr_degraded_reason", None),
         # Operator-supplied reference recipe source (audit only); the resolved server_args / envs / model are
         # authoritative in state.json.
-        "reference_script": (getattr(args, "reference_script", None) if args is not None else None),
+        "reference_script": getattr(args, "reference_script", None),
     }
 
 
