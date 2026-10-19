@@ -456,9 +456,11 @@ interactivity curve. The ladder is sized for the workload: powers of two
 down from 256 for a synthetic run, `1,4,8,10,14,20,28` for an agentic one,
 where a request carries orders of magnitude more prompt and the same card
 saturates far lower. Override either with `--conc-sweep-concs`. Under
-AgentX the sweep is off unless `--enable-conc-sweep` is passed, since each
-rung is a 3600 s window and the session grades at a fixed CONC; SWEEP then
-records a disabled skip.
+native Magpie AgentX, concurrency is fixed for the session and
+`--enable-conc-sweep` is rejected at startup. Start a separate session for each
+CONC. The independent MLPerf backend keeps its optional sweep, disabled by
+default. See the [AgentX workflow](../how-to/optimize.md#optimize-an-agentx-workload)
+for supported workload controls.
 
 Results update `last_conc_sweep` and feed the final report and breakdown.
 The phase exits on `sweep_done` (or `sweep_failed`). While the sweep it

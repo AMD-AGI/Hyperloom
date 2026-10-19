@@ -681,6 +681,362 @@ async def test_explore_executor_keeps_and_reverts_per_variant(sub_agent_runner, 
     assert rejected_provenance == {"llm_direct"}
 
 
+async def _explore_on_an_observed_fp8_stack(sub_agent_runner, tmp_path, monkeypatch, grid, tputs, inherited=""):
+    """Run one explore round whose stack was observed launching with ``--kv-cache-dtype fp8``."""
+    sub, tr, _ = sub_agent_runner
+    _force_cold_decision(monkeypatch)
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+    if inherited:
+        cfg = yaml.safe_load(base.read_text())
+        cfg["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"] = inherited
+        base.write_text(yaml.safe_dump(cfg))
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors.explore.observed_launch_from_state",
+        lambda _state: ({"kv_cache_dtype": "fp8", "max_running_requests": 512}, {}),
+    )
+    launched: list[str] = []
+
+    def _fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        name = next(n for n in tputs if n in slot.parent.name + "/" + slot.name)
+        launched.append(name)
+        _fake_workspace(slot, tput=tputs[name])
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={"config_path": str(base), "output_dir": str(tmp_path / "out"), "base_tput": 800.0, "grid": grid},
+        idempotency_key="ex-noop-stack",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+    return res.result, launched
+
+
+@pytest.mark.asyncio
+async def test_a_variant_that_was_the_stack_runs_once_a_keep_has_moved_the_stack(
+    sub_agent_runner, tmp_path, monkeypatch
+):
+    """``--kv-cache-dtype fp8`` restates the round's opening stack, but not the stack after ``auto`` KEEPs."""
+    grid = [
+        {"name": "v_auto", "extra_args": "--kv-cache-dtype auto", "extra_envs": {}},
+        {"name": "v_fp8", "extra_args": "--kv-cache-dtype fp8", "extra_envs": {}},
+    ]
+    out, launched = await _explore_on_an_observed_fp8_stack(
+        sub_agent_runner, tmp_path, monkeypatch, grid, {"v_auto": 840.0, "v_fp8": 900.0}
+    )
+
+    assert launched == ["v_auto", "v_fp8"]
+    outcomes = {row["name"]: row["outcome"] for row in out["explore_search_update"]["tested"].values()}
+    assert outcomes == {"v_auto": "KEEP", "v_fp8": "KEEP"}
+    assert not [sd for sd in out["skipped_dup"] if sd.get("reason") == "baseline_noop"]
+
+
+@pytest.mark.asyncio
+async def test_a_variant_that_is_the_stack_is_skipped_while_the_stack_has_not_moved(
+    sub_agent_runner, tmp_path, monkeypatch
+):
+    """Before any KEEP, and after a REVERT, the observed launch still describes the stack."""
+    grid = [
+        {"name": "v_noop_first", "extra_args": "--max-running-requests 512", "extra_envs": {}},
+        {"name": "v_revert", "extra_args": "--revert-flag", "extra_envs": {}},
+        {"name": "v_noop_after", "extra_args": "--kv-cache-dtype fp8", "extra_envs": {}},
+    ]
+    out, launched = await _explore_on_an_observed_fp8_stack(
+        sub_agent_runner, tmp_path, monkeypatch, grid, {"v_noop_first": 900.0, "v_revert": 800.4, "v_noop_after": 900.0}
+    )
+
+    assert launched == ["v_revert"]
+    noop = {sd["name"] for sd in out["skipped_dup"] if sd.get("reason") == "baseline_noop"}
+    assert noop == {"v_noop_first", "v_noop_after"}
+    assert {row["name"] for row in out["explore_search_update"]["tested"].values()} == {"v_revert"}
+
+
+@pytest.mark.asyncio
+async def test_a_restatement_dropped_up_front_does_not_claim_a_later_identical_variant(
+    sub_agent_runner, tmp_path, monkeypatch
+):
+    """``fp8`` then ``auto`` then ``fp8``: the first ``fp8`` can only meet the opening stack; the last meets ``auto``."""
+    grid = [
+        {"name": "v_fp8_first", "extra_args": "--kv-cache-dtype fp8", "extra_envs": {}},
+        {"name": "v_auto", "extra_args": "--kv-cache-dtype auto", "extra_envs": {}},
+        {"name": "v_fp8_later", "extra_args": "--kv-cache-dtype fp8", "extra_envs": {}},
+    ]
+    out, launched = await _explore_on_an_observed_fp8_stack(
+        sub_agent_runner, tmp_path, monkeypatch, grid, {"v_fp8_first": 900.0, "v_auto": 840.0, "v_fp8_later": 900.0}
+    )
+
+    assert launched == ["v_auto", "v_fp8_later"]
+    assert {sd["name"] for sd in out["skipped_dup"] if sd.get("reason") == "baseline_noop"} == {"v_fp8_first"}
+    assert not [sd for sd in out["skipped_dup"] if sd.get("reason") == "round_dup"]
+
+
+@pytest.mark.asyncio
+async def test_a_restatement_that_repeats_a_launch_of_this_round_is_a_round_dup(
+    sub_agent_runner, tmp_path, monkeypatch
+):
+    """On a moved stack a restatement runs once; the same launch later in the round is the usual in-round duplicate."""
+    grid = [
+        {"name": "v_auto", "extra_args": "--kv-cache-dtype auto", "extra_envs": {}},
+        {"name": "v_fp8_a", "extra_args": "--kv-cache-dtype fp8", "extra_envs": {}},
+        {"name": "v_fp8_b", "extra_args": "--kv-cache-dtype fp8", "extra_envs": {}},
+    ]
+    out, launched = await _explore_on_an_observed_fp8_stack(
+        sub_agent_runner, tmp_path, monkeypatch, grid, {"v_auto": 840.0, "v_fp8_a": 900.0, "v_fp8_b": 900.0}
+    )
+
+    assert launched == ["v_auto", "v_fp8_a"]
+    assert [sd["name"] for sd in out["skipped_dup"] if sd.get("reason") == "round_dup"] == ["v_fp8_b"]
+
+
+@pytest.mark.asyncio
+async def test_a_grid_that_only_restates_the_stack_is_exhausted_before_the_round(
+    sub_agent_runner, tmp_path, monkeypatch
+):
+    """With nothing ahead of them that could KEEP, every restatement is dropped before a round is planned."""
+    grid = [
+        {"name": "v_noop_a", "extra_args": "--max-running-requests 512", "extra_envs": {}},
+        {"name": "v_noop_b", "extra_args": "--kv-cache-dtype fp8", "extra_envs": {}},
+    ]
+    out, launched = await _explore_on_an_observed_fp8_stack(
+        sub_agent_runner, tmp_path, monkeypatch, grid, {"v_noop_a": 900.0, "v_noop_b": 900.0}
+    )
+
+    assert launched == []
+    assert out["explore_grid_exhausted"] is True
+    assert {sd["name"] for sd in out["skipped_dup"] if sd.get("reason") == "baseline_noop"} == {"v_noop_a", "v_noop_b"}
+
+
+@pytest.mark.asyncio
+async def test_a_restatement_stays_skipped_after_a_keep_on_an_unrelated_setting(
+    sub_agent_runner, tmp_path, monkeypatch
+):
+    """A KEEP of ``--max-num-seqs 256`` does not touch the observed ``--kv-cache-dtype fp8``, so fp8 is still the stack."""
+    grid = [
+        {"name": "v_seqs", "extra_args": "--max-num-seqs 256", "extra_envs": {}},
+        {"name": "v_fp8", "extra_args": "--kv-cache-dtype fp8", "extra_envs": {}},
+    ]
+    out, launched = await _explore_on_an_observed_fp8_stack(
+        sub_agent_runner, tmp_path, monkeypatch, grid, {"v_seqs": 840.0, "v_fp8": 900.0}
+    )
+
+    assert launched == ["v_seqs"]
+    assert [v["name"] for v in out["winners"]] == ["v_seqs"]
+    skipped = [(sd["name"], sd["reason"]) for sd in out["skipped_dup"]]
+    assert skipped == [("v_fp8", "baseline_noop")]
+
+
+@pytest.mark.asyncio
+async def test_a_restatement_left_leading_by_the_skip_list_is_skipped_at_its_turn(
+    sub_agent_runner, tmp_path, monkeypatch
+):
+    """The operator skip list removes ``auto`` after the leading drop, so ``fp8`` meets the unmoved stack and is skipped."""
+    monkeypatch.setenv("SKIP_VARIANTS", "v_auto")
+    grid = [
+        {"name": "v_auto", "extra_args": "--kv-cache-dtype auto", "extra_envs": {}},
+        {"name": "v_fp8", "extra_args": "--kv-cache-dtype fp8", "extra_envs": {}},
+    ]
+    out, launched = await _explore_on_an_observed_fp8_stack(
+        sub_agent_runner, tmp_path, monkeypatch, grid, {"v_auto": 840.0, "v_fp8": 900.0}
+    )
+
+    assert launched == []
+    assert {sd["name"] for sd in out["skipped_dup"] if sd.get("reason") == "baseline_noop"} == {"v_fp8"}
+
+
+@pytest.mark.asyncio
+async def test_a_restatement_stays_skipped_after_a_keep_that_switches_the_stack_to_replace_mode(
+    sub_agent_runner, tmp_path, monkeypatch
+):
+    """A KEEP that removes a flag persists the stack's launched args in replace mode, which moves only that flag."""
+    grid = [
+        {
+            "name": "v_drop",
+            "extra_args": "--chunked-prefill-size 4096",
+            "remove_args": ["--stale-flag"],
+            "extra_envs": {},
+        },
+        {"name": "v_fp8", "extra_args": "--kv-cache-dtype fp8", "extra_envs": {}},
+    ]
+    out, launched = await _explore_on_an_observed_fp8_stack(
+        sub_agent_runner,
+        tmp_path,
+        monkeypatch,
+        grid,
+        {"v_drop": 840.0, "v_fp8": 900.0},
+        inherited="--stale-flag 1 --kv-cache-dtype fp8",
+    )
+
+    assert launched == ["v_drop"]
+    (keep,) = out["winners"]
+    assert keep["args_mode"] == "replace"
+    assert [(sd["name"], sd["reason"]) for sd in out["skipped_dup"]] == [("v_fp8", "baseline_noop")]
+
+
+@pytest.mark.asyncio
+async def test_a_restatement_runs_after_a_keep_in_replace_mode_that_removes_what_it_restates(
+    sub_agent_runner, tmp_path, monkeypatch
+):
+    """The same switch to replace mode releases ``fp8`` when the KEEP is the one that removed ``--kv-cache-dtype``."""
+    grid = [
+        {"name": "v_drop", "extra_args": "", "remove_args": ["--kv-cache-dtype"], "extra_envs": {}},
+        {"name": "v_fp8", "extra_args": "--kv-cache-dtype fp8", "extra_envs": {}},
+    ]
+    out, launched = await _explore_on_an_observed_fp8_stack(
+        sub_agent_runner,
+        tmp_path,
+        monkeypatch,
+        grid,
+        {"v_drop": 840.0, "v_fp8": 900.0},
+        inherited="--kv-cache-dtype fp8",
+    )
+
+    assert launched == ["v_drop", "v_fp8"]
+
+
+@pytest.mark.asyncio
+async def test_a_restatement_twin_that_was_only_skipped_has_not_claimed_the_launch(
+    sub_agent_runner, tmp_path, monkeypatch
+):
+    """``fp8`` listed twice: the first meets the unmoved stack and is skipped; after ``auto`` KEEPs, the second runs."""
+    grid = [
+        {"name": "v_seqs", "extra_args": "--max-num-seqs 256", "extra_envs": {}},
+        {"name": "v_fp8_a", "extra_args": "--kv-cache-dtype fp8", "extra_envs": {}},
+        {"name": "v_auto", "extra_args": "--kv-cache-dtype auto", "extra_envs": {}},
+        {"name": "v_fp8_b", "extra_args": "--kv-cache-dtype fp8", "extra_envs": {}},
+    ]
+    out, launched = await _explore_on_an_observed_fp8_stack(
+        sub_agent_runner,
+        tmp_path,
+        monkeypatch,
+        grid,
+        {"v_seqs": 840.0, "v_fp8_a": 900.0, "v_auto": 880.0, "v_fp8_b": 920.0},
+    )
+
+    assert launched == ["v_seqs", "v_auto", "v_fp8_b"]
+    assert [(sd["name"], sd["reason"]) for sd in out["skipped_dup"]] == [("v_fp8_a", "baseline_noop")]
+
+
+@pytest.mark.asyncio
+async def test_a_round_of_measured_and_restated_variants_is_answered_not_failed(
+    sub_agent_runner, tmp_path, monkeypatch
+):
+    """Everything is either already measured or a restatement of the stack: nothing is left to run, so it succeeded."""
+    _force_cold_decision(monkeypatch)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    sub.shared_state = state
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors.explore.observed_launch_from_state",
+        lambda _state: ({"kv_cache_dtype": "fp8"}, {}),
+    )
+    first: list[str] = []
+    await _run_explore_round(
+        sub,
+        tr,
+        tmp_path,
+        state,
+        key="round-1",
+        grid=[{"name": "max_running_48", "extra_args": "--max-running-requests 48"}],
+        base_args="--base-flag 1",
+        bench_calls=first,
+    )
+    assert len(first) == 1
+
+    second: list[str] = []
+    out = await _run_explore_round(
+        sub,
+        tr,
+        tmp_path,
+        state,
+        key="round-2",
+        grid=[
+            {"name": "mrr_48", "extra_args": "--max-running-requests 48"},
+            {"name": "v_fp8", "extra_args": "--kv-cache-dtype fp8"},
+        ],
+        base_args="--base-flag 1",
+        bench_calls=second,
+    )
+
+    assert second == []
+    assert {(sd["name"], sd["reason"]) for sd in out["skipped_dup"]} == {
+        ("mrr_48", "already_measured"),
+        ("v_fp8", "baseline_noop"),
+    }
+    assert out["status"] == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_restatements_left_leading_by_a_filter_are_dropped_before_the_serving_lease(
+    sub_agent_runner, tmp_path, monkeypatch
+):
+    """A variant the skip list removes does not keep the restatements behind it in the round."""
+    monkeypatch.setenv("SKIP_VARIANTS", "v_skipped")
+    leases: list[int] = []
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors.explore.maybe_serving_lease",
+        lambda **kw: leases.append(1),
+    )
+    grid = [
+        {"name": "v_skipped", "extra_args": "--kv-cache-dtype auto", "extra_envs": {}},
+        {"name": "v_noop_a", "extra_args": "--max-running-requests 512", "extra_envs": {}},
+        {"name": "v_noop_b", "extra_args": "--kv-cache-dtype fp8", "extra_envs": {}},
+    ]
+    out, launched = await _explore_on_an_observed_fp8_stack(
+        sub_agent_runner, tmp_path, monkeypatch, grid, {"v_skipped": 840.0, "v_noop_a": 900.0, "v_noop_b": 900.0}
+    )
+
+    assert launched == []
+    assert leases == []
+    assert out["explore_grid_exhausted"] is True
+    assert {sd["name"] for sd in out["skipped_dup"] if sd.get("reason") == "baseline_noop"} == {"v_noop_a", "v_noop_b"}
+
+
+def test_observed_launch_after_drops_only_what_the_stack_changed():
+    from hyperloom.orchestrator.actions.executors._launch_restatement import observed_launch_after
+
+    opening = {
+        "extra_server_args": "--a 1",
+        "extra_envs": {"E1": "x"},
+        "remove_args": [],
+        "unset_envs": [],
+        "args_mode": "append",
+    }
+    observed = ({"a": 1, "kv_cache_dtype": "fp8", "max_num_seqs": 64}, {"E1": "x", "E2": "y", "E3": "z"})
+
+    def after(**moved):
+        return observed_launch_after(*observed, opening, {**opening, **moved}, "sglang")
+
+    assert after() == observed
+    # A KEEP that adds an unrelated setting leaves the rest observed; one that sets or drops a named one does not.
+    assert after(extra_server_args="--a 1 --max-num-seqs 256")[0] == {"a": 1, "kv_cache_dtype": "fp8"}
+    assert after(extra_server_args="--a 1 --kv-cache-dtype auto")[0] == {"a": 1, "max_num_seqs": 64}
+    assert after(extra_server_args="")[0] == {"kv_cache_dtype": "fp8", "max_num_seqs": 64}
+    assert after(remove_args=["--kv-cache-dtype"])[0] == {"a": 1, "max_num_seqs": 64}
+    # A removal the opening stack carried and a KEEP cleared exposes the setting again, so its observed value is stale too.
+    cleared = {**opening, "remove_args": ["--kv-cache-dtype"], "unset_envs": ["E3"]}
+    assert observed_launch_after(*observed, cleared, opening, "sglang") == (
+        {"a": 1, "max_num_seqs": 64},
+        {"E1": "x", "E2": "y"},
+    )
+    # A boolean flag and its negated spelling are one setting: switching either way leaves the observed value stale.
+    flag_on = ({"a": 1, "enable_x": True}, {})
+    assert observed_launch_after(*flag_on, opening, {**opening, "extra_server_args": "--a 1 --no-enable-x"}, "sglang")[
+        0
+    ] == {"a": 1}
+    assert after(extra_envs={"E1": "x", "E2": "other"})[1] == {"E1": "x", "E3": "z"}
+    assert after(extra_envs={})[1] == {"E2": "y", "E3": "z"}
+    assert after(unset_envs=["E3"])[1] == {"E1": "x", "E2": "y"}
+    # The mode is not a setting: the caller compares args as launched, so a switch to replace moves nothing by itself.
+    assert after(args_mode="replace") == observed
+
+
 @pytest.mark.asyncio
 async def test_explore_projection_drops_a_variant_before_it_is_benchmarked(sub_agent_runner, tmp_path, monkeypatch):
     """A projected loser never boots; the survivor's KEEP comes from its own measurement."""
@@ -2125,61 +2481,6 @@ async def test_explore_decision_round_skips_eval_warmup_keeps_it(
     decision = [ev for slot, ev in seen if "warmup_round" not in slot]
     assert warmup and not _eval_off(warmup[0])
     assert decision and all(_eval_off(ev) for ev in decision)
-
-
-@pytest.mark.asyncio
-async def test_explore_no_eval_disables_magpie_warmup_and_decision(
-    sub_agent_runner,
-    tmp_path,
-):
-    """Session ``--no-eval`` turns Magpie RUN_EVAL off for every explore round."""
-    sub, tr, _ = sub_agent_runner
-    state = SharedState()
-    state.eval_disabled = True
-    sub.shared_state = state
-    base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
-    output_dir = tmp_path / "explore-session-noeval"
-
-    seen: list[tuple[str, str]] = []
-
-    def _fake_run(cmd, *args, **kwargs):
-        out_idx = cmd.index("--output-dir")
-        slot = Path(cmd[out_idx + 1])
-        seen.append((str(slot), _run_eval_of(cmd)))
-        _fake_workspace(slot, tput=920.0)
-        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
-
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "output_dir": str(output_dir),
-            "base_tput": 800.0,
-            "grid": [
-                {
-                    "name": "session_noeval",
-                    "extra_args": "--warm-flag",
-                    "extra_envs": {},
-                    "provenance": "llm_direct",
-                }
-            ],
-            "baseline_runtime_sec": 10.0,
-            "baseline_warm_runtime_sec": 5.0,
-        },
-        idempotency_key="ex-session-noeval",
-    )
-    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
-    with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
-        side_effect=_fake_run,
-    ):
-        await sub.run_task(task)
-
-    assert seen
-    assert all(_eval_off(ev) for _slot, ev in seen)
-    base_yaml = yaml.safe_load((output_dir / "explore_base.with_envs.yaml").read_text())
-    assert _eval_off(base_yaml["benchmark"]["envs"].get("RUN_EVAL", ""))
 
 
 @pytest.mark.asyncio
@@ -3676,3 +3977,435 @@ async def test_explore_grades_the_rounds_own_gpu_power_against_the_budget(
     coord.shared_state = state
     await coord.writeback._promote_explore(out, None, wb._PromoteOutcome(verdict=wb.Verdict.RECORDED))
     assert state.current_best["variant_name"] == "v_power"
+
+
+async def _run_explore_round(
+    sub,
+    tr,
+    tmp_path,
+    state,
+    *,
+    key: str,
+    grid: list[dict],
+    base_args: str,
+    bench_calls,
+    extra_params=None,
+    keep="",
+    fail="",
+):
+    """Run one explore round on ``state`` and fold its ledger update back, as write-back does.
+
+    Every variant measures within noise of the 800 anchor (REVERT) except the one named ``keep``, which KEEPs, and
+    the one named ``fail``, whose benchmark exits non-zero.
+    """
+
+    def _fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        bench_calls.append(slot.name)
+        if fail and slot.name.endswith(f"_{fail}"):
+            return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr="boom")
+        _fake_workspace(slot, tput=900.0 if keep and slot.name.endswith(f"_{keep}") else 801.0)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    base = tmp_path / "base.yaml"
+    if not base.exists():
+        _write_baseline_yaml(base)
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / key),
+            "base_tput": 800.0,
+            "base_extra_args": base_args,
+            "grid": grid,
+            **(extra_params or {}),
+        },
+        idempotency_key=key,
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        out = (await sub.run_task(task)).result
+    state.apply_explore_search_update(out["explore_search_update"])
+    return out
+
+
+@pytest.mark.asyncio
+async def test_a_variant_measured_on_the_same_stack_is_not_measured_again(sub_agent_runner, tmp_path, monkeypatch):
+    """A later round skips a launch an earlier round already gave a verdict on; the new variant still runs."""
+    _force_cold_decision(monkeypatch)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    sub.shared_state = state
+    first: list[str] = []
+    await _run_explore_round(
+        sub,
+        tr,
+        tmp_path,
+        state,
+        key="round-1",
+        grid=[{"name": "max_running_48", "extra_args": "--max-running-requests 48"}],
+        base_args="--base-flag 1",
+        bench_calls=first,
+    )
+    assert len(first) == 1
+
+    second: list[str] = []
+    out = await _run_explore_round(
+        sub,
+        tr,
+        tmp_path,
+        state,
+        key="round-2",
+        grid=[
+            # Same launch under another name.
+            {"name": "mrr_48", "extra_args": "--max-running-requests 48"},
+            {"name": "fresh", "extra_args": "--fresh-flag"},
+        ],
+        base_args="--base-flag 1",
+        bench_calls=second,
+    )
+    assert len(second) == 1
+    assert [v["name"] for v in out["losers"]] == ["fresh"]
+    skipped = {d["name"]: d for d in out["skipped_dup"]}
+    assert skipped["mrr_48"]["reason"] == "already_measured"
+    assert "max_running_48" in skipped["mrr_48"]["detail"]
+    assert out["status"] == "succeeded"
+
+    # A round with nothing left to measure is answered from the ledger, not failed.
+    out = await _run_explore_round(
+        sub,
+        tr,
+        tmp_path,
+        state,
+        key="round-3",
+        grid=[{"name": "mrr_48", "extra_args": "--max-running-requests 48"}],
+        base_args="--base-flag 1",
+        bench_calls=second,
+    )
+    assert len(second) == 1
+    assert out["status"] == "succeeded"
+
+    # A skipped variant does not make a round whose only new variant failed look successful.
+    out = await _run_explore_round(
+        sub,
+        tr,
+        tmp_path,
+        state,
+        key="round-4",
+        grid=[
+            {"name": "mrr_48", "extra_args": "--max-running-requests 48"},
+            {"name": "broken", "extra_args": "--broken-flag"},
+        ],
+        base_args="--base-flag 1",
+        bench_calls=second,
+        fail="broken",
+    )
+    assert out["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_a_budget_stop_after_a_skipped_variant_is_still_reported(sub_agent_runner, tmp_path, monkeypatch):
+    """Skipping a measured variant does not hide that the budget stopped the new one before it ran."""
+    _force_cold_decision(monkeypatch)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    sub.shared_state = state
+    measured = {"name": "max_running_48", "extra_args": "--max-running-requests 48"}
+    calls: list[str] = []
+    await _run_explore_round(sub, tr, tmp_path, state, key="r1", grid=[measured], base_args="", bench_calls=calls)
+    state.max_minutes = 3.0  # ~60s usable
+    out = await _run_explore_round(
+        sub,
+        tr,
+        tmp_path,
+        state,
+        key="r2",
+        grid=[measured, {"name": "fresh", "extra_args": "--fresh-flag"}],
+        base_args="",
+        bench_calls=calls,
+        extra_params={"baseline_runtime_sec": 600.0},
+    )
+    assert len(calls) == 1
+    assert [d["reason"] for d in out["skipped_dup"]] == ["already_measured"]
+    assert out["status"] == "failed"
+    assert out["error_class"] == "session_time_exhausted"
+
+
+@pytest.mark.asyncio
+async def test_a_measured_variant_with_removals_is_not_measured_again(sub_agent_runner, tmp_path, monkeypatch):
+    """A variant's own removals are part of the launch it measured, so the same removal is the same launch."""
+    _force_cold_decision(monkeypatch)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    sub.shared_state = state
+    grid = [{"name": "drop_base", "extra_args": "--x 1", "remove_args": ["--base-flag"]}]
+    calls: list[str] = []
+    await _run_explore_round(
+        sub, tr, tmp_path, state, key="r1", grid=grid, base_args="--base-flag 1", bench_calls=calls
+    )
+    out = await _run_explore_round(
+        sub, tr, tmp_path, state, key="r2", grid=grid, base_args="--base-flag 1", bench_calls=calls
+    )
+    assert len(calls) == 1
+    assert [d["reason"] for d in out["skipped_dup"]] == ["already_measured"]
+
+
+@pytest.mark.asyncio
+async def test_a_measured_variant_runs_after_a_keep_earlier_in_the_same_round(sub_agent_runner, tmp_path, monkeypatch):
+    """A KEEP advances the stack mid-round, so a variant measured on the round's opening stack is measured again."""
+    _force_cold_decision(monkeypatch)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    sub.shared_state = state
+    measured = {"name": "max_running_48", "extra_args": "--max-running-requests 48"}
+    calls: list[str] = []
+    await _run_explore_round(sub, tr, tmp_path, state, key="r1", grid=[measured], base_args="", bench_calls=calls)
+    out = await _run_explore_round(
+        sub,
+        tr,
+        tmp_path,
+        state,
+        key="r2",
+        grid=[{"name": "winner", "extra_args": "--winner 1"}, measured],
+        base_args="",
+        bench_calls=calls,
+        keep="winner",
+    )
+    assert [v["name"] for v in out["winners"]] == ["winner"]
+    assert [v["name"] for v in out["losers"]] == ["max_running_48"]
+    assert out["skipped_dup"] == []
+    assert len(calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_a_measured_variant_runs_again_once_the_stack_moved(sub_agent_runner, tmp_path, monkeypatch):
+    """The verdict belongs to the stack it was measured on; on a different base launch the variant is measured anew."""
+    _force_cold_decision(monkeypatch)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    sub.shared_state = state
+    grid = [{"name": "max_running_48", "extra_args": "--max-running-requests 48"}]
+    calls: list[str] = []
+    await _run_explore_round(
+        sub, tr, tmp_path, state, key="r1", grid=grid, base_args="--base-flag 1", bench_calls=calls
+    )
+    out = await _run_explore_round(
+        sub, tr, tmp_path, state, key="r2", grid=grid, base_args="--base-flag 2", bench_calls=calls
+    )
+    assert len(calls) == 2
+    assert out["skipped_dup"] == []
+
+
+@pytest.mark.asyncio
+async def test_a_throughput_revert_is_measured_again_once_the_bar_decays_below_its_gain(
+    sub_agent_runner, tmp_path, monkeypatch
+):
+    """The round's variants measure +0.125%: refused under a 1.0% bar, worth another look under a 0.1% bar."""
+    _force_cold_decision(monkeypatch)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    sub.shared_state = state
+    grid = [{"name": "max_running_48", "extra_args": "--max-running-requests 48"}]
+    calls: list[str] = []
+    await _run_explore_round(
+        sub,
+        tr,
+        tmp_path,
+        state,
+        key="r1",
+        grid=grid,
+        base_args="",
+        bench_calls=calls,
+        extra_params={"keep_threshold_pct": 1.0},
+    )
+    (row,) = state.explore_search["tested"].values()
+    assert row["outcome"] == "REVERT" and row["reason"] == "gain_below_threshold"
+    assert row["graded_gain_pct"] == pytest.approx(0.125)
+
+    out = await _run_explore_round(
+        sub,
+        tr,
+        tmp_path,
+        state,
+        key="r2",
+        grid=grid,
+        base_args="",
+        bench_calls=calls,
+        extra_params={"keep_threshold_pct": 0.5},
+    )
+    assert len(calls) == 1
+    assert [d["reason"] for d in out["skipped_dup"]] == ["already_measured"]
+
+    out = await _run_explore_round(
+        sub,
+        tr,
+        tmp_path,
+        state,
+        key="r3",
+        grid=grid,
+        base_args="",
+        bench_calls=calls,
+        extra_params={"keep_threshold_pct": 0.1},
+    )
+    assert len(calls) == 2
+    assert out["skipped_dup"] == []
+
+
+@pytest.mark.asyncio
+async def test_an_accuracy_revert_stays_answered_when_the_bar_decays(sub_agent_runner, tmp_path, monkeypatch):
+    """Only the throughput gate moves with the bar: a variant refused on accuracy is not re-measured for a lower bar."""
+    _force_cold_decision(monkeypatch)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    sub.shared_state = state
+    grid = [{"name": "max_running_48", "extra_args": "--max-running-requests 48"}]
+    calls: list[str] = []
+    await _run_explore_round(
+        sub,
+        tr,
+        tmp_path,
+        state,
+        key="r1",
+        grid=grid,
+        base_args="",
+        bench_calls=calls,
+        extra_params={"keep_threshold_pct": 0.1},
+    )
+    (row,) = state.explore_search["tested"].values()
+    row.update(outcome="REVERT", reason="accuracy_drop", graded_gain_pct=5.0)
+    out = await _run_explore_round(
+        sub,
+        tr,
+        tmp_path,
+        state,
+        key="r2",
+        grid=grid,
+        base_args="",
+        bench_calls=calls,
+        extra_params={"keep_threshold_pct": 0.1},
+    )
+    assert len(calls) == 1
+    assert [d["reason"] for d in out["skipped_dup"]] == ["already_measured"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_variant_is_not_treated_as_measured(sub_agent_runner, tmp_path, monkeypatch):
+    """A FAILED row carries no verdict on the launch, so the variant may run again on the same stack."""
+    _force_cold_decision(monkeypatch)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    sub.shared_state = state
+    grid = [{"name": "max_running_48", "extra_args": "--max-running-requests 48"}]
+    calls: list[str] = []
+    await _run_explore_round(sub, tr, tmp_path, state, key="r1", grid=grid, base_args="", bench_calls=calls)
+    for row in state.explore_search["tested"].values():
+        row["outcome"] = "FAILED"
+    await _run_explore_round(sub, tr, tmp_path, state, key="r2", grid=grid, base_args="", bench_calls=calls)
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_stack_revalidation_measures_again(sub_agent_runner, tmp_path, monkeypatch):
+    """A revalidation exists to re-measure, so a verdict already in the ledger does not skip it."""
+    _force_cold_decision(monkeypatch)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    sub.shared_state = state
+    grid = [{"name": "max_running_48", "extra_args": "--max-running-requests 48"}]
+    calls: list[str] = []
+    await _run_explore_round(sub, tr, tmp_path, state, key="r1", grid=grid, base_args="", bench_calls=calls)
+    await _run_explore_round(
+        sub,
+        tr,
+        tmp_path,
+        state,
+        key="r2",
+        grid=grid,
+        base_args="",
+        bench_calls=calls,
+        extra_params={"source": "stack_revalidate"},
+    )
+    assert len(calls) == 2
+
+
+def test_measured_verdict_holds_only_for_the_same_workload_and_stack():
+    from hyperloom.orchestrator.actions.executors.measured_variants import (
+        MeasuredOn,
+        grid_fingerprints,
+        measured_verdict,
+        stack_of,
+    )
+
+    params = {"base_tput": 800.0, "base_extra_args": "--a 1", "grid": [{"name": "v", "extra_args": "--b 2"}]}
+    (fp,) = grid_fingerprints(params)
+    stack = stack_of(params)
+    variant = params["grid"][0]
+    row = {
+        "outcome": "REVERT",
+        "workload_signature": "w1",
+        "extra_server_args": "--b 2",
+        "extra_envs": {},
+        "measured_against": {"throughput": 800.0, "extra_server_args": "--a 1", "extra_envs": {}},
+    }
+    ledger = {"tested": {fp: row}}
+
+    def verdict(ledger=ledger, variant=variant, stack=stack, signature="w1"):
+        return measured_verdict(ledger, fp, variant=variant, now=MeasuredOn(stack, signature, 1.0))
+
+    assert verdict() is not None
+    assert verdict(signature="w2") is None
+    assert verdict(stack=stack_of({**params, "base_extra_envs": {"E": "1"}})) is None
+    assert verdict(ledger={"tested": {fp: {**row, "measured_against": None}}}) is None
+    # The key was fingerprinted against its round's opening controls; a KEEP in that round can move them, so a row
+    # under the same key whose own change differs (here: it removed nothing) does not speak for this variant.
+    assert verdict(variant={**variant, "remove_args": ["--c"]}) is None
+    # The bar decays per macro-cycle: a throughput-gate REVERT stands only while its gain is below the current bar.
+    missed = {**row, "reason": "gain_below_threshold", "graded_gain_pct": 0.7}
+    assert verdict(ledger={"tested": {fp: missed}}) is not None
+    assert verdict(ledger={"tested": {fp: {**missed, "graded_gain_pct": 1.0}}}) is None
+    # Accuracy and tail-guard REVERTs do not depend on the bar, whatever gain they measured.
+    for reason in ("accuracy_drop", "accuracy_unavailable", "p90_regressed"):
+        assert verdict(ledger={"tested": {fp: {**missed, "reason": reason, "graded_gain_pct": 5.0}}}) is not None
+    # An overlay changes the launch without changing args or envs, so it has no comparable identity.
+    assert grid_fingerprints(
+        {**params, "grid": [{"name": "v", "extra_args": "--b 2", "overlay_pythonpath": "/o"}]}
+    ) == [""]
+
+
+@pytest.mark.asyncio
+async def test_a_kernel_overlay_variant_is_not_skipped_by_a_plain_one(sub_agent_runner, tmp_path, monkeypatch):
+    """An overlay changes the launch without changing args or envs, so a measured plain twin does not skip it."""
+    _force_cold_decision(monkeypatch)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    sub.shared_state = state
+    overlay = tmp_path / "overlay"
+    overlay.mkdir()
+    calls: list[str] = []
+    plain = {"name": "plain", "extra_args": "--max-running-requests 48"}
+    await _run_explore_round(sub, tr, tmp_path, state, key="r1", grid=[plain], base_args="", bench_calls=calls)
+    out = await _run_explore_round(
+        sub,
+        tr,
+        tmp_path,
+        state,
+        key="r2",
+        grid=[{**plain, "name": "with_overlay", "overlay_pythonpath": str(overlay)}],
+        base_args="",
+        bench_calls=calls,
+    )
+    assert len(calls) == 2
+    assert out["skipped_dup"] == []

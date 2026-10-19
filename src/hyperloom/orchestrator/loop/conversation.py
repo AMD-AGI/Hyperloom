@@ -15,6 +15,7 @@ from ..roles.base import BackendTurnResult
 from ..bus.message_bus import Message
 from hyperloom.inference_optimizer.trace.conversation_trace import ConversationRecord, append_conversation
 from ..state.failure_evidence import UNMEASURED_OUTCOMES, render_failure_line
+from ..state.shared_state import KbInjection
 from hyperloom.common.prompt_safety import defang_prompt_structure as _defang_prompt_structure
 from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_inbox
 
@@ -285,11 +286,13 @@ class ConversationCollaborator(CoordinatorCollaborator):
             )
         )
         self.shared_state.record_experience_kb_injection(
-            consumer="orchestration",
-            read_id=evidence.read_id,
-            experience_ids=[str(ref.get("id") or "") for ref in evidence.rendered_refs],
-            experiences=[dict(item) for item in evidence.experiences],
-            prompt_block=block,
+            KbInjection(
+                consumer="orchestration",
+                read_id=evidence.read_id,
+                experience_ids=[str(ref.get("id") or "") for ref in evidence.rendered_refs],
+                experiences=[dict(item) for item in evidence.experiences],
+                prompt_block=block,
+            )
         )
         return block
 

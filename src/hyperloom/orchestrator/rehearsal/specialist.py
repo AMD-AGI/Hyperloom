@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.orchestrator.rehearsal.clock import VirtualClock
-from hyperloom.orchestrator.specialists.subprocess_ import SpecialistSubprocessResult
+from hyperloom.orchestrator.specialists.subprocess_ import SpecialistSpawn, SpecialistSubprocessResult
 
 __all__ = ["CRASHED", "COMPLETED", "EMPTY", "HUNG", "ScriptedSpecialist", "SpecialistStep"]
 
@@ -98,22 +98,15 @@ class ScriptedSpecialist:
         """bool: Whether a later dispatch arrived under a task id no earlier one used."""
         return len(set(self.task_ids)) > 1
 
-    async def run(
-        self,
-        *,
-        task_id: str,
-        workspace: Path,
-        worktree: Path | None = None,
-        **_ignored: Any,
-    ) -> SpecialistSubprocessResult:
-        """Play the next step into ``workspace`` and report it.
+    async def run(self, request: SpecialistSpawn) -> SpecialistSubprocessResult:
+        """Play the next step into the request's workspace and report it.
 
         Args:
-            task_id: The dispatching task's id, kept so a retry is visible.
-            workspace: ``runs/specialist/<task_id>/``, where the step writes.
-            worktree: The per-task worktree; the done-file goes there when there
-                is one, matching where the runner looks first.
-            **_ignored: The rest of the dispatch surface, unused here.
+            request: The dispatch the runner would hand the real dispatcher. Only
+                its task id (kept so a retry is visible), its workspace
+                (``runs/specialist/<task_id>/``, where the step writes) and its
+                worktree (where the done-file goes when there is one, matching
+                where the runner looks first) are used.
 
         Returns:
             SpecialistSubprocessResult: The step's outcome.
@@ -121,13 +114,14 @@ class ScriptedSpecialist:
         Raises:
             IndexError: When the script has no step left for this dispatch.
         """
+        task_id, workspace, worktree = request.task_id, Path(request.workspace), request.worktree
         if self.served >= len(self.steps):
             raise IndexError(
                 f"scripted specialist has {len(self.steps)} steps; dispatch {self.served + 1} was requested"
             )
         step = self.steps[self.served]
         self.task_ids.append(task_id)
-        self.workspaces.append(Path(workspace))
+        self.workspaces.append(workspace)
 
         workspace.mkdir(parents=True, exist_ok=True)
         process_log = workspace / "process.log"

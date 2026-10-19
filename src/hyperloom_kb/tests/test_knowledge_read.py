@@ -13,14 +13,12 @@ from hyperloom_kb import (
     AnthropicPlannerBackend,
     Experience,
     ExperienceDeclaration,
-    ExperienceService,
     ExperienceStatus,
     FieldDeclaration,
     FieldKind,
     FieldRole,
     InMemoryExperienceStore,
     InMemoryQueryViewStore,
-    InMemorySchemaRegistry,
     KnowledgeReadService,
     LexicalFuzzyProvider,
     LLMQueryPlanner,
@@ -31,7 +29,6 @@ from hyperloom_kb import (
     PlannerGatewayConfig,
     Provenance,
     QueryExecutor,
-    QueryViewMaintainer,
     ReadRequest,
     ReadStatus,
     ReadTrace,
@@ -40,6 +37,7 @@ from hyperloom_kb import (
     WeightedQueryPlan,
     derive_experience_id,
 )
+from hyperloom_kb.tests.view_fixtures import publish_view, submit_complete
 
 NOW = datetime(2026, 9, 22, tzinfo=timezone.utc)
 
@@ -144,11 +142,8 @@ def _planner_response() -> str:
 
 def _stack():
     schema = _declaration()
-    schemas = InMemorySchemaRegistry()
     experiences = InMemoryExperienceStore()
     views = InMemoryQueryViewStore()
-    service = ExperienceService(schemas, experiences)
-    service.register_schema(schema)
     target = _experience(
         schema,
         "run-target",
@@ -163,13 +158,9 @@ def _stack():
         knob="fp8_kv",
         reasoning="FP8 KV cache reduces decode KV bandwidth.",
     )
-    for item in (target, other):
-        service.submit_complete(item)
+    submit_complete(schema, experiences, target, other)
     fuzzy = LexicalFuzzyProvider(experiences, schema)
-    view = QueryViewMaintainer(schemas, experiences, views).rebuild(
-        schema.schema_ref,
-        fuzzy_ready=True,
-    )
+    view = publish_view(schema, experiences, views, fuzzy_ready=True)
     retrieval = LocalRetrievalService(experiences, views, providers=(fuzzy,))
     configuration = RetrievalConfiguration.create(
         schema.schema_ref,
@@ -182,10 +173,8 @@ def _stack():
     )
     return (
         schema,
-        schemas,
         experiences,
         views,
-        service,
         view,
         retrieval,
         configuration,
@@ -339,8 +328,6 @@ def test_read_service_plans_queries_and_returns_prompt_ready_evidence() -> None:
         _,
         _,
         _,
-        _,
-        _,
         retrieval,
         configuration,
         target,
@@ -381,10 +368,8 @@ def test_read_service_plans_queries_and_returns_prompt_ready_evidence() -> None:
 def test_read_keeps_same_corpus_snapshot_while_planner_runs() -> None:
     (
         schema,
-        schemas,
         experiences,
         views,
-        experience_service,
         view,
         retrieval,
         configuration,
@@ -401,11 +386,8 @@ def test_read_keeps_same_corpus_snapshot_while_planner_runs() -> None:
 
     class PublishingBackend(FakePlannerBackend):
         def complete(self, **kwargs):
-            experience_service.submit_complete(late)
-            QueryViewMaintainer(schemas, experiences, views).rebuild(
-                schema.schema_ref,
-                fuzzy_ready=True,
-            )
+            submit_complete(schema, experiences, late)
+            publish_view(schema, experiences, views, fuzzy_ready=True)
             return super().complete(**kwargs)
 
     backend = PublishingBackend([_planner_response()])
@@ -440,8 +422,6 @@ def test_direct_query_is_replayable_without_planner() -> None:
         schema,
         _,
         _,
-        _,
-        _,
         view,
         retrieval,
         configuration,
@@ -466,20 +446,3 @@ def test_direct_query_is_replayable_without_planner() -> None:
 
     assert first.groups == second.groups
     assert first.groups[0].representative_ids == (target.id,)
-
-
-def test_disabled_read_is_a_no_op() -> None:
-    schema = _declaration()
-    service = KnowledgeReadService(
-        schema,
-        None,
-        None,
-        enabled=False,
-    )
-
-    request = _request(schema)
-    result = service.read(request.decision, request.context)
-
-    assert result.status is ReadStatus.DISABLED
-    assert result.prompt_block == ""
-    assert result.rendered_refs == ()

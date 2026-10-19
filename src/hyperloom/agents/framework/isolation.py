@@ -38,7 +38,6 @@ class DiskPreflightError(RuntimeError):
 class WorkspacePaths:
     """Resolved per-candidate workspace layout returned by prepare_candidate_workspace."""
 
-    candidate_dir: Path
     worktree_dir: Path
     venv_dir: Path
 
@@ -186,7 +185,7 @@ def prepare_candidate_workspace(
         ]
     )
     create_venv(venv_dir)
-    return WorkspacePaths(candidate_dir, worktree_dir, venv_dir)
+    return WorkspacePaths(worktree_dir, venv_dir)
 
 
 __all__ = [

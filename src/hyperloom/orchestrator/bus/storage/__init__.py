@@ -8,8 +8,6 @@ from .schema import (
     DEFAULT_LANE_CAPACITIES,
     SCHEMA_VERSION,
     ensure_schema,
-    get_lane_capacity,
-    reset_schema,
     set_lane_capacity,
 )
 
@@ -18,8 +16,6 @@ __all__ = [
     "SCHEMA_VERSION",
     "SqliteConnection",
     "ensure_schema",
-    "get_lane_capacity",
     "open_connection",
-    "reset_schema",
     "set_lane_capacity",
 ]

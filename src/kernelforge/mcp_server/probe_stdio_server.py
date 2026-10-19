@@ -26,8 +26,6 @@ log = logging.getLogger(__name__)
 #: Re-exported so the two servers stay one import away from the shared wire
 #: format; both spellings name the same objects.
 InvalidParamsError = stdio_transport.InvalidParamsError
-_write_message = stdio_transport.write_message
-_write_error = stdio_transport.write_error
 
 SERVER_NAME = "kernelforge-specialist-probe"
 # Agents see these as mcp__specialist_probe__<name>.

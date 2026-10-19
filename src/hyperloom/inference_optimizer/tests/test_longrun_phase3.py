@@ -255,7 +255,7 @@ async def test_phase_transition_preserves_close_report_task(cyclic_coordinator):
 
 async def _build_minimal_coord(tmp_path: Path, monkeypatch):
     """Build a minimal Coordinator with no real GPU pool (capacity=0)."""
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
     from hyperloom.orchestrator.roles.mock_backend import MockBackend, ScriptedPlan
     from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -290,7 +290,7 @@ async def _build_minimal_coord(tmp_path: Path, monkeypatch):
         session_dir=sd,
         backends=backends,
         role_registry=default_role_registry(),
-        knowledge_plane=None,
+        advisory=AdvisoryServices(knowledge_plane=None),
     )
 
 

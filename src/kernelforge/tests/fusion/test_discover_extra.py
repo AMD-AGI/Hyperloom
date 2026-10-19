@@ -8,8 +8,10 @@ from __future__ import annotations
 import inspect
 import json
 
+from kernelforge.fusion.locate import FrameworkInstall
+from kernelforge.fusion.discover import DiscoveryTarget
 from kernelforge.fusion import discover as discover_module
-from kernelforge.fusion.diagnose import diagnose_from_shares
+from kernelforge.fusion.diagnose import TraceProfile, diagnose_from_shares
 from kernelforge.fusion.discover import (
     _extract_json_array,
     _salvage_objects,
@@ -21,8 +23,9 @@ from kernelforge.fusion.discover import (
 
 def _candidate_diag():
     return diagnose_from_shares(
-        {"gemm": 0.4, "add": 0.14, "elementwise": 0.14, "cast": 0.13, "mul": 0.08},
-        busy_fraction_of_wall=0.21,
+        TraceProfile(
+            {"gemm": 0.4, "add": 0.14, "elementwise": 0.14, "cast": 0.13, "mul": 0.08}, busy_fraction_of_wall=0.21
+        )
     )
 
 
@@ -84,17 +87,16 @@ def test_extract_skips_invalid_array_then_salvages():
 
 def test_parse_anchor_as_string_coerced():
     text = '[{"name":"x","env_flag":"F","source_anchors":"single_anchor"}]'
-    recipes = parse_discovered_recipes(text, model_type="m", framework="f", source_file="/x.py", shapes={})
+    recipes = parse_discovered_recipes(
+        text, DiscoveryTarget(model_type="m", install=FrameworkInstall(framework="f"), source_file="/x.py", shapes={})
+    )
     assert recipes[0].source_hints == ["single_anchor"]
 
 
 def test_discover_recipes_empty_source_file():
     recipes = discover_recipes(
         _candidate_diag(),
-        model_type="m",
-        framework="f",
-        source_file="",
-        shapes={},
+        DiscoveryTarget(model_type="m", install=FrameworkInstall(framework="f"), source_file="", shapes={}),
         trace_path="/x",
         llm_fn=lambda _prompt: "[]",
     )
@@ -104,10 +106,9 @@ def test_discover_recipes_empty_source_file():
 def test_discover_recipes_unreadable_source(tmp_path):
     recipes = discover_recipes(
         _candidate_diag(),
-        model_type="m",
-        framework="f",
-        source_file=str(tmp_path / "nope.py"),
-        shapes={},
+        DiscoveryTarget(
+            model_type="m", install=FrameworkInstall(framework="f"), source_file=str(tmp_path / "nope.py"), shapes={}
+        ),
         trace_path="/x",
         llm_fn=lambda _prompt: "[]",
     )

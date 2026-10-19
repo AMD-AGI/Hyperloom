@@ -456,7 +456,7 @@ KB Store backend is unreachable.
 
 1. Resolve and test the local KB root:
    ```bash
-   KB_ROOT="${KNOWLEDGE_LOCAL_ROOT:-${HYPERLOOM_LOCAL_KB_ROOT:-${USER_DATA_PATH:-$HOME/.cache/hyperloom}/knowledge}}"
+   KB_ROOT="${KNOWLEDGE_LOCAL_ROOT:-${USER_DATA_PATH:-$HOME/.cache/hyperloom}/knowledge}"
    echo "$KB_ROOT"
    mkdir -p "$KB_ROOT"
    touch "$KB_ROOT/.write-test" && rm "$KB_ROOT/.write-test"

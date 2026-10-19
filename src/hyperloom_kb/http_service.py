@@ -36,6 +36,7 @@ from hyperloom_kb.observability import (
     JsonLogFormatter,
     Metrics,
     RequestContext,
+    ServedRequest,
     current_request,
     event,
     route_of,
@@ -57,7 +58,7 @@ from hyperloom_kb.query_view import (
     QueryViewBuilder,
     RetrievalCapability,
 )
-from hyperloom_kb.remote import RemoteClient, RemoteConfig
+from hyperloom_kb.remote import ReadQuery, RemoteClient, RemoteConfig
 from hyperloom_kb.retrieval import LocalRetrievalService, render_complete_experience
 from hyperloom_kb.retrieval_policy import (
     LEXICAL_FUZZY_PROVIDER_REF,
@@ -225,6 +226,19 @@ def _bounded_int(value: Any, name: str, *, minimum: int, maximum: int | None = N
     return value
 
 
+def _read_query(body: dict[str, JsonValue]) -> ReadQuery:
+    _reject_unknown(body, _READ_FIELDS)
+    outcome, schema_ref = body.get("outcome"), body.get("schema_ref")
+    return ReadQuery(
+        decision=_required_text(body.get("decision"), "decision"),
+        context=_json_object(body.get("context", {}), "context"),
+        outcome=None if outcome is None else _required_text(outcome, "outcome"),
+        limit=_bounded_int(body.get("limit", DEFAULT_READ_LIMIT), "limit", minimum=1, maximum=MAX_READ_LIMIT),
+        schema_ref=None if schema_ref is None else _required_text(schema_ref, "schema_ref"),
+        render_budget_chars=cast(int | None, body.get("render_budget_chars")),
+    )
+
+
 def _query_int(query: Mapping[str, list[str]], name: str, default: int) -> int:
     raw = query.get(name, [str(default)])[0]
     try:
@@ -255,6 +269,10 @@ def _reject_unknown(body: Mapping[str, JsonValue], allowed: frozenset[str]) -> N
 class HTTPServiceConfig:
     home: Path
     token: str
+    #: How this service names itself in health, metrics and to the KBs it syncs with.
+    name: str = ""
+    #: Digest of the settings the service was started with, reported by health.
+    config_digest: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "home", Path(self.home).expanduser())
@@ -271,14 +289,15 @@ def _role_value(
 
 
 def _summary(declaration: ExperienceDeclaration, experience: Experience) -> dict[str, JsonValue]:
-    """A list line: the record's id and run, and the values its schema gives the summary, decision, and
-    measurement roles."""
+    """A list line: the record's id and run, the conditions it was measured under, and the values its schema gives
+    the summary, decision, and measurement roles."""
 
     summary = _role_value(declaration, experience, "change", FieldRole.SUMMARY)
     decision = _role_value(declaration, experience, "outcome", FieldRole.DECISION)
     return {
         "experience_id": experience.id,
         "source_run_id": experience.run_id,
+        "identity": cast(JsonValue, dict(experience.identity)),
         "change_summary": summary if isinstance(summary, str) else "",
         "decision": decision if isinstance(decision, str) else "",
         "baseline_value": cast(JsonValue, _role_value(declaration, experience, "baseline", FieldRole.MEASUREMENT)),
@@ -311,16 +330,14 @@ class ExperienceHTTPService:
         *,
         database: Database,
         global_kb: RemoteClient | None = None,
-        config_digest: str = "",
-        name: str = "",
     ) -> None:
         self.config = config
         self.declaration = declaration
-        self.name = name
+        self.name = config.name
         self._database = database
         config.home.mkdir(parents=True, exist_ok=True)
         self.kb_id = database.resolve_kb()
-        self._config_digest = config_digest
+        self._config_digest = config.config_digest
         self._code_digest = code_digest()
         self._records = RecordFiles(config.home, self.kb_id)
         self._files = FileStore(config.home, self.kb_id)
@@ -418,14 +435,6 @@ class ExperienceHTTPService:
         if row is None:
             raise UnknownStateItem(f"Experience {experience_id} is not held here")
         return self._records.read(experience_id, str(row["content_hash"]))
-
-    @property
-    def schema_refs(self) -> tuple[str, ...]:
-        with self._database.transaction() as connection:
-            rows = connection.execute(
-                "SELECT schema_ref FROM schemas WHERE kb_id = %s ORDER BY schema_ref", (self.kb_id,)
-            ).fetchall()
-        return tuple(str(row["schema_ref"]) for row in rows)
 
     def declaration_for(self, schema_ref: str) -> ExperienceDeclaration:
         declaration = self._declarations.get(schema_ref)
@@ -661,27 +670,21 @@ class ExperienceHTTPService:
         self._views[schema_ref] = built
         return built
 
-    def read(
-        self,
-        *,
-        decision: str,
-        context: dict[str, JsonValue],
-        outcome: str | None = None,
-        limit: int = DEFAULT_READ_LIMIT,
-        schema_ref: str | None = None,
-        render_budget_chars: int | None = None,
-    ) -> dict[str, JsonValue]:
-        """Search one schema's Experiences, this service's default schema unless ``schema_ref`` names another.
+    def read(self, query: ReadQuery) -> dict[str, JsonValue]:
+        """Search one schema's Experiences, this service's default schema unless ``query.schema_ref`` names another.
 
         Each record renders whole; a file field renders as the path on this host its file is read from. With
-        ``render_budget_chars``, the block carries whole records while they fit and names only those in
+        ``query.render_budget_chars``, the block carries whole records while they fit and names only those in
         ``rendered_refs``.
         """
 
-        decision = _required_text(decision, "decision")
-        declaration = self.declaration_for(schema_ref or self.declaration.schema_ref)
-        selected_outcome = self._outcome(outcome, declaration)
-        limit = _bounded_int(limit, "limit", minimum=1, maximum=MAX_READ_LIMIT)
+        decision = _required_text(query.decision, "decision")
+        declaration = self.declaration_for(query.schema_ref or self.declaration.schema_ref)
+        selected_outcome = self._outcome(query.outcome, declaration)
+        limit = _bounded_int(
+            DEFAULT_READ_LIMIT if query.limit is None else query.limit, "limit", minimum=1, maximum=MAX_READ_LIMIT
+        )
+        render_budget_chars = query.render_budget_chars
         if render_budget_chars is not None:
             render_budget_chars = _bounded_int(render_budget_chars, "render_budget_chars", minimum=1)
         read_view = self._read_view(declaration)
@@ -739,7 +742,7 @@ class ExperienceHTTPService:
             configuration,
             planner=self._planner,
             trace_sink=traces.append,
-        ).read(decision, context)
+        ).read(decision, query.context)
         groups = {
             experience_id: group
             for group in (traces[-1].execution.groups if traces else ())
@@ -1241,26 +1244,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._write(HTTPStatus.OK, app.rebind())
             return
         if self.command == _POST and parsed.path == "/v1/read":
-            body = self._body()
-            _reject_unknown(body, _READ_FIELDS)
-            outcome = body.get("outcome")
-            schema_ref = body.get("schema_ref")
-            self._write(
-                HTTPStatus.OK,
-                app.read(
-                    decision=_required_text(body.get("decision"), "decision"),
-                    context=_json_object(body.get("context", {}), "context"),
-                    outcome=None if outcome is None else _required_text(outcome, "outcome"),
-                    limit=_bounded_int(
-                        body.get("limit", DEFAULT_READ_LIMIT),
-                        "limit",
-                        minimum=1,
-                        maximum=MAX_READ_LIMIT,
-                    ),
-                    schema_ref=None if schema_ref is None else _required_text(schema_ref, "schema_ref"),
-                    render_budget_chars=cast(int | None, body.get("render_budget_chars")),
-                ),
-            )
+            self._write(HTTPStatus.OK, app.read(_read_query(self._body())))
             return
         prefix = "/v1/experiences/"
         if self.command == _PUT and parsed.path.startswith(prefix):
@@ -1341,7 +1325,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             seconds = time.monotonic() - started
             received = int(self.headers.get("Content-Length") or 0) if self.command in (_POST, _PUT) else 0
             metrics.observe_request(
-                method=self.command, route=route, status=status, seconds=seconds, bytes_in=received, bytes_out=sent
+                ServedRequest(
+                    method=self.command, route=route, status=status, seconds=seconds, bytes_in=received, bytes_out=sent
+                )
             )
             if route not in PROBE_ROUTES:
                 event(
@@ -1486,13 +1472,13 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit(str(exc)) from None
         stack.callback(database.close)
         app = ExperienceHTTPService(
-            HTTPServiceConfig(home, os.environ.get("HYPERLOOM_KB_TOKEN", "")),
+            HTTPServiceConfig(
+                home, os.environ.get("HYPERLOOM_KB_TOKEN", ""), name=args.name, config_digest=settings.digest()
+            ),
             load_declaration(args.declaration),
             planner,
             database=database,
             global_kb=None if settings.global_kb is None else RemoteClient(settings.global_kb),
-            config_digest=settings.digest(),
-            name=args.name,
         )
         for seed in args.seed_jsonl:
             log.info("seeded %s: %s", seed, _canonical(app.seed(seed)))

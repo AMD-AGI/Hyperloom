@@ -9,6 +9,7 @@ import itertools
 import json
 import logging
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -185,15 +186,17 @@ def build_search_space(thorough: bool) -> list[dict[str, int]]:
     return space[: max(_thorough_cap(), len(_SEED_CONFIGS))]
 
 
-def _generate_sweep_script(
-    work_dir: Path,
-    profile: Any,
-    batch_sizes: list[int],
-    iters: int,
-    warmup: int,
-    gpu_id: str,
-    configs: list[dict[str, int]],
-) -> Path:
+@dataclass(frozen=True)
+class SweepGrid:
+    """What the MoE sweep measures: every config at every batch size, timed with these iterations."""
+
+    batch_sizes: list[int]
+    configs: list[dict[str, int]]
+    iters: int
+    warmup: int
+
+
+def _generate_sweep_script(work_dir: Path, profile: Any, grid: SweepGrid, gpu_id: str) -> Path:
     """Generate a standalone Python script that performs the Triton MoE sweep."""
     script_path = work_dir / "vllm_moe_sweep.py"
     config_path = work_dir / "sweep_config.json"
@@ -210,10 +213,10 @@ def _generate_sweep_script(
         "intermediate_size": inter_size,
         "hidden_size": hidden_size,
         "topk": topk,
-        "batch_sizes": batch_sizes,
-        "iters": iters,
-        "warmup": warmup,
-        "configs": configs,
+        "batch_sizes": grid.batch_sizes,
+        "iters": grid.iters,
+        "warmup": grid.warmup,
+        "configs": grid.configs,
         "output_path": str(work_dir / "sweep_results.json"),
     }
     config_path.write_text(json.dumps(sweep_config, indent=2), encoding="utf-8")
@@ -465,13 +468,10 @@ class VllmMoeTritonTuner(BaseTuner):
 
         # Generate and run the sweep script
         script = _generate_sweep_script(
-            work_dir=self.work_dir,
-            profile=profile,
-            batch_sizes=batch_sizes,
-            iters=self.ctx.iters,
-            warmup=self.ctx.warmup,
-            gpu_id=gpu_id,
-            configs=configs,
+            self.work_dir,
+            profile,
+            SweepGrid(batch_sizes=batch_sizes, configs=configs, iters=self.ctx.iters, warmup=self.ctx.warmup),
+            gpu_id,
         )
 
         rc, stdout, stderr = run_subprocess(

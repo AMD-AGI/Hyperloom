@@ -9,7 +9,7 @@ import json
 
 import pytest
 
-from kernelforge.fusion.diagnose import diagnose_from_shares
+from kernelforge.fusion.diagnose import TraceProfile, diagnose_from_shares
 from kernelforge.fusion.llm_failure import (
     AGENT_SAFETY_REJECTION_ATTR,
     API_ERROR,
@@ -24,6 +24,9 @@ from kernelforge.fusion.llm_failure import (
     retry_delay,
 )
 from kernelforge.fusion.report import (
+    LocatedFusions,
+    ManifestSubject,
+    RunOutcome,
     FUSION_MANIFEST_SCHEMA_VERSION,
     LLM_UNAVAILABLE_VERDICT,
     build_manifest,
@@ -129,18 +132,16 @@ def test_env_setting_ignores_unparseable_and_negative_overrides(monkeypatch):
 
 def _launch_bound_diagnosis():
     return diagnose_from_shares(
-        {"gemm": 0.4, "add": 0.14, "elementwise": 0.14, "cast": 0.13, "mul": 0.08},
-        busy_fraction_of_wall=0.21,
+        TraceProfile(
+            {"gemm": 0.4, "add": 0.14, "elementwise": 0.14, "cast": 0.13, "mul": 0.08}, busy_fraction_of_wall=0.21
+        )
     )
 
 
 def test_a_launch_bound_model_with_no_recipe_is_still_no_opportunity():
     manifest = build_manifest(
-        framework="sglang",
-        model_path="/m",
-        model_type="mixtral",
-        diagnosis=_launch_bound_diagnosis(),
-        recipe=None,
+        ManifestSubject(framework="sglang", model_path="/m", model_type="mixtral", diagnosis=_launch_bound_diagnosis()),
+        LocatedFusions(recipe=None),
     )
     assert manifest["verdict"] == "no_opportunity"
     assert manifest["error"] is None
@@ -151,13 +152,9 @@ def test_an_unreachable_llm_is_not_reported_as_no_opportunity():
     assert diagnosis.is_candidate, "the incident's precondition: the trace WAS a candidate"
     error = LlmUnavailableError("gateway 400 x4", kind=API_ERROR, attempts=4)
     manifest = build_manifest(
-        framework="sglang",
-        model_path="/m",
-        model_type="mixtral",
-        diagnosis=diagnosis,
-        recipe=None,
-        verdict_override=LLM_UNAVAILABLE_VERDICT,
-        error=error.to_dict(),
+        ManifestSubject(framework="sglang", model_path="/m", model_type="mixtral", diagnosis=diagnosis),
+        LocatedFusions(recipe=None),
+        RunOutcome(verdict_override=LLM_UNAVAILABLE_VERDICT, error=error.to_dict()),
     )
     assert manifest["verdict"] == LLM_UNAVAILABLE_VERDICT
     assert manifest["error"]["kind"] == API_ERROR
@@ -167,11 +164,8 @@ def test_an_unreachable_llm_is_not_reported_as_no_opportunity():
 
 def test_the_wider_verdict_enum_declares_itself_as_schema_v2():
     manifest = build_manifest(
-        framework="sglang",
-        model_path="/m",
-        model_type="mixtral",
-        diagnosis=_launch_bound_diagnosis(),
-        recipe=None,
+        ManifestSubject(framework="sglang", model_path="/m", model_type="mixtral", diagnosis=_launch_bound_diagnosis()),
+        LocatedFusions(recipe=None),
     )
     assert FUSION_MANIFEST_SCHEMA_VERSION == 2
     assert manifest["schema_version"] == 2
@@ -194,11 +188,8 @@ def test_the_wider_verdict_enum_declares_itself_as_schema_v2():
 
 def test_the_manifest_lands_whole_with_the_bytes_its_readers_parse(tmp_path):
     manifest = build_manifest(
-        framework="sglang",
-        model_path="/m",
-        model_type="mixtral",
-        diagnosis=_launch_bound_diagnosis(),
-        recipe=None,
+        ManifestSubject(framework="sglang", model_path="/m", model_type="mixtral", diagnosis=_launch_bound_diagnosis()),
+        LocatedFusions(recipe=None),
     )
     path = write_manifest(manifest, tmp_path / "out")
     raw = path.read_bytes()

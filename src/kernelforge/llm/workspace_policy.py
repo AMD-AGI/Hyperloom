@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 import stat
 from typing import Iterable
-from kernelforge.llm.git import git
+from kernelforge.llm.git import git_bytes
 
 
 PROTECTED_GLOBS = (
@@ -167,7 +167,7 @@ def tracked_editable_paths(
     """Return every tracked workspace path outside the protected measurement set."""
 
     root = Path(workspace).expanduser().resolve()
-    result = git("ls-files", "-z", cwd=root, check=False, text=False)
+    result = git_bytes("ls-files", "-z", cwd=root, check=False)
     if result.returncode != 0:
         return set()
     editable: set[str] = set()

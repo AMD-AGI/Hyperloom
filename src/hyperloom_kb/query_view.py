@@ -4,13 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import statistics
-import tempfile
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from enum import Enum
-from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from hyperloom_kb.schema import (
@@ -23,7 +20,7 @@ from hyperloom_kb.schema import (
     JsonScalar,
     JsonValue,
 )
-from hyperloom_kb.storage import ExperienceStore, SchemaRegistry, StoredExperience
+from hyperloom_kb.storage import StoredExperience
 
 QUERY_VIEW_VERSION = 2
 GROUP_BUILDER_VERSION = "repeat-group-v2"
@@ -501,130 +498,15 @@ class InMemoryQueryViewStore:
         return self._views.get(current) if current is not None else None
 
 
-class LocalQueryViewStore:
-    """Filesystem query-view generations with an atomic current pointer."""
-
-    def __init__(self, root: str | Path) -> None:
-        self.root = Path(root) / "query-views"
-
-    @staticmethod
-    def _schema_digest(schema_ref: str) -> str:
-        if not schema_ref.startswith("schema:sha256:"):
-            raise QueryViewError("schema_ref is invalid")
-        return schema_ref.rsplit(":", 1)[-1]
-
-    @staticmethod
-    def _view_digest(view_id: str) -> str:
-        if not view_id.startswith("view:sha256:"):
-            raise QueryViewError("view_id is invalid")
-        return view_id.rsplit(":", 1)[-1]
-
-    def _schema_root(self, schema_ref: str) -> Path:
-        return self.root / self._schema_digest(schema_ref)
-
-    def _view_path(self, schema_ref: str, view_id: str) -> Path:
-        return self._schema_root(schema_ref) / "generations" / f"{self._view_digest(view_id)}.json"
-
-    @staticmethod
-    def _atomic_write(path: Path, data: bytes) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(
-            mode="wb",
-            prefix=f".{path.name}.",
-            dir=path.parent,
-            delete=False,
-        ) as stream:
-            temporary = Path(stream.name)
-            stream.write(data)
-            stream.flush()
-            os.fsync(stream.fileno())
-        try:
-            os.replace(temporary, path)
-        finally:
-            temporary.unlink(missing_ok=True)
-
-    def publish_view(self, view: QueryView) -> QueryViewRef:
-        path = self._view_path(view.ref.schema_ref, view.ref.view_id)
-        data = (_canonical(view.to_dict()) + "\n").encode()
-        if path.exists():
-            if path.read_bytes() != data:
-                raise QueryViewError("view_id collision")
-        else:
-            self._atomic_write(path, data)
-        pointer = self._schema_root(view.ref.schema_ref) / "current"
-        self._atomic_write(pointer, f"{view.ref.view_id}\n".encode())
-        return view.ref
-
-    def get_view(self, view_id: str) -> QueryView | None:
-        digest = self._view_digest(view_id)
-        for path in self.root.glob(f"*/generations/{digest}.json"):
-            try:
-                value = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError) as exc:
-                raise QueryViewError(f"cannot read Query View: {exc}") from exc
-            if not isinstance(value, dict):
-                raise QueryViewError("Query View document is not an object")
-            return QueryView.from_dict(value)
-        return None
-
-    def current_view(self, schema_ref: str) -> QueryView | None:
-        pointer = self._schema_root(schema_ref) / "current"
-        try:
-            view_id = pointer.read_text(encoding="utf-8").strip()
-        except FileNotFoundError:
-            return None
-        except OSError as exc:
-            raise QueryViewError(f"cannot read current view pointer: {exc}") from exc
-        view = self.get_view(view_id)
-        if view is None or view.ref.schema_ref != schema_ref:
-            raise QueryViewError("current view pointer does not resolve for schema_ref")
-        return view
-
-
-class QueryViewMaintainer:
-    """Rebuild and atomically publish a query view from canonical storage."""
-
-    def __init__(
-        self,
-        schemas: SchemaRegistry,
-        experiences: ExperienceStore,
-        views: QueryViewStore,
-    ) -> None:
-        self._schemas = schemas
-        self._experiences = experiences
-        self._views = views
-
-    def rebuild(
-        self,
-        schema_ref: str,
-        *,
-        fuzzy_ready: bool = False,
-        semantic_ready: bool = False,
-    ) -> QueryViewRef:
-        declaration = self._schemas.get_schema(schema_ref)
-        if declaration is None:
-            raise QueryViewError("cannot build a view for an unknown schema_ref")
-        records = self._experiences.list_experiences(schema_ref)
-        view = QueryViewBuilder().build(
-            declaration,
-            records,
-            fuzzy_ready=fuzzy_ready,
-            semantic_ready=semantic_ready,
-        )
-        return self._views.publish_view(view)
-
-
 __all__ = [
     "ANNOTATION_BUILDER_VERSION",
     "GROUP_BUILDER_VERSION",
     "QUERY_VIEW_VERSION",
     "CapabilityState",
     "InMemoryQueryViewStore",
-    "LocalQueryViewStore",
     "QueryView",
     "QueryViewBuilder",
     "QueryViewError",
-    "QueryViewMaintainer",
     "QueryViewRef",
     "QueryViewStore",
     "RepeatAnnotations",

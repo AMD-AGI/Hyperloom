@@ -8,8 +8,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from hyperloom.orchestrator.actions.executors import _magpie_patcher as mp
 
 
@@ -818,39 +816,6 @@ def test_tolerance_not_fooled_by_outer_catchall_sentinel(tmp_path):
     assert mp._inferencex_tolerates_eval_flag(str(ix)) is False
 
 
-def test_real_pinned_benchmark_lib_patches_run_lm_eval(tmp_path):
-    """Integration against a real benchmark_lib.sh, when one is checked in.
-
-    The fixture it names has never been in the tree, so this has always skipped
-    -- and because its docstring claimed the stub above covered it, the gap read
-    as intentional. The stub covers the *shape*; it cannot tell you whether the
-    file upstream actually pins still has that shape, which is the question a
-    pin bump raises and the one whose wrong answer makes install.sh die().
-
-    That question is now answered by ``test_inferencex_anchor_contract`` --
-    hermetically via a recorded ``magpie_patch`` entry, and against the real
-    pinned file when the repo is reachable. This case stays as a convenience for
-    dropping a local copy in to debug against, and says what it is.
-    """
-    fixture = Path(__file__).parent / "fixtures" / "benchmark_lib_a4bb43af.sh"
-    if not fixture.is_file():
-        pytest.skip(
-            "no local benchmark_lib.sh fixture; the pinned file is verified by "
-            "test_inferencex_anchor_contract (magpie_patch)"
-        )
-    lib = tmp_path / "benchmark_lib.sh"
-    lib.write_text(fixture.read_text(encoding="utf-8"), encoding="utf-8")
-
-    assert mp._apply_run_lm_eval_arg_patch_atomic(lib) is True
-    text = lib.read_text(encoding="utf-8")
-    region = mp._extract_run_lm_eval_region(text)
-    assert region is not None
-    body = text[region[0] : region[1]]
-    assert "--concurrent-requests|--concurrent_requests" in body
-    assert mp._RUN_LM_EVAL_PARSER_SENTINEL in body
-    assert text.count("--concurrent-requests|--concurrent_requests") == 1
-
-
 def test_unpatchable_parser_with_live_flag_stays_fatal(tmp_path):
     """The narrowed judgement must still fail when a live flag really survives
     an unteachable parser (no false negative)."""
@@ -1031,6 +996,7 @@ def test_a_model_needing_a_named_tokenizer_refuses_an_unpatchable_checkout(tmp_p
 
     scripts = tmp_path / "ix" / "benchmarks"
     scripts.mkdir(parents=True)
+    (scripts / "benchmark_lib.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
     (scripts / "vllm_mi300x.sh").write_text(
         '#!/usr/bin/env bash\nrun_benchmark_serving --result-dir "$WORKSPACE_DIR/" --drifted\n',
         encoding="utf-8",
@@ -1044,11 +1010,7 @@ def test_a_model_needing_a_named_tokenizer_refuses_an_unpatchable_checkout(tmp_p
         encoding="utf-8",
     )
 
-    ex = bl.BaselineExecutor(session_dir=tmp_path) if hasattr(bl, "BaselineExecutor") else None
-    if ex is None:
-        import pytest as _pytest
-
-        _pytest.skip("BaselineExecutor not exposed under this name")
+    ex = bl.BaselineExecutor(session_dir=tmp_path)
     monkeypatch.setattr(bl, "materialized_run_eval_disabled", lambda _p: False)
     # The subject is the refusal, not the mode detection that precedes it.
     # ``_client_tokenizer_mode`` answers "" when ``transformers`` cannot be
@@ -1072,6 +1034,7 @@ def test_the_hook_is_required_even_with_evaluation_disabled(tmp_path, monkeypatc
 
     scripts = tmp_path / "ix" / "benchmarks"
     scripts.mkdir(parents=True)
+    (scripts / "benchmark_lib.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
     (scripts / "vllm_mi300x.sh").write_text(
         '#!/usr/bin/env bash\nrun_benchmark_serving --result-dir "$WORKSPACE_DIR/" --drifted\n',
         encoding="utf-8",

@@ -29,11 +29,6 @@ class KnowledgeConfig:
     kb_store_token: str = ""
 
     @property
-    def experience_root(self) -> Path:
-        """Filesystem root used by the local KernelForge experience store."""
-        return self.local_root / "kernelforge" / "experiences"
-
-    @property
     def rewrite_root(self) -> Path:
         """Filesystem root holding local Rewrite records."""
         return self.local_root / "kernelforge" / "rewrite"

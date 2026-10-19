@@ -16,6 +16,7 @@ import pytest
 
 from kernelforge.cli import lanes as cli_lanes
 from kernelforge.config import Config
+from kernelforge.orchestrator.agent import ImplementerSetup, ImplementerTask
 from kernelforge.loop import fanout
 from kernelforge.llm.process_reaping import ReapReport
 from kernelforge.loop.fanout import (
@@ -657,8 +658,16 @@ class _RecordingImplementer:
     def __init__(self) -> None:
         self.calls: list[dict] = []
 
-    def __call__(self, **kwargs):
-        self.calls.append(kwargs)
+    def __call__(self, config, setup, **kwargs):
+        self.calls.append(
+            {
+                "config": config,
+                "source_files": setup.task.source_files,
+                "driver_script": setup.measurement.driver_script,
+                "interposed_driver_path": setup.measurement.interposed_driver_path,
+                **kwargs,
+            }
+        )
 
         async def agent(kernel_path: str, plan: str) -> str:
             return f"{kernel_path}:{plan}"
@@ -681,10 +690,12 @@ def _lane_factory(config: Config, workspace: Path, implementer) -> object:
     return cli_lanes._make_lane_agent_factory(
         make_agent=implementer,
         config=config,
-        workspace_dir=str(workspace),
-        driver=str(workspace / DRIVER_NAME),
-        source_files=[str(workspace / "src" / "kernel.py")],
-        session_kwargs={"program_md": "", "kernel_backend_name": "ck"},
+        binding=cli_lanes.LaneBinding(
+            workspace_dir=str(workspace),
+            driver=str(workspace / DRIVER_NAME),
+            source_files=[str(workspace / "src" / "kernel.py")],
+        ),
+        setup=ImplementerSetup(ImplementerTask(program_md="", kernel_backend_name="ck")),
     )
 
 
@@ -742,10 +753,12 @@ def test_a_relative_path_is_read_against_the_workspace_it_names(tmp_path):
     factory = cli_lanes._make_lane_agent_factory(
         make_agent=implementer,
         config=config,
-        workspace_dir=str(workspace),
-        driver=DRIVER_NAME,
-        source_files=["src/kernel.py"],
-        session_kwargs={},
+        binding=cli_lanes.LaneBinding(
+            workspace_dir=str(workspace),
+            driver=DRIVER_NAME,
+            source_files=["src/kernel.py"],
+        ),
+        setup=ImplementerSetup(ImplementerTask(program_md="")),
     )
 
     factory(str(lane_dir), _serialized_driver(lane_dir))
@@ -773,10 +786,12 @@ def test_a_driver_outside_the_workspace_stops_the_lane(tmp_path):
     factory = cli_lanes._make_lane_agent_factory(
         make_agent=_RecordingImplementer(),
         config=config,
-        workspace_dir=str(workspace),
-        driver=str(outside),
-        source_files=[str(workspace / "src" / "kernel.py")],
-        session_kwargs={},
+        binding=cli_lanes.LaneBinding(
+            workspace_dir=str(workspace),
+            driver=str(outside),
+            source_files=[str(workspace / "src" / "kernel.py")],
+        ),
+        setup=ImplementerSetup(ImplementerTask(program_md="")),
     )
 
     with pytest.raises(ValueError) as error:
@@ -795,10 +810,12 @@ def test_a_source_file_outside_the_workspace_stops_the_lane(tmp_path):
     factory = cli_lanes._make_lane_agent_factory(
         make_agent=_RecordingImplementer(),
         config=config,
-        workspace_dir=str(workspace),
-        driver=str(workspace / DRIVER_NAME),
-        source_files=[str(outside)],
-        session_kwargs={},
+        binding=cli_lanes.LaneBinding(
+            workspace_dir=str(workspace),
+            driver=str(workspace / DRIVER_NAME),
+            source_files=[str(outside)],
+        ),
+        setup=ImplementerSetup(ImplementerTask(program_md="")),
     )
 
     with pytest.raises(ValueError) as error:

@@ -5,20 +5,24 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import os
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn
 
 import click
 
+from kernelforge.option_groups import option_group
+
 from . import __version__
 
 if TYPE_CHECKING:
-    from .tuners.base import TuneResult
+    from .tuners.base import TuneContext, TuneResult
 
 log = logging.getLogger("kernelforge.gemm_tune")
 
@@ -137,15 +141,7 @@ def _coverage_gaps(
         return []
 
 
-def _attempt_tier3(
-    gaps: list,
-    demand_json: str,
-    output_dir: Path,
-    *,
-    profile: Any,
-    gpu_type: str,
-    framework: str,
-) -> "TuneResult | None":
+def _attempt_tier3(gaps: list, ctx: "TuneContext") -> "TuneResult | None":
     """Try Tier3 for the strongest otherwise-uncovered gap.
 
     Never raises and returns only referee-verified improvements. Accepting the
@@ -154,11 +150,14 @@ def _attempt_tier3(
     if not gaps:
         return None
     try:
+        profile = ctx.profile
+        output_dir = ctx.output_dir
         model_name = str(getattr(profile, "model_path", "") or getattr(profile, "architecture", "") or "unknown")
         from .evidence import demand_shapes, load_demand
         from .tier3 import attempt_generated_tuner
         from .tier3.dispatch import adapters_for
         from .tier3.gate import should_generate
+        from .tier3.runner import Retiming, Tier3Target
 
         decision = should_generate(gaps)
         if not decision.allowed or decision.gap is None:
@@ -166,7 +165,7 @@ def _attempt_tier3(
             return None
 
         adapter = adapters_for(decision.gap.table)
-        demand = load_demand(demand_json)
+        demand = load_demand(ctx.demand_json)
 
         def shapes_for(gap):
             # ``load_demand`` returns a parsed dict, not an object with ``tables``.
@@ -177,17 +176,15 @@ def _attempt_tier3(
 
         try:
             outcome = attempt_generated_tuner(
-                gaps,
+                decision,
                 shapes_for,
                 output_dir,
-                model_name=model_name,
-                gpu=gpu_type,
-                framework=framework,
-                decision=decision,
-                make_baseline=adapter.make_baseline if adapter else None,
-                make_dispatch=adapter.make_dispatch if adapter else None,
-                make_correctness=adapter.make_correctness if adapter else None,
-                sync=adapter.sync() if adapter else None,
+                target=Tier3Target(model_name=model_name, gpu=ctx.gpu_type, framework=ctx.framework),
+                retiming=(
+                    Retiming(adapter.make_baseline, adapter.make_dispatch, adapter.make_correctness, adapter.sync())
+                    if adapter
+                    else None
+                ),
             )
         finally:
             # An adapter steers the library under test through process-wide state, so the
@@ -321,13 +318,9 @@ def _write_gpu_check(output_dir: Path) -> None:
 
 def _aiter_preflight_problems(output_dir: Path) -> list[str]:
     """Record the aiter tune/serve alignment check and return the problems that block tuning."""
-    try:
-        from .aiter_preflight import collect as _aiter_collect
+    from .aiter_preflight import collect as _aiter_collect
 
-        preflight = _aiter_collect()
-    except Exception as exc:  # noqa: BLE001 - unavailable diagnostics remain best-effort
-        log.debug("aiter preflight skipped: %s", exc)
-        return []
+    preflight = _aiter_collect()
     (output_dir / "aiter_preflight.json").write_text(json.dumps(preflight, indent=2), encoding="utf-8")
     for message in preflight["soft"]:
         log.warning("aiter preflight: %s", message)
@@ -454,103 +447,191 @@ def gemm_tune():
     """Deterministic GEMM tuning for AMD GPUs."""
 
 
+@dataclass(frozen=True)
+class RoutingTarget:
+    """The deployment the tuners are routed for: framework, precision, quant type and GPU."""
+
+    framework: str
+    precision: str
+    quant_type: str
+    gpu_type: str
+
+
+@dataclass(frozen=True)
+class ServingWorkload:
+    """The serving deployment the token coverage is computed for."""
+
+    tp: int
+    conc: int
+    tokens: str
+
+
+@dataclass(frozen=True)
+class BenchSettings:
+    """How each tuner benchmarks a config and what counts as an improvement."""
+
+    iters: int
+    warmup: int
+    min_improvement_pct: float
+
+
+@dataclass(frozen=True)
+class TuneTimeouts:
+    """The per-tuner and whole-session timeouts, in seconds; a zero global timeout is unlimited."""
+
+    timeout: int
+    global_timeout: int
+
+
+@dataclass(frozen=True)
+class TunerChoice:
+    """A forced tuner, and the cap on how many routed tuners run; 0 means uncapped."""
+
+    tuner: str
+    max_tuners: int
+
+
+@dataclass(frozen=True)
+class ShapeSources:
+    """The shape inputs a tuning run reads, and the serving log it detects MoE stages and demand from."""
+
+    untuned_csv: str
+    moe_untuned_csv: str
+    shapes_json: str
+    shapes_manifest: str
+    demand_json: str
+    tunableop_input: str
+    kernel_signature_log: str
+
+
+@dataclass(frozen=True)
+class GpuSelection:
+    """The GPUs tuning uses, and whether the busy-GPU preflight is skipped."""
+
+    gpu_ids: str
+    skip_gpu_check: bool
+
+
+@dataclass(frozen=True)
+class TuneRequest:
+    """Every option of one ``gemm-tune run`` invocation, grouped by concern."""
+
+    model_path: str
+    target: RoutingTarget
+    workload: ServingWorkload
+    mp: int
+    output_dir: str
+    bench: BenchSettings
+    timeouts: TuneTimeouts
+    thorough: bool
+    choice: TunerChoice
+    sources: ShapeSources
+    gpus: GpuSelection
+    kb_current_lib: str
+    verbose: bool
+
+
 @gemm_tune.command()
-@click.option("--model-path", required=True, help="Path to model directory (must contain config.json)")
-@click.option(
-    "--framework",
-    required=True,
-    type=click.Choice(["sglang", "vllm", "vllm-aiter"]),
-    help="Target framework (vllm-aiter = vllm with VLLM_ROCM_USE_AITER=1)",
+@option_group(
+    "request",
+    TuneRequest,
+    click.option("--model-path", required=True, help="Path to model directory (must contain config.json)"),
+    option_group(
+        "target",
+        RoutingTarget,
+        click.option(
+            "--framework",
+            required=True,
+            type=click.Choice(["sglang", "vllm", "vllm-aiter"]),
+            help="Target framework (vllm-aiter = vllm with VLLM_ROCM_USE_AITER=1)",
+        ),
+        click.option("--precision", required=True, help="Precision: bf16, fp8, fp4, int8, awq"),
+        click.option(
+            "--quant-type",
+            default="auto",
+            help="Quant type: auto, none, per_token, blockscale, bpreshuffle, awq, gptq, fp4, mxfp4",
+        ),
+        click.option(
+            "--gpu-type", default="auto", help="GPU type: auto (detect via rocminfo), mi300x, mi355x, gfx942, ..."
+        ),
+    ),
+    option_group(
+        "workload",
+        ServingWorkload,
+        click.option("--tp", default=1, type=int, help="Tensor parallel degree"),
+        click.option("--conc", default=64, type=int, help="Target serving concurrency (for token coverage)"),
+        click.option("--tokens", default="", help="Comma-separated explicit token list (overrides auto)"),
+    ),
+    click.option("--mp", default=1, type=int, help="Number of GPUs for parallel tuning"),
+    click.option("--output-dir", required=True, type=click.Path(), help="Output directory for all artifacts"),
+    option_group(
+        "bench",
+        BenchSettings,
+        click.option("--iters", default=80, type=int, help="Benchmark iterations per config"),
+        click.option("--warmup", default=20, type=int, help="Warmup iterations"),
+        click.option("--min-improvement-pct", default=3.0, type=float, help="Min improvement threshold (%%)"),
+    ),
+    option_group(
+        "timeouts",
+        TuneTimeouts,
+        click.option(
+            "--timeout",
+            default=10800,
+            type=int,
+            help="Per-tuner timeout in seconds (default 3h; first run includes JIT compilation)",
+        ),
+        click.option("--global-timeout", default=0, type=int, help="Global timeout for entire session (0=unlimited)"),
+    ),
+    click.option(
+        "--thorough",
+        is_flag=True,
+        help="Thorough mode: full search space (all libtypes, more shapes, no per-shape timeout). Slower but finds absolute best config.",
+    ),
+    option_group(
+        "choice",
+        TunerChoice,
+        click.option("--tuner", default="", help="Force a specific tuner (skip routing)"),
+        click.option(
+            "--max-tuners",
+            default=0,
+            type=int,
+            help="Run at most this many of the routed tuners, in priority order. 0 means uncapped.",
+        ),
+    ),
+    option_group(
+        "sources",
+        ShapeSources,
+        click.option(OPT_UNTUNED_CSV, default="", help="Input untuned CSV for dense aiter tuners"),
+        click.option(
+            "--moe-untuned-csv",
+            default="",
+            help="Input untuned CSV for the MoE tuner, keyed on the tuple aiter dispatched at run time",
+        ),
+        click.option("--shapes-json", default="", help="Input shapes JSON from TraceLens/Hyperloom"),
+        click.option(
+            OPT_SHAPES_MANIFEST,
+            default="",
+            help="Weighted TraceShapeManifest JSON (Hyperloom WP-1); preferred dense-shape source when set",
+        ),
+        click.option(
+            OPT_DEMAND,
+            "demand_json",
+            default="",
+            help="demand.json from a serving log (kernelforge gemm-tune evidence); the highest-priority shape source",
+        ),
+        click.option("--tunableop-input", default="", help="PyTorch TunableOp shape file"),
+        click.option("--kernel-signature-log", default="", help="Server log for 1-stage ASM detection"),
+    ),
+    option_group(
+        "gpus",
+        GpuSelection,
+        click.option("--gpu-ids", default="", help="Comma-separated GPU IDs to use"),
+        click.option("--skip-gpu-check", is_flag=True, help="Skip rocm-smi preflight check"),
+    ),
+    click.option("--kb-current-lib", default="", help="Current backend lib_version recorded as artifact provenance"),
+    click.option("--verbose", "-v", is_flag=True, help="Verbose logging"),
 )
-@click.option("--precision", required=True, help="Precision: bf16, fp8, fp4, int8, awq")
-@click.option(
-    "--quant-type",
-    default="auto",
-    help="Quant type: auto, none, per_token, blockscale, bpreshuffle, awq, gptq, fp4, mxfp4",
-)
-@click.option("--gpu-type", default="auto", help="GPU type: auto (detect via rocminfo), mi300x, mi355x, gfx942, ...")
-@click.option("--tp", default=1, type=int, help="Tensor parallel degree")
-@click.option("--conc", default=64, type=int, help="Target serving concurrency (for token coverage)")
-@click.option("--tokens", default="", help="Comma-separated explicit token list (overrides auto)")
-@click.option("--mp", default=1, type=int, help="Number of GPUs for parallel tuning")
-@click.option("--output-dir", required=True, type=click.Path(), help="Output directory for all artifacts")
-@click.option("--iters", default=80, type=int, help="Benchmark iterations per config")
-@click.option("--warmup", default=20, type=int, help="Warmup iterations")
-@click.option("--min-improvement-pct", default=3.0, type=float, help="Min improvement threshold (%%)")
-@click.option(
-    "--timeout",
-    default=10800,
-    type=int,
-    help="Per-tuner timeout in seconds (default 3h; first run includes JIT compilation)",
-)
-@click.option("--global-timeout", default=0, type=int, help="Global timeout for entire session (0=unlimited)")
-@click.option(
-    "--thorough",
-    is_flag=True,
-    help="Thorough mode: full search space (all libtypes, more shapes, no per-shape timeout). Slower but finds absolute best config.",
-)
-@click.option("--tuner", default="", help="Force a specific tuner (skip routing)")
-@click.option(
-    "--max-tuners",
-    default=0,
-    type=int,
-    help="Run at most this many of the routed tuners, in priority order. 0 means uncapped.",
-)
-@click.option(OPT_UNTUNED_CSV, default="", help="Input untuned CSV for dense aiter tuners")
-@click.option(
-    "--moe-untuned-csv",
-    default="",
-    help="Input untuned CSV for the MoE tuner, keyed on the tuple aiter dispatched at run time",
-)
-@click.option("--shapes-json", default="", help="Input shapes JSON from TraceLens/Hyperloom")
-@click.option(
-    OPT_SHAPES_MANIFEST,
-    default="",
-    help="Weighted TraceShapeManifest JSON (Hyperloom WP-1); preferred dense-shape source when set",
-)
-@click.option(
-    OPT_DEMAND,
-    "demand_json",
-    default="",
-    help="demand.json from a serving log (kernelforge gemm-tune evidence); the highest-priority shape source",
-)
-@click.option("--tunableop-input", default="", help="PyTorch TunableOp shape file")
-@click.option("--kernel-signature-log", default="", help="Server log for 1-stage ASM detection")
-@click.option("--gpu-ids", default="", help="Comma-separated GPU IDs to use")
-@click.option("--skip-gpu-check", is_flag=True, help="Skip rocm-smi preflight check")
-@click.option("--kb-current-lib", default="", help="Current backend lib_version recorded as artifact provenance")
-@click.option("--verbose", "-v", is_flag=True, help="Verbose logging")
-def run(
-    model_path: str,
-    framework: str,
-    precision: str,
-    quant_type: str,
-    gpu_type: str,
-    tp: int,
-    conc: int,
-    tokens: str,
-    mp: int,
-    output_dir: str,
-    iters: int,
-    warmup: int,
-    min_improvement_pct: float,
-    timeout: int,
-    global_timeout: int,
-    thorough: bool,
-    tuner: str,
-    max_tuners: int,
-    untuned_csv: str,
-    moe_untuned_csv: str,
-    shapes_json: str,
-    shapes_manifest: str,
-    demand_json: str,
-    tunableop_input: str,
-    kernel_signature_log: str,
-    gpu_ids: str,
-    skip_gpu_check: bool,
-    kb_current_lib: str,
-    verbose: bool,
-):
+def run(request: TuneRequest):
     """Run GEMM tuning for the specified model and framework."""
     from .model_analyzer import analyze_model
     from .router import resolve_gpu_type, select_tuners
@@ -559,31 +640,33 @@ def run(
     from .tuners.base import TuneContext
     from .report import build_report, write_report
 
-    output_path = Path(output_dir)
-    _setup_logging(output_path, verbose)
+    output_path = Path(request.output_dir)
+    _setup_logging(output_path, request.verbose)
     started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     start_time = time.time()
 
     try:
-        gpu_type = resolve_gpu_type(gpu_type)
+        target = dataclasses.replace(request.target, gpu_type=resolve_gpu_type(request.target.gpu_type))
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
 
     # Defensive input normalization: callers sometimes pass inline JSON content instead of a file path.
-    shapes_json = _normalize_inline_shapes_json(shapes_json, output_path)
-    untuned_csv = _existing_file_or_blank(untuned_csv, OPT_UNTUNED_CSV)
-    moe_untuned_csv = _existing_file_or_blank(moe_untuned_csv, "--moe-untuned-csv")
-    shapes_manifest = _existing_file_or_blank(shapes_manifest, OPT_SHAPES_MANIFEST)
-    demand_json = _existing_file_or_blank(demand_json, OPT_DEMAND)
+    sources = request.sources
+    shapes_json = _normalize_inline_shapes_json(sources.shapes_json, output_path)
+    untuned_csv = _existing_file_or_blank(sources.untuned_csv, OPT_UNTUNED_CSV)
+    moe_untuned_csv = _existing_file_or_blank(sources.moe_untuned_csv, "--moe-untuned-csv")
+    shapes_manifest = _existing_file_or_blank(sources.shapes_manifest, OPT_SHAPES_MANIFEST)
+    demand_json = _existing_file_or_blank(sources.demand_json, OPT_DEMAND)
+    kernel_signature_log = sources.kernel_signature_log
 
     # The serving log is already handed to us for MoE stage detection, and it is the same log the demand parser reads.
     if not demand_json and kernel_signature_log and _safe_is_file(kernel_signature_log):
         demand_json = _demand_from_serving_log(kernel_signature_log, output_path)
 
     log.info("kernelforge gemm-tune starting (artifact layout v%s)", __version__)
-    log.info("Model: %s, Framework: %s, Precision: %s", model_path, framework, precision)
+    log.info("Model: %s, Framework: %s, Precision: %s", request.model_path, target.framework, target.precision)
 
-    if not skip_gpu_check:
+    if not request.gpus.skip_gpu_check:
         _write_gpu_check(output_path)
 
     preflight_hard = _aiter_preflight_problems(output_path)
@@ -592,17 +675,17 @@ def run(
 
     # Analyze model
     try:
-        profile = analyze_model(model_path)
+        profile = analyze_model(request.model_path)
     except Exception as exc:  # noqa: BLE001 - model analysis is third-party
         log.error("Model analysis failed: %s", exc)
         _exit_failed(output_path, error=str(exc), error_class=type(exc).__name__)
 
     # Compute token coverage.
     try:
-        explicit_tokens = _explicit_token_list(tokens)
+        explicit_tokens = _explicit_token_list(request.workload.tokens)
     except ValueError as exc:
         _exit_failed(output_path, error=f"Invalid --tokens value: {exc}", error_class="invalid_tokens")
-    token_list = compute_token_coverage(conc=conc, explicit_tokens=explicit_tokens)
+    token_list = compute_token_coverage(conc=request.workload.conc, explicit_tokens=explicit_tokens)
     log.info("Token coverage: %s", token_list)
 
     # Parsed once: selection needs the tables the runtime consulted, and the coverage report needs the same document
@@ -612,16 +695,16 @@ def run(
     # Select tuners
     tuner_specs = select_tuners(
         profile,
-        framework=framework,
-        precision=precision,
-        quant_type=quant_type,
-        gpu_type=gpu_type,
+        framework=target.framework,
+        precision=target.precision,
+        quant_type=target.quant_type,
+        gpu_type=target.gpu_type,
         kernel_signature_log=kernel_signature_log or None,
         has_untuned_csv=bool(untuned_csv),
         # A demand file is a shape source like the others, and a stronger one: it lists the keys the runtime actually
         # asked for.
         has_shapes_json=bool(shapes_json or shapes_manifest or demand_json),
-        has_tunableop_input=bool(tunableop_input),
+        has_tunableop_input=bool(sources.tunableop_input),
         # ...and a stronger *selection* input for the same reason.
         demand_report=demand_report,
     )
@@ -630,6 +713,7 @@ def run(
     coverage_gap_list = _coverage_gaps(demand_report, tuner_specs, output_path)
 
     # If --tuner specified, filter to only that one.
+    tuner = request.choice.tuner
     if tuner:
         from .router import TunerSpec
 
@@ -638,7 +722,7 @@ def run(
             log.warning(
                 "Requested tuner %r not auto-selected (quant_type=%r); honoring explicit --tuner anyway.",
                 tuner,
-                quant_type,
+                target.quant_type,
             )
             selected = [TunerSpec(tuner, priority=20, estimated_minutes=20)]
         tuner_specs = selected
@@ -651,16 +735,16 @@ def run(
             )
 
     # 0 means no ceiling was supplied.
-    if max_tuners > 0:
-        tuner_specs = _cap_tuner_count(tuner_specs, max_tuners)
+    if request.choice.max_tuners > 0:
+        tuner_specs = _cap_tuner_count(tuner_specs, request.choice.max_tuners)
 
     # Write plan
     plan = {
-        "model_path": model_path,
-        "framework": framework,
-        "precision": precision,
-        "quant_type": quant_type,
-        "gpu_type": gpu_type,
+        "model_path": request.model_path,
+        "framework": target.framework,
+        "precision": target.precision,
+        "quant_type": target.quant_type,
+        "gpu_type": target.gpu_type,
         "tokens": token_list,
         "tuners": [
             {
@@ -686,6 +770,7 @@ def run(
     )
 
     # Budget warning: if global_timeout is set but estimated time exceeds it
+    global_timeout = request.timeouts.global_timeout
     if global_timeout > 0 and total_est_min * 60 > global_timeout:
         log.warning(
             "Estimated total time (%.0f min) exceeds global timeout (%d s / %.0f min). "
@@ -699,35 +784,35 @@ def run(
     # Build context
     ctx = TuneContext(
         profile=profile,
-        framework=framework,
-        precision=precision,
-        quant_type=quant_type,
-        gpu_type=gpu_type,
-        tp=tp,
-        conc=conc,
+        framework=target.framework,
+        precision=target.precision,
+        quant_type=target.quant_type,
+        gpu_type=target.gpu_type,
+        tp=request.workload.tp,
+        conc=request.workload.conc,
         tokens=token_list,
-        mp=mp,
+        mp=request.mp,
         output_dir=output_path,
-        iters=iters,
-        warmup=warmup,
-        min_improvement_pct=min_improvement_pct,
-        timeout_s=timeout,
-        thorough=thorough,
+        iters=request.bench.iters,
+        warmup=request.bench.warmup,
+        min_improvement_pct=request.bench.min_improvement_pct,
+        timeout_s=request.timeouts.timeout,
+        thorough=request.thorough,
         untuned_csv=Path(untuned_csv) if untuned_csv else None,
         moe_untuned_csv=Path(moe_untuned_csv) if moe_untuned_csv else None,
         shapes_json=Path(shapes_json) if shapes_json else None,
         shapes_manifest=Path(shapes_manifest) if shapes_manifest else None,
         demand_json=Path(demand_json) if demand_json else None,
-        tunableop_input=Path(tunableop_input) if tunableop_input else None,
+        tunableop_input=Path(sources.tunableop_input) if sources.tunableop_input else None,
         kernel_signature_log=Path(kernel_signature_log) if kernel_signature_log else None,
-        gpu_ids=gpu_ids,
+        gpu_ids=request.gpus.gpu_ids,
     )
 
     global_deadline = (start_time + global_timeout) if global_timeout > 0 else float("inf")
     results, skipped = _execute_tuners(
         tuner_specs,
         ctx,
-        timeout=timeout,
+        timeout=request.timeouts.timeout,
         global_timeout=global_timeout,
         global_deadline=global_deadline,
     )
@@ -737,33 +822,13 @@ def run(
     # produced something, and the recomputed list says which of them did.
     coverage_gap_list = _coverage_gaps(demand_report, tuner_specs, output_path, results)
     if coverage_gap_list and time.time() < global_deadline:
-        generated = _attempt_tier3(
-            coverage_gap_list,
-            demand_json,
-            output_path,
-            profile=profile,
-            gpu_type=gpu_type,
-            framework=framework,
-        )
+        generated = _attempt_tier3(coverage_gap_list, ctx)
         if generated is not None:
             results.append(generated)
 
     # Build report
     total_elapsed = time.time() - start_time
-    report = build_report(
-        results,
-        skipped,
-        profile=profile,
-        framework=framework,
-        precision=precision,
-        quant_type=quant_type,
-        gpu_type=gpu_type,
-        tp=tp,
-        conc=conc,
-        tokens=token_list,
-        started_at=started_at,
-        total_elapsed_s=total_elapsed,
-    )
+    report = build_report(results, skipped, ctx, started_at, total_elapsed)
 
     # Write report to file
     report_path = write_report(report, output_path)
@@ -777,13 +842,7 @@ def run(
             results,
             output_path,
             shape_manifest_path=shapes_manifest or None,
-            gpu_type=gpu_type,
-            framework=framework,
-            precision=precision,
-            quant_type=quant_type,
-            tp=tp,
-            tuner_lib_version=kb_current_lib,
-            generated_at=report.finished_at,
+            tuner_lib_version=request.kb_current_lib,
         )
 
     # Emit sentinel-wrapped JSON to stdout
@@ -828,31 +887,41 @@ def evidence(logs: tuple[str, ...], out: str, verbose: bool):
     raise SystemExit(0)
 
 
+@dataclass(frozen=True)
+class RoutingInputs:
+    """The serving log and shape inputs a routing preview weighs."""
+
+    kernel_signature_log: str
+    untuned_csv: str
+    shapes_json: str
+    shapes_manifest: str
+    demand_json: str
+    tunableop_input: str
+
+
 @gemm_tune.command()
 @click.option("--model-path", required=True, help="Path to model directory")
-@click.option("--framework", required=True, type=click.Choice(["sglang", "vllm", "vllm-aiter"]))
-@click.option("--precision", required=True, help="Precision: bf16, fp8, fp4, int8, awq")
-@click.option("--quant-type", default="auto")
-@click.option("--gpu-type", default="auto", help="GPU type: auto (detect via rocminfo), mi300x, mi355x, gfx942, ...")
-@click.option("--kernel-signature-log", default="")
-@click.option(OPT_UNTUNED_CSV, default="")
-@click.option("--shapes-json", default="")
-@click.option(OPT_SHAPES_MANIFEST, default="", help="Weighted TraceShapeManifest JSON (Hyperloom WP-1)")
-@click.option(OPT_DEMAND, "demand_json", default="", help="demand.json from `evidence`")
-@click.option("--tunableop-input", default="")
-def plan(
-    model_path: str,
-    framework: str,
-    precision: str,
-    quant_type: str,
-    gpu_type: str,
-    kernel_signature_log: str,
-    untuned_csv: str,
-    shapes_json: str,
-    shapes_manifest: str,
-    demand_json: str,
-    tunableop_input: str,
-):
+@option_group(
+    "target",
+    RoutingTarget,
+    click.option("--framework", required=True, type=click.Choice(["sglang", "vllm", "vllm-aiter"])),
+    click.option("--precision", required=True, help="Precision: bf16, fp8, fp4, int8, awq"),
+    click.option("--quant-type", default="auto"),
+    click.option(
+        "--gpu-type", default="auto", help="GPU type: auto (detect via rocminfo), mi300x, mi355x, gfx942, ..."
+    ),
+)
+@option_group(
+    "inputs",
+    RoutingInputs,
+    click.option("--kernel-signature-log", default=""),
+    click.option(OPT_UNTUNED_CSV, default=""),
+    click.option("--shapes-json", default=""),
+    click.option(OPT_SHAPES_MANIFEST, default="", help="Weighted TraceShapeManifest JSON (Hyperloom WP-1)"),
+    click.option(OPT_DEMAND, "demand_json", default="", help="demand.json from `evidence`"),
+    click.option("--tunableop-input", default=""),
+)
+def plan(model_path: str, target: RoutingTarget, inputs: RoutingInputs):
     """Show which tuners would run without executing them."""
     import tempfile
 
@@ -861,9 +930,11 @@ def plan(
 
     profile = analyze_model(model_path)
     try:
-        gpu_type = resolve_gpu_type(gpu_type)
+        target = dataclasses.replace(target, gpu_type=resolve_gpu_type(target.gpu_type))
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
+    kernel_signature_log = inputs.kernel_signature_log
+    demand_json = inputs.demand_json
 
     # Same derivation as `run`, or the preview answers a different question than the thing it previews: a serving log
     # that unblocks TunableOp there would show it skipped here.
@@ -873,14 +944,14 @@ def plan(
 
         tuner_specs = select_tuners(
             profile,
-            framework=framework,
-            precision=precision,
-            quant_type=quant_type,
-            gpu_type=gpu_type,
+            framework=target.framework,
+            precision=target.precision,
+            quant_type=target.quant_type,
+            gpu_type=target.gpu_type,
             kernel_signature_log=kernel_signature_log or None,
-            has_untuned_csv=bool(untuned_csv),
-            has_shapes_json=bool(shapes_json or shapes_manifest or demand_json),
-            has_tunableop_input=bool(tunableop_input),
+            has_untuned_csv=bool(inputs.untuned_csv),
+            has_shapes_json=bool(inputs.shapes_json or inputs.shapes_manifest or demand_json),
+            has_tunableop_input=bool(inputs.tunableop_input),
             demand_report=_load_demand_report(demand_json),
         )
 
@@ -891,7 +962,10 @@ def plan(
         f"  Hidden: {profile.hidden_size}, Inter: {profile.intermediate_size}, MoE Inter: {profile.moe_intermediate_size}"
     )
     click.echo(f"  Quant: {profile.quant_method or 'none'} ({profile.quant_bits}-bit)")
-    click.echo(f"\nFramework: {framework}, Precision: {precision}, Quant Type: {quant_type}, GPU Type: {gpu_type}")
+    click.echo(
+        f"\nFramework: {target.framework}, Precision: {target.precision}, "
+        f"Quant Type: {target.quant_type}, GPU Type: {target.gpu_type}"
+    )
     click.echo(f"\nTuners ({len(tuner_specs)}):")
 
     for spec in tuner_specs:

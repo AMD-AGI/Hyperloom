@@ -24,6 +24,7 @@ from hyperloom_kb import (
     Experience,
     ExperienceDeclaration,
     ExperienceHTTPService,
+    ExperienceStart,
     ExperienceStatus,
     FieldDeclaration,
     FieldKind,
@@ -35,6 +36,7 @@ from hyperloom_kb import (
     ObjectiveDeclaration,
     PlannerConfiguration,
     Provenance,
+    ReadQuery,
     RemoteClient,
     RemoteClientError,
     RemoteConfig,
@@ -263,7 +265,7 @@ def test_write_is_immediately_readable_immutable_and_rendered_losslessly(
         replayed = client.publish(experience)
         with pytest.raises(RemoteClientError, match="HTTP 409") as conflict:
             client.publish(replace(experience, reflection={"text": "Different content."}))
-        read = client.read(DECISION, _read_context())
+        read = client.read(ReadQuery(DECISION, _read_context()))
         page = client.list_experiences()
         health = client.health()
 
@@ -281,9 +283,11 @@ def test_write_is_immediately_readable_immutable_and_rendered_losslessly(
     assert (read.experiences[0]["baseline_value"], read.experiences[0]["outcome_value"]) == (100.0, 110.0)
     assert read.experiences[0]["decision"] == "keep"
     assert read.experiences[0]["source_run_id"] == "run-1"
+    assert read.experiences[0]["identity"] == {"model": "qwen3", "gpu": "mi325x"}
     assert read.experiences[0]["score"] > 0
     assert read.experiences[0]["why_matched"]
     assert [item["experience_id"] for item in page.items] == [experience.id]
+    assert page.items[0]["identity"] == {"model": "qwen3", "gpu": "mi325x"}
     assert "score" not in page.items[0]
     kb_id = str(health.pop("kb_id"))
     assert kb_id.startswith("kb-")
@@ -318,7 +322,7 @@ def test_what_shaped_a_decision_stays_in_the_record_but_never_reaches_a_prompt(t
     with RunningServer(_app(tmp_path / "service", schema)) as url:
         client = _client(url, tmp_path)
         client.publish(experience)
-        read = client.read(DECISION, _read_context())
+        read = client.read(ReadQuery(DECISION, _read_context()))
         [exported] = client.export_page().items
 
     assert _record_json(read.prompt_block, experience.id) == experience.knowledge()
@@ -338,13 +342,15 @@ def test_a_file_field_is_kept_by_the_kb_and_a_read_renders_the_path_it_is_read_f
     with RunningServer(app) as url:
         client = _client(url, tmp_path)
         session = RemoteExperienceKB(client, schema).begin(
-            run_id="run-file",
-            seq=0,
-            objective="throughput@v1",
-            provenance=Provenance("service-test", "1"),
-            identity={"model": "qwen3", "gpu": "mi325x"},
-            baseline={"config": "default", "value": 100.0},
-            created_at=NOW,
+            ExperienceStart(
+                run_id="run-file",
+                seq=0,
+                objective="throughput@v1",
+                provenance=Provenance("service-test", "1"),
+                identity={"model": "qwen3", "gpu": "mi325x"},
+                baseline={"config": "default", "value": 100.0},
+                created_at=NOW,
+            )
         )
         session.decide(
             change={"knob": "page_size", "summary": "Test page_size.", "artifact": artifact},
@@ -353,7 +359,7 @@ def test_a_file_field_is_kept_by_the_kb_and_a_read_renders_the_path_it_is_read_f
         session.complete(outcome={"decision": "keep", "value": 110.0}, completed_at=NOW)
         receipt = session.publish()
         artifact.unlink()
-        read = client.read(DECISION, _read_context())
+        read = client.read(ReadQuery(DECISION, _read_context()))
         fetched = _fetched(client, hashlib.sha256(content).hexdigest())
         held = client.missing_files(session.record.files())
 
@@ -378,13 +384,15 @@ def test_raw_logs_are_kept_by_the_kb_with_their_record_and_a_read_renders_where_
     with RunningServer(app) as url:
         client = _client(url, tmp_path)
         session = RemoteExperienceKB(client, schema).begin(
-            run_id="run-log",
-            seq=0,
-            objective="throughput@v1",
-            provenance=Provenance("service-test", "1"),
-            identity={"model": "qwen3", "gpu": "mi325x"},
-            baseline={"config": "default", "value": 100.0},
-            created_at=NOW,
+            ExperienceStart(
+                run_id="run-log",
+                seq=0,
+                objective="throughput@v1",
+                provenance=Provenance("service-test", "1"),
+                identity={"model": "qwen3", "gpu": "mi325x"},
+                baseline={"config": "default", "value": 100.0},
+                created_at=NOW,
+            )
         )
         session.decide(
             change={"knob": "page_size", "summary": "Test page_size."},
@@ -393,7 +401,7 @@ def test_raw_logs_are_kept_by_the_kb_with_their_record_and_a_read_renders_where_
         session.complete(outcome={"decision": "keep", "value": 110.0}, completed_at=NOW, raw_logs=[log])
         receipt = session.publish()
         log.unlink()
-        read = client.read(DECISION, _read_context())
+        read = client.read(ReadQuery(DECISION, _read_context()))
         [exported] = client.export_page().items
 
     ref = FileRef("benchmark.log", hashlib.sha256(content).hexdigest(), len(content))
@@ -441,13 +449,15 @@ def test_notes_written_outside_the_schema_are_kept_and_rendered_like_other_text(
     with RunningServer(_app(tmp_path / "service", schema)) as url:
         client = _client(url, tmp_path)
         session = RemoteExperienceKB(client, schema).begin(
-            run_id="run-notes",
-            seq=0,
-            objective="throughput@v1",
-            provenance=Provenance("service-test", "1"),
-            identity={"model": "qwen3", "gpu": "mi325x"},
-            baseline={"config": "default", "value": 100.0},
-            created_at=NOW,
+            ExperienceStart(
+                run_id="run-notes",
+                seq=0,
+                objective="throughput@v1",
+                provenance=Provenance("service-test", "1"),
+                identity={"model": "qwen3", "gpu": "mi325x"},
+                baseline={"config": "default", "value": 100.0},
+                created_at=NOW,
+            )
         )
         session.decide(
             change={"knob": "page_size", "summary": "P."},
@@ -460,7 +470,7 @@ def test_notes_written_outside_the_schema_are_kept_and_rendered_like_other_text(
             notes={"xgmi": observed},
         )
         session.publish()
-        read = client.read(DECISION, _read_context())
+        read = client.read(ReadQuery(DECISION, _read_context()))
         [exported] = client.export_page().items
         schemas = client.health()["schemas"]
 
@@ -481,11 +491,11 @@ def test_a_read_budget_carries_whole_records_and_names_only_those_it_carries(tmp
         client = _client(url, tmp_path)
         for record in records:
             client.publish(record)
-        full = client.read(DECISION, _read_context())
+        full = client.read(ReadQuery(DECISION, _read_context()))
         starts = [match.start() for match in re.finditer(r"^Experience exp-", full.prompt_block, re.MULTILINE)]
         one_record = starts[1] - starts[0] - len("\n\n")
-        budgeted = client.read(DECISION, _read_context(), render_budget_chars=one_record)
-        nothing_fits = client.read(DECISION, _read_context(), render_budget_chars=1)
+        budgeted = client.read(ReadQuery(DECISION, _read_context(), render_budget_chars=one_record))
+        nothing_fits = client.read(ReadQuery(DECISION, _read_context(), render_budget_chars=1))
 
     assert all(_record_json(full.prompt_block, record.id) == record.knowledge() for record in records)
     [shown] = budgeted.rendered_refs
@@ -522,8 +532,8 @@ def test_read_defaults_to_ten_mixed_and_filters_by_the_declared_decision(tmp_pat
             "/v1/read",
             {"decision": DECISION, "context": context, "outcome": "keep"},
         )
-        reverted = client.read(DECISION, context, outcome="revert", limit=3)
-        invalid = client.read(DECISION, context, outcome="maybe")
+        reverted = client.read(ReadQuery(DECISION, context, outcome="revert", limit=3))
+        invalid = client.read(ReadQuery(DECISION, context, outcome="maybe"))
         too_many = _http(
             url,
             "POST",
@@ -553,8 +563,8 @@ def test_a_schema_without_a_decision_field_reads_mixed_only(tmp_path: Path) -> N
     with RunningServer(_app(tmp_path / "service", schema)) as url:
         client = _client(url, tmp_path)
         client.publish(experience)
-        mixed = client.read(DECISION, _read_context())
-        restricted = client.read(DECISION, _read_context(), outcome="keep")
+        mixed = client.read(ReadQuery(DECISION, _read_context()))
+        restricted = client.read(ReadQuery(DECISION, _read_context(), outcome="keep"))
         [listed] = client.list_experiences().items
 
     assert [item.id for item in mixed.rendered_refs] == [experience.id]
@@ -572,7 +582,7 @@ def test_outcome_filter_keeps_full_repeat_group_annotations(tmp_path: Path) -> N
         client = _client(url, tmp_path)
         client.publish(kept)
         client.publish(reverted)
-        read = client.read(DECISION, _read_context(), outcome="keep")
+        read = client.read(ReadQuery(DECISION, _read_context(), outcome="keep"))
 
     assert [item.id for item in read.rendered_refs] == [kept.id]
     annotations = json.loads(read.prompt_block.split("Repeat Group Annotations:\n", 1)[1].split("\nRecord:\n", 1)[0])
@@ -770,7 +780,7 @@ def test_unavailable_service_fails_open_and_flushes_spool_idempotently(tmp_path:
         opener=unavailable,
     )
     experience = _experience(schema)
-    read = offline.read(DECISION, _read_context())
+    read = offline.read(ReadQuery(DECISION, _read_context()))
     spooled = offline.publish(experience)
     assert offline.flush_spool() == ()
 
@@ -827,7 +837,7 @@ def test_a_response_too_deeply_nested_to_decode_fails_open(tmp_path: Path) -> No
 
     client = RemoteClient(RemoteConfig("http://kb.invalid", TOKEN, spool_root=tmp_path / "spool"), opener=deep)
 
-    assert client.read(DECISION, _read_context()).status == "unavailable"
+    assert client.read(ReadQuery(DECISION, _read_context())).status == "unavailable"
     with pytest.raises(RemoteClientError, match="RecursionError"):
         client.health()
 
@@ -846,7 +856,7 @@ def test_an_error_response_cut_off_mid_body_is_still_a_client_error(tmp_path: Pa
     schema = _declaration()
     client = RemoteClient(RemoteConfig("http://kb.invalid", TOKEN, spool_root=tmp_path / "spool"), opener=proxy_error)
 
-    assert client.read(DECISION, _read_context()).status == "unavailable"
+    assert client.read(ReadQuery(DECISION, _read_context())).status == "unavailable"
     assert client.publish(_experience(schema)).status == "spooled"
     with pytest.raises(RemoteClientError, match="HTTP 502") as failed:
         client.write(_experience(schema, seq=1, knob="other"))
@@ -925,21 +935,23 @@ def test_sdk_uses_only_url_and_token_with_packaged_declaration(
         assert isinstance(kb, RemoteExperienceKB)
         assert kb.client.config.spool_root == tmp_path / "home" / ".cache/hyperloom/kb-spool"
         session = kb.begin(
-            run_id="run-remote",
-            seq=0,
-            objective="e2e_throughput@v1",
-            provenance=Provenance("service-test", "1"),
-            identity={
-                "model": "qwen3",
-                "gpu": "mi325x",
-                "framework": "vllm",
-                "model_type": "dense",
-                "architecture": "Qwen3ForCausalLM",
-                "framework_version": "0.10.0",
-                "precision": "bf16",
-            },
-            baseline={"baseline_fingerprint": "baseline-1", "value": 100.0},
-            created_at=NOW,
+            ExperienceStart(
+                run_id="run-remote",
+                seq=0,
+                objective="e2e_throughput@v1",
+                provenance=Provenance("service-test", "1"),
+                identity={
+                    "model": "qwen3",
+                    "gpu": "mi325x",
+                    "framework": "vllm",
+                    "model_type": "dense",
+                    "architecture": "Qwen3ForCausalLM",
+                    "framework_version": "0.10.0",
+                    "precision": "bf16",
+                },
+                baseline={"baseline_fingerprint": "baseline-1", "value": 100.0},
+                created_at=NOW,
+            )
         )
         session.decide(
             change={

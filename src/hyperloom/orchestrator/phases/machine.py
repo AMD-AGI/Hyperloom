@@ -40,7 +40,6 @@ class Transition:
     to_phase: str
     reason: str
     evidence: dict
-    loopback: bool
 
 
 class MachinePhase(CoordinatorCollaborator):
@@ -106,9 +105,11 @@ class MachinePhase(CoordinatorCollaborator):
                     "predicate_inputs": _phase_state.initial_workflow_predicate_inputs(
                         state,
                         current_phase="",
-                        kernel_enabled=self.kernel_enabled(),
-                        optimize_enabled=self.optimize_enabled(),
-                        enablement_enabled=self._coord.enablement_lane.enablement_admitted(),
+                        flags=_phase_state.PhaseFlags(
+                            kernel_enabled=self.kernel_enabled(),
+                            optimize_enabled=self.optimize_enabled(),
+                            enablement_enabled=self._coord.enablement_lane.enablement_admitted(),
+                        ),
                     ),
                 },
             )
@@ -134,9 +135,11 @@ class MachinePhase(CoordinatorCollaborator):
                 "predicate_inputs": _phase_state.initial_workflow_predicate_inputs(
                     state,
                     current_phase=_phase_state.PHASE_CLOSE,
-                    kernel_enabled=self.kernel_enabled(),
-                    optimize_enabled=self.optimize_enabled(),
-                    enablement_enabled=self._coord.enablement_lane.enablement_admitted(),
+                    flags=_phase_state.PhaseFlags(
+                        kernel_enabled=self.kernel_enabled(),
+                        optimize_enabled=self.optimize_enabled(),
+                        enablement_enabled=self._coord.enablement_lane.enablement_admitted(),
+                    ),
                 ),
             },
         )
@@ -207,11 +210,13 @@ class MachinePhase(CoordinatorCollaborator):
         state = self.shared_state
         next_phase = _phase_state.compute_next_phase(
             state,
-            kernel_enabled=self.kernel_enabled(),
-            optimize_enabled=optimize_enabled,
-            enablement_enabled=self._coord.enablement_lane.enablement_admitted(),
             enablement_in_flight=enablement_in_flight,
             kernel_work_in_flight=kernel_work_in_flight,
+            flags=_phase_state.PhaseFlags(
+                kernel_enabled=self.kernel_enabled(),
+                optimize_enabled=optimize_enabled,
+                enablement_enabled=self._coord.enablement_lane.enablement_admitted(),
+            ),
         )
         if next_phase is None or str(state.phase or "").upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
             return next_phase
@@ -448,7 +453,6 @@ class MachinePhase(CoordinatorCollaborator):
             to_phase=(to_phase or "").upper(),
             reason=str(reason or ""),
             evidence=evidence if isinstance(evidence, dict) else {},
-            loopback=bool(isinstance(evidence, dict) and evidence.get("loopback")),
         )
 
         self.fire_phase_exit(tr)

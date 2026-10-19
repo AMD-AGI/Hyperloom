@@ -289,8 +289,8 @@ cost — light for a Triton launch (eager ≈ graph), heavy for a FlyDSL launch
 operators or repository tasks (e.g. AITER) that fire many kernels per call, where
 the host gaps between launches compound into a big eager-vs-graph gap.
 
-**Why there are multiple identical copies of `graph_harness.py`.**  Six of the
-example directories contain a byte-for-byte identical `graph_harness.py` (195
+**Why there are multiple identical copies of `graph_harness.py`.**  Seven of the
+example directories contain a byte-for-byte identical `graph_harness.py` (89
 lines, same md5).  This duplication is intentional: each example is designed as a
 self-contained, copy-as-a-whole reference task.
 `loop/task_preparer.py`'s `_materialize_reference()` copies the entire `examples/`
@@ -300,7 +300,7 @@ agent's driver imports `from graph_harness import …` relative to its own
 directory, so each task must be self-contained rather than sharing a root-level
 file.  Do not de-duplicate these files.
 
-Note: `triton2flydsl-mxfp8-grouped-gemm/` contains a shorter 94-line variant
+Note: `triton2flydsl-mxfp8-grouped-gemm/` contains a shorter 80-line variant
 with a different md5 (it benchmarks a different op shape).
 `mori_ep_dispatch_combine/` has no `graph_harness.py` at all — a real 8-process
 collective cannot be captured under a single CUDA/HIP graph; see that task's

@@ -18,7 +18,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from kernelforge.llm.git import git
+from kernelforge.llm.git import git, git_bytes
 from kernelforge.agent_backends import (
     AgentHook,
     AgentHooks,
@@ -30,6 +30,7 @@ from kernelforge.agent_backends.registry import create_registered_backend
 from kernelforge.config import Config
 from kernelforge.rewrite_by_flydsl import protocol
 from kernelforge.rewrite_by_flydsl.budget import DEFAULT_REWRITE_BUDGET
+from kernelforge.rewrite_by_flydsl.measurement import FlydslMeasurement
 from kernelforge.rewrite_by_flydsl.protocol import validate_applyback_manifest
 from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
 from kernelforge.durable_io import atomic_write_text
@@ -39,6 +40,50 @@ from kernelforge.tracker import UsageAccumulator
 # owns (``forge_experiments/best*``).
 APPLYBACK_NAMESPACE = "rewrite_applyback"
 _IMPORT_MODULE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$")
+
+
+@dataclass(frozen=True)
+class ApplybackRequest:
+    """One apply-back: the pristine base, the best and what it measured, diagnostics, deadline, imports, attempts."""
+
+    base_commit: str
+    experiments_dir: str
+    best_commit: str = ""
+    measurement: FlydslMeasurement = FlydslMeasurement(None, None, None)
+    deadline_unix: float | None = None
+    import_modules: list[str] | tuple[str, ...] = ()
+    max_attempts: int = 2
+
+
+@dataclass(frozen=True)
+class CollectedPatch:
+    """The integration commit, the patch from the pristine base to it, the files it changes and the ref keeping it."""
+
+    base_commit: str
+    applyback_commit: str
+    commit_ref: str
+    patch: str
+    changed_files: list[str]
+
+
+@dataclass(frozen=True)
+class _IntegrationBrief:
+    """What every attempt integrates: the rewrite, its framework, the source path and the read-only reference."""
+
+    spec: RewriteSpec
+    framework: str
+    source_relative: str
+    reference_path: Path
+
+
+@dataclass(frozen=True)
+class _ApplybackTurn:
+    """One clean-room session: its worktree, budget, progress log and the failure the previous attempt left."""
+
+    worktree: Path
+    timeout_sec: int
+    progress_log: list[str]
+    prior_failure: str = ""
 
 
 @dataclass
@@ -74,9 +119,9 @@ def _atomic_write_json(path: Path, payload: dict) -> None:
     atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
-def _infer_framework(spec: RewriteSpec, explicit: str) -> str:
-    if explicit.strip():
-        return explicit.strip().lower()
+def _infer_framework(spec: RewriteSpec) -> str:
+    if spec.framework.strip():
+        return spec.framework.strip().lower()
     parts = {part.lower() for part in Path(spec.source_kernel).parts}
     for candidate in protocol.SUPPORTED_FRAMEWORKS:
         if candidate in parts:
@@ -173,15 +218,8 @@ def _validate_imports(
             raise RuntimeError(f"{stage} apply-back import validation failed for {module}: {output}")
 
 
-def _build_prompt(
-    *,
-    spec: RewriteSpec,
-    framework: str,
-    source_relative: str,
-    reference_path: str,
-    time_budget_seconds: int,
-    prior_failure: str = "",
-) -> str:
+def _build_prompt(brief: _IntegrationBrief, *, time_budget_seconds: int, prior_failure: str = "") -> str:
+    spec = brief.spec
     targets = ", ".join(spec.target_functions) or "(not specified)"
     retry_context = (
         "\n## Previous clean-room attempt\n"
@@ -192,17 +230,17 @@ def _build_prompt(
         else ""
     )
     return f"""\
-Integrate a verified FlyDSL rewrite into the original {framework} repository.
+Integrate a verified FlyDSL rewrite into the original {brief.framework} repository.
 
 Repository source operation:
-- Source file: `{source_relative}`
+- Source file: `{brief.source_relative}`
 - Source symbols: `{targets}`
 - Logical operator: `{spec.op_name}`
 - Required FlyDSL factory: `{spec.builder_symbol}`
 
 The latest correctness-verified and performance-selected standalone FlyDSL
 implementation is available read-only at:
-`{reference_path}`
+`{brief.reference_path}`
 
 Inspect the repository and implement the production integration now. Use the
 reference implementation as the computational source of truth, but place code
@@ -318,31 +356,20 @@ def _make_applyback_hooks(*, deadline_monotonic: float) -> AgentHooks:
 
 async def _run_agent(
     *,
-    spec: RewriteSpec,
     config: Config,
-    worktree: Path,
-    reference_path: Path,
-    framework: str,
-    source_relative: str,
-    timeout_sec: int,
-    progress_log: list[str],
-    prior_failure: str = "",
+    brief: _IntegrationBrief,
+    turn: _ApplybackTurn,
     usage: UsageAccumulator | None = None,
 ) -> tuple[str, str]:
+    worktree = turn.worktree
+    timeout_sec = turn.timeout_sec
     runtime = config.agent_runtime()
     backend = create_registered_backend(
         runtime,
         preflight=False,
         probe_cwd=str(worktree),
     )
-    prompt = _build_prompt(
-        spec=spec,
-        framework=framework,
-        source_relative=source_relative,
-        reference_path=str(reference_path),
-        time_budget_seconds=timeout_sec,
-        prior_failure=prior_failure,
-    )
+    prompt = _build_prompt(brief, time_budget_seconds=timeout_sec, prior_failure=turn.prior_failure)
     deadline_monotonic = time.monotonic() + timeout_sec
     run_spec = AgentRunSpec(
         system_prompt=(
@@ -355,10 +382,10 @@ async def _run_agent(
         cwd=str(worktree),
         writable=True,
         timeout_sec=timeout_sec,
-        additional_directories=[str(reference_path.parent)],
+        additional_directories=[str(brief.reference_path.parent)],
         allow_untracked=True,
         hooks=_make_applyback_hooks(deadline_monotonic=deadline_monotonic),
-        progress_log=progress_log,
+        progress_log=turn.progress_log,
         tool_policy=AgentToolPolicy(
             read=True,
             search=True,
@@ -508,15 +535,7 @@ def _snapshot_failure(
     return str(root)
 
 
-def _collect_patch(
-    *,
-    workspace: Path,
-    worktree: Path,
-    patch_path: Path,
-    base_commit: str,
-    op_name: str,
-    operator_slug: str,
-) -> tuple[str, list[str], str, str]:
+def _collect_patch(spec: RewriteSpec, worktree: Path, patch_path: Path, base_commit: str) -> CollectedPatch:
     staged = _git(worktree, "add", "-A", "--", ".")
     if staged.returncode != 0:
         raise RuntimeError(f"could not stage integration changes: {staged.stderr.strip()}")
@@ -528,7 +547,7 @@ def _collect_patch(
         "user.email=forge-rewrite@local",
         "commit",
         "-m",
-        f"forge-rewrite: integrate {op_name} flydsl apply-back",
+        f"forge-rewrite: integrate {spec.op_name} flydsl apply-back",
     )
     if committed.returncode != 0:
         raise RuntimeError(
@@ -575,29 +594,23 @@ def _collect_patch(
     checked = _git(worktree, "apply", "--check", str(patch_path))
     if checked.returncode != 0:
         raise RuntimeError(f"generated framework patch does not apply to the pristine base: {checked.stderr.strip()}")
-    commit_ref = f"refs/forge-rewrite/applyback/{operator_slug}-{applyback_commit[:12]}"
-    published_ref = _git(workspace, "update-ref", commit_ref, applyback_commit)
+    commit_ref = f"refs/forge-rewrite/applyback/{spec.operator_slug}-{applyback_commit[:12]}"
+    published_ref = _git(Path(spec.workspace).resolve(), "update-ref", commit_ref, applyback_commit)
     if published_ref.returncode != 0:
         raise RuntimeError(f"could not preserve apply-back commit: {published_ref.stderr.strip()}")
-    return patch, changed_files, applyback_commit, commit_ref
+    return CollectedPatch(base_commit, applyback_commit, commit_ref, patch, changed_files)
 
 
 def _publish_patch(
-    *,
     spec: RewriteSpec,
     framework: str,
-    base_commit: str,
-    applyback_commit: str,
     flydsl_best_commit: str,
-    commit_ref: str,
-    source_ms: float | None,
-    flydsl_best_ms: float | None,
-    speedup: float | None,
-    reference_snr_db: float | None,
-    patch: str,
-    changed_files: list[str],
+    measurement: FlydslMeasurement,
+    collected: CollectedPatch,
 ) -> tuple[str, str, str, str]:
     """Publish the framework patch into the apply-back-owned artifact namespace."""
+    applyback_commit = collected.applyback_commit
+    changed_files = collected.changed_files
     workspace = Path(spec.workspace).resolve()
     root = workspace / "forge_experiments"
     namespace_root = root / APPLYBACK_NAMESPACE
@@ -632,14 +645,14 @@ def _publish_patch(
             "builder_symbol": spec.builder_symbol,
             "source_entry": spec.source_entry,
             "commit_hash": applyback_commit,
-            "base_commit": base_commit,
-            "commit_ref": commit_ref,
+            "base_commit": collected.base_commit,
+            "commit_ref": collected.commit_ref,
             "flydsl_best_commit": flydsl_best_commit,
-            "baseline_wall_ms": source_ms,
-            "best_wall_ms": flydsl_best_ms,
-            "speedup": speedup,
+            "baseline_wall_ms": measurement.source_ms,
+            "best_wall_ms": measurement.flydsl_ms,
+            "speedup": measurement.speedup,
             "reference_correctness_passed": True,
-            "reference_snr_db": reference_snr_db,
+            "reference_snr_db": measurement.snr_db,
             "integration_validation_required": True,
             "integration_validation_status": protocol.INTEGRATION_VALIDATION_PENDING,
             "target_language": "flydsl",
@@ -661,7 +674,7 @@ def _publish_patch(
         )
     )
     try:
-        atomic_write_text(temporary / "forge.patch", patch)
+        atomic_write_text(temporary / "forge.patch", collected.patch)
         atomic_write_text(
             temporary / "validation.txt",
             "Standalone FlyDSL reference passed the rewrite correctness gate.\n"
@@ -670,8 +683,8 @@ def _publish_patch(
         _atomic_write_json(
             temporary / "benchmark.json",
             {
-                "source_ms": source_ms,
-                "flydsl_best_ms": flydsl_best_ms,
+                "source_ms": measurement.source_ms,
+                "flydsl_best_ms": measurement.flydsl_ms,
             },
         )
         _atomic_write_json(temporary / "publication.json", manifest)
@@ -681,14 +694,7 @@ def _publish_patch(
             target = Path(relative)
             if target.is_absolute() or ".." in target.parts:
                 raise RuntimeError(f"apply-back changed file escapes repository: {relative}")
-            content = git(
-                "-C",
-                str(workspace),
-                "show",
-                f"{applyback_commit}:{target.as_posix()}",
-                check=False,
-                text=False,
-            )
+            content = git_bytes("-C", str(workspace), "show", f"{applyback_commit}:{target.as_posix()}", check=False)
             # Deleted files belong in the patch but have no final snapshot.
             if content.returncode != 0:
                 continue
@@ -715,21 +721,14 @@ def _publish_patch(
 def generate_applyback_patch(
     spec: RewriteSpec,
     config: Config,
+    request: ApplybackRequest,
     *,
-    base_commit: str,
-    experiments_dir: str,
-    framework: str = "",
-    best_commit: str = "",
-    source_ms: float | None = None,
-    flydsl_best_ms: float | None = None,
-    speedup: float | None = None,
-    reference_snr_db: float | None = None,
-    deadline_unix: float | None = None,
-    import_modules: list[str] | tuple[str, ...] = (),
-    max_attempts: int = 2,
     usage: UsageAccumulator | None = None,
 ) -> ApplybackResult:
     """Run bounded clean-room agent attempts and publish a validated patch."""
+    base_commit = request.base_commit
+    deadline_unix = request.deadline_unix
+    max_attempts = request.max_attempts
     workspace = Path(spec.workspace).resolve()
     if not base_commit:
         return ApplybackResult(
@@ -762,7 +761,7 @@ def generate_applyback_patch(
             ok=False,
             error=("insufficient time remaining for the apply-back agent and host validation"),
         )
-    resolved_framework = _infer_framework(spec, framework)
+    resolved_framework = _infer_framework(spec)
     if resolved_framework not in protocol.SUPPORTED_FRAMEWORKS:
         return ApplybackResult(
             ok=False,
@@ -772,6 +771,7 @@ def generate_applyback_patch(
     reference_dir = Path(tempfile.mkdtemp(prefix="forge_rewrite_reference_"))
     reference_path = reference_dir / spec.flydsl_kernel_name
     reference_path.write_bytes(flydsl_path.read_bytes())
+    brief = _IntegrationBrief(spec, resolved_framework, source_relative, reference_path)
     prior_failure = ""
     last_result = ApplybackResult(
         ok=False,
@@ -820,7 +820,7 @@ def generate_applyback_patch(
                 import_plan = _build_import_validation_plan(
                     worktree=worktree,
                     source_relative=source_relative,
-                    import_modules=import_modules,
+                    import_modules=request.import_modules,
                 )
                 remaining_for_baseline = rewrite_budget.remaining_seconds(deadline_unix)
                 baseline_import_timeout = (
@@ -851,15 +851,9 @@ def generate_applyback_patch(
                 )
                 backend_name, backend_model = asyncio.run(
                     _run_agent(
-                        spec=spec,
                         config=config,
-                        worktree=worktree,
-                        reference_path=reference_path,
-                        framework=resolved_framework,
-                        source_relative=source_relative,
-                        timeout_sec=timeout_sec,
-                        progress_log=progress_log,
-                        prior_failure=prior_failure,
+                        brief=brief,
+                        turn=_ApplybackTurn(worktree, timeout_sec, progress_log, prior_failure),
                         usage=usage,
                     )
                 )
@@ -874,38 +868,20 @@ def generate_applyback_patch(
                     import_plan=import_plan,
                 )
                 temporary_patch = reference_dir / f"forge_attempt_{attempt:02d}.patch"
-                patch, changed_files, applyback_commit, commit_ref = _collect_patch(
-                    workspace=workspace,
-                    worktree=worktree,
-                    patch_path=temporary_patch,
-                    base_commit=base_commit,
-                    op_name=spec.op_name,
-                    operator_slug=spec.operator_slug,
-                )
+                collected = _collect_patch(spec, worktree, temporary_patch, base_commit)
                 patch_path, manifest_path, files_root, result_path = _publish_patch(
-                    spec=spec,
-                    framework=resolved_framework,
-                    base_commit=base_commit,
-                    applyback_commit=applyback_commit,
-                    flydsl_best_commit=best_commit,
-                    commit_ref=commit_ref,
-                    source_ms=source_ms,
-                    flydsl_best_ms=flydsl_best_ms,
-                    speedup=speedup,
-                    reference_snr_db=reference_snr_db,
-                    patch=patch,
-                    changed_files=changed_files,
+                    spec, resolved_framework, request.best_commit, request.measurement, collected
                 )
                 return ApplybackResult(
                     ok=True,
                     patch_path=patch_path,
                     manifest_path=manifest_path,
-                    changed_files=changed_files,
+                    changed_files=collected.changed_files,
                     agent_backend=backend_name,
                     agent_model=backend_model,
                     base_commit=base_commit,
-                    best_commit=applyback_commit,
-                    commit_ref=commit_ref,
+                    best_commit=collected.applyback_commit,
+                    commit_ref=collected.commit_ref,
                     canonical_patch_path=patch_path,
                     canonical_files_root=files_root,
                     canonical_result_path=result_path,
@@ -929,7 +905,7 @@ def generate_applyback_patch(
                 if error_text and worktree_added:
                     diagnostic_path = _snapshot_failure(
                         worktree=worktree,
-                        experiments_dir=experiments_dir,
+                        experiments_dir=request.experiments_dir,
                         error=error_text,
                         progress_log=progress_log,
                         attempt=attempt,

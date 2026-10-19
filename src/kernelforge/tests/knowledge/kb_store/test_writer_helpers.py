@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from kernelforge.knowledge.kb_store.identity import source_resolution
 from kernelforge.knowledge.kb_store import writer as sink
 
@@ -20,6 +22,17 @@ def test_resolve_operation_uses_first_when_all_launchers(monkeypatch):
 
     monkeypatch.setattr(pmc, "derive_kernel_names", lambda _src: ["launch_a", "main"])
     assert source_resolution.resolve_operation("src", "/p/f.py") == "launch_a"
+
+
+def test_resolve_operation_propagates_a_name_derivation_defect(monkeypatch):
+    import kernelforge.mcp_server.tools.pmc as pmc
+
+    def _boom(_src):
+        raise RuntimeError("derivation defect")
+
+    monkeypatch.setattr(pmc, "derive_kernel_names", _boom)
+    with pytest.raises(RuntimeError, match="^derivation defect$"):
+        source_resolution.resolve_operation("src", "/p/f.py", target_functions=["op_x"])
 
 
 def test_resolve_operation_falls_back_to_target_then_stem(monkeypatch):
@@ -42,16 +55,6 @@ def test_resolve_operation_fallback_is_order_independent(monkeypatch):
     # launchers/wrappers are de-prioritized even when they sort first
     c = source_resolution.resolve_operation("", "/p/f.py", target_functions=["launch_gemm", "gemm_kernel"])
     assert c == "gemm_kernel"
-
-
-def test_resolve_operation_survives_derive_exception(monkeypatch):
-    import kernelforge.mcp_server.tools.pmc as pmc
-
-    def boom(_src):
-        raise RuntimeError("derive failed")
-
-    monkeypatch.setattr(pmc, "derive_kernel_names", boom)
-    assert source_resolution.resolve_operation("", "/p/stem.py") == "stem"
 
 
 # --------------------------------------------------------------------------- # detect_backend_language
@@ -258,7 +261,7 @@ def test_summarize_run_returns_defaults_on_llm_failure(monkeypatch):
         raise RuntimeError("no sdk")
 
     monkeypatch.setattr(sink, "_query_llm", boom)
-    out = sink.summarize_run(config=object(), workspace="/w", op="op", digest="d", kernel_source="s")
+    out = sink.summarize_run(config=object(), workspace="/w", prompt=sink._summary_prompt("op", "d", "s"))
     assert out == {"category": "others", "strategy": "", "recipe": "", "lessons": ""}
 
 
@@ -272,7 +275,7 @@ def test_summarize_run_parses_reply(monkeypatch):
 
     monkeypatch.setattr(sink, "_query_llm", reply)
     usage = object()
-    out = sink.summarize_run(config=object(), workspace="/w", op="op", digest="d", kernel_source="s", usage=usage)
+    out = sink.summarize_run(config=object(), workspace="/w", prompt=sink._summary_prompt("op", "d", "s"), usage=usage)
     assert out["category"] == "attention"
     assert out["strategy"] == "tile"
     assert captured["usage"] is usage

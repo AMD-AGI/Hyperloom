@@ -13,7 +13,6 @@ from kernelforge.config import Config
 from kernelforge.kernel_backends.base import build_single_kernel_backend_prompt
 from kernelforge.kernel_backends.constants import (
     KERNEL_BACKENDS,
-    resolve_language_dir,
     resolve_language_dirs,
 )
 from kernelforge.loop.campaign_config import infer_kernel_backend
@@ -69,12 +68,6 @@ class TestLanguagePairing:
         (tmp_path / "languages" / "triton").mkdir(parents=True)
         assert resolve_language_dirs("triton", tmp_path) == ("triton",)
         assert resolve_language_dirs("gluon", tmp_path) == ("triton",)
-
-    def test_primary_accessor_still_returns_one_name(self, config):
-        """``resolve_language_dir`` keeps its old contract for callers wanting one."""
-        root = Path(config.local_knowledge_dir)
-        assert resolve_language_dir("gluon", root) == "gluon"
-        assert resolve_language_dir("triton", root) == "triton"
 
 
 class TestKnowledgeBuilderAcceptsASequence:

@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from .benchmark_config import add_benchmark_argument
+
 import argparse
 import os
 from pathlib import Path
@@ -186,7 +188,6 @@ def _build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--verbose", "-v", action="count", default=0, help="Verbose logging (-v INFO, -vv DEBUG)")
     sub = p.add_subparsers(dest="command", required=True)
-
     opt = sub.add_parser("optimize", parents=[common], help="Drive a multi-agent optimization run on a model")
     opt.add_argument(
         "--model",
@@ -300,6 +301,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--framework custom; for the built-in frameworks it overrides the "
         "checkout they would otherwise clone.",
     )
+    add_benchmark_argument(opt)
     opt.add_argument(
         "--benchmark-scripts-dir",
         default=None,
@@ -703,16 +705,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "quick-win parameter path. Default: kernel enabled.",
     )
     opt.add_argument(
-        "--no-eval",
-        action="store_true",
-        default=False,
-        help="Skip the accuracy eval everywhere. The baseline anchors on "
-        "throughput alone instead of halting on a missing accuracy "
-        "reference, and every candidate is graded on throughput only. "
-        "Useful for CI/CD tuning runs that care about performance and not "
-        "accuracy; the run is not accuracy-validated. Default: eval enabled.",
-    )
-    opt.add_argument(
         "--launch-info-file",
         type=str,
         default=None,
@@ -802,23 +794,6 @@ def _build_parser() -> argparse.ArgumentParser:
     opt.add_argument("--critic-prompt", type=str, default=None, help="Override Critic system prompt")
     _add_custom_specialist_args(opt)
     opt.add_argument(
-        "--local-kb-root",
-        dest="local_kb_root",
-        type=str,
-        default=None,
-        help="Filesystem root for the local recipe-snapshot KB store. "
-        "All writes (put_recipe / append_attempt / delete_recipe) go "
-        "here. Defaults to "
-        "$HYPERLOOM_LOCAL_KB_ROOT, then $USER_DATA_PATH/kb, "
-        "then /workspace/hyperloom/kb. Layout is a 5-level "
-        "directory tree keyed by canonical_id components "
-        "(model -> hardware -> framework -> framework_version -> "
-        "precision); each leaf holds recipe.json + history/ + "
-        "attempts.ndjson + .lock. See "
-        "src/hyperloom/orchestrator/knowledge/recipe_kb/local_store.py for the "
-        "on-disk contract.",
-    )
-    opt.add_argument(
         "--degraded-kb",
         dest="degraded_kb",
         action="store_true",
@@ -883,13 +858,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "The specialist tool whitelist drops mcp__pr_monitor__* tools. "
         "Short-circuits the IR-3 PR Monitor probe; IR-3 sets this "
         "automatically when PR Monitor is unreachable (soft degrade).",
-    )
-    opt.add_argument(
-        "--pr-feed-window-days",
-        dest="pr_feed_window_days",
-        type=int,
-        default=30,
-        help="Look-back window for the PR feed warmup (days). Default: 30.",
     )
     # specialist research_lane capacity (locked at session start).
     opt.add_argument(
@@ -1059,8 +1027,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Run a post-optimization concurrency sweep (baseline vs "
         "current_best across CONC) and write "
         "reports/conc_sweep_summary.json + conc_sweep_raw.csv. "
-        "On by default, off under AgentX (each rung is a 3600s window); "
-        "force either way with --enable-conc-sweep / --no-enable-conc-sweep.",
+        "On by default for synthetic workloads, off by default for MLPerf. "
+        "Unavailable for native Magpie AgentX: start a separate session for each CONC.",
     )
     opt.add_argument(
         "--conc-sweep-concs",
@@ -1070,9 +1038,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Comma-separated CONC ladder for --enable-conc-sweep. Ordered "
         "high-to-low internally for single-server arm reuse, so the order given "
         "does not matter. Defaults to the ladder for the workload: "
-        "256,128,64,32,16,8,4,2 synthetic, 1,4,8,10,14,20,28 under "
-        "HYPERLOOM_AGENTX (an agentic request carries orders of magnitude more "
-        "prompt, so the same card saturates far lower).",
+        "256,128,64,32,16,8,4,2 for synthetic, 1,4,8,10,14,20,28 for MLPerf. "
+        "Unavailable for native Magpie AgentX.",
     )
     opt.add_argument(
         "--conc-sweep-total-budget-sec",

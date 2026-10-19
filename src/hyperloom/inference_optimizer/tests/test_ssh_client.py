@@ -49,7 +49,7 @@ def test_ssh_identity_does_not_pipe_fds_to_subprocess(monkeypatch, known_hosts, 
         return _FakeCompleted(0, "out", "")
 
     monkeypatch.setattr(ssh_client.subprocess, "run", _run)
-    ssh_client.ssh_run("10.0.0.1", "echo hi", key_path=key_file, known_hosts=known_hosts)
+    ssh_client.ssh_run(ssh_client.SshTarget("10.0.0.1", key_file, known_hosts), "echo hi")
     assert "pass_fds" not in captured["kwargs"]
 
 
@@ -62,14 +62,7 @@ def test_ssh_run_builds_expected_argv(monkeypatch, known_hosts, key_file):
         return _FakeCompleted(0, "out", "")
 
     monkeypatch.setattr(ssh_client.subprocess, "run", _run)
-    cp = ssh_client.ssh_run(
-        "10.0.0.1",
-        "echo hi",
-        key_path=key_file,
-        known_hosts=known_hosts,
-        port=2345,
-        timeout=42,
-    )
+    cp = ssh_client.ssh_run(ssh_client.SshTarget("10.0.0.1", key_file, known_hosts, port=2345), "echo hi", timeout=42)
     assert cp.returncode == 0
     argv = captured["argv"]
     assert argv[0] == "ssh"
@@ -95,14 +88,10 @@ def test_ssh_run_script_base64_wraps_and_prepends_env(monkeypatch, known_hosts, 
     monkeypatch.setattr(ssh_client.subprocess, "run", _run)
     script = "print('multi\nnode')"
     ssh_client.ssh_run_script(
-        "h",
-        script,
-        "python3",
-        "--flag v",
-        key_path=key_file,
-        known_hosts=known_hosts,
-        env={"MORI_DISPATCH": "1", "SGLANG_FOO": "a b"},
-        remote_path="/tmp/run.py",
+        ssh_client.SshTarget("h", key_file, known_hosts),
+        ssh_client.RemoteScript(
+            script, "python3", "--flag v", env={"MORI_DISPATCH": "1", "SGLANG_FOO": "a b"}, remote_path="/tmp/run.py"
+        ),
     )
     remote_cmd = captured["argv"][-1]
     enc = base64.b64encode(script.encode()).decode()
@@ -118,13 +107,8 @@ def test_ssh_run_script_rejects_invalid_env_key(monkeypatch, known_hosts):
     monkeypatch.setattr(ssh_client.subprocess, "run", lambda *a, **kw: _FakeCompleted(0))
     with pytest.raises(ValueError, match="disallowed SSH forward env keys"):
         ssh_client.ssh_run_script(
-            "h",
-            "x=1",
-            "python3",
-            "",
-            key_path="/k",
-            known_hosts=known_hosts,
-            env={"BAD KEY": "1"},
+            ssh_client.SshTarget("h", "/k", known_hosts),
+            ssh_client.RemoteScript("x=1", "python3", "", env={"BAD KEY": "1"}),
         )
 
 
@@ -135,7 +119,9 @@ def test_ssh_run_script_no_env_has_no_prefix(monkeypatch, known_hosts, key_file)
         "run",
         lambda argv, **kw: captured.setdefault("argv", argv) or _FakeCompleted(0),
     )
-    ssh_client.ssh_run_script("h", "x=1", "python3", "", key_path=key_file, known_hosts=known_hosts)
+    ssh_client.ssh_run_script(
+        ssh_client.SshTarget("h", key_file, known_hosts), ssh_client.RemoteScript("x=1", "python3", "")
+    )
     remote_cmd = captured["argv"][-1]
     assert "&& python3 /tmp/mn_infera_launch" in remote_cmd
 
@@ -151,11 +137,7 @@ def test_ssh_run_bash_with_env_pipes_secrets_via_stdin(monkeypatch, known_hosts,
 
     monkeypatch.setattr(ssh_client.subprocess, "run", _run)
     ssh_client.ssh_run_bash_with_env(
-        "h",
-        "echo body",
-        {"OOB_API_KEY": "secret-123"},
-        key_path=key_file,
-        known_hosts=known_hosts,
+        ssh_client.SshTarget("h", key_file, known_hosts), "echo body", {"OOB_API_KEY": "secret-123"}
     )
     assert captured["argv"][-2:] == ["bash", "-s"]
     assert "export OOB_API_KEY=secret-123" in captured["input"]
@@ -165,52 +147,3 @@ def test_ssh_run_bash_with_env_pipes_secrets_via_stdin(monkeypatch, known_hosts,
     # Secrets still stay off argv (they go over stdin); the identity is the key path.
     assert captured["argv"][captured["argv"].index("-i") + 1] == str(key_file)
     assert "pass_fds" not in captured["kwargs"]
-
-
-def test_generate_session_keypair_idempotent_reuse(tmp_path, monkeypatch):
-    priv = tmp_path / "mn_id_ed25519"
-    pub = tmp_path / "mn_id_ed25519.pub"
-    priv.write_text("PRIV", encoding="utf-8")
-    pub.write_text("ssh-ed25519 AAAA reuse\n", encoding="utf-8")
-
-    def _no_keygen(*a, **kw):
-        raise AssertionError("ssh-keygen must not run when keys already exist")
-
-    monkeypatch.setattr(ssh_client.subprocess, "run", _no_keygen)
-    out_priv, pub_str = ssh_client.generate_session_keypair(tmp_path)
-    assert out_priv == priv
-    assert pub_str == "ssh-ed25519 AAAA reuse"
-
-
-def test_generate_session_keypair_uses_unencrypted_key(tmp_path, monkeypatch):
-    calls = []
-
-    def _run(argv, **kwargs):
-        calls.append((argv, kwargs))
-        if argv[0] == "ssh-keygen":
-            assert argv[argv.index("-N") + 1] == ""
-            (tmp_path / "mn_id_ed25519").write_text("PRIVATE", encoding="utf-8")
-            (tmp_path / "mn_id_ed25519.pub").write_text(
-                "ssh-ed25519 AAAA generated\n",
-                encoding="utf-8",
-            )
-            return _FakeCompleted(0, "", "")
-        raise AssertionError(f"unexpected command: {argv}")
-
-    monkeypatch.setattr(ssh_client.subprocess, "run", _run)
-    out_priv, pub_str = ssh_client.generate_session_keypair(tmp_path)
-    assert out_priv == tmp_path / "mn_id_ed25519"
-    assert pub_str == "ssh-ed25519 AAAA generated"
-    assert [c[0][0] for c in calls] == ["ssh-keygen"]
-    assert not (tmp_path / "mn_id_ed25519.pass").exists()
-    assert not (tmp_path / "mn_ssh_askpass.sh").exists()
-
-
-def test_generate_session_keypair_raises_on_keygen_failure(tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        ssh_client.subprocess,
-        "run",
-        lambda *a, **kw: _FakeCompleted(1, "", "boom"),
-    )
-    with pytest.raises(RuntimeError, match="ssh-keygen failed"):
-        ssh_client.generate_session_keypair(tmp_path)

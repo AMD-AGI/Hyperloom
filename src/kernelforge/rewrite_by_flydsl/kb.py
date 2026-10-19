@@ -22,6 +22,7 @@ from kernelforge.loop.validation import run_validation_pipeline
 from kernelforge.mcp_server.tools.bench import CaseCoverageError, calculate_mean_case_speedup
 from kernelforge.rewrite_by_flydsl import driver_contract
 from kernelforge.rewrite_by_flydsl.identity import resolve_identity
+from kernelforge.rewrite_by_flydsl.measurement import FlydslMeasurement
 from kernelforge.rewrite_by_flydsl.port_loop import check_flydsl_port
 from kernelforge.knowledge.kb_store.record_store import (
     RewriteRecordStore,
@@ -34,7 +35,8 @@ _REWRITE_KIND = "standalone_flydsl"
 _KERNEL_ARTIFACT = "kernel.py"
 _REFERENCE_CONTENT_CAP = 12_000
 
-# Ceiling on the benchmark that times one candidate, when nothing tighter bounds it.
+# Ceilings on the correctness suite and the benchmark that try one candidate, when nothing tighter bounds them.
+_VALIDATION_TIMEOUT_SEC = 1800
 _BENCH_TIMEOUT_SEC = 600
 
 
@@ -49,6 +51,15 @@ def _stage_timeout(cap_sec: int, search_deadline: float, run_deadline_sec: float
     if run_deadline_sec is not None:
         allowance = min(allowance, run_deadline_sec)
     return max(1, min(cap_sec, int(allowance)))
+
+
+@dataclass(frozen=True)
+class RewriteKbTarget:
+    """The rewrite a KB read or write is about: its spec, the driver measuring it, the runtime naming store and GPU."""
+
+    spec: RewriteSpec
+    driver_path: str
+    config: Config
 
 
 @dataclass
@@ -111,7 +122,6 @@ def _read_top_candidates(
     spec: RewriteSpec,
     config: Config,
     *,
-    framework: str,
     top_k: int,
 ) -> _ReadPlan:
     store = create_rewrite_record_store(config)
@@ -123,7 +133,6 @@ def _read_top_candidates(
     try:
         identity, canonical_id, _signature, _implementation = resolve_identity(
             spec,
-            framework=framework,
             gpu=gpu_type,
             source_text=_source_text(spec),
         )
@@ -232,14 +241,10 @@ def _reference_context(references: list[dict]) -> str:
 
 
 async def try_flydsl_kb_warmstart(
-    spec: RewriteSpec,
-    driver_path: str,
-    config: Config,
+    target: RewriteKbTarget,
     *,
     source_case_ms: dict[str, float],
-    framework: str = "",
     top_k: int | None = None,
-    validation_timeout_sec: int = 1800,
     stop_at_unix: float | None = None,
 ) -> RewriteKbReadResult:
     """Measure the admissible candidates and skip PORT with the best scoring one.
@@ -256,10 +261,11 @@ async def try_flydsl_kb_warmstart(
     a guess about its provenance. This matches the loop-layer warm start, which has always measured a candidate
     whose implementation signature disagreed instead of refusing it.
     """
+    spec = target.spec
+    driver_path = target.driver_path
     plan = _read_top_candidates(
         spec,
-        config,
-        framework=framework,
+        target.config,
         top_k=warmstart_policy.top_k() if top_k is None else top_k,
     )
     result = RewriteKbReadResult(
@@ -325,7 +331,7 @@ async def try_flydsl_kb_warmstart(
                         driver_script=driver_path,
                         snr_threshold=spec.snr_threshold,
                         timeout_per_stage=_stage_timeout(
-                            validation_timeout_sec,
+                            _VALIDATION_TIMEOUT_SEC,
                             search_deadline,
                             remaining,
                         ),
@@ -406,30 +412,23 @@ async def try_flydsl_kb_warmstart(
 
 
 def write_flydsl_kb_solution(
-    spec: RewriteSpec,
-    driver_path: str,
-    config: Config,
+    target: RewriteKbTarget,
+    measurement: FlydslMeasurement,
     *,
-    source_ms: float | None,
-    flydsl_best_ms: float | None,
-    speedup: float | None,
-    best_commit: str = "",
-    framework: str = "",
-    snr_db: float | None = None,
     session_key: str = "",
     content_override: bytes | None = None,
 ) -> dict:
     """Record a validated FlyDSL port as a candidate under its identity.
 
-    Correctness alone qualifies a port; only the champion pointer is gated on speedup. ``speedup`` is the arena's
-    equal-weight mean over per-case ratios, so a consumer ranking records is ranking on the number they will be
-    graded on; the two wall times travel with it as raw evidence, not as the claim. ``session_key`` names the
-    session this record belongs to, so a caller publishing repeatedly through one session replaces its own record
-    rather than burying the identity's history under a sibling per publication. ``content_override`` supplies the
-    kernel bytes for a caller publishing while an agent is still editing the workspace. ``snr_db`` is the accuracy
-    measured for *this* artifact; a caller that did not measure it passes ``None``, because a reading taken from
-    another kernel is not a substitute.
+    Correctness alone qualifies a port; only the champion pointer is gated on speedup, so a consumer ranking records
+    is ranking on the number they will be graded on. ``session_key`` names the session this record belongs to, so a
+    caller publishing repeatedly through one session replaces its own record rather than burying the identity's
+    history under a sibling per publication. ``content_override`` supplies the kernel bytes for a caller publishing
+    while an agent is still editing the workspace.
     """
+    spec = target.spec
+    config = target.config
+    speedup = measurement.speedup
     store = create_rewrite_record_store(config)
     if store is None:
         return {"written": False, "reason": "not_configured"}
@@ -440,14 +439,12 @@ def write_flydsl_kb_solution(
         content = content_override if content_override is not None else Path(spec.flydsl_kernel).read_bytes()
         identity, canonical_id, signature, implementation = resolve_identity(
             spec,
-            framework=framework,
             gpu=gpu_type,
             source_text=_source_text(spec),
         )
         content_hash = hashlib.sha256(content).hexdigest()
         # Only when the caller has no session identity at all does the artifact name the record, and then every
-        # publication is a sibling. ``best_commit`` is metadata here, never a name: a caller that wants its commit to
-        # name the record says so through ``session_key``.
+        # publication is a sibling. A caller that wants its commit to name the record says so through ``session_key``.
         session_id = candidate_session_id(canonical_id, identity.kernel_name, session_key or content_hash)
         knowledge = {
             "producer": identity.producer,
@@ -459,17 +456,17 @@ def write_flydsl_kb_solution(
                 "rewrite_kind": _REWRITE_KIND,
                 "flydsl_kernel": _KERNEL_ARTIFACT,
                 "metric": {
-                    "wall_ms": flydsl_best_ms,
-                    "baseline_wall_ms": source_ms,
+                    "wall_ms": measurement.flydsl_ms,
+                    "baseline_wall_ms": measurement.source_ms,
                     "speedup": round(speedup, 4) if speedup is not None else None,
-                    "snr_db": snr_db,
+                    "snr_db": measurement.snr_db,
                     "gpu_arch": config.gpu_target,
                     "correct": True,
                 },
                 "implementation_signature": signature,
                 "implementation_identity": implementation,
                 "source_sha256": _sha256(spec.source_kernel),
-                "driver_sha256": _sha256(driver_path),
+                "driver_sha256": _sha256(target.driver_path),
                 "builder_symbol": spec.builder_symbol,
             },
         }

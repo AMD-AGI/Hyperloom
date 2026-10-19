@@ -33,7 +33,7 @@ from hyperloom.orchestrator.actions.executors._subprocess_kill import (
 )
 from hyperloom.orchestrator.bus.gpu_pool import GPU_LEASE_TTL_GRACE
 from hyperloom.orchestrator.loop import time_budget
-from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.coordinator import Coordinator, RunOptions
 from hyperloom.orchestrator.loop.dispatcher import (
     _CANCEL_NOTICE_SEC,
     _COOPERATIVE_CANCEL_GRACE_SEC,
@@ -49,8 +49,8 @@ from hyperloom.orchestrator.policy.gate import PolicyDenied
 from hyperloom.orchestrator.roles import Backend, MockBackend, ScriptedPlan
 from hyperloom.orchestrator.state.shared_state import SharedState, effective_closing_grace_sec
 from hyperloom.orchestrator.state.task_registry import Task
+from hyperloom.orchestrator.loop.dispatcher import HeldLeases
 
-from ._dispatch_helpers import pump_until_settled
 
 # The costliest action the catalogue prices, so a short budget cannot fit it.
 _EXPENSIVE_ACTION = "conc_sweep"
@@ -246,7 +246,7 @@ class TestTheReserveIsTheClosingGraceWindow:
     async def test_the_coordinator_hands_the_operators_window_to_the_state(self, coord: Coordinator):
         """The reserve lives on SharedState, but the flag arrives at the Coordinator."""
         try:
-            await coord.run(max_ticks=1, max_minutes=60, closing_grace_sec=0.0)
+            await coord.run(options=RunOptions(max_minutes=60, max_ticks=1, closing_grace_sec=0.0))
         finally:
             await coord.stop()
         assert coord.shared_state.closing_grace_sec == 0.0
@@ -538,42 +538,6 @@ class TestPreDispatchBackstop:
         assert (await coord.tasks.get(task.task_id)).state == "queued"
 
     @pytest.mark.asyncio
-    async def test_a_queued_recover_is_retired_even_when_the_budget_is_spent(
-        self,
-        coord: Coordinator,
-    ):
-        """Legacy rows settle as unsupported, not as attempted recovery or budget failure."""
-        _set_budget(coord, minutes=600)
-        coord.sub.executor_registry.pop("recover", None)
-        task, _ = await coord.tasks.create_or_return_existing(
-            kind="recover",
-            params={},
-            idempotency_key="q-recover",
-        )
-        _set_budget(coord, minutes=600, elapsed_min=600.0)
-
-        await pump_until_settled(coord.dispatcher)
-
-        row = await coord.tasks.get(task.task_id)
-        assert row.state == "cancelled"
-        assert [(step["from"], step["to"]) for step in row.history] == [("queued", "cancelled")]
-        assert row.history[-1]["evidence"] == {
-            "reason": "unsupported_action",
-            "cleanup_confirmed": True,
-            "outcome": {
-                "task_id": task.task_id,
-                "state": "cancelled",
-                "result": {"status": "cancelled", "error_class": "unsupported_action"},
-                "error": "recover is no longer supported",
-                "error_class": "unsupported_action",
-            },
-        }
-        assert not await coord.locks.lane_holders()
-        assert not coord.dispatcher._inflight_actions
-        failures = list(getattr(coord.shared_state, "last_action_failures", []) or [])
-        assert not [failure for failure in failures if failure.get("action") == "recover"]
-
-    @pytest.mark.asyncio
     async def test_a_queued_targeted_build_is_dropped_when_the_budget_is_spent(
         self,
         coord: Coordinator,
@@ -637,10 +601,10 @@ class TestPreDispatchBackstop:
         assert coord.shared_state.last_conc_sweep["skip_reason"] == "session_time_budget"
         assert coord.shared_state.last_conc_sweep["was_skipped"] is True
         # Verify the sweep exit logic sees the recorded skip as a "done" closeout.
-        from hyperloom.orchestrator.phases.machine_state import workflow_predicate_inputs, replay_next_phase
+        from hyperloom.orchestrator.phases.machine_state import PhaseFlags, replay_next_phase, workflow_predicate_inputs
 
         coord.shared_state.phase = "SWEEP"
-        inputs = workflow_predicate_inputs(coord.shared_state, optimize_enabled=False)
+        inputs = workflow_predicate_inputs(coord.shared_state, flags=PhaseFlags(optimize_enabled=False))
         result = replay_next_phase(inputs)
         assert result is not None
         _target, reason, evidence = result
@@ -1186,25 +1150,6 @@ async def test_stop_defers_db_close_until_pending_worker_cleanup(coord, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_retired_queued_recover_emits_cancelled_result_without_failure(coord):
-    coord.sub.executor_registry.pop("recover", None)
-    task = await coord.tasks.create(
-        kind="recover", params={}, idempotency_key="retired-queued", requires_lanes=["server_lifecycle"]
-    )
-    await coord.locks.acquire_many(
-        ["server_lifecycle"], holder_id="occupied", task_id="occupied", action="baseline", ttl_sec=60
-    )
-    await pump_until_settled(coord.dispatcher)
-    assert (await coord.tasks.get(task.task_id)).state == "cancelled"
-    event = await coord.db.fetchone("SELECT payload FROM events WHERE topic='delegated_result'")
-    assert event is not None
-    import json
-
-    assert json.loads(event["payload"])["state"] == "cancelled"
-    assert (await coord.locks.lane_holders())["server_lifecycle"] == 1
-
-
-@pytest.mark.asyncio
 async def test_cancelled_result_bookkeeping_does_not_release_gpu_capacity(coord):
     from hyperloom.orchestrator.bus.gpu_pool import SpecialistGpuPool
 
@@ -1248,7 +1193,7 @@ async def test_specialist_cleanup_ack_precedes_capacity_release(coord, confirmed
     coord.gpu_specialist_pool.release = release
     on_complete = AsyncMock()
     execution = coord.dispatcher.run_task_registered(
-        task, gpu_lease=gpu, gpu_specialist_lease=RayLease(), on_complete=on_complete
+        task, HeldLeases(gpu_lease=gpu, gpu_specialist_lease=RayLease()), on_complete=on_complete
     )
     if confirmed:
         await execution
@@ -1501,7 +1446,7 @@ class TestATickCannotOutliveTheSessionBound:
         started = time.monotonic()
         try:
             reason = await asyncio.wait_for(
-                coord.run(max_minutes=0.05, closing_grace_sec=0.0, tick_interval_sec=0.0),
+                coord.run(options=RunOptions(max_minutes=0.05, tick_interval_sec=0.0, closing_grace_sec=0.0)),
                 timeout=15.0,
             )
         finally:
@@ -1521,7 +1466,7 @@ class TestATickCannotOutliveTheSessionBound:
         started = time.monotonic()
         try:
             reason = await asyncio.wait_for(
-                coord.run(max_minutes=0.05, closing_grace_sec=0.0, tick_interval_sec=0.0),
+                coord.run(options=RunOptions(max_minutes=0.05, tick_interval_sec=0.0, closing_grace_sec=0.0)),
                 timeout=15.0,
             )
         finally:
@@ -1697,7 +1642,7 @@ class TestTheSessionBudgetIsSummedForwardOverLegs:
     @pytest.mark.asyncio
     async def test_a_leg_charges_its_time_to_the_session(self, coord: Coordinator):
         try:
-            await coord.run(max_ticks=1, max_minutes=60, closing_grace_sec=0.0)
+            await coord.run(options=RunOptions(max_minutes=60, max_ticks=1, closing_grace_sec=0.0))
         finally:
             await coord.stop()
         assert coord.shared_state.leg_anchor_unix > 0.0
@@ -1709,7 +1654,7 @@ class TestTheSessionBudgetIsSummedForwardOverLegs:
         coord.shared_state.max_minutes = 180
         coord.shared_state.elapsed_charged_sec = 120 * 60.0
         try:
-            await coord.run(max_ticks=1, max_minutes=180, closing_grace_sec=0.0)
+            await coord.run(options=RunOptions(max_minutes=180, max_ticks=1, closing_grace_sec=0.0))
         finally:
             await coord.stop()
         assert coord.shared_state.elapsed_charged_sec >= 120 * 60.0
@@ -1721,11 +1666,7 @@ class TestTheSessionBudgetIsSummedForwardOverLegs:
         coord.shared_state.elapsed_charged_sec = 180 * 60.0
         started = time.monotonic()
         try:
-            reason = await coord.run(
-                max_minutes=180,
-                closing_grace_sec=0.0,
-                max_ticks=8,
-            )
+            reason = await coord.run(options=RunOptions(max_minutes=180, max_ticks=8, closing_grace_sec=0.0))
         finally:
             await coord.stop()
         assert reason == "time_exhausted"
@@ -1777,7 +1718,7 @@ class TestTheSessionBudgetIsSummedForwardOverLegs:
         coord.shared_state.max_minutes = 180
         coord.shared_state.deadline_unix = start.timestamp() + 180 * 60.0
         try:
-            await coord.run(max_minutes=180, closing_grace_sec=0.0, max_ticks=8)
+            await coord.run(options=RunOptions(max_minutes=180, max_ticks=8, closing_grace_sec=0.0))
             # Read liveness before the safety kill below, or the assertion is
             # satisfied by this test rather than by the teardown.
             reaped = proc.poll() is not None or proc.wait(timeout=10) is not None

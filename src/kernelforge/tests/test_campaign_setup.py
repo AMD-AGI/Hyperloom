@@ -6,7 +6,8 @@ import subprocess
 
 import pytest
 
-from kernelforge.loop.campaign_setup import parse_list, resolve_campaign
+from kernelforge.loop.campaign_config import CampaignInputs, parse_list
+from kernelforge.loop.campaign_setup import resolve_campaign
 from kernelforge.loop.campaign_config import CampaignConfigStore
 
 
@@ -65,15 +66,14 @@ def _git_workspace(tmp_path, name="workspace"):
     return workspace, kernel, driver
 
 
-def _base_args(workspace, kernel, driver):
+def _base_args(workspace, kernel, driver, **inputs):
     return dict(
         workspace_dir=str(workspace),
+        inputs=CampaignInputs(
+            kernel=str(kernel), driver=str(driver), kernel_backend="triton", snr_threshold=2.0, **inputs
+        ),
         resume=False,
         prepare_task=False,
-        kernel=str(kernel),
-        driver=str(driver),
-        kernel_backend="triton",
-        snr_threshold=2.0,
     )
 
 
@@ -103,12 +103,7 @@ class TestResolveCampaign:
         stored_sha = r1.campaign.driver_sha256
 
         r2 = resolve_campaign(
-            workspace_dir=str(workspace),
-            resume=True,
-            prepare_task=False,
-            kernel="",
-            driver="",
-            snr_threshold=2.0,
+            str(workspace), CampaignInputs(kernel="", driver="", snr_threshold=2.0), resume=True, prepare_task=False
         )
         assert r2.campaign.driver_sha256 == stored_sha
         assert r2.save_deferred is False
@@ -118,36 +113,30 @@ class TestResolveCampaign:
         resolve_campaign(**_base_args(workspace, kernel, driver))
         with pytest.raises(ValueError, match="immutable configuration"):
             resolve_campaign(
-                workspace_dir=str(workspace),
+                str(workspace),
+                CampaignInputs(kernel=str(kernel), driver=str(driver), snr_threshold=2.0),
                 resume=True,
                 prepare_task=False,
-                kernel=str(kernel),
-                driver=str(driver),
-                snr_threshold=2.0,
             )
 
     def test_missing_kernel_raises_for_fresh(self, tmp_path):
         workspace, _kernel, driver = _git_workspace(tmp_path)
         with pytest.raises(ValueError, match="fresh campaign requires"):
             resolve_campaign(
-                workspace_dir=str(workspace),
+                str(workspace),
+                CampaignInputs(kernel="", driver=str(driver), snr_threshold=2.0),
                 resume=False,
                 prepare_task=False,
-                kernel="",
-                driver=str(driver),
-                snr_threshold=2.0,
             )
 
     def test_missing_driver_raises_for_fresh(self, tmp_path):
         workspace, kernel, _driver = _git_workspace(tmp_path)
         with pytest.raises(ValueError, match="fresh campaign requires"):
             resolve_campaign(
-                workspace_dir=str(workspace),
+                str(workspace),
+                CampaignInputs(kernel=str(kernel), driver="", snr_threshold=2.0),
                 resume=False,
                 prepare_task=False,
-                kernel=str(kernel),
-                driver="",
-                snr_threshold=2.0,
             )
 
     def test_pending_retry_mismatch_raises(self, tmp_path):
@@ -159,11 +148,10 @@ class TestResolveCampaign:
         other_kernel.write_text("def k(): return 99\n")
         with pytest.raises(ValueError, match="does not match"):
             resolve_campaign(
-                workspace_dir=str(workspace),
+                str(workspace),
+                CampaignInputs(
+                    kernel=str(other_kernel), driver=str(driver), snr_threshold=2.0, kernel_backend="triton"
+                ),
                 resume=False,
                 prepare_task=False,
-                kernel=str(other_kernel),
-                driver=str(driver),
-                kernel_backend="triton",
-                snr_threshold=2.0,
             )
