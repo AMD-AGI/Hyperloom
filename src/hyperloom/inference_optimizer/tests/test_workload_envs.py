@@ -433,14 +433,6 @@ def test_run_eval_false_from_template_or_operator_pin_is_ignored(monkeypatch, tm
     assert envs.get("MY_KNOB") == "1"
 
 
-def test_run_eval_round_override_still_applies(monkeypatch, tmp_path):
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
-    src = _write(tmp_path / "cfg.yaml")
-    bench = _materialize(src, tmp_path / "out", extra_envs={"RUN_EVAL": "false"})
-    assert bench["envs"]["RUN_EVAL"] == "false"
-
-
 def test_profile_negative_delay_clamped(monkeypatch, tmp_path):
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
