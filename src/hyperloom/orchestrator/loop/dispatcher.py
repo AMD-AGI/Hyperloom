@@ -12,7 +12,6 @@ from collections.abc import Awaitable, Callable
 from functools import partial
 from typing import Any, NamedTuple
 from hyperloom.common.deadline import Deadline
-from hyperloom.common.env import is_truthy
 from hyperloom.common.framework_arm import verdict_subject
 from hyperloom.common.llm_attribution import current_action_scope
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
@@ -48,10 +47,11 @@ from ..bus.resource_lock import (
 )
 from .dispatch_admission import (
     GpuAdmission,
-    GpuPoolChoice,
     LaneAdmission,
     acquire_gpu_lease,
+    gpu_pool_for_specialist,
     serving_slot_probe,
+    specialist_gpu_count,
 )
 from .sub_agent_runner import SubAgentResult
 from .task_settlement import (
@@ -608,44 +608,6 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         for lane in lease.lanes:
             holders[lane] = max(0, int(holders.get(lane, 0)) - 1)
 
-    def _gpu_pool_for_specialist(self, params: dict[str, Any]) -> GpuPoolChoice:
-        """Pick the pool a GPU specialist leases from and the card count it defaults to.
-
-        Whole-machine, time-shared lane vs serving-disjoint pool: enablement and bench-capable
-        specialists lease the whole machine from ``framework_gpu_pool``; every other GPU
-        specialist leases from ``gpu_specialist_pool``. An explicit ``gpu_count`` always wins.
-        """
-        from ..specialists.profile import is_authoring_specialist, uses_whole_machine_gpu_lane
-
-        if not uses_whole_machine_gpu_lane(params):
-            return GpuPoolChoice(self.gpu_specialist_pool, self.resolve_serving_tp() or 1)
-        gpu_pool = self.framework_gpu_pool
-        if is_authoring_specialist(params):
-            return GpuPoolChoice(gpu_pool, gpu_pool.capacity or 1)
-        # Bench specialist: size to the serving TP.
-        return GpuPoolChoice(gpu_pool, self.resolve_serving_tp() or gpu_pool.capacity or 1)
-
-    def _specialist_gpu_count(self, task: Task, default_gpu_count: int) -> int:
-        """Cards to lease for a GPU specialist, floored up to the serving TP when it benches."""
-        params = task.params or {}
-        try:
-            gpu_count = int(params.get("gpu_count", default_gpu_count) or default_gpu_count)
-        except (TypeError, ValueError):
-            gpu_count = default_gpu_count
-        serving_tp = self.resolve_serving_tp() or 0
-        if is_truthy(params.get("bench")) and serving_tp > 0 and gpu_count < serving_tp:
-            log.info(
-                "specialist %s: bench=true with gpu_count=%d < serving "
-                "TP=%d; flooring gpu_count to TP (a bench specialist "
-                "starts a real TP-sharded server and cannot run on "
-                "fewer cards).",
-                task.task_id,
-                gpu_count,
-                serving_tp,
-            )
-            return serving_tp
-        return gpu_count
-
     async def _admit_gpu_specialist(
         self,
         task: Task,
@@ -664,8 +626,14 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         if slot_probe is not None and slot_probe():
             # Serving is active — keep the task queued rather than piling onto the contended GPU.
             return GpuAdmission(False)
-        choice = self._gpu_pool_for_specialist(params)
-        gpu_count = self._specialist_gpu_count(task, choice.default_gpu_count)
+        serving_tp = self.resolve_serving_tp()
+        choice = gpu_pool_for_specialist(
+            params,
+            framework_pool=self.framework_gpu_pool,
+            specialist_pool=self.gpu_specialist_pool,
+            serving_tp=serving_tp,
+        )
+        gpu_count = specialist_gpu_count(task, choice.default_gpu_count, serving_tp)
         # Iron law: kill <= gpu_lease TTL <= gpu_research_lane TTL, measured from the same deadline
         # carried down to the reaper.
         gpu_ttl_sec = self.gpu_lease_ttl_sec(
@@ -1175,14 +1143,8 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 )
             )
         except Exception as exc:
-            log.exception(
-                "dispatcher: failed to append delegated_result for task=%s",
-                task.task_id,
-            )
-            self._coord.record_exception(
-                stage="dispatcher_result",
-                exc=exc,
-            )
+            log.exception("dispatcher: failed to append delegated_result for task=%s", task.task_id)
+            self._coord.record_exception(stage="dispatcher_result", exc=exc)
             return False
         return True
 
@@ -1224,14 +1186,8 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             if task.task_id not in self._dead_holder_accounted:
                 await writeback.handle_unpromotable_result(task, unpromotable_payload(result))
         except Exception as exc:
-            log.exception(
-                "dispatcher: promotion/unpromotable handling failed for task=%s",
-                task.task_id,
-            )
-            self._coord.record_exception(
-                stage="dispatcher_promote",
-                exc=exc,
-            )
+            log.exception("dispatcher: promotion/unpromotable handling failed for task=%s", task.task_id)
+            self._coord.record_exception(stage="dispatcher_promote", exc=exc)
             return PromotionOutcome(Verdict.FAILED, (), True)
         return PromotionOutcome(Verdict.FAILED, (), False)
 
@@ -1245,14 +1201,8 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 adopted_variants=promotion.adopted_variants,
             )
         except Exception as exc:
-            log.exception(
-                "dispatcher: fact-write hook failed for task=%s",
-                task.task_id,
-            )
-            self._coord.record_exception(
-                stage="dispatcher_fact_write",
-                exc=exc,
-            )
+            log.exception("dispatcher: fact-write hook failed for task=%s", task.task_id)
+            self._coord.record_exception(stage="dispatcher_fact_write", exc=exc)
 
     async def _refresh_explore_gaps(self, task: Task, result: SubAgentResult) -> None:
         """Append this explore round's per-variant KEEP/REVERT, then re-run the global gap refresh."""
