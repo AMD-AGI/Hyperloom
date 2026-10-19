@@ -4373,6 +4373,36 @@ class TestTracelensRootResolution:
         assert called["n"] == 1
         assert called["root"] == default_root
 
+    @pytest.mark.parametrize("error", [OSError("disk gone"), subprocess.TimeoutExpired(cmd="git", timeout=600)])
+    def test_selfheal_logs_an_expected_failure_and_returns(self, tmp_path, monkeypatch, error):
+        monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "podlocal"))
+        default_root = tmp_path / "podlocal" / "TraceLens"
+        warnings = []
+
+        def _fail(root, *, log_path=None):
+            raise error
+
+        _stub_tracelens_analysis(monkeypatch, _fail)
+        ta._maybe_selfheal_tracelens_root(
+            default_root, log=types.SimpleNamespace(warning=lambda *a: warnings.append(a))
+        )
+
+        assert warnings == [
+            ("trace_analyze: TraceLens root %s missing; attempting self-heal", default_root),
+            ("trace_analyze: TraceLens self-heal failed: %s", error),
+        ]
+
+    def test_selfheal_lets_an_unexpected_failure_propagate(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "podlocal"))
+
+        def _fail(root, *, log_path=None):
+            raise RuntimeError("heal bug")
+
+        _stub_tracelens_analysis(monkeypatch, _fail)
+
+        with pytest.raises(RuntimeError, match="heal bug"):
+            ta._maybe_selfheal_tracelens_root(tmp_path / "podlocal" / "TraceLens")
+
 
 class TestBuildTraceAnalyzeCmd:
     """argv golden for ``_build_trace_analyze_cmd``: the splitter (non-scriptable) and diffusion (scriptable) surfaces, plus the bypass vs TraceLens difference."""
