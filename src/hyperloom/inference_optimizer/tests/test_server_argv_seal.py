@@ -41,20 +41,29 @@ _COMPOSERS = (
 )
 
 #: The functions allowed to write the argument env: the two composers, the phases
-#: the first one delegates to, the two helpers they delegate a step to -- the
-#: per-flag merge every injection goes through and the final guards -- all of
-#: which run above the seal, plus the seal itself and the re-seal a repair is
-#: written back through.
+#: they delegate to and the steps those phases are themselves made of -- the
+#: per-source merges, the per-framework profiler flags, the caller's removals and
+#: the final guards -- all of which run above the seal, plus the seal itself and
+#: the re-seal a repair is written back through.
 _WRITERS = frozenset(
     {
         "materialize_config_with_envs",
         "_apply_profile_config",
         "_shape_profile_trace",
+        "_bound_vllm_profiler_capture",
+        "_publish_patched_shape_discovery",
         "_apply_framework_envs",
+        "_drop_redundant_graph_capture_flag",
         "_apply_eval_envs",
         "_tokenized_requests_env",
         "_resolve_tensor_parallel",
         "add_server_arg_unless_pinned",
+        "_seed_reference_server_args",
+        "_merge_caller_server_args",
+        "_compose_server_args",
+        "_apply_caller_removals",
+        "_restore_vllm_profiler_bounds",
+        "_apply_atom_tracelens_knobs",
         "_finalize_framework_server_args",
         "_build_variant_yaml",
         "seal_server_argv",
