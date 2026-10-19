@@ -440,7 +440,7 @@ def test_grid_deadline_attribution_does_not_relabel_cancellation(sweep_run, monk
         never_started="conc_sweep total budget exhausted before this round ran",
         ends_the_batch=True,
     )
-    original_grid = conc_sweep.run_grid
+    original_grid = _conc_sweep_run.run_grid
 
     async def attributed_grid(**kwargs):
         kwargs["deadline_stop"] = sweep_stop
