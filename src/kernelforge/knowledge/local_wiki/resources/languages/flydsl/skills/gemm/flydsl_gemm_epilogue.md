@@ -51,7 +51,7 @@ Run three ablations of the epilogue:
 3. **Same segments, fewer VALU instructions.** This measures the issue cost.
 
 Only (1) moving means the store is byte- or bandwidth-bound, and width or reorder work will not help.
-*(field)* Ablation (2) gave +0.8%, (3) gave −0.5% and (1) gave −20.3%, so the store was
+*(field)* In one kernel the time changes were (1) −20.3%, (2) +0.8%, (3) −0.5%, so its store was
 byte-bound. Check that an ablation arm writes the same `M×N×2` bytes to the same rows. *(field)* A
 probe that collapsed four rows into one segment also cut the written bytes about 6×, and read as a false
 request win.
@@ -134,8 +134,8 @@ At one wave per SIMD nothing overlaps the epilogue unless you put it inside MFMA
 
 - **C is write-once: store it non-temporal** (`nt`, aux=2). Caching it evicts the A/B band that the L2 tile
   order is keeping (FP8:72-73).
-- For a beta=1 burst too large for L2, use device scope `sc0|sc1|nt` (aux=19). Turbo switches at 26 MB
-  (`_cstore_aux`, FP8:74-77, 1885). That threshold is a measured value.
+- For a beta=1 burst too large for L2, use system scope `sc0|sc1|nt` (aux=19; agent scope is `sc1` alone).
+  Turbo switches at 26 MB (`_cstore_aux`, FP8:74-77, 1885). That threshold is a measured value.
 - **The sign is shape-dependent, so race it.** *(field)* In the MXFP8 GEMM, `nt` cut the wide shapes by 4.6%
   and 3.0% and cost 0.9–1.9% on narrow shapes whose slabs were already L2-resident. It is raced at a 1%
   margin, not pinned (MX8:968-974).

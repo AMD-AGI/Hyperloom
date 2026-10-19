@@ -1,4 +1,4 @@
-<!-- Vendored from ROCm/FlyDSL@dd8373349:docs/kernel_authoring_guide.md -->
+<!-- Vendored from ROCm/FlyDSL@dd8373349:docs/kernel_authoring_guide.md, with KernelForge corrections -->
 # Kernel authoring guide
 
 This guide covers writing GPU kernels with FlyDSL: the `@flyc.jit` and `@flyc.kernel` decorators, expression API, launch configuration, shared memory, and synchronization. It documents the `@flyc.kernel`/`@flyc.jit` API from `flydsl.compiler` and `flydsl.expr` (`python/flydsl/`).
@@ -260,7 +260,7 @@ copy_op = rocdl.BufferCopy64b()    # 64-bit buffer copy
 copy_op = rocdl.BufferCopy32b()    # 32-bit buffer copy
 ```
 
-See [gfx1250 WMMA & TDM atoms](#gfx1250-wmma-tdm-atoms-wave32) below for the
+See [gfx1250 WMMA & TDM atoms](#gfx1250-wmma--tdm-atoms-wave32) below for the
 gfx1250 WMMA (incl. MX-scaled) MMA atoms and the TDM async copy atom.
 
 #### MFMA instructions

@@ -151,9 +151,11 @@ probes that cut one LDS read stream by 17–33%. Decide with a halve-the-reads p
 
 - **A `v_mfma_f32_16x16x32_bf16` offers 12 cycles of shadow on gfx950.** `SQ_VALU_MFMA_BUSY_CYCLES /
   SQ_INSTS_MFMA` reads 16 cycles for it, and issue takes 4. *(field)* The same 16 was read on three
-  different kernels. Read the ratio for the MFMA your kernel issues: `v_mfma_f32_16x16x128_f8f6f4` reads 32
-  (`flydsl_gemm_grid_pricing.md` §5). The
-  ceiling for interleaving work is `12 × MFMAs in the phase`.
+  different kernels. Read the ratio for the MFMA and operand format your kernel issues:
+  `v_mfma_f32_16x16x128_f8f6f4` with fp8 A and B reads 32 (`flydsl_gemm_grid_pricing.md` §5). Its fp4 form
+  is shorter — LLVM's gfx950 hazard model gives it fewer wait states (`flydsl_gemm_correctness.md` §7) — so
+  read its ratio rather than assuming 32. The ceiling for interleaving work is `(cycles − 4)` per MFMA in
+  the phase: `12 × MFMAs` for the bf16 atom above.
 - **The register allocator is the constraint.** *(field)* An epilogue interleaved into the last chunk's MFMAs
   did interleave (one MFMA per 29 instructions), but spills went 0 → 16 and wall time lost 2–4%. Dump the
   ISA and check spills before timing.

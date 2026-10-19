@@ -30,7 +30,8 @@ sources:
 
 **Somewhere else if:** the loop structure is the question → `flydsl_gemm_mainloop.md`; wave placement,
 XCD order, scheduling hints or the epilogue → `flydsl_gemm_schedule_and_locality.md`; the arguments of a
-shipped kernel → `../optimize/flydsl_levers/flydsl_knob_space.md`.
+shipped kernel → the entry points in `INDEX.md`'s kernel map, and aiter's FlyDSL a16w16 rows →
+`flydsl_gemm_small_m.md`.
 
 FlyDSL's guide starts the tile choice from `preshuffle_gemm`'s constraints and a table by M
 (`../optimize/gemm-optimization.md` §1.3–§1.5), and its checklist asks for enough blocks to fill the GPU (§13).
@@ -59,8 +60,8 @@ How to read it:
 | `last_round < slots` | CUs idle through the last round | **narrow** the tile (or split) so the last round fills |
 
 Narrowing pays even when it does not remove a round — filling a partial last round is enough.
-*(field)* On related MXFP6/MXFP4 GEMM kernels, widening `tile_n` 256→384 on
-forward shapes whose last round was already full gained +16.9%; narrowing 256→192 gained on exactly the 6
+*(field)* On related MXFP6/MXFP4 GEMM kernels, widening `tile_n` 256→384 on forward shapes (four of the
+six already ended on a full round) was worth +14.6% by ablation; narrowing 256→192 gained on exactly the 6
 of 12 backward shapes whose last round was partial and on none of the others (+16% where the last round
 filled 144 of 256 CUs, +4–6% where it filled 128).
 
@@ -93,7 +94,7 @@ time it recovers, no split wins.
 **How Primus-Turbo implements it** (main `7615a5a2`, files under `primus_turbo/flydsl/gemm/`):
 - The gate above is Turbo's MXFP4 gate. `_mxfp4_wave_eff = tiles / (ncu · ceil(tiles/ncu))`; no split
   when `eff > 0.95` or `K < 2048`; a split must raise `eff` by more than 0.05; the race gets `s = 1`
-  plus the two best splits (`_ksplit_candidates`, `gemm_mxfp4_kernel.py:3488-3512`).
+  plus the two best splits (`_ksplit_candidates`, `gemm_mxfp4_kernel.py:3489-3511`).
 - **Reduce with pairwise `torch.add(out=)` launched after the GEMM**, not inside it. It "runs at the pure write floor where
   `sum(dim=0)` reaches half of it, and the reduce is a sixth of a split launch -- the fold's form decides
   whether a split pays at all" (`_fold_mxfp4_partials`, `gemm_mxfp4_kernel.py:3540-3546`).
@@ -104,8 +105,9 @@ time it recovers, no split wins.
   `gemm_mxfp8_kernel.py:654-672`). *(field)* A uniform split netted out at zero.
 - **Dense fp8 TN splits one window.** Only the last partial round's `rem` tiles are sliced s ways
   (s ∈ {2, 3, 4}), choosing the s with the shortest window time (rounds × K/s; the smaller s on a tie) (`_dense_tn_split`,
-  `gemm_fp8_kernel.py:1857-1872`). At s=2 the two slices hand off through a device-scope flag inside the
-  GEMM, so no reduce kernel is launched (`_tn4_handoff_wait`, `gemm_fp8_kernel.py:1325`).
+  `gemm_fp8_kernel.py:1857-1872`). At s=2 the two slices hand off through a flag accessed at system
+  scope (`sc0 sc1`) inside the GEMM, so no reduce kernel is launched (`_tn4_handoff_wait`,
+  `gemm_fp8_kernel.py:1325`).
 
 Refinements, in the order they usually pay:
 - **Tail split.** Split only the tiles of the ragged last round. Makespan matches a uniform split, but
@@ -114,7 +116,7 @@ Refinements, in the order they usually pay:
   moved (e.g. 3.5 rounds → 3 + 1 = 4).
 - **Stream-K** when you want the idle slots without a full reduce: only boundary tiles need a fixup.
 - The split must cut K into whole K-blocks the kernel accepts; shipped kernels assert their own
-  constraints (`../optimize/flydsl_levers/flydsl_knob_space.md` covers aiter's `flydsl_hgemm`).
+  constraints (for `gemm_a16w16_gfx950`'s split-K, `flydsl_gemm_small_m.md` §4).
 - If the scoring harness rejects GPU work from kernels you did not write, the reduce has to be your own
   kernel in the same language, not a framework op.
 
@@ -182,7 +184,7 @@ ceil(K_real / inst_k) < ceil(K_pad / inst_k)
 last iteration's feed bytes. Confirm the granule from counters: `SQ_INSTS_MFMA` should equal
 `M·N·K / (m·n·k of the instruction)`.
 
-A bigger MFMA shape is not a throughput lever. *(field)* On gfx950,
+A bigger MFMA shape is not a throughput lever. *(field)* On gfx950 with fp8 A and B,
 `v_mfma_f32_32x32x64_f8f6f4` occupies the matrix pipe exactly twice as long as
 `v_mfma_f32_16x16x128_f8f6f4` (`SQ_VALU_MFMA_BUSY_CYCLES / SQ_INSTS_MFMA` = 64 vs 32), so pipe time per
 FLOP is unchanged; it needs 4× the accumulator registers per instruction and leaves fewer independent
@@ -202,10 +204,10 @@ t_tile = a · n_kblocks + F
 
 `F` — prologue, epilogue, tail peel, address and descriptor setup, drain — is paid once per tile, and its
 share `F / (a · n_kblocks + F)` grows as K shrinks. Across a shape table it usually explains the TF/s
-ranking better than any other variable. *(field)* `F` = 2.21 K-blocks: 19% of tile time at K=2944, 1.7%
-at K=32768, and the table's TF/s order was essentially the inverse of that share. By the fit, removing
-one K-block of `F` is worth ~4–5% over that table — a projection, not a measurement, but already larger
-than the 1–2% that swizzle and candidate-table changes returned.
+ranking better than any other variable. *(field)* `F` = 2.21 K-blocks of 256: 16% of tile time at K=2944
+(11.5 blocks), 1.7% at K=32768, and the table's TF/s order was essentially the inverse of that share. By
+the fit, removing one K-block of `F` is worth ~4–5% over that table — a projection, not a measurement, but
+already larger than the 1–2% that swizzle and candidate-table changes returned.
 
 Two traps when reading such a table:
 - **Compare absolute µs, not TF/s, across padded shapes.** TF/s counts useful FLOPs, so padding waste
@@ -245,11 +247,11 @@ A second tile shape trades arithmetic intensity for CU fill. Price both sides be
   narrower 256×192 tile join the race only when its gain in resident workgroups exceeds its loss in
   intensity: `coverage(rect) / coverage(square) > intensity(rect) / intensity(square)` (`_nt4_geoms`,
   `gemm_fp8_kernel.py:2102-2119`).
-- **A narrow tile only wins where it removes a whole ragged round.** Turbo's MXFP4 picks BLOCK_N=192 over
-  256 only when that changes the round count, pricing a k-block at the pessimistic feed ratio
-  `(BM + BN) / (2·BM)` plus the C store the narrow tile can no longer fold (`_mxfp4_pick_block_n`,
-  `gemm_mxfp4_kernel.py:3427-3445`). The store penalty was solved from one measured shape; re-derive it
-  for your kernel.
+- **A narrow tile wins only where its extra tiles still fit in the same number of dispatch rounds**, so
+  each round is shorter. Turbo's MXFP4 picks BLOCK_N=192 over 256 only when the 192 grid needs no more
+  rounds and its priced time is lower: a k-block at the pessimistic feed ratio `(BM + BN) / (2·BM)`, plus
+  the C store the narrow tile can no longer fold (`_mxfp4_pick_block_n`, `gemm_mxfp4_kernel.py:3426-3445`).
+  The store penalty was solved from one measured shape; re-derive it for your kernel.
 - **Dead quadrants still issue their MFMAs.** The descriptor bound drops only their loads and stores. An
   exact tile (e.g. 192 rows when M divides by 192) therefore shortens every workgroup's own path. Turbo
   adds exact tiles only when they fit in one CU pass and cut the per-workgroup MFMAs per K block
@@ -279,6 +281,6 @@ A second tile shape trades arithmetic intensity for CU fill. Price both sides be
 ## Related
 `flydsl_gemm_workflow.md` (order of operations) · `flydsl_gemm_schedule_and_locality.md` (wave
 placement, XCD order, scheduling) · `flydsl_gemm_autotune.md` (racing the candidates) ·
-`../optimize/flydsl_levers/flydsl_knob_space.md` (shipped kernels' split-K and tile arguments) ·
+`flydsl_gemm_small_m.md` (split-K and tile arguments of aiter's FlyDSL a16w16 kernel) ·
 `../../../../common_methodology/optimization/lever_grid_sizing.md` ·
 `../../../../hardware/mi350_execution.md` · `../../../../hardware/mi350_matrix_core.md`

@@ -36,8 +36,9 @@ or how to run the next round.
 | Writing your first FlyDSL kernel | `../../API_docs/flydsl-tile-programming.md` |
 | Not a GEMM, or the bottleneck is still unidentified | `../optimize/flydsl_levers/flydsl_authoring_method.md` |
 
-**Two questions to settle before writing anything.** Does a shipped kernel already cover the shape
-(`../optimize/flydsl_levers/flydsl_kernel_library.md`)? Is FlyDSL even the backend that will be dispatched
+**Two questions to settle before writing anything.** Does a shipped kernel already cover the shape (the
+kernel maps in `INDEX.md`; aiter's FlyDSL wrappers in `../optimize/flydsl_levers/flydsl_kernel_library.md`)?
+Is FlyDSL even the backend that will be dispatched
 (`../../../../framework/aiter/skills/optimize/aiter_levers/aiter_flydsl_libtype.md`)? Both are cheaper to
 answer than a rewrite.
 
@@ -45,11 +46,12 @@ answer than a rewrite.
 
 Read FlyDSL's `../optimize/gemm-optimization.md` for how the pieces of a FlyDSL GEMM fit together. Then pick
 the closest reference kernel for your dtype, layout and shape from the two maps in `INDEX.md`:
-- **FlyDSL's `kernels/gemm/`**: fp8/int8/fp16/bf16 with a preshuffled B (`preshuffle_gemm`), bf16/fp16 with
-  async DMA and split-K (`gemm_a16w16_gfx950`, also the small-M kernel), and fp8/MXFP4 NT in 8-wave and
-  4-wave forms. K must be a multiple of the K tile.
-- **Primus-Turbo's FlyDSL GEMMs**: NN and TN as well as NT, any K, a whole-loop inline-asm design, a
-  per-shape race between designs, and fused epilogues. They target training shapes; for M ≤ 256 use
+- **FlyDSL's `kernels/gemm/`**: fp8/int8/fp16/bf16 with a preshuffled B and an optional bias + ReLU/SiLU/GELU
+  epilogue (`preshuffle_gemm`), bf16/fp16 in NN/NT/TN/TT with async DMA and split-K (`gemm_a16w16_gfx950`,
+  also the small-M kernel), and fp8/MXFP4 NT in 8-wave and 4-wave forms. K must be a multiple of the K tile.
+- **Primus-Turbo's FlyDSL GEMMs**: fp8 NN and TN as well as NT, fp8 at any K ≥ 129 (MXFP4 needs
+  K % 64 == 0, MXFP8 K % 128 == 0), a whole-loop inline-asm design, a per-shape race between designs, and
+  fused GLU/dGLU + MXFP4-quantization epilogues. They target training shapes; for M ≤ 256 use
   `flydsl_gemm_small_m.md`.
 
 Both run on FlyDSL v0.3.2. Copy the structure and the reasoning; re-derive the constants (tile and preload
@@ -120,8 +122,9 @@ These rules come from Primus-Turbo's optimization loop (`agent/skills/kernel-opt
     any control-flow or layout change.
   - Never drop a shape inside a level.
 - **Accept mechanically.** The primary metric must improve beyond the noise floor
-  (`flydsl_gemm_measurement.md`), and no scored shape may regress beyond its own floor, even when the
-  geomean improves.
+  (`flydsl_gemm_measurement.md`). Turbo's rule rolls back any round where a core shape regresses by 5% or
+  more and records smaller regressions as a trade-off; a stricter gate rejects any scored shape that
+  regresses beyond its own floor.
 - **Escalate on consecutive rollbacks.**
   1. One rollback: write down why it failed.
   2. Two: re-profile from scratch.

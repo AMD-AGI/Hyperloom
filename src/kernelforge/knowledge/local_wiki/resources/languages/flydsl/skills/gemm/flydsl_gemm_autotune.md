@@ -19,7 +19,8 @@ sources:
 > policy and split-K all change sign between shapes (`flydsl_gemm_mainloop.md` §1,
 > `flydsl_gemm_epilogue.md` §5). Turbo's dense GEMMs therefore race a short candidate list on the first call
 > for each shape and cache the winner. FlyDSL's own kernels take their configuration from the caller; aiter picks
-> it from offline-tuned tables (`flydsl_gemm_small_m.md` §7, `../optimize/flydsl_levers/flydsl_knob_space.md`).
+> it from offline-tuned tables (`flydsl_gemm_small_m.md` §7). FlyDSL also ships a general `flydsl.autotune`
+> decorator that benchmarks a config list per key (`python/flydsl/autotune.py`).
 > "FP8", "FP4", "MX8" and "GH" are the files under
 > `primus_turbo/flydsl/{gemm,utils}` at Primus-Turbo main `7615a5a2`. Numbers marked *(field)* are measured
 > values. Use them for direction and order of magnitude, not as targets.
@@ -72,9 +73,10 @@ deployment shapes only costs compile time.
 - **Race noise above the margin makes the winner flip between runs.** *(field)* One shape alternated between two
   configurations about 3% apart. Clearing the cache and re-running the same shape showed a 2:1 split. The
   cause was the measurement order, not thermal noise.
-  - Time base and candidate inside one window, as a palindrome `(base, cand, cand, base)` per rep, and take
-    the median of `(c1+c2)/(b1+b2)` (`_robust_ab_ratio`, GH:2091). The DVFS ramp is odd in the slot index,
-    so it cancels within a rep.
+  - Time base and candidate in one process, inside one window, as a palindrome `(base, cand, cand, base)` per
+    rep, and take the median of `(c1+c2)/(b1+b2)` (`_robust_ab_ratio`, GH:2091). The DVFS ramp is odd in the
+    slot index, so it cancels within a rep. This is the two-arm in-process case of
+    `flydsl_gemm_measurement.md` §2.
   - *(field)* With the palindrome, 48 of 48 re-runs picked the same configuration.
   - Check stability itself repeatedly. One stable check is not evidence; use at least 6 cleared-cache
     re-runs and report every adopted configuration.
@@ -101,9 +103,9 @@ When a search stalls, change the family of the dimension you search (split-K, MF
 
 ## 4. Representative probe data
 
-- **Time on production-magnitude data.** fp8 wall time depends on the data's magnitude through power and
-  clock. "An all-zero probe would misrank candidates" (Turbo comment). Zero operands are a false ruler:
-  *(field)* 155 µs against 205 µs for the same build and shape.
+- **Time on production-magnitude data.** fp8 wall time depends on operand magnitude through power and
+  clock, so race on the caller's operands, as Turbo's dense race does (`_bench_dense_args`, FP8:3008-3013).
+  Zero operands are a false ruler: *(field)* 155 µs against 205 µs for the same build and shape.
 - **Rank at the caller's beta.** Race beta=1 configurations on scratch and rebuild the winner with the
   accumulate epilogue (`flydsl_gemm_epilogue.md` §7).
 - **Check numerics, not only finiteness, for candidates that change arithmetic order** (split-K, different

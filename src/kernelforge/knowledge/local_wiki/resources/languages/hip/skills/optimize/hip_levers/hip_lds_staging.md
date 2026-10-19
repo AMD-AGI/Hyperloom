@@ -29,7 +29,7 @@ conflicts, register staging you did not need, and missing wait counters.
 | Bank index | **`(byte_addr / 4) mod 64`** | `mod 32` |
 | Read bandwidth | **256 B/clk** | 128 B/clk |
 | Allocation granule | **320 DWORD** | 128 DWORD |
-| Direct global→LDS | **1/2/4/12/16 DWORD** (≤128 b/lane) | 1/2/4 (32 b/lane) |
+| Direct global→LDS | **1/2/4/12/16 bytes per lane** (≤128 b/lane) | 1/2/4 bytes per lane (32 b/lane) |
 | Read-with-transpose `ds` | **yes** | no |
 
 > **The 32 → 64 bank change invalidates every inherited swizzle.** A padding or XOR pattern tuned for

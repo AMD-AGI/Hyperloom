@@ -75,7 +75,7 @@ Run `/kernel-trace-analysis` first. Apply this skill when the trace shows:
 Because gfx950 has **64 banks** instead of 32, the bank conflict patterns change:
 
 - **Stride that causes conflicts**: multiples of 64 banks (256 bytes) instead of 32 banks (128 bytes)
-- A stride of 128 bytes that caused **full conflict on gfx942** (all threads hit same bank) will only cause **partial conflict on gfx950** (threads alternate between 2 banks)
+- A stride of 128 bytes that caused **full conflict on gfx942** (all threads hit same bank) puts every lane on one of only **two banks on gfx950** (0 and 32), which is still a heavy conflict
 - To cause full 64-way conflict on gfx950, the stride must be a multiple of `64 * 4 = 256` bytes
 - **XOR swizzle masks may need adjustment** — masks designed for 32-bank gfx942 may be suboptimal on 64-bank gfx950
 
@@ -216,29 +216,32 @@ swizzled_col = original_col XOR (row >> shift)
 
 This ensures threads accessing the same column in different rows hit different banks.
 
-### FlyDSL XOR Swizzle with SmemAllocator
+### FlyDSL XOR Swizzle with SharedAllocator
 
-In FlyDSL, LDS is managed through `SmemAllocator`. To apply swizzle, XOR the
-row index into the LDS address when computing store/load offsets:
+In FlyDSL, declare the LDS storage as an `@fx.struct` of `fx.Array` fields and
+allocate it inside the kernel with `fx.SharedAllocator`. To apply swizzle, XOR
+the row index into the LDS address when computing store/load offsets:
 
 ```python
-from flydsl.utils.smem_allocator import SmemAllocator
+import flydsl.expr as fx
 
-allocator = SmemAllocator(None, arch="gfx942", global_sym_name="smem0")
-lds_key = allocator.allocate_array(T.f16, KV_BLOCK_SIZE * HEAD_SIZE)
+@fx.struct
+class SharedStorage:
+    key: fx.Array[fx.Float16, KV_BLOCK_SIZE * HEAD_SIZE]
 
 @flyc.kernel
 def my_kernel(...):
-    lds_base = allocator.get_base()
-    lds_key_ptr = lds_key(lds_base)
+    lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+    lds_key = lds.key.view(fx.make_layout((KV_BLOCK_SIZE, PADDED_STRIDE), (PADDED_STRIDE, 1)))
 
     # XOR-swizzle address: distribute bank accesses
     # row_idx and col_idx are the logical 2D coordinates
     # XOR_BITS controls swizzle width (typically 4 for fp16 vec=8)
     swizzled_col = col_idx ^ (row_idx & XOR_MASK)
-    lds_offset = row_idx * PADDED_STRIDE + swizzled_col
-    lds_key_ptr.store(data, [lds_offset])
+    fx.memref_store(data, lds_key, [row_idx, swizzled_col])
 ```
+
+`flydsl.utils.smem_allocator.SmemAllocator` is legacy and has no `allocate_array`.
 
 ### Choosing Swizzle Parameters
 
@@ -260,10 +263,14 @@ Before (conflict-prone, linear layout):
 
 ```python
 # Linear shared memory layout — threads in same warp hit same banks
-lds_key = allocator.allocate_array(T.f16, KV_BLOCK_SIZE * HEAD_SIZE)
+@fx.struct
+class SharedStorage:
+    key: fx.Array[fx.Float16, KV_BLOCK_SIZE * HEAD_SIZE]
+
+lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+lds_key = lds.key.view(fx.make_layout((KV_BLOCK_SIZE, HEAD_SIZE), (HEAD_SIZE, 1)))
 # Store key tile: all threads write to column 0,1,2... -> bank conflicts
-lds_offset = row * HEAD_SIZE + col
-lds_key_ptr.store(data, [lds_offset])
+fx.memref_store(data, lds_key, [row, col])
 ```
 
 After (swizzled, conflict-free):
@@ -271,10 +278,10 @@ After (swizzled, conflict-free):
 ```python
 # XOR-swizzle distributes accesses across banks
 XOR_BITS = 4  # for fp16 vec=8: covers 4 banks per vec
-lds_key = allocator.allocate_array(T.f16, KV_BLOCK_SIZE * HEAD_SIZE)
+lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+lds_key = lds.key.view(fx.make_layout((KV_BLOCK_SIZE, HEAD_SIZE), (HEAD_SIZE, 1)))
 swizzled_col = col ^ ((row & 0x7) << XOR_BITS)
-lds_offset = row * HEAD_SIZE + swizzled_col
-lds_key_ptr.store(data, [lds_offset])  # now conflict-free
+fx.memref_store(data, lds_key, [row, swizzled_col])  # now conflict-free
 ```
 
 ## Optimization Method 2: Padding
@@ -308,34 +315,30 @@ PADDING = 1  # or a small number
 PADDED_HEAD_SIZE = HEAD_SIZE + PADDING
 
 # Allocate with extra column for padding
-lds_key = allocator.allocate_array(T.f16, KV_BLOCK_SIZE * PADDED_HEAD_SIZE)
+@fx.struct
+class SharedStorage:
+    key: fx.Array[fx.Float16, KV_BLOCK_SIZE * PADDED_HEAD_SIZE]
 
 @flyc.kernel
 def my_kernel(...):
-    lds_base = allocator.get_base()
-    lds_key_ptr = lds_key(lds_base)
+    lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+    # View with padded stride: physical row stride is PADDED_HEAD_SIZE
+    lds_key = lds.key.view(fx.make_layout((KV_BLOCK_SIZE, HEAD_SIZE), (PADDED_HEAD_SIZE, 1)))
 
-    # Write key data using padded stride (ignore padding column)
-    lds_offset = row * PADDED_HEAD_SIZE + col
-    lds_key_ptr.store(data, [lds_offset])
+    # Write key data using padded stride (padding column stays unused)
+    fx.memref_store(data, lds_key, [row, col])
 
-    # Read back using same padded stride
-    data = lds_key_ptr.load([row * PADDED_HEAD_SIZE + col])
+    # Read back using same padded-stride view
+    data = fx.memref_load(lds_key, [row, col])
 ```
 
 ### Padding Amount
 
-The minimum padding to eliminate all bank conflicts:
-
-```
-# gfx942 (32 banks):
-padding_elements = 32 / (element_size_bytes)  # worst case
-
-# gfx950 (64 banks):
-padding_elements = 64 / (element_size_bytes)  # worst case
-```
-
-But usually 1-4 elements suffice. The cost is extra LDS usage:
+Pick the smallest padding whose row stride is a fractional number of dwords or coprime with the bank
+count: the lanes then touch `NBANKS / gcd(row_stride_dwords, NBANKS)` distinct banks, and a fractional
+stride walks all of them. For 2-byte elements that is **+1 or +2 elements**. Do **not** use
+`padding = bank_count / element_size_bytes`: for fp16 on gfx950 that gives +32 elements, an 80-dword
+stride, and a 16-way conflict. The cost of padding is extra LDS usage:
 - 1 element padding per row: `KV_BLOCK_SIZE * element_size` extra bytes
 - Must ensure total LDS usage stays within **64 KB** per CU (gfx942) or **160 KB** per CU (gfx950)
 
@@ -428,7 +431,7 @@ After applying LDS optimizations:
 
 3. **LDS usage**: Check total LDS consumption:
    ```python
-   # Estimate: sum of all allocator.allocate_array() sizes * element_size
+   # Estimate: sum of all @fx.struct fx.Array field byte sizes
    # gfx942: Must be <= 65536 bytes (64 KB) per workgroup
    # gfx950: Must be <= 163840 bytes (160 KB) per workgroup
    # Note: gfx950 allocates LDS in 1280-byte granularity (1280-byte aligned blocks)

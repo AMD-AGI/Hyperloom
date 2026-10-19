@@ -58,7 +58,7 @@ Reference material: [../optimize/hip_levers/hip_traps.md](../optimize/hip_levers
 
 ## 5. Occupancy & spills — predict before you measure
 ```
-occ_vgpr = floor(512 / round_up_8(vgpr_used))           # waves/SIMD from VGPR
+occ_vgpr = min(8, floor(512 / round_up_8(vgpr_used)))   # waves/SIMD from VGPR (8-wave cap)
 occ_lds  = floor(LDS_CAP / lds_bytes_used)               # blocks/CU (65536 / 163840)
 occ (wg/CU) = min(floor(occ_vgpr * 4 / num_warps), occ_lds)   # 4 SIMD/CU
 ```

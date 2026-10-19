@@ -101,7 +101,7 @@ languages/flydsl/
 │   ├── gemm/                             # dense GEMM package (FlyDSL kernels, Primus-Turbo main, measured work) — open its INDEX.md
 │   │   ├── INDEX.md                      # task → card routing, kernel map
 │   │   └── flydsl_gemm_*.md              # workflow · grid_pricing · mainloop · datapath · schedule_and_locality ·
-│   │                                     #   epilogue · autotune · attribution · correctness · measurement
+│   │                                     #   epilogue · autotune · attribution · correctness · measurement · small_m
 │   ├── optimize/
 │   │   ├── flydsl_levers/
 │   │   │   ├── flydsl_kernel_library.md  # Path A: the shipped aiter families (HGEMM, small-M, fp8-A8, MoE, GDR, silu_fq)

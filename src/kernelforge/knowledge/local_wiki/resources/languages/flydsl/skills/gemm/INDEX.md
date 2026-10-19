@@ -18,8 +18,12 @@ scales), MXFP4, MXFP8, bf16/fp16 and int8, layouts NT/NN/TN.
   `../optimize/prefetch-data-load.md` cover the general LDS and prefetch transformations. The kernels are in
   FlyDSL's `kernels/gemm/` (map below).
 - **Primus-Turbo's FlyDSL GEMMs** (`primus_turbo/flydsl/{gemm,utils}` at main `7615a5a2`), built for training
-  shapes (large M). They add NN/TN layouts, any K, a whole-loop inline-asm design, a per-shape race and fused
-  epilogues. Their comments record why each choice was made, and the cards cite them by file and line.
+  shapes (large M). They add fp8 NN/TN layouts (FlyDSL's bf16/fp16 `gemm_a16w16` already takes NN/NT/TN/TT),
+  K tails without a padding copy (fp8 at any K ≥ 129, MXFP4 at K % 64 == 0), a whole-loop inline-asm design, a
+  per-shape race inside the entry point (FlyDSL ships a general `flydsl.autotune` decorator; its GEMM kernels
+  take the configuration from the caller), and fused GLU/dGLU + MXFP4-quantization epilogues (FlyDSL's
+  `preshuffle_gemm` fuses bias + ReLU/SiLU/GELU). Their comments record why each choice was made, and the cards
+  cite them by file and line.
 - **Measured FlyDSL GEMM work**, marked *(field)*: what moved wall time and what did not.
 
 The cards in this package start from what FlyDSL's guide already says and add the rest. Read the guide first if
@@ -54,16 +58,18 @@ Numbers marked *(field)* are measured values. Use them for direction and order o
 
 | File | dtype / layout | Loop design | Entry point |
 |---|---|---|---|
-| `preshuffle_gemm.py` | fp8, int8, fp16, bf16; per-row × per-column scales; B preshuffled; optional bias + ReLU/SiLU/GELU | 4 waves along N; A through a 2-stage LDS ping-pong, B straight to VGPR; `hot_loop_scheduler` hints; optional async A copy (gfx950) | `compile_preshuffle_gemm` (:108) |
-| `gemm_a16w16_gfx950.py` | bf16, fp16 | `m×n×k` waves, A and B by async DMA, `stages` deep, CShuffle store, split-K by atomics | `gemm_a16w16` (:1283) |
+| `preshuffle_gemm.py` | fp8, int8, fp16, bf16; per-row × per-column scales; B preshuffled; optional bias + ReLU/SiLU/GELU | 4 waves along N; A through a 2-stage LDS ping-pong, B straight to VGPR; `hot_loop_scheduler` hints; optional A DMA into LDS (`use_async_copy`, gfx950) | `compile_preshuffle_gemm` (:108) |
+| `gemm_a16w16_gfx950.py` | bf16, fp16; NN, NT, TN, TT | `m×n×k` waves, A and B by async DMA, `stages` deep, CShuffle store, split-K by atomics | `gemm_a16w16` (:1283) |
 | `fp8_gemm_8wave.py` | fp8, row-wise scales; NT; B plain or preshuffled | 8 waves (512 threads), 8 LDS buffers (A/B × cur/next × two halves) | `compile_fp8_gemm_8w` (:148) |
 | `fp8_gemm_4wave.py` | fp8, row-wise scales; NT; B plain or preshuffled | 4 waves 2×2, each a 128×128 quadrant; accumulators pinned in AGPR by per-MFMA inline asm; XCD remap | `compile_fp8_gemm_4w` (:162) |
-| `fp4_gemm_4wave.py` | MXFP4 (E8M0 per 32); NT | the fp8 4-wave structure with the scaled MFMA | `compile_fp4_gemm_4w` (:634) |
-| `mxfp4_preshuffle.py` | A MXFP4/MXFP6/MXFP8 × B MXFP4 (preshuffled weights and scales) | A by double-buffered async DMA into LDS, scaled 16x16x128 MFMA | `launch_gemm` (:58) |
+| `fp4_gemm_4wave.py` | MXFP4 (E8M0 per 32); NT | the fp8 4-wave structure (2×2 waves, 8-buffer LDS ping-pong) with the scaled MFMA; scales through LDS | `compile_fp4_gemm_4w` (:634) |
+| `mxfp4_preshuffle.py` | A MXFP4/MXFP6/MXFP8 × B MXFP4 or MXFP8 (preshuffled weights and scales) | 4 waves along N; A by DMA into a 2-buffer LDS ring; preshuffled B and the scales loaded straight to registers; scaled 16x16x128 MFMA | `launch_gemm` (:58) |
 
 Shared helpers are in `kernels/common/mma/` (`mfma_preshuffle_pipeline.py`, `mfma_epilogues.py`). None of these
-handles a K tail: K must be a multiple of the K tile. Calling them through aiter, and their argument space, is in
-`../optimize/flydsl_levers/flydsl_kernel_library.md` and `../optimize/flydsl_levers/flydsl_knob_space.md`.
+handles a K tail: K must be a multiple of the K tile. Their arguments are the entry-point signatures above. aiter's
+FlyDSL wrappers are in `../optimize/flydsl_levers/flydsl_kernel_library.md` and
+`../optimize/flydsl_levers/flydsl_knob_space.md`; their bf16 `flydsl_hgemm` sections describe aiter's earlier
+kernel, not `gemm_a16w16_gfx950` (`flydsl_gemm_small_m.md`).
 
 ### Primus-Turbo main `7615a5a2`, `primus_turbo/flydsl/`
 

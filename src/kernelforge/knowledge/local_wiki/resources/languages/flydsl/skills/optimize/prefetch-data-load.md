@@ -88,7 +88,7 @@ for i in range(START, END):
     data_B = buffer_ops.buffer_load(rsrc_B, offsets, vec_width=4)
 
     # === COMPUTE PHASE ===
-    result = rocdl.mfma_f32_16x16x16_f16(transform(data_A), transform(data_B), acc)
+    result = rocdl.mfma_f32_16x16x16f16(T.vec(4, T.f32), [transform(data_A), transform(data_B), acc])
 ```
 
 Apply the following transformation using `range(..., init=...)`:
@@ -122,7 +122,7 @@ for iv, state in range(_start, _stop, _step, init=init_state):
     next_data_B = buffer_ops.buffer_load(rsrc_B, offsets_next, vec_width=4)
 
     # Compute using current data (overlaps with next load)
-    acc = rocdl.mfma_f32_16x16x16_f16(transform(data_A), transform(data_B), acc)
+    acc = rocdl.mfma_f32_16x16x16f16(T.vec(4, T.f32), [transform(data_A), transform(data_B), acc])
 
     results = yield [_unwrap(v) for v in [next_data_A, next_data_B, acc]]
 ```
@@ -133,7 +133,7 @@ for iv, state in range(_start, _stop, _step, init=init_state):
 data_A = results[0]
 data_B = results[1]
 acc = results[2]
-acc = rocdl.mfma_f32_16x16x16_f16(transform(data_A), transform(data_B), acc)
+acc = rocdl.mfma_f32_16x16x16f16(T.vec(4, T.f32), [transform(data_A), transform(data_B), acc])
 ```
 
 ### Handling auxiliary data (block tables, scales)
@@ -157,8 +157,8 @@ for iv, state in range(_start, _stop, _step, init=init_state):
     next_scale = buffer_ops.buffer_load(rsrc_scale, next_block_id, vec_width=1)
 
     # Compute with current data
-    acc = rocdl.mfma_f32_16x16x16_f16(
-        transform(data_A) * scale, transform(data_B), acc
+    acc = rocdl.mfma_f32_16x16x16f16(
+        T.vec(4, T.f32), [transform(data_A) * scale, transform(data_B), acc]
     )
 
     results = yield [_unwrap(v) for v in [
@@ -190,7 +190,7 @@ def _unpack(state):
 pf_0 = issue_bt_k_loads(partition_0)
 init_state = _pack(flatten(pf_0['kv']), pf_0['part_start'], ...)
 
-# Runtime loop (bounds MUST be fx.Index, not Python ints!)
+# Runtime loop: Python-int or typed (fx.Index, fx.Int32, fx.Int64) bounds all lower to scf.for with init=
 for iv, state in range(fx.Index(0), fx.Index(N - 1), fx.Index(1), init=init_state):
     kv, part_start, bt, rmax, rsum, acc = _unpack(state)
     rmax, rsum, acc = compute_qk_softmax_pv(kv, part_start, bt, rmax, rsum, acc)
@@ -359,7 +359,7 @@ This works because:
 - **Don't reorder loads that have data dependencies**: if `load_B` depends on the result of `load_A` (e.g., block table lookup -> cache load), they must stay sequential within the prefetch block.
 - **Don't forget to handle conditional branches**: if scale loads are conditional (`KV_QUANT_MODE`), the prefetch must replicate the same conditions.
 - **Don't break the prologue/epilogue semantics**: the prologue covers iteration 0; the runtime loop runs N-1 iterations carrying prefetched data; epilogue processes the last iteration from `results`.
-- **Don't use Python ints as loop bounds when using `init=`**: use `fx.Index(...)` or the loop will be unrolled, silently ignoring `init=`.
+- **Don't rely on a Python rebinding inside `range(..., init=...)`**: only yielded values are carried. Python-int bounds are fine (they become index constants).
 
 ## Verification
 

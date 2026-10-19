@@ -128,7 +128,7 @@ What this buys:
 - Code size does not grow with K. The trip count can be a compile-time constant or a runtime SGPR.
 - FlyDSL's own fp4 kernel avoids full unrolling for that reason: "full unroll -> 111KB > 32KB I-cache"
   (`kernels/gemm/fp4_gemm_4wave.py:651`).
-- *(field)* The whole-loop rewrite was the largest single lever.
+- *(field)* The whole-loop rewrite was a key lever.
 
 How Turbo structures it (FP8:1133-1230, 2187-2412):
 - **Operand pools.** A macro tile is described as `(side, width, nbuf)` pools. The NT square tile is
@@ -156,7 +156,8 @@ How Turbo structures it (FP8:1133-1230, 2187-2412):
 - **Buffer select is free.** Each pool keeps one set of per-lane addresses. The buffer and tile deltas
   go into the 16-bit `ds_read` offset field (`_Tn4Pool` asserts the sum stays below 65536, FP8:1208).
 
-*(field)* This emit order is a sharp local optimum. Every perturbation lost:
+*(field)* In one 4-wave whole loop built this way, the emit order was a sharp local optimum. Every
+perturbation lost:
 
 | Perturbation | Effect |
 |---|---|
@@ -201,7 +202,7 @@ hot loop) and by wall time, not by `accum_offset` or register totals.
   C store packs straight out of arch VGPRs with no shuttle (`_MXFP4_ARCH_ACC`, FP4:578-582).
 - The same trade on the fp8 NT whole loop "measured a wash" (FP8:2045-2047): an MFMA writing an arch
   VGPR that a VALU then reads needs wait states that the single wave per SIMD has nothing to fill.
-- *(field)* At unchanged occupancy, freed registers buy nothing on their own. Releasing 72
+- *(field)* At unchanged occupancy, freed registers buy nothing on their own. In one kernel, releasing 72
   VGPRs and 72 AGPRs cost −2.05%. Name the specific gain the headroom is for before building it.
 
 **Setting `amdgpu-agpr-alloc` and friends.** Turbo passes these through `value_attrs`
@@ -219,14 +220,16 @@ read `.agpr_count`, `.vgpr_count` and the waves-per-eu fields from the ISA (`FLY
   (fp4 takes 4 dwords).
 - **bf16: prefer 16x16x32 to 32x32x16.** Both cover the same block with the same accumulators, operand
   bytes and `ds_read` count, but each MFMA rewrites its whole accumulator tile, so the smaller atom moves
-  fewer register-file bytes per MAC. *(field)* At the power cap the clock rose from 1.40 to 1.667 GHz
-  and the wall fell 10.8%, while cycles per dispatch rose 8% and MFMA utilization fell from 84% to 77%.
+  fewer register-file bytes per MAC. *(field)* In one bf16 kernel with 256×256 tiles at the power cap, the
+  swap raised the clock from 1.40 to 1.667 GHz and cut the wall 10.8%, while cycles per dispatch rose 8% and
+  MFMA utilization fell from 84% to 77%.
   `SQ_VALU_MFMA_BUSY_CYCLES` was bit-identical across the swap. **Rank atoms on wall time and energy,
   never on utilization counters.**
 
 ## 6. K tails inside the kernel
 
-Turbo accepts any K without a padding copy. FlyDSL's shipped kernels assert `K % BLOCK_K == 0`.
+Turbo's fp8 kernel accepts any K ≥ 129 without a padding copy; its MXFP4 kernel needs K % 64 == 0 and
+MXFP8 K % 128 == 0. FlyDSL's shipped kernels require K to be a multiple of their K tile.
 An over-read past K is legal only when every term it contributes has a factor that is exactly zero by
 construction. The three ways to get that zero:
 - **K-contiguous operands** (stored `[·, K]`, as in NT). Run `ceil(K/128)` iterations. A partial last block over-reads into the
@@ -264,7 +267,8 @@ layout (`b_preshuffled`).
 | PS `compile_preshuffle_gemm` | fp8, int8, fp16, bf16 | 4 waves along N; A through LDS, pre-shuffled B straight to VGPR | per-row × per-col scales; `use_async_copy` is gfx950-only |
 | A16 `gemm_a16w16` | bf16, fp16 | `m×n×k` waves (default 2×4×1), async DMA for A and B, `stages` deep | split-K by atomics (not bitwise reproducible), `group_m` XCD swizzle, half-tile interleave |
 | `fp8_gemm_8wave.py`, `fp8_gemm_4wave.py` | fp8 (row-wise scales) | the §2 pipeline / a 4-wave per-MFMA-asm loop | NT only, `K % 128 == 0` |
-| `fp4_gemm_4wave.py`, `mxfp4_preshuffle.py` | MXFP4 (and MXFP8 via `mxfp4_preshuffle`) | 4-wave, scales through LDS | host-side scale and weight preshuffle |
+| `fp4_gemm_4wave.py` | MXFP4 | 2×2 waves, 8-buffer LDS ping-pong, scales through LDS | host-side scale and weight preshuffle |
+| `mxfp4_preshuffle.py` | A MXFP4/MXFP6/MXFP8 × B MXFP4/MXFP8 | 4 waves along N; A by DMA into a 2-buffer LDS ring; preshuffled B and the scales loaded straight to registers | host-side scale and weight preshuffle |
 
 Facts about PS and A16 that matter when tuning them:
 - **PS tile algebra.** `tile_K_perm = 128 if mfma_scale else (64 if 8-bit else 32)` (PS:171). Four waves
@@ -279,8 +283,8 @@ Facts about PS and A16 that matter when tuning them:
 - **A16 waits.** A16 waits with `rocdl.asyncmark()` / `rocdl.wait_asyncmark(stages-2)` around
   `cdna4.BufferLoadAsyncLDS128b`, which counts DMA groups instead of `vmcnt`. This is the in-DSL
   alternative to hand-written waits.
-- **Configuration space.** The argument space of the aiter-shipped variants is in
-  `../optimize/flydsl_levers/flydsl_knob_space.md`.
+- **Configuration space.** The arguments are the entry-point signatures in `INDEX.md`'s kernel map; aiter's
+  tuned rows for A16 are in `flydsl_gemm_small_m.md` §7.
 
 ## 9. Throughput arithmetic
 
