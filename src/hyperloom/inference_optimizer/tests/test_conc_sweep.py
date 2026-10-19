@@ -23,10 +23,8 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
     GridVariant,
     VariantResult,
 )
-from hyperloom.orchestrator.kernel import conc_sweep as conc_sweep_module
-from hyperloom.orchestrator.kernel.conc_sweep import (
-    DEFAULT_CONCS,
-    DEFAULT_TOTAL_BUDGET_SEC,
+from hyperloom.orchestrator.kernel import _conc_sweep_run as conc_sweep_run_module
+from hyperloom.orchestrator.kernel._conc_sweep_run import (
     _Arm,
     _build_arm_grid,
     _flush_conc_sweep_report,
@@ -34,6 +32,10 @@ from hyperloom.orchestrator.kernel.conc_sweep import (
     _optimized_arm,
     _order_concs_desc,
     _point_from_variant,
+)
+from hyperloom.orchestrator.kernel.conc_sweep import (
+    DEFAULT_CONCS,
+    DEFAULT_TOTAL_BUDGET_SEC,
     conc_sweep_declined_to_run,
     run_conc_sweep,
 )
@@ -214,7 +216,7 @@ def test_conc_sweep_preserves_retained_launch_controls(
         return results
 
     with (
-        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=launch_children),
+        patch("hyperloom.orchestrator.kernel._conc_sweep_run.run_grid", side_effect=launch_children),
         patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_fake_materialize),
     ):
         payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[1, 2]))
@@ -279,7 +281,7 @@ def test_conc_sweep_loads_retained_overlay_only_in_optimized_arm(
         return outputs
 
     with (
-        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_child_run_grid),
+        patch("hyperloom.orchestrator.kernel._conc_sweep_run.run_grid", side_effect=_child_run_grid),
         patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_fake_materialize),
     ):
         payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[1, 2]))
@@ -308,7 +310,7 @@ def test_conc_sweep_does_not_benchmark_without_retained_overlay(
         baseline_config_path=str(baseline_yaml),
         current_best={"extra_server_args": "--max-running-requests 64", "final_overlay": overlay_path},
     )
-    with patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid") as grid:
+    with patch("hyperloom.orchestrator.kernel._conc_sweep_run.run_grid") as grid:
         payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[1]))
     grid.assert_not_called()
     assert payload["status"] == "skipped"
@@ -404,7 +406,7 @@ def test_run_conc_sweep_skip_short_circuits(
         setattr(state, k, v)
 
     with patch(
-        "hyperloom.orchestrator.kernel.conc_sweep.run_grid",
+        "hyperloom.orchestrator.kernel._conc_sweep_run.run_grid",
     ) as mock_run_grid:
         payload = asyncio.run(run_conc_sweep(state, session_dir))
 
@@ -420,7 +422,7 @@ def test_run_conc_sweep_skip_empty_conc_list(
 ):
     state = _make_state(baseline_config_path=str(baseline_yaml))
     with patch(
-        "hyperloom.orchestrator.kernel.conc_sweep.run_grid",
+        "hyperloom.orchestrator.kernel._conc_sweep_run.run_grid",
     ) as mock_run_grid:
         payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[]))
     assert payload["status"] == "skipped"
@@ -438,7 +440,7 @@ def test_run_conc_sweep_skip_missing_config(
         baseline_config_path=str(tmp_path / "does_not_exist.yaml"),
     )
     with patch(
-        "hyperloom.orchestrator.kernel.conc_sweep.run_grid",
+        "hyperloom.orchestrator.kernel._conc_sweep_run.run_grid",
     ) as mock_run_grid:
         payload = asyncio.run(run_conc_sweep(state, session_dir))
     assert payload["status"] == "skipped"
@@ -513,7 +515,7 @@ def test_run_conc_sweep_happy_path_writes_reports(
 
     with (
         patch(
-            "hyperloom.orchestrator.kernel.conc_sweep.run_grid",
+            "hyperloom.orchestrator.kernel._conc_sweep_run.run_grid",
             side_effect=_fake_run_grid,
         ),
         patch(
@@ -588,7 +590,7 @@ def test_run_conc_sweep_canonicalizes_gpu_type_to_runner(
 
     with (
         patch(
-            "hyperloom.orchestrator.kernel.conc_sweep.run_grid",
+            "hyperloom.orchestrator.kernel._conc_sweep_run.run_grid",
             side_effect=_fake_run_grid,
         ),
         patch(
@@ -637,7 +639,7 @@ def test_conc_sweep_preserves_baseline_script_through_variant_materialization(se
         calls.append((kwargs, yaml.safe_load(path.read_text())["benchmark"]))
         return [_fake_variant(variant.name, throughput=120.0, envs=variant.extra_envs)]
 
-    monkeypatch.setattr("hyperloom.orchestrator.kernel.conc_sweep.run_grid", capture_grid)
+    monkeypatch.setattr("hyperloom.orchestrator.kernel._conc_sweep_run.run_grid", capture_grid)
     result = asyncio.run(run_conc_sweep(state, session_dir, concs=[64], total_budget_sec=None))
 
     assert result["status"] == "succeeded"
@@ -692,7 +694,7 @@ def test_run_conc_sweep_optimized_oom_yields_failed_pair(
 
     with (
         patch(
-            "hyperloom.orchestrator.kernel.conc_sweep.run_grid",
+            "hyperloom.orchestrator.kernel._conc_sweep_run.run_grid",
             side_effect=_fake_run_grid,
         ),
         patch(
@@ -735,7 +737,7 @@ def test_run_conc_sweep_args_only_optimization_triggers_run(
 
     with (
         patch(
-            "hyperloom.orchestrator.kernel.conc_sweep.run_grid",
+            "hyperloom.orchestrator.kernel._conc_sweep_run.run_grid",
             side_effect=_fake_run_grid,
         ) as mock_run,
         patch(
@@ -775,7 +777,7 @@ def test_run_conc_sweep_envs_only_optimization_triggers_run(
 
     with (
         patch(
-            "hyperloom.orchestrator.kernel.conc_sweep.run_grid",
+            "hyperloom.orchestrator.kernel._conc_sweep_run.run_grid",
             side_effect=_fake_run_grid,
         ) as mock_run,
         patch(
@@ -809,7 +811,7 @@ def test_run_conc_sweep_does_not_touch_final_json(
 
     with (
         patch(
-            "hyperloom.orchestrator.kernel.conc_sweep.run_grid",
+            "hyperloom.orchestrator.kernel._conc_sweep_run.run_grid",
             side_effect=_fake_run_grid,
         ),
         patch(
@@ -862,7 +864,7 @@ def test_run_conc_sweep_none_budget_disables_gate(
 
     with (
         patch(
-            "hyperloom.orchestrator.kernel.conc_sweep.run_grid",
+            "hyperloom.orchestrator.kernel._conc_sweep_run.run_grid",
             side_effect=_fake_run_grid,
         ) as mock_run,
         patch(
@@ -896,7 +898,7 @@ def test_run_conc_sweep_zero_budget_skips_without_running(
 
     with (
         patch(
-            "hyperloom.orchestrator.kernel.conc_sweep.run_grid",
+            "hyperloom.orchestrator.kernel._conc_sweep_run.run_grid",
             side_effect=_fake_run_grid,
         ) as mock_run,
         patch(
@@ -1340,7 +1342,7 @@ def test_run_conc_sweep_single_server_arm_major_order(
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 
     with (
-        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
+        patch("hyperloom.orchestrator.kernel._conc_sweep_run.run_grid", side_effect=_fake_run_grid),
         patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_fake_materialize),
     ):
         payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16]))
@@ -1368,7 +1370,7 @@ def test_run_conc_sweep_single_server_concs_descending(
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 
     with (
-        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
+        patch("hyperloom.orchestrator.kernel._conc_sweep_run.run_grid", side_effect=_fake_run_grid),
         patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_fake_materialize),
     ):
         asyncio.run(run_conc_sweep(state, session_dir, concs=[1, 4, 16]))
@@ -1691,14 +1693,14 @@ def test_flush_conc_sweep_report_is_atomic(session_dir: Path, monkeypatch: pytes
 def _record_summary_writes(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     """Capture ``conc_sweep_summary.json`` as it stands on disk after every write."""
     writes: list[dict[str, Any]] = []
-    real_flush = conc_sweep_module._flush_conc_sweep_report
+    real_flush = conc_sweep_run_module._flush_conc_sweep_report
 
     def _flush(payload: dict[str, Any], session_dir: Path) -> Exception | None:
         error = real_flush(payload, session_dir)
         writes.append(json.loads(Path(payload["report_json_path"]).read_text()))
         return error
 
-    monkeypatch.setattr(conc_sweep_module, "_flush_conc_sweep_report", _flush)
+    monkeypatch.setattr(conc_sweep_run_module, "_flush_conc_sweep_report", _flush)
     return writes
 
 
@@ -1716,7 +1718,7 @@ def test_mid_sweep_summary_is_the_final_report_in_progress(
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 
     with (
-        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
+        patch("hyperloom.orchestrator.kernel._conc_sweep_run.run_grid", side_effect=_fake_run_grid),
         patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_fake_materialize),
     ):
         payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16], total_budget_sec=9000))
@@ -1752,7 +1754,7 @@ def test_mid_sweep_summary_keeps_the_requested_conc_order(
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 
     with (
-        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
+        patch("hyperloom.orchestrator.kernel._conc_sweep_run.run_grid", side_effect=_fake_run_grid),
         patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_fake_materialize),
     ):
         asyncio.run(run_conc_sweep(state, session_dir, concs=[1, 8, 4]))
@@ -1774,7 +1776,7 @@ def test_mid_sweep_summary_writes_the_remaining_budget_as_the_final_report_does(
         return [stopped]
 
     with (
-        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
+        patch("hyperloom.orchestrator.kernel._conc_sweep_run.run_grid", side_effect=_fake_run_grid),
         patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_fake_materialize),
     ):
         payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16], total_budget_sec=9000))
@@ -2288,7 +2290,7 @@ def test_single_server_option_a_boot_and_reuse(
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 
     with (
-        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
+        patch("hyperloom.orchestrator.kernel._conc_sweep_run.run_grid", side_effect=_fake_run_grid),
         patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_fake_materialize),
     ):
         payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16, 64]))
@@ -2352,7 +2354,7 @@ def test_single_server_boot_only_is_measured_by_reuse_round(
             return [booted]
         return [_fake_variant(variant.name, throughput=100.0, envs=variant.extra_envs)]
 
-    monkeypatch.setattr("hyperloom.orchestrator.kernel.conc_sweep.run_grid", _fake_run_grid)
+    monkeypatch.setattr("hyperloom.orchestrator.kernel._conc_sweep_run.run_grid", _fake_run_grid)
 
     payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[32, 16]))
 
@@ -2393,7 +2395,7 @@ def test_single_server_boot_retry_descend(
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 
     with (
-        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
+        patch("hyperloom.orchestrator.kernel._conc_sweep_run.run_grid", side_effect=_fake_run_grid),
         patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_fake_materialize),
     ):
         payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[16, 64]))
@@ -2428,7 +2430,7 @@ def test_single_server_all_boot_fail_falls_back_option_b(
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 
     with (
-        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
+        patch("hyperloom.orchestrator.kernel._conc_sweep_run.run_grid", side_effect=_fake_run_grid),
         patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_fake_materialize),
     ):
         payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[8, 16]))
@@ -2460,7 +2462,7 @@ def test_single_server_not_eligible_uses_option_b(
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 
     with (
-        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
+        patch("hyperloom.orchestrator.kernel._conc_sweep_run.run_grid", side_effect=_fake_run_grid),
         patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_fake_materialize),
     ):
         payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16]))
@@ -2488,7 +2490,7 @@ def test_single_server_reuse_loop_stops_on_closing_phase(
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 
     with (
-        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
+        patch("hyperloom.orchestrator.kernel._conc_sweep_run.run_grid", side_effect=_fake_run_grid),
         patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_fake_materialize),
     ):
         payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16, 64]))
@@ -2517,7 +2519,7 @@ def test_single_server_reuse_exception_recorded_as_failed(
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 
     with (
-        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
+        patch("hyperloom.orchestrator.kernel._conc_sweep_run.run_grid", side_effect=_fake_run_grid),
         patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_fake_materialize),
     ):
         payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16]))
@@ -2550,7 +2552,7 @@ def test_single_server_boot_exception_falls_back(
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 
     with (
-        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
+        patch("hyperloom.orchestrator.kernel._conc_sweep_run.run_grid", side_effect=_fake_run_grid),
         patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_fake_materialize),
     ):
         payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[16, 64]))
@@ -2581,7 +2583,7 @@ def test_single_server_pre_arm_skip_on_closing_phase(
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 
     with (
-        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
+        patch("hyperloom.orchestrator.kernel._conc_sweep_run.run_grid", side_effect=_fake_run_grid),
         patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_fake_materialize),
     ):
         payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16]))
@@ -2630,7 +2632,7 @@ def test_a_cancelled_sweep_stops_the_ladder_and_is_not_failed(
             return [reaped]
         return [_fake_variant(variant.name, throughput=100.0, envs=variant.extra_envs)]
 
-    monkeypatch.setattr("hyperloom.orchestrator.kernel.conc_sweep.run_grid", _fake_run_grid)
+    monkeypatch.setattr("hyperloom.orchestrator.kernel._conc_sweep_run.run_grid", _fake_run_grid)
     monkeypatch.setattr("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", _fake_materialize)
 
     if scope_published:

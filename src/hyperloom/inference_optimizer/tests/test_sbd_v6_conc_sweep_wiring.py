@@ -123,7 +123,7 @@ def _sweep_event(session_dir: Path) -> dict[str, Any]:
 
 def _run(state: SharedState, session_dir: Path, *, recorder: Any, run_grid: Any, concs: list[int] | None = None):
     with (
-        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=run_grid),
+        patch("hyperloom.orchestrator.kernel._conc_sweep_run.run_grid", side_effect=run_grid),
         patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_materialize),
     ):
         return asyncio.run(
@@ -347,7 +347,7 @@ def test_a_rung_the_budget_refused_mid_ladder_is_recorded_as_such(session_dir: P
             return_value={"eligible": True, "reason": "supported", "port": 8888, "framework": "sglang"},
         ),
         patch("hyperloom.orchestrator.kernel.conc_sweep.time.monotonic", side_effect=lambda: clock["now"]),
-        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_refuse_reuse),
+        patch("hyperloom.orchestrator.kernel._conc_sweep_run.run_grid", side_effect=_refuse_reuse),
         patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_materialize),
     ):
         asyncio.run(
@@ -452,7 +452,7 @@ def test_the_dispatch_names_the_event_and_binds_the_session_itself(session_dir: 
     state.save(session_dir)
 
     with (
-        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_all_succeed),
+        patch("hyperloom.orchestrator.kernel._conc_sweep_run.run_grid", side_effect=_all_succeed),
         patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_materialize),
     ):
         result = asyncio.run(ConcSweepExecutor()(_ctx(session_dir)))
@@ -482,7 +482,7 @@ def test_a_sweep_that_raised_leaves_a_closed_failed_event(session_dir: Path, bas
         raise RuntimeError("the harness fell over")
 
     with (
-        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_all_succeed),
+        patch("hyperloom.orchestrator.kernel._conc_sweep_run.run_grid", side_effect=_all_succeed),
         patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_explode),
         pytest.raises(RuntimeError),
     ):
@@ -523,7 +523,7 @@ def test_a_sweep_that_could_not_write_its_report_records_the_step_that_broke(
 
     with (
         session_scope(session_dir),
-        patch("hyperloom.orchestrator.kernel.conc_sweep._write_csv", side_effect=_no_csv),
+        patch("hyperloom.orchestrator.kernel._conc_sweep_run._write_csv", side_effect=_no_csv),
     ):
         payload = _run(state, session_dir, recorder=_recorder(), run_grid=_all_succeed)
         event = _sweep_event(session_dir)
@@ -595,7 +595,7 @@ def _cancelled_arm(session_dir: Path, baseline_yaml: Path, *, rungs: int, lifecy
     ctx.task.params = {**_Task.params, "concs": [4, 16]}
     lifecycle_params = {"eligible": lifecycle, "reason": "supported", "port": 8888, "framework": "sglang"}
     with (
-        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_cancelled_after(rungs)),
+        patch("hyperloom.orchestrator.kernel._conc_sweep_run.run_grid", side_effect=_cancelled_after(rungs)),
         patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_materialize),
         patch(
             "hyperloom.orchestrator.actions.executors._server_lifecycle.resolve_lifecycle_params",
@@ -649,7 +649,7 @@ def test_a_dispatch_with_no_session_records_nothing_and_still_runs(session_dir: 
             "hyperloom.inference_optimizer.session.session_binding.session_is_bound",
             return_value=False,
         ),
-        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_all_succeed),
+        patch("hyperloom.orchestrator.kernel._conc_sweep_run.run_grid", side_effect=_all_succeed),
         patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_materialize),
     ):
         result = asyncio.run(ConcSweepExecutor()(ctx))

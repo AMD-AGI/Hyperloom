@@ -25,7 +25,7 @@ from hyperloom.orchestrator.actions.stop_attribution import (
     STOPPED_BY_THE_RUN,
     StoppedByTheRun,
 )
-from hyperloom.orchestrator.kernel import conc_sweep
+from hyperloom.orchestrator.kernel import _conc_sweep_run, conc_sweep
 from hyperloom.orchestrator.rehearsal import LaunchAttempt, LaunchScenario, ScriptedLaunchBackend, VirtualClock
 from hyperloom.orchestrator.rehearsal.clock import installed_clock
 from hyperloom.orchestrator.state import shared_state
@@ -96,7 +96,7 @@ def sweep_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launch_backend):
         grid_calls.append(dict(kwargs))
         return await gr.run_grid(**kwargs)
 
-    monkeypatch.setattr(conc_sweep, "run_grid", record_grid)
+    monkeypatch.setattr(_conc_sweep_run, "run_grid", record_grid)
 
     def run(
         *,
@@ -446,7 +446,7 @@ def test_grid_deadline_attribution_does_not_relabel_cancellation(sweep_run, monk
         kwargs["deadline_stop"] = sweep_stop
         return await original_grid(**kwargs)
 
-    monkeypatch.setattr(conc_sweep, "run_grid", attributed_grid)
+    monkeypatch.setattr(_conc_sweep_run, "run_grid", attributed_grid)
     attempt = (
         LaunchAttempt(outcome="died_silently", duration_sec=1.0, returncode=ORCHESTRATOR_CANCELLED_RETURNCODE)
         if cancelled

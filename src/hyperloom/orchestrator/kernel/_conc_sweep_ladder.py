@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import Any, NamedTuple
 
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.breakdown.recorder.conc_sweep_event import (
@@ -23,20 +23,18 @@ from hyperloom.inference_optimizer.breakdown.recorder.conc_sweep_event import (
     STRATEGY_SINGLE_SERVER,
     ArmStrategy,
 )
-from ._conc_sweep_grid import (
+from ._conc_sweep_run import (
     _Arm,
     _budget_skip_result,
     _CANCEL_STOP,
     _deadline_skip_result,
     _RungNote,
     _RungServer,
+    _SweepRun,
 )
 from ..actions.executors._grid_runner import GridVariant, VariantResult, variant_conc
 from ..actions.executors._subprocess_kill import session_deadline_to_remaining_sec
 from ..actions.stop_attribution import ORCHESTRATOR_CANCELLED_CLASS, StoppedByTheRun
-
-if TYPE_CHECKING:
-    from .conc_sweep import _SweepRun
 
 
 log = logging.getLogger(__name__)
