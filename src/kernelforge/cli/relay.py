@@ -28,6 +28,7 @@ from kernelforge.loop.agent_relay import (
     AgentRelayPolicy,
     ProfileAvailability,
     ProviderAvailability,
+    StartPreference,
     select_start_profile,
 )
 from kernelforge.loop.search_actors import SearchActorBundle, SearchActorPool
@@ -282,12 +283,12 @@ def build_search_actor_pool(
     *,
     bundle_factory: Callable[[AgentProfile], SearchActorBundle],
     availability: AgentAvailabilitySnapshot | None = None,
-    fallback_provider: str = "",
+    start: StartPreference = StartPreference(),
     recheck: Callable[[AgentProfile], ProfileAvailability] | None = None,
 ) -> SearchActorPool:
     """Construct every available profile's search actor and choose the profile this session starts on.
 
-    Raises ``ValueError`` when neither the primary nor the fallback provider's profile can run.
+    Raises ``ValueError`` when no profile ``start`` allows can run.
     """
     from kernelforge.agent_backends.registry import get_agent_provider
 
@@ -336,7 +337,7 @@ def build_search_actor_pool(
         config=relay_config,
         availability=snapshot,
         bundles=bundles,
-        start_profile_id=select_start_profile(relay_config, snapshot, fallback_provider=fallback_provider),
+        start_profile_id=select_start_profile(relay_config, snapshot, start),
         recheck=recheck,
     )
 
@@ -371,11 +372,13 @@ def start_search_actors(
     *,
     availability: AgentAvailabilitySnapshot | None,
     workspace: str,
+    resume_profile_id: str = "",
 ) -> SearchActorStartup:
     """Build every runnable profile's search actor, choose the start profile, and report both.
 
     A campaign without relay runs the configured provider as its only profile, with provider fallback allowed.
-    Raises ``ValueError`` when no profile the session may start on can run.
+    ``resume_profile_id`` is the profile a resumed campaign was running. Raises ``ValueError`` when no profile the
+    session may start on can run.
     """
     relay_enabled = session_relay is not None
     relay_config = session_relay or _single_profile_relay(builder.config)
@@ -383,7 +386,7 @@ def start_search_actors(
         relay_config,
         bundle_factory=replace(builder, relay=session_relay).build,
         availability=availability,
-        fallback_provider=builder.config.agent_fallback_provider,
+        start=StartPreference(builder.config.agent_fallback_provider, resume_profile_id),
         recheck=(
             partial(probe_agent_profile, relay_config=relay_config, config=builder.config, workspace=workspace)
             if relay_enabled
@@ -404,11 +407,12 @@ def _report_search_actors(pool: SearchActorPool, *, relay_enabled: bool) -> None
     for profile_id, status in pool.availability.profiles.items():
         state = "available" if status.available else f"unavailable ({status.reason})"
         print(f"  Agent profile: {profile_id} / {status.model}: {state}")
-    if pool.start_profile_id != pool.config.primary_profile_id:
-        print(
-            f"  WARNING: primary Agent profile {pool.config.primary_profile_id} is unavailable; "
-            f"starting on fallback profile {pool.start_profile_id}"
-        )
+    start, primary = pool.start_profile_id, pool.config.primary_profile_id
+    primary_status = pool.availability.profiles.get(primary)
+    if start != primary and primary_status is not None and primary_status.available:
+        print(f"  Agent relay: resuming on profile {start}, which the campaign was running")
+    elif start != primary:
+        print(f"  WARNING: primary Agent profile {primary} is unavailable; starting on profile {start}")
     if relay_enabled and not relay_switch_possible(pool.availability):
         print(
             "  WARNING: model relay disabled for this session: only one Agent profile passed its startup check "

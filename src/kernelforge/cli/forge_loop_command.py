@@ -982,6 +982,16 @@ def _reject_incompatible_loop_options(*, producer: str) -> None:
             raise click.UsageError(f"--producer must be one of: {', '.join(sorted(KERNEL_RECIPE_PRODUCERS))}")
 
 
+def _resumed_profile_id(state_path: Path) -> str:
+    """The Agent profile a resumed campaign was running, or ``""`` for a fresh one."""
+    from kernelforge.loop.run_state import read_run_state
+
+    try:
+        return read_run_state(state_path).agent_relay.active_profile_id
+    except ValueError as error:
+        raise click.ClickException(str(error)) from error
+
+
 def _check_workspace_matches_resume(
     *,
     resume: bool,
@@ -1949,6 +1959,7 @@ def forge_loop(request: ForgeLoopRequest):
             actor_builder,
             availability=startup_availability,
             workspace=str(workspace),
+            resume_profile_id=_resumed_profile_id(state_path),
         )
     except (OSError, RuntimeError, ValueError) as error:
         raise click.ClickException(f"Agent startup availability check failed: {error}") from error

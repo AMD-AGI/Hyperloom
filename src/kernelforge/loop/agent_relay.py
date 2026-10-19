@@ -326,35 +326,55 @@ def select_replacement_for_unavailable(
     )
 
 
+@dataclass(frozen=True)
+class StartPreference:
+    """Where a session may start when the primary profile cannot run."""
+
+    #: Preferred member when the primary cannot run; ``""`` disables starting a session on any other member.
+    fallback_provider: str = ""
+    #: The profile a resumed campaign was running; it continues there whenever that profile can run.
+    resume_profile_id: str = ""
+
+
 def select_start_profile(
     config: AgentRelayConfig,
     availability: AgentAvailabilitySnapshot,
-    *,
-    fallback_provider: str,
+    preference: StartPreference,
 ) -> str:
-    """The profile a session starts on: the primary, else the configured fallback provider's profile."""
+    """The profile a session starts on.
+
+    A resumed campaign continues on the profile it was running. Otherwise the primary starts; if it cannot run, the
+    fallback provider's member, then any other available member, unless fallback is disabled.
+    """
+    by_id = _profile_mapping(config.profiles)
+    resumed = by_id.get(preference.resume_profile_id)
+    if resumed is not None and _profile_is_available(resumed, availability):
+        return resumed.profile_id
     primary = config.primary_profile
     if _profile_is_available(primary, availability):
         return primary.profile_id
-    status = availability.profiles.get(primary.profile_id)
-    reason = f"primary Agent profile {primary.profile_id} is unavailable: {status.reason if status else 'not probed'}"
-    fallback = next(
-        (
-            profile
-            for profile in config.profiles
-            if fallback_provider
-            and profile.provider == fallback_provider
-            and profile.profile_id != primary.profile_id
-            and _profile_is_available(profile, availability)
-        ),
-        None,
-    )
-    if fallback is None:
-        detail = (
-            f"fallback provider {fallback_provider} is unavailable" if fallback_provider else "no fallback provider"
+    if not preference.fallback_provider:
+        raise ValueError(
+            f"{_unavailable(primary, availability)}; provider fallback is disabled, so the session does not start "
+            "on another relay member"
         )
-        raise ValueError(f"{reason}; {detail}")
-    return fallback.profile_id
+    others = [
+        profile
+        for profile in config.profiles
+        if profile.profile_id != primary.profile_id and _profile_is_available(profile, availability)
+    ]
+    preferred = [profile for profile in others if profile.provider == preference.fallback_provider]
+    if not others:
+        raise ValueError(
+            "no Agent profile can start this session: "
+            + "; ".join(_unavailable(profile, availability) for profile in config.profiles)
+        )
+    return (preferred or others)[0].profile_id
+
+
+def _unavailable(profile: AgentProfile, availability: AgentAvailabilitySnapshot) -> str:
+    status = availability.profiles.get(profile.profile_id)
+    return f"Agent profile {profile.profile_id} is unavailable: {status.reason if status else 'not probed'}"
 
 
 def apply_profile_switch(
@@ -507,6 +527,7 @@ __all__ = [
     "ProfileAvailability",
     "ProviderAvailability",
     "RelayIntervention",
+    "StartPreference",
     "apply_profile_recheck",
     "apply_profile_switch",
     "apply_relay_keep",

@@ -650,6 +650,17 @@ class WorkspaceLock:
         self.release()
 
 
+def read_run_state(state_path: Path) -> RunState:
+    """Read one ``run_state.json`` checkpoint, or a fresh state when absent."""
+    if not state_path.exists():
+        return RunState()
+    try:
+        payload = json.loads(state_path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"invalid run state checkpoint: {state_path}") from error
+    return RunState.from_dict(migrate_run_state_relay_fields(payload))
+
+
 class LoopStateStore:
     """Best-effort file store for ``run_state.json`` + ``events.jsonl``."""
 
@@ -696,13 +707,7 @@ class LoopStateStore:
 
     def load(self) -> RunState:
         """Load the current persisted state, or a fresh state when absent."""
-        if not self.state_path.exists():
-            return RunState()
-        try:
-            payload = json.loads(self.state_path.read_text())
-        except (OSError, json.JSONDecodeError) as error:
-            raise ValueError(f"invalid run state checkpoint: {self.state_path}") from error
-        return RunState.from_dict(migrate_run_state_relay_fields(payload))
+        return read_run_state(self.state_path)
 
     def save(self, state: RunState) -> None:
         """Atomically overwrite ``run_state.json``."""

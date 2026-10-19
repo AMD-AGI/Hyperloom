@@ -23,6 +23,7 @@ from kernelforge.loop.agent_relay import (
     AgentRelayConfig,
     AgentRelayPolicy,
     ProfileAvailability,
+    StartPreference,
     select_start_profile,
 )
 from kernelforge.loop.search_actors import SearchActorBundle
@@ -331,33 +332,72 @@ def _availability(**available: bool) -> AgentAvailabilitySnapshot:
     )
 
 
-def test_an_available_primary_is_where_the_session_starts():
-    assert (
-        select_start_profile(_relay_config("codex"), _availability(claude=True, codex=True), fallback_provider="claude")
-        == "codex"
+@pytest.mark.parametrize(
+    ("primary", "available", "preference", "expected"),
+    [
+        ("codex", {"claude": True, "codex": True}, StartPreference("claude"), "codex"),
+        ("codex", {"claude": True, "codex": False}, StartPreference("claude"), "claude"),
+        ("claude", {"claude": False, "codex": True}, StartPreference("claude"), "codex"),
+        ("claude", {"claude": True, "codex": True}, StartPreference("claude", "codex"), "codex"),
+        ("claude", {"claude": False, "codex": True}, StartPreference("", "codex"), "codex"),
+        ("claude", {"claude": True, "codex": False}, StartPreference("claude", "codex"), "claude"),
+    ],
+    ids=[
+        "available_primary",
+        "fallback_provider",
+        "fallback_naming_the_primary_takes_any_member",
+        "resume_continues_on_its_profile",
+        "resume_continues_with_fallback_disabled",
+        "resume_profile_down_starts_on_the_primary",
+    ],
+)
+def test_start_profile(primary, available, preference, expected):
+    assert select_start_profile(_relay_config(primary), _availability(**available), preference) == expected
+
+
+def test_the_fallback_provider_is_preferred_among_the_other_members():
+    config = AgentRelayConfig(
+        primary_profile_id="claude",
+        profiles=(
+            AgentProfile("claude", "claude", "claude-opus-5"),
+            AgentProfile("codex", "codex", "gpt-6-astra"),
+            AgentProfile("kimi", "kimi", "kimi-k3"),
+        ),
     )
+    availability = _availability(claude=False, codex=True)
+    availability.profiles["kimi"] = ProfileAvailability(provider="kimi", model="kimi-k3", available=True)
 
-
-def test_an_unavailable_primary_starts_on_the_fallback_providers_profile():
-    start = select_start_profile(
-        _relay_config("codex"), _availability(claude=True, codex=False), fallback_provider="claude"
-    )
-
-    assert start == "claude"
+    assert select_start_profile(config, availability, StartPreference("kimi")) == "kimi"
+    assert select_start_profile(config, availability, StartPreference("claude")) == "codex"
 
 
 @pytest.mark.parametrize(
-    ("fallback", "available", "detail"),
+    ("available", "preference", "message"),
     [
-        ("", {"claude": True, "codex": False}, "no fallback provider"),
-        ("claude", {"claude": False, "codex": False}, "fallback provider claude is unavailable"),
+        (
+            {"claude": False, "codex": True},
+            StartPreference(""),
+            "Agent profile claude is unavailable: claude down; provider fallback is disabled",
+        ),
+        (
+            {"claude": False, "codex": True},
+            StartPreference("", "claude"),
+            "Agent profile claude is unavailable: claude down; provider fallback is disabled",
+        ),
+        (
+            {"claude": False, "codex": False},
+            StartPreference("claude"),
+            "no Agent profile can start this session: Agent profile claude is unavailable: claude down; "
+            "Agent profile codex is unavailable: codex down",
+        ),
     ],
+    ids=["fallback_disabled", "resume_profile_down_and_fallback_disabled", "no_member_available"],
 )
-def test_no_runnable_start_profile_refuses_startup(fallback, available, detail):
-    with pytest.raises(ValueError, match="primary Agent profile codex is unavailable: codex down") as error:
-        select_start_profile(_relay_config("codex"), _availability(**available), fallback_provider=fallback)
+def test_no_runnable_start_profile_refuses_startup(available, preference, message):
+    with pytest.raises(ValueError) as error:
+        select_start_profile(_relay_config("claude"), _availability(**available), preference)
 
-    assert detail in str(error.value)
+    assert str(error.value).startswith(message)
 
 
 def test_search_actor_pool_starts_on_the_fallback_when_the_primary_cannot_run():
@@ -365,7 +405,7 @@ def test_search_actor_pool_starts_on_the_fallback_when_the_primary_cannot_run():
     pool = build_search_actor_pool(
         relay_config,
         availability=_availability(claude=True, codex=False),
-        fallback_provider="claude",
+        start=StartPreference("claude"),
         bundle_factory=lambda profile: SearchActorBundle(profile=profile, agent_fn=lambda: None),
     )
 
@@ -422,3 +462,26 @@ def test_relay_summary_reports_whether_a_switch_is_possible():
         "available": False,
         "reason": "no key",
     }
+
+
+@pytest.mark.parametrize(
+    ("claude_up", "line"),
+    [
+        (True, "Agent relay: resuming on profile codex, which the campaign was running"),
+        (False, "WARNING: primary Agent profile claude is unavailable; starting on profile codex"),
+    ],
+    ids=["resumed_profile", "primary_down"],
+)
+def test_startup_report_says_why_the_session_is_not_on_the_primary(capsys, claude_up, line):
+    from kernelforge.cli.relay import _report_search_actors
+
+    pool = build_search_actor_pool(
+        _relay_config("claude"),
+        availability=_availability(claude=claude_up, codex=True),
+        start=StartPreference("claude", "codex"),
+        bundle_factory=lambda profile: SearchActorBundle(profile=profile, agent_fn=lambda: None),
+    )
+
+    _report_search_actors(pool, relay_enabled=True)
+
+    assert line in capsys.readouterr().out
