@@ -206,14 +206,14 @@ def _installed_sglang_version(sglang_module: Any) -> str:
         from sglang.version import __version__ as module_version  # type: ignore[import-not-found]
 
         version = (module_version or "").strip()
-    except Exception:  # noqa: BLE001
+    except ImportError:
         version = ""
     if not version:
         try:
             import importlib.metadata as _md
 
             version = (_md.version("sglang") or "").strip()
-        except Exception:  # noqa: BLE001
+        except _md.PackageNotFoundError:
             version = ""
     if not version:
         version = (getattr(sglang_module, "__version__", "") or "").strip()
@@ -233,7 +233,7 @@ def _sglang_anchor_path(sglang_module: Any) -> Path | None:
 
         if _spm.__file__:
             return Path(_spm.__file__)
-    except Exception:  # noqa: BLE001
+    except ImportError:
         pass
     search_path = list(getattr(sglang_module, "__path__", []) or [])
     return Path(search_path[0]) if search_path else None
@@ -314,7 +314,7 @@ def _apply_on_pod(
     try:
         try:
             import sglang  # type: ignore[import-not-found]
-        except Exception as e:  # noqa: BLE001
+        except ImportError as e:
             result["status"] = "failed"
             result["error"] = f"sglang not importable: {e}"
             return result

@@ -26,7 +26,7 @@ def sglang_shape_mode() -> str:
         import sglang  # type: ignore[import-not-found]
 
         version = (getattr(sglang, "__version__", "") or "").strip()
-    except Exception:  # noqa: BLE001
+    except ImportError:
         version = os.environ.get("HYPERLOOM_SGLANG_VERSION_PIN", "").strip()
     m = re.match(r"^\s*v?(\d+(?:\.\d+)*)", version)
     if not m:
