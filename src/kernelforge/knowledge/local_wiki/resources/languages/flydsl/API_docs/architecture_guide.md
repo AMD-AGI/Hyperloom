@@ -1,6 +1,7 @@
-# Architecture & Compilation Pipeline Guide
+<!-- Vendored from ROCm/FlyDSL@dd8373349:docs/architecture_guide.md -->
+# Architecture & compilation pipeline guide
 
-> FlyDSL project structure, compilation stages, key abstractions, and configuration.
+This guide covers the FlyDSL project structure, compilation stages, key abstractions, and environment configuration.
 
 ## Quick Reference
 
@@ -15,7 +16,7 @@
 
 ---
 
-## 1. Project Structure
+## 1. Project structure
 
 ```
 FlyDSL/
@@ -60,9 +61,7 @@ FlyDSL/
 │   │   ├── primitive.py              # Primitive operations (layout algebra, copy, gemm)
 │   │   ├── derived.py                # Derived types (CopyAtom, MmaAtom, TiledCopy)
 │   │   ├── arith.py                  # Arithmetic dialect ops
-│   │   ├── vector.py                 # Vector dialect ops
 │   │   ├── gpu.py                    # GPU dialect ops (thread_idx, block_idx, barrier)
-│   │   ├── buffer_ops.py             # Buffer / memory operations
 │   │   └── rocdl/                    # ROCm-specific intrinsics (MFMA/WMMA, buffer, TDM, cluster)
 │   ├── runtime/
 │   │   └── device.py                 # get_rocm_arch() — GPU architecture detection
@@ -77,31 +76,47 @@ FlyDSL/
 │   ├── 03-tiledMma.py                # Tiled MMA (GEMM) with MFMA atoms
 │   └── 04-preshuffle_gemm.py         # Preshuffle GEMM end-to-end example
 │
-├── kernels/                          # Production GPU kernels
-│   ├── preshuffle_gemm.py            # GEMM (preshuffle layout)
-│   ├── blockscale_preshuffle_gemm.py # Blockscale GEMM
-│   ├── hgemm_splitk.py               # FP16 GEMM split-K
-│   ├── moe_gemm_2stage.py            # MoE GEMM (2-stage gate/up + reduce)
-│   ├── moe_blockscale_2stage.py      # MoE Blockscale GEMM
-│   ├── mixed_moe_gemm_2stage.py      # Mixed-precision MoE GEMM
-│   ├── pa_decode_fp8.py              # Paged attention decode (FP8)
-│   ├── flash_attn_generic.py         # FlashAttention generic fallback
-│   ├── flash_attn_gfx950.py          # FlashAttention gfx950 fast path
-│   ├── layernorm_kernel.py           # LayerNorm (layout API)
-│   ├── rmsnorm_kernel.py             # RMSNorm (layout API)
-│   ├── softmax_kernel.py             # Softmax (layout API)
-│   ├── fused_rope_cache_kernel.py    # Fused RoPE + KV cache
-│   ├── custom_all_reduce.py          # Multi-GPU all-reduce
-│   ├── rdna_f16_gemm.py              # RDNA FP16 GEMM
-│   ├── rdna_fp8_preshuffle_gemm.py   # RDNA FP8 GEMM
-│   ├── gemm_common_gfx1250.py        # GFX1250 GEMM common
-│   ├── gemm_fp8fp4_gfx1250.py        # GFX1250 FP8/FP4 GEMM
-│   ├── wmma_gemm_gfx1250.py          # GFX1250 WMMA GEMM
-│   ├── mfma_epilogues.py             # MFMA epilogue helpers
-│   ├── mfma_preshuffle_pipeline.py   # Preshuffle helpers for MFMA kernels
-│   ├── pipeline_utils.py             # Pipeline utility helpers
-│   ├── kernels_common.py             # Common kernel utilities
-│   └── tensor_shim.py                # GTensor/STensor abstraction
+├── kernels/                          # Production GPU kernels (organized by domain)
+│   ├── gemm/                         # Dense GEMM kernels
+│   │   ├── preshuffle_gemm.py        # GEMM (preshuffle layout)
+│   │   ├── mxfp4_preshuffle.py       # MXFP4 preshuffle GEMM
+│   │   ├── fp4_gemm_4wave.py         # FP4 4-wave GEMM
+│   │   ├── fp8_gemm_4wave.py         # FP8 4-wave GEMM
+│   │   ├── fp8_gemm_8wave.py         # FP8 8-wave GEMM
+│   │   ├── rdna_f16_gemm.py          # RDNA FP16 GEMM
+│   │   ├── rdna_fp8_preshuffle_gemm.py # RDNA FP8 GEMM
+│   │   ├── gemm_common_gfx1250.py    # GFX1250 GEMM common
+│   │   ├── gemm_fp8fp4_gfx1250.py    # GFX1250 FP8/FP4 GEMM
+│   │   ├── wmma_gemm_gfx1250.py      # GFX1250 WMMA GEMM
+│   │   └── fp8_gemm_utils.py         # FP8 GEMM helpers
+│   ├── norm/                         # Normalization kernels
+│   │   ├── layernorm_kernel.py       # LayerNorm (layout API)
+│   │   ├── rmsnorm_kernel.py         # RMSNorm (layout API)
+│   │   └── softmax_kernel.py         # Softmax (layout API)
+│   ├── attention/                    # Attention kernels
+│   │   ├── pa_decode_fp8.py          # Paged attention decode (FP8)
+│   │   ├── pa_decode_swa.py          # Paged attention sliding-window
+│   │   ├── flash_attn_generic.py     # FlashAttention generic fallback
+│   │   ├── flash_attn_gfx950.py      # FlashAttention gfx950 fast path
+│   │   ├── mla_fwd_decode.py         # MLA forward decode
+│   │   └── fused_rope_cache_kernel.py # Fused RoPE + KV cache
+│   ├── moe/                          # Mixture-of-experts kernels
+│   │   ├── moe_gemm_2stage.py        # MoE GEMM (2-stage gate/up + reduce)
+│   │   ├── mxfp_moe/               # Fused a4w4/a8w4 MoE 2-stage (device fp4 re-quant)
+│   │   ├── moe_sorting_kernel.py     # MoE token sorting
+│   │   └── topk_gating_softmax_kernel.py # Top-k gating softmax
+│   ├── mma/                          # Shared MMA pipeline helpers
+│   │   ├── mfma_epilogues.py         # MFMA epilogue helpers
+│   │   ├── mfma_preshuffle_pipeline.py # Preshuffle helpers for MFMA kernels
+│   │   └── pipeline_utils.py         # Pipeline utility helpers
+│   ├── conv/                         # Convolution kernels
+│   │   └── conv3d_implicit_8wave.py  # Implicit-GEMM 3D convolution
+│   ├── comm/                         # Multi-GPU communication
+│   │   └── custom_all_reduce.py      # Multi-GPU all-reduce
+│   └── common/                       # Cross-domain kernel utilities
+│       ├── kernels_common.py         # Common kernel utilities
+│       ├── layout_utils.py           # Layout helpers
+│       └── tensor_shim.py            # GTensor/STensor abstraction
 │
 ├── tests/
 │   ├── mlir/                         # MLIR-level tests (Conversion, LayoutAlgebra, Transforms)
@@ -115,7 +130,7 @@ FlyDSL/
 └── scripts/                          # Build and test helpers
     ├── build.sh                      # Build FlyDSL (CMake + ninja)
     ├── build_llvm.sh                 # Build MLIR from ROCm llvm-project
-    ├── run_tests.sh                  # Run GEMM test suite
+    ├── run_tests.sh                  # Run full test suite (pytest + examples + FileCheck)
     ├── run_benchmark.sh              # Run benchmarks
     └── dumpir.sh                     # Dump intermediate IR
 ```
@@ -127,18 +142,18 @@ FlyDSL/
 The user-facing API lives in `python/flydsl/`. Kernel authors use `@flyc.jit` and `@flyc.kernel` decorators with expression operations from `flydsl.expr`:
 
 - **Traces** Python functions via AST rewriting and execution
-- **Generates** Fly dialect ops + standard MLIR dialects (gpu, arith, scf, memref, vector, rocdl)
+- **Generates** Fly dialect ops and standard MLIR dialects (gpu, arith, scf, memref, vector, rocdl)
 - **Compiles** through the `MlirCompiler` pass pipeline (Fly → ROCDL → LLVM → HSACO)
-- **Caches** compiled kernels to disk for fast re-use
+- **Caches** compiled kernels to disk for fast reuse
 - **Executes** via MLIR ExecutionEngine
 
-The Fly dialect (`include/flydsl/Dialect/Fly/`) provides the MLIR-level layout algebra (composition, product, divide, coordinate mapping). Python DSL operations in `flydsl.expr` lower to Fly dialect ops during tracing, which are then compiled through the `MlirCompiler` pipeline.
+The Fly dialect (`include/flydsl/Dialect/Fly/`) provides the MLIR-level layout algebra (composition, product, divide, coordinate mapping). Python DSL operations in `flydsl.expr` lower to Fly dialect ops during tracing, and are then compiled through the `MlirCompiler` pipeline.
 
 ---
 
-## 3. Compilation Pipeline
+## 3. Compilation pipeline
 
-### 3.1 High-Level Flow
+### 3.1 High-level flow
 
 ```
 Python Function (@flyc.kernel / @flyc.jit)
@@ -184,7 +199,7 @@ Python Function (@flyc.kernel / @flyc.jit)
    JITCFunction (ExecutionEngine)
 ```
 
-### 3.2 Pipeline Stages in Detail
+### 3.2 Pipeline stages in detail
 
 The pipeline is built by `RocmBackend._pipeline_parts()` in
 `python/flydsl/compiler/backends/rocm.py`. The orchestrator
@@ -205,7 +220,7 @@ external LLVM toolchain only for Stage C (`gpu-module-to-binary`).
 | 5 | `canonicalize` | Standard MLIR canonicalization (constant folding, etc.). |
 | 6 | `fly-convert-atom-call-to-ssa-form` | Converts `copy_atom_call` / `mma_atom_call` to their SSA counterparts; promotes register tensors to vector SSA values. |
 | 7 | `fly-promote-regmem-to-vectorssa` | Promotes `fly.make_ptr(register)` memory semantics to vector SSA values (requires #6). |
-| 8 | `convert-fly-to-rocdl` | Lowers remaining Fly ops to MLIR upstream + ROCDL dialects (copy atoms → `rocdl.buffer_load/store`, MMA atoms → `rocdl.mfma.*`). |
+| 8 | `convert-fly-to-rocdl` | Lowers remaining Fly ops to MLIR upstream + ROCDL dialects (copy atoms → `rocdl.buffer_load/store`, or gfx1250 TDM → `rocdl.tensor.load.to.lds` / `store.from.lds`; MMA atoms → `rocdl.mfma.*` on CDNA, `rocdl.wmma.*` on gfx11/gfx1250). |
 | 9 | `canonicalize` | Second canonicalization round after ROCDL lowering. |
 | 10 | `gpu.module(convert-scf-to-cf, cse, convert-gpu-to-rocdl{chipset=gfxNNN ...}, fly-rocdl-cluster-attr)` | Inside the GPU module: SCF→CF, CSE, GPU intrinsics→ROCDL, then `fly-rocdl-cluster-attr` injects `amdgpu-cluster-dims` into the `llvm.func` `passthrough`. |
 
@@ -232,29 +247,29 @@ When `FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1`, Stage B appends
 |---|---|---|
 | 19 | `gpu-module-to-binary{format=fatbin opts="..."}` | Invokes the LLVM AMDGPU backend and emits an HSA fatbin. |
 
-`gpu-kernel-outlining` is no longer a pass in the runtime pipeline — kernel
+`gpu-kernel-outlining` is no longer a pass in the runtime pipeline. Kernel
 outlining happens during Python tracing, when `@flyc.kernel` emits
 `gpu.func` ops directly into a `gpu.container_module`.
 
-### 3.3 JIT Compilation Flow
+### 3.3 JIT compilation flow
 
 When a `@flyc.jit` function is called:
 
-1. **Cache check** — look up by argument type signature (in-memory → disk)
-2. **AST rewriting** — `ASTRewriter.transform` converts Python `for`/`if` to MLIR `scf.for`/`scf.if`
-3. **MLIR module creation** — sets up `gpu.container_module` with target
-4. **Argument conversion** — `convert_to_jit_arguments` maps Python args to IR types
-5. **Function tracing** — execute transformed function body to generate MLIR ops
-6. **GPU kernel emission** — `@kernel` calls emit `gpu.func` into `gpu.module`
-7. **Pipeline compilation** — `MlirCompiler.compile()` runs the full pass pipeline
-8. **Execution** — `JITCFunction` wraps MLIR ExecutionEngine for invoking the compiled code
-9. **Cache store** — compiled function is serialized to disk for future runs
+1. **Cache check**: Look up by argument type signature (in-memory → disk).
+2. **AST rewriting**: `ASTRewriter.transform` converts Python `for`/`if` to MLIR `scf.for`/`scf.if`.
+3. **MLIR module creation**: Sets up `gpu.container_module` with target.
+4. **Argument conversion**: `convert_to_jit_arguments` maps Python args to IR types.
+5. **Function tracing**: Execute the transformed function body to generate MLIR ops.
+6. **GPU kernel emission**: `@kernel` calls emit `gpu.func` into `gpu.module`.
+7. **Pipeline compilation**: `MlirCompiler.compile()` runs the full pass pipeline.
+8. **Execution**: `JITCFunction` wraps MLIR ExecutionEngine to invoke the compiled code.
+9. **Cache store**: Serialize the compiled function to disk for future runs.
 
 ---
 
-## 4. Key Abstractions
+## 4. Key abstractions
 
-### 4.1 `@flyc.jit` — Host Launcher
+### 4.1 `@flyc.jit` — Host launcher
 
 Decorates a Python function as a JIT-compiled host launcher:
 
@@ -269,13 +284,13 @@ def launch(a: fx.Tensor, b: fx.Tensor, n: fx.Constexpr[int],
 ```
 
 Key behaviors:
-- First call triggers compilation; subsequent calls with the same type signature use cached binary
-- `Constexpr[T]` parameters become compile-time constants (affect cache key)
-- `Tensor` parameters map to memref descriptors via DLPack
-- `Stream` parameters pass CUDA/HIP stream to the GPU runtime
-- When called inside an existing MLIR context, acts as a normal function (composable)
+- The first call triggers compilation; subsequent calls with the same type signature use the cached binary.
+- `Constexpr[T]` parameters become compile-time constants and affect the cache key.
+- `Tensor` parameters map to memref descriptors via DLPack.
+- `Stream` parameters pass a CUDA/HIP stream to the GPU runtime.
+- When called inside an existing MLIR context, the function acts as a normal composable function.
 
-### 4.2 `@flyc.kernel` — GPU Kernel
+### 4.2 `@flyc.kernel` — GPU kernel
 
 Decorates a Python function as a GPU kernel:
 
@@ -288,14 +303,14 @@ def my_kernel(a: fx.Tensor, b: fx.Tensor, n: fx.Constexpr[int]):
 ```
 
 Key behaviors:
-- Can only be called inside a `@flyc.jit` function
-- Calling returns a `KernelLauncher` — you must call `.launch()` to emit the launch op
-- Supports `Constexpr[T]` for compile-time specialization
-- Emits a `gpu.func` with `gpu.kernel` attribute into the `gpu.module`
+- You can only call this inside a `@flyc.jit` function.
+- Calling the kernel returns a `KernelLauncher`; you must call `.launch()` to emit the launch op.
+- Supports `Constexpr[T]` for compile-time specialization.
+- Emits a `gpu.func` with `gpu.kernel` attribute into the `gpu.module`.
 
 ### 4.3 `KernelLauncher`
 
-Returned by calling a `@kernel` function. Use `.launch()` to configure and emit the GPU launch:
+Calling a `@kernel` function returns a `KernelLauncher`. Use `.launch()` to configure and emit the GPU launch:
 
 ```python
 launcher = my_kernel(a, b, 1024)
@@ -311,12 +326,12 @@ launcher.launch(
 
 Wraps MLIR's `ExecutionEngine` for JIT execution:
 
-- Thread-safe with lazy engine initialization
-- Serializable (pickle) for disk caching
-- Supports packed calling convention via `ctypes`
-- Provides `.print_ir()` for debugging compiled/original IR
+- Thread-safe with lazy engine initialization.
+- Serializable (pickle) for disk caching.
+- Supports packed calling convention via `ctypes`.
+- Provides `.print_ir()` for debugging compiled or original IR.
 
-### 4.5 `DslType` / `JitArgument` Protocols
+### 4.5 `DslType` / `JitArgument` protocols
 
 Extensible type system for mapping Python values to MLIR:
 
@@ -333,9 +348,9 @@ class JitArgument(Protocol):
     def __get_c_pointers__(self) -> List[ctypes.c_void_p]: ...
 ```
 
-Built-in types: `Tensor`, `Stream`, `Int32`, `Constexpr[T]`
+Built-in types: `Tensor`, `Stream`, `Int32`, and `Constexpr[T]`
 
-Register custom types:
+To register custom types:
 ```python
 from flydsl.compiler import JitArgumentRegistry
 
@@ -356,9 +371,9 @@ Transforms Python control flow to MLIR ops at the AST level:
 
 ---
 
-## 5. Environment Variables
+## 5. Environment variables
 
-### 5.1 Compilation Options (`FLYDSL_COMPILE_*`)
+### 5.1 Compilation options (`FLYDSL_COMPILE_*`)
 
 | Variable | Default | Description |
 |---|---|---|
@@ -366,7 +381,7 @@ Transforms Python control flow to MLIR ops at the AST level:
 | `COMPILE_ONLY` | `0` | If `1`, compile without creating an executor. Returns `None`. |
 | `ARCH` | auto-detect | Override target GPU architecture (e.g., `gfx942`, `gfx950`). |
 
-### 5.2 Debug Options (`FLYDSL_DEBUG_*`)
+### 5.2 Debug options (`FLYDSL_DEBUG_*`)
 
 | Variable | Default | Description |
 |---|---|---|
@@ -380,16 +395,16 @@ Transforms Python control flow to MLIR ops at the AST level:
 | `FLYDSL_DEBUG_ENABLE_VERIFIER` | `true` | Verify IR module. |
 | `FLYDSL_DEBUG_LOG_LEVEL` | `WARNING` | Logging level (DEBUG, INFO, WARNING, ERROR). |
 
-### 5.3 Runtime Options (`FLYDSL_RUNTIME_*`)
+### 5.3 Runtime options (`FLYDSL_RUNTIME_*`)
 
 | Variable | Default | Description |
 |---|---|---|
 | `FLYDSL_RUNTIME_CACHE_DIR` | `~/.flydsl/cache` | Directory for caching compiled kernels. |
 | `FLYDSL_RUNTIME_ENABLE_CACHE` | `true` | Enable kernel disk caching (in-memory cache is always active). |
 
-### 5.4 Architecture Detection Priority
+### 5.4 Architecture detection priority
 
-`get_rocm_arch()` in `runtime/device.py` checks in order:
+`get_rocm_arch()` in `runtime/device.py` checks in the following order:
 1. `FLYDSL_GPU_ARCH` env var
 2. `HSA_OVERRIDE_GFX_VERSION` env var (supports `9.4.2` → `gfx942` format)
 3. `rocm_agent_enumerator` system tool
@@ -397,7 +412,7 @@ Transforms Python control flow to MLIR ops at the AST level:
 
 ---
 
-## 6. Target Hardware
+## 6. Target hardware
 
 | Architecture | GPU | LDS per CU | Notes |
 |---|---|---|---|
@@ -409,7 +424,7 @@ Transforms Python control flow to MLIR ops at the AST level:
 
 ---
 
-## 7. IR Dump Workflow
+## 7. IR dump workflow
 
 Enable with `FLYDSL_DUMP_IR=1`:
 
@@ -417,7 +432,7 @@ Enable with `FLYDSL_DUMP_IR=1`:
 FLYDSL_DUMP_IR=1 FLYDSL_DUMP_DIR=./dumps python test_my_kernel.py
 ```
 
-Produces numbered dump files (exact pass count tracks `RocmBackend._pipeline_parts()`):
+This produces numbered dump files (exact pass count tracks `RocmBackend._pipeline_parts()`):
 ```
 dumps/my_func_name/
 ├── 00_origin.mlir
@@ -445,12 +460,11 @@ dumps/my_func_name/
 └── 21_final_isa.s                    # AMD ISA assembly (best-effort)
 ```
 
-If `FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1`, the debug-info pass adds an extra
-numbered dump before `gpu_module_to_binary`.
+If `FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1`, the debug-info pass adds an extra numbered dump before `gpu_module_to_binary`.
 
 ---
 
-## 8. Source Files
+## 8. Source files
 
 | File | Description |
 |---|---|

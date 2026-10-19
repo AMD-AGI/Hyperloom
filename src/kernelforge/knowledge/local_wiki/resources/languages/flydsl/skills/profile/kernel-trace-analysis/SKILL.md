@@ -7,14 +7,17 @@ description: >
   lines, and produce an actionable optimization plan.
   Usage: /kernel-trace-analysis <cmd>
   Can also analyze an existing dispatch dir directly: /kernel-trace-analysis --dir <path>
-tools: Read,Edit,Bash,Grep,Glob,Agent,Write
-note: All analysis is done programmatically via hotspot_analyzer.py + code.json. Do NOT use GUI tools.
+allowed-tools: Read,Edit,Bash,Grep,Glob,Agent,Write
 ---
+<!-- Vendored from ROCm/FlyDSL@dd8373349:.claude/skills/kernel-trace-analysis/SKILL.md -->
 
 # Kernel Trace Analysis
 
 Profile and analyze GPU kernel ATT traces to identify stall hotspots and produce
 an optimization plan.
+
+All analysis is done programmatically via `hotspot_analyzer.py` + `code.json`.
+Do **not** use GUI tools.
 
 ## Arguments
 
@@ -45,11 +48,12 @@ an optimization plan.
 If the user provides `--dir <path>` or already has a `ui_output_agent_*_dispatch_*` directory:
 
 ```bash
+# Both analyzers ship with this skill -- do not reimplement them.
 python scripts/hotspot_analyzer.py <dispatch_dir> --topk 15 --mode both
 python scripts/hotspot_analyzer.py <dispatch_dir> --topk 5 --mode src --detail --context 4
 ```
 
-Skip to **Step 4: Interpret Results**.
+Skip to **Step 5: Interpret Results**.
 
 ---
 
@@ -82,11 +86,8 @@ GROUP BY ks.KernelName ORDER BY avg_us DESC LIMIT 20;"
 
 #### Step 2: Configure input.yaml
 
-```bash
-cp ~/Documents/input.yaml /tmp/trace_input.yaml
-```
-
-Edit `/tmp/trace_input.yaml`:
+Write `/tmp/trace_input.yaml` with the job below, setting
+`kernel_include_regex` to the kernel found in Step 1:
 
 ```yaml
 jobs:
@@ -117,11 +118,17 @@ FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1 rocprofv3 -i /tmp/trace_input.yaml -- <CMD> 2>&
 find . -type d -name "ui_output_agent_*" -newer /tmp/trace_ts 2>/dev/null
 ```
 
-If `rocprof-trace-decoder` library is missing:
+If the `rocprof-trace-decoder` library is missing, install the release matching
+the ROCm version in `/opt/rocm/.info/version`. Set `RTD_VERSION` to that release
+before running the block below. **build-rocm-image** hardcodes its own
+`RTD_VERSION` for the image it builds and does not derive it either; if the two
+disagree, the ROCm version on the machine you are profiling wins:
 ```bash
-wget -q https://github.com/ROCm/rocprof-trace-decoder/releases/download/0.1.6/rocprof-trace-decoder-manylinux-2.28-0.1.6-Linux.sh
-chmod +x rocprof-trace-decoder-manylinux-2.28-0.1.6-Linux.sh
-./rocprof-trace-decoder-manylinux-2.28-0.1.6-Linux.sh --skip-license --prefix=/tmp/rtd-install
+RTD_VERSION=0.1.6   # <-- set to the release matching your ROCm version
+RTD_INSTALLER="rocprof-trace-decoder-manylinux-2.28-${RTD_VERSION}-Linux.sh"
+wget -q "https://github.com/ROCm/rocprof-trace-decoder/releases/download/${RTD_VERSION}/${RTD_INSTALLER}"
+chmod +x "${RTD_INSTALLER}"
+"./${RTD_INSTALLER}" --skip-license --prefix=/tmp/rtd-install
 find /tmp/rtd-install -name '*.so*' -exec cp -a {} /opt/rocm/lib/ \;
 ldconfig
 ```
@@ -141,7 +148,7 @@ ui_output_agent_<PID>_dispatch_<N>/
 
 ## Step 4: Run hotspot_analyzer.py
 
-Run the bundled script:
+The analyzer ships with this skill — do not reimplement it. Run:
 
 ```bash
 # Full report
@@ -191,6 +198,11 @@ Flatten recursively: `/FlyDSL/kernels/pa_decode_sw_fp8_ps.py` → `source_0_pa_d
 | `LDS` | `ds_read_*`, `ds_write_*` | LDS access latency |
 
 ### Common hotspot patterns
+
+The snippets below are schematic — they illustrate *instruction scheduling*, so
+loads are written in the abbreviated raw-intrinsic form. On the current surface
+these are `fx.copy` from a `make_buffer_tensor` view; the scheduling advice is
+unchanged either way.
 
 #### Pattern 1: V/K loads inside MFMA loop → very high stall rate (80–95%)
 

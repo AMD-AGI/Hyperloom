@@ -13,10 +13,9 @@ precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 Advanced Micro Devices, Inc."
 SPDX-License-Identifier = "MIT"
 
-# Reference kernels copied from the FlyDSL project, carried in forge's
-# knowledge base so the agent can read working examples of the language. They
-# keep their own headers; this stops the blanket entry above from adding an AMD
-# claim on top.
+# Reference kernels, docs and skills copied from the FlyDSL project, carried in
+# forge's knowledge base so the agent can read the language's own documentation.
+# This stops the blanket entry above from adding an AMD claim on top.
 [[annotations]]
 path = [
     "src/kernelforge/examples/flydsl-softmax-forge-loop/softmax_kernel.py",
@@ -24,6 +23,19 @@ path = [
     "src/kernelforge/knowledge/local_wiki/resources/languages/flydsl/API_docs/examples/02-tiledCopy.py",
     "src/kernelforge/knowledge/local_wiki/resources/languages/flydsl/API_docs/examples/03-tiledMma.py",
     "src/kernelforge/knowledge/local_wiki/resources/languages/flydsl/API_docs/examples/04-preshuffle_gemm.py",
+    "src/kernelforge/knowledge/local_wiki/resources/languages/flydsl/API_docs/architecture_guide.md",
+    "src/kernelforge/knowledge/local_wiki/resources/languages/flydsl/API_docs/conventions.md",
+    "src/kernelforge/knowledge/local_wiki/resources/languages/flydsl/API_docs/cute_layout_algebra_guide.md",
+    "src/kernelforge/knowledge/local_wiki/resources/languages/flydsl/API_docs/flydsl-kernel-authoring.md",
+    "src/kernelforge/knowledge/local_wiki/resources/languages/flydsl/API_docs/kernel_authoring_guide.md",
+    "src/kernelforge/knowledge/local_wiki/resources/languages/flydsl/API_docs/layout_system_guide.md",
+    "src/kernelforge/knowledge/local_wiki/resources/languages/flydsl/API_docs/prebuilt_kernels_guide.md",
+    "src/kernelforge/knowledge/local_wiki/resources/languages/flydsl/skills/profile/capture-kernel-trace.md",
+    "src/kernelforge/knowledge/local_wiki/resources/languages/flydsl/skills/profile/kernel-trace-analysis/SKILL.md",
+    "src/kernelforge/knowledge/local_wiki/resources/languages/flydsl/skills/profile/kernel-trace-analysis/scripts/hotspot_analyzer.py",
+    "src/kernelforge/knowledge/local_wiki/resources/languages/flydsl/skills/profile/kernel-trace-analysis/scripts/pmc_l2_analyzer.py",
+    "src/kernelforge/knowledge/local_wiki/resources/languages/flydsl/skills/profile/testing_benchmarking_guide.md",
+    "src/kernelforge/knowledge/local_wiki/resources/languages/flydsl/skills/profile/tests_tiering_README.md",
 ]
 precedence = "override"
 SPDX-FileCopyrightText = "FlyDSL Project Contributors"

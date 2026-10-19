@@ -1,10 +1,13 @@
-# Layout Algebra Guide
+<!-- Vendored from ROCm/FlyDSL@dd8373349:docs/layout_system_guide.md -->
+# Layout algebra guide
 
-> Core types, construction, coordinate mapping, algebra operations, and layout utilities in FlyDSL.
+This guide covers the core layout types, construction, coordinate mapping, algebra operations, and layout utilities in FlyDSL.
 
-> **Important:** All `fx.*` layout operations generate MLIR IR and **must** be called inside a `@flyc.kernel` or `@flyc.jit` function body. Code snippets below show API usage patterns within that context, not standalone scripts.
+:::{important}
+All `fx.*` layout operations generate MLIR IR and must be called inside a `@flyc.kernel` or `@flyc.jit` function body. The code snippets below show API usage patterns within that context, not standalone scripts.
+:::
 
-## Quick Reference
+## Quick reference
 
 | Operation | Python API | Fly Dialect Op | Description |
 |---|---|---|---|
@@ -39,12 +42,11 @@
 | | `fx.group(it, begin, end)` | `fly.group` | Group modes into nested tuple |
 | | `fx.append(base, elem)` | `fly.append` | Append mode to IntTuple |
 | | `fx.prepend(base, elem)` | `fly.prepend` | Prepend mode to IntTuple |
-| | `fx.zip(lhs, rhs)` | `fly.zip` | Zip two IntTuples |
 | **Recast** | `fx.recast_layout(ly, old, new)` | `fly.recast_layout` | Recast layout for type width change |
 
 ---
 
-## 1. Core Types
+## 1. Core types
 
 The Fly dialect defines several custom MLIR types for layout algebra:
 
@@ -58,7 +60,7 @@ The Fly dialect defines several custom MLIR types for layout algebra:
 | `!fly.copy_atom` | `!fly.copy_atom_universal_copy<...>` | Copy atom type |
 | `!fly.mma_atom` | `!fly.mma_atom_universal_fma<...>` | MMA atom type |
 
-### IntTuple Patterns
+### IntTuple patterns
 
 IntTuples encode structure at the type level:
 
@@ -99,26 +101,25 @@ shape_nested = fx.make_shape(9, (4, 8))   # (9, (4, 8))
 col_major = fx.make_ordered_layout((M, N), order=(0, 1))  # stride order: M-first
 row_major = fx.make_ordered_layout((M, N), order=(1, 0))  # stride order: N-first
 
-# Identity layout / tensor
+# Identity layout
 identity = fx.make_identity_layout((M, N))
-id_tensor = fx.make_identity_tensor((M, N))
 ```
 
 ---
 
-## 3. Coordinate Mapping
+## 3. Coordinate mapping
 
-The fundamental operation: mapping between logical coordinates and physical memory indices.
+The fundamental operation maps between logical coordinates and physical memory indices.
 
 **Formula**: `Index = sum(coord_i * stride_i)`
 
-### `crd2idx` — Coordinate to Index
+### `crd2idx` — Coordinate to index
 
 ```python
 idx = fx.crd2idx(coord, layout)
 ```
 
-### `idx2crd` — Index to Coordinate (inverse)
+### `idx2crd` — Index to coordinate (inverse)
 
 ```python
 coord = fx.idx2crd(idx, layout)
@@ -132,7 +133,7 @@ For layout `((8, 16), (1, 8))` (8x16, column-major):
 
 ---
 
-## 4. Query Operations
+## 4. Query operations
 
 | Operation | Description | Example |
 |---|---|---|
@@ -156,11 +157,11 @@ r = fx.rank(shape)            # number of modes
 
 ---
 
-## 5. Layout Algebra
+## 5. Layout algebra
 
 ### 5.1 Composition: `composition(A, B)`
 
-Composes two layouts: result maps through B first, then A.
+Composes two layouts: the result maps through B first, then A.
 
 **Semantics**: `result(x) = A(B(x))`
 
@@ -192,7 +193,7 @@ Simplifies a layout by flattening nested modes and combining adjacent modes when
 simplified = fx.coalesce(layout)
 ```
 
-### 5.4 Right Inverse: `right_inverse(layout)`
+### 5.4 Right inverse: `right_inverse(layout)`
 
 Computes the right inverse of a layout mapping.
 
@@ -200,9 +201,9 @@ Computes the right inverse of a layout mapping.
 inv = fx.right_inverse(layout)
 ```
 
-### 5.5 Recast Layout: `recast_layout(layout, old_bits, new_bits)`
+### 5.5 Recast layout: `recast_layout(layout, old_bits, new_bits)`
 
-Adjusts a layout for a type width change (e.g., FP16 → FP8):
+Adjusts a layout for a type width change (for example, FP16 → FP8):
 
 ```python
 # Convert layout from 16-bit to 8-bit elements
@@ -211,7 +212,7 @@ recasted = fx.recast_layout(layout, old_type_bits=16, new_type_bits=8)
 
 ---
 
-## 6. Product Operations
+## 6. Product operations
 
 Products combine two layouts to create a larger layout. All products take `(layout, tiler)`.
 
@@ -232,7 +233,7 @@ result = fx.raked_product(layout, tiler)
 
 ---
 
-## 7. Divide Operations
+## 7. Divide operations
 
 Divides partition a layout by a divisor, creating a view that separates "tile" and "rest" dimensions.
 
@@ -250,7 +251,7 @@ result = fx.zipped_divide(layout, divisor)
 
 ---
 
-## 8. Structural Operations
+## 8. Structural operations
 
 ### `select(int_tuple, indices)`
 
@@ -277,14 +278,6 @@ extended = fx.append(base_tuple, new_elem)
 extended = fx.prepend(base_tuple, new_elem)
 ```
 
-### `zip(lhs, rhs)`
-
-Zip two IntTuples mode-wise:
-
-```python
-zipped = fx.zip(shapes_a, shapes_b)
-```
-
 ### `slice(src, coord)`
 
 Slice an IntTuple/layout at a coordinate:
@@ -295,9 +288,9 @@ sliced = fx.slice(layout, coord)
 
 ---
 
-## 9. MemRef / View / Copy Operations
+## 9. MemRef / view / copy operations
 
-### MemRef Operations
+### MemRef operations
 
 ```python
 # Allocate on-chip memory with layout
@@ -318,7 +311,7 @@ ly = fx.get_layout(memref)
 it = fx.get_iter(memref)
 ```
 
-### View and Offset
+### View and offset
 
 ```python
 # Create a view from iterator + layout
@@ -328,9 +321,9 @@ view = fx.make_view(iterator, layout)
 ptr = fx.add_offset(ptr, offset)
 ```
 
-### Copy Atoms and Tiled Copies
+### Copy atoms and tiled copies
 
-#### Copy Atom Types
+#### Copy atom types
 
 | Type Factory | Description |
 |---|---|
@@ -341,6 +334,7 @@ ptr = fx.add_offset(ptr, offset)
 | `fx.rocdl.BufferCopy128b()` | AMD buffer-descriptor 128-bit copy |
 | `fx.rocdl.BufferCopy64b()` | AMD buffer-descriptor 64-bit copy |
 | `fx.rocdl.BufferCopy32b()` | AMD buffer-descriptor 32-bit copy |
+| `fx.rocdl.make_tdm_atom(tensor, extents, ...)` | gfx1250 TDM async Global↔LDS whole-tile copy (1–5D); descriptor carried as atom state |
 
 #### Construction
 
@@ -348,8 +342,12 @@ ptr = fx.add_offset(ptr, offset)
 # Create copy atom (copy_op_type, elem_type)
 copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Float32)
 
-# Create MMA atom
+# Create MMA atom (CDNA MFMA)
 mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 4, fx.Float32))
+
+# gfx1250 (wave32): WMMA and MX-scaled WMMA MMA atoms
+mma_atom = fx.make_mma_atom(fx.rocdl.WMMA(16, 16, 128, fx.Float8E4M3FN))
+mma_atom = fx.make_mma_atom(fx.rocdl.WMMAScale(16, 16, 128, fx.Float8E4M3FN))  # E8M0 block scale
 
 # Build thread-value layout from thread and value layouts
 tiler_mn, layout_tv = fx.make_layout_tv(thr_layout, val_layout)
@@ -367,7 +365,7 @@ tiled_mma = fx.make_tiled_mma(mma_atom, atom_layout)
 tiled_mma = fx.make_tiled_mma(mma_atom, atom_layout, permutation)
 ```
 
-#### Thread Slicing and Partitioning
+#### Thread slicing and partitioning
 
 ```python
 # Get a per-thread view of a tiled copy
@@ -406,20 +404,20 @@ fx.gemm(mma_atom, d, a, b, c)
 | Property | Class | Description |
 |---|---|---|
 | `copy_atom.thr_layout` | `CopyAtom` | Thread layout of copy atom |
-| `copy_atom.tv_layout_src` | `CopyAtom` | Thread-value layout for source |
-| `copy_atom.tv_layout_dst` | `CopyAtom` | Thread-value layout for destination |
+| `copy_atom.layout_src_tv` | `CopyAtom` | Thread-value layout for source |
+| `copy_atom.layout_dst_tv` | `CopyAtom` | Thread-value layout for destination |
 | `mma_atom.thr_layout` | `MmaAtom` | Thread layout |
 | `mma_atom.shape_mnk` | `MmaAtom` | M×N×K tile dimensions |
-| `mma_atom.tv_layout_A/B/C` | `MmaAtom` | Thread-value layouts per operand |
-| `tiled_copy.tiled_tv_layout_S` | `TiledCopy` | Full tiled source layout |
-| `tiled_copy.tiled_tv_layout_D` | `TiledCopy` | Full tiled destination layout |
+| `mma_atom.layout_A_tv/layout_B_tv/layout_C_tv` | `MmaAtom` | Thread-value layouts per operand |
+| `tiled_copy.layout_src_tv_tiled` | `TiledCopy` | Full tiled source layout |
+| `tiled_copy.layout_dst_tv_tiled` | `TiledCopy` | Full tiled destination layout |
 | `tiled_mma.tile_size_mnk` | `TiledMma` | Tiled MMA dimensions |
 | `tiled_mma.thr_layout_vmnk` | `TiledMma` | Thread layout across V,M,N,K |
-| `tiled_mma.tiled_tv_layout_A/B/C` | `TiledMma` | Full tiled layouts per operand |
+| `tiled_mma.tv_layout_A_tiled/tv_layout_B_tiled/tv_layout_C_tiled` | `TiledMma` | Full tiled layouts per operand |
 
 ---
 
-## 10. Nested / Hierarchical Layouts
+## 10. Nested / hierarchical layouts
 
 The Fly dialect supports nested layouts for representing multi-level tiling hierarchies:
 
@@ -432,7 +430,7 @@ Nested layouts are used in GEMM kernels for multi-level tiling (block → warp �
 
 ---
 
-## 11. IntTuple Arithmetic
+## 11. IntTuple arithmetic
 
 ```python
 # Element-wise operations on IntTuples
@@ -450,7 +448,7 @@ products = fx.int_tuple_product_each(int_tuple)
 
 ---
 
-## 12. Printf Debugging
+## 12. Printf debugging
 
 The Fly dialect provides a `printf` op for kernel debugging:
 
@@ -466,7 +464,7 @@ Supports:
 
 ---
 
-## 13. Decision Tree
+## 13. Decision tree
 
 ```
 Which layout operation do I need?
@@ -507,7 +505,7 @@ Which layout operation do I need?
 
 ---
 
-## 14. Source Files
+## 14. Source files
 
 | File | Description |
 |---|---|

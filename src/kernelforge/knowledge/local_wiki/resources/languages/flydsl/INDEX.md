@@ -3,6 +3,7 @@ title: FlyDSL knowledge map — index, file roles & problem-routing
 kind: index
 scope: languages/flydsl
 updated: 2026-10-19
+pinned_source: ROCm/FlyDSL@dd8373349 (v0.3.2) — API_docs/ and skills/profile/ are vendored from it
 ---
 
 # FlyDSL — knowledge map

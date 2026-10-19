@@ -1,6 +1,7 @@
-# CuTe Layout Algebra Reference for FlyDSL
+<!-- Vendored from ROCm/FlyDSL@dd8373349:docs/cute_layout_algebra_guide.md -->
+# CuTe layout algebra reference for FlyDSL
 
-> FlyDSL implements the CuTe layout algebra for AMD GPUs. This guide covers the mathematical foundations of the layout algebra and how FlyDSL exposes them through its Python API.
+FlyDSL implements the CuTe layout algebra for AMD GPUs. This guide covers the mathematical foundations of the layout algebra and how FlyDSL exposes them through its Python API.
 
 The CuTe layout algebra was introduced in the [CUTLASS](https://github.com/NVIDIA/cutlass) C++ library under BSD-3-Clause license (`include/cute/`). FlyDSL adopts the same algebraic framework — shapes, strides, coordinate mappings, products, and divides — and provides a Python API targeting AMD ROCm/HIP GPUs via MLIR.
 
@@ -8,7 +9,7 @@ The CuTe layout algebra was introduced in the [CUTLASS](https://github.com/NVIDI
 
 ## 1. Overview
 
-### 1.1 What is the CuTe Layout Algebra?
+### 1.1 What is the CuTe layout algebra?
 
 The CuTe layout algebra is a mathematical framework for describing multidimensional data layouts as compositions of shapes, strides, and coordinate transformations. It provides:
 
@@ -25,7 +26,7 @@ The algebra is defined in the C++ headers of CUTLASS (BSD-3-Clause):
 A pure-Python reference implementation also exists in PyTorch:
 - `torch/distributed/_pycute/layout.py` — Layout class with all algebra operations
 
-### 1.2 FlyDSL as an AMD Implementation
+### 1.2 FlyDSL as an AMD implementation
 
 FlyDSL implements the CuTe layout algebra for AMD GPUs through the Fly MLIR dialect:
 
@@ -41,13 +42,13 @@ FlyDSL implements the CuTe layout algebra for AMD GPUs through the Fly MLIR dial
 
 ---
 
-## 2. Layout Algebra Fundamentals
+## 2. Layout algebra fundamentals
 
-### 2.1 Core Types
+### 2.1 Core types
 
 A **Layout** is defined by a pair `(Shape, Stride)`:
 
-| Concept | Mathematical Definition | FlyDSL API |
+| Concept | Mathematical definition | FlyDSL API |
 |---|---|---|
 | **Shape** | Tuple of positive integers describing dimensions | `fx.make_shape(M, N)` |
 | **Stride** | Tuple of integers describing step sizes per dimension | `fx.make_stride(s0, s1)` |
@@ -64,7 +65,7 @@ layout = fx.make_layout(shape, stride)
 coord = fx.make_coord(3, 5)
 ```
 
-### 2.2 Query Operations
+### 2.2 Query operations
 
 | Operation | Formula | FlyDSL API |
 |---|---|---|
@@ -75,12 +76,12 @@ coord = fx.make_coord(3, 5)
 
 > **Reference:** `include/cute/layout.hpp` — `size()`, `cosize()`, `rank()` functions.
 
-### 2.3 Coordinate Mapping
+### 2.3 Coordinate mapping
 
 The fundamental operation of a layout is mapping a logical coordinate to a physical index:
 
 ```
-index = crd2idx(coord, shape, stride) = dot(coord, stride)
+index = crd2idx(coord, layout) = dot(coord, stride)
 ```
 
 For a layout `L = ((S0, S1), (d0, d1))` and coordinate `(c0, c1)`:
@@ -92,7 +93,7 @@ index = c0 * d0 + c1 * d1
 The inverse operation recovers a coordinate from a linear index:
 
 ```
-coord = idx2crd(index, shape, stride)
+coord = idx2crd(index, layout)
 ```
 
 | Operation | Definition | FlyDSL API |
@@ -102,7 +103,7 @@ coord = idx2crd(index, shape, stride)
 
 > **Reference:** `include/cute/layout.hpp` — `crd2idx()`, `idx2crd()`.
 
-### 2.4 Layout Algebra Operations
+### 2.4 Layout algebra operations
 
 All operations below are defined mathematically in the CuTe algebra and implemented in FlyDSL with identical semantics.
 
@@ -162,7 +163,7 @@ Divides decompose a layout by a tiler, creating a hierarchical layout with "tile
 
 > **Reference:** `include/cute/layout.hpp` — `logical_divide()`, `zipped_divide()`, `tiled_divide()`, `flat_divide()`.
 
-#### Partitioning Utilities
+#### Partitioning utilities
 
 | Operation | Description | FlyDSL API |
 |---|---|---|
@@ -173,7 +174,7 @@ Divides decompose a layout by a tiler, creating a hierarchical layout with "tile
 
 ---
 
-## 3. FlyDSL Kernel Development
+## 3. FlyDSL kernel development
 
 FlyDSL kernels are defined using `@flyc.kernel` for GPU device functions and `@flyc.jit` for host-side launch wrappers:
 
@@ -214,7 +215,7 @@ def launch(
 
 ---
 
-## 4. Thread and Block Hierarchy
+## 4. Thread and block hierarchy
 
 GPU kernels organize threads into a hierarchy of blocks and grids. FlyDSL provides direct access to thread/block indices:
 
@@ -228,7 +229,7 @@ Supported dimensions: `.x`, `.y`, `.z`.
 
 **Hardware mapping (NVIDIA → AMD):**
 
-| NVIDIA Concept | AMD Concept | Notes |
+| NVIDIA concept | AMD concept | Notes |
 |---|---|---|
 | Warp (32 threads) | Wavefront (64 threads) | Fundamental SIMD unit |
 | Thread Block | Workgroup | Cooperative thread group |
@@ -238,9 +239,9 @@ Supported dimensions: `.x`, `.y`, `.z`.
 
 ---
 
-## 5. Tensor Creation and Memory
+## 5. Tensor creation and memory
 
-### 5.1 Tensor Construction
+### 5.1 Tensor construction
 
 FlyDSL provides tensor operations with layout-aware partitioning:
 
@@ -258,9 +259,9 @@ tA_thr = fx.slice(tA, (None, tid))
 # Allocate register memrefs / copy_atom_call: see docs/quickstart.rst or examples/01-vectorAdd.py
 ```
 
-### 5.2 Memory Hierarchy
+### 5.2 Memory hierarchy
 
-| Level | NVIDIA | AMD | Typical Size |
+| Level | NVIDIA | AMD | Typical size |
 |---|---|---|---|
 | Global Memory (GMEM) | Global Memory | Global Memory (HBM) | GBs |
 | Shared/Local Memory | SMEM (48–228 KB) | LDS (64–160 KB) | Per-CU |
@@ -269,17 +270,23 @@ tA_thr = fx.slice(tA, (None, tid))
 
 **LDS allocation in FlyDSL:**
 ```python
-from flydsl.utils.smem_allocator import SmemAllocator
+import flydsl.expr as fx
 
-allocator = SmemAllocator(ctx, arch="gfx942")
-lds_gen = allocator.allocate_array(T.f16(), num_elems=128*64)
-allocator.finalize()
+# Declare the LDS storage layout as a @fx.struct of fx.Array fields ...
+@fx.struct
+class SharedStorage:
+    tile: fx.Array[fx.Float16, 128, 64]
 
-base = allocator.get_base()
-lds_ptr = lds_gen(base)
+# ... then allocate it inside the kernel and view each field as a layout.
+lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+lds_tile = lds.tile.view(fx.make_layout((128, 64), (64, 1)))
 ```
 
-### 5.3 Swizzling (Bank Conflict Avoidance)
+The compiler sizes the per-leaf static LDS global automatically (default
+``static=True``), so ``launch(smem=...)`` is normally left unset. The legacy
+``flydsl.utils.smem_allocator.SmemAllocator`` remains for un-migrated kernels.
+
+### 5.3 Swizzling (bank conflict avoidance)
 
 Swizzling remaps addresses to avoid bank conflicts in shared/local memory. FlyDSL does not provide a built-in swizzle function; kernels implement XOR-based swizzling manually using arithmetic ops:
 
@@ -292,9 +299,9 @@ The pattern XORs the row index into the column address at 16-byte boundaries, di
 
 ---
 
-## 6. Data Movement
+## 6. Data movement
 
-### 6.1 Copy Atoms and Tiled Copies
+### 6.1 Copy atoms and tiled copies
 
 FlyDSL uses the CuTe copy abstraction: a **copy atom** defines a single thread's copy capability, and a **tiled copy** distributes the atom across all threads:
 
@@ -317,7 +324,7 @@ dst_partition = thr_copy.partition_D(dst_tensor)
 fx.copy(copy_atom, src_partition, dst_partition)
 ```
 
-### 6.2 Buffer Loads (AMD-specific)
+### 6.2 Buffer loads (AMD-specific)
 
 AMD GPUs provide buffer load instructions for efficient global memory access. FlyDSL exposes these via the ``rocdl`` submodule:
 
@@ -330,7 +337,7 @@ copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Float32)
 
 ---
 
-## 7. Compute Operations (MFMA)
+## 7. Compute operations (MFMA)
 
 AMD GPUs use MFMA (Matrix Fused Multiply-Add) instructions for matrix math. FlyDSL provides direct access to MFMA intrinsics:
 
@@ -338,7 +345,7 @@ AMD GPUs use MFMA (Matrix Fused Multiply-Add) instructions for matrix math. FlyD
 mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 4, fx.Float32))
 tiled_mma = fx.make_tiled_mma(mma_atom, fx.make_layout((2, 2, 1), (1, 2, 0)))
 
-# Block-level tensor views bA, bB, bC (e.g. after zipped_divide + slice by block)
+# Block-level tensor views bA, bB, bC (for example, after zipped_divide + slice by block)
 thr_mma = tiled_mma.thr_slice(tid)
 frag_A = thr_mma.make_fragment_A(bA)
 frag_B = thr_mma.make_fragment_B(bB)
@@ -348,7 +355,7 @@ fx.gemm(mma_atom, frag_C, frag_A, frag_B, frag_C)
 
 **MFMA instruction reference (AMD CDNA):**
 
-| Instruction | Data Type | M×N×K | Architecture |
+| Instruction | Data type | M×N×K | Architecture |
 |---|---|---|---|
 | `mfma_f32_16x16x16f16` | FP16 | 16×16×16 | GFX942+ |
 | `mfma_f32_16x16x32_fp8_fp8` | FP8 | 16×16×32 | GFX942+ |
@@ -382,9 +389,9 @@ fx.gpu.barrier()
 
 ---
 
-## 9. Compilation and Execution
+## 9. Compilation and execution
 
-### 9.1 Compilation Pipeline
+### 9.1 Compilation pipeline
 
 FlyDSL compiles Python → MLIR IR → ROCDL dialect → HSACO binary:
 
@@ -408,12 +415,12 @@ def launch(A: fx.Tensor, B: fx.Tensor, C, ...,
 launch(A_torch, B_torch, C_torch, ..., stream=torch.cuda.Stream())
 ```
 
-### 9.2 Environment Variables
+### 9.2 Environment variables
 
 | Variable | Description |
 |---|---|
 | `FLYDSL_COMPILE_BACKEND=rocm` | Compile backend id |
-| `ARCH` | Target architecture (e.g., `gfx942`, `gfx950`) |
+| `ARCH` | Target architecture (for example, `gfx942`, `gfx950`) |
 | `FLYDSL_DUMP_IR=1` | Dump intermediate MLIR IR |
 | `FLYDSL_DUMP_DIR=/path` | IR dump location |
 | `COMPILE_ONLY=1` | Skip execution, compile only |
@@ -422,7 +429,7 @@ launch(A_torch, B_torch, C_torch, ..., stream=torch.cuda.Stream())
 
 ---
 
-## 10. Complete Example: GEMM with Layout Algebra
+## 10. Complete example: GEMM with layout algebra
 
 This example matches `examples/03-tiledMma.py`: zipped divide and block slice, then
 `tiled_copy_*` + `thr_copy.retile` + `fx.copy` into fragments, `fx.gemm`, and copy out.
@@ -495,14 +502,14 @@ def tiledMma(A: fx.Tensor, B: fx.Tensor, C: fx.Tensor,
     gemm_kernel(A, B, C).launch(grid=(1, 1, 1), block=(256, 1, 1), stream=stream)
 ```
 
-See `examples/03-tiledMma.py` for the runnable script, and `kernels/preshuffle_gemm.py`
+See `examples/03-tiledMma.py` for the runnable script, and `kernels/gemm/preshuffle_gemm.py`
 for a production-quality GEMM implementation.
 
 ---
 
 ## 11. References
 
-### CuTe Layout Algebra (BSD-3-Clause)
+### CuTe layout algebra (BSD-3-Clause)
 - **C++ headers:** [CUTLASS `include/cute/`](https://github.com/NVIDIA/cutlass/tree/main/include/cute)
   - `layout.hpp` — Layout type, all algebra operations
   - `tensor.hpp` — Tensor type (pointer + layout)
@@ -510,13 +517,13 @@ for a production-quality GEMM implementation.
 - **GTC presentations:** "CuTe: A Layout Algebra for CUTLASS" — mathematical foundations and design rationale
 - **PyCute reference:** `torch/distributed/_pycute/layout.py` — pure-Python layout algebra (open source, PyTorch)
 
-### FlyDSL Source Files
+### FlyDSL source files
 - `python/flydsl/expr/` — Layout algebra and expression API (`primitive.py`, `derived.py`, etc.)
 - `python/flydsl/expr/rocdl/` — ROCDL-specific operations
 - `python/flydsl/compiler/` — JIT compilation pipeline (`kernel_function.py`, `jit_function.py`)
-- `python/flydsl/utils/smem_allocator.py` — SmemAllocator
+- `python/flydsl/expr/gpu.py` — `SharedAllocator` for LDS allocation (`fx.SharedAllocator`)
+- `python/flydsl/utils/smem_allocator.py` — legacy `SmemAllocator`
 - `examples/01-vectorAdd.py` — VecAdd example with layout algebra
 - `examples/02-tiledCopy.py` — Tiled copy example
 - `examples/03-tiledMma.py` — Tiled MFMA GEMM example
-- `kernels/preshuffle_gemm.py` — Production GEMM implementation
-- `kernels/preshuffle_gemm_flyc.py` — GEMM using `@flyc.kernel` API
+- `kernels/gemm/preshuffle_gemm.py` — Production GEMM implementation
