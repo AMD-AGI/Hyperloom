@@ -68,6 +68,8 @@ def degraded_reason(result: Mapping[str, Any]) -> str:
 
 
 def _table_rows(path: Path) -> list[dict[str, str]]:
+    if not path.is_file():
+        return []
     try:
         with path.open(encoding="utf-8", newline="") as handle:
             return list(csv.DictReader(handle))

@@ -5,14 +5,9 @@
 
 from __future__ import annotations
 
-import json
-import sys
-import types
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
-import pytest
 
 from hyperloom_multibranch.contracts.notebook.records import MAX_OP_SHARES
 from hyperloom_multibranch.toolbox.tools import (
@@ -23,44 +18,15 @@ from hyperloom_multibranch.toolbox.tools import (
     roofline_tool,
     tracelens_tool,
 )
+from hyperloom_multibranch.toolbox.tools.op_shares import OPS_SUMMARY
 from hyperloom_multibranch.toolbox.tools.tests.sinks import RecordingSink
 
-_TRACE_PKG = "hyperloom.orchestrator.trace_analysis"
 
-
-@pytest.fixture(autouse=True)
-def _loader_without_tracelens(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Run the main flow's real ``analysis.json`` reader with TraceLens' source resolver replaced."""
-    stub = types.ModuleType(f"{_TRACE_PKG}._kernel_source")
-    stub.ResolveResult = SimpleNamespace  # type: ignore[attr-defined]
-    stub.resolve_source_verdict = lambda *a, **k: SimpleNamespace(  # type: ignore[attr-defined]
-        location=None, patchable=False, reason="", kind="", method="unresolved"
-    )
-    monkeypatch.setitem(sys.modules, f"{_TRACE_PKG}._kernel_source", stub)
-    for name in ("_analysis_json", "analysis_json"):
-        monkeypatch.delitem(sys.modules, f"{_TRACE_PKG}.{name}", raising=False)
-
-
-def _task(operation: str, share: float, *, kernels: int = 1) -> dict[str, Any]:
-    member = {
-        "kernel_name": ["k"],
-        "args_shapes": ["(1,2)"],
-        "args_datatypes": ["bf16"],
-        "time_ms": 1.0,
-        "count": 1,
-        "pct_e2e": share,
-        "impact_score": share,
-    }
-    return {
-        "priority": 1,
-        "operation": operation,
-        "impact": {"mid": 1.0, "low": 0.5, "high": 2.0},
-        "members": [dict(member, pct_e2e=share / kernels) for _ in range(kernels)],
-    }
-
-
-def _report(tmp_path: Path, tasks: list[dict[str, Any]]) -> Path:
-    (tmp_path / "analysis.json").write_text(json.dumps({"compute_optimizations": tasks}), encoding="utf-8")
+def _report(tmp_path: Path, shares: dict[str, float]) -> Path:
+    """An analysis report with the ops summary TraceLens' perf report writes beside it."""
+    (tmp_path / OPS_SUMMARY).parent.mkdir(parents=True, exist_ok=True)
+    rows = "".join(f"{name},{share}\n" for name, share in shares.items())
+    (tmp_path / OPS_SUMMARY).write_text(f"name,Percentage (%)\n{rows}", encoding="utf-8")
     report = tmp_path / "analysis.md"
     report.write_text("# report\n", encoding="utf-8")
     return report
@@ -83,21 +49,15 @@ _IDS = {"commit_id": "c9", "profile_request_id": "req-4"}
 
 
 async def test_tracelens_pointer_carries_the_shares_the_commit_and_the_profile_request(tmp_path: Path) -> None:
-    report = _report(tmp_path, [_task("aiter::gemm", 40.0), _task("rccl::all_reduce", 12.5), _task("silu", 3.25)])
+    report = _report(tmp_path, {"aiter::gemm": 40.0, "rccl::all_reduce": 12.5, "silu": 3.25})
     pointer = await _tracelens_pointer(tmp_path, {"status": "completed", "trace_report_path": str(report)}, _IDS)
     assert dict(pointer.op_shares) == {"aiter::gemm": 40.0, "rccl::all_reduce": 12.5, "silu": 3.25}
     assert (pointer.commit_id, pointer.profile_request_id) == ("c9", "req-4")
 
 
-async def test_an_op_listed_in_several_members_has_its_shares_summed(tmp_path: Path) -> None:
-    report = _report(tmp_path, [_task("aiter::gemm", 30.0, kernels=3), _task("silu", 5.0)])
-    pointer = await _tracelens_pointer(tmp_path, {"status": "completed", "trace_report_path": str(report)}, _IDS)
-    assert pointer.op_shares["aiter::gemm"] == pytest.approx(30.0)
-
-
 async def test_more_than_fifty_ops_keep_the_fifty_largest(tmp_path: Path) -> None:
     ops = {f"op{n:02d}": float(n) for n in range(1, 61)}
-    report = _report(tmp_path, [_task(name, share) for name, share in reversed(ops.items())])
+    report = _report(tmp_path, dict(reversed(ops.items())))
     pointer = await _tracelens_pointer(tmp_path, {"status": "completed", "trace_report_path": str(report)}, _IDS)
     kept = {f"op{n:02d}" for n in range(11, 61)}
     assert len(pointer.op_shares) == MAX_OP_SHARES
@@ -113,21 +73,21 @@ async def test_no_table_leaves_the_shares_empty_and_the_job_fine(tmp_path: Path)
 
 
 async def test_an_unknown_commit_leaves_the_shares_empty_instead_of_failing(tmp_path: Path) -> None:
-    report = _report(tmp_path, [_task("silu", 5.0)])
+    report = _report(tmp_path, {"silu": 5.0})
     result = {"status": "completed", "trace_report_path": str(report)}
     pointer = await _tracelens_pointer(tmp_path, result, {"profile_request_id": "req-4"})
     assert pointer.op_shares == {} and pointer.commit_id == "" and pointer.profile_request_id == ""
 
 
 async def test_a_trace_that_did_not_come_from_a_profile_test_has_no_request_id(tmp_path: Path) -> None:
-    report = _report(tmp_path, [_task("silu", 5.0)])
+    report = _report(tmp_path, {"silu": 5.0})
     result = {"status": "completed", "trace_report_path": str(report)}
     pointer = await _tracelens_pointer(tmp_path, result, {"commit_id": "c9"})
     assert pointer.op_shares == {"silu": 5.0} and pointer.profile_request_id == ""
 
 
 async def test_roofline_pointer_reads_the_table_beside_its_analysis_report(tmp_path: Path) -> None:
-    report = _report(tmp_path, [_task("aiter::gemm", 40.0)])
+    report = _report(tmp_path, {"aiter::gemm": 40.0})
 
     class Executor:
         async def __call__(self, ctx: Any) -> dict:
@@ -144,7 +104,7 @@ async def test_roofline_pointer_reads_the_table_beside_its_analysis_report(tmp_p
 
 
 async def test_another_tool_keeps_the_pointer_defaults_even_beside_a_table(tmp_path: Path) -> None:
-    report = _report(tmp_path, [_task("silu", 5.0)])
+    report = _report(tmp_path, {"silu": 5.0})
 
     class Executor:
         async def __call__(self, ctx: Any) -> dict:
@@ -167,7 +127,7 @@ async def test_tracelens_runs_on_local_disk_and_copies_back_only_what_is_read(tm
         out = session_dir / "run"
         out.mkdir()
         (out / "merged.trace_iteration_0:4.json.gz").write_text("x", encoding="utf-8")
-        report = _report(out, [_task("gemm", 60.0)])
+        report = _report(out, {"gemm": 60.0})
         return {
             "status": "ok",
             "trace_report_path": str(report),
@@ -183,7 +143,7 @@ async def test_tracelens_runs_on_local_disk_and_copies_back_only_what_is_read(tm
     workdir = tmp_path / "jobs" / "j1"
     assert not seen["dir"].is_relative_to(tmp_path)
     assert not seen["dir"].exists()
-    assert (workdir / "run" / "analysis.md").is_file() and (workdir / "run" / "analysis.json").is_file()
+    assert (workdir / "run" / "analysis.md").is_file() and (workdir / "run" / OPS_SUMMARY).is_file()
     assert not [p for p in workdir.rglob("*") if ":" in p.name]
     pointer = sink.pointers[0]
     assert pointer.op_shares == {"gemm": 60.0}
