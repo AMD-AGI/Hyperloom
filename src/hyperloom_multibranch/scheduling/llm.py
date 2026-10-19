@@ -18,6 +18,7 @@ from dataclasses import dataclass
 
 from hyperloom.common.llm_config import (
     AGENT_BACKEND_CLAUDE,
+    AnthropicCompletionRequest,
     aanthropic_completion,
     build_http_timeout,
     provider_model_defaults,
@@ -124,17 +125,16 @@ def anthropic_completion(model: str, *, component: str, operation: str) -> Compl
     timeout = build_http_timeout(connect=MB_LLM_CONNECT_TIMEOUT_SECONDS, read=MB_LLM_READ_TIMEOUT_SECONDS)
 
     async def complete(system: str, user: str) -> CompletionReply:
+        request = AnthropicCompletionRequest(
+            model=model,
+            messages=[{"role": "user", "content": user}],
+            max_tokens=COMPLETION_MAX_TOKENS,
+            system=system,
+            timeout=timeout,
+            timeout_s=MB_LLM_READ_TIMEOUT_SECONDS,
+        )
         try:
-            result = await aanthropic_completion(
-                model=model,
-                messages=[{"role": "user", "content": user}],
-                max_tokens=COMPLETION_MAX_TOKENS,
-                system=system,
-                timeout=timeout,
-                timeout_s=MB_LLM_READ_TIMEOUT_SECONDS,
-                component=component,
-                operation=operation,
-            )
+            result = await aanthropic_completion(request=request, component=component, operation=operation)
         except errors as exc:
             raise CompletionFailed(f"{operation} call failed: {type(exc).__name__}: {exc}") from exc
         return CompletionReply(result.text, _anthropic_usage(result.usage))

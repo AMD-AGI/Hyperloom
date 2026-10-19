@@ -168,21 +168,20 @@ def anthropic_critic(model: str, *, component: str) -> CriticCompletion:
         import httpx
         from claude_agent_sdk import ClaudeSDKError
 
-        from hyperloom.common.llm_config import aanthropic_completion
+        from hyperloom.common.llm_config import AnthropicCompletionRequest, aanthropic_completion
 
         # The HTTP transport raises RuntimeError on a bad status or body (LLMConfigError is one) and httpx errors on
         # the wire; the SDK transport raises the SDK's own errors and TimeoutError.
         transport_errors = (RuntimeError, OSError, TimeoutError, httpx.HTTPError, ClaudeSDKError)
         try:
-            result = await aanthropic_completion(
+            request = AnthropicCompletionRequest(
                 model=model,
                 messages=[{"role": "user", "content": user}],
                 max_tokens=CRITIC_MAX_TOKENS,
                 system=system,
                 timeout_s=CRITIC_TIMEOUT_SECONDS,
-                component=component,
-                operation="fix_critic",
             )
+            result = await aanthropic_completion(request=request, component=component, operation="fix_critic")
         except transport_errors as exc:
             raise CriticUnavailable(f"{type(exc).__name__}: {exc}") from exc
         return result.text

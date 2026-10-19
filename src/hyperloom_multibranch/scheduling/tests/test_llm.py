@@ -13,19 +13,25 @@ import httpx
 import pytest
 from claude_agent_sdk import ClaudeSDKError
 
-from hyperloom.common.llm_config import AnthropicMessageResult
+from hyperloom.common.llm_config import AnthropicCompletionRequest, AnthropicMessageResult
 from hyperloom_multibranch.scheduling import llm
 
 
-def _answering(monkeypatch: pytest.MonkeyPatch, usage: object) -> None:
-    async def transport(**kwargs: object) -> AnthropicMessageResult:
+def _answering(monkeypatch: pytest.MonkeyPatch, usage: object) -> list[AnthropicCompletionRequest]:
+    asked: list[AnthropicCompletionRequest] = []
+
+    async def transport(
+        *, request: AnthropicCompletionRequest, env: object = None, component: str = "", operation: str = ""
+    ) -> AnthropicMessageResult:
+        asked.append(request)
         return AnthropicMessageResult(text="reply", stop_reason="end_turn", usage=usage)
 
     monkeypatch.setattr(llm, "aanthropic_completion", transport)
+    return asked
 
 
 async def test_the_completion_returns_the_reply_text_and_its_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
-    _answering(
+    asked = _answering(
         monkeypatch,
         {"input_tokens": 40, "cache_read_input_tokens": 900, "cache_creation_input_tokens": 60, "output_tokens": 25},
     )
@@ -33,6 +39,12 @@ async def test_the_completion_returns_the_reply_text_and_its_tokens(monkeypatch:
     reply = await llm.anthropic_completion("m", component="c", operation="judge")("sys", "user")
 
     assert reply == llm.CompletionReply("reply", llm.CompletionUsage(input_tokens=1000, output_tokens=25))
+    (request,) = asked
+    assert (request.model, request.system, list(request.messages)) == (
+        "m",
+        "sys",
+        [{"role": "user", "content": "user"}],
+    )
 
 
 @pytest.mark.parametrize("usage", [None, {}, {"input_tokens": None, "output_tokens": -1}])

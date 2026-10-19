@@ -11,6 +11,8 @@ from hyperloom.contracts.measurement import NOT_REPRODUCED, REPRODUCED
 from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.rulegate.critic import (
+    CRITIC_MAX_TOKENS,
+    CRITIC_TIMEOUT_SECONDS,
     CriticUnavailable,
     CriticVerdict,
     FixReview,
@@ -129,17 +131,19 @@ async def _ask_anthropic(monkeypatch, transport) -> str:
 async def test_the_anthropic_critic_asks_the_configured_model(monkeypatch):
     asked = {}
 
-    async def transport(**kwargs):
-        asked.update(kwargs)
+    async def transport(*, request, env=None, component="", operation=""):
+        asked.update(request=request, component=component, operation=operation)
         return SimpleNamespace(text=REACHABLE)
 
     assert await _ask_anthropic(monkeypatch, transport) == REACHABLE
-    assert (asked["model"], asked["system"], asked["component"]) == ("claude-x", "the system", "hyperloom-mb")
-    assert asked["messages"] == [{"role": "user", "content": "the user"}]
+    request = asked["request"]
+    assert (request.model, request.system, asked["component"]) == ("claude-x", "the system", "hyperloom-mb")
+    assert list(request.messages) == [{"role": "user", "content": "the user"}]
+    assert (request.max_tokens, request.timeout_s) == (CRITIC_MAX_TOKENS, CRITIC_TIMEOUT_SECONDS)
 
 
 async def test_a_failed_anthropic_call_is_a_critic_unavailable(monkeypatch):
-    async def transport(**_kwargs):
+    async def transport(*, request, env=None, component="", operation=""):
         raise RuntimeError("anthropic messages status=529")
 
     with pytest.raises(CriticUnavailable, match="RuntimeError: anthropic messages status=529"):
