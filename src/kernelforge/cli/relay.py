@@ -24,6 +24,7 @@ from kernelforge.loop.agent_relay import (
     AgentRelayConfig,
     ProfileAvailability,
     ProviderAvailability,
+    select_start_profile,
 )
 from kernelforge.loop.search_actors import SearchActorBundle, SearchActorPool
 
@@ -131,12 +132,8 @@ class SearchActorBuildContext:
             raise ValueError(f"relay profile {profile.profile_id} resolved to {effective[0]}/{effective[1]}")
         if effective == (profile.provider, profile.model):
             return profile
-        return AgentProfile(
-            effective[0],
-            effective[0],
-            effective[1],
-            profile.reasoning_effort,
-        )
+        # Without relay a provider fallback is allowed; the identity stays, the record names what actually runs.
+        return AgentProfile(profile.profile_id, effective[0], effective[1], profile.reasoning_effort)
 
     def _lane_session_kwargs(self, profile: AgentProfile) -> dict:
         return {
@@ -286,15 +283,11 @@ def probe_agent_profiles(
             available=provider_available and model_available,
             reason="" if model_available else failure,
         )
-    snapshot = AgentAvailabilitySnapshot(
+    return AgentAvailabilitySnapshot(
         checked_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         providers=provider_status,
         profiles=profile_status,
     )
-    primary = snapshot.profiles[relay_config.primary_profile_id]
-    if not primary.available:
-        raise ValueError(f"primary Agent profile is unavailable: {primary.reason}")
-    return snapshot
 
 
 def build_search_actor_pool(
@@ -302,8 +295,12 @@ def build_search_actor_pool(
     *,
     bundle_factory: Callable[[AgentProfile], SearchActorBundle],
     availability: AgentAvailabilitySnapshot | None = None,
+    fallback_provider: str = "",
 ) -> SearchActorPool:
-    """Probe every profile by constructing its complete search actor at startup."""
+    """Construct every available profile's search actor and choose the profile this session starts on.
+
+    Raises ``ValueError`` when neither the primary nor the fallback provider's profile can run.
+    """
     from kernelforge.agent_backends.registry import get_agent_provider
 
     provider_status: dict[str, ProviderAvailability] = {}
@@ -351,6 +348,7 @@ def build_search_actor_pool(
         config=relay_config,
         availability=snapshot,
         bundles=bundles,
+        start_profile_id=select_start_profile(relay_config, snapshot, fallback_provider=fallback_provider),
     )
 
 

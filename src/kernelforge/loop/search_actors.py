@@ -35,10 +35,12 @@ class SearchActorPool:
         config: AgentRelayConfig,
         availability: AgentAvailabilitySnapshot,
         bundles: Mapping[str, SearchActorBundle],
+        start_profile_id: str = "",
     ) -> None:
         self.config = config
         self.availability = availability
         self._bundles = dict(bundles)
+        self.start_profile_id = start_profile_id or config.primary_profile_id
         configured = {profile.profile_id for profile in config.profiles}
         unknown = set(self._bundles) - configured
         if unknown:
@@ -46,16 +48,12 @@ class SearchActorPool:
         for profile_id, bundle in self._bundles.items():
             if bundle.profile.profile_id != profile_id:
                 raise ValueError(f"search actor bundle key does not match profile: {profile_id}")
-        if config.primary_profile_id not in self._bundles:
-            raise ValueError("primary search actor bundle is unavailable")
+        if self.start_profile_id not in self._bundles:
+            raise ValueError(f"start search actor bundle is unavailable: {self.start_profile_id}")
 
     @property
     def profiles(self) -> tuple[AgentProfile, ...]:
         return self.config.profiles
-
-    @property
-    def primary_profile_id(self) -> str:
-        return self.config.primary_profile_id
 
     @property
     def blockage_threshold(self) -> int:

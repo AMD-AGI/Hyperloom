@@ -14,7 +14,13 @@ from kernelforge.cli.relay import (
     resolve_default_relay_config,
 )
 from kernelforge.config import Config
-from kernelforge.loop.agent_relay import AgentProfile, AgentRelayConfig
+from kernelforge.loop.agent_relay import (
+    AgentAvailabilitySnapshot,
+    AgentProfile,
+    AgentRelayConfig,
+    ProfileAvailability,
+    select_start_profile,
+)
 from kernelforge.loop.search_actors import SearchActorBundle
 
 
@@ -164,25 +170,63 @@ def test_optional_profile_probe_failure_is_saved_and_skipped(monkeypatch, tmp_pa
     assert "model is unavailable" in pool.availability.profiles["codex"].reason
 
 
-def test_primary_profile_probe_failure_refuses_startup(monkeypatch, tmp_path):
-    monkeypatch.setattr(registry, "get_agent_provider", _provider)
-    monkeypatch.setattr(
-        registry,
-        "create_registered_backend",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("primary unavailable")),
+def _availability(**available: bool) -> AgentAvailabilitySnapshot:
+    def status(provider: str, model: str) -> ProfileAvailability:
+        up = available[provider]
+        return ProfileAvailability(
+            provider=provider,
+            model=model,
+            provider_available=True,
+            model_available=up,
+            available=up,
+            reason="" if up else f"{provider} down",
+        )
+
+    return AgentAvailabilitySnapshot(
+        profiles={"claude": status("claude", "claude-opus-5"), "codex": status("codex", "gpt-6-astra")}
     )
 
-    with pytest.raises(ValueError, match="primary Agent profile is unavailable"):
-        probe_agent_profiles(
-            _relay_config(),
-            config=Config(
-                workspace=str(tmp_path),
-                agent_backend="claude",
-                agent_model="claude-opus-5",
-                agent_reasoning_effort="max",
-            ),
-            workspace=str(tmp_path),
-        )
+
+def test_an_available_primary_is_where_the_session_starts():
+    assert (
+        select_start_profile(_relay_config("codex"), _availability(claude=True, codex=True), fallback_provider="claude")
+        == "codex"
+    )
+
+
+def test_an_unavailable_primary_starts_on_the_fallback_providers_profile():
+    start = select_start_profile(
+        _relay_config("codex"), _availability(claude=True, codex=False), fallback_provider="claude"
+    )
+
+    assert start == "claude"
+
+
+@pytest.mark.parametrize(
+    ("fallback", "available", "detail"),
+    [
+        ("", {"claude": True, "codex": False}, "no fallback provider"),
+        ("claude", {"claude": False, "codex": False}, "fallback provider claude is unavailable"),
+    ],
+)
+def test_no_runnable_start_profile_refuses_startup(fallback, available, detail):
+    with pytest.raises(ValueError, match="primary Agent profile codex is unavailable: codex down") as error:
+        select_start_profile(_relay_config("codex"), _availability(**available), fallback_provider=fallback)
+
+    assert detail in str(error.value)
+
+
+def test_search_actor_pool_starts_on_the_fallback_when_the_primary_cannot_run():
+    relay_config = _relay_config("codex")
+    pool = build_search_actor_pool(
+        relay_config,
+        availability=_availability(claude=True, codex=False),
+        fallback_provider="claude",
+        bundle_factory=lambda profile: SearchActorBundle(profile=profile, agent_fn=lambda: None),
+    )
+
+    assert pool.start_profile_id == "claude"
+    assert not pool.has_bundle("codex")
 
 
 def test_switching_the_implementer_provider_drops_the_other_providers_cli_and_options(monkeypatch, tmp_path):

@@ -2050,29 +2050,35 @@ def forge_loop(
             relay_config,
             bundle_factory=actor_builder.build,
             availability=startup_availability,
+            fallback_provider=config.agent_fallback_provider,
         )
     except (OSError, RuntimeError, ValueError) as error:
         raise click.ClickException(f"Agent startup availability check failed: {error}") from error
-    primary_bundle = search_actors.bundle(relay_config.primary_profile_id)
-    agent_fn = primary_bundle.agent_fn
-    _lane_agent_factory = primary_bundle.agent_factory
-    orchestration_service = primary_bundle.orchestration_service
-    supervisor_fn = primary_bundle.supervisor_fn
-    effective_implementer = primary_bundle.profile.provider
-    effective_implementer_model = primary_bundle.profile.model
+    start_bundle = search_actors.bundle(search_actors.start_profile_id)
+    agent_fn = start_bundle.agent_fn
+    _lane_agent_factory = start_bundle.agent_factory
+    orchestration_service = start_bundle.orchestration_service
+    supervisor_fn = start_bundle.supervisor_fn
+    effective_implementer = start_bundle.profile.provider
+    effective_implementer_model = start_bundle.profile.model
     for profile_id, status in search_actors.availability.profiles.items():
         state = "available" if status.available else f"unavailable ({status.reason})"
         print(f"  Agent profile: {profile_id} / {status.model}: {state}")
+    if search_actors.start_profile_id != relay_config.primary_profile_id:
+        print(
+            f"  WARNING: primary Agent profile {relay_config.primary_profile_id} is unavailable; "
+            f"starting on fallback profile {search_actors.start_profile_id}"
+        )
     if campaign.agent_relay is not None and not relay_switch_possible(search_actors.availability):
         print(
-            "  WARNING: model relay disabled for this session: no Agent profile other than the primary passed its "
-            "startup check (reasons above); a search blockage falls back to the Supervisor"
+            "  WARNING: model relay disabled for this session: only one Agent profile passed its startup check "
+            "(reasons above); a search blockage falls back to the Supervisor"
         )
 
     from kernelforge.orchestrator.analysis import make_analysis_agent_service
 
     analysis_config = (
-        config_for_profile(config, primary_bundle.profile, primary_provider=primary_bundle.profile.provider)
+        config_for_profile(config, start_bundle.profile, primary_provider=relay_config.primary_profile.provider)
         if campaign.agent_relay is not None
         else config
     )

@@ -262,6 +262,66 @@ def select_relay_intervention(
     )
 
 
+def select_replacement_for_unavailable(
+    state: AgentRelayState,
+    *,
+    profiles: Sequence[AgentProfile],
+    availability: AgentAvailabilitySnapshot,
+) -> RelayIntervention | None:
+    """Choose an available profile to take over from an active profile this session cannot run.
+
+    Unlike a blockage, unavailability says nothing about the search, so profiles tried since the last KEEP stay
+    eligible: running one again is better than not running at all.
+    """
+    by_id = _profile_mapping(profiles)
+    active = by_id.get(state.active_profile_id)
+    candidates = [
+        profile
+        for profile in profiles
+        if profile.profile_id != state.active_profile_id and _profile_is_available(profile, availability)
+    ]
+    if not candidates:
+        return None
+    cross = [profile for profile in candidates if active is None or profile.provider != active.provider]
+    target = (cross or candidates)[0]
+    return RelayIntervention(
+        kind=INTERVENTION_CROSS_HARNESS if cross else INTERVENTION_SAME_HARNESS,
+        target_profile_id=target.profile_id,
+        reason="active profile is unavailable in this session",
+    )
+
+
+def select_start_profile(
+    config: AgentRelayConfig,
+    availability: AgentAvailabilitySnapshot,
+    *,
+    fallback_provider: str,
+) -> str:
+    """The profile a session starts on: the primary, else the configured fallback provider's profile."""
+    primary = config.primary_profile
+    if _profile_is_available(primary, availability):
+        return primary.profile_id
+    status = availability.profiles.get(primary.profile_id)
+    reason = f"primary Agent profile {primary.profile_id} is unavailable: {status.reason if status else 'not probed'}"
+    fallback = next(
+        (
+            profile
+            for profile in config.profiles
+            if fallback_provider
+            and profile.provider == fallback_provider
+            and profile.profile_id != primary.profile_id
+            and _profile_is_available(profile, availability)
+        ),
+        None,
+    )
+    if fallback is None:
+        detail = (
+            f"fallback provider {fallback_provider} is unavailable" if fallback_provider else "no fallback provider"
+        )
+        raise ValueError(f"{reason}; {detail}")
+    return fallback.profile_id
+
+
 def apply_profile_switch(
     state: AgentRelayState,
     *,
@@ -405,4 +465,6 @@ __all__ = [
     "migrate_run_state_relay_fields",
     "relay_blockage_reached",
     "select_relay_intervention",
+    "select_replacement_for_unavailable",
+    "select_start_profile",
 ]

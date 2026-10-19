@@ -22,6 +22,7 @@ from kernelforge.loop.agent_relay import (
     migrate_run_state_relay_fields,
     relay_blockage_reached,
     select_relay_intervention,
+    select_replacement_for_unavailable,
 )
 from kernelforge.loop.run_state import RunState
 from kernelforge.loop.runner import IterationLoop
@@ -384,3 +385,68 @@ def test_keep_after_a_switch_keeps_the_intervention_in_its_provenance(tmp_path):
         "intervention_kind": INTERVENTION_CROSS_HARNESS,
     }
     assert (result.agent_profile_id, result.agent_model, result.blockage_epoch) == ("codex_gpt", "gpt-6-astra", 1)
+
+
+def test_an_unavailable_active_profile_is_replaced_even_if_already_tried():
+    state = AgentRelayState(active_profile_id="codex_gpt", profiles_tried_since_keep=["claude_opus"])
+
+    replacement = select_replacement_for_unavailable(
+        state,
+        profiles=_profiles(),
+        availability=_snapshot(codex=False),
+    )
+
+    assert replacement.kind == INTERVENTION_CROSS_HARNESS
+    assert replacement.target_profile_id == "claude_opus"
+    assert replacement.reason == "active profile is unavailable in this session"
+
+
+def test_no_available_replacement_is_reported_as_none():
+    snapshot = _snapshot(codex=False, sonnet=False)
+    snapshot.profiles["claude_opus"].available = False
+
+    assert (
+        select_replacement_for_unavailable(
+            AgentRelayState(active_profile_id="claude_opus"),
+            profiles=_profiles(),
+            availability=snapshot,
+        )
+        is None
+    )
+
+
+def test_a_resumed_session_moves_off_an_active_profile_it_cannot_run(tmp_path):
+    loop = _loop_for_boundary(tmp_path, streak=0)
+    loop.run_state.agent_relay.active_profile_id = "codex_gpt"
+    loop.run_state.agent_availability_snapshot = _snapshot(codex=False)
+    profiles = _profiles()
+    pool = SearchActorPool(
+        config=AgentRelayConfig(primary_profile_id="codex_gpt", profiles=profiles),
+        availability=_snapshot(codex=False),
+        bundles={
+            profile.profile_id: SearchActorBundle(profile=profile, agent_fn=lambda: None)
+            for profile in profiles
+            if profile.profile_id != "codex_gpt"
+        },
+        start_profile_id="claude_opus",
+    )
+
+    bundle, force_supervisor = loop._prepare_search_actor(3, pool)
+
+    assert bundle.profile.profile_id == "claude_opus"
+    assert force_supervisor is False
+    assert [event["type"] for event in loop.state_store.events] == [
+        "relay_profile_unavailable",
+        "relay_profile_switched",
+    ]
+    assert loop.state_store.events[-1]["reason"] == "active profile is unavailable in this session"
+
+
+def test_a_runnable_profile_below_the_threshold_needs_no_intervention(tmp_path):
+    loop = _loop_for_boundary(tmp_path, streak=2)
+
+    bundle, force_supervisor = loop._prepare_search_actor(3, _search_actor_pool())
+
+    assert bundle.profile.profile_id == "claude_opus"
+    assert force_supervisor is False
+    assert loop.state_store.events == []

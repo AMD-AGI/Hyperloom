@@ -75,6 +75,7 @@ from kernelforge.loop.agent_relay import (
     invalidate_profile,
     relay_blockage_reached,
     select_relay_intervention,
+    select_replacement_for_unavailable,
 )
 from kernelforge.loop.search_actors import SearchActorPool
 from kernelforge.loop.round_budget import (
@@ -6210,8 +6211,8 @@ class IterationLoop(AnalysisRuntimeMixin):
         """Use the persisted active profile while campaign recovery initializes."""
         if search_actors is None:
             return agent_fn, agent_factory, orchestration_service, supervisor_fn
-        active = self.run_state.agent_relay.active_profile_id or search_actors.primary_profile_id
-        profile_id = active if search_actors.has_bundle(active) else search_actors.primary_profile_id
+        active = self.run_state.agent_relay.active_profile_id or search_actors.start_profile_id
+        profile_id = active if search_actors.has_bundle(active) else search_actors.start_profile_id
         bundle = search_actors.bundle(profile_id)
         return bundle.agent_fn, bundle.agent_factory, bundle.orchestration_service, bundle.supervisor_fn
 
@@ -6223,12 +6224,13 @@ class IterationLoop(AnalysisRuntimeMixin):
         snapshot.session_index = self.run_state.session_index
         self.run_state.agent_availability_snapshot = snapshot
         if not self.run_state.agent_relay.active_profile_id:
-            self.run_state.agent_relay.active_profile_id = search_actors.primary_profile_id
+            self.run_state.agent_relay.active_profile_id = search_actors.start_profile_id
         self.state_store.append_event(
             make_event(
                 "agent_availability_snapshot",
                 self.run_state.iteration,
                 snapshot=asdict(snapshot),
+                start_profile_id=search_actors.start_profile_id,
             )
         )
 
@@ -6258,6 +6260,27 @@ class IterationLoop(AnalysisRuntimeMixin):
         self._merge_precedence_streak = 0
         self.device_hazard = DeviceHazardLog(self.ic.workspace_dir)
 
+    def _select_boundary_intervention(self, search_actors: SearchActorPool):
+        """The intervention this boundary needs, if any, and the event type that records why."""
+        relay = self.run_state.agent_relay
+        availability = self.run_state.agent_availability_snapshot
+        status = availability.profiles.get(relay.active_profile_id)
+        runnable = search_actors.has_bundle(relay.active_profile_id) and bool(status and status.available)
+        if not runnable:
+            replacement = select_replacement_for_unavailable(
+                relay,
+                profiles=search_actors.profiles,
+                availability=availability,
+            )
+            if replacement is not None:
+                return replacement, "relay_profile_unavailable"
+            if not search_actors.has_bundle(relay.active_profile_id):
+                raise RuntimeError(f"no Agent profile can run: {relay.active_profile_id} has no search actor")
+        if not relay_blockage_reached(relay, threshold=search_actors.blockage_threshold):
+            return None, ""
+        intervention = select_relay_intervention(relay, profiles=search_actors.profiles, availability=availability)
+        return intervention, "relay_blockage_detected"
+
     def _prepare_search_actor(
         self,
         iteration: int,
@@ -6266,32 +6289,20 @@ class IterationLoop(AnalysisRuntimeMixin):
         """Select and durably switch the complete search actor at a clean boundary."""
         relay = self.run_state.agent_relay
         if not relay.active_profile_id:
-            relay.active_profile_id = search_actors.primary_profile_id
+            relay.active_profile_id = search_actors.start_profile_id
             self.state_store.save(self.run_state)
-        active_status = self.run_state.agent_availability_snapshot.profiles.get(relay.active_profile_id)
-        active_unavailable = not search_actors.has_bundle(relay.active_profile_id) or not (
-            active_status and active_status.available
-        )
-        blocked = active_unavailable or relay_blockage_reached(
-            relay,
-            threshold=search_actors.blockage_threshold,
-        )
-        if not blocked:
+        intervention, event_type = self._select_boundary_intervention(search_actors)
+        if intervention is None:
             return search_actors.bundle(relay.active_profile_id), False
-
-        intervention = select_relay_intervention(
-            relay,
-            profiles=search_actors.profiles,
-            availability=self.run_state.agent_availability_snapshot,
-        )
         self.state_store.append_event(
             make_event(
-                "relay_blockage_detected",
+                event_type,
                 iteration,
                 active_profile_id=relay.active_profile_id,
                 streak=relay.active_no_improvement_streak,
                 selected_intervention=intervention.kind,
                 target_profile_id=intervention.target_profile_id or None,
+                reason=intervention.reason,
             )
         )
         if intervention.kind == INTERVENTION_SUPERVISOR:
