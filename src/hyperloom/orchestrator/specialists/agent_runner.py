@@ -68,6 +68,7 @@ __all__ = [
     "AgentStatus",
     "Beat",
     "HeartbeatSink",
+    "Liveness",
     "LocalAgentRunner",
     "McpEndpoint",
     "RunnerHost",
@@ -334,6 +335,15 @@ class RunnerHost:
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
 
 
+@dataclass(frozen=True)
+class Liveness:
+    """When a session counts as alive: CPU work of ``activity_cpu_seconds`` in one sampling period beats its heartbeat,
+    and ``lost_after_seconds`` with no heartbeat and no process-log growth loses it."""
+
+    activity_cpu_seconds: float = ACTIVITY_CPU_SECONDS
+    lost_after_seconds: float = LOST_AFTER_SEC
+
+
 class LocalAgentRunner:
     """Run agent CLIs as local subprocesses of this process (the default implementation)."""
 
@@ -345,11 +355,12 @@ class LocalAgentRunner:
         session_dir: Path,
         poll_interval_seconds: float = 5.0,
         version_probe: Callable[[str, Mapping[str, str]], str] = _probe_version,
-        activity_cpu_seconds: float = ACTIVITY_CPU_SECONDS,
+        liveness: Liveness = Liveness(),
         host: RunnerHost = RunnerHost(),
     ) -> None:
         self._log = ResourceLog(Path(session_dir) / RESOURCES_RELATIVE_PATH)
         self._poll_interval = float(poll_interval_seconds)
+        self._lost_after = float(liveness.lost_after_seconds)
         self._monotonic = host.monotonic
         self._wall = host.wall
         self._popen = host.popen
@@ -358,11 +369,11 @@ class LocalAgentRunner:
         self._version_probe = version_probe
         self._dispatcher = SpecialistSubprocessDispatcher(
             SpecialistSubprocessConfig(
-                poll_interval_seconds=self._poll_interval, heartbeat_stale_seconds=LOST_AFTER_SEC
+                poll_interval_seconds=self._poll_interval, heartbeat_stale_seconds=self._lost_after
             )
         )
         self._sleep = host.sleep
-        self._activity_cpu = float(activity_cpu_seconds)
+        self._activity_cpu = float(liveness.activity_cpu_seconds)
         self._live: dict[int, _Session] = {}
         self._claims: set[str] = set()
         self._max_concurrent = 0
@@ -438,8 +449,8 @@ class LocalAgentRunner:
                 timed_out=bool(outcome.get("timed_out")),
                 error=str(outcome.get("error", "")),
             )
-        if self._wall() - (heartbeat or session.started_unix) > LOST_AFTER_SEC:
-            return AgentStatus(STATE_LOST, None, heartbeat, error=f"no heartbeat for more than {LOST_AFTER_SEC:.0f}s")
+        if self._wall() - (heartbeat or session.started_unix) > self._lost_after:
+            return AgentStatus(STATE_LOST, None, heartbeat, error=f"no heartbeat for more than {self._lost_after:.0f}s")
         return AgentStatus("running", None, heartbeat)
 
     async def cancel(self, handle: AgentHandle) -> None:

@@ -6,8 +6,10 @@ long as its branch runs.
 
 Every session starts at the branch head, with the worktree synced to it and a launch prompt built from the brief,
 rebuilt at that head when the setup can, and the branch log. A session that ends as a session should, its model's turn done or its deadline reached, is
-followed by a fresh one: a branch runs until the scheduler stops it. One that is lost, exits with an error or ends
-within ``min_session_seconds`` raises, and the runtime decides whether to restart it. The session's process registry
+followed by a fresh one: a branch runs until the scheduler stops it. A Claude CLI whose turn ended but that a leftover
+background shell keeps alive is ended, as a turn that finished. One that is lost, exits with an error or ends
+within ``min_session_seconds`` raises, and the runtime decides whether to restart it. Claude streams partial messages
+into its log, so a long reasoning step shows as log growth and is not taken for a lost session. The session's process registry
 adopts every process the socket starts, so the session stop kills it even when this stop cannot. Each launch's spend,
 its logged tokens at the gateway's rates, is written to the branch's notebook once the launch is collected, however it
 ended.
@@ -17,7 +19,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
+import os
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -53,6 +57,13 @@ logger = logging.getLogger(__name__)
 MCP_SERVER = "hyperloom"
 #: A session ending sooner than this did not work, whatever its exit code: a misconfigured CLI must not relaunch forever.
 MIN_SESSION_S = 120.0
+#: Polls a Claude CLI may stay up after its turn's ``result`` before it is ended: a CLI exits soon after, unless a
+#: background shell it started keeps it alive.
+TURN_END_GRACE_POLLS = 2
+#: A session silent this long, with no log growth, CPU work or tool call in flight, is hung: a test takes about eight
+#: minutes and one reasoning step can take as long, and Claude streams its reasoning into the log.
+SPECIALIST_LOST_AFTER_S = 600.0
+_LOG_TAIL_BYTES = 65536
 PROMPT_FILE, ROLE_FILE, DONE_FILE, HEARTBEAT_FILE = (
     "prompt.md",
     "system_prompt.md",
@@ -104,6 +115,7 @@ class AgentCommand:
             "--output-format",
             "stream-json",
             "--verbose",
+            "--include-partial-messages",
             "--permission-mode",
             "bypassPermissions",
             *role,
@@ -230,6 +242,7 @@ class AgentSession:
         workspace.mkdir(parents=True, exist_ok=True)
         done = workspace / DONE_FILE
         done.unlink(missing_ok=True)
+        (workspace / PROCESS_LOG).unlink(missing_ok=True)
         role_file = workspace / ROLE_FILE
         role_file.write_bytes(setup.role.encode())
         (workspace / PROMPT_FILE).write_bytes(setup.command.stdin(setup.role, prompt).encode())
@@ -256,12 +269,27 @@ class AgentSession:
             logger.warning("the agent CLI of %s ended before the process registry took it over", branch, exc_info=True)
 
     async def _wait(self, handle: AgentHandle) -> AgentStatus:
+        ended_polls = 0
         while True:
             status = await self._setup.runner.poll(handle)
             if status.state != _RUNNING or self._stopped.is_set():
                 return status
+            ended = self._setup.command.backend == AGENT_BACKEND_CLAUDE and turn_ended(
+                self._place.workspace / PROCESS_LOG
+            )
+            ended_polls = ended_polls + 1 if ended else 0
+            if ended_polls > TURN_END_GRACE_POLLS:
+                return await self._end_held_turn(handle, status)
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(self._stopped.wait(), self._setup.poll_seconds)
+
+    async def _end_held_turn(self, handle: AgentHandle, status: AgentStatus) -> AgentStatus:
+        """End a CLI whose turn is over but that a leftover background shell keeps alive; its turn finished."""
+        logger.info("the turn of %s ended but its CLI did not exit; ending it", self._start.branch)
+        await self._setup.runner.cancel(handle)
+        while (await self._setup.runner.poll(handle)).state == _RUNNING:
+            await asyncio.sleep(self._setup.poll_seconds)
+        return AgentStatus("exited", 0, status.last_heartbeat_unix)
 
     async def _finish(self, handle: AgentHandle, *, cancel: bool) -> None:
         if cancel:
@@ -284,6 +312,24 @@ class AgentSession:
         if any(price is None for price, _ in prices):
             return None
         return sum(price.cost_usd(counts) for price, counts in prices if price is not None)
+
+
+def turn_ended(process_log: Path) -> bool:
+    """Whether a Claude stream-json log has the ``result`` event that ends its one turn."""
+    try:
+        with process_log.open("rb") as handle:
+            handle.seek(max(0, handle.seek(0, os.SEEK_END) - _LOG_TAIL_BYTES))
+            tail = handle.read().decode(errors="replace")
+    except OSError:
+        return False
+    for line in tail.splitlines():
+        if '"result"' not in line:
+            continue
+        with contextlib.suppress(json.JSONDecodeError):
+            row = json.loads(line)
+            if isinstance(row, dict) and row.get("type") == "result":
+                return True
+    return False
 
 
 def _describe(status: AgentStatus, seconds: float) -> str:

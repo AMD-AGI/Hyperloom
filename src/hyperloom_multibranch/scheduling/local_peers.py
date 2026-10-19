@@ -346,8 +346,8 @@ def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
     """
 
     def build(wiring: SessionWiring) -> ModelSessions:
-        from hyperloom.orchestrator.specialists.agent_runner import LocalAgentRunner, build_specialist_env
-        from hyperloom_multibranch.specialist.agent_session import AgentSetup
+        from hyperloom.orchestrator.specialists.agent_runner import Liveness, LocalAgentRunner, build_specialist_env
+        from hyperloom_multibranch.specialist.agent_session import SPECIALIST_LOST_AFTER_S, AgentSetup
         from hyperloom_multibranch.specialist.model_sessions import model_sessions
         from hyperloom_multibranch.specialist.prompts import role_prompt
         from hyperloom_multibranch.specialist.worktree import SourceBase
@@ -357,7 +357,9 @@ def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
             command=command,
             role=role_prompt(_specialist_role(workload)),
             env=build_specialist_env(),
-            runner=LocalAgentRunner(session_dir=layout.logs),
+            runner=LocalAgentRunner(
+                session_dir=layout.logs, liveness=Liveness(lost_after_seconds=SPECIALIST_LOST_AFTER_S)
+            ),
             tokens=wiring.tokens,
             processes=wiring.setup.processes,
             repo=wiring.repo,

@@ -67,6 +67,7 @@ class _Runner:
 
     async def cancel(self, handle):
         self.cancelled.append(handle.pid - FIRST_PID)
+        self.ends.setdefault(handle.pid - FIRST_PID, (AgentStatus("exited", -9, None), 0.0))
 
     async def collect(self, handle):
         self.collected.append(handle.pid - FIRST_PID)
@@ -180,6 +181,22 @@ async def test_a_session_that_ends_as_it_should_is_followed_by_a_fresh_one(rig):
     assert (rig.runner.cancelled, rig.runner.collected) == ([3], [1, 2, 3])
     assert (rig.tokens.issued, rig.tokens.revoked) == ([BRANCH], [BRANCH])
     assert rig.worktree.head() == rig.root
+
+
+async def test_a_cli_held_open_after_its_turn_ended_is_ended_as_a_finished_turn(rig):
+    session = rig.session()
+    running = asyncio.create_task(session.run())
+    await _until(lambda: len(rig.runner.specs) == 1, "the first launch")
+    rig.clock.now += 3600.0
+    (rig.workspace / "process.log").write_text(json.dumps({"type": "result", "subtype": "success"}) + "\n")
+
+    await _until(lambda: len(rig.runner.specs) == 2, "a fresh session")
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+
+    assert rig.runner.cancelled[0] == 1
+    assert "ended: its model finished its turn" in rig.runner.prompts[1]
+    assert "--include-partial-messages" in rig.runner.specs[0].argv
 
 
 async def test_each_launch_records_its_tokens_at_the_gateway_s_rates_however_it_ended(rig):

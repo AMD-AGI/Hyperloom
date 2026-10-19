@@ -20,7 +20,7 @@ import pytest
 from hyperloom.common.deadline import Deadline
 from hyperloom.orchestrator.specialists import agent_runner
 from hyperloom.orchestrator.specialists import subprocess_ as ss
-from hyperloom.orchestrator.specialists.agent_runner import LOST_AFTER_SEC, AgentConfigError, McpEndpoint
+from hyperloom.orchestrator.specialists.agent_runner import LOST_AFTER_SEC, AgentConfigError, Liveness, McpEndpoint
 from hyperloom.orchestrator.specialists.tests._agent_fixtures import (
     child_argv,
     make_runner,
@@ -204,6 +204,29 @@ async def test_poll_reports_lost_while_the_process_is_still_up(tmp_path: Path) -
         assert status.state == "lost"
         assert status.last_heartbeat_unix == pytest.approx(old, abs=1.0)
         assert status.returncode is None
+    finally:
+        await runner.cancel(handle)
+        await handle.session.task
+
+
+async def test_a_runner_given_a_longer_lost_window_keeps_a_session_quiet_for_less(tmp_path: Path) -> None:
+    ws = tmp_path / "w"
+    runner = make_runner(
+        tmp_path / "session", poll_interval_seconds=2.0, liveness=Liveness(lost_after_seconds=3 * LOST_AFTER_SEC)
+    )
+    spec = make_spec(ws)
+    handle = await runner.launch(spec)
+    try:
+        assert (await runner.poll(handle)).state == "running"
+        quiet = real_time.time() - (LOST_AFTER_SEC + 100)
+        for path in (spec.heartbeat_path, ws / "process.log"):
+            path.touch()
+            os.utime(path, (quiet, quiet))
+        assert (await runner.poll(handle)).state == "running"
+        silent = real_time.time() - (3 * LOST_AFTER_SEC + 100)
+        for path in (spec.heartbeat_path, ws / "process.log"):
+            os.utime(path, (silent, silent))
+        assert (await runner.poll(handle)).error == f"no heartbeat for more than {3 * LOST_AFTER_SEC:.0f}s"
     finally:
         await runner.cancel(handle)
         await handle.session.task
