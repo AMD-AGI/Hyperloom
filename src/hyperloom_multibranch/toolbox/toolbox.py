@@ -507,8 +507,11 @@ class RealToolbox:
 
     # --- quarantine ----------------------------------------------------------------------------------------------
 
-    async def _node_failed(self, node: str, reason: str) -> None:
-        await self._quarantine.add(node, reason)
+    async def _node_failed(self, node: str, reason: str, reproduced: bool) -> None:
+        if reproduced:
+            await self._quarantine.add(node, reason)
+        else:
+            await self._quarantine.add_suspect(node, reason)
 
     async def _renew_loop(self) -> None:
         while True:

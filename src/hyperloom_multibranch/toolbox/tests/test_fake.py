@@ -287,7 +287,43 @@ async def test_unclear_failure_reruns_once_and_the_rerun_wins() -> None:
     assert first.failure_class is FailureClass.INFRA and second.failure_class is None
     assert first.failure_reason.startswith("unclear failure did not reproduce on a rerun")
     assert second.sandbox.node_name != first.sandbox.node_name
-    assert [e.node for e in book.of("quarantine")] == [first.sandbox.node_name]
+    assert book.of("quarantine") == [] and box.quarantined == set()
+
+
+async def _reran_clear(box: FakeToolbox, request: TestRequest | None = None) -> str:
+    box.script(lambda r: True, [Fate.UNCLEAR, Fate.OK])
+    result = await _run_one(box, request)
+    assert result.validity is Validity.SUCCEEDED
+    assert result.attempts[0].failure_reason.startswith("unclear failure did not reproduce on a rerun")
+    return result.attempts[0].sandbox.node_name
+
+
+async def test_a_second_unclear_failure_that_did_not_reproduce_on_one_node_quarantines_it() -> None:
+    book = Notebook()
+    box = _toolbox(notebook=book, nodes=("a", "b"))
+    node = await _reran_clear(box)
+    assert box.quarantined == set()
+    other = ({"a", "b"} - {node}).pop()
+    assert await _reran_clear(box, _request("b2", avoid_nodes=(other,))) == node
+    assert box.quarantined == {node}
+    assert [e.node for e in book.of("quarantine")] == [node]
+
+
+async def test_unclear_failures_that_did_not_reproduce_on_different_nodes_quarantine_none() -> None:
+    box = _toolbox(nodes=("a", "b"))
+    first = await _reran_clear(box)
+    other = ({"a", "b"} - {first}).pop()
+    assert await _reran_clear(box, _request("b2", avoid_nodes=(first,))) == other
+    assert box.quarantined == set()
+
+
+async def test_an_infra_failure_quarantines_its_node_at_once() -> None:
+    book = Notebook()
+    box = _toolbox(notebook=book)
+    box.script(lambda r: True, [Fate.INFRA, Fate.OK])
+    result = await _run_one(box)
+    assert box.quarantined == {result.attempts[0].sandbox.node_name}
+    assert len(book.of("quarantine")) == 1
 
 
 async def test_unclear_failure_that_repeats_is_the_candidates() -> None:

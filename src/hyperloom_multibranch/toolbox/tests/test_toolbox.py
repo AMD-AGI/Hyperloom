@@ -8,12 +8,13 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.contracts.measurement import FailureClass, Purpose, Validity
+from hyperloom.contracts.measurement import FailureClass, Purpose, TestResult, Validity
 from hyperloom_multibranch.contracts.gate import ResultUnverified, ResultVerifier
 from hyperloom_multibranch.contracts.notebook import Role
 from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, DedupStatus
 from hyperloom_multibranch.contracts.toolbox import Backpressure, CancelOutcome, RequestRejected, UnknownTestRequest
 from hyperloom_multibranch.notebook.tests.factories import TTL, intent
+from hyperloom_multibranch.toolbox.attempts import TestJob
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.toolbox import RealToolbox
 from hyperloom_multibranch.toolbox.tests.helpers import (
@@ -160,7 +161,9 @@ async def test_a_new_policy_from_the_scheduler_takes_effect_on_the_queue(tmp_pat
 # --- attempts and reruns --------------------------------------------------------------------------------------------
 
 
-async def test_an_unclear_failure_is_rerun_on_another_node_and_the_first_node_is_quarantined(tmp_path: Path) -> None:
+async def test_an_unclear_failure_is_rerun_on_another_node_and_one_that_did_not_reproduce_does_not_quarantine(
+    tmp_path: Path,
+) -> None:
     executor = ScriptedExecutor([lambda j: failed(j, FailureClass.UNCLEAR, "n1"), lambda j: ok(j, "n2")])
     rig = build(tmp_path, executor=executor)
     request_id = await rig.toolbox.submit_test(req())
@@ -169,6 +172,39 @@ async def test_an_unclear_failure_is_rerun_on_another_node_and_the_first_node_is
     assert record.result is not None and record.result.validity.value == "succeeded"
     assert [(a.node, a.failure and a.failure.value) for a in record.result.attempts] == [("n1", "infra"), ("n2", None)]
     assert executor.jobs[1].avoid_nodes == ("n1",) and executor.jobs[1].attempt == 2
+    assert await rig.notebook.quarantined() == ()
+    assert rig.toolbox.quarantined == frozenset()
+
+
+async def test_a_second_unclear_failure_that_did_not_reproduce_quarantines_its_node(tmp_path: Path) -> None:
+    unclear_then_ok = [lambda j: failed(j, FailureClass.UNCLEAR, "n1"), lambda j: ok(j, "n2")]
+    executor = ScriptedExecutor(unclear_then_ok * 2)
+    rig = build(tmp_path, executor=executor)
+    for flag in ("--a", "--b"):
+        await rig.toolbox.submit_test(req(server_args=flag))
+        await rig.toolbox.drain()
+    assert [event.node for event in await rig.notebook.quarantined()] == ["n1"]
+    assert rig.toolbox.quarantined == {"n1"}
+
+
+async def test_unclear_failures_that_did_not_reproduce_on_different_nodes_quarantine_none(tmp_path: Path) -> None:
+    def first_attempt_on_a_node_of_its_own(job: TestJob) -> TestResult:
+        return failed(job, FailureClass.UNCLEAR, "n1" if job.request.branch_id == "b1" else "n2")
+
+    executor = ScriptedExecutor([first_attempt_on_a_node_of_its_own, lambda j: ok(j, "n3")])
+    rig = build(tmp_path, executor=executor)
+    for branch in ("b1", "b2"):
+        await rig.toolbox.submit_test(req(branch))
+        await rig.toolbox.drain()
+    assert [job.attempt for job in executor.jobs] == [1, 2, 1, 2]
+    assert await rig.notebook.quarantined() == ()
+
+
+async def test_an_infrastructure_failure_quarantines_its_node_at_once(tmp_path: Path) -> None:
+    executor = ScriptedExecutor([lambda j: failed(j, FailureClass.INFRA, "n1"), lambda j: ok(j, "n2")])
+    rig = build(tmp_path, executor=executor)
+    await rig.toolbox.submit_test(req())
+    await rig.toolbox.drain()
     assert [event.node for event in await rig.notebook.quarantined()] == ["n1"]
 
 

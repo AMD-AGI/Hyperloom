@@ -7,10 +7,11 @@ An :class:`Executor` runs ONE attempt in a fresh sandbox and returns a ``TestRes
 attempts into the request's single result:
 
 * ``infra`` failure: another sandbox, away from every node tried, up to ``max_infra_retries`` retries, then
-  ``measurement_failed``; the node is reported for quarantine.
+  ``measurement_failed``; the node is reported as an infrastructure failure.
 * ``candidate`` failure (a known failure signature): ``candidate_failed`` at once.
 * ``unclear`` failure: one rerun away from the first node. A second failure is ``candidate_failed``; a success is the
-  result, and the first attempt is re-labelled an infrastructure failure of its node and reported for quarantine.
+  result, and the first attempt is re-labelled an infrastructure failure of its node and reported as a failure that
+  did not reproduce.
 * an executor that raises :class:`MeasurementRefused` (a rejected spec, a result that fails verification): no retry,
   ``measurement_failed``.
 
@@ -63,7 +64,9 @@ class Executor(Protocol):
         :class:`~hyperloom_multibranch.contracts.gate.ResultUnverified` when it does not match or cannot be checked."""
 
 
-NodeFailure = Callable[[str, str], Awaitable[None]]
+NodeFailure = Callable[[str, str, bool], Awaitable[None]]
+"""Hears ``(node, reason, reproduced)``: ``reproduced`` is False for an unclear failure that did not recur on its rerun
+and True for an infrastructure failure the executor classified."""
 
 
 def _attempt_of(result: TestResult) -> Attempt:
@@ -97,7 +100,7 @@ class _Ending(NamedTuple):
 
 class AttemptRunner:
     """Runs a request's attempts with ``executor``; ``avoid`` supplies the quarantine list, ``on_node_failure`` hears of
-    a node that failed for an infrastructure reason."""
+    a node that failed."""
 
     def __init__(
         self,
@@ -141,7 +144,7 @@ class AttemptRunner:
                     )
                 reran = True
                 continue
-            await self._report(attempts[-1], job, result.failure_reason)
+            await self._report(attempts[-1], result.failure_reason, reproduced=True)
             if infra_retries >= self._max_infra_retries:
                 reason = f"{infra_retries + 1} attempts failed for infrastructure reasons: {result.failure_reason}"
                 return self._final(
@@ -154,12 +157,12 @@ class AttemptRunner:
         if len(attempts) > 1 and first.failure_class is FailureClass.UNCLEAR:
             reason = f"unclear failure did not reproduce on a rerun: {first.failure_reason or 'no reason given'}"
             attempts[0] = replace(first, failure_class=FailureClass.INFRA, failure_reason=reason)
-            await self._report(attempts[0], job, reason)
+            await self._report(attempts[0], reason, reproduced=False)
         return self._final(job, result, attempts, _Ending(result.validity, None, None))
 
-    async def _report(self, attempt: Attempt, job: TestJob, reason: str | None) -> None:
+    async def _report(self, attempt: Attempt, reason: str | None, *, reproduced: bool) -> None:
         if attempt.node:
-            await self._on_node_failure(attempt.node, reason or "infrastructure failure")
+            await self._on_node_failure(attempt.node, reason or "infrastructure failure", reproduced)
 
     @staticmethod
     def _final(job: TestJob, result: TestResult | None, attempts: list[Attempt], ending: _Ending) -> TestResult:

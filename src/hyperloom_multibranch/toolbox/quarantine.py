@@ -3,8 +3,9 @@
 
 """The node quarantine list, kept in the notebook's ``NodeHealth`` and read back when the toolbox starts (design 4.5).
 
-A node enters the list when an attempt on it fails for an infrastructure reason, or when an unclear failure did not
-reproduce on the rerun. Quarantine only widens ``avoid_nodes``; it never blocks a test: on a single node, avoiding it
+A node enters the list when an attempt on it fails with an infrastructure failure the executor classified, or when a
+second unclear failure that did not reproduce on its rerun happens on it within the session (the toolbox's lifetime;
+the count is not persisted). A single non-reproducing unclear failure does not quarantine a node. Quarantine only widens ``avoid_nodes``; it never blocks a test: on a single node, avoiding it
 still creates the sandbox there and the result is marked same-node (design 4.9.3).
 """
 
@@ -21,6 +22,7 @@ class Quarantine:
     def __init__(self, health: NodeHealth) -> None:
         self._health = health
         self._nodes: set[str] = set()
+        self._suspected: set[str] = set()
 
     async def load(self) -> None:
         """Read the list the notebook holds; called once when the toolbox starts."""
@@ -48,6 +50,14 @@ class Quarantine:
         )
         self._nodes.add(node)
         return True
+
+    async def add_suspect(self, node: str, reason: str, request_ids: Iterable[str] = ()) -> bool:
+        """Count an unclear failure that did not reproduce on ``node``; its second one quarantines it."""
+
+        if node not in self._suspected:
+            self._suspected.add(node)
+            return False
+        return await self.add(node, reason, request_ids)
 
     async def add_cards(self, node: str, gpu_ids: Iterable[int], reason: str) -> None:
         """Record cards of ``node`` that are lost for good; the node itself stays in service (one event, not a node
