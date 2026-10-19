@@ -13,7 +13,7 @@ import time
 import re
 import shutil
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
 from hyperloom.common.coerce import first_float, first_int, to_float, to_int
 from hyperloom.common.jsonio import read_json
@@ -359,53 +359,58 @@ def _aggregate_gpu_samples_by_role(samples: list[dict[str, Any]]) -> dict[str, A
     return out
 
 
-def harvest_mn_gpu_metrics(
-    destination: Path,
-    *,
-    subprocess_started_unix: float | None = None,
-) -> dict[str, Any]:
-    """Fold pod-side GPU sampler CSVs into ``destination`` (multi-node only)."""
-    out: dict[str, Any] = {}
-    # Multi-node only: single-node uses Magpie's own client-side GPUMonitor, so never touch its result path.
-    # is_multi_node() is the authoritative gate (state nodes>=2 or $INFERENCE_OPTIMIZER_NODES>=2).
-    from ._multi_node_env import is_multi_node
-
-    if not is_multi_node():
-        return out
-    # Resolve the shared server-log dir exactly as cli.py forwards it to the pods (explicit env, else the
-    # $USER_DATA_PATH/server_logs default) so the client reads where the pod sampler wrote, without changing
-    # forwarding logic.
+def _pod_gpu_metric_csvs() -> list[Path]:
+    """The per-pod GPU sampler CSVs sitting in the shared server-log dir the pods were told to write to."""
+    # Resolved exactly as cli.py forwards it to the pods (explicit env, else the $USER_DATA_PATH/server_logs
+    # default) so the client reads where the pod sampler wrote, without changing forwarding logic.
     shared = os.path.expandvars(
         os.environ.get("HYPERLOOM_MN_SERVER_LOG_DIR", "").strip() or "$USER_DATA_PATH/server_logs"
     )
     if not shared.startswith("/") or "$" in shared:
-        return out
+        return []
     src_dir = Path(shared)
     try:
         if not src_dir.is_dir():
-            return out
-        pod_csvs = sorted(src_dir.glob("gpu_metrics_*.csv"))
+            return []
+        return sorted(src_dir.glob("gpu_metrics_*.csv"))
     except OSError:
-        return out
-    if not pod_csvs:
-        return out
+        return []
 
-    # PD-disaggregation: map each pod IP -> prefill/decode role so metrics can be tagged and aggregated per role
-    # (empty unless disaggregated).
-    from ._multi_node_env import pd_topology_from_state
 
-    pd = pd_topology_from_state()
+def _pod_role_by_ip(pd: dict[str, Any]) -> dict[str, str]:
+    """Pod IP to prefill/decode role, so metrics can be tagged and aggregated per role.
+
+    Empty unless the deployment is PD-disaggregated.
+    """
     role_of: dict[str, str] = {}
-    for _ip in pd.get("prefill_pod_ips", []):
-        role_of[str(_ip)] = "prefill"
-    for _ip in pd.get("decode_pod_ips", []):
-        role_of[str(_ip)] = "decode"
+    for ip in pd.get("prefill_pod_ips", []):
+        role_of[str(ip)] = "prefill"
+    for ip in pd.get("decode_pod_ips", []):
+        role_of[str(ip)] = "decode"
+    return role_of
 
-    lo = None
-    if subprocess_started_unix is not None:
-        lo = float(subprocess_started_unix) - _MN_GPU_WINDOW_SLACK_SEC
-    hi = time.time() + _MN_GPU_WINDOW_SLACK_SEC
 
+class _SampleWindow(NamedTuple):
+    """The wall-clock span a pod sample has to fall in to belong to this round."""
+
+    lo: float | None
+    hi: float
+
+    def excludes(self, ts: float) -> bool:
+        """Whether ``ts`` falls outside the window; a window with no lower bound excludes nothing."""
+        return self.lo is not None and (ts < self.lo or ts > self.hi)
+
+
+class _MergedPodMetrics(NamedTuple):
+    """Every pod's GPU rows under one header, with the subset that parsed into samples."""
+
+    header: list[str] | None
+    rows: list[list[str]]
+    samples: list[dict[str, Any]]
+
+
+def _merge_pod_gpu_rows(pod_csvs: list[Path], role_of: dict[str, str], window: _SampleWindow) -> _MergedPodMetrics:
+    """Tag every in-window pod row with its host and role and collect them under a single header."""
     header: list[str] | None = None
     merged: list[list[str]] = []
     samples: list[dict[str, Any]] = []
@@ -423,12 +428,8 @@ def harvest_mn_gpu_metrics(
         if header is None:
             header = (["host", "role"] if role_of else ["host"]) + rocm_header
         for row in rows[1:]:
-            if not row:
-                continue
-            ts = _num_from_cell(row[0])
-            if ts is None:
-                continue
-            if lo is not None and (ts < lo or ts > hi):
+            ts = _num_from_cell(row[0]) if row else None
+            if ts is None or window.excludes(ts):
                 continue
             merged.append(([host, role] if role_of else [host]) + row)
             s = _row_to_gpu_sample(rocm_header, row)
@@ -436,48 +437,83 @@ def harvest_mn_gpu_metrics(
                 if role:
                     s["role"] = role
                 samples.append(s)
+    return _MergedPodMetrics(header, merged, samples)
 
-    if header and merged:
-        try:
-            destination.mkdir(parents=True, exist_ok=True)
-            csv_path = destination / "gpu_metrics.csv"
-            with csv_path.open("w", encoding="utf-8", newline="") as f:
-                w = csv.writer(f)
-                w.writerow(header)
-                w.writerows(merged)
-            out["gpu_metrics_csv"] = str(csv_path)
-            out["rows"] = len(merged)
-        except OSError as exc:
-            log.warning("benchmark_result: MN gpu_metrics.csv write failed: %s", exc)
 
-    if samples:
-        report_path = destination / "benchmark_report.json"
-        if report_path.is_file():
-            try:
-                with report_path.open(encoding="utf-8") as f:
-                    report = json.load(f)
-            except (OSError, json.JSONDecodeError):
-                report = None
-            if isinstance(report, dict):
-                if len(samples) > _MN_GPU_SAMPLE_CAP:
-                    stride = max(1, len(samples) // _MN_GPU_SAMPLE_CAP)
-                    report["gpu_monitor"] = samples[::stride]
-                else:
-                    report["gpu_monitor"] = samples
-                # PD-disaggregation: surface topology + per-role GPU aggregate so downstream analysis / the specialist
-                # LLM can target prefill (compute/TTFT) vs decode (bandwidth/TPOT).
-                if pd:
-                    report["pd"] = pd
-                    by_role = _aggregate_gpu_samples_by_role(samples)
-                    if by_role:
-                        report["gpu_monitor_by_role"] = by_role
-                        out["gpu_monitor_by_role"] = {k: v.get("samples") for k, v in by_role.items()}
-                try:
-                    with report_path.open("w", encoding="utf-8") as f:
-                        json.dump(report, f, indent=2)
-                    out["gpu_monitor_samples"] = len(report["gpu_monitor"])
-                except (OSError, TypeError) as exc:
-                    log.warning("benchmark_result: gpu_monitor inject failed: %s", exc)
+def _write_merged_gpu_csv(destination: Path, merged: _MergedPodMetrics) -> dict[str, Any]:
+    """Write the tagged pod rows as ``gpu_metrics.csv`` under ``destination``."""
+    if not merged.header or not merged.rows:
+        return {}
+    csv_path = destination / "gpu_metrics.csv"
+    try:
+        destination.mkdir(parents=True, exist_ok=True)
+        with csv_path.open("w", encoding="utf-8", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(merged.header)
+            w.writerows(merged.rows)
+    except OSError as exc:
+        log.warning("benchmark_result: MN gpu_metrics.csv write failed: %s", exc)
+        return {}
+    return {"gpu_metrics_csv": str(csv_path), "rows": len(merged.rows)}
+
+
+def _inject_gpu_monitor(report_path: Path, samples: list[dict[str, Any]], pd: dict[str, Any]) -> dict[str, Any]:
+    """Fold the pod GPU samples, and the per-role aggregate when disaggregated, into an existing report."""
+    if not samples or not report_path.is_file():
+        return {}
+    try:
+        with report_path.open(encoding="utf-8") as f:
+            report = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(report, dict):
+        return {}
+    if len(samples) > _MN_GPU_SAMPLE_CAP:
+        stride = max(1, len(samples) // _MN_GPU_SAMPLE_CAP)
+        report["gpu_monitor"] = samples[::stride]
+    else:
+        report["gpu_monitor"] = samples
+    out: dict[str, Any] = {}
+    # PD-disaggregation: surface topology + per-role GPU aggregate so downstream analysis / the specialist
+    # LLM can target prefill (compute/TTFT) vs decode (bandwidth/TPOT).
+    if pd:
+        report["pd"] = pd
+        by_role = _aggregate_gpu_samples_by_role(samples)
+        if by_role:
+            report["gpu_monitor_by_role"] = by_role
+            out["gpu_monitor_by_role"] = {k: v.get("samples") for k, v in by_role.items()}
+    try:
+        with report_path.open("w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2)
+        out["gpu_monitor_samples"] = len(report["gpu_monitor"])
+    except (OSError, TypeError) as exc:
+        log.warning("benchmark_result: gpu_monitor inject failed: %s", exc)
+    return out
+
+
+def harvest_mn_gpu_metrics(
+    destination: Path,
+    *,
+    subprocess_started_unix: float | None = None,
+) -> dict[str, Any]:
+    """Fold pod-side GPU sampler CSVs into ``destination`` (multi-node only)."""
+    # Multi-node only: single-node uses Magpie's own client-side GPUMonitor, so never touch its result path.
+    # is_multi_node() is the authoritative gate (state nodes>=2 or $INFERENCE_OPTIMIZER_NODES>=2).
+    from ._multi_node_env import is_multi_node, pd_topology_from_state
+
+    if not is_multi_node():
+        return {}
+    pod_csvs = _pod_gpu_metric_csvs()
+    if not pod_csvs:
+        return {}
+
+    pd = pd_topology_from_state()
+    lo = None if subprocess_started_unix is None else float(subprocess_started_unix) - _MN_GPU_WINDOW_SLACK_SEC
+    window = _SampleWindow(lo, time.time() + _MN_GPU_WINDOW_SLACK_SEC)
+    merged = _merge_pod_gpu_rows(pod_csvs, _pod_role_by_ip(pd), window)
+
+    out = _write_merged_gpu_csv(destination, merged)
+    out.update(_inject_gpu_monitor(destination / "benchmark_report.json", merged.samples, pd))
     if out:
         log.info("benchmark_result: harvested MN GPU metrics %s", out)
     return out
@@ -637,13 +673,54 @@ def extract_benchmark_measurement(
         measurement = agentx_measurement(report)
         measurement.update(_round_gpu_power(report, workspace, subprocess_started_unix))
         return measurement
+    measurement = _measurement_from_report(report, workspace, subprocess_started_unix)
+
+    origins: dict[str, str] = {}
+    _tag_latency_origins(
+        measurement,
+        origins,
+        label=LATENCY_FROM_REPORT,
+        before=dict.fromkeys(_LATENCY_FIELDS),
+    )
+
+    _merge_workspace_measurements(measurement, origins, workspace)
+
+    warnings = measurement["nonfatal_warnings"]
+    if report and report.get("success") is not True:
+        warnings.append("benchmark_report_success_false")
+    if workspace is not None and measurement.get("raw_result_path"):
+        warnings.append("raw_inferencex_result_used")
+
+    before = _latency_snapshot(measurement)
+    _derive_tpot_if_missing(measurement, report)
+    _tag_latency_origins(measurement, origins, label=LATENCY_DERIVED, before=before)
+    measurement["valid_measurement"] = is_valid_measurement(measurement)
+
+    if not measurement["valid_measurement"] and workspace is not None:
+        _salvage_from_leaked_results(measurement, origins, report, workspace, subprocess_started_unix)
+
+    # One label for the pair, keyed on TTFT and falling back to E2EL, because
+    # that is the question a reader asks of it: the two are read from the same
+    # place in every path that supplies either, and TTFT is the one a latency
+    # reference is anchored on.
+    measurement["ttft_e2el_source"] = origins.get("ttft_mean_ms") or origins.get("e2el_mean_ms") or LATENCY_UNAVAILABLE
+    # Separate from the pair: TPOT is the one latency figure that can be
+    # computed rather than measured, and a derived value must not be read as
+    # one the benchmark reported.
+    measurement["tpot_source"] = origins.get("tpot_mean_ms") or LATENCY_UNAVAILABLE
+    return measurement
+
+
+def _measurement_from_report(
+    report: dict[str, Any], workspace: Path | None, subprocess_started_unix: float | None
+) -> dict[str, Any]:
+    """The normalized fields a Magpie ``benchmark_report.json`` supplies on its own."""
     throughput = report.get("throughput") or {}
     latency = report.get("latency") or {}
     ttft = latency.get("ttft") or {}
     tpot = latency.get("tpot") or {}
     e2el = latency.get("e2el") or {}
-
-    measurement: dict[str, Any] = {
+    return {
         "reported_success": report.get("success") if report else None,
         "framework": report.get("framework"),
         "model": report.get("model"),
@@ -678,66 +755,38 @@ def extract_benchmark_measurement(
         "nonfatal_warnings": [],
     }
 
-    origins: dict[str, str] = {}
-    _tag_latency_origins(
-        measurement,
-        origins,
-        label=LATENCY_FROM_REPORT,
-        before=dict.fromkeys(_LATENCY_FIELDS),
-    )
 
-    _merge_workspace_measurements(measurement, origins, workspace)
-
+def _salvage_from_leaked_results(
+    measurement: dict[str, Any],
+    origins: dict[str, str],
+    report: dict[str, Any],
+    workspace: Path,
+    subprocess_started_unix: float | None,
+) -> None:
+    """Adopt a Magpie leak written after launch as the measurement, when the in-workspace search found none."""
     warnings = measurement["nonfatal_warnings"]
-    if report and report.get("success") is not True:
-        warnings.append("benchmark_report_success_false")
-    if workspace is not None and measurement.get("raw_result_path"):
-        warnings.append("raw_inferencex_result_used")
-
+    for rescue_path in _rescue_candidate_paths(workspace, subprocess_started_unix=subprocess_started_unix):
+        raw = read_json(rescue_path, default=None, require_dict=True)
+        if not raw or to_float(raw.get("output_throughput")) is None:
+            continue
+        # Copy the leak into the workspace BEFORE merging so the NFS clone stays self-contained.
+        materialized = _materialize_rescue_into_workspace(
+            rescue_path,
+            workspace,
+        )
+        recorded_path = materialized if materialized is not None else rescue_path
+        before = _latency_snapshot(measurement)
+        _merge_raw_result(measurement, raw, source_path=recorded_path)
+        _tag_latency_origins(measurement, origins, label=LATENCY_FROM_RESCUED_RAW, before=before)
+        if is_valid_measurement(measurement):
+            warnings.append(f"rescued_from_leaked_path:{rescue_path}")
+            if materialized is None:
+                warnings.append(f"rescued_copy_into_workspace_failed: {rescue_path}")
+            break
     before = _latency_snapshot(measurement)
     _derive_tpot_if_missing(measurement, report)
     _tag_latency_origins(measurement, origins, label=LATENCY_DERIVED, before=before)
     measurement["valid_measurement"] = is_valid_measurement(measurement)
-
-    # Second-chance salvage from Magpie leak destinations when the in-workspace search found no usable measurement
-    # (mtime-gated).
-    if not measurement["valid_measurement"] and workspace is not None:
-        for rescue_path in _rescue_candidate_paths(
-            workspace,
-            subprocess_started_unix=subprocess_started_unix,
-        ):
-            raw = read_json(rescue_path, default=None, require_dict=True)
-            if not raw or to_float(raw.get("output_throughput")) is None:
-                continue
-            # Copy the leak into the workspace BEFORE merging so the NFS clone stays self-contained.
-            materialized = _materialize_rescue_into_workspace(
-                rescue_path,
-                workspace,
-            )
-            recorded_path = materialized if materialized is not None else rescue_path
-            before = _latency_snapshot(measurement)
-            _merge_raw_result(measurement, raw, source_path=recorded_path)
-            _tag_latency_origins(measurement, origins, label=LATENCY_FROM_RESCUED_RAW, before=before)
-            if is_valid_measurement(measurement):
-                warnings.append(f"rescued_from_leaked_path:{rescue_path}")
-                if materialized is None:
-                    warnings.append(f"rescued_copy_into_workspace_failed: {rescue_path}")
-                break
-        before = _latency_snapshot(measurement)
-        _derive_tpot_if_missing(measurement, report)
-        _tag_latency_origins(measurement, origins, label=LATENCY_DERIVED, before=before)
-        measurement["valid_measurement"] = is_valid_measurement(measurement)
-
-    # One label for the pair, keyed on TTFT and falling back to E2EL, because
-    # that is the question a reader asks of it: the two are read from the same
-    # place in every path that supplies either, and TTFT is the one a latency
-    # reference is anchored on.
-    measurement["ttft_e2el_source"] = origins.get("ttft_mean_ms") or origins.get("e2el_mean_ms") or LATENCY_UNAVAILABLE
-    # Separate from the pair: TPOT is the one latency figure that can be
-    # computed rather than measured, and a derived value must not be read as
-    # one the benchmark reported.
-    measurement["tpot_source"] = origins.get("tpot_mean_ms") or LATENCY_UNAVAILABLE
-    return measurement
 
 
 def _derive_tpot_if_missing(
