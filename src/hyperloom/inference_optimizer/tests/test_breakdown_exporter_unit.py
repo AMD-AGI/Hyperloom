@@ -316,7 +316,7 @@ def test_final_is_projected_from_the_recipe_the_close_out_settled(tmp_path):
 
     bd = ex.build(sd)
     final_sec = bd.get("outcome", {}).get("final", {})
-    assert final_sec.get("throughput_tok_s_per_gpu") == pytest.approx(123.0), "recorded recipe lost"
+    assert final_sec.get("output_throughput") == pytest.approx(123.0), "recorded recipe lost"
     assert final_sec.get("action_path") == ["baseline"]
     invocation = final_sec.get("invocation")
     assert invocation is not None, "the final block must always carry an invocation"

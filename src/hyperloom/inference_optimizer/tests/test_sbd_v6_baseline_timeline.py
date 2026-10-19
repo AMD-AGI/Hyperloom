@@ -109,7 +109,7 @@ def test_the_measurement_states_the_unit_its_throughput_is_in(tmp_path: Path) ->
     recorder.finish(_measured())
 
     measurement = _actions(tmp_path)[0]["measurement"]
-    assert measurement["throughput_tok_s_per_gpu"] == 15630.28
+    assert measurement["output_throughput"] == 15630.28
     assert measurement["throughput_unit"] == "tok/s"
 
 
@@ -205,7 +205,7 @@ def test_a_measured_baseline_closes_succeeded_with_its_numbers(tmp_path: Path) -
     action = _actions(tmp_path)[0]
     assert action["status"] == "succeeded"
     # Named as the V5 section named it, which is what a consumer selects on.
-    assert action["measurement"]["throughput_tok_s_per_gpu"] == pytest.approx(15630.28)
+    assert action["measurement"]["output_throughput"] == pytest.approx(15630.28)
     assert action["measurement"]["ttft_mean_ms"] == pytest.approx(138.89)
     assert action["measurement"]["benchmark_report_path"].endswith("benchmark_report.json")
     assert action["timing"]["subprocess_runtime_sec"] == pytest.approx(241.0)
@@ -236,8 +236,8 @@ def test_the_discarded_warmup_is_recorded_beside_the_pass_that_counted(tmp_path:
 
     rounds = _actions(tmp_path)[0]["runs"][0]["rounds"]
     assert [row["label"] for row in rounds] == [ROUND_WARMUP, ROUND_MEASURE]
-    assert rounds[0]["measurement"]["throughput_tok_s_per_gpu"] == pytest.approx(9000.0)
-    assert rounds[1]["measurement"]["throughput_tok_s_per_gpu"] == pytest.approx(15630.28)
+    assert rounds[0]["measurement"]["output_throughput"] == pytest.approx(9000.0)
+    assert rounds[1]["measurement"]["output_throughput"] == pytest.approx(15630.28)
     assert _actions(tmp_path)[0]["warmup_round_tput"] == pytest.approx(9000.0)
 
 
@@ -350,7 +350,7 @@ def test_a_failed_baseline_names_the_class_it_failed_with(tmp_path: Path) -> Non
     failure = _actions(tmp_path)[0]["failure"]
     assert failure["error_class"] == "server_init_dead"
     assert failure["returncode"] == 250
-    assert _actions(tmp_path)[0]["measurement"]["throughput_tok_s_per_gpu"] is None
+    assert _actions(tmp_path)[0]["measurement"]["output_throughput"] is None
 
 
 def test_an_executor_that_raised_is_not_left_running(tmp_path: Path) -> None:
@@ -567,7 +567,7 @@ async def test_an_inner_step_measurement_records_into_the_event_that_asked_for_i
     action = assemble_baseline_action(baseline_event_parts(host), event=host, task_id="t-exec")
     assert action is not None
     assert action["status"] == "succeeded"
-    assert action["measurement"]["throughput_tok_s_per_gpu"] == pytest.approx(15630.28)
+    assert action["measurement"]["output_throughput"] == pytest.approx(15630.28)
 
 
 @pytest.mark.asyncio

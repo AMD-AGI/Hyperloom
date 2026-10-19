@@ -109,7 +109,7 @@ fields to read first are:
 
 | Field | What it tells you |
 |-------|-------------------|
-| `final.throughput_tok_s_per_gpu` | Validated end-of-session serving throughput — the headline number for SGLang / vLLM |
+| `final.output_throughput` | Validated end-of-session serving throughput — the headline number for SGLang / vLLM |
 | `final.cumulative_gain_pct_validated` | Validated gain over baseline |
 | `final.action_path` | Ordered list of changes that make up the final optimized stack |
 

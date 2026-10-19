@@ -270,20 +270,22 @@ downstream consumers:
 
 | Field                              | Meaning                                                                                   |
 |------------------------------------|-------------------------------------------------------------------------------------------|
-| `throughput_tok_s_per_gpu`         | Validated end-of-session throughput. The headline number. See the scope note below.        |
-| `cumulative_gain_pct_validated`    | Validated cumulative gain vs `baseline.throughput_tok_s_per_gpu`. The headline %.          |
+| `output_throughput`                | Validated end-of-session output throughput. The headline number. See the scope note below. |
+| `cumulative_gain_pct_validated`    | Validated cumulative gain vs `baseline.output_throughput`. The headline %.                   |
 | `action_path`                      | Ordered list of `action:variant` labels that made the final stack — the recipe.            |
 | `extra_server_args`                | The exact extra args needed to reproduce the final config.                                 |
 | `extra_envs`                       | The exact env overrides needed to reproduce the final config (allowlisted, no secrets).    |
 | `invocation`                       | Same shape as `baseline.invocation`; lets a consumer replay the final benchmark.          |
 | `closing_phase_entered`            | True iff Coordinator entered the closing phase cleanly (vs SIGTERM exit).                  |
 
-> **Scope of `throughput_tok_s_per_gpu`: whole-server total in `throughput_unit`, not per-GPU.**
-> The key name is a misnomer held fixed by this contract; do not divide it by a GPU count.
+> **Scope of `output_throughput`: whole-server total in `throughput_unit`, not per-GPU.**
+> Do not divide it by a GPU count.
 > `cumulative_gain_pct_validated` is a ratio of two such numbers and is unaffected.
+> This key was `throughput_tok_s_per_gpu` in V6 sessions exported before the rename; the rename was made within V6
+> without a version bump, so a consumer reading archived sessions must accept either key.
 
 > Consumer best practice: index on
-> `(session.session_id, final.throughput_tok_s_per_gpu,
+> `(session.session_id, final.output_throughput,
 > final.cumulative_gain_pct_validated, workload.model_name,
 > workload.gpu_type)`. Everything else is detail.
 
@@ -434,7 +436,7 @@ The following example shows a complete `session_breakdown.json` for a finished G
     "stage_reached": "CLOSE",
 
     "baseline": {
-        "throughput_tok_s_per_gpu": 100.0,
+        "output_throughput": 100.0,
       "accuracy": 0.812,
       "ttft_mean_ms": 0.0,
       "e2el_mean_ms": 0.0,
@@ -476,7 +478,7 @@ The following example shows a complete `session_breakdown.json` for a finished G
     },
 
     "final": {
-      "throughput_tok_s_per_gpu": 150.0,
+      "output_throughput": 150.0,
       "graded_on": "output_throughput",
       "perf": {
         "e2e_norm_intvty_p50": null,
