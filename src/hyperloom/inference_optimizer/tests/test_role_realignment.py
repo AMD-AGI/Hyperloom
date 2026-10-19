@@ -968,6 +968,34 @@ async def test_send_message_to_specialist_prefers_worktree_inbox(coordinator_wit
 
 
 @pytest.mark.asyncio
+async def test_send_message_with_a_list_recipient_is_denied_not_crashed(coordinator_with_mocks):
+    """A ``to`` array is refused by the gate instead of faulting the phase event.
+
+    Before the check the raw list reached the events INSERT as ``to_agent``
+    and sqlite3.ProgrammingError escaped handle_intent, marking the running
+    phase event failed.
+    """
+    c = coordinator_with_mocks
+    try:
+        await c.router.handle_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.SEND_MESSAGE,
+                payload={
+                    "to": ["critic", "kernel_agent"],
+                    "topic": "observation",
+                    "body_md": "addressing several agents at once",
+                },
+            ),
+        )
+        denials = c.bus.inbox_context_sync("orchestration")
+        kinds = [m.payload.get("kind") for m in denials if m.payload.get("kind") == "policy_denied"]
+        assert kinds, "expected a policy_denied observation for the malformed recipient"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
 async def test_extend_lease_also_pushes_gpu_rows(coordinator_with_mocks):
     """The GPU lease is extended with the lane rows so the TTL ordering holds."""
     from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType

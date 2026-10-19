@@ -335,6 +335,7 @@ class PolicyGate:
             self._validate_propose_action(role, payload)
         elif intent.type == IntentType.SEND_MESSAGE:
             self._validate_send_message_topic(payload)
+            self._validate_send_message_recipient(payload)
         elif intent.type == IntentType.REQUEST:
             self._validate_request(role, payload)
         elif intent.type == IntentType.REVIEW_VERDICT:
@@ -599,6 +600,28 @@ class PolicyGate:
         topic = str(payload.get("topic", "")).strip()
         if not topic:
             raise PolicyDenied("send_message missing topic", rule="payload")
+
+    def _validate_send_message_recipient(self, payload: dict[str, Any]) -> None:
+        """Require ``to`` to be a non-empty string when a ``SEND_MESSAGE`` carries one.
+
+        An absent ``to`` broadcasts; a present one names a single recipient.
+        Other shapes (a JSON array of recipients among them) cannot be bound
+        as the ``to_agent`` column of the ``events`` row, so they are denied
+        here rather than crashing the intent handler.
+
+        Raises:
+            PolicyDenied: with ``rule='payload'`` when ``to`` is present but
+                not a non-empty string.
+        """
+        to = payload.get("to")
+        if to is None:
+            return
+        if not isinstance(to, str) or not to.strip():
+            raise PolicyDenied(
+                f"send_message to must be a non-empty string, got {to!r}",
+                rule="payload",
+                hint="address one recipient per send_message, or omit 'to' to broadcast.",
+            )
 
     def _validate_request(self, role: "AgentRole", payload: dict[str, Any]) -> None:
         """Validate a ``REQUEST`` intent against the routing matrix.
