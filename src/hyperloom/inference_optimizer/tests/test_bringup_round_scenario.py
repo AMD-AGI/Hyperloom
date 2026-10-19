@@ -37,6 +37,7 @@ from hyperloom.orchestrator.rehearsal import (
     SpecialistStep,
     boot_log_for,
 )
+from hyperloom.orchestrator.specialists.subprocess_ import SpecialistSpawn
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 from hyperloom.orchestrator.state.round_store import (
@@ -300,7 +301,16 @@ async def test_a_bringup_round_peels_two_blockers_and_lands_one_observation_per_
         dispatched.append(task_id)
 
         workspace = session / "runs" / "specialist" / task_id
-        outcome = await specialists.run(task_id=task_id, workspace=workspace)
+        spawn = SpecialistSpawn(
+            task_id=task_id,
+            workspace=workspace,
+            worktree=None,
+            worktree_base=None,
+            system_prompt="",
+            user_prompt="",
+            max_turns=1,
+        )
+        outcome = await specialists.run(spawn)
         await tasks.transition(task_id, "running")
         await tasks.transition(task_id, "succeeded" if outcome.done_payload else "failed")
 
