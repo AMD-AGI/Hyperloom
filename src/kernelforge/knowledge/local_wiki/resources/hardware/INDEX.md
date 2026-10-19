@@ -3,7 +3,7 @@ title: MI350X / MI355X hardware — knowledge map
 kind: index
 scope: hardware
 gens: [gfx950]
-updated: 2026-08-28
+updated: 2026-10-19
 ---
 
 # MI350X / MI355X hardware — knowledge map
@@ -45,7 +45,7 @@ for its subsystem, so a single Read answers a question end to end.
 | | |
 |---|---|
 | 256 CU (8 XCD × 32) · 4 SIMD/CU · 1024 matrix cores | wave64 · 8 slots/SIMD → 32 waves/CU |
-| 512 regs/SIMD, 16-granule · ≤256 AGPR, unified pool | LDS **160 KiB/CU, 64 banks**, 256 B/clk, 320-DWORD granule |
+| 512 regs/SIMD, 8-granule · ≤256 AGPR, unified pool | LDS **160 KiB/CU, 64 banks**, 256 B/clk, 320-DWORD granule |
 | HBM3E **288 GB @ 8 TB/s** · 256 MiB Infinity Cache · **L2 per-XCD** | FP16 **2.5 PF** · FP8 **5 PF** · FP6/FP4 **10 PF** |
 | FP16 ridge ≈ **312 FLOP/byte** | tuned GEMM sustains **~45–55% of peak** |
 | FP8 is **OCP**, not FNUZ | **TF32 removed** |

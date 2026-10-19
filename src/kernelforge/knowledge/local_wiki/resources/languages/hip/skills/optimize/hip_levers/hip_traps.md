@@ -3,7 +3,7 @@ title: HIP — CUDA→HIP traps, by symptom, and the ISA checklist
 kind: language
 lever: hip_traps
 gens: [gfx950]
-updated: 2026-08-28
+updated: 2026-10-19
 sources:
   - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
   - https://github.com/ROCm/HIP/issues/3667
@@ -93,7 +93,7 @@ Also: **TF32 was removed** on CDNA4. → `hardware/mi350_dtypes.md`
 ## Predict occupancy before you measure
 
 ```
-occ_vgpr    = floor(512 / round_up_16(vgpr_used))            # waves/SIMD
+occ_vgpr    = floor(512 / round_up_8(vgpr_used))             # waves/SIMD
 occ_lds     = floor(163840 / lds_bytes_per_workgroup)        # workgroups/CU
 occ (wg/CU) = min(floor(occ_vgpr * 4 / num_waves), occ_lds)  # 4 SIMD/CU
 ```

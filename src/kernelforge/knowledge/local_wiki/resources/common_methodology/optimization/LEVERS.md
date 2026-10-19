@@ -5,7 +5,7 @@ scope: common_methodology/optimization
 gens: [gfx950]
 dtypes: [bf16, fp16, fp8_e4m3, fp8_e5m2, fp6_e2m3, fp4_e2m1, int8]
 regimes: [prefill, decode, both]
-updated: 2026-08-28
+updated: 2026-10-19
 ---
 
 # Optimization levers — MI350X · MI355X (gfx950)
@@ -48,7 +48,7 @@ row in a permitted data file are all edits *inside* the permitted set.
 |---|---|---|
 | `lever_bottleneck_class.md` | **entry point** | AI vs ridge, the four classes, gfx950 machine balance, the ~45–55% reality, re-classifying after fusion |
 | `lever_mfma_sched.md` | compute-bound | 16×16 vs 32×32 (the 4× C-register argument), 8-wave ping-pong / 4-wave interleave, multiple accumulators, `OPTIMIZE_EPILOGUE`, block-scaled MXFP |
-| `lever_occupancy.md` | latency / occupancy-bound | 512 regs/SIMD, 16-granule, AGPR pool, the 160 KiB LDS denominator, `waves_per_eu`, the spill cliff |
+| `lever_occupancy.md` | latency / occupancy-bound | 512 regs/SIMD, 8-granule, AGPR pool, the 160 KiB LDS denominator, `waves_per_eu`, the spill cliff |
 | `lever_lds_banks.md` | LDS-bound | **64 banks** (not 32), padding vs XOR swizzle, `ds_*_b128`, read-with-transpose, double-buffer on 160 KiB |
 | `lever_prefetch.md` | latency-bound | 128-bit `global_load_lds`, software pipelining, `num_stages` 3–4 on gfx950, the flat-sweep diagnostic |
 | `lever_loop_form.md` | **precondition for the two above** | shape-static trip count + addresses, the `while`/indirect-load signature, gather → static range + mask, why 2–4× more nominal work ran ~2× faster |
@@ -68,7 +68,7 @@ Stated here once so a card can be read standalone without a hardware lookup:
 | | |
 |---|---|
 | 256 CU (8 XCD × 32), 4 SIMD/CU, 1024 matrix cores | wave64, 8 slots/SIMD → 32 waves/CU |
-| 512 regs/SIMD, 16-granule, ≤256 AGPR, unified pool | LDS **160 KiB/CU, 64 banks**, 256 B/clk |
+| 512 regs/SIMD, 8-granule, ≤256 AGPR, unified pool | LDS **160 KiB/CU, 64 banks**, 256 B/clk |
 | HBM3E 288 GB @ 8 TB/s · 256 MiB Infinity Cache · **L2 per-XCD** | FP16 2.5 PF / FP8 5 PF / FP6·FP4 10 PF |
 | FP16 ridge ≈ **312 FLOP/byte** | tuned GEMM sustains **~45–55% of peak** |
 | FP8 is **OCP**, not FNUZ | **TF32 removed** |

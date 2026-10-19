@@ -2,7 +2,7 @@
 title: Triton-on-AMD knowledge map — index, file roles, problem-routing & pinned sources
 kind: index
 scope: languages/triton
-updated: 2026-08-28
+updated: 2026-10-19
 ---
 
 # Triton on AMD — knowledge map
@@ -55,7 +55,7 @@ exploration, or the `torch.compile`/Inductor `max-autotune` path.
   `knobs.amd.use_async_copy` (default-on on gfx950). Rewriting a data-dependent gather as
   "shape-static `tl.range` + mask" once ran **~2× faster while visiting 2–4× more blocks**
   (`local_knowledge/common_methodology/optimization/lever_loop_form.md`).
-- **LDS = 64 KB/CU (CDNA3) / 160 KB (CDNA4)**, **512 VGPR/EU** (16-granule) — big tiles silently drop to
+- **LDS = 64 KB/CU (CDNA3) / 160 KB (CDNA4)**, **512 VGPR/EU** (8-granule) — big tiles silently drop to
   1 wg/CU or fail to compile.
 - **FP8 is FNUZ on CDNA3, OCP on CDNA4** — OCP `float8_e4m3fn` into `tl.dot` on gfx942 fails to lower; use `*_fnuz`.
 - **AMD-only knobs take effect only inside `triton.Config({...})`** — setting them as Python variables does nothing.

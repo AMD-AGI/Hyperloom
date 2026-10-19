@@ -3,7 +3,7 @@ title: HIP — MFMA builtins, buffer descriptors, cross-lane, scheduling
 kind: language
 lever: hip_builtins
 gens: [gfx950]
-updated: 2026-08-28
+updated: 2026-10-19
 sources:
   - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
   - https://github.com/ROCm/amd_matrix_instruction_calculator
@@ -26,7 +26,7 @@ cross-lane permutes, and the scheduling builtins that let you build a software p
 
 | Class | What | gfx950 budget | Role in MFMA |
 |---|---|---|---|
-| **VGPR** | per-lane vector | 512/SIMD, granule 16 | A/B operands, addresses |
+| **VGPR** | per-lane vector | 512/SIMD, granule 8 | A/B operands, addresses |
 | **AGPR** | accumulation | ≤ 256/lane, **unified pool with VGPR** | MFMA C/D accumulators |
 | **SGPR** | scalar (wave-uniform) | ~102 usable | buffer descriptors, loop counters |
 

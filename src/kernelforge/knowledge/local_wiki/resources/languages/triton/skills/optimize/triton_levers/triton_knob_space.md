@@ -3,7 +3,7 @@ title: Triton on AMD — the knob space and autotune
 kind: language
 lever: triton_knob_space
 gens: [gfx950]
-updated: 2026-08-28
+updated: 2026-10-19
 sources:
   - https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
@@ -47,18 +47,20 @@ Only switch if 32 measurably wins on your shape.
 
 ## `waves_per_eu` — occupancy via register trimming
 
-Emits `amdgpu-waves-per-eu`. Hardware: **512 registers/SIMD**, allocated in **16-granules**. Achievable
-iff `round_up_16(vgpr_used) × waves_per_eu ≤ 512`.
+Emits `amdgpu-waves-per-eu`. Hardware: **512 registers/SIMD**, allocated in **8-register granules**.
+Achievable iff `round_up_8(vgpr_used) × waves_per_eu ≤ 512`.
 
 | vgpr_used | rounds to | max waves/SIMD |
 |---:|---:|---:|
 | ≤ 64 | 64 | 8 |
+| 65 | 72 | 7 |
 | 128 | 128 | 4 |
+| 168 | 168 | 3 |
 | 170 | **176** | 2 (176×3 = 528 > 512) |
 | 256 | 256 | 2 |
 
 **Use it when you are just over a boundary.** VGPR = 176 → set `waves_per_eu=3` and LLVM may shave
-under 170 to fit three waves. Push too far and you get spills, which cost more than the occupancy buys.
+to 168 or fewer to fit three waves. Push too far and you get spills, which cost more than the occupancy buys.
 Typical tuned values: **2–3** for GEMM, **3–4** for memory-bound.
 
 Verify with `AMDGCN_ENABLE_DUMP=1 | grep .vgpr_count`, or `occ.sh` from `ROCm/triton`.

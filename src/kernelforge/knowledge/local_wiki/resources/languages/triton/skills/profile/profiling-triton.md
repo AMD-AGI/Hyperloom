@@ -43,10 +43,10 @@ by more than run-to-run jitter (~2% noise floor). Autotune timing alone is not e
 
 ## 3. Occupancy boundary from .vgpr_count
 ```
-max_waves = floor(512 / round_up_16(vgpr_used))     # 512 VGPR/EU, 16-granule
+max_waves = floor(512 / round_up_8(vgpr_used))      # 512 VGPR/EU, 8-granule
 ```
-One granule over a boundary (e.g. 176 → 2 waves) → set `waves_per_eu = target+1` so LLVM shaves VGPRs
-(176→160 → 3 waves). If that introduces scratch spill, back off. `occ.sh` (ROCm/triton) automates this.
+Just over a boundary (e.g. 176 → 2 waves) → set `waves_per_eu = target+1` so LLVM shaves VGPRs
+(176→≤168 → 3 waves). If that introduces scratch spill, back off. `occ.sh` (ROCm/triton) automates this.
 
 ## 4. Always cross-check with ISA
 PMC says *what* is slow; the AMDGCN says *why*. Confirm the inner loop against the checklist in
