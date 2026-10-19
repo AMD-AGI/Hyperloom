@@ -20,8 +20,6 @@ from typing import Any, Callable, NamedTuple, NoReturn
 
 import yaml
 
-from hyperloom.common.coerce import to_str_list
-from hyperloom.common.benchmark_config import is_magpie_agentx
 from hyperloom.common.env import env_flag, is_truthy
 from hyperloom.common.perf_metric import constraint_fields
 from hyperloom.common.env_safety import (
@@ -43,7 +41,6 @@ from ._benchmark_runtime import apply_runtime_benchmark_overrides as apply_runti
 from ._benchmark_interpreter import (
     _resolve_probe_python as _resolve_probe_python,
 )
-from ._recipe_script import launcher_overwritten_envs
 from ._subprocess_kill import (
     AGENTX_PREFLIGHT_ERROR_CLASS,
     AGENTX_PREFLIGHT_RETURNCODE,
@@ -68,13 +65,9 @@ from .benchmark_result import (
 from ._gpu_metrics import write_gpu_metrics_from_report
 from .benchmark_backend import build_benchmark_command
 from .benchmark_config import prepare_benchmark_runtime
-from .magpie_agentx import LaunchChanges, materialize_variant
-from hyperloom.inference_optimizer.runtime_environment import apply_runtime_override
-
 from ._launch_evidence import build_launch_evidence, persist_launch_evidence
 from ...measurement.runtime_findings import persist_runtime_findings, scan_server_log
-from ._server_argv import seal_server_argv
-from ._spec_decode_pin import SPECULATIVE_DECODING_PINNED, refuse_unpinned_speculative_change
+from ._spec_decode_pin import SPECULATIVE_DECODING_PINNED
 
 # Re-exported from sibling modules to keep the module namespace intact.
 from ._grid_base import (
@@ -89,6 +82,10 @@ from hyperloom.inference_optimizer.grid_server_args import (
     _shell_safe_dedupe as _shell_safe_dedupe,
     _SGLANG_MOE_RUNNER_BACKEND_RE as _SGLANG_MOE_RUNNER_BACKEND_RE,
     moe_runner_requires_aiter as moe_runner_requires_aiter,
+)
+from ._grid_variant_yaml import (
+    _build_variant_yaml as _build_variant_yaml,
+    variant_conc as variant_conc,
 )
 from ._grid_variant_filter import (
     resolve_skip_spec as resolve_skip_spec,
@@ -295,185 +292,6 @@ def sanitize_result_dir(value: Any) -> str | None:
             "metacharacters; pass an absolute or workspace-relative path"
         )
     return text
-
-
-def _apply_variant_env(envs, variant, base_extra_envs, base_unset_envs):
-    """Apply accepted environment edits before the candidate's set/unset operations."""
-    # Composed base-then-variant, so a variant unsetting a key the base sets
-    # removes it: the last layer to name a key is the one that decides it.
-    for k in to_str_list(base_unset_envs):
-        if k.strip().upper() in BLOCKED_EXTERNAL_ENV_NAMES:
-            continue
-        envs.pop(k, None)
-    for k, v in (base_extra_envs or {}).items():
-        envs[str(k)] = str(v)
-    base_envs = dict(envs)
-    for k in getattr(variant, "unset_envs", []) or []:
-        # Unsetting a pin retargets the benchmark rather than toggling a knob.
-        if str(k).strip().upper() in BLOCKED_EXTERNAL_ENV_NAMES:
-            log.warning("grid: refusing to unset pinned env %s for variant %s", k, variant.name)
-            continue
-        envs.pop(str(k), None)
-    for k, v in variant.extra_envs.items():
-        envs[str(k)] = str(v)
-    return base_envs
-
-
-def _runnable_moe_backend_args(combined: str, *, args_env: str, model_path: str | None, variant: GridVariant) -> str:
-    """``combined`` with a MoE runner backend this checkpoint cannot run dropped.
-
-    A grid variant never injects one itself, but it inherits one from the baseline recipe it
-    was seeded with or from an explicitly authored variant, and a quant scheme implemented
-    only on the aiter runner crashes on the first forward pass under any other.
-    """
-    if not combined or not _SGLANG_MOE_RUNNER_BACKEND_RE.search(combined):
-        return combined
-    if args_env != "EXTRA_SGLANG_ARGS" or not moe_runner_requires_aiter(combined, model_path):
-        return combined
-    from ._workload_envs import _remove_moe_runner_backend_arg
-
-    log.warning(
-        "grid: dropping inherited --moe-runner-backend for variant %s: "
-        "this checkpoint's MoE quant scheme is only implemented on the "
-        "aiter runner and would crash on the first forward pass.",
-        variant.name,
-    )
-    return _remove_moe_runner_backend_arg(combined)
-
-
-def _importable_overlay_dir(variant: GridVariant) -> str:
-    """This variant's overlay directory, or ``""`` when it names none the server may import.
-
-    A legitimate authored-kernel overlay is a single existing directory: never a
-    ``:``-joined list, a ``..`` traversal, or a path carrying control characters.
-    """
-    overlay = str(getattr(variant, "overlay_pythonpath", "") or "").strip()
-    if not overlay:
-        return ""
-    contained = ":" not in overlay and ".." not in Path(overlay).parts
-    if contained and not any(c in overlay for c in ("\n", "\r", "\x00")) and Path(overlay).is_dir():
-        return overlay
-    log.warning(
-        "grid: dropping unsafe overlay_pythonpath %r (not a single existing directory / contains separator or traversal)",
-        overlay,
-    )
-    return ""
-
-
-def _pin_xdit_tool_path(envs: dict[str, Any], framework: Any) -> None:
-    """Force the xdit wrapper's own tool directories onto ``PATH``.
-
-    It needs both ``/venv/bin`` (the ``xdit`` console script) and ``/opt/rocm/bin``
-    (``hipcc``), and an LLM-supplied PATH must not be able to drop either.
-    """
-    if str(framework or "").strip().lower() != "xdit":
-        return
-    parts = [p for p in str(envs.get("PATH", "") or "").split(":") if p]
-    for essential in ("/opt/rocm/bin", "/venv/bin"):
-        if essential not in parts:
-            parts.insert(0, essential)
-    envs["PATH"] = ":".join(parts)
-
-
-def _build_variant_yaml(
-    base_yaml_path: Path,
-    base_extra_args: str,
-    variant: GridVariant,
-    *,
-    output_subdir: Path,
-    model_path: str | None = None,
-    gpu_type: str | None = None,
-    benchmark_script: str | None = None,
-    server_lifecycle: dict[str, Any] | None = None,
-    base_args_mode: str = "append",
-    base_extra_envs: dict[str, str] | None = None,
-    base_remove_args: list[str] | None = None,
-    base_unset_envs: list[str] | None = None,
-) -> Path:
-    """Materialize a per-variant Magpie YAML on disk."""
-    cfg = yaml.safe_load(base_yaml_path.read_text(encoding="utf-8"))
-    bench = cfg.setdefault("benchmark", {})
-    if is_magpie_agentx(bench):
-        return materialize_variant(
-            base_yaml_path,
-            variant,
-            output_subdir,
-            model_path=model_path,
-            base=LaunchChanges(
-                base_extra_args,
-                base_extra_envs or {},
-                base_remove_args or [],
-                base_unset_envs or [],
-                base_args_mode == "replace",
-            ),
-        )
-    replacing = str(base_args_mode).strip().lower() == "replace"
-    envs = apply_runtime_benchmark_overrides(
-        bench,
-        model_path=model_path,
-        gpu_type=gpu_type,
-        benchmark_script=benchmark_script,
-        conc=variant_conc(variant),
-    )
-    extra_args_env = server_args_env_name(bench.get("framework"))
-
-    # A replacing base drops the inherited string wholesale, so its own removals have nothing left to strip.
-    inherited, base_remove = ("", []) if replacing else (str(envs.get(extra_args_env, "")), base_remove_args)
-    base_args = compose_server_args(inherited_args=inherited, base_extra_args=base_extra_args, remove_args=base_remove)
-    combined = compose_server_args(
-        inherited_args=inherited,
-        base_extra_args=base_extra_args,
-        variant_extra_args=variant.extra_server_args,
-        remove_args=to_str_list(base_remove) + to_str_list(getattr(variant, "remove_args", [])),
-        args_mode=getattr(variant, "args_mode", "append"),
-    )
-    combined = _runnable_moe_backend_args(combined, args_env=extra_args_env, model_path=model_path, variant=variant)
-    if combined:
-        envs[extra_args_env] = _shell_safe_dedupe(combined)
-    elif extra_args_env in envs or variant.args_mode == "replace" or base_args_mode == "replace":
-        envs[extra_args_env] = ""
-    base_envs = _apply_variant_env(envs, variant, base_extra_envs, base_unset_envs)
-    from ._workload_envs import pin_mlperf_round_concurrency
-    from hyperloom.inference_optimizer.runtime_environment import prepend_launch_path
-
-    pin_mlperf_round_concurrency(envs)
-    # The launcher re-exports these unconditionally, so a value carried here is
-    # one the run never used.
-    for k in launcher_overwritten_envs(bench) & envs.keys():
-        log.warning("grid: dropping %s for variant %s; the recipe overwrites it", k, variant.name)
-        envs.pop(k, None)
-    # The three AgentX bounds took this rung's CONC through ``variant_conc`` above, not through this merge: raising
-    # the client's grace alone would make the round wait inside a cap that did not move with it.
-    _overlay = _importable_overlay_dir(variant)
-    if _overlay:
-        prepend_launch_path(envs, "PYTHONPATH", _overlay)
-
-    # Attempt runtime override: inject path_prefix/pythonpath_prefix/framework_bin etc. into benchmark.envs so the
-    # server subprocess resolves the attempt runtime.
-    _rt_override = getattr(variant, "runtime_override", None) or {}
-    if _rt_override:
-        apply_runtime_override(envs, _rt_override)
-    refuse_unpinned_speculative_change(base_args, base_envs, combined, envs)
-
-    _pin_xdit_tool_path(envs, bench.get("framework"))
-
-    if server_lifecycle is not None:
-        from ._server_lifecycle import inject_lifecycle
-
-        inject_lifecycle(
-            bench,
-            cleanup=bool(server_lifecycle.get("cleanup", True)),
-            pid_dir=server_lifecycle["pid_dir"],
-            port=int(server_lifecycle["port"]),
-        )
-
-    # The final write to the argument env; nothing below may touch it.
-    seal_server_argv(envs, bench.get("framework"))
-    output_subdir.mkdir(parents=True, exist_ok=True)
-    out_path = output_subdir / "config.yaml"
-    with out_path.open("w", encoding="utf-8") as f:
-        yaml.safe_dump(cfg, f, sort_keys=False)
-    return out_path
 
 
 def _parse_report(workspace: Path) -> dict[str, Any] | None:
@@ -753,16 +571,6 @@ def stopped_by_the_run(returncode: int | None) -> StoppedByTheRun | None:
     return _STOPPED_BY_THE_RUN.get(int(returncode))
 
 
-def variant_conc(variant: Any) -> int | None:
-    """The concurrency a variant will run at, or ``None`` when it names none."""
-    raw = (getattr(variant, "extra_envs", None) or {}).get("CONC")
-    try:
-        conc = int(raw)
-    except (TypeError, ValueError):
-        return None
-    return conc if conc > 0 else None
-
-
 def session_grid_bounds(shared_state: Any) -> tuple[float | None, float | None]:
     """Resolve ``(session_deadline_sec, variant_expected_sec)`` for a :func:`run_grid` call."""
     if shared_state is None:
@@ -1001,6 +809,11 @@ class _VariantOutcome(NamedTuple):
     warnings: list[str]
 
 
+def _variant_tag(run: _GridRun, at: _VariantSlot) -> str:
+    """How the grid's log lines name one variant: its position and its name."""
+    return f"{at.idx + 1}/{len(run.grid)} name={at.variant.name}"
+
+
 def _abort_variant(at: _VariantSlot, failure: _VariantFailure, **fields: Any) -> NoReturn:
     """Record why this variant ended against its slot and end it."""
     _write_variant_abort_marker(
@@ -1039,10 +852,8 @@ def _abort_on_round_stop(
     at = attempt.at
     runtime_sec = round(max(0.0, time.time() - attempt.started_unix), 2)
     log.warning(
-        "grid_runner: variant %d/%d name=%s %s round reaped after %.1fs: %s; recorded as skipped, not failed",
-        at.idx + 1,
-        len(run.grid),
-        at.variant.name,
+        "grid_runner: variant %s %s round reaped after %.1fs: %s; recorded as skipped, not failed",
+        _variant_tag(run, at),
         round_label,
         runtime_sec,
         stopped.interrupted,
@@ -1183,10 +994,8 @@ def _refuse_unsupported_capability(run: _GridRun, at: _VariantSlot) -> None:
     if not reason:
         return
     log.warning(
-        "grid_runner: variant %d/%d name=%s aborted: capability_unsupported: %s",
-        at.idx + 1,
-        len(run.grid),
-        at.variant.name,
+        "grid_runner: variant %s aborted: capability_unsupported: %s",
+        _variant_tag(run, at),
         reason,
     )
     _abort_variant(at, _VariantFailure("capability_unsupported", reason))
@@ -1225,10 +1034,8 @@ async def _variant_yaml_or_abort(
     except Exception as exc:  # noqa: BLE001
         error_class = failure_class or getattr(exc, "error_class", "yaml_build_error")
         log.warning(
-            "grid_runner: variant %d/%d name=%s aborted: %s: %r",
-            at.idx + 1,
-            len(run.grid),
-            at.variant.name,
+            "grid_runner: variant %s aborted: %s: %r",
+            _variant_tag(run, at),
             error_class,
             exc,
         )
@@ -1322,10 +1129,8 @@ async def _run_warmup_round(run: _GridRun, at: _VariantSlot, rounds: _VariantRou
     except subprocess.TimeoutExpired as exc:
         _teardown_variant_server(at.path, rounds.lifecycle)
         log.warning(
-            "grid_runner: variant %d/%d name=%s aborted: warmup timeout (timeout_sec=%d): %s",
-            at.idx + 1,
-            len(run.grid),
-            at.variant.name,
+            "grid_runner: variant %s aborted: warmup timeout (timeout_sec=%d): %s",
+            _variant_tag(run, at),
             warmup_cap_sec,
             exc,
         )
@@ -1389,10 +1194,8 @@ async def _warmup_throughput(
         else "warmup benchmark_report missing valid throughput/completed requests"
     )
     log.warning(
-        "grid_runner: variant %d/%d name=%s aborted: warmup_round_failed (rc=%s): %s",
-        at.idx + 1,
-        len(run.grid),
-        at.variant.name,
+        "grid_runner: variant %s aborted: warmup_round_failed (rc=%s): %s",
+        _variant_tag(run, at),
         returncode,
         warmup_error[:200],
     )
@@ -1419,10 +1222,8 @@ def _log_variant_banner(run: _GridRun, at: _VariantSlot) -> None:
 
     log_mn_banner("grid_runner", log, variant=f"{at.idx + 1}/{len(run.grid)}:{at.variant.name}")
     log.info(
-        "grid_runner: variant %d/%d name=%s args=%s",
-        at.idx + 1,
-        len(run.grid),
-        at.variant.name,
+        "grid_runner: variant %s args=%s",
+        _variant_tag(run, at),
         at.variant.extra_server_args,
     )
 
@@ -1446,10 +1247,8 @@ async def _restart_multi_node_server(run: _GridRun, at: _VariantSlot, rounds: _V
         )
     except ServerRestartFailed as exc:
         log.warning(
-            "grid_runner: variant %d/%d name=%s aborted: mn_server_restart_failed: %s",
-            at.idx + 1,
-            len(run.grid),
-            at.variant.name,
+            "grid_runner: variant %s aborted: mn_server_restart_failed: %s",
+            _variant_tag(run, at),
             exc,
         )
         _abort_variant(
@@ -1488,10 +1287,8 @@ async def _run_multi_node_warmup(run: _GridRun, at: _VariantSlot, rounds: _Varia
         session_deadline_sec=launch.session_deadline_sec,
     )
     log.info(
-        "grid_runner: MN warmup pass done (discarded) %d/%d name=%s rc=%s",
-        at.idx + 1,
-        len(run.grid),
-        at.variant.name,
+        "grid_runner: MN warmup pass done (discarded) %s rc=%s",
+        _variant_tag(run, at),
         proc.returncode,
     )
     stopped = stopped_by_the_run(proc.returncode)
@@ -1531,10 +1328,8 @@ async def _run_measured_round(run: _GridRun, at: _VariantSlot, rounds: _VariantR
         destination = select_run_workspace(at.path, known_before=workspaces_before) or at.path
         harvested = harvest_leaked_artifacts(destination, subprocess_started_unix=started_unix)
         log.warning(
-            "grid_runner: variant %d/%d name=%s aborted: magpie timeout (timeout_sec=%d): %s",
-            at.idx + 1,
-            len(run.grid),
-            at.variant.name,
+            "grid_runner: variant %s aborted: magpie timeout (timeout_sec=%d): %s",
+            _variant_tag(run, at),
             measure_cap_sec,
             exc,
         )
@@ -1556,10 +1351,8 @@ def _abort_on_watchdog(run: _GridRun, at: _VariantSlot, round_: _MeasuredRound, 
     destination = select_run_workspace(at.path, known_before=round_.workspaces_before) or at.path
     harvested = harvest_leaked_artifacts(destination, subprocess_started_unix=round_.started_unix)
     log.warning(
-        "grid_runner: variant %d/%d name=%s aborted: %s after %.1fs",
-        at.idx + 1,
-        len(run.grid),
-        at.variant.name,
+        "grid_runner: variant %s aborted: %s after %.1fs",
+        _variant_tag(run, at),
         stop.cause,
         runtime_sec,
     )
@@ -1579,10 +1372,8 @@ def _refuse_reaped_round(run: _GridRun, at: _VariantSlot, round_: _MeasuredRound
     if returncode == EVAL_PROBE_UNPATCHABLE_RETURNCODE:
         # Eval bounds could not be installed for a variant that runs eval, so nothing launched.
         log.error(
-            "grid_runner: variant %d/%d name=%s aborted: eval_probe_unpatchable: %s",
-            at.idx + 1,
-            len(run.grid),
-            at.variant.name,
+            "grid_runner: variant %s aborted: eval_probe_unpatchable: %s",
+            _variant_tag(run, at),
             round_.proc.stderr,
         )
         _abort_variant(
@@ -1658,10 +1449,8 @@ def _abort_without_workspace(
         _preflight_abort_error(round_.proc) if preflight_abort else _missing_workspace_error(round_.proc, server_log)
     )
     log.warning(
-        "grid_runner: variant %d/%d name=%s aborted: %s (rc=%s)",
-        at.idx + 1,
-        len(run.grid),
-        at.variant.name,
+        "grid_runner: variant %s aborted: %s (rc=%s)",
+        _variant_tag(run, at),
         found.error_class,
         returncode,
     )
@@ -1671,12 +1460,10 @@ def _abort_without_workspace(
         halt, trailing = _Halt.STOP, _preflight_abandoned_results(run, at)
         # Environment, not variant.
         log.error(
-            "grid_runner: variant %d/%d name=%s aborted on the AgentX preflight; "
+            "grid_runner: variant %s aborted on the AgentX preflight; "
             "abandoning the remaining %d point(s) -- the client is missing for the "
             "whole grid, not for this variant: %s",
-            at.idx + 1,
-            len(run.grid),
-            at.variant.name,
+            _variant_tag(run, at),
             len(run.grid) - (at.idx + 1),
             found.summary,
         )
@@ -1733,10 +1520,8 @@ def _abort_on_invalid_measurement(run: _GridRun, at: _VariantSlot, outcome: _Var
         slot=at.path,
     )
     log.warning(
-        "grid_runner: variant %d/%d name=%s aborted: %s (rc=%s): %s",
-        at.idx + 1,
-        len(run.grid),
-        at.variant.name,
+        "grid_runner: variant %s aborted: %s (rc=%s): %s",
+        _variant_tag(run, at),
         found.error_class,
         returncode,
         found.summary[:200],

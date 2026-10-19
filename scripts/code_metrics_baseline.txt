@@ -44,7 +44,6 @@ cognitive-complexity src/hyperloom/orchestrator/actions/executors/_framework_rew
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_framework_switch_manifest.py::parse_manifest 62
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_geak_sweep.py::sweep_via_geak 67
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_grid_base.py::coerce_extra_envs 38
-cognitive-complexity src/hyperloom/orchestrator/actions/executors/_grid_runner.py::run_grid 170
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_kv_metrics.py::_read_aiperf_aggregate_json 91
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_kv_metrics.py::sample_from_families 33
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_launch_evidence.py::build_launch_evidence 37
@@ -278,7 +277,6 @@ cognitive-complexity src/kernelforge/rewrite_by_flydsl/kb.py::try_flydsl_kb_warm
 cognitive-complexity src/kernelforge/rewrite_by_flydsl/port_loop.py::check_flydsl_port 35
 cognitive-complexity src/kernelforge/rewrite_by_flydsl/port_loop.py::run_port_loop 52
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_framework_switch_manifest.py::parse_manifest 27
-cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_grid_runner.py::run_grid 55
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_kv_metrics.py::_read_aiperf_aggregate_json 22
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::_wait_for_server_health_async 23
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::_wait_for_workers_ready_async 22
@@ -482,10 +480,10 @@ function-args src/hyperloom/inference_optimizer/recipe_snapshot_constants.py::kb
 function-args src/hyperloom/inference_optimizer/recipe_snapshot_constants.py::recipe_canonical_id 8
 function-args src/hyperloom/orchestrator/actions/executors/_geak_sweep.py::sweep_via_geak 10
 function-args src/hyperloom/orchestrator/actions/executors/_grid_base.py::GridVariant.__init__ 7
-function-args src/hyperloom/orchestrator/actions/executors/_grid_runner.py::_build_variant_yaml 12
 function-args src/hyperloom/orchestrator/actions/executors/_grid_runner.py::_run_magpie 12
 function-args src/hyperloom/orchestrator/actions/executors/_grid_runner.py::run_grid 23
 function-args src/hyperloom/orchestrator/actions/executors/_grid_variant_filter.py::apply_compatibility_filter 6
+function-args src/hyperloom/orchestrator/actions/executors/_grid_variant_yaml.py::_build_variant_yaml 12
 function-args src/hyperloom/orchestrator/actions/executors/_kv_metrics.py::KvMetricsRecorder.__init__ 6
 function-args src/hyperloom/orchestrator/actions/executors/_launch_evidence.py::build_launch_evidence 8
 function-args src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::restart_server_for_round 9
@@ -666,9 +664,9 @@ function-lines src/hyperloom/orchestrator/actions/executors/_framework_rewrite_e
 function-lines src/hyperloom/orchestrator/actions/executors/_framework_switch_manifest.py::parse_manifest 95
 function-lines src/hyperloom/orchestrator/actions/executors/_geak_sweep.py::sweep_via_geak 217
 function-lines src/hyperloom/orchestrator/actions/executors/_gpu_pin.py::resolve_gpu_pin 105
-function-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py::_build_variant_yaml 135
 function-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py::_run_magpie 93
-function-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py::run_grid 1017
+function-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py::run_grid 106
+function-lines src/hyperloom/orchestrator/actions/executors/_grid_variant_yaml.py::_build_variant_yaml 99
 function-lines src/hyperloom/orchestrator/actions/executors/_kernel_agent_tool.py::materialize_unified_patch_snapshot 94
 function-lines src/hyperloom/orchestrator/actions/executors/_kv_metrics.py::_read_aiperf_aggregate_json 101
 function-lines src/hyperloom/orchestrator/actions/executors/_kv_metrics.py::sample_from_families 100
@@ -1033,7 +1031,7 @@ module-lines src/hyperloom/inference_optimizer/cli/model_gate.py 1821
 module-lines src/hyperloom/inference_optimizer/cli/preflight.py 2696
 module-lines src/hyperloom/inference_optimizer/multi_node/cli.py 1874
 module-lines src/hyperloom/inference_optimizer/roofline_ceiling.py 1445
-module-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py 2089
+module-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py 2002
 module-lines src/hyperloom/orchestrator/actions/executors/_kv_metrics.py 1606
 module-lines src/hyperloom/orchestrator/actions/executors/_workload_envs.py 2161
 module-lines src/hyperloom/orchestrator/actions/executors/baseline.py 4253
