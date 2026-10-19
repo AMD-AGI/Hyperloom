@@ -1154,7 +1154,7 @@ def test_record_conc_sweep_writes_last_conc_sweep():
 
 def test_sweep_exits_based_on_ladder_status():
     """The concurrency ladder is the only sweep, so its status is the phase's."""
-    from hyperloom.orchestrator.phases.machine_state import compute_next_phase
+    from hyperloom.orchestrator.phases.machine_state import PhaseFlags, compute_next_phase
 
     def _State(last_conc_sweep=None):
         return SharedState(
@@ -1167,7 +1167,7 @@ def test_sweep_exits_based_on_ladder_status():
 
     def _next(state):
         # optimize_enabled=False blocks cycle_reloop so the sweep status drives the exit.
-        return compute_next_phase(state, optimize_enabled=False)
+        return compute_next_phase(state, flags=PhaseFlags(optimize_enabled=False))
 
     # Nothing recorded => don't exit (budget remaining).
     assert _next(_State()) is None
@@ -1792,19 +1792,21 @@ def test_mid_sweep_summary_writes_the_remaining_budget_as_the_final_report_does(
 
 
 def test_render_conc_sweep_curve_no_data_returns_none(tmp_path: Path):
-    from hyperloom.orchestrator.kernel.conc_sweep_plot import render_conc_sweep_curve
+    from hyperloom.orchestrator.kernel.conc_sweep_plot import ConcCurveOptions, render_conc_sweep_curve
 
     payload = {
         "baseline": {"points": []},
         "optimized": {"points": []},
     }
-    result = render_conc_sweep_curve(payload, tmp_path / "out.png", model_label="M", gpu_label="GPU", tp=1)
+    result = render_conc_sweep_curve(
+        payload, tmp_path / "out.png", ConcCurveOptions(model_label="M", gpu_label="GPU", tp=1)
+    )
     assert result is None
 
 
 def test_render_conc_sweep_curve_writes_png(tmp_path: Path):
     pytest.importorskip("matplotlib")
-    from hyperloom.orchestrator.kernel.conc_sweep_plot import render_conc_sweep_curve
+    from hyperloom.orchestrator.kernel.conc_sweep_plot import ConcCurveOptions, render_conc_sweep_curve
 
     payload = {
         "baseline": {
@@ -1827,7 +1829,9 @@ def test_render_conc_sweep_curve_writes_png(tmp_path: Path):
         },
     }
     out_path = tmp_path / "curve.png"
-    result = render_conc_sweep_curve(payload, out_path, model_label="TestModel", gpu_label="MI300X", tp=8)
+    result = render_conc_sweep_curve(
+        payload, out_path, ConcCurveOptions(model_label="TestModel", gpu_label="MI300X", tp=8)
+    )
     assert result == out_path
     assert out_path.exists()
     assert out_path.stat().st_size > 0
@@ -1835,7 +1839,7 @@ def test_render_conc_sweep_curve_writes_png(tmp_path: Path):
 
 def test_render_conc_sweep_curve_from_file(tmp_path: Path):
     pytest.importorskip("matplotlib")
-    from hyperloom.orchestrator.kernel.conc_sweep_plot import render_conc_sweep_curve
+    from hyperloom.orchestrator.kernel.conc_sweep_plot import ConcCurveOptions, render_conc_sweep_curve
 
     payload = {
         "baseline": {"points": [{"conc": 8, "output_throughput": 800.0}]},
@@ -1843,7 +1847,7 @@ def test_render_conc_sweep_curve_from_file(tmp_path: Path):
     }
     json_file = tmp_path / "summary.json"
     json_file.write_text(json.dumps(payload))
-    result = render_conc_sweep_curve(json_file, tmp_path / "out.png", tp=1)
+    result = render_conc_sweep_curve(json_file, tmp_path / "out.png", ConcCurveOptions(tp=1))
     assert result is not None
     assert result.exists()
 
@@ -1979,11 +1983,11 @@ class TestTheCurveFollowsTheLadder:
     def test_the_rendered_line_joins_the_rungs_in_concurrency_order(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        from hyperloom.orchestrator.kernel.conc_sweep_plot import render_conc_sweep_curve
+        from hyperloom.orchestrator.kernel.conc_sweep_plot import ConcCurveOptions, render_conc_sweep_curve
 
         calls = _install_fake_matplotlib(monkeypatch)
         out_path = tmp_path / "curve.png"
-        assert render_conc_sweep_curve(self._payload(), out_path, tp=8) == out_path
+        assert render_conc_sweep_curve(self._payload(), out_path, ConcCurveOptions(tp=8)) == out_path
 
         lines = {
             kwargs["label"]: args[0]
@@ -2000,10 +2004,10 @@ class TestTheCurveFollowsTheLadder:
     def test_a_rung_only_one_arm_measured_is_drawn_hollow_and_explained(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        from hyperloom.orchestrator.kernel.conc_sweep_plot import render_conc_sweep_curve
+        from hyperloom.orchestrator.kernel.conc_sweep_plot import ConcCurveOptions, render_conc_sweep_curve
 
         calls = _install_fake_matplotlib(monkeypatch)
-        render_conc_sweep_curve(self._payload(), tmp_path / "curve.png", tp=8)
+        render_conc_sweep_curve(self._payload(), tmp_path / "curve.png", ConcCurveOptions(tp=8))
 
         hollow = [(args, kwargs) for args, kwargs in calls["plots"] if "markerfacecolor" in kwargs and args[0]]
         assert [args[0] for args, _kwargs in hollow] == [[pytest.approx(75.09)]]
@@ -2011,12 +2015,12 @@ class TestTheCurveFollowsTheLadder:
         assert any("one arm only" in str(kwargs.get("label", "")) for _args, kwargs in calls["plots"])
 
     def test_matched_rungs_carry_no_hollow_marker_or_note(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-        from hyperloom.orchestrator.kernel.conc_sweep_plot import render_conc_sweep_curve
+        from hyperloom.orchestrator.kernel.conc_sweep_plot import ConcCurveOptions, render_conc_sweep_curve
 
         calls = _install_fake_matplotlib(monkeypatch)
         payload = self._payload()
         payload["optimized"] = self._arm({c: self._OPTIMIZED[c] for c in self._BASELINE})
-        render_conc_sweep_curve(payload, tmp_path / "curve.png", tp=8)
+        render_conc_sweep_curve(payload, tmp_path / "curve.png", ConcCurveOptions(tp=8))
 
         assert not any("markerfacecolor" in kwargs for _args, kwargs in calls["plots"])
 
@@ -2049,11 +2053,11 @@ class TestTheRooflineNeedsBothItsAxisAndARealShape:
         }
 
     def _drew_it(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, payload: dict[str, Any]) -> bool:
-        from hyperloom.orchestrator.kernel.conc_sweep_plot import render_conc_sweep_curve
+        from hyperloom.orchestrator.kernel.conc_sweep_plot import ConcCurveOptions, render_conc_sweep_curve
 
         calls = _install_fake_matplotlib(monkeypatch)
         out_path = tmp_path / "curve.png"
-        assert render_conc_sweep_curve(payload, out_path, tp=8, draw_ceiling=True) == out_path
+        assert render_conc_sweep_curve(payload, out_path, ConcCurveOptions(tp=8, draw_ceiling=True)) == out_path
         return any("roofline" in str(kwargs.get("label", "")).lower() for _args, kwargs in calls["plots"])
 
     def test_a_synthetic_output_chart_draws_it(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -2081,15 +2085,13 @@ def test_render_conc_sweep_curve_missing_matplotlib_returns_none(
             raise ImportError("no module named matplotlib (mocked)")
         return _real_import(name, *args, **kwargs)
 
-    from hyperloom.orchestrator.kernel.conc_sweep_plot import render_conc_sweep_curve
+    from hyperloom.orchestrator.kernel.conc_sweep_plot import ConcCurveOptions, render_conc_sweep_curve
 
     monkeypatch.setattr(builtins, "__import__", _mock_import)
     result = render_conc_sweep_curve(
         {"baseline": {"points": [{"conc": 4, "output_throughput": 400.0}]}, "optimized": {"points": []}},
         tmp_path / "out.png",
-        model_label="M",
-        gpu_label="G",
-        tp=1,
+        ConcCurveOptions(model_label="M", gpu_label="G", tp=1),
     )
     assert result is None
 
@@ -2204,7 +2206,7 @@ def _install_fake_matplotlib(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
 
 def test_render_conc_sweep_curve_with_fake_matplotlib(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    from hyperloom.orchestrator.kernel.conc_sweep_plot import render_conc_sweep_curve
+    from hyperloom.orchestrator.kernel.conc_sweep_plot import ConcCurveOptions, render_conc_sweep_curve
 
     calls = _install_fake_matplotlib(monkeypatch)
     payload = {
@@ -2216,12 +2218,7 @@ def test_render_conc_sweep_curve_with_fake_matplotlib(tmp_path: Path, monkeypatc
     result = render_conc_sweep_curve(
         payload,
         out_path,
-        model_label="M",
-        gpu_label="MI300X",
-        tp=4,
-        isl=1024,
-        osl=512,
-        draw_ceiling=True,
+        ConcCurveOptions(model_label="M", gpu_label="MI300X", tp=4, isl=1024, osl=512, draw_ceiling=True),
     )
 
     assert result == out_path
@@ -2610,7 +2607,7 @@ def test_a_cancelled_sweep_stops_the_ladder_and_is_not_failed(
     """
     from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cancel_scope
     from hyperloom.orchestrator.actions.stop_attribution import ORCHESTRATOR_CANCELLED_CLASS
-    from hyperloom.orchestrator.phases.machine_state import compute_next_phase
+    from hyperloom.orchestrator.phases.machine_state import PhaseFlags, compute_next_phase
 
     teardown_log: list[tuple] = []
     _patch_lifecycle_eligible(monkeypatch, teardown_log)
@@ -2666,7 +2663,7 @@ def test_a_cancelled_sweep_stops_the_ladder_and_is_not_failed(
         phase_budget_pct={"SWEEP": 0.05, "CLOSE": 0.02},
     )
     sweep_state.elapsed_charged_sec = 7000.0
-    result = compute_next_phase(sweep_state, now_unix=now, optimize_enabled=False)
+    result = compute_next_phase(sweep_state, now_unix=now, flags=PhaseFlags(optimize_enabled=False))
     assert result is not None
     target, reason, evidence = result
     assert target == "CLOSE"
@@ -2681,7 +2678,7 @@ def test_the_sweep_phase_budget_waits_for_the_sweep_it_granted():
     session clock still had. Ten minutes in, with no result yet, the phase waits for the grant; once the grant has
     run out, or the sweep has landed, the ordinary exits apply again.
     """
-    from hyperloom.orchestrator.phases.machine_state import compute_next_phase
+    from hyperloom.orchestrator.phases.machine_state import PhaseFlags, compute_next_phase
 
     now = 1_800_000_000.0
 
@@ -2699,7 +2696,7 @@ def test_the_sweep_phase_budget_waits_for_the_sweep_it_granted():
         return state
 
     def _next(state: SharedState):
-        return compute_next_phase(state, now_unix=now, optimize_enabled=False)
+        return compute_next_phase(state, now_unix=now, flags=PhaseFlags(optimize_enabled=False))
 
     granted = now - 600.0 + 3624 + 600
     assert _next(_state(granted_until=granted)) is None

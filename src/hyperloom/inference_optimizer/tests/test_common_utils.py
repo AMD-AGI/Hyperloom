@@ -1111,12 +1111,7 @@ async def test_kb_writeback_rejects_unknown_outcome() -> None:
 
     with pytest.raises(ValueError):
         await kb_writeback.write_framework_record(
-            pr_url="u",
-            pr_sha="s",
-            patch_path="p",
-            outcome="not_a_real_outcome",
-            tps_delta_pct=1.0,
-            session_id="sess",
+            kb_writeback.FrameworkOutcome("u", "s", "p", "not_a_real_outcome", 1.0, "sess")
         )
 
 
