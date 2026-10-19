@@ -3086,7 +3086,7 @@ def test_remote_read_is_wired_into_cli_t0_and_close_write_remains() -> None:
             fromlist=["_bootstrap_recipe_kb"],
         )._bootstrap_recipe_kb
     )
-    close_source = inspect.getsource(RecipeJournalCollaborator.finalize_recipe_and_journal)
+    close_source = inspect.getsource(RecipeJournalCollaborator._publish_remote_recipe)
     assert "RemoteWarmRecipeAdapter" in bootstrap_source
     assert "HyperloomRemoteKB.from_env().write" in close_source
     assert "write_final_remote_recipe" not in close_source

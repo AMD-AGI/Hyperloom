@@ -22,6 +22,9 @@ from hyperloom.orchestrator.knowledge.recipe_kb import (
     recipe_canonical_id,
 )
 from hyperloom.orchestrator.knowledge.config import KnowledgeConfig
+from hyperloom.orchestrator.knowledge._recipe_attrs import (
+    recipe_attrs_from_state,
+)
 
 
 _MODEL = "qwen3-30b-a3b"
@@ -379,10 +382,10 @@ def _seed_kept_kernel(coord: Coordinator) -> None:
 
 
 def test_build_recipe_attrs_surfaces_kept_kernel(tmp_path: Path) -> None:
-    """``_build_recipe_attrs_from_state`` emits a ``kernel_optimizations`` entry carrying micro_speedup + E2E outcome."""
+    """``recipe_attrs_from_state`` emits a ``kernel_optimizations`` entry carrying micro_speedup + E2E outcome."""
     coord = _make_coordinator(tmp_path)
     _seed_kept_kernel(coord)
-    attrs = coord.recipe_journal._build_recipe_attrs_from_state()
+    attrs = recipe_attrs_from_state(coord.shared_state, coord.session_dir.name)
     kopts = attrs.get("kernel_optimizations") or []
     assert kopts, "KEEP'd kernel k006 missing from recipe attrs"
     k = next((x for x in kopts if x.get("kernel_id") == "k006"), None)
@@ -464,7 +467,7 @@ def test_best_config_reads_stack_args_from_canonical_server_key(
         }
     ]
     ss.cumulative_gain_validated = 10.0
-    attrs = coord.recipe_journal._build_recipe_attrs_from_state()
+    attrs = recipe_attrs_from_state(coord.shared_state, coord.session_dir.name)
     assert attrs["best_config"]["extra_server_args"] == ("--page-size 32 --schedule-policy lpm"), (
         "stack-layer launch args must be read from the canonical "
         "extra_server_args key; got "
@@ -592,7 +595,7 @@ def test_kernel_e2e_decision_reflects_integrate_revert(tmp_path: Path) -> None:
             ],
         },
     }
-    attrs = coord.recipe_journal._build_recipe_attrs_from_state()
+    attrs = recipe_attrs_from_state(coord.shared_state, coord.session_dir.name)
     kopts = attrs.get("kernel_optimizations") or []
     k = next((x for x in kopts if x.get("kernel_id") == "k007"), None)
     assert k is not None, f"k007 missing from {kopts}"
@@ -617,7 +620,7 @@ def test_kernel_e2e_decision_micro_only_when_not_integrated(
         },
     }
     ss.kernel_integrate_attempts = {}
-    attrs = coord.recipe_journal._build_recipe_attrs_from_state()
+    attrs = recipe_attrs_from_state(coord.shared_state, coord.session_dir.name)
     kopts = attrs.get("kernel_optimizations") or []
     k = next((x for x in kopts if x.get("kernel_id") == "k009"), None)
     assert k is not None
@@ -644,7 +647,7 @@ def test_session_entry_carries_throughput_date_and_actions(
     ]
     ss.cumulative_gain_validated = 7.5
     ss.cumulative_gain_validated_stack_len = 2
-    attrs = coord.recipe_journal._build_recipe_attrs_from_state()
+    attrs = recipe_attrs_from_state(coord.shared_state, coord.session_dir.name)
     sessions = attrs.get("sessions") or []
     assert sessions, "no session entry emitted"
     s = sessions[0]

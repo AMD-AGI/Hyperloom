@@ -6,8 +6,10 @@
 from __future__ import annotations
 
 import logging as _logging
+from copy import copy
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Collection, Mapping
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, Collection, Mapping, NamedTuple
 
 from hyperloom.common.coerce import to_float, to_int
 from hyperloom.common.io import JsonLineFormat, append_jsonl
@@ -24,12 +26,13 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
     summarize_change,
 )
 from hyperloom.orchestrator.knowledge.recipe_kb import recipe_canonical_id
-from hyperloom.orchestrator.knowledge.workload_tags import workload_shape_tags
 from hyperloom.orchestrator.lever import LEVER_CONFIG, lever_kind_for_task
 
 from ..collaborator import CoordinatorCollaborator
 from ..state.attempt_ledger import AttemptRow, record_attempt_row
-from ..state.failure_evidence import UNMEASURED_OUTCOMES, classify_failure_attribution
+from ._config_timeline import NON_ATTEMPT_OUTCOMES, record_config_attempts, record_config_run
+from ._recipe_attrs import recipe_attrs_from_state, workload_kb_tags
+from .config import KnowledgeStoreMode
 
 if TYPE_CHECKING:
     from ..loop.coordinator import Coordinator
@@ -61,6 +64,79 @@ _REMOTE_RESULT_TYPES: dict[str, str] = {
 # The one exception class meaning the store rejected the bundle, rather than
 # that we never reached the store at all.
 _REMOTE_VALIDATION_ERROR = "RemoteRecipeValidationError"
+
+
+#: Recipe fields an amend carries forward when the caller does not override
+#: them, each with the empty value ``put_recipe`` falls back to.
+_PRESERVED_RECIPE_FIELDS: Mapping[str, Any] = MappingProxyType(
+    {
+        "best_config": {},
+        "best_throughput": 0.0,
+        "what_worked": [],
+        "what_failed": [],
+        "remaining_gaps": [],
+        "last_profiled": "",
+        "stack_fingerprint": {},
+        "sessions": [],
+        "authority": "EXPERIENTIAL",
+        "confidence": 0.85,
+        "evidence_refs": [],
+    }
+)
+
+#: Row keys ``put_recipe`` owns; everything else on a live row is a session
+#: extra and survives the amend untouched.
+_RECIPE_OWNED_KEYS: frozenset[str] = frozenset(_PRESERVED_RECIPE_FIELDS) | frozenset(
+    {
+        "canonical_id",
+        "version",
+        "created_at",
+        "updated_at",
+        "model",
+        "hardware",
+        "framework",
+        "framework_name",
+        "framework_version",
+        "precision",
+        "pitfalls",
+        "lessons",
+        "provenance",
+    }
+)
+
+#: Explore outcomes the journal collapses into a plain revert.
+_MEASURED_LOSS_OUTCOMES: frozenset[str] = frozenset({OUTCOME_REVERT, "FAILED"})
+
+#: Per-variant measurement detail the journal row carries beyond the headline
+#: gain and throughput.
+_VARIANT_DETAIL_METRICS: tuple[str, ...] = (
+    "runtime_sec",
+    "wall_clock_ratio_vs_baseline",
+    "estimated_output_throughput",
+)
+
+
+class _FrameworkIdentity(NamedTuple):
+    """The framework dimensions of a Recipe identity, with the version resolved."""
+
+    name: str
+    version: str
+    precision: str
+
+
+class _VariantMeasurement(NamedTuple):
+    """What one explore variant's benchmark reported."""
+
+    gain_pct: float | None
+    throughput_after: float | None
+    detail: dict[str, Any]
+
+
+class _VariantFailure(NamedTuple):
+    """Why a variant was reverted; both fields absent for every other outcome."""
+
+    error_class: str | None
+    reason: str | None
 
 
 def _remote_result_type(status: str, reason: str) -> str:
@@ -96,193 +172,6 @@ def _predicted_gain(*sources: dict[str, Any] | None) -> float | None:
     return None
 
 
-#: Explore outcomes that are not an attempt at anything: a variant skipped as a
-#: duplicate was never measured, so no measurement would back its funnel row.
-_NON_ATTEMPT_OUTCOMES = frozenset({"SKIPPED_DEDUP"})
-
-
-def _record_config_run(coord: Any, *, task: Any, result_dict: Mapping[str, Any]) -> None:
-    """Record the configuration arm's grid dispatch on the framework event.
-
-    The arm's dispatch is one ``explore`` task, and it earns a run row for the
-    same reason a specialist dispatch does: the event reduces its status over
-    what it dispatched, so an arm whose grid came back with nothing must not
-    read as an arm that was never tried. Recorded at completion, where the
-    outcome is known, with the dispatch time taken off the task row; a grid
-    that measured nothing still lands, which is the case
-    :func:`_record_config_attempts` never sees.
-    """
-    recorder = coord._coord.phase_framework.timeline()
-    if recorder is None:
-        return
-    from hyperloom.common.timeutil import now_iso
-    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import ARM_CONFIG, ROLE_CONFIG
-
-    task_id = str(getattr(task, "task_id", "") or "")
-    if not task_id:
-        return
-    variants = result_dict.get("per_variant_outcomes")
-    measured = [row for row in variants if isinstance(row, dict)] if isinstance(variants, list) else []
-    status = str(result_dict.get("status") or "") or "succeeded"
-    recorder.record_run(
-        task_id,
-        role=ROLE_CONFIG,
-        arm=ARM_CONFIG,
-        status=status,
-        dispatched_at=str(getattr(task, "created_at", "") or ""),
-        completed_at=now_iso("seconds"),
-        reason=str(result_dict.get("error") or "")[:200],
-        # A grid the run stopped before it measured anything is not a grid
-        # whose variants were measured and lost.
-        empty=not measured,
-        workspace=str(result_dict.get("workspace") or ""),
-    )
-
-
-def _record_config_attempts(
-    coord: Any,
-    *,
-    task: Any,
-    per_variant: list[dict[str, Any]],
-    result_dict: Mapping[str, Any],
-    adopted_variants: Collection[str],
-) -> None:
-    """Record the configuration arm's measured attempts on the framework event.
-
-    Timeline only: the ledger row is written by ``fact_write_hook``, which does
-    not depend on a recorder being open. The outcome is recorded verbatim here,
-    unlike the journal beside it, which collapses ``KEEP_UNSTABLE`` and
-    ``KILLED_OVERTIME`` into a plain revert.
-    """
-    recorder = coord._coord.phase_framework.timeline()
-    if recorder is None:
-        return
-    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import ARM_CONFIG, GateVerdict
-
-    task_id = str(getattr(task, "task_id", "") or "")
-    params = getattr(task, "params", None) or {}
-    round_id = str(result_dict.get("round_id") or "")
-    recorded = 0
-    for row in per_variant:
-        if not isinstance(row, dict):
-            continue
-        outcome = str(row.get("outcome") or "")
-        if outcome in _NON_ATTEMPT_OUTCOMES:
-            continue
-        metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
-        variant = row.get("variant") if isinstance(row.get("variant"), dict) else {}
-        fingerprint = str(row.get("fingerprint") or "")
-        adopted = fingerprint in adopted_variants
-        # The fingerprint identifies the variant within the round and the round
-        # within the task, so the three together identify the attempt.
-        attempt_id = ":".join(part for part in (task_id, round_id, fingerprint) if part) or task_id
-        if not attempt_id:
-            continue
-        gates = [gate for gate in (row.get("gates") or []) if isinstance(gate, dict)]
-        # This arm gates accuracy rather than reporting it, so the block both
-        # arms carry is projected from the gate that ruled. No gate row means
-        # nothing gated the variant, which is not a gate that refused it.
-        accuracy_gate = next((gate for gate in gates if str(gate.get("gate") or "") == "accuracy"), {})
-        error_class = str(row.get("error_class") or "")
-        error_excerpt = str(row.get("error_excerpt") or "")
-        failure_attribution = ""
-        if outcome in UNMEASURED_OUTCOMES:
-            failure_attribution = classify_failure_attribution(
-                error_class=error_class,
-                error_excerpt=error_excerpt,
-                reason=row.get("reason"),
-                explicit=row.get("failure_attribution"),
-            )
-        recorder.record_attempt(
-            attempt_id,
-            arm=ARM_CONFIG,
-            round_id=round_id,
-            task_id=task_id,
-            proposal_ref=str(params.get("proposal_msg_id") or ""),
-            provenance=str(row.get("provenance") or ""),
-            outcome=outcome,
-            reason=str(row.get("reason") or ""),
-            reasoning=str(variant.get("note") or ""),
-            reasoning_origin=str(variant.get("reasoning_origin") or ""),
-            experience_citations=variant.get("experience_citations") or [],
-            stage=str(row.get("stage") or ""),
-            fingerprint=fingerprint,
-            # The fingerprint is the join key; the name is what a reader
-            # recognises the variant by.
-            variant_name=str(row.get("variant_name") or ""),
-            measurement={
-                # Both ends of the pair: the anchor advances on every KEEP,
-                # so a percentage without its denominator adds to nothing.
-                "before_tput": metrics.get("base_tput"),
-                "after_tput": metrics.get("tput"),
-                "gain_pct": metrics.get("gain_pct"),
-                "runtime_sec": metrics.get("runtime_sec"),
-                "estimated_output_throughput": metrics.get("estimated_output_throughput"),
-            },
-            config_delta={
-                "extra_server_args": variant.get("extra_server_args"),
-                "extra_envs": variant.get("extra_envs"),
-                "remove_args": variant.get("remove_args"),
-                "unset_envs": variant.get("unset_envs"),
-                "args_mode": variant.get("args_mode"),
-            },
-            accuracy={
-                "required": True if accuracy_gate else None,
-                "value": accuracy_gate.get("observed"),
-                "reference": accuracy_gate.get("threshold"),
-                "passed": accuracy_gate.get("passed"),
-            },
-            failure={
-                "error_class": error_class,
-                "error_excerpt": error_excerpt,
-                "attribution": failure_attribution,
-            },
-            artifacts={
-                "workspace": str(row.get("workspace") or ""),
-                "server_log_path": str(row.get("server_log_path") or ""),
-                "raw_result_path": str(row.get("raw_result_path") or ""),
-            },
-            decision=outcome,
-            adopted=adopted,
-            # Recorded rather than referenced: every KEEP advances the
-            # stack, so the session's current config is not what this
-            # variant was measured on top of.
-            measured_against=row.get("measured_against") or {},
-            # What stood behind the verdict. Absent when nothing ruled.
-            validation_basis=str(row.get("validation_basis") or ""),
-            # A pair is what makes a gain addable, so eligibility follows
-            # the pair being present rather than the outcome being a KEEP.
-            attribution_eligible=(adopted and metrics.get("base_tput") is not None and metrics.get("tput") is not None),
-        )
-        for gate in gates:
-            if not str(gate.get("gate") or ""):
-                continue
-            recorder.record_attempt_gate(
-                attempt_id,
-                GateVerdict(
-                    gate=str(gate.get("gate")),
-                    passed=gate.get("passed"),
-                    reason=str(gate.get("reason") or ""),
-                    observed=gate.get("observed"),
-                    threshold=gate.get("threshold"),
-                ),
-            )
-        recorded += 1
-    proposal_ref = str(params.get("proposal_msg_id") or "")
-    if not (recorded and proposal_ref):
-        return
-    # Settled here rather than at materialization: a grid whose task dies before
-    # any variant runs has no attempt to stand behind an ``attempted`` reading,
-    # and is more honestly left unsettled.
-    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
-        DISPOSITION_ATTEMPTED,
-        STEP_ATTEMPTED,
-    )
-
-    recorder.record_proposal_step(proposal_ref, step=STEP_ATTEMPTED, outcome=str(recorded))
-    recorder.settle_proposal(proposal_ref, disposition=DISPOSITION_ATTEMPTED)
-
-
 def _extra_server_args(payload: Mapping[str, Any]) -> str:
     """Read canonical ``extra_server_args`` from a payload."""
     value = payload.get("extra_server_args")
@@ -293,6 +182,221 @@ def _extra_server_args(payload: Mapping[str, Any]) -> str:
     if isinstance(value, (list, tuple)):
         return " ".join(str(v).strip() for v in value if str(v).strip())
     return str(value)
+
+
+def _framework_identity(state: Any) -> _FrameworkIdentity:
+    """The session's framework, the version it is running and its precision.
+
+    The version is probed from the installed framework when the session never
+    recorded one, so a recipe is never filed under a blank version.
+    """
+    name = str(state.framework or "")
+    version = str(state.framework_version or "")
+    if not version and name:
+        version = detect_framework_version(name)
+    return _FrameworkIdentity(name=name, version=version, precision=str(state.precision or ""))
+
+
+def _result_payload(result: Any) -> dict[str, Any]:
+    """A completed task's result dict, whatever shape the executor returned it in."""
+    payload = result.result if hasattr(result, "result") else (result or {})
+    return payload if isinstance(payload, dict) else {}
+
+
+def _grid_attempt_row(
+    variant_outcome: Any,
+    *,
+    task_id: str,
+    round_id: str,
+    adopted: bool,
+) -> AttemptRow | None:
+    """The adoption-ledger row for one measured grid variant, or ``None`` when it measured nothing."""
+    outcome = str(variant_outcome.get("outcome") or "") if isinstance(variant_outcome, dict) else ""
+    if not outcome or outcome in NON_ATTEMPT_OUTCOMES:
+        return None
+    metrics = variant_outcome.get("metrics") if isinstance(variant_outcome.get("metrics"), dict) else {}
+    return AttemptRow(
+        lever_kind=LEVER_CONFIG,
+        task_id=task_id,
+        round_id=round_id,
+        fingerprint=str(variant_outcome.get("fingerprint") or ""),
+        variant_name=str(variant_outcome.get("variant_name") or ""),
+        outcome=outcome,
+        adopted=adopted,
+        gain_pct=metrics.get("gain_pct"),
+        before_tput=metrics.get("base_tput"),
+        after_tput=metrics.get("tput"),
+        error_class=str(variant_outcome.get("error_class") or ""),
+        provenance=str(variant_outcome.get("provenance") or ""),
+    )
+
+
+def _variant_verdict(outcome: str, adopted: bool) -> Verdict:
+    """How one explore variant's own outcome settles against the adoption rule.
+
+    An executor KEEP the adoption rule did not lift is a refusal, not a revert:
+    nothing about it failed to measure.
+    """
+    if outcome == OUTCOME_KEEP:
+        return Verdict.ADOPTED if adopted else Verdict.REFUSED
+    if outcome in _MEASURED_LOSS_OUTCOMES:
+        return Verdict.REVERTED
+    return Verdict.REFUSED
+
+
+def _variant_measurement(metrics: Any) -> _VariantMeasurement:
+    """One variant's measured figures, blank throughout when it never measured."""
+    if not isinstance(metrics, dict):
+        return _VariantMeasurement(gain_pct=None, throughput_after=None, detail={})
+    return _VariantMeasurement(
+        gain_pct=to_float(metrics.get("gain_pct")),
+        throughput_after=to_float(metrics.get("output_throughput")),
+        detail={key: metrics[key] for key in _VARIANT_DETAIL_METRICS if metrics.get(key) is not None},
+    )
+
+
+def _variant_failure(variant_outcome: Mapping[str, Any], outcome: str) -> _VariantFailure:
+    """What the journal records about a reverted variant, blank for every other outcome."""
+    if outcome != OUTCOME_REVERT:
+        return _VariantFailure(error_class=None, reason=None)
+    return _VariantFailure(
+        error_class=str(variant_outcome.get("error_class") or "") or None,
+        reason=str(variant_outcome.get("reason") or "") or None,
+    )
+
+
+def _variant_pitfall_signals(variant_outcome: Mapping[str, Any], metrics: Any) -> dict[str, Any]:
+    """A variant's measurement plus the fields a pitfall severity is ruled from."""
+    return {
+        **(metrics if isinstance(metrics, dict) else {}),
+        "error_class": variant_outcome.get("error_class"),
+        "status": variant_outcome.get("outcome"),
+    }
+
+
+def _variant_change_attrs(variant_attrs: Any, variant_name: str) -> dict[str, Any]:
+    """One variant's attributes as the change summary needs them.
+
+    A variant that names no knob falls back to its own name, else every variant
+    in the grid would summarise to an identical row.
+    """
+    attrs = dict(variant_attrs) if isinstance(variant_attrs, dict) else {}
+    named_knob = attrs.get("extra_server_args") or attrs.get("extra_envs") or attrs.get("name")
+    if not named_knob and variant_name:
+        attrs["name"] = variant_name
+    return attrs
+
+
+def _finalize_outcome(*, status: str, reason: str, backend: str, result_type: str) -> dict[str, Any]:
+    """One terminal Recipe-finalize outcome, in the shape the close-out step records."""
+    return {
+        "status": status,
+        "reason": reason,
+        "backend": backend,
+        "result_type": result_type,
+    }
+
+
+def _finalize_error(exc: BaseException, *, reason: str, backend: str, result_type: str) -> dict[str, Any]:
+    """The outcome for a finalize attempt an exception ended."""
+    return {
+        "status": "error",
+        "reason": reason,
+        "backend": backend,
+        "result_type": result_type,
+        "error_class": type(exc).__name__,
+    }
+
+
+def _remote_publish_failure_type(exc: BaseException) -> str:
+    """Whether the KB Store rejected the bundle or was never reached at all."""
+    if type(exc).__name__ == _REMOTE_VALIDATION_ERROR:
+        return _close_out.RESULT_BUNDLE_BUILD_FAILED
+    return _close_out.RESULT_TRANSPORT_FAILED
+
+
+def _rows_not_superseded(live_rows: Any, superseding: Any, key: str) -> list[dict[str, Any]]:
+    """Copies of the live rows whose ``key`` no superseding row already claims."""
+    claimed = {str(row.get(key) or "") for row in superseding or [] if isinstance(row, dict)}
+    kept: list[dict[str, Any]] = []
+    for row in live_rows or []:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get(key) or "") in claimed:
+            continue
+        kept.append(dict(row))
+    return kept
+
+
+def _improved_best_config(state: Any, attrs: Mapping[str, Any], live: Mapping[str, Any]) -> dict[str, Any]:
+    """The ``best_config`` override, empty unless this session genuinely beat the live row.
+
+    A session that validated nothing has no standing to overwrite a
+    configuration somebody else measured.
+    """
+    my_throughput = float(attrs.get("best_throughput") or 0.0)
+    validated_gain = float(state.cumulative_gain_validated or 0.0)
+    current_args = str(state.current_best.get("extra_server_args") or "").strip()
+    has_validated_win = bool((state.optimization_stack or []) or validated_gain > 0.0 or current_args)
+    if not has_validated_win or my_throughput <= to_float(live.get("best_throughput"), 0.0):
+        return {}
+    return {
+        "best_config": attrs["best_config"],
+        "best_throughput": my_throughput,
+    }
+
+
+def _appended(live_facts: Any, addition: Mapping[str, Any] | None) -> list[Any]:
+    """The live lesson or pitfall list with one more appended, when the caller brought one."""
+    facts = list(live_facts or [])
+    if addition is not None:
+        facts.append(addition)
+    return facts
+
+
+def _amend_provenance(details: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The provenance block stamped on every amend; the central server requires one."""
+    return {
+        "source": "hyperloom-inference-optimizer",
+        "generator": "coordinator",
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
+        "details": dict(details or {}),
+    }
+
+
+def _amended_recipe_fields(live: Mapping[str, Any], overrides: Mapping[str, Any]) -> dict[str, Any]:
+    """The preserved recipe fields for one amend: an override wins, an unset field keeps its live value.
+
+    An absent or empty live value falls back to the field's own default, so
+    ``put_recipe`` never sees ``None`` where it declares a container.
+    """
+    merged: dict[str, Any] = {}
+    for field, default in _PRESERVED_RECIPE_FIELDS.items():
+        if field in overrides:
+            merged[field] = overrides[field]
+            continue
+        live_value = live.get(field)
+        merged[field] = type(default)(live_value) if live_value else copy(default)
+    return merged
+
+
+def _amended_recipe_extras(live: Mapping[str, Any], overrides: Mapping[str, Any], state: Any) -> dict[str, Any]:
+    """The free-form extras an amend writes back: the prior ones, the caller's, then the model's identity.
+
+    The architecture tags are re-stamped from config.json each time because a
+    row written before the architecture was read carries none.
+    """
+    extras = {key: value for key, value in live.items() if key not in _RECIPE_OWNED_KEYS}
+    extras.update(overrides.get("extras") or {})
+    architectures = state.model_architectures or []
+    if isinstance(architectures, list):
+        named = [str(name).strip() for name in architectures if str(name or "").strip()]
+        if named:
+            extras["architectures"] = named
+    model_type = str(state.model_type or "").strip()
+    if model_type:
+        extras["model_type"] = model_type
+    return extras
 
 
 class RecipeJournalCollaborator(CoordinatorCollaborator):
@@ -369,45 +473,26 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             adopted_variants: Fingerprints of the explore winners whose lift
                 landed; a per-variant KEEP outside it did not adopt anything.
         """
-        result_dict = result.result if hasattr(result, "result") else (result or {})
-        if not isinstance(result_dict, dict):
-            result_dict = {}
+        result_dict = _result_payload(result)
         source_session_id = self._source_session_id()
         per_variant = result_dict.get("per_variant_outcomes")
         if task.kind == "explore":
-            _record_config_run(self, task=task, result_dict=result_dict)
+            record_config_run(self, task=task, result_dict=result_dict)
         if task.kind == "explore" and isinstance(per_variant, list) and per_variant:
-            _record_config_attempts(
+            record_config_attempts(
                 self,
                 task=task,
                 per_variant=per_variant,
                 result_dict=result_dict,
                 adopted_variants=adopted_variants,
             )
-            round_id = str(result_dict.get("round_id") or "")
-            for vo in per_variant:
-                adopted = str(vo.get("fingerprint") or "") in adopted_variants
-                outcome = str(vo.get("outcome") or "") if isinstance(vo, dict) else ""
-                if outcome and outcome not in _NON_ATTEMPT_OUTCOMES:
-                    metrics = vo.get("metrics") if isinstance(vo.get("metrics"), dict) else {}
-                    row = AttemptRow(
-                        lever_kind=LEVER_CONFIG,
-                        task_id=str(task.task_id or ""),
-                        round_id=round_id,
-                        fingerprint=str(vo.get("fingerprint") or ""),
-                        variant_name=str(vo.get("variant_name") or ""),
-                        outcome=outcome,
-                        adopted=adopted,
-                        gain_pct=metrics.get("gain_pct"),
-                        before_tput=metrics.get("base_tput"),
-                        after_tput=metrics.get("tput"),
-                        error_class=str(vo.get("error_class") or ""),
-                        provenance=str(vo.get("provenance") or ""),
-                    )
-                    record_attempt_row(self.shared_state, row)
-                self._record_fact_per_variant(
-                    task=task, source_session_id=source_session_id, variant_outcome=vo, adopted=adopted
-                )
+            self._record_grid_facts(
+                task=task,
+                source_session_id=source_session_id,
+                per_variant=per_variant,
+                round_id=str(result_dict.get("round_id") or ""),
+                adopted_variants=adopted_variants,
+            )
         else:
             self._record_fact_per_task(
                 task=task,
@@ -416,6 +501,29 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                 verdict=verdict,
             )
         self.shared_state.save(self.session_dir)
+
+    def _record_grid_facts(
+        self,
+        *,
+        task: "Task",
+        source_session_id: str,
+        per_variant: list[dict[str, Any]],
+        round_id: str,
+        adopted_variants: Collection[str],
+    ) -> None:
+        """Record every variant of one explore grid: an adoption-ledger row and a journal fact each."""
+        task_id = str(task.task_id or "")
+        for variant_outcome in per_variant:
+            adopted = str(variant_outcome.get("fingerprint") or "") in adopted_variants
+            row = _grid_attempt_row(variant_outcome, task_id=task_id, round_id=round_id, adopted=adopted)
+            if row is not None:
+                record_attempt_row(self.shared_state, row)
+            self._record_fact_per_variant(
+                task=task,
+                source_session_id=source_session_id,
+                variant_outcome=variant_outcome,
+                adopted=adopted,
+            )
 
     def ensure_journal(self) -> Journal:
         """Lazy-instantiate the per-session :class:`Journal` (load_or_create reads an existing file on resume).
@@ -526,7 +634,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         """
         models = [str(self.shared_state.model_name or "")] if self.shared_state.model_name else []
         hardware = [str(self.shared_state.gpu_type or "")] if self.shared_state.gpu_type else []
-        workload_tags = self._collect_workload_tags()
+        workload_tags = workload_kb_tags(self.shared_state)
         extra = workload_tags if workload_tags else None
         now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -739,73 +847,42 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         """
         journal = self.ensure_journal()
         outcome_raw = str(variant_outcome.get("outcome") or "")
-        if outcome_raw == "SKIPPED_DEDUP":
+        if outcome_raw in NON_ATTEMPT_OUTCOMES:
             return
-        if outcome_raw == "KEEP":
-            verdict = Verdict.ADOPTED if adopted else Verdict.REFUSED
-        elif outcome_raw in ("REVERT", "FAILED"):
-            verdict = Verdict.REVERTED
-        else:
-            verdict = Verdict.REFUSED
-        outcome = derive_journal_outcome(verdict, variant_outcome)
+        outcome = derive_journal_outcome(_variant_verdict(outcome_raw, adopted), variant_outcome)
         variant_name = str(variant_outcome.get("variant_name") or "")
         metrics = variant_outcome.get("metrics") or {}
-        gain_pct = to_float(metrics.get("gain_pct") if isinstance(metrics, dict) else None)
-        throughput_after = to_float(metrics.get("output_throughput") if isinstance(metrics, dict) else None)
+        measurement = _variant_measurement(metrics)
         variant_attrs = variant_outcome.get("variant") or {}
-        kind = classify_change_kind(
-            task.kind,
-            variant_attrs if isinstance(variant_attrs, dict) else None,
-        )
-        # Ensure the change summary is variant-specific (else every explore variant writes an identical row).
-        change_attrs = dict(variant_attrs) if isinstance(variant_attrs, dict) else {}
-        if (
-            not (change_attrs.get("extra_server_args") or change_attrs.get("extra_envs") or change_attrs.get("name"))
-            and variant_name
-        ):
-            change_attrs["name"] = variant_name
+        attrs = variant_attrs if isinstance(variant_attrs, dict) else None
+        kind = classify_change_kind(task.kind, attrs)
+        change_attrs = _variant_change_attrs(variant_attrs, variant_name)
         change = summarize_change(task.kind, change_attrs, None)
-        error_class = None
-        reason = None
-        if outcome == OUTCOME_REVERT:
-            error_class = str(variant_outcome.get("error_class") or "") or None
-            reason = str(variant_outcome.get("reason") or "") or None
-        # Proposer attribution + per-variant measurement detail, carried from the
-        # explore executor's per_variant_outcomes so the decision row records who
-        # proposed the change and how it measured (beyond headline gain/tput).
-        detail_metrics = {
-            k: metrics[k]
-            for k in (
-                "runtime_sec",
-                "wall_clock_ratio_vs_baseline",
-                "estimated_output_throughput",
-            )
-            if isinstance(metrics, dict) and metrics.get(k) is not None
-        }
+        failure = _variant_failure(variant_outcome, outcome)
+        tick = int(self.shared_state.tick or 0)
         journal.append_entry(
             JournalEntry(
                 phase=self.journal_entry_phase(),
-                lever_kind=lever_kind_for_task(kind, variant_outcome if isinstance(variant_outcome, dict) else None),
-                iter=int(self.shared_state.tick or 0),
+                lever_kind=lever_kind_for_task(kind, variant_outcome),
+                iter=tick,
                 kind=kind,
                 change=change,
                 outcome=outcome,
-                gain_pct=gain_pct,
-                throughput_after=throughput_after,
-                error_class=error_class,
-                reason=reason,
+                gain_pct=measurement.gain_pct,
+                throughput_after=measurement.throughput_after,
+                error_class=failure.error_class,
+                reason=failure.reason,
                 task_id=task.task_id,
                 variant_name=variant_name,
                 provenance=str(variant_outcome.get("provenance") or ""),
                 scope=str(variant_outcome.get("scope") or ""),
                 fingerprint=str(variant_outcome.get("fingerprint") or ""),
-                metrics=detail_metrics,
-                tick=int(self.shared_state.tick or 0),
-                predicted_gain_pct=_predicted_gain(
-                    variant_outcome,
-                    variant_attrs if isinstance(variant_attrs, dict) else None,
-                    getattr(task, "params", None),
-                ),
+                # Proposer attribution and the measurement detail beyond the
+                # headline figures, so the row records how the change measured
+                # and who proposed it.
+                metrics=measurement.detail,
+                tick=tick,
+                predicted_gain_pct=_predicted_gain(variant_outcome, attrs, getattr(task, "params", None)),
             )
         )
 
@@ -817,296 +894,17 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             source_session_id=source_session_id,
             is_keep=(outcome == OUTCOME_KEEP),
             change=change,
-            gain_pct=gain_pct,
-            throughput_after=throughput_after,
+            gain_pct=measurement.gain_pct,
+            throughput_after=measurement.throughput_after,
             best_config_candidate=self.extract_kept_best_config(
                 task=task,
                 variant_attrs=change_attrs,
             ),
             # Workload-shape tags — see _record_fact_per_task.
             evidence_refs=[f"log:task-{task.task_id}", f"variant:{variant_name}"],
-            pitfall_severity_dict={
-                **(metrics if isinstance(metrics, dict) else {}),
-                "error_class": variant_outcome.get("error_class"),
-                "status": variant_outcome.get("outcome"),
-            },
+            pitfall_severity_dict=_variant_pitfall_signals(variant_outcome, metrics),
             variant_name=variant_name,
         )
-
-    def _collect_workload_tags(self) -> dict[str, Any]:
-        """Return the workload-shape KB tag dict for the current session; shared by recipe attrs + lesson/pitfall writes so the warm-start reader filters symmetrically.
-
-        Returns:
-            A dict of workload-shape KB tags (framework, model, parallelism,
-            runtime versions, baseline workload extras) with empty values
-            omitted.
-        """
-        ss = self.shared_state
-        out: dict[str, Any] = {}
-        # model_family is not part of the seven-dimension Recipe identity.
-        for attr in ("framework", "model_class", "model_name"):
-            text = str(getattr(ss, attr, "") or "").strip()
-            if text:
-                out[attr] = text
-        precision = getattr(ss, "precision", None)
-        if precision not in (None, "", 0):
-            out["precision"] = precision
-        out.update(workload_shape_tags(ss))
-        # runtime version tags from stack_fingerprint_meta (cli writes at boot, resume reads verbatim).
-        fp_meta = ss.stack_fingerprint_meta or {}
-        if isinstance(fp_meta, dict):
-            # framework_version is whichever of sglang/vllm is active.
-            fw_lc = out.get("framework", "").lower()
-            if fw_lc in ("sglang", "vllm"):
-                version = str(fp_meta.get(fw_lc) or "").strip()
-                if version and version != "unknown":
-                    out["framework_version"] = version
-            for src_key, dst_key in (
-                ("rocm", "rocm_version"),
-                ("aiter", "aiter_version"),
-                ("image_digest", "image_digest"),
-            ):
-                version = str(fp_meta.get(src_key) or "").strip()
-                if version and version != "unknown":
-                    out[dst_key] = version
-        # per-baseline workload extras from materialized YAML; keep bool False (don't drop an "explicitly disabled" signal).
-        wl_extra = ss.baseline_workload_extra or {}
-        if isinstance(wl_extra, dict):
-            for k in ("max_running_requests", "max_num_seqs"):
-                v = wl_extra.get(k)
-                if isinstance(v, int) and v > 0:
-                    out[k] = v
-            for k in ("chunked_prefill_enabled", "enable_torch_compile"):
-                v = wl_extra.get(k)
-                if isinstance(v, bool):
-                    out[k] = v
-            for k in ("quant_scheme", "workload_mode"):
-                v = wl_extra.get(k)
-                if isinstance(v, str) and v.strip():
-                    out[k] = v.strip()
-        return out
-
-    def _build_kernel_optimizations_from_state(self) -> list[dict[str, Any]]:
-        """Collect KEEP'd kernel optimizations + their E2E verdict by joining kernel_opt_task_attempts (micro) and kernel_integrate_attempts (E2E) on kernel_id; non-integrated KEEPs surface integrated=False. Returns KernelOptimization-shaped dicts.
-
-        Returns:
-            A list of KernelOptimization-shaped dicts for each KEEP'd kernel,
-            joined with its E2E integrate verdict where available.
-        """
-        ss = self.shared_state
-        opt_attempts = ss.kernel_opt_task_attempts or {}
-        integ_attempts = ss.kernel_integrate_attempts or {}
-        if not isinstance(opt_attempts, dict):
-            return []
-
-        # Index integrate results by kernel_id (last write wins; entry carries rolled-up best_gain_pct).
-        integ_by_kid: dict[str, dict[str, Any]] = {}
-        integ_by_task: dict[str, dict[str, Any]] = {}
-        if isinstance(integ_attempts, dict):
-            for entry in integ_attempts.values():
-                if not isinstance(entry, dict):
-                    continue
-                kid = str(entry.get("kernel_id") or "")
-                if kid:
-                    integ_by_kid[kid] = entry
-                task_group_key = str(entry.get("task_group_key") or "")
-                if task_group_key:
-                    integ_by_task[task_group_key] = entry
-
-        out: list[dict[str, Any]] = []
-        for ledger_id, e in opt_attempts.items():
-            if not isinstance(e, dict):
-                continue
-            if str(e.get("last_decision", "")).upper() != "KEEP":
-                continue
-            try:
-                micro = float(e.get("last_micro_speedup") or 0.0)
-            except (TypeError, ValueError):
-                micro = 0.0
-            kid = str(e.get("current_kernel_id") or e.get("kernel_id") or ledger_id)
-            task_group_key = str(e.get("task_group_key") or "")
-            integ = integ_by_task.get(task_group_key) if task_group_key else integ_by_kid.get(kid)
-            e2e_gain = 0.0
-            e2e_tput = 0.0
-            e2e_decision = ""
-            integrated = False
-            if isinstance(integ, dict):
-                integrated = True
-                # Integrate-layer verdict (E2E); lets warm-start skip a micro-win/E2E-loss kernel.
-                e2e_decision = str(integ.get("last_decision") or "").upper()
-                try:
-                    e2e_gain = float(integ.get("best_gain_pct") or 0.0)
-                except (TypeError, ValueError):
-                    e2e_gain = 0.0
-                # Last attempt's E2E re-bench throughput.
-                for att in reversed(list(integ.get("attempts") or [])):
-                    if isinstance(att, dict) and att.get("new_tput") is not None:
-                        try:
-                            e2e_tput = float(att.get("new_tput") or 0.0)
-                        except (TypeError, ValueError):
-                            e2e_tput = 0.0
-                        break
-            out.append(
-                {
-                    "kernel_id": kid,
-                    "source_file": str(e.get("last_source_file") or ""),
-                    "artifact_path": str(e.get("last_artifact_path") or ""),
-                    "micro_speedup": micro,
-                    "decision": "KEEP",
-                    "e2e_gain_pct": e2e_gain,
-                    "e2e_tput": e2e_tput,
-                    "e2e_decision": e2e_decision,
-                    "integrated": integrated,
-                    "ts": str(e.get("last_ts") or ""),
-                }
-            )
-        return out
-
-    def _collect_attempt_provenance(
-        self,
-    ) -> tuple[dict[str, str], dict[str, str], list[dict[str, Any]]]:
-        """Map proven optimizations to their research-hint origin from the gaps[] attempts ledger; returns (kept_sources by name/kernel, kept_by_gap by canonical_id, reverted_rows). Fail-soft.
-
-        Returns:
-            A ``(kept_sources, kept_by_gap, reverted_rows)`` tuple: KEEP'd
-            provenance keyed by variant/kernel name, KEEP'd provenance keyed by
-            gap canonical_id, and reverted-attempt rows.
-        """
-        kept_sources: dict[str, str] = {}
-        kept_by_gap: dict[str, str] = {}
-        reverted_rows: list[dict[str, Any]] = []
-        gaps = self.shared_state.gaps or []
-        for gap in gaps:
-            if not isinstance(gap, dict):
-                continue
-            provenance = str(gap.get("provenance") or "").strip()
-            canonical = str(gap.get("canonical_id") or "").strip()
-            for attempt in gap.get("attempts") or []:
-                if not isinstance(attempt, dict):
-                    continue
-                variant = str(attempt.get("variant_name") or "").strip()
-                kernel = str(attempt.get("kernel_id") or "").strip()
-                outcome = str(attempt.get("outcome") or "").strip().upper()
-                if outcome == "KEEP" and provenance:
-                    if variant:
-                        kept_sources.setdefault(variant, provenance)
-                    if kernel:
-                        kept_sources.setdefault(kernel, provenance)
-                    if canonical:
-                        kept_by_gap.setdefault(canonical, provenance)
-                elif outcome == "REVERT" and (variant or kernel):
-                    row: dict[str, Any] = {
-                        "name": variant or kernel,
-                        "reason": "reverted",
-                        "gain_pct": attempt.get("gain_pct"),
-                    }
-                    if provenance:
-                        row["source"] = provenance
-                    reverted_rows.append(row)
-        return kept_sources, kept_by_gap, reverted_rows
-
-    def _build_recipe_attrs_from_state(self) -> dict[str, Any]:
-        """Materialise the recipe-shaped view of :class:`SharedState` (defensive getattr).
-
-        Returns:
-            A recipe-shaped attrs dict (best_config, what_worked, what_failed,
-            kernel_optimizations, workload tags, session row) for KB recipe
-            writes.
-        """
-        ss = self.shared_state
-        current_best = ss.current_best
-        opt_stack = ss.optimization_stack or []
-        gain_per_stack = ss.gain_per_stack_entry or []
-        last_failures = ss.last_action_failures or []
-        # RecipeKB best_config keys on the canonical extra_server_args field.
-        best_config: dict[str, Any] = {}
-        cb_args = current_best.get("extra_server_args")
-        if cb_args:
-            best_config["extra_server_args"] = str(cb_args)
-        for key in ("extra_envs", "name", "tput", "accuracy"):
-            if key in current_best:
-                best_config[key] = current_best[key]
-        # Prefer the last validated stack layer for launch args (current_best may carry a corrupted string).
-        if opt_stack:
-            last_entry = opt_stack[-1]
-            if isinstance(last_entry, dict):
-                stack_args = str(
-                    last_entry.get("candidate_extra_server_args") or last_entry.get("extra_server_args") or "",
-                ).strip()
-                if stack_args:
-                    best_config["extra_server_args"] = stack_args
-        sediment_on = bool(ss.recipe_sediment_enabled)
-        kept_sources, kept_by_gap, reverted_rows = self._collect_attempt_provenance() if sediment_on else ({}, {}, [])
-        what_worked: list[dict[str, Any]] = []
-        for idx, entry in enumerate(opt_stack):
-            if not isinstance(entry, dict):
-                continue
-            gain_per: float | None = None
-            if idx < len(gain_per_stack):
-                gain_per = gain_per_stack[idx]
-            name = str(entry.get("variant_name") or entry.get("name") or entry.get("kernel_id") or "")
-            row: dict[str, Any] = {
-                "name": name,
-                "extra_server_args": str(entry.get("extra_server_args") or ""),
-                "extra_envs": dict(entry.get("extra_envs") or {}),
-                "gain_pct": gain_per,
-            }
-            # Prefer the entry's gap-id provenance (naming-independent); fall back to name/kernel_id match.
-            entry_gap = str(entry.get("gap_canonical_id") or "").strip()
-            src = (
-                (kept_by_gap.get(entry_gap) if entry_gap else None)
-                or kept_sources.get(name)
-                or kept_sources.get(str(entry.get("kernel_id") or ""))
-            )
-            if src:
-                row["source"] = src
-            what_worked.append(row)
-        what_failed: list[dict[str, Any]] = []
-        for failure in last_failures[-10:]:
-            if isinstance(failure, dict):
-                what_failed.append(
-                    {
-                        "name": str(failure.get("name") or failure.get("action") or ""),
-                        "reason": str(failure.get("reason") or failure.get("error_class") or ""),
-                    }
-                )
-        for rev in reverted_rows:
-            what_failed.append(rev)
-        kernel_optimizations = self._build_kernel_optimizations_from_state()
-        cumulative_validated = float(ss.cumulative_gain_validated or 0.0)
-        validated_stack_len = int(ss.cumulative_gain_validated_stack_len or 0)
-        # Workload-shape tags for shape-filtered warm-start queries (shared via _collect_workload_tags).
-        workload_tags = self._collect_workload_tags()
-        # framework_version left unset here (manifest-derived); the T0 backfill writes it.
-        return {
-            "best_config": best_config,
-            "best_throughput": float(current_best.get("tput", 0.0)),
-            "what_worked": what_worked,
-            "what_failed": what_failed,
-            "kernel_optimizations": kernel_optimizations,
-            "last_profiled": str(ss.cumulative_gain_validated_ts or ""),
-            "workload": workload_tags,
-            "sessions": [
-                {
-                    "session_id": str(ss.recipe_kb_session_id or self.session_dir.name),
-                    "gain_pct": cumulative_validated,
-                    "stack_len": validated_stack_len or len(opt_stack),
-                    # arbor-shape provenance so the session row is self-describing (before/after tput + knobs).
-                    "throughput_before": float(ss.baseline_tput or 0.0),
-                    "throughput_after": float(current_best.get("tput", 0.0)),
-                    "date": datetime.now(timezone.utc).isoformat(),
-                    "actions_taken": [
-                        nm
-                        for nm in (
-                            str(e.get("variant_name") or e.get("name") or e.get("action") or "").strip()
-                            for e in opt_stack
-                            if isinstance(e, dict)
-                        )
-                        if nm
-                    ],
-                }
-            ],
-        }
 
     def _record_remote_recipe_audit(
         self,
@@ -1280,248 +1078,225 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             "osl": to_int(state.osl, None),
         }
 
+    def _unvalidated_stack_outcome(self) -> dict[str, Any] | None:
+        """The skip outcome when the working recipe outran its last validation, else ``None``.
+
+        ``current_best`` and ``cumulative_gain_validated`` are only one Recipe's
+        figures when nothing was lifted since the last validation. Otherwise
+        every sink below -- journal, local KB, remote KB -- would pair the
+        newer config with the older gain, so none of them runs.
+        """
+        state = self.shared_state
+        if not state.optimization_stack_has_unvalidated_keeps():
+            return None
+        log.warning(
+            "Recipe finalize skipped: working recipe is not validated (stack=%s/%s generation=%s/%s)",
+            len(state.optimization_stack or []),
+            state.cumulative_gain_validated_stack_len,
+            state.working_recipe_generation,
+            state.validated_recipe_generation,
+        )
+        return _finalize_outcome(
+            status="skipped",
+            reason="unvalidated_recipe_stack",
+            backend="none",
+            result_type=_close_out.RESULT_UNVALIDATED_RECIPE,
+        )
+
+    def _finalize_journal(self) -> None:
+        """Stamp the journal header with the session's settled throughput and total gain."""
+        state = self.shared_state
+        final_tput = float(state.current_best.get("tput", 0.0))
+        self.ensure_journal().finalize(
+            final_throughput=final_tput if final_tput > 0 else None,
+            total_gain_pct=float(state.cumulative_gain_validated or 0.0),
+        )
+
     def finalize_recipe_and_journal(
         self,
         *,
         source: str = "close",
     ) -> dict[str, Any]:
         """Finalize Recipe state and return a secret-free observable outcome."""
-        # ``current_best`` and ``cumulative_gain_validated`` are only one Recipe's
-        # figures when nothing was lifted since the last validation. Otherwise
-        # every sink below -- journal, local KB, remote KB -- would pair the
-        # newer config with the older gain, so none of them runs.
-        if self.shared_state.optimization_stack_has_unvalidated_keeps():
-            ss = self.shared_state
-            log.warning(
-                "Recipe finalize skipped: working recipe is not validated (stack=%s/%s generation=%s/%s)",
-                len(ss.optimization_stack or []),
-                ss.cumulative_gain_validated_stack_len,
-                ss.working_recipe_generation,
-                ss.validated_recipe_generation,
-            )
-            return {
-                "status": "skipped",
-                "reason": "unvalidated_recipe_stack",
-                "backend": "none",
-                "result_type": _close_out.RESULT_UNVALIDATED_RECIPE,
-            }
-        journal = self.ensure_journal()
-        ss = self.shared_state
-        final_tput = float(ss.current_best.get("tput", 0.0))
-        total_gain = float(ss.cumulative_gain_validated or 0.0)
-        journal.finalize(
-            final_throughput=final_tput if final_tput > 0 else None,
-            total_gain_pct=total_gain,
-        )
+        unvalidated = self._unvalidated_stack_outcome()
+        if unvalidated is not None:
+            return unvalidated
+        self._finalize_journal()
 
-        kp = self.knowledge_plane
-        if bool(getattr(kp, "kb_disabled", False)):
+        knowledge_plane = self.knowledge_plane
+        if bool(getattr(knowledge_plane, "kb_disabled", False)):
             log.info("Recipe KB finalize skipped (--degraded-kb)")
-            return {
-                "status": "skipped",
-                "reason": "degraded_kb",
-                "backend": "disabled",
-                "result_type": _close_out.RESULT_KB_DISABLED,
-            }
+            return _finalize_outcome(
+                status="skipped",
+                reason="degraded_kb",
+                backend="disabled",
+                result_type=_close_out.RESULT_KB_DISABLED,
+            )
 
-        from ..knowledge.config import KnowledgeConfig, KnowledgeStoreMode
+        from ..knowledge.config import KnowledgeConfig
 
         try:
-            config = getattr(kp, "config", None) or KnowledgeConfig.from_env()
+            config = getattr(knowledge_plane, "config", None) or KnowledgeConfig.from_env()
         except Exception as exc:
             log.exception("Recipe KB finalize configuration failed (non-fatal)")
-            return {
-                "status": "error",
-                "reason": f"configuration:{type(exc).__name__}",
-                "backend": "unknown",
-                "result_type": _close_out.RESULT_CONFIGURATION_FAILED,
-                "error_class": type(exc).__name__,
-            }
+            return _finalize_error(
+                exc,
+                reason=f"configuration:{type(exc).__name__}",
+                backend="unknown",
+                result_type=_close_out.RESULT_CONFIGURATION_FAILED,
+            )
         from hyperloom.common.perf_metric import agentx_active
 
-        if (
-            agentx_active(benchmark_mode=self.shared_state.benchmark_mode)
-            and config.mode is not KnowledgeStoreMode.REMOTE
-        ):
-            return {
-                "status": "skipped",
-                "reason": "agentx_local_store_unsupported",
-                "backend": str(getattr(config, "mode", "") or "unknown"),
-                "result_type": _close_out.RESULT_AGENTX_BLOCKED,
-            }
-        if config.mode is KnowledgeStoreMode.REMOTE:
-            # Remote mode has one Recipe sink: the KB Store final session
-            # writer. T0 and runtime amendment are intentionally absent.
-            remote_cid = ""
-            remote_sid = str(
-                self.shared_state.recipe_kb_session_id or self.shared_state.session_id or self.session_dir.name
+        remote = config.mode is KnowledgeStoreMode.REMOTE
+        if agentx_active(benchmark_mode=self.shared_state.benchmark_mode) and not remote:
+            return _finalize_outcome(
+                status="skipped",
+                reason="agentx_local_store_unsupported",
+                backend=str(getattr(config, "mode", "") or "unknown"),
+                result_type=_close_out.RESULT_AGENTX_BLOCKED,
             )
-            try:
-                from ..knowledge.remote_recipe import HyperloomRemoteKB
+        if remote:
+            return self._publish_remote_recipe(source)
+        return self._write_local_recipe()
 
-                remote_cid = self.workload_canonical_id()
-                remote_result = HyperloomRemoteKB.from_env().write(
-                    remote_cid,
-                    self.shared_state,
-                    session_id=remote_sid,
-                )
-                log.info(
-                    "Remote Recipe KB finalize: status=%s reason=%s cid=%s sid=%s",
-                    remote_result.status,
-                    remote_result.reason,
-                    remote_cid,
-                    remote_result.session_id,
-                )
-                self._record_remote_recipe_audit(
-                    source=source,
-                    status=remote_result.status,
-                    canonical_id=remote_cid,
-                    session_id=remote_result.session_id,
-                    primary_metric=remote_result.primary_metric,
-                    primary_value=remote_result.primary_value,
-                    reason=remote_result.reason,
-                )
-                return {
-                    "status": remote_result.status,
-                    "reason": remote_result.reason,
-                    "backend": "kb-store",
-                    "canonical_id": str(getattr(remote_result, "canonical_id", "") or remote_cid),
-                    "session_id": str(getattr(remote_result, "session_id", "") or remote_sid),
-                    "result_type": _remote_result_type(remote_result.status, remote_result.reason),
-                }
-            except Exception as exc:
-                self._record_remote_recipe_audit(
-                    source=source,
-                    status="error",
-                    canonical_id=remote_cid,
-                    session_id=remote_sid,
-                    error=exc,
-                )
-                log.exception("Remote Recipe KB finalize failed (non-fatal)")
-                return {
-                    "status": "error",
-                    "reason": type(exc).__name__,
-                    "backend": "kb-store",
-                    "canonical_id": remote_cid,
-                    "session_id": remote_sid,
-                    "result_type": (
-                        _close_out.RESULT_BUNDLE_BUILD_FAILED
-                        if type(exc).__name__ == _REMOTE_VALIDATION_ERROR
-                        else _close_out.RESULT_TRANSPORT_FAILED
-                    ),
-                    "error_class": type(exc).__name__,
-                }
+    def _publish_remote_recipe(self, source: str) -> dict[str, Any]:
+        """Publish the terminal Recipe to the KB Store and audit the attempt.
 
-        # Local mode never consults ambient KB_STORE_* credentials.
-        if self.recipe_kb is None:
+        Remote mode has one Recipe sink: the KB Store final session writer. T0
+        and runtime amendment are intentionally absent.
+        """
+        state = self.shared_state
+        session_id = str(state.recipe_kb_session_id or state.session_id or self.session_dir.name)
+        canonical_id = ""
+        try:
+            from ..knowledge.remote_recipe import HyperloomRemoteKB
+
+            canonical_id = self.workload_canonical_id()
+            written = HyperloomRemoteKB.from_env().write(canonical_id, state, session_id=session_id)
+        except Exception as exc:
+            self._record_remote_recipe_audit(
+                source=source,
+                status="error",
+                canonical_id=canonical_id,
+                session_id=session_id,
+                error=exc,
+            )
+            log.exception("Remote Recipe KB finalize failed (non-fatal)")
             return {
-                "status": "skipped",
-                "reason": "no_recipe_backend",
-                "backend": "local",
-                "result_type": _close_out.RESULT_KB_DISABLED,
+                **_finalize_error(
+                    exc,
+                    reason=type(exc).__name__,
+                    backend="kb-store",
+                    result_type=_remote_publish_failure_type(exc),
+                ),
+                "canonical_id": canonical_id,
+                "session_id": session_id,
             }
-        ss = self.shared_state
-        model_name = ss.model_name or ""
-        gpu_type = ss.gpu_type or ""
+        log.info(
+            "Remote Recipe KB finalize: status=%s reason=%s cid=%s sid=%s",
+            written.status,
+            written.reason,
+            canonical_id,
+            written.session_id,
+        )
+        self._record_remote_recipe_audit(
+            source=source,
+            status=written.status,
+            canonical_id=canonical_id,
+            session_id=written.session_id,
+            primary_metric=written.primary_metric,
+            primary_value=written.primary_value,
+            reason=written.reason,
+        )
+        return {
+            **_finalize_outcome(
+                status=written.status,
+                reason=written.reason,
+                backend="kb-store",
+                result_type=_remote_result_type(written.status, written.reason),
+            ),
+            "canonical_id": str(getattr(written, "canonical_id", "") or canonical_id),
+            "session_id": str(getattr(written, "session_id", "") or session_id),
+        }
+
+    def _final_recipe_overrides(self) -> dict[str, Any]:
+        """What this session's close writes over the live Recipe row.
+
+        Read-modify-write under the cid flock, so two finalises of the same
+        session leave one row rather than tearing the lists they both append to.
+        """
+        state = self.shared_state
+        attrs = recipe_attrs_from_state(state, self.session_dir.name)
+        live = self._authoritative_recipe_row(self.workload_canonical_id())
+        my_sessions = list(attrs["sessions"] or [])
+        my_kernels = list(attrs.get("kernel_optimizations") or [])
+        # KEEP'd kernel optimizations ride the extras channel.
+        extras = dict(attrs.get("workload") or {})
+        kernels = my_kernels + _rows_not_superseded(live.get("kernel_optimizations"), my_kernels, "kernel_id")
+        if kernels:
+            extras["kernel_optimizations"] = kernels
+        overrides: dict[str, Any] = {
+            "what_worked": attrs["what_worked"],
+            "what_failed": attrs["what_failed"],
+            "last_profiled": attrs["last_profiled"],
+            "sessions": _rows_not_superseded(live.get("sessions"), my_sessions, "session_id") + my_sessions,
+            "extras": extras,
+        }
+        overrides.update(_improved_best_config(state, attrs, live))
+        return overrides
+
+    def _write_local_recipe(self) -> dict[str, Any]:
+        """Amend the local Recipe row with this session's settled result.
+
+        Local mode never consults ambient KB_STORE_* credentials.
+        """
+        if self.recipe_kb is None:
+            return _finalize_outcome(
+                status="skipped",
+                reason="no_recipe_backend",
+                backend="local",
+                result_type=_close_out.RESULT_KB_DISABLED,
+            )
+        state = self.shared_state
+        model_name = state.model_name or ""
+        gpu_type = state.gpu_type or ""
         if not model_name or not gpu_type:
             log.info(
                 "recipe KB finalize_recipe: missing model/hardware (model=%r hardware=%r); skipping update_recipe",
                 model_name,
                 gpu_type,
             )
-            return {
-                "status": "skipped",
-                "reason": "missing_model_or_hardware",
-                "backend": "local",
-                "result_type": _close_out.RESULT_INVALID_SCOPE,
-            }
+            return _finalize_outcome(
+                status="skipped",
+                reason="missing_model_or_hardware",
+                backend="local",
+                result_type=_close_out.RESULT_INVALID_SCOPE,
+            )
         try:
-            attrs = self._build_recipe_attrs_from_state()
-            # Hoist workload tags flat into top-level recipe attrs (shallow-merged) for warm-start filters.
-            workload_tags = attrs.get("workload") or {}
-
-            # sessions[] read-modify-write: read anchor, drop prior entry with our session_id (resume safety), append ours, write back.
-            my_sessions = list(attrs["sessions"] or [])
-            my_session_ids = {str((s or {}).get("session_id") or "") for s in my_sessions if isinstance(s, dict)}
-            # v2: read-modify-write the recipe row; sessions[] merged in-process under the cid flock so concurrent finalises don't tear.
-            merged_sessions: list[dict[str, Any]] = list(my_sessions)
-            existing_row: dict[str, Any] = {}
-            if self.recipe_kb is not None:
-                cid = self.workload_canonical_id()
-                # Read exactly the local store's authority row.
-                try:
-                    existing_row = self.recipe_kb.get_authoritative_recipe(canonical_id=cid) or {}
-                except Exception as exc:  # noqa: BLE001 - the recipe store may be remote
-                    log.info("recipe read failed (%s); finalize appends the current session only", exc)
-                existing_sessions: list[dict[str, Any]] = []
-                for row in existing_row.get("sessions") or []:
-                    if not isinstance(row, dict):
-                        continue
-                    if str(row.get("session_id") or "") in my_session_ids:
-                        # Resume/retry of the same session — our new entry supersedes the prior one.
-                        continue
-                    existing_sessions.append(dict(row))
-                merged_sessions = existing_sessions + my_sessions
-
-            # KEEP'd kernel optimizations ride the extras channel; merge with prior rows, dedup by kernel_id.
-            kopts_new = list(attrs.get("kernel_optimizations") or [])
-            new_kids = {str((k or {}).get("kernel_id") or "") for k in kopts_new if isinstance(k, dict)}
-            merged_kopts: list[dict[str, Any]] = list(kopts_new)
-            for prior in existing_row.get("kernel_optimizations") or []:
-                if not isinstance(prior, dict):
-                    continue
-                if str(prior.get("kernel_id") or "") in new_kids:
-                    continue
-                merged_kopts.append(dict(prior))
-
-            extras_payload = dict(workload_tags or {})
-            if merged_kopts:
-                extras_payload["kernel_optimizations"] = merged_kopts
-
-            overrides: dict[str, Any] = {
-                "what_worked": attrs["what_worked"],
-                "what_failed": attrs["what_failed"],
-                "last_profiled": attrs["last_profiled"],
-                "sessions": merged_sessions,
-                "extras": extras_payload,
-            }
-            # Overwrite best_config/best_throughput only on a real improvement: requires has_validated_win AND my_tput > live_tput.
-            my_tput = float(attrs.get("best_throughput") or 0.0)
-            cb_args_now = str(ss.current_best.get("extra_server_args") or "").strip()
-            validated_gain = float(ss.cumulative_gain_validated or 0.0)
-            has_validated_win = bool((ss.optimization_stack or []) or validated_gain > 0.0 or cb_args_now)
-            try:
-                live_tput = float(existing_row.get("best_throughput") or 0.0)
-            except (TypeError, ValueError):
-                live_tput = 0.0
-            if has_validated_win and my_tput > live_tput:
-                overrides["best_config"] = attrs["best_config"]
-                overrides["best_throughput"] = my_tput
             self.kb_amend_recipe(
-                recipe_overrides=overrides,
+                recipe_overrides=self._final_recipe_overrides(),
                 provenance_details={
                     "phase": "close_finalize",
                     "evidence": [
-                        f"log:session-{ss.recipe_kb_session_id or self.session_dir.name}",
+                        f"log:session-{state.recipe_kb_session_id or self.session_dir.name}",
                     ],
                 },
             )
-            return {
-                "status": "written",
-                "reason": "",
-                "backend": "local",
-                "result_type": _close_out.RESULT_WRITTEN,
-            }
         # Catch-all keeps CLOSE step 2.5 defensive against programmer bugs.
         except Exception as exc:
             log.exception("update_recipe raised unexpectedly")
-            return {
-                "status": "error",
-                "reason": type(exc).__name__,
-                "backend": "local",
-                "result_type": _close_out.RESULT_TRANSPORT_FAILED,
-                "error_class": type(exc).__name__,
-            }
+            return _finalize_error(
+                exc,
+                reason=type(exc).__name__,
+                backend="local",
+                result_type=_close_out.RESULT_TRANSPORT_FAILED,
+            )
+        return _finalize_outcome(
+            status="written",
+            reason="",
+            backend="local",
+            result_type=_close_out.RESULT_WRITTEN,
+        )
 
     def _kb_hardware_slug(self) -> str:
         """Topology-aware hardware dimension for the recipe ``canonical_id``."""
@@ -1533,46 +1308,42 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
 
     def workload_canonical_id(self) -> str:
         """Return the workload's canonical seven-dimension Recipe identity."""
-        ss = self.shared_state
-        workload = ss.model_name or "unknown_model"
-        hw = self._kb_hardware_slug()
-        framework = str(ss.framework or "")
-        framework_version = str(ss.framework_version or "")
-        if not framework_version and framework:
-            framework_version = detect_framework_version(framework)
-        precision = str(ss.precision or "")
-        model_type = str(ss.model_type or "")
-        architectures = ss.model_architectures or []
+        state = self.shared_state
+        identity = _framework_identity(state)
         from hyperloom.common.perf_metric import agentx_active
 
         return recipe_canonical_id(
-            model=workload,
-            hardware=hw,
-            framework_name=framework,
-            framework_version=framework_version,
-            precision=precision,
-            model_type=model_type,
-            architectures=architectures,
-            scheme=("agentx" if agentx_active(benchmark_mode=ss.benchmark_mode) else "inference"),
+            model=state.model_name or "unknown_model",
+            hardware=self._kb_hardware_slug(),
+            framework_name=identity.name,
+            framework_version=identity.version,
+            precision=identity.precision,
+            model_type=str(state.model_type or ""),
+            architectures=state.model_architectures or [],
+            scheme=("agentx" if agentx_active(benchmark_mode=state.benchmark_mode) else "inference"),
         )
 
+    def _authoritative_recipe_row(self, canonical_id: str) -> dict[str, Any]:
+        """The store's exact authority row for a canonical id, empty when the read fails.
+
+        A store that refuses the read still gets this session's write: losing
+        the rest of the row is better than losing what this session proved.
+        """
+        try:
+            return self.recipe_kb.get_authoritative_recipe(canonical_id=canonical_id) or {}
+        except Exception as exc:  # noqa: BLE001 - the recipe store may be remote
+            log.info("recipe authority read failed for cid=%s (%s); proceeding without it", canonical_id, exc)
+            return {}
+
     def read_local_recipe_row(self) -> dict[str, Any]:
-        """Load the selected store's exact authority row for writes."""
+        """Load the selected store's exact authority row for writes, cached for the current tick."""
         if self.recipe_kb is None:
             return {}
         tick = int(self.shared_state.tick or 0)
         cache = self._local_recipe_cache
         if isinstance(cache, tuple) and len(cache) == 2 and cache[0] == tick:
             return cache[1]
-        try:
-            row = (
-                self.recipe_kb.get_authoritative_recipe(
-                    canonical_id=self.workload_canonical_id(),
-                )
-                or {}
-            )
-        except Exception:  # noqa: BLE001 - the recipe store may be remote
-            row = {}
+        row = self._authoritative_recipe_row(self.workload_canonical_id())
         self._local_recipe_cache = (tick, row)
         return row
 
@@ -1642,6 +1413,20 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             return overrides
         return {}
 
+    def _amends_local_recipe(self) -> bool:
+        """Whether this session's Recipe row is a local one an amend may rewrite.
+
+        Remote mode has a single Recipe sink at close, and AgentX sessions do
+        not write recipes at all.
+        """
+        config = getattr(self.knowledge_plane, "config", None)
+        mode = getattr(getattr(config, "mode", None), "value", None)
+        if mode == KnowledgeStoreMode.REMOTE.value or self.recipe_kb is None:
+            return False
+        from hyperloom.common.perf_metric import agentx_active
+
+        return not agentx_active(benchmark_mode=self.shared_state.benchmark_mode)
+
     def kb_amend_recipe(
         self,
         *,
@@ -1650,129 +1435,30 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         recipe_overrides: dict[str, Any] | None = None,
         provenance_details: dict[str, Any] | None = None,
     ) -> None:
-        """Read-modify-write helper for the recipe-snapshot KB: load live row, append lesson/pitfall, merge recipe_overrides (unset fields preserved), write back. Best-effort; lesson/pitfall appended without dedup."""
-        config = getattr(self.knowledge_plane, "config", None)
-        if getattr(getattr(config, "mode", None), "value", None) == "remote" or self.recipe_kb is None:
+        """Read-modify-write the local recipe row: append the fact, merge the overrides, write it back.
+
+        Best effort. A lesson or pitfall is appended without dedup, and a field
+        the caller did not override keeps the value the live row carries.
+        """
+        if not self._amends_local_recipe():
             return
-        from hyperloom.common.perf_metric import agentx_active
-
-        if agentx_active(benchmark_mode=self.shared_state.benchmark_mode):
-            return
-        cid = self.workload_canonical_id()
-
-        ss = self.shared_state
-        framework = str(ss.framework or "")
-        framework_version = str(ss.framework_version or "")
-        if not framework_version and framework:
-            framework_version = detect_framework_version(framework)
-        precision = str(ss.precision or "")
-
-        # Local mode reads the exact authority row before amending it.
-        try:
-            live = self.recipe_kb.get_authoritative_recipe(canonical_id=cid) or {}
-        except Exception as exc:  # noqa: BLE001
-            log.info(
-                "kb_amend_recipe: authority get_recipe failed (%s); proceeding with empty live",
-                exc,
-            )
-            live = {}
-
-        lessons = list(live.get("lessons") or [])
-        if append_lesson is not None:
-            lessons.append(append_lesson)
-        pitfalls = list(live.get("pitfalls") or [])
-        if append_pitfall is not None:
-            pitfalls.append(append_pitfall)
-
-        # Build put_recipe kwargs, preserving live fields the caller didn't override.
+        state = self.shared_state
+        canonical_id = self.workload_canonical_id()
+        identity = _framework_identity(state)
+        live = self._authoritative_recipe_row(canonical_id)
         overrides = dict(recipe_overrides or {})
-        _reserved = {
-            "canonical_id",
-            "version",
-            "created_at",
-            "updated_at",
-            "model",
-            "hardware",
-            "framework",
-            "framework_name",
-            "framework_version",
-            "precision",
-            "best_config",
-            "best_throughput",
-            "what_worked",
-            "what_failed",
-            "remaining_gaps",
-            "pitfalls",
-            "lessons",
-            "last_profiled",
-            "stack_fingerprint",
-            "sessions",
-            "authority",
-            "confidence",
-            "evidence_refs",
-            "provenance",
-        }
-        prior_extras = {k: v for k, v in live.items() if k not in _reserved}
-        merged_extras = {**prior_extras, **(overrides.get("extras") or {})}
-        # Re-stamp config.json architecture-identity tags; skipped when unset.
-        _arch = ss.model_architectures or []
-        if isinstance(_arch, list):
-            _arch_list = [str(a).strip() for a in _arch if str(a or "").strip()]
-            if _arch_list:
-                merged_extras["architectures"] = _arch_list
-        _mtype = str(ss.model_type or "").strip()
-        if _mtype:
-            merged_extras["model_type"] = _mtype
         put_kwargs: dict[str, Any] = {
-            "canonical_id": cid,
-            "model": ss.model_name or "unknown_model",
+            "canonical_id": canonical_id,
+            "model": state.model_name or "unknown_model",
             "hardware": self._kb_hardware_slug(),
-            "framework_name": framework,
-            "framework_version": framework_version,
-            "precision": precision,
-            "best_config": overrides.get("best_config")
-            if "best_config" in overrides
-            else dict(live.get("best_config") or {}),
-            "best_throughput": overrides.get("best_throughput")
-            if "best_throughput" in overrides
-            else float(live.get("best_throughput") or 0.0),
-            "what_worked": overrides.get("what_worked")
-            if "what_worked" in overrides
-            else list(live.get("what_worked") or []),
-            "what_failed": overrides.get("what_failed")
-            if "what_failed" in overrides
-            else list(live.get("what_failed") or []),
-            "remaining_gaps": overrides.get("remaining_gaps")
-            if "remaining_gaps" in overrides
-            else list(live.get("remaining_gaps") or []),
-            "pitfalls": pitfalls,
-            "lessons": lessons,
-            "last_profiled": overrides.get("last_profiled")
-            if "last_profiled" in overrides
-            else str(live.get("last_profiled") or ""),
-            "stack_fingerprint": overrides.get("stack_fingerprint")
-            if "stack_fingerprint" in overrides
-            else dict(live.get("stack_fingerprint") or {}),
-            "sessions": overrides.get("sessions") if "sessions" in overrides else list(live.get("sessions") or []),
-            "extras": merged_extras,
-            # Preserve audit fields across the amend (else put_recipe resets them to defaults).
-            "authority": overrides.get("authority")
-            if "authority" in overrides
-            else str(live.get("authority") or "EXPERIENTIAL"),
-            "confidence": overrides.get("confidence")
-            if "confidence" in overrides
-            else float(live.get("confidence") or 0.85),
-            "evidence_refs": overrides.get("evidence_refs")
-            if "evidence_refs" in overrides
-            else list(live.get("evidence_refs") or []),
-            "provenance": {
-                "source": "hyperloom-inference-optimizer",
-                "generator": "coordinator",
-                "generated_at": datetime.now(timezone.utc).isoformat(
-                    timespec="microseconds",
-                ),
-                "details": dict(provenance_details or {}),
-            },
+            "framework_name": identity.name,
+            "framework_version": identity.version,
+            "precision": identity.precision,
+            "pitfalls": _appended(live.get("pitfalls"), append_pitfall),
+            "lessons": _appended(live.get("lessons"), append_lesson),
+            "extras": _amended_recipe_extras(live, overrides, state),
+            "provenance": _amend_provenance(provenance_details),
+            **_amended_recipe_fields(live, overrides),
         }
         try:
             self.recipe_kb.put_recipe(**put_kwargs)
@@ -1780,7 +1466,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         except Exception:
             log.exception(
                 "kb_amend_recipe: put_recipe failed for cid=%s",
-                cid,
+                canonical_id,
             )
 
 
