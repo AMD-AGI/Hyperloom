@@ -12,7 +12,13 @@ import time
 
 import pytest
 
-from hyperloom.orchestrator.bringup.reconcile import Reconciler, TIMEOUT_VERDICT
+from hyperloom.orchestrator.bringup.reconcile import (
+    TIMEOUT_VERDICT,
+    ReconcileLimits,
+    ReconcileLinks,
+    Reconciler,
+    ReconcileStores,
+)
 from hyperloom.orchestrator.bus.resource_lock import (
     BRINGUP_ROUND_LANE,
     ResourceLockManager,
@@ -87,20 +93,23 @@ def db(tmp_path):
     conn.close()
 
 
-def _build(db, *, proposals=None, state=None, **kw) -> tuple[Reconciler, RoundStore, TaskRegistry, _State]:
+def _build(
+    db, *, proposals=None, state=None, result_pending=None, **limits
+) -> tuple[Reconciler, RoundStore, TaskRegistry, _State]:
     """A reconciler over ``db``, with the pieces a test needs to inspect."""
     rounds = RoundStore(db)
     tasks = TaskRegistry(db)
     shared = state or _State()
     rec = Reconciler(
-        rounds=rounds,
-        tasks=tasks,
-        locks=ResourceLockManager(SqliteLeaseBackend(db)),
-        shared_state=shared,
-        resources=ResourceFacts(),
-        proposals=(lambda: proposals) if proposals is not None else None,
-        session_dir=db.db_path.parent,
-        **kw,
+        ReconcileStores(rounds=rounds, tasks=tasks, locks=ResourceLockManager(SqliteLeaseBackend(db))),
+        shared,
+        links=ReconcileLinks(
+            resources=ResourceFacts(),
+            proposals=(lambda: proposals) if proposals is not None else None,
+            session_dir=db.db_path.parent,
+            result_pending=result_pending,
+        ),
+        limits=ReconcileLimits(**limits),
     )
     return rec, rounds, tasks, shared
 
