@@ -10,6 +10,7 @@ from dataclasses import replace
 
 import pytest
 
+from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom_multibranch.contracts.notebook import (
     AlreadyTested,
     CeilingTooLow,
@@ -61,6 +62,18 @@ async def test_the_same_action_in_progress_under_another_intent_is_held_too(open
         await open_as(Role.SPECIALIST_RUNTIME, "s2").acquire(
             intent("s2", "c0", "decode batch", "larger batch"), ACTION, ttl_seconds=TTL
         )
+
+
+async def test_claims_made_before_their_change_is_written_meet_only_by_intent(open_as: Open) -> None:
+    no_change = RecipeDelta().fingerprint()
+    await open_as(Role.SPECIALIST_RUNTIME, "s1").acquire(intent("s1", "c0"), no_change, ttl_seconds=TTL)
+    s2 = open_as(Role.SPECIALIST_RUNTIME, "s2")
+
+    other = await s2.acquire(intent("s2", "c0", "decode attention", "page size 16"), no_change, ttl_seconds=TTL)
+    with pytest.raises(ClaimHeld):
+        await s2.acquire(intent("s2", "c0"), no_change, ttl_seconds=TTL)
+
+    assert other.holder == "s2"
 
 
 async def test_a_suspected_duplicate_needs_a_reason_and_the_decision_is_logged_for_q6(open_as: Open) -> None:

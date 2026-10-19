@@ -20,7 +20,7 @@ from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
 
-from hyperloom.contracts.recipe import DIGEST_PREFIX
+from hyperloom.contracts.recipe import DIGEST_PREFIX, RecipeDelta
 from hyperloom_multibranch.contracts.notebook.interfaces import (
     AlreadyTested,
     BranchLogStore,
@@ -147,6 +147,15 @@ def _check_learning(learning: Learning, state: NotebookState) -> Learning:
     if learning.supersedes is not None and learning.supersedes not in own:
         raise NotRecorded(f"branch {learning.branch} has no learning {learning.supersedes}")
     return replace(learning, content=content, target=learning.target.strip(), mechanism=learning.mechanism.strip())
+
+
+#: The action of a claim made before its change is written, as the role asks; it names no action, so two such claims
+#: on one commit meet only by intent.
+_NO_ACTION = RecipeDelta().fingerprint()
+
+
+def _same_action(one: str | None, other: str | None) -> bool:
+    return one == other and one != _NO_ACTION
 
 
 def _refusal(answer: DedupAnswer, reason: str) -> NotebookError | None:
@@ -482,7 +491,7 @@ class LocalNotebook(
             record for record in state.records() if record.measured and record.request.intent_fingerprint is not None
         ]
         here = [record for record in measured if record.request.parent_commit == key.parent_commit]
-        exact = tuple(record for record in here if record.request.action_fingerprint == action_fingerprint)
+        exact = tuple(record for record in here if _same_action(record.request.action_fingerprint, action_fingerprint))
         same_intent = tuple(record for record in here if record.request.intent_fingerprint == key.intent_fingerprint)
         elsewhere = tuple(
             record
@@ -496,7 +505,7 @@ class LocalNotebook(
                 for claim in self._leases.all_current()
                 if is_live(claim, now)
                 and claim.key.parent_commit == key.parent_commit
-                and (claim.key == key or claim.action_fingerprint == action_fingerprint)
+                and (claim.key == key or _same_action(claim.action_fingerprint, action_fingerprint))
             ),
             key=lambda claim: claim.key != key,
         )
