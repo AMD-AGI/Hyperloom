@@ -119,11 +119,10 @@ class TestCallSiteBinding:
         )
         tl.write_reports(
             run_dir,
-            trace_input_type="file",
-            trace_files=[trace],
+            tl.TraceInputs(input_type="file", files=[trace]),
             candidates=[],
             args=args,
-            existing_report_path=md,
+            outcome=tl.OrchestratorOutcome(report_path=md),
         )
         assert seen, "the TraceLens route never reached resolve_perstep_divisor"
         assert seen["requested_steps"] == 9, "the declared count must bind to requested_steps"

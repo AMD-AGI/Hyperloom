@@ -123,7 +123,6 @@ def run_benchmark(
             framework=framework,
             model=model,
             bench=bench,
-            bench_envs=bench_envs,
             timeout_s=timeout_s,
             output_dir=output_dir,
         )
@@ -257,13 +256,15 @@ class _Round:
         """Launch the server and wait until it serves; on failure, report it and return the exit code."""
         try:
             cmd = bypass_engine.build_server_command(
-                framework=self.framework,
-                model=self.model,
-                tp=self.tp,
-                port=self.port,
-                max_model_len=self.max_model_len,
-                extra_args=_tokenize_extra_args(self.bench_envs, self.framework),
-                profile_dir=self.profile_dir,
+                bypass_engine.ServerSpec(
+                    framework=self.framework,
+                    model=self.model,
+                    tp=self.tp,
+                    port=self.port,
+                    max_model_len=self.max_model_len,
+                    profile_dir=self.profile_dir,
+                ),
+                _tokenize_extra_args(self.bench_envs, self.framework),
                 python_exe=sys.executable,
                 framework_python=str(self.bench_envs.get("HYPERLOOM_FRAMEWORK_PYTHON") or ""),
             )
@@ -286,12 +287,10 @@ class _Round:
         except OSError:
             pgid = proc.pid
         bypass_engine.write_lifecycle_files(
-            pid_dir=pid_dir,
-            framework=self.framework,
-            port=self.port,
-            pid=proc.pid,
-            pgid=pgid,
-            model=self.model,
+            pid_dir,
+            bypass_engine.LifecycleRecord(
+                framework=self.framework, port=self.port, pid=proc.pid, pgid=pgid, model=self.model
+            ),
         )
 
     def run_client(self) -> int:
@@ -302,35 +301,39 @@ class _Round:
         num_prompts = _as_opt_int(os.environ.get("NUM_PROMPTS") or bench_envs.get("NUM_PROMPTS"))
         num_warmups = _as_opt_int(os.environ.get("NUM_WARMUPS") or bench_envs.get("NUM_WARMUPS"))
         client_cmd = bypass_engine.build_client_command(
-            inferencex_root=self.inferencex_root,
-            python_exe=sys.executable,
-            model=self.model,
-            base_url=self.base_url,
-            isl=self.isl,
-            osl=self.osl,
-            conc=self.conc,
-            random_range_ratio=self.rrr,
-            result_dir=str(self.workspace),
-            result_filename="inferencex_result",
-            num_prompts=num_prompts,
-            num_warmups=num_warmups,
-            profile=self.profile,
-            trust_remote_code=True,
+            bypass_engine.ClientRun(
+                inferencex_root=self.inferencex_root,
+                python_exe=sys.executable,
+                model=self.model,
+                base_url=self.base_url,
+                isl=self.isl,
+                osl=self.osl,
+                conc=self.conc,
+                random_range_ratio=self.rrr,
+                result_dir=str(self.workspace),
+                num_prompts=num_prompts,
+                num_warmups=num_warmups,
+                profile=self.profile,
+                trust_remote_code=True,
+            )
         )
         rc = _run_subprocess(client_cmd, self.timeout_s, self.workspace, "client")
         if rc == 0 and _run_eval_enabled(bench_envs):
             _ensure_eval_deps(sys.executable)
             eval_cmd = bypass_engine.build_eval_command(
-                python_exe=sys.executable,
-                model=self.model,
-                base_url=self.base_url,
-                conc=self.conc,
-                out_dir=str(self.workspace / "lm_eval"),
-                tasks=str(bench_envs.get("MAGPIE_EVAL_TASKS") or os.environ.get("MAGPIE_EVAL_TASKS", "")).strip()
-                or "gsm8k",
-                limit=(
-                    str(bench_envs.get("MAGPIE_EVAL_LIMIT") or os.environ.get("MAGPIE_EVAL_LIMIT", "")).strip() or None
-                ),
+                bypass_engine.EvalRun(
+                    python_exe=sys.executable,
+                    model=self.model,
+                    base_url=self.base_url,
+                    conc=self.conc,
+                    out_dir=str(self.workspace / "lm_eval"),
+                    tasks=str(bench_envs.get("MAGPIE_EVAL_TASKS") or os.environ.get("MAGPIE_EVAL_TASKS", "")).strip()
+                    or "gsm8k",
+                    limit=(
+                        str(bench_envs.get("MAGPIE_EVAL_LIMIT") or os.environ.get("MAGPIE_EVAL_LIMIT", "")).strip()
+                        or None
+                    ),
+                )
             )
             eval_rc = _run_subprocess(eval_cmd, self.timeout_s, self.workspace, "eval")
             # Magpie's ``run_eval ... || exit $?`` aborts the benchmark when the accuracy pass fails, so a healthy
@@ -340,10 +343,13 @@ class _Round:
                 return eval_rc
         return rc
 
+    @property
+    def subject(self) -> bypass_report.ReportSubject:
+        """What this round's report describes."""
+        return bypass_report.ReportSubject(self.framework, self.model, profiling_enabled=self.profile)
+
     def report_failure(self, start: float, reason: str) -> None:
-        _write_report(
-            self.workspace, self.framework, self.model, False, start, [reason], profiling_enabled=self.profile
-        )
+        _write_report(self.workspace, self.subject, bypass_report.RunOutcome(False, [reason]), start)
 
     def finalize(self, start: float, rc: int) -> int:
         """Parse raw result, build analysis, write report; return exit code."""
@@ -368,14 +374,9 @@ class _Round:
         )
         _write_report(
             self.workspace,
-            self.framework,
-            self.model,
-            success,
+            self.subject,
+            bypass_report.RunOutcome(success, errors, raw_result=raw, analysis=analysis),
             start,
-            errors,
-            raw=raw,
-            analysis=analysis,
-            profiling_enabled=self.profile,
         )
         if success:
             return 0
@@ -437,7 +438,6 @@ def _run_scriptable_benchmark(
     framework,
     model,
     bench,
-    bench_envs,
     timeout_s,
     output_dir,
 ) -> int:
@@ -455,17 +455,20 @@ def _run_scriptable_benchmark(
         Path(profile_dir).mkdir(parents=True, exist_ok=True)
     start = time.time()
     rc, error = bypass_scriptable.run_scriptable(
-        framework=framework,
-        runner_type=runner_type,
-        inferencex_root=str(inferencex_root or ""),
-        bench=bench,
-        workspace=workspace,
+        bypass_scriptable.ScriptableBenchmark(
+            framework=framework,
+            runner_type=runner_type,
+            inferencex_root=str(inferencex_root or ""),
+            bench=bench,
+        ),
+        workspace,
         timeout_s=timeout_s,
         profile=profile,
         profile_dir=profile_dir,
     )
+    subject = bypass_report.ReportSubject(framework, model, profiling_enabled=profile)
     if error is not None:
-        _write_report(workspace, framework, model, False, start, [error], profiling_enabled=profile)
+        _write_report(workspace, subject, bypass_report.RunOutcome(False, [error]), start)
         return 2
     raw = _load_raw_result(workspace)
     success = rc == 0 and raw is not None
@@ -474,16 +477,7 @@ def _run_scriptable_benchmark(
         errors.append(f"scriptable benchmark exited {rc}")
     if raw is None:
         errors.append("inferencex_result.json not produced")
-    _write_report(
-        workspace,
-        framework,
-        model,
-        success,
-        start,
-        errors,
-        raw=raw,
-        profiling_enabled=profile,
-    )
+    _write_report(workspace, subject, bypass_report.RunOutcome(success, errors, raw_result=raw), start)
     return 0 if success else (rc or 1)
 
 
@@ -631,27 +625,16 @@ def _read_eval_returncode(workspace: Path) -> int:
 
 def _write_report(
     workspace: Path,
-    framework: str,
-    model: str,
-    success: bool,
+    subject: bypass_report.ReportSubject,
+    outcome: bypass_report.RunOutcome,
     start: float,
-    errors: list[str],
-    *,
-    raw: dict[str, Any] | None = None,
-    analysis: dict[str, Any] | None = None,
-    profiling_enabled: bool = False,
 ) -> None:
     """Build and write the Magpie-compatible report."""
     report = bypass_report.build_report(
-        raw,
-        framework=framework,
-        model=model,
-        success=success,
+        subject,
+        outcome,
         workspace_dir=str(workspace),
         execution_time=time.time() - start,
-        errors=errors,
-        analysis=analysis,
-        profiling_enabled=profiling_enabled,
     )
     bypass_report.write_report(workspace, report)
 
@@ -666,7 +649,12 @@ def _read_log(path: Path) -> str:
 
 def _emit_failure(output_dir: Path, framework: str, model: str, error: str) -> None:
     """Emit a failing report + workspace for an error found before the round's workspace exists."""
-    _write_report(bypass_report.create_workspace(output_dir, framework), framework, model, False, time.time(), [error])
+    _write_report(
+        bypass_report.create_workspace(output_dir, framework),
+        bypass_report.ReportSubject(framework, model),
+        bypass_report.RunOutcome(False, [error]),
+        time.time(),
+    )
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:

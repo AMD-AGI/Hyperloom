@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import csv
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -197,19 +198,25 @@ def _top_bypass_kernels(hot_kernels: list[dict[str, Any]], k: int) -> list[dict[
     ]
 
 
+@dataclass(frozen=True)
+class WorkloadTotals:
+    """Roofline totals aggregated over every analyzed device kernel, and how many kernels they cover."""
+
+    totals: dict[str, Any]
+    kernel_count: int
+
+
 def build_report_from_bypass(
     hot_kernels: list[dict[str, Any]],
     timeline: dict[str, Any],
     num_denoise_steps: int | None,
     top_k: int,
     *,
-    totals: dict[str, Any] | None = None,
-    kernels_aggregated: int | None = None,
+    workload: WorkloadTotals | None = None,
 ) -> dict[str, Any]:
     """Build the workload roofline report from the bypass candidate set."""
-    full_scope = totals is not None
-    if totals is None:
-        totals = aggregate_bypass_candidates(hot_kernels)
+    full_scope = workload is not None
+    totals = workload.totals if workload is not None else aggregate_bypass_candidates(hot_kernels)
     timeline_pct: dict[str, float] = {}
     if isinstance(timeline, dict):
         if timeline.get("busy_pct") is not None:
@@ -225,5 +232,5 @@ def build_report_from_bypass(
     )
     # Scope + count reflect all kernels under full scope, else the top-k subset.
     report["kernel_scope"] = "all_device_kernels" if full_scope else "analyzed_candidates"
-    report["kernels_aggregated"] = int(kernels_aggregated) if kernels_aggregated is not None else len(hot_kernels)
+    report["kernels_aggregated"] = int(workload.kernel_count) if workload is not None else len(hot_kernels)
     return report

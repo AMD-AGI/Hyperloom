@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -251,13 +252,20 @@ def _probe_check_rows(certificate: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
+@dataclass(frozen=True)
+class _TraceProbe:
+    """One self-certification probe over a trace dir: where it ran, and its certificate or why it produced none."""
+
+    trace_dir: Path
+    framework: str
+    certificate: dict[str, Any] | None = None
+    error: str = ""
+
+
 def _build_trace_validate(
     health: dict[str, Any],
+    probe: _TraceProbe,
     *,
-    trace_dir: Path,
-    framework: str,
-    certificate: dict[str, Any] | None = None,
-    probe_error: str = "",
     preflight: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assemble the profile-stage trace validation block.
@@ -268,20 +276,20 @@ def _build_trace_validate(
     checks = [row for row in (health.get("checks") or []) if isinstance(row, dict)]
     if isinstance(preflight, dict):
         checks = [preflight] + checks
-    certificate = certificate or {}
+    certificate = probe.certificate or {}
     if certificate:
         checks = checks + _probe_check_rows(certificate)
         probe_status = "ok"
     else:
-        probe_status = "failed" if probe_error else "skipped"
+        probe_status = "failed" if probe.error else "skipped"
     return {
         "schema_version": certificate.get("schema_version"),
         "probe_version": certificate.get("probe_version"),
         "probe_status": probe_status,
-        "probe_error": str(probe_error or ""),
+        "probe_error": str(probe.error or ""),
         "checked_at": now_iso(timespec="seconds"),
-        "trace_dir": str(trace_dir),
-        "framework": str(framework or ""),
+        "trace_dir": str(probe.trace_dir),
+        "framework": str(probe.framework or ""),
         "verdict": certificate.get("verdict") or {},
         "trace_dir_level": certificate.get("trace_dir_level") or {},
         "rank_level": certificate.get("rank_level") or [],
@@ -1286,10 +1294,7 @@ class ProfileExecutor(BenchmarkRunExecutor):
                             log.debug("profile_executor: trace self-certification failed: %s", probe_error)
                         result["trace_validate"] = _build_trace_validate(
                             health,
-                            trace_dir=selected_trace_dir,
-                            framework=framework,
-                            certificate=certificate,
-                            probe_error=probe_error,
+                            _TraceProbe(selected_trace_dir, framework, certificate=certificate, error=probe_error),
                             preflight=self._instrumentation_preflight,
                         )
                         result["trace_validate_path"] = _write_trace_certificate(
@@ -1385,11 +1390,6 @@ def _map_native_capture(capture: dict[str, Any], measurement: dict[str, Any]) ->
     health = _validate_trace_structure(trace_dir, framework)
     certificate = _certify_trace_dir(trace_dir, framework)
     result["trace_health"] = health
-    result["trace_validate"] = _build_trace_validate(
-        health,
-        trace_dir=trace_dir,
-        framework=framework,
-        certificate=certificate,
-    )
+    result["trace_validate"] = _build_trace_validate(health, _TraceProbe(trace_dir, framework, certificate=certificate))
     result["trace_validate_path"] = _write_trace_certificate(trace_dir, result["trace_validate"])
     return result

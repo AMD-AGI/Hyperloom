@@ -344,8 +344,8 @@ async def test_launch_only_runtime_override_passed_to_bench(tmp_path):
 
     captured: list[dict] = []
 
-    async def _capture_bench(self_inner=None, **kwargs):
-        captured.append(dict(kwargs.get("params", {})))
+    async def _capture_bench(self_inner, bench, **kwargs):
+        captured.append(dict(bench.params))
         return {"output_throughput": 50.0, "completed_requests": 12, "status": "succeeded"}, {
             "enablement_accuracy": None,
             "timed_out": False,
@@ -385,13 +385,13 @@ async def _capture_launch(ex, params, ctx_extra):
     """Run the executor and return what it handed the bench."""
     captured: dict[str, Any] = {}
 
-    async def _spy(**kwargs):
+    async def _spy(bench, **kwargs):
         captured.update(kwargs)
         return (
             {
                 "output_throughput": 100.0,
                 "status": "succeeded",
-                "boot_observation_path": kwargs["params"].get("_obs_path", ""),
+                "boot_observation_path": bench.params.get("_obs_path", ""),
             },
             {"enablement_accuracy": None, "timed_out": False},
         )

@@ -169,7 +169,6 @@ def build_apply_feedback(
     channel: str,
     tried_levels: "list[int] | None" = None,
     stderr: str = "",
-    rejected_hunks: str = "",
     framework_root: "Path | None" = None,
 ) -> ApplyFeedback:
     """Build an :class:`ApplyFeedback` record with optional source context."""
@@ -187,7 +186,6 @@ def build_apply_feedback(
         channel=channel,
         tried_levels=tried_levels or [],
         stderr=stderr,
-        rejected_hunks=rejected_hunks,
         source_context=source_ctx,
     )
 

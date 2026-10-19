@@ -24,7 +24,7 @@ from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
     build_specialist_prompts,
 )
 from hyperloom.orchestrator.specialists.domains import get_domain
-from hyperloom.orchestrator.state.shared_state import _KB_INJECTIONS_CAP, SharedState
+from hyperloom.orchestrator.state.shared_state import _KB_INJECTIONS_CAP, KbInjection, SharedState
 from hyperloom_kb import RemoteClient, RemoteConfig
 
 _FIRST = "exp-00000000000000000000000000000001"
@@ -347,13 +347,15 @@ def test_orchestration_injection_is_recorded_once_per_injected_experience_set(tm
         integration.evidence = evidence
         asyncio.run(coordinator.conversation._kb_prompt_block("proposal"))
         state.record_experience_kb_injection(
-            consumer="specialist",
-            domain="serving_specialist",
-            gap_canonical_id="gap.x",
-            read_id=f"specialist-{tick}",
-            experience_ids=[_FIRST],
-            experiences=[],
-            prompt_block="x",
+            KbInjection(
+                consumer="specialist",
+                domain="serving_specialist",
+                gap_canonical_id="gap.x",
+                read_id=f"specialist-{tick}",
+                experience_ids=[_FIRST],
+                experiences=[],
+                prompt_block="x",
+            )
         )
     integration.evidence = ExperienceKBEvidence(
         tick=4, read_id="read-4", status="unavailable", prompt_block="", rendered_refs=(), warnings=("offline",)
@@ -373,11 +375,13 @@ def test_injection_record_is_capped_and_survives_resume(tmp_path) -> None:
     for index in range(_KB_INJECTIONS_CAP + 5):
         state.tick = index
         state.record_experience_kb_injection(
-            consumer="orchestration",
-            read_id=f"read-{index}",
-            experience_ids=[f"exp-{index}"],
-            experiences=[],
-            prompt_block="x",
+            KbInjection(
+                consumer="orchestration",
+                read_id=f"read-{index}",
+                experience_ids=[f"exp-{index}"],
+                experiences=[],
+                prompt_block="x",
+            )
         )
     state.save(tmp_path)
 
@@ -603,23 +607,27 @@ def test_state_reader_prints_each_consumers_latest_injection(tmp_path, monkeypat
 
     state = SharedState(tick=5, phase="FRAMEWORK_AGENT")
     state.record_experience_kb_injection(
-        consumer="orchestration",
-        read_id="read-5",
-        experience_ids=[_FIRST, _SECOND],
-        experiences=[
-            {"experience_id": _SECOND, "decision": "revert", "change_summary": "compile", "source_run_id": "run-a"},
-            {"experience_id": _FIRST, "decision": "keep", "change_summary": "chunk-8192", "source_run_id": "run-a"},
-        ],
-        prompt_block=f"Experience {_FIRST}\n...\nExperience {_SECOND}\n...",
+        KbInjection(
+            consumer="orchestration",
+            read_id="read-5",
+            experience_ids=[_FIRST, _SECOND],
+            experiences=[
+                {"experience_id": _SECOND, "decision": "revert", "change_summary": "compile", "source_run_id": "run-a"},
+                {"experience_id": _FIRST, "decision": "keep", "change_summary": "chunk-8192", "source_run_id": "run-a"},
+            ],
+            prompt_block=f"Experience {_FIRST}\n...\nExperience {_SECOND}\n...",
+        )
     )
     state.record_experience_kb_injection(
-        consumer="specialist",
-        domain="kernel_switch_specialist",
-        gap_canonical_id="gap.x",
-        read_id="read-6",
-        experience_ids=[_SECOND],
-        experiences=[{"experience_id": _SECOND, "decision": "revert", "change_summary": "compile"}],
-        prompt_block=f"Experience {_SECOND}\n...",
+        KbInjection(
+            consumer="specialist",
+            domain="kernel_switch_specialist",
+            gap_canonical_id="gap.x",
+            read_id="read-6",
+            experience_ids=[_SECOND],
+            experiences=[{"experience_id": _SECOND, "decision": "revert", "change_summary": "compile"}],
+            prompt_block=f"Experience {_SECOND}\n...",
+        )
     )
     state.save(tmp_path)
     monkeypatch.setattr(sys, "argv", ["read_optimizer_state.py", str(tmp_path)])

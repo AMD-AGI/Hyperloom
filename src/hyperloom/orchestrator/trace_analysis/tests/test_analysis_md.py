@@ -67,7 +67,7 @@ def _sample_kwargs():
 
 
 def test_render_report_canonical_sections():
-    md = am.render_report(**_sample_kwargs())
+    md = am.render_report(am.AnalysisReport(**_sample_kwargs()))
     assert md.startswith("# Performance Analysis Report \u2014 M")
     assert "> Generated via bypass route (HYPERLOOM_TRACE_ANALYSIS_ROUTE=bypass). detail." in md
     assert "## Executive Summary" in md and "| Metric | Value |" in md
@@ -92,7 +92,7 @@ def test_render_report_missing_values_render_dash():
         p_items=[],
     )
     kw["exec_summary"]["top_bottleneck_category"] = ""
-    md = am.render_report(**kw)
+    md = am.render_report(am.AnalysisReport(**kw))
     # no model -> plain title
     assert md.splitlines()[0] == "# Performance Analysis Report"
     assert f"| Total GPU Time | {am.DASH} ms |" in md
@@ -103,7 +103,7 @@ def test_render_report_missing_values_render_dash():
 def test_extra_sections_appended_under_divider():
     kw = _sample_kwargs()
     kw["extra_sections"] = "## Route Extra\n\nbody"
-    md = am.render_report(**kw)
+    md = am.render_report(am.AnalysisReport(**kw))
     assert "Additional route-specific detail below" in md
     assert "## Route Extra" in md
     # extras come AFTER the shared Top Hot Kernels section
@@ -127,7 +127,9 @@ _CANONICAL_SPINE = (
 def _bypass_md():
     analyze = _analyze([dict(k) for k in _KERNELS])
     cands = br.build_candidates(analyze, framework="vllm", target_platform="MI300X")
-    return br.render_analysis_md(cands, analyze, model_name="M", framework="vllm", target_platform="MI300X")
+    return br.render_analysis_md(
+        cands, analyze, br.BypassReportContext(model_name="M", framework="vllm", target_platform="MI300X")
+    )
 
 
 def test_bypass_report_carries_the_canonical_spine():

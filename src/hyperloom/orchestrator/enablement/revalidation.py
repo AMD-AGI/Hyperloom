@@ -15,7 +15,8 @@ from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
 
 from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
 from ..collaborator import CoordinatorCollaborator
-from ..state.task_registry import TerminalTaskReuse, create_in_cursor, task_dispatch_origin
+from ..state.round_store import RoundRequest
+from ..state.task_registry import TaskSpec, TerminalTaskReuse, create_in_cursor, task_dispatch_origin
 from .params import _enablement_carrier_params
 
 if TYPE_CHECKING:
@@ -196,14 +197,16 @@ class EnablementRevalidation(CoordinatorCollaborator):
             def _join(cur: sqlite3.Cursor, _key: str = key, _holder: str = holder) -> None:
                 _task, existing = create_in_cursor(
                     cur,
-                    kind="baseline",
-                    params=params,
-                    idempotency_key=_key,
-                    requires_lanes=requires_lanes,
-                    lease_ttl_sec=lease_ttl_sec,
-                    task_id=_holder,
-                    dispatch_class="coordinator",
-                    dispatch_origin=task_dispatch_origin(self.shared_state),
+                    TaskSpec(
+                        kind="baseline",
+                        params=params,
+                        idempotency_key=_key,
+                        requires_lanes=requires_lanes,
+                        lease_ttl_sec=lease_ttl_sec,
+                        task_id=_holder,
+                        dispatch_class="coordinator",
+                        dispatch_origin=task_dispatch_origin(self.shared_state),
+                    ),
                 )
                 if existing:
                     # A live row already runs this generation, under the round
@@ -213,11 +216,9 @@ class EnablementRevalidation(CoordinatorCollaborator):
             try:
                 acquired = await self.rounds.open(
                     f"revalidation-{holder}",
+                    RoundRequest(now_unix=time.time(), request_id=key, evidence={"idempotency_key": key}),
                     holder_task_id=holder,
                     lease_sec=float(lease_ttl_sec),
-                    now_unix=time.time(),
-                    request_id=key,
-                    evidence={"idempotency_key": key},
                     join=_join,
                 )
             except _RowAlreadyLive:

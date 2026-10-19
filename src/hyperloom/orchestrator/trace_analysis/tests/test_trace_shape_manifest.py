@@ -59,31 +59,22 @@ def test_dual_gemm_tags():
     # bf16 GEMM -> both tags true.
     r_bf16 = tsm.build_row(
         _launch("gemm_bf16", op_name="aten::mm", dtypes=["c10::BFloat16", "c10::BFloat16"]),
-        graph_variant="eager",
+        tsm.GraphVariant("eager", "decode", "eager", capture_only=False),
         node_ordinal=0,
-        phase="decode",
-        bucket="eager",
-        capture_only=False,
     )
     assert r_bf16["is_gemm"] is True and r_bf16["is_target_gemm"] is True
     # GEMM with no dtype info -> gemm but NOT target (unaddressable == uncovered).
     r_nodtype = tsm.build_row(
         _launch("gemm_unknown", op_name="aten::mm"),
-        graph_variant="eager",
+        tsm.GraphVariant("eager", "decode", "eager", capture_only=False),
         node_ordinal=1,
-        phase="decode",
-        bucket="eager",
-        capture_only=False,
     )
     assert r_nodtype["is_gemm"] is True and r_nodtype["is_target_gemm"] is False
     # Non-GEMM -> neither.
     r_norm = tsm.build_row(
         _launch("rms_norm", op_name="", dtypes=["c10::BFloat16"]),
-        graph_variant="eager",
+        tsm.GraphVariant("eager", "decode", "eager", capture_only=False),
         node_ordinal=2,
-        phase="decode",
-        bucket="eager",
-        capture_only=False,
     )
     assert r_norm["is_gemm"] is False and r_norm["is_target_gemm"] is False
 
@@ -91,11 +82,8 @@ def test_dual_gemm_tags():
 def test_dims_extraction_from_shapes():
     r = tsm.build_row(
         _launch("gemm", op_name="aten::mm", shapes=[[128, 4096], [4096, 8192]], dtypes=["fp8"]),
-        graph_variant="eager",
+        tsm.GraphVariant("eager", "decode", "eager", capture_only=False),
         node_ordinal=0,
-        phase="decode",
-        bucket="eager",
-        capture_only=False,
     )
     assert r["dims"] == {"M": 128, "N": 8192, "K": 4096, "batch": None, "groups": None}
 
@@ -116,11 +104,8 @@ def test_dims_extraction_aiter_blockscale_weight_nk_layout():
     for shapes, expect_n in cases:
         r = tsm.build_row(
             _launch("gemm", op_name="aiter::gemm_a8w8_blockscale_ck", shapes=shapes, dtypes=["fp8", "fp8"]),
-            graph_variant="bs_512",
+            tsm.GraphVariant("bs_512", "decode", "bs_512", capture_only=True),
             node_ordinal=0,
-            phase="decode",
-            bucket="bs_512",
-            capture_only=True,
         )
         assert r["dims"]["M"] == shapes[0][0], (shapes, r["dims"])
         assert r["dims"]["K"] == shapes[0][1], (shapes, r["dims"])
@@ -129,11 +114,10 @@ def test_dims_extraction_aiter_blockscale_weight_nk_layout():
 
 def test_variant_meta_recorded_in_workload():
     m = tsm.build_shape_manifest(
-        main_analysis=_analysis([]),
-        capture_variants=[("bs_512", _analysis([]))],
+        _analysis([]),
+        [tsm.CaptureShard("bs_512", _analysis([]), meta={"batch_size": "512", "mode": "PIECEWISE"})],
+        tsm.ManifestOrigin(main_trace_hash="h"),
         provenance={},
-        main_trace_hash="h",
-        variant_meta={"bs_512": {"batch_size": "512", "mode": "PIECEWISE"}},
     )
     assert m["workload"]["variant_meta"]["bs_512"]["mode"] == "PIECEWISE"
     assert m["workload"]["variant_meta"]["bs_512"]["batch_size"] == "512"
@@ -205,12 +189,8 @@ def test_discover_capture_shards_sglang_gc_variants(tmp_path):
 def test_signature_discriminates_variant():
     """Same math shape + same ordinal but different graph_variant -> distinct."""
     launch = _launch("gemm", op_name="aten::mm", shapes=[[16, 4096], [4096, 4096]], dtypes=["bf16"])
-    r16 = tsm.build_row(
-        launch, graph_variant="bs_16", node_ordinal=0, phase="decode", bucket="bs_16", capture_only=True
-    )
-    r32 = tsm.build_row(
-        launch, graph_variant="bs_32", node_ordinal=0, phase="decode", bucket="bs_32", capture_only=True
-    )
+    r16 = tsm.build_row(launch, tsm.GraphVariant("bs_16", "decode", "bs_16", capture_only=True), node_ordinal=0)
+    r32 = tsm.build_row(launch, tsm.GraphVariant("bs_32", "decode", "bs_32", capture_only=True), node_ordinal=0)
     assert r16["signature_key"] != r32["signature_key"]
 
 
@@ -220,9 +200,7 @@ def test_node_ordinal_distinguishes_same_kernel():
         _launch("gemm", op_name="aten::mm", ts=1.0, shapes=[[16, 4096], [4096, 4096]], dtypes=["bf16"]),
         _launch("gemm", op_name="aten::mm", ts=2.0, shapes=[[16, 4096], [4096, 4096]], dtypes=["bf16"]),
     ]
-    rows = tsm.build_variant_rows(
-        graph_variant="bs_16", analysis=_analysis(launches), phase="decode", bucket="bs_16", capture_only=True
-    )
+    rows = tsm.build_variant_rows(tsm.GraphVariant("bs_16", "decode", "bs_16", capture_only=True), _analysis(launches))
     assert len(rows) == 2
     assert {r["node_ordinal"] for r in rows} == {0, 1}
 
@@ -235,10 +213,10 @@ def test_multi_variant_not_merged_and_replay_unresolved():
     cap16 = _analysis([launch])
     cap32 = _analysis([launch])
     manifest = tsm.build_shape_manifest(
-        main_analysis=_analysis([], kernels=[{"name": "hipGraphLaunch", "count": 118}]),
-        capture_variants=[("bs_16", cap16), ("bs_32", cap32)],
+        _analysis([], kernels=[{"name": "hipGraphLaunch", "count": 118}]),
+        [tsm.CaptureShard("bs_16", cap16), tsm.CaptureShard("bs_32", cap32)],
+        tsm.ManifestOrigin(main_trace_hash="deadbeef"),
         provenance={"_provenance_source": "wp1_stub"},
-        main_trace_hash="deadbeef",
     )
     variants = {r["graph_variant"] for r in manifest["rows"]}
     assert variants == {"bs_16", "bs_32"}
@@ -251,10 +229,10 @@ def test_multi_variant_not_merged_and_replay_unresolved():
 def test_single_variant_replay_attributed():
     launch = _launch("gemm", op_name="aten::mm", shapes=[[16, 4096], [4096, 4096]], dtypes=["bf16"])
     manifest = tsm.build_shape_manifest(
-        main_analysis=_analysis([], kernels=[{"name": "hipGraphLaunch", "count": 118}]),
-        capture_variants=[("bs_16", _analysis([launch]))],
+        _analysis([], kernels=[{"name": "hipGraphLaunch", "count": 118}]),
+        [tsm.CaptureShard("bs_16", _analysis([launch]))],
+        tsm.ManifestOrigin(main_trace_hash="abc"),
         provenance={},
-        main_trace_hash="abc",
     )
     assert manifest["workload"]["variant_steady_replay"] == {"bs_16": 118}
     assert manifest["workload"]["total_graph_replays"] == 118
@@ -265,12 +243,7 @@ def test_eager_fallback_when_no_capture():
         _launch("gemm", op_name="aten::mm", ts=1.0, dur=200.0, shapes=[[1, 4096], [4096, 4096]], dtypes=["bf16"]),
         _launch("rms_norm", op_name="", ts=2.0, dur=50.0, dtypes=["bf16"]),
     ]
-    manifest = tsm.build_shape_manifest(
-        main_analysis=_analysis(launches),
-        capture_variants=[],
-        provenance={},
-        main_trace_hash="x",
-    )
+    manifest = tsm.build_shape_manifest(_analysis(launches), [], tsm.ManifestOrigin(main_trace_hash="x"), provenance={})
     assert {r["graph_variant"] for r in manifest["rows"]} == {"eager"}
     assert all(r["capture_only"] is False for r in manifest["rows"])
     assert manifest["workload"]["variant_steady_replay"] == {"eager": 1}
@@ -285,35 +258,34 @@ def test_eager_fallback_when_no_capture():
 def test_manifest_hash_deterministic_and_sensitive():
     launch = _launch("gemm", op_name="aten::mm", shapes=[[16, 4096], [4096, 4096]], dtypes=["bf16"])
     m1 = tsm.build_shape_manifest(
-        main_analysis=_analysis([]),
-        capture_variants=[("bs_16", _analysis([launch]))],
+        _analysis([]),
+        [tsm.CaptureShard("bs_16", _analysis([launch]))],
+        tsm.ManifestOrigin(main_trace_hash="h"),
         provenance={},
-        main_trace_hash="h",
     )
     m2 = tsm.build_shape_manifest(
-        main_analysis=_analysis([]),
-        capture_variants=[("bs_16", _analysis([launch]))],
+        _analysis([]),
+        [tsm.CaptureShard("bs_16", _analysis([launch]))],
+        tsm.ManifestOrigin(main_trace_hash="h"),
         provenance={},
-        main_trace_hash="h",
     )
     assert m1["manifest_hash"] == m2["manifest_hash"]
     other = _launch("gemm", op_name="aten::mm", shapes=[[32, 4096], [4096, 4096]], dtypes=["bf16"])
     m3 = tsm.build_shape_manifest(
-        main_analysis=_analysis([]),
-        capture_variants=[("bs_16", _analysis([other]))],
+        _analysis([]),
+        [tsm.CaptureShard("bs_16", _analysis([other]))],
+        tsm.ManifestOrigin(main_trace_hash="h"),
         provenance={},
-        main_trace_hash="h",
     )
     assert m3["manifest_hash"] != m1["manifest_hash"]
 
 
 def test_manifest_schema_shape():
     manifest = tsm.build_shape_manifest(
-        main_analysis=_analysis([]),
-        capture_variants=[],
+        _analysis([]),
+        [],
+        tsm.ManifestOrigin(main_trace_hash="h", generated_at="2026-07-23T00:00:00Z"),
         provenance={"_provenance_source": "wp1_stub"},
-        main_trace_hash="h",
-        generated_at="2026-07-23T00:00:00Z",
     )
     assert manifest["schema_version"] == tsm.SCHEMA_VERSION
     assert manifest["manifest_kind"] == tsm.MANIFEST_KIND
@@ -325,10 +297,10 @@ def test_manifest_schema_shape():
 
 def test_empty_launches_produce_no_rows():
     manifest = tsm.build_shape_manifest(
-        main_analysis=_analysis([]),
-        capture_variants=[("bs_16", _analysis([]))],
+        _analysis([]),
+        [tsm.CaptureShard("bs_16", _analysis([]))],
+        tsm.ManifestOrigin(main_trace_hash="h"),
         provenance={},
-        main_trace_hash="h",
     )
     assert manifest["rows"] == []
 
@@ -355,17 +327,12 @@ def test_reader_enriches_launches_and_feeds_producer(tmp_path):
     with gzip.open(trace, "wt", encoding="utf-8") as fh:
         json.dump({"traceEvents": events}, fh)
 
-    analysis = reader.analyze_trace(trace, top_k=0, emit_launches=True)
+    analysis = reader.analyze_trace(trace, reader.TraceAnalysisOptions(top_k=0, emit_launches=True))
     launches = analysis["kernel_launches"]
     assert launches and launches[0]["shapes"] == [[64, 4096], [4096, 4096]]
     assert launches[0]["dtypes"] == ["c10::BFloat16", "c10::BFloat16"]
 
-    manifest = tsm.build_shape_manifest(
-        main_analysis=analysis,
-        capture_variants=[],
-        provenance={},
-        main_trace_hash="h",
-    )
+    manifest = tsm.build_shape_manifest(analysis, [], tsm.ManifestOrigin(main_trace_hash="h"), provenance={})
     row = next(r for r in manifest["rows"] if r["op"] == "gemm")
     assert row["dims"] == {"M": 64, "N": 4096, "K": 4096, "batch": None, "groups": None}
     assert row["is_target_gemm"] is True

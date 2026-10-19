@@ -166,10 +166,12 @@ def test_watchdog_clock_boundaries(monkeypatch, tmp_path, reused, ready, log, no
     with pytest.raises(error):
         sk._communicate_with_watchdog(
             Proc(),
-            hard_timeout=7800,
-            silence_timeout_sec=600,
-            server_log_path=str(tmp_path / "server.log") if log else None,
-            server_already_ready=reused,
+            sk._WatchedRound(
+                hard_timeout=7800,
+                server_log_path=str(tmp_path / "server.log") if log else None,
+                silence_timeout_sec=600,
+                server_already_ready=reused,
+            ),
             recorders=sk._RecorderFanout([]),
         )
     assert now[0] == expected
@@ -208,11 +210,13 @@ def test_unobserved_reuse_keeps_other_stop_gates_and_telemetry(monkeypatch, tmp_
     with pytest.raises(error[gate]):
         sk._communicate_with_watchdog(
             Proc(),
-            hard_timeout=10,
-            silence_timeout_sec=1,
-            server_log_path=str(tmp_path / "server.log"),
-            server_already_ready=True,
-            session_deadline_sec=3 if gate == "session" else None,
+            sk._WatchedRound(
+                hard_timeout=10,
+                server_log_path=str(tmp_path / "server.log"),
+                silence_timeout_sec=1,
+                server_already_ready=True,
+                session_deadline_sec=3 if gate == "session" else None,
+            ),
             cancel_scope=scope,
             recorders=sk._RecorderFanout([recorder]),
         )
@@ -232,7 +236,7 @@ def test_exited_process_wins_over_expired_gates(monkeypatch):
             return "finished", ""
 
     out = sk._communicate_with_watchdog(
-        Proc(), hard_timeout=0, session_deadline_sec=-1, recorders=sk._RecorderFanout([])
+        Proc(), sk._WatchedRound(hard_timeout=0, session_deadline_sec=-1), recorders=sk._RecorderFanout([])
     )
     assert out == ("finished", "")
 

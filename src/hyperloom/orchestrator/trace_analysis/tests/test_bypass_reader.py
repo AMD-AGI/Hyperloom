@@ -41,7 +41,7 @@ def _write_trace(path: Path, gz: bool = False) -> Path:
 
 def test_analyze_basic_aggregates(tmp_path):
     tf = _write_trace(tmp_path / "t.trace.json")
-    out = reader.analyze_trace(tf, top_k=0)
+    out = reader.analyze_trace(tf, reader.TraceAnalysisOptions(top_k=0))
     assert out["status"] == "ok"
     assert out["event_total"] == 6
 
@@ -63,7 +63,7 @@ def test_long_kernel_names_are_not_merged_before_display_truncation(tmp_path):
     tf = tmp_path / "long-names.trace.json"
     tf.write_text(json.dumps({"traceEvents": events}), encoding="utf-8")
 
-    out = reader.analyze_trace(tf, top_k=0)
+    out = reader.analyze_trace(tf, reader.TraceAnalysisOptions(top_k=0))
 
     assert len(out["kernels"]) == 2
     assert sorted(row["gpu_time_us"] for row in out["kernels"]) == [10.0, 20.0]
@@ -81,7 +81,7 @@ def test_gpu_event_cap_returns_truncated_analysis(tmp_path, monkeypatch):
     tf.write_text(json.dumps({"traceEvents": events}), encoding="utf-8")
     monkeypatch.setattr(reader, "_MAX_BUFFERED_GPU_EVENTS", 2)
 
-    out = reader.analyze_trace(tf, top_k=0)
+    out = reader.analyze_trace(tf, reader.TraceAnalysisOptions(top_k=0))
 
     assert out["status"] == "ok"
     assert out["truncated"] is True
@@ -91,7 +91,7 @@ def test_gpu_event_cap_returns_truncated_analysis(tmp_path, monkeypatch):
 
 def test_correlation_attribution(tmp_path):
     tf = _write_trace(tmp_path / "t.trace.json")
-    out = reader.analyze_trace(tf, top_k=0)
+    out = reader.analyze_trace(tf, reader.TraceAnalysisOptions(top_k=0))
 
     attr = out["attribution"]
     assert attr["kernel_count"] == 2
@@ -141,7 +141,7 @@ def test_launch_geom_and_backfill_threaded_to_rows(tmp_path):
     payload = json.dumps({"traceEvents": _FALLBACK_TRACE_EVENTS}).encode("utf-8")
     tf = tmp_path / "fb.trace.json"
     tf.write_bytes(payload)
-    out = reader.analyze_trace(tf, top_k=0)
+    out = reader.analyze_trace(tf, reader.TraceAnalysisOptions(top_k=0))
     rows = {k["name"]: k for k in out["kernels"]}
 
     # Same-name kernel resolved a shape at capture time -> backfill index seeded.
@@ -175,7 +175,7 @@ def test_backfill_majority_shape_and_ambiguous_flag(tmp_path):
     payload = json.dumps({"traceEvents": _MULTI_SHAPE_BACKFILL_EVENTS}).encode("utf-8")
     tf = tmp_path / "multi.trace.json"
     tf.write_bytes(payload)
-    row = reader.analyze_trace(tf, top_k=0)["kernels"][0]
+    row = reader.analyze_trace(tf, reader.TraceAnalysisOptions(top_k=0))["kernels"][0]
     assert row["name"] == "dyn_kernel"
     assert row["backfill_shapes"] == [[64, 64]]
     assert row["backfill_ambiguous"] is True
@@ -183,7 +183,7 @@ def test_backfill_majority_shape_and_ambiguous_flag(tmp_path):
 
 def test_timeline_union_math(tmp_path):
     tf = _write_trace(tmp_path / "t.trace.json")
-    tl = reader.analyze_trace(tf, top_k=0)["timeline"]
+    tl = reader.analyze_trace(tf, reader.TraceAnalysisOptions(top_k=0))["timeline"]
     assert tl["total_time_ms"] == 0.75  # (1750 - 1000) us
     assert tl["busy_time_ms"] == 0.55  # 200 + 300 + 50 us (disjoint)
     assert tl["idle_time_ms"] == 0.2
@@ -193,7 +193,7 @@ def test_timeline_union_math(tmp_path):
 
 def test_annotation_windows(tmp_path):
     tf = _write_trace(tmp_path / "t.trace.json")
-    out = reader.analyze_trace(tf, top_k=0)
+    out = reader.analyze_trace(tf, reader.TraceAnalysisOptions(top_k=0))
     windows = out["annotation_windows"]
     assert len(windows) == 1
     assert windows[0]["name"] == "ProfilerStep#1"
@@ -202,7 +202,7 @@ def test_annotation_windows(tmp_path):
 
 def test_gzip_trace_is_transparent(tmp_path):
     tf = _write_trace(tmp_path / "t.trace.json.gz", gz=True)
-    out = reader.analyze_trace(tf, top_k=0)
+    out = reader.analyze_trace(tf, reader.TraceAnalysisOptions(top_k=0))
     assert out["status"] == "ok"
     assert len(out["kernels"]) == 2
 
@@ -213,7 +213,7 @@ def test_directory_input_resolves_largest_trace(tmp_path):
     _write_trace(d / "t.trace.json")
     resolved = reader.resolve_trace_file(d)
     assert resolved is not None and resolved.name == "t.trace.json"
-    out = reader.analyze_trace(d, top_k=0)
+    out = reader.analyze_trace(d, reader.TraceAnalysisOptions(top_k=0))
     assert out["status"] == "ok"
 
 
@@ -285,7 +285,7 @@ def test_analyze_reports_rank_provenance(tmp_path):
     _write_ranked(d, 0)
     _write_ranked(d, 1)
     _write_ranked(d, 2)
-    out = reader.analyze_trace(d, top_k=0)
+    out = reader.analyze_trace(d, reader.TraceAnalysisOptions(top_k=0))
     assert out["status"] == "ok"
     assert out["analyzed_rank"] == 0
     assert out["rank_count"] == 3
@@ -293,7 +293,7 @@ def test_analyze_reports_rank_provenance(tmp_path):
 
 def test_single_file_rank_provenance_is_none(tmp_path):
     tf = _write_trace(tmp_path / "t.trace.json")
-    out = reader.analyze_trace(tf, top_k=0)
+    out = reader.analyze_trace(tf, reader.TraceAnalysisOptions(top_k=0))
     assert out["analyzed_rank"] is None
     assert out["rank_count"] == 1
 
@@ -342,7 +342,7 @@ def test_capture_fragment_dir_selects_main_trace_content(tmp_path):
     cap = d / "capture_traces"
     for bs in (512, 496):
         _write_capture_fragment(cap, bs)
-    out = reader.analyze_trace(d, top_k=0)
+    out = reader.analyze_trace(d, reader.TraceAnalysisOptions(top_k=0))
     assert out["status"] == "ok"
     assert {k["name"] for k in out["kernels"]} == {"Cijk_Alik_Bljk_HHS", "paged_attention_v1"}
     assert out["rank_count"] == 1
@@ -415,7 +415,7 @@ def test_rank_count_ignores_multi_rank_capture_shards(tmp_path):
     cap = d / "capture_traces"
     _write_capture_fragment(cap, 512, rank=0)
     _write_capture_fragment(cap, 512, rank=1)
-    out = reader.analyze_trace(d, top_k=0)
+    out = reader.analyze_trace(d, reader.TraceAnalysisOptions(top_k=0))
     assert out["rank_count"] == 1
     assert {k["name"] for k in out["kernels"]} == {"Cijk_Alik_Bljk_HHS", "paged_attention_v1"}
 
@@ -424,12 +424,12 @@ def test_selected_capture_fragment_flag(tmp_path):
     # Only capture shards -> analyze marks selected_capture_fragment; a normal main trace does not.
     only_shards = tmp_path / "torch_trace_shards"
     _write_capture_fragment(only_shards / "capture_traces", 512)
-    out = reader.analyze_trace(only_shards, top_k=0)
+    out = reader.analyze_trace(only_shards, reader.TraceAnalysisOptions(top_k=0))
     assert out["selected_capture_fragment"] is True
 
     main_dir = tmp_path / "torch_trace_main"
     _write_main_tp_trace(main_dir)
-    out2 = reader.analyze_trace(main_dir, top_k=0)
+    out2 = reader.analyze_trace(main_dir, reader.TraceAnalysisOptions(top_k=0))
     assert out2["selected_capture_fragment"] is False
 
 
@@ -451,7 +451,7 @@ def test_multi_rank_main_traces_survive_capture_shard_filter(tmp_path):
 
 def test_top_k_limits_returned_rows(tmp_path):
     tf = _write_trace(tmp_path / "t.trace.json")
-    out = reader.analyze_trace(tf, top_k=1)
+    out = reader.analyze_trace(tf, reader.TraceAnalysisOptions(top_k=1))
     assert len(out["kernels"]) == 1
     # highest share first
     assert out["kernels"][0]["name"] == "paged_attention_v1"
@@ -459,7 +459,7 @@ def test_top_k_limits_returned_rows(tmp_path):
 
 def test_full_trace_scope_is_default(tmp_path):
     tf = _write_trace(tmp_path / "t.trace.json")
-    out = reader.analyze_trace(tf, top_k=0)
+    out = reader.analyze_trace(tf, reader.TraceAnalysisOptions(top_k=0))
     assert out["aggregation_scope"] == "full_trace"
     assert "steady_window" not in out
 
@@ -536,11 +536,11 @@ def test_select_steady_window_needs_enough_repeats():
 
 def test_analyze_steady_state_filters_to_window(tmp_path):
     tf = _write_steady(tmp_path / "s.trace.json")
-    full = reader.analyze_trace(tf, top_k=0)
+    full = reader.analyze_trace(tf, reader.TraceAnalysisOptions(top_k=0))
     assert full["aggregation_scope"] == "full_trace"
     assert {k["name"] for k in full["kernels"]} == {"warmup_gemm", "paged_attention_v1"}
 
-    steady = reader.analyze_trace(tf, top_k=0, steady_state=True)
+    steady = reader.analyze_trace(tf, reader.TraceAnalysisOptions(top_k=0, steady_state=True))
     assert steady["aggregation_scope"] == "steady_state"
     assert steady["steady_window"]["step_name"] == "ProfilerStep"
     # only the in-window kernel survives the steady filter.
@@ -567,7 +567,7 @@ _OVERHANG_EVENTS = [
 def test_steady_window_clips_overhanging_kernel(tmp_path):
     tf = tmp_path / "o.trace.json"
     tf.write_bytes(json.dumps({"traceEvents": _OVERHANG_EVENTS}).encode("utf-8"))
-    out = reader.analyze_trace(tf, top_k=0, steady_state=True)
+    out = reader.analyze_trace(tf, reader.TraceAnalysisOptions(top_k=0, steady_state=True))
     assert out["aggregation_scope"] == "steady_state"
     tl = out["timeline"]
     # window [200,300); kernel [210,410) clips to [210,300) = 90us busy.
@@ -582,7 +582,7 @@ def test_steady_window_clips_overhanging_kernel(tmp_path):
 def test_steady_state_falls_back_to_full_when_no_windows(tmp_path):
     # The basic trace has a single ProfilerStep (no repeating loop) -> no window.
     tf = _write_trace(tmp_path / "t.trace.json")
-    out = reader.analyze_trace(tf, top_k=0, steady_state=True)
+    out = reader.analyze_trace(tf, reader.TraceAnalysisOptions(top_k=0, steady_state=True))
     assert out["aggregation_scope"] == "full_trace"
     assert out.get("steady_window_status")
     assert len(out["kernels"]) == 2
@@ -596,7 +596,7 @@ def test_non_kineto_json_yields_no_kernels(tmp_path):
     # turns this into a warning).
     tf = tmp_path / "notrace.json"
     tf.write_bytes(json.dumps({"foo": "bar", "schemaVersion": 1}).encode("utf-8"))
-    out = reader.analyze_trace(tf, top_k=0)
+    out = reader.analyze_trace(tf, reader.TraceAnalysisOptions(top_k=0))
     assert out["status"] == "ok"
     assert out["kernels"] == []
     assert out["event_total"] == 0
@@ -606,7 +606,7 @@ def test_non_kineto_json_yields_no_kernels(tmp_path):
 def test_empty_trace_events_array(tmp_path):
     tf = tmp_path / "empty.trace.json"
     tf.write_bytes(json.dumps({"traceEvents": []}).encode("utf-8"))
-    out = reader.analyze_trace(tf, top_k=0)
+    out = reader.analyze_trace(tf, reader.TraceAnalysisOptions(top_k=0))
     assert out["status"] == "ok"
     assert out["kernels"] == []
     assert out["timeline"]["total_time_ms"] == 0.0
@@ -626,7 +626,7 @@ def test_truncated_trace_recovers_complete_events(tmp_path):
     text = '{"traceEvents": [' + json.dumps(good) + ', {"cat": "kernel", "ph": "X", "name": "Cij'
     tf = tmp_path / "truncated.trace.json"
     tf.write_bytes(text.encode("utf-8"))
-    out = reader.analyze_trace(tf, top_k=0)
+    out = reader.analyze_trace(tf, reader.TraceAnalysisOptions(top_k=0))
     assert out["status"] == "ok"
     assert {k["name"] for k in out["kernels"]} == {"paged_attention_v1"}
     assert len(out["stream_errors"]) == 1
@@ -764,7 +764,7 @@ def test_single_event_trace(tmp_path):
     tf = tmp_path / "single.trace.json"
     one = [{"cat": "kernel", "ph": "X", "name": "rms_norm_kernel", "ts": 5, "dur": 10, "args": {"correlation": 1}}]
     tf.write_bytes(json.dumps({"traceEvents": one}).encode("utf-8"))
-    out = reader.analyze_trace(tf, top_k=0)
+    out = reader.analyze_trace(tf, reader.TraceAnalysisOptions(top_k=0))
     assert out["status"] == "ok"
     assert len(out["kernels"]) == 1
     assert out["kernels"][0]["name"] == "rms_norm_kernel"
@@ -780,7 +780,7 @@ def test_malformed_events_missing_fields_do_not_crash(tmp_path):
     ]
     tf = tmp_path / "malformed.trace.json"
     tf.write_bytes(json.dumps({"traceEvents": events}).encode("utf-8"))
-    out = reader.analyze_trace(tf, top_k=0)
+    out = reader.analyze_trace(tf, reader.TraceAnalysisOptions(top_k=0))
     assert out["status"] == "ok"
     # Two kernel events parsed (one unnamed, one silu); no exception raised.
     assert out["attribution"]["kernel_count"] == 2
@@ -806,7 +806,7 @@ def test_reader_extracts_shapes_and_triton_kernel_file(tmp_path):
     ]
     tf = tmp_path / "meta.trace.json"
     tf.write_bytes(json.dumps({"traceEvents": events}).encode("utf-8"))
-    out = reader.analyze_trace(tf, top_k=0)
+    out = reader.analyze_trace(tf, reader.TraceAnalysisOptions(top_k=0))
     k = next(k for k in out["kernels"] if k["name"] == "triton_silu_kernel")
     assert k["op_name"] == "aten::silu_and_mul"
     assert k["op_shapes"] == [[1024, 256], []]
@@ -818,7 +818,7 @@ def test_reader_extracts_shapes_and_triton_kernel_file(tmp_path):
 def test_reader_meta_absent_defaults_empty(tmp_path):
     # Unlinked kernel (no cpu_op) -> meta fields present but empty, never missing.
     tf = _write_trace(tmp_path / "t.trace.json")
-    out = reader.analyze_trace(tf, top_k=0)
+    out = reader.analyze_trace(tf, reader.TraceAnalysisOptions(top_k=0))
     replay = next(k for k in out["kernels"] if k["name"] == "paged_attention_v1")
     assert replay["op_shapes"] == [] and replay["op_kernel_file"] == ""
 
@@ -830,7 +830,7 @@ def test_steady_state_with_zero_annotations_falls_back(tmp_path):
     ]
     tf = tmp_path / "noann.trace.json"
     tf.write_bytes(json.dumps({"traceEvents": events}).encode("utf-8"))
-    out = reader.analyze_trace(tf, top_k=0, steady_state=True, framework="xdit")
+    out = reader.analyze_trace(tf, reader.TraceAnalysisOptions(top_k=0, steady_state=True, framework="xdit"))
     assert out["aggregation_scope"] == "full_trace"
     assert out.get("steady_window_status")
     assert len(out["kernels"]) == 2
@@ -849,7 +849,7 @@ def _gpu(name: str, ts: float, dur: float, pid: int = 1, tid: int = 1) -> dict:
 def test_stream_overlap_absent_on_consistent_trace(tmp_path):
     """Durations that fit between their neighbours must not be flagged."""
     tf = _write_trace(tmp_path / "ok.trace.json")
-    out = reader.analyze_trace(tf, top_k=0)
+    out = reader.analyze_trace(tf, reader.TraceAnalysisOptions(top_k=0))
     assert "stream_overlap" not in (out.get("timeline") or {})
 
 
@@ -862,7 +862,7 @@ def test_stream_overlap_detects_impossible_duration(tmp_path):
         _gpu("k_c", 1300, 100),
     ]
     tf = _stream_trace(tmp_path / "bad.trace.json", events)
-    out = reader.analyze_trace(tf, top_k=0)
+    out = reader.analyze_trace(tf, reader.TraceAnalysisOptions(top_k=0))
     so = (out.get("timeline") or {}).get("stream_overlap")
     assert so, "corrupt duration should be reported"
     assert (so["pid"], so["tid"]) == (1, 1)
@@ -884,7 +884,7 @@ def test_stream_overlap_not_triggered_by_concurrent_streams(tmp_path):
         events.append(_gpu(f"s1_{i}", 1000 + i * 100, 100, pid=1, tid=1))
         events.append(_gpu(f"s2_{i}", 1000 + i * 100, 100, pid=1, tid=2))
     tf = _stream_trace(tmp_path / "concurrent.trace.json", events)
-    out = reader.analyze_trace(tf, top_k=0)
+    out = reader.analyze_trace(tf, reader.TraceAnalysisOptions(top_k=0))
     assert "stream_overlap" not in (out.get("timeline") or {})
 
 
@@ -972,7 +972,7 @@ def test_analyze_trace_caps_annotation_buffers(tmp_path, monkeypatch):
     events = [{"cat": "gpu_user_annotation", "ph": "X", "name": f"step{i}", "ts": i, "dur": 1} for i in range(5)]
     path = tmp_path / "cap.trace.json"
     path.write_text(json.dumps({"traceEvents": events}), encoding="utf-8")
-    out = reader.analyze_trace(path, top_k=0)
+    out = reader.analyze_trace(path, reader.TraceAnalysisOptions(top_k=0))
     assert out["status"] == "ok"
     assert out["truncated"] is True
     assert out["truncation_reason"] == "annotation_windows"

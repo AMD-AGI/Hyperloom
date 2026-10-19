@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 from hyperloom.common.env import env_flag
@@ -87,33 +88,40 @@ def _merge_worker_env(caller_env: dict[str, str] | None) -> dict[str, str]:
     return scrub_benchmark_process_env(align_hip_with_ray_rocr(merged))
 
 
-def _run_subprocess_worker(
-    *,
-    cmd: list[str],
-    env: dict[str, str] | None,
-    cwd: str | None,
-    timeout_s: int | float | None,
-    silence_timeout_sec: float | None,
-    server_log_path: str | None,
-    server_already_ready: bool,
-    session_remaining_sec: float | None = None,
-) -> tuple[int, str, str]:
+@dataclass(frozen=True)
+class SessionKillRound:
+    """One benchmark round a Ray worker runs under session-kill semantics.
+
+    ``session_remaining_sec`` is a duration, re-anchored as a deadline on the worker's own clock.
+    """
+
+    cmd: list[str]
+    env: dict[str, str] | None = None
+    cwd: str | None = None
+    timeout: int | float | None = None
+    silence_timeout_sec: float | None = None
+    server_log_path: str | None = None
+    server_already_ready: bool = False
+    session_remaining_sec: float | None = None
+
+
+def _run_subprocess_worker(bench_round: SessionKillRound) -> tuple[int, str, str]:
     """Ray worker body: run the subprocess under session-kill semantics."""
     from hyperloom.orchestrator.actions.executors._subprocess_kill import (
         session_remaining_to_deadline_sec,
     )
     from hyperloom.orchestrator.actions.executors._subprocess_kill import run_with_session_kill
 
-    worker_env = _merge_worker_env(env)
+    worker_env = _merge_worker_env(bench_round.env)
     proc = run_with_session_kill(
-        cmd,
+        bench_round.cmd,
         env=worker_env,
-        cwd=cwd,
-        timeout=timeout_s,
-        silence_timeout_sec=silence_timeout_sec,
-        server_log_path=server_log_path,
-        server_already_ready=server_already_ready,
-        session_deadline_sec=session_remaining_to_deadline_sec(session_remaining_sec),
+        cwd=bench_round.cwd,
+        timeout=bench_round.timeout,
+        silence_timeout_sec=bench_round.silence_timeout_sec,
+        server_log_path=bench_round.server_log_path,
+        server_already_ready=bench_round.server_already_ready,
+        session_deadline_sec=session_remaining_to_deadline_sec(bench_round.session_remaining_sec),
     )
     return proc.returncode, proc.stdout or "", proc.stderr or ""
 

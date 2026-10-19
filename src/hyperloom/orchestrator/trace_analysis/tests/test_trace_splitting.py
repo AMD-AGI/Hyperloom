@@ -280,9 +280,7 @@ class TestSplitterE2E:
 
         chunk, meta = tla._run_trace_split(
             args,
-            trace_path,
-            split_dir,
-            tl_root,
+            tla.TraceSplitJob(trace_path, split_dir, tl_root),
             log_path,
             [],
         )
@@ -307,9 +305,7 @@ class TestSplitterE2E:
 
         chunk, meta = tla._run_trace_split(
             args,
-            trace_path,
-            split_dir,
-            tl_root,
+            tla.TraceSplitJob(trace_path, split_dir, tl_root),
             log_path,
             [],
         )
@@ -341,23 +337,26 @@ class TestBuildTraceAnalyzeCmd:
 
     def _run(self, *, scriptable: bool, framework: str, **payload_kw):
         from hyperloom.orchestrator.actions.executors.trace_analyze import (
+            _AnalysisRun,
             _build_trace_analyze_cmd,
         )
 
         cmd, mode = _build_trace_analyze_cmd(
-            payload=payload_kw,
+            payload_kw,
+            _AnalysisRun(
+                trace_input="/tmp/trace",
+                workspace_path="/tmp/test",
+                tracelens_root=Path("/tmp/tl"),
+                is_bypass=False,
+                scriptable=scriptable,
+                model_name="test",
+                framework=framework,
+                target_platform="MI300X",
+                analysis_mode="default",
+            ),
             session_dir=Path("/tmp/test"),
             state=self._mock_state(),
-            workspace_path="/tmp/test",
-            trace_input="/tmp/trace",
-            tracelens_root=Path("/tmp/tl"),
-            is_bypass=False,
-            scriptable=scriptable,
             workload={},
-            model_name="test",
-            framework=framework,
-            target_platform="MI300X",
-            analysis_mode="default",
         )
         return cmd, mode
 

@@ -18,7 +18,7 @@ from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 from hyperloom.inference_optimizer import framework_registry
 
 from . import machine_state as _phase_state
-from ..state.attempt_ledger import record_patch_attempt
+from ..state.attempt_ledger import AttemptRow, record_attempt_row
 from ..state.failure_evidence import UNMEASURED_OUTCOMES, classify_failure_attribution
 from ..state.task_registry import TaskNotFound
 from ..state.shared_state import resolve_grading_anchor_tput, inject_stack_base_params
@@ -37,11 +37,7 @@ from hyperloom.inference_optimizer.grid_server_args import (
 from ..actions.executors.integrate_patch import PATCH_SOURCE_UPSTREAM_PR
 from ..specialists.profile import is_authoring_specialist
 from hyperloom.common.framework_arm import LOCAL_EXPLORE_CANDIDATE_PREFIX
-from hyperloom.orchestrator.lever import (
-    LEVER_SOURCE_PATCH,
-    LEVER_UPSTREAM_PR,
-    patch_owner_phase,
-)
+from hyperloom.orchestrator.lever import LEVER_SOURCE_PATCH, LEVER_UPSTREAM_PR, patch_lever_kind, patch_owner_phase
 from .proposal_bench import CUSTOM_PROPOSAL_DOMAIN, ProposalBench, kb_exposure_of
 
 log = _logging.getLogger(__name__)
@@ -1593,14 +1589,14 @@ class FrameworkPhase(ProposalBench):
         """Compose the ``(gap, keywords)`` steering the local-exploration arm."""
         state = self.shared_state
         try:
-            from ..actions.executors._framework_gap_composer import compose_gap
+            from ..actions.executors._framework_gap_composer import GapEvidence, compose_gap
 
             return compose_gap(
                 framework=str(state.framework or ""),
                 gpu_type=str(state.gpu_type or ""),
                 model_class=str(state.model_class or ""),
                 precision=str(state.precision or ""),
-                rewrite_evidence_path=state.last_framework_rewrite_evidence or None,
+                evidence=GapEvidence(rewrite_evidence_path=state.last_framework_rewrite_evidence or None),
             )
         except Exception:
             log.debug("FRAMEWORK: local-explore gap compose failed", exc_info=True)
@@ -2427,9 +2423,11 @@ class FrameworkPhase(ProposalBench):
         )
         if not recorded:
             return
-        record_patch_attempt(
-            self.shared_state,
+        evidence = {**res, **params}  # A lever the dispatch named outranks the one the deliverable names.
+        row = AttemptRow(
+            lever_kind=patch_lever_kind(evidence),
             task_id=str(getattr(task, "task_id", "") or ""),
+            candidate_id=str(evidence.get("framework_agent_candidate_id") or ""),
             specialist_task_id=spec_tid,
             outcome=status,
             adopted=adopted,
@@ -2437,10 +2435,8 @@ class FrameworkPhase(ProposalBench):
             before_tput=res.get("base_tput") if res.get("base_tput") is not None else params.get("base_tput"),
             after_tput=new_tput,
             error_class=str(res.get("error_class") or ""),
-            # The deliverable names the lever when the dispatch did not,
-            # but a dispatch that named one outranks it.
-            evidence={**res, **params},
         )
+        record_attempt_row(self.shared_state, row)
         _record_source_attempt(
             self,
             task=task,

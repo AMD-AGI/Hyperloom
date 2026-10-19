@@ -20,6 +20,7 @@ from hyperloom.orchestrator.actions.executors._setup_replay import (
     SETUP_CMD_MAX,
     refused_setup_commands,
     resolve_setup_commands,
+    SetupLedger,
     run_setup_commands,
 )
 from hyperloom.orchestrator.enablement.recipe.setup_ledger import command_digest
@@ -30,15 +31,11 @@ def _proposed(*commands: str) -> list[tuple[str, str]]:
 
 
 def _run(commands: list[tuple[str, str]], tmp_path: Path, **overrides: Any) -> list[str]:
-    kwargs: dict[str, Any] = {
-        "cwd": tmp_path,
-        "log_dir": tmp_path / "logs",
-        "round_task_id": "r1",
-        "seq_start": 0,
-        "on_execution": lambda _row: None,
-    }
-    kwargs.update(overrides)
-    return run_setup_commands(commands, **kwargs)
+    kwargs: dict[str, Any] = {"cwd": tmp_path, "log_dir": tmp_path / "logs"}
+    ledger: dict[str, Any] = {"round_task_id": "r1", "seq_start": 0, "on_execution": lambda _row: None}
+    for key, value in overrides.items():
+        (ledger if key in ledger else kwargs)[key] = value
+    return run_setup_commands(commands, ledger=SetupLedger(**ledger), **kwargs)
 
 
 def _succeed(monkeypatch, ran: list[str] | None = None) -> None:
@@ -213,9 +210,7 @@ async def test_a_completed_setup_row_is_durable_even_when_the_await_is_cancelled
             _proposed("pip install one", "pip install two"),
             cwd=tmp_path,
             log_dir=tmp_path / "logs",
-            round_task_id="r-cancel",
-            seq_start=0,
-            on_execution=durable.append,
+            ledger=SetupLedger(round_task_id="r-cancel", seq_start=0, on_execution=durable.append),
         )
     )
     # The first command has finished and the second is in flight.

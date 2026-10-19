@@ -16,6 +16,7 @@ from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
 from ..collaborator import CoordinatorCollaborator
 from ..measurement.runtime_findings import render_runtime_findings
+from ..state.shared_state import KbInjection
 from ..phases import machine_state as _phase_state
 from ..policy.gate import (
     PolicyDenied,
@@ -280,13 +281,15 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             return
         params["experience_kb_block"] = evidence.prompt_block
         state.record_experience_kb_injection(
-            consumer="specialist",
-            domain=str(params.get("domain") or ""),
-            gap_canonical_id=str(params.get("gap_canonical_id") or ""),
-            read_id=evidence.read_id,
-            experience_ids=[str(ref.get("id") or "") for ref in evidence.rendered_refs],
-            experiences=[dict(item) for item in evidence.experiences],
-            prompt_block=evidence.prompt_block,
+            KbInjection(
+                consumer="specialist",
+                domain=str(params.get("domain") or ""),
+                gap_canonical_id=str(params.get("gap_canonical_id") or ""),
+                read_id=evidence.read_id,
+                experience_ids=[str(ref.get("id") or "") for ref in evidence.rendered_refs],
+                experiences=[dict(item) for item in evidence.experiences],
+                prompt_block=evidence.prompt_block,
+            )
         )
 
     async def maybe_auto_retry_specialist(
