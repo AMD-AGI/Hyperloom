@@ -8,9 +8,19 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from hyperloom.common.coerce import to_float
+from hyperloom.common.coerce import to_float, to_int
 
-from .base import RenderedSection, as_dict, outcome_of, session_of, stop_reason_of, task_config_of, validation_of
+from ..variant_funnel import VARIANT_COUNTS, variants_from_timeline
+from .base import (
+    RenderedSection,
+    as_dict,
+    outcome_of,
+    session_of,
+    stop_reason_of,
+    task_config_of,
+    timeline_of,
+    validation_of,
+)
 
 __all__ = ["GlobalFacts", "build_global_facts"]
 
@@ -28,6 +38,7 @@ class GlobalFacts:
     capabilities_not_attempted: list[str]
     capabilities_kept: list[str]
     kernel_pipeline_funnel: dict[str, int]  # detected/recommended/optimized/adopted/...
+    variant_funnel: dict[str, Any]  # outcome.variants counts, keep_rate_pct, final_stack, validated_gain_pct
     data_quality_flags: list[str]
     # "stack_ledger" | "unattributed" | "unattributed (stack listed for
     # reference, not verified as KEEP)" | "missing"
@@ -150,6 +161,31 @@ def _kernel_funnel(breakdown: dict[str, Any]) -> dict[str, int]:
     }
 
 
+def _variant_funnel(breakdown: dict[str, Any]) -> dict[str, Any]:
+    """The framework phase's bench runs by how each ended, and the stack the session shipped.
+
+    Read off ``outcome.variants``; a breakdown exported before the block existed
+    is counted off its timeline by the same rule, so re-rendering an older
+    session still reports it.
+
+    Args:
+        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
+
+    Returns:
+        dict[str, Any]: The ``outcome.variants`` counts and ``keep_rate_pct``,
+            plus ``final_stack``, the ledger's adoption count, and
+            ``validated_gain_pct``; each of the last three is ``None`` when the
+            session recorded none.
+    """
+    outcome = outcome_of(breakdown)
+    recorded = as_dict(outcome.get("variants")) or variants_from_timeline(timeline_of(breakdown))
+    funnel: dict[str, Any] = {name: to_int(recorded.get(name), 0) for name in VARIANT_COUNTS}
+    funnel["keep_rate_pct"] = to_float(recorded.get("keep_rate_pct"))
+    funnel["final_stack"] = to_int(validation_of(breakdown).get("adoption_count"))
+    funnel["validated_gain_pct"] = to_float(as_dict(outcome.get("final")).get("gain_pct"))
+    return funnel
+
+
 def _data_quality_flags(
     breakdown: dict[str, Any],
     rendered: list[RenderedSection],
@@ -246,8 +282,8 @@ def build_global_facts(
     """Assemble the deterministic :class:`GlobalFacts` pack for the LLM.
 
     This is the single entry point that combines the workload summary,
-    headline, gain attribution, capability split, kernel funnel and
-    data-quality flags into one fact pack.
+    headline, gain attribution, capability split, kernel and variant funnels
+    and data-quality flags into one fact pack.
 
     Args:
         breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
@@ -271,6 +307,7 @@ def build_global_facts(
         capabilities_not_attempted=not_attempted,
         capabilities_kept=kept,
         kernel_pipeline_funnel=_kernel_funnel(breakdown),
+        variant_funnel=_variant_funnel(breakdown),
         data_quality_flags=_data_quality_flags(breakdown, rendered),
         attribution_method=attribution_method,
     )

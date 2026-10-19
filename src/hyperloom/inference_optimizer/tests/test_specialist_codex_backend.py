@@ -20,6 +20,7 @@ from hyperloom.common.deadline import Deadline
 import hyperloom.orchestrator.roles.claude as claude_role
 import hyperloom.orchestrator.specialists.subprocess_ as sp
 from hyperloom.inference_optimizer.trace import parse_usage as pu
+from hyperloom.orchestrator.specialists.subprocess_ import SpecialistSpawn
 
 AGENT_BACKEND_CLAUDE = llm_config.AGENT_BACKEND_CLAUDE
 AGENT_BACKEND_CODEX = llm_config.AGENT_BACKEND_CODEX
@@ -155,15 +156,17 @@ async def test_openai_only_deployment_runs_the_specialist_on_the_codex_cli(
         )
     )
     result = await dispatcher.run(
-        task_id="t-openai-only",
-        workspace=workspace,
-        worktree=None,
-        worktree_base=None,
-        system_prompt="be a research scout",
-        user_prompt="find the gap",
-        disallowed_tools=frozenset(),
-        max_turns=2,
-        deadline=Deadline.after(60.0),
+        SpecialistSpawn(
+            task_id="t-openai-only",
+            workspace=workspace,
+            worktree=None,
+            worktree_base=None,
+            system_prompt="be a research scout",
+            user_prompt="find the gap",
+            disallowed_tools=frozenset(),
+            max_turns=2,
+            deadline=Deadline.after(60.0),
+        )
     )
 
     assert result.exit_code == 0, (
@@ -207,15 +210,17 @@ async def test_codex_home_is_per_task_and_outside_any_temp_dir(
         )
     )
     result = await dispatcher.run(
-        task_id="t-codex-home",
-        workspace=workspace,
-        worktree=None,
-        worktree_base=None,
-        system_prompt="sys",
-        user_prompt="usr",
-        disallowed_tools=frozenset(),
-        max_turns=1,
-        deadline=Deadline.after(60.0),
+        SpecialistSpawn(
+            task_id="t-codex-home",
+            workspace=workspace,
+            worktree=None,
+            worktree_base=None,
+            system_prompt="sys",
+            user_prompt="usr",
+            disallowed_tools=frozenset(),
+            max_turns=1,
+            deadline=Deadline.after(60.0),
+        )
     )
 
     assert result.done_payload is not None
@@ -550,15 +555,17 @@ async def test_missing_codex_runtime_fails_the_task_instead_of_spawning_claude(
 
     dispatcher = SpecialistSubprocessDispatcher(SpecialistSubprocessConfig(poll_interval_seconds=0.05))
     result = await dispatcher.run(
-        task_id="t-no-codex",
-        workspace=tmp_path / "workspace",
-        worktree=None,
-        worktree_base=None,
-        system_prompt="sys",
-        user_prompt="usr",
-        disallowed_tools=frozenset(),
-        max_turns=1,
-        deadline=Deadline.after(60.0),
+        SpecialistSpawn(
+            task_id="t-no-codex",
+            workspace=tmp_path / "workspace",
+            worktree=None,
+            worktree_base=None,
+            system_prompt="sys",
+            user_prompt="usr",
+            disallowed_tools=frozenset(),
+            max_turns=1,
+            deadline=Deadline.after(60.0),
+        )
     )
 
     assert result.done_payload is None
@@ -578,15 +585,17 @@ async def test_unconfigured_codex_gateway_fails_the_task(
         SpecialistSubprocessConfig(codex_executable="/usr/bin/codex", poll_interval_seconds=0.05)
     )
     result = await dispatcher.run(
-        task_id="t-no-gateway",
-        workspace=tmp_path / "workspace",
-        worktree=None,
-        worktree_base=None,
-        system_prompt="sys",
-        user_prompt="usr",
-        disallowed_tools=frozenset(),
-        max_turns=1,
-        deadline=Deadline.after(60.0),
+        SpecialistSpawn(
+            task_id="t-no-gateway",
+            workspace=tmp_path / "workspace",
+            worktree=None,
+            worktree_base=None,
+            system_prompt="sys",
+            user_prompt="usr",
+            disallowed_tools=frozenset(),
+            max_turns=1,
+            deadline=Deadline.after(60.0),
+        )
     )
     assert result.done_payload is None
     assert "not configured" in result.error
@@ -865,16 +874,18 @@ async def test_codex_secret_opt_out_masks_parent_provider_secrets_before_resolut
             poll_interval_seconds=0.01,
         )
     ).run(
-        task_id="secret-opt-out",
-        workspace=workspace,
-        worktree=None,
-        worktree_base=None,
-        system_prompt="system",
-        user_prompt="user",
-        disallowed_tools=frozenset(),
-        max_turns=1,
-        deadline=Deadline.after(10.0),
-        gpu_lease=lease,
+        SpecialistSpawn(
+            task_id="secret-opt-out",
+            workspace=workspace,
+            worktree=None,
+            worktree_base=None,
+            system_prompt="system",
+            user_prompt="user",
+            disallowed_tools=frozenset(),
+            max_turns=1,
+            deadline=Deadline.after(10.0),
+            gpu_lease=lease,
+        )
     )
 
     assert resolver_overlays
@@ -928,15 +939,17 @@ async def test_codex_child_receives_provider_env_without_secrets_or_prompt_in_ar
             poll_interval_seconds=0.01,
         )
     ).run(
-        task_id="provider-env",
-        workspace=workspace,
-        worktree=None,
-        worktree_base=None,
-        system_prompt="SYSTEM_ROLE_SENTINEL",
-        user_prompt="FULL_USER_PROMPT_SENTINEL",
-        disallowed_tools=frozenset(),
-        max_turns=1,
-        deadline=Deadline.after(10.0),
+        SpecialistSpawn(
+            task_id="provider-env",
+            workspace=workspace,
+            worktree=None,
+            worktree_base=None,
+            system_prompt="SYSTEM_ROLE_SENTINEL",
+            user_prompt="FULL_USER_PROMPT_SENTINEL",
+            disallowed_tools=frozenset(),
+            max_turns=1,
+            deadline=Deadline.after(10.0),
+        )
     )
 
     assert result.exit_code == 0
@@ -983,15 +996,17 @@ async def test_workspace_write_fails_closed_when_bwrap_probe_fails(
             poll_interval_seconds=0.01,
         )
     ).run(
-        task_id="probe-failure",
-        workspace=tmp_path / "workspace",
-        worktree=None,
-        worktree_base=None,
-        system_prompt="system",
-        user_prompt="user",
-        disallowed_tools=frozenset(),
-        max_turns=1,
-        deadline=Deadline.after(10.0),
+        SpecialistSpawn(
+            task_id="probe-failure",
+            workspace=tmp_path / "workspace",
+            worktree=None,
+            worktree_base=None,
+            system_prompt="system",
+            user_prompt="user",
+            disallowed_tools=frozenset(),
+            max_turns=1,
+            deadline=Deadline.after(10.0),
+        )
     )
 
     assert "bubblewrap" in result.error
@@ -1047,17 +1062,19 @@ async def test_ray_codex_launch_uses_replace_env_and_prompt_file_stdin(
             poll_interval_seconds=0.01,
         )
     ).run(
-        task_id="ray-stdin",
-        workspace=workspace,
-        worktree=None,
-        worktree_base=None,
-        system_prompt="ray system",
-        user_prompt="ray user prompt",
-        disallowed_tools=frozenset(),
-        max_turns=1,
-        gpu_ids=(0,),
-        deadline=Deadline.after(10.0),
-        gpu_lease=lease,
+        SpecialistSpawn(
+            task_id="ray-stdin",
+            workspace=workspace,
+            worktree=None,
+            worktree_base=None,
+            system_prompt="ray system",
+            user_prompt="ray user prompt",
+            disallowed_tools=frozenset(),
+            max_turns=1,
+            gpu_ids=(0,),
+            deadline=Deadline.after(10.0),
+            gpu_lease=lease,
+        )
     )
 
     assert result.exit_code == 0
@@ -1121,15 +1138,17 @@ async def test_codex_mcp_config_is_translated_without_credentials_in_config_or_a
             poll_interval_seconds=0.01,
         )
     ).run(
-        task_id="mcp-translation",
-        workspace=workspace,
-        worktree=None,
-        worktree_base=None,
-        system_prompt="mcp system",
-        user_prompt="mcp user",
-        disallowed_tools=frozenset(),
-        max_turns=1,
-        deadline=Deadline.after(10.0),
+        SpecialistSpawn(
+            task_id="mcp-translation",
+            workspace=workspace,
+            worktree=None,
+            worktree_base=None,
+            system_prompt="mcp system",
+            user_prompt="mcp user",
+            disallowed_tools=frozenset(),
+            max_turns=1,
+            deadline=Deadline.after(10.0),
+        )
     )
 
     assert result.exit_code == 0
@@ -1215,16 +1234,18 @@ async def test_codex_mcp_env_rejects_control_and_provider_collisions_before_laun
             poll_interval_seconds=0.01,
         )
     ).run(
-        task_id=f"mcp-collision-{collision_key.lower()}",
-        workspace=workspace,
-        worktree=None,
-        worktree_base=None,
-        system_prompt="system",
-        user_prompt="user",
-        disallowed_tools=frozenset(),
-        max_turns=1,
-        deadline=Deadline.after(10.0),
-        gpu_lease=lease,
+        SpecialistSpawn(
+            task_id=f"mcp-collision-{collision_key.lower()}",
+            workspace=workspace,
+            worktree=None,
+            worktree_base=None,
+            system_prompt="system",
+            user_prompt="user",
+            disallowed_tools=frozenset(),
+            max_turns=1,
+            deadline=Deadline.after(10.0),
+            gpu_lease=lease,
+        )
     )
 
     assert collision_key in result.error
@@ -1317,15 +1338,17 @@ async def test_codex_structured_failure_is_propagated_and_redacted(
             poll_interval_seconds=0.01,
         )
     ).run(
-        task_id="structured-error",
-        workspace=tmp_path / "workspace",
-        worktree=None,
-        worktree_base=None,
-        system_prompt="system",
-        user_prompt="user",
-        disallowed_tools=frozenset(),
-        max_turns=1,
-        deadline=Deadline.after(10.0),
+        SpecialistSpawn(
+            task_id="structured-error",
+            workspace=tmp_path / "workspace",
+            worktree=None,
+            worktree_base=None,
+            system_prompt="system",
+            user_prompt="user",
+            disallowed_tools=frozenset(),
+            max_turns=1,
+            deadline=Deadline.after(10.0),
+        )
     )
 
     assert result.exit_code == 7

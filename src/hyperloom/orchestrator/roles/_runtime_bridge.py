@@ -10,6 +10,9 @@ from typing import Callable, Sequence
 
 from .base import BackendError
 
+#: Characters of the child's stderr kept in a failure message.
+_STDERR_TRUNCATE_CHARS = 500
+
 
 @dataclass
 class RuntimeCall:
@@ -38,7 +41,6 @@ def invoke_runtime_cli(
     agent_label: str,
     timeout_sec: float,
     extra_args: Sequence[str] = (),
-    stderr_truncate: int = 500,
 ) -> None:
     """Run ``python -m <module> <call.phase> --request ... --out ... <extra_args>``."""
     cmd = [
@@ -73,7 +75,7 @@ def invoke_runtime_cli(
     if proc.returncode != 0:
         raise BackendError(
             f"{agent_label} runtime.cli {call.phase} exited rc={proc.returncode}: "
-            f"stderr={proc.stderr.strip()[:stderr_truncate]!r}"
+            f"stderr={proc.stderr.strip()[:_STDERR_TRUNCATE_CHARS]!r}"
         )
 
 
