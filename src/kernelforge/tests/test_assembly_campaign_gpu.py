@@ -21,10 +21,10 @@ if not torch.cuda.get_device_properties(torch.cuda.current_device()).gcnArchName
     pytest.skip("vector-add campaign test targets gfx950", allow_module_level=True)
 pytest.importorskip("flydsl.compiler")
 
-from kernelforge.assembly.prepare import prepare_assembly
+from kernelforge.assembly.prepare import AssemblyTask, prepare_assembly
 from kernelforge.config import Config
 from kernelforge.loop.validation import run_validation_pipeline
-from kernelforge.mcp_server.tools.bench import bench_wallclock
+from kernelforge.mcp_server.tools.bench import BenchRun, bench_wallclock
 
 
 def test_flydsl_capture_wrong_result_and_clean_export(tmp_path, monkeypatch):
@@ -45,12 +45,9 @@ def test_flydsl_capture_wrong_result_and_clean_export(tmp_path, monkeypatch):
     driver = str(workspace / "driver.py")
     record = asyncio.run(
         prepare_assembly(
-            config=Config(workspace=str(workspace), gpu_target="gfx950"),
-            kernel=str(workspace / "kernel.py"),
-            driver=driver,
-            sources=[],
+            Config(workspace=str(workspace), gpu_target="gfx950"),
+            AssemblyTask(kernel=str(workspace / "kernel.py"), driver=driver, sources=[], threshold=50.0),
             base_commit=base,
-            threshold=50.0,
             deadline=time.time() + 1800,
         )
     )
@@ -86,11 +83,13 @@ def test_flydsl_capture_wrong_result_and_clean_export(tmp_path, monkeypatch):
     assert asyncio.run(run_validation_pipeline(str(replay / "driver.py"))).all_passed
     bench = asyncio.run(
         bench_wallclock(
-            str(replay / "driver.py"),
-            driver_args=["--bench-case", "random"],
-            warmup_iters=2,
-            bench_iters=10,
-            repeat=2,
+            BenchRun(
+                str(replay / "driver.py"),
+                driver_args=["--bench-case", "random"],
+                warmup_iters=2,
+                bench_iters=10,
+                repeat=2,
+            )
         )
     )
     assert bench["success"], bench

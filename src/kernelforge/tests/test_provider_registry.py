@@ -11,6 +11,7 @@ import kernelforge.agent_backends.codex as codex_backend
 import kernelforge.agent_backends.registry as registry
 from kernelforge.agent_backends import (
     AgentCapabilities,
+    AgentRuntimeSettings,
     AgentProvider,
     AgentProviderUnavailableError,
     AgentRunResult,
@@ -206,7 +207,7 @@ def test_fallback_provider_failure_raises_combined_error() -> None:
     """When both the primary and fallback providers fail, both names are reported."""
     _register_fake("offlinecli", unavailable=True)
     _register_fake("backupcli", unavailable=True)
-    runtime = resolve_agent_runtime("offlinecli", fallback_provider="backupcli")
+    runtime = resolve_agent_runtime("offlinecli", settings=AgentRuntimeSettings(fallback_provider="backupcli"))
     with pytest.raises(
         AgentProviderUnavailableError,
         match="offlinecli unavailable:.*fallback backupcli unavailable",
@@ -301,10 +302,7 @@ def test_custom_provider_uses_generic_runtime() -> None:
     """Construct a custom backend without changing any core dispatch code."""
     _register_fake("testcli")
     runtime = resolve_agent_runtime(
-        "testcli",
-        executable="/tmp/testcli",
-        timeout_sec=77,
-        options={"flag": "value"},
+        "testcli", settings=AgentRuntimeSettings(executable="/tmp/testcli", timeout_sec=77, options={"flag": "value"})
     )
 
     backend = create_registered_backend(runtime)
@@ -320,10 +318,7 @@ def test_generic_fallback_uses_registered_provider() -> None:
     """Fall back without hard-coding either provider name in dispatch."""
     _register_fake("offlinecli", unavailable=True)
     _register_fake("backupcli", model="backup-model")
-    runtime = resolve_agent_runtime(
-        "offlinecli",
-        fallback_provider="backupcli",
-    )
+    runtime = resolve_agent_runtime("offlinecli", settings=AgentRuntimeSettings(fallback_provider="backupcli"))
 
     backend = create_registered_backend(runtime)
 
@@ -405,12 +400,14 @@ def test_builtin_codex_consumes_generic_runtime() -> None:
     runtime = resolve_agent_runtime(
         "codex",
         model="gpt-test",
-        executable="/tmp/missing-codex",
-        timeout_sec=91,
-        reasoning_effort="medium",
-        sandbox_mode="workspace-write",
-        precheck=False,
-        fallback_provider="",
+        settings=AgentRuntimeSettings(
+            executable="/tmp/missing-codex",
+            timeout_sec=91,
+            reasoning_effort="medium",
+            sandbox_mode="workspace-write",
+            precheck=False,
+            fallback_provider="",
+        ),
     )
 
     backend = create_registered_backend(runtime)
@@ -434,8 +431,7 @@ def test_builtin_codex_uses_generic_fallback_on_preflight(monkeypatch) -> None:
     _register_fake("codexbackup", model="fallback-model")
     runtime = resolve_agent_runtime(
         "codex",
-        executable="/tmp/definitely-missing-codex",
-        fallback_provider="codexbackup",
+        settings=AgentRuntimeSettings(executable="/tmp/definitely-missing-codex", fallback_provider="codexbackup"),
     )
 
     backend = create_registered_backend(runtime)

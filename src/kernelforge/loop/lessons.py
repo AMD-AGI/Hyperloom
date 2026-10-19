@@ -888,20 +888,32 @@ class LessonStore:
         return rendered
 
 
-def format_outcome_line(
-    *,
-    decision: str,
-    wall_ms: float | None,
-    best_wall_ms: float | None,
-    mean_case_speedup: float | None = None,
-    best_mean_case_speedup: float | None = None,
-    snr_db: float | None,
-    end_reason: str,
-    turns: int | None = None,
-    summary_failure: str = "",
-) -> str:
+@dataclass(frozen=True)
+class SessionEnd:
+    """How an implementer session ended, its turn count, and why it left no summary."""
+
+    end_reason: str
+    turns: int | None = None
+    summary_failure: str = ""
+
+
+@dataclass(frozen=True)
+class OutcomeMeasurement:
+    """An iteration's measured result beside the incumbent best it was judged against."""
+
+    wall_ms: float | None
+    best_wall_ms: float | None
+    snr_db: float | None
+    mean_case_speedup: float | None = None
+    best_mean_case_speedup: float | None = None
+
+
+def format_outcome_line(*, decision: str, measurement: OutcomeMeasurement, session: SessionEnd) -> str:
     """One compact, machine-written verdict line for a lesson document."""
     parts = [f"OUTCOME: {decision or 'UNKNOWN'}"]
+    mean_case_speedup, best_mean_case_speedup = measurement.mean_case_speedup, measurement.best_mean_case_speedup
+    wall_ms, best_wall_ms, snr_db = measurement.wall_ms, measurement.best_wall_ms, measurement.snr_db
+    end_reason, turns, summary_failure = session.end_reason, session.turns, session.summary_failure
     if mean_case_speedup is not None:
         measured_speedup = f"mean case speedup {mean_case_speedup:.6f}x"
         if best_mean_case_speedup is not None:
@@ -935,14 +947,21 @@ class SummaryOutcome:
         return bool(self.text)
 
 
+@dataclass(frozen=True)
+class PrReferenceNote:
+    """The upstream PR references a run surfaced: their labels and the rendered context."""
+
+    labels: tuple[str, ...] = ()
+    context: str = ""
+
+
 async def summarize_iteration(
     *,
     store: LessonStore,
     iteration: int,
     end_reason: str,
     summarizer,
-    pr_references: tuple[str, ...] = (),
-    pr_reference_context: str = "",
+    references: PrReferenceNote = PrReferenceNote(),
 ) -> SummaryOutcome:
     """Ask the just-finished implementer session to write its lesson document."""
     if summarizer is None:
@@ -950,8 +969,8 @@ async def summarize_iteration(
     prompt = build_summary_prompt(
         iteration=iteration,
         end_reason=end_reason,
-        pr_references=pr_references,
-        pr_reference_context=pr_reference_context,
+        pr_references=references.labels,
+        pr_reference_context=references.context,
     )
     try:
         text = await summarizer(prompt)
@@ -966,27 +985,33 @@ async def summarize_iteration(
     return SummaryOutcome(text=text)
 
 
+@dataclass(frozen=True)
+class SessionObservations:
+    """What the loop itself saw of a session: its net diff, gate findings, final plan and provider progress."""
+
+    diff_summary: str
+    findings: str
+    plan: str = ""
+    progress_log: list[str] | None = None
+
+
 def build_fallback_document(
+    observed: SessionObservations,
+    session: SessionEnd,
     *,
-    diff_summary: str,
-    findings: str,
-    end_reason: str,
-    summary_failure: str = "",
-    turns: int | None = None,
-    plan: str = "",
-    progress_log: list[str] | None = None,
     max_findings: int = 6,
     max_progress: int = 8,
 ) -> str:
     """Compose a lesson document from what the loop itself observed."""
-    blocks = [line.strip() for line in (findings or "").split("\n---\n") if line.strip()]
+    end_reason, turns, summary_failure, plan = session.end_reason, session.turns, session.summary_failure, observed.plan
+    blocks = [line.strip() for line in (observed.findings or "").split("\n---\n") if line.strip()]
     progress = []
-    for entry in progress_log or []:
+    for entry in observed.progress_log or []:
         compact = " ".join(str(entry).split())
         if not compact or compact.lower().startswith("progress: not supported"):
             continue
         progress.append(compact[:240])
-    diff_summary = (diff_summary or "").strip()
+    diff_summary = (observed.diff_summary or "").strip()
     if not blocks and not diff_summary and not progress:
         return ""
 

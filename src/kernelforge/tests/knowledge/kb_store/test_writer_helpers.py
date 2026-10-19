@@ -258,7 +258,7 @@ def test_summarize_run_returns_defaults_on_llm_failure(monkeypatch):
         raise RuntimeError("no sdk")
 
     monkeypatch.setattr(sink, "_query_llm", boom)
-    out = sink.summarize_run(config=object(), workspace="/w", op="op", digest="d", kernel_source="s")
+    out = sink.summarize_run(config=object(), workspace="/w", prompt=sink._summary_prompt("op", "d", "s"))
     assert out == {"category": "others", "strategy": "", "recipe": "", "lessons": ""}
 
 
@@ -272,7 +272,7 @@ def test_summarize_run_parses_reply(monkeypatch):
 
     monkeypatch.setattr(sink, "_query_llm", reply)
     usage = object()
-    out = sink.summarize_run(config=object(), workspace="/w", op="op", digest="d", kernel_source="s", usage=usage)
+    out = sink.summarize_run(config=object(), workspace="/w", prompt=sink._summary_prompt("op", "d", "s"), usage=usage)
     assert out["category"] == "attention"
     assert out["strategy"] == "tile"
     assert captured["usage"] is usage
