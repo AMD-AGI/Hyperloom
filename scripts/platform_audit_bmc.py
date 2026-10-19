@@ -86,13 +86,13 @@ NAME_BLOCKLIST = re.compile(r"\bsev(?!(?-i:[a-z]))|snp.?support|encrypt", re.I)
 
 
 def run(cmd: list[str], timeout: int = 30, stdin: str | None = None) -> tuple[bool, str, str]:
-    """Run a command, returning ``(ok, stdout, stderr)``. Never raises."""
+    """Run a command, returning ``(ok, stdout, stderr)``; a spawn failure or timeout is a failed result."""
     try:
         r = subprocess.run(  # nosec B603 - fixed argv, no shell.
             cmd, capture_output=True, text=True, timeout=timeout, input=stdin
         )
         return r.returncode == 0, r.stdout, r.stderr
-    except Exception as exc:  # noqa: BLE001 - surfaced to the caller as stderr
+    except (OSError, subprocess.TimeoutExpired) as exc:
         return False, "", str(exc)
 
 
