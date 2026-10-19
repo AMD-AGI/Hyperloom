@@ -12,7 +12,7 @@ and what each reading is allowed to publish.
 from __future__ import annotations
 
 import logging as _logging
-from typing import TYPE_CHECKING, Any, Mapping, NamedTuple
+from typing import Any, Mapping, NamedTuple
 
 from hyperloom.common.perf_metric import GradedComparison
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
@@ -34,9 +34,7 @@ from ..kernel.geak_config import (
 )
 from ..state.shared_state import resolve_graded_comparison, stack_base_params
 from ..state.task_registry import Task
-
-if TYPE_CHECKING:
-    from .writeback import _PromoteOutcome
+from ._promote_outcome import _PromoteOutcome
 
 log = _logging.getLogger(__name__)
 

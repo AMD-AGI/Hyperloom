@@ -7,7 +7,6 @@ from __future__ import annotations
 import os
 import time
 import uuid
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -77,6 +76,7 @@ from ..measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX
 from ._geak_harness_replay import GeakHarnessReplay
 from ._geak_revalidation import GeakRevalidation
 from ._launch_identity import LaunchIdentity
+from ._promote_outcome import _PromoteOutcome
 
 if TYPE_CHECKING:
     from hyperloom.common.perf_metric import GradedComparison
@@ -380,23 +380,6 @@ def _is_patch_column_keep(task_params: Mapping[str, Any], result: Mapping[str, A
 
 class IntegrateRecoveryIncomplete(RuntimeError):
     """An integration cannot publish a result while its recovery is unconfirmed."""
-
-
-@dataclass
-class _PromoteOutcome:
-    """Mutable carrier threaded through the per-kind promote handlers;
-    ``early_return`` skips the shared audit/save tail (conc_sweep).
-
-    ``verdict`` is the settlement's single answer to "was this adopted";
-    ``adopted_variants`` names, by fingerprint, the explore winners whose lift
-    landed."""
-
-    verdict: Verdict
-    adopted_variants: set[str] = field(default_factory=set)
-    changed: bool = False
-    audit_decision: str | None = None
-    audit_extras: dict[str, Any] = field(default_factory=dict)
-    early_return: bool = False
 
 
 def _source_layer_handles(result: Mapping[str, Any]) -> dict[str, Any]:

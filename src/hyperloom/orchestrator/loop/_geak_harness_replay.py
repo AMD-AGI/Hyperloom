@@ -11,7 +11,7 @@ construction, which is what makes a succeeded replay engagement proof.
 from __future__ import annotations
 
 import logging as _logging
-from typing import TYPE_CHECKING, Any, Mapping, NamedTuple
+from typing import Any, Mapping, NamedTuple
 
 from hyperloom.common.env import env_int
 
@@ -24,10 +24,8 @@ from ..kernel.geak_config import (
     _normalize_geak_overlay_dir,
     geak_overlay_is_loadable,
 )
+from ..state.task_registry import Task
 from ._geak_revalidation import FALLBACK, VALIDATED, _GeakRebench, _ReplayRuling
-
-if TYPE_CHECKING:
-    from ..state.task_registry import Task
 
 log = _logging.getLogger(__name__)
 
@@ -287,7 +285,7 @@ class GeakHarnessReplay(CoordinatorCollaborator):
         self,
         result: dict,
         *,
-        task: "Task",
+        task: Task,
         rebench: _GeakRebench,
     ) -> _ReplayRuling:
         """Replay an inconclusive 2b revalidation through the GEAK harness (2a).
