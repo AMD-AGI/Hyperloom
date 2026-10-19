@@ -26,7 +26,7 @@ sources:
 
 | Ruler | What it cancels | Use for |
 |---|---|---|
-| **One process, two module instances, arms interleaved per rep** (load the frozen base file and the candidate file as two modules; median of 6–8 groups) | drift, clocks, allocator state — both arms see them | effects of 0.1–2% that live in the loaded file. *(field)* A-vs-A geomean −0.009% against 0.61% for the per-process scorer |
+| **One process, two module instances, arms interleaved per rep** (load the frozen base file and the candidate file as two modules; median of 6–8 groups) | drift, clocks, allocator state — both arms see them | effects of 0.1–2% that live in the loaded file. *(field)* A-vs-A read −0.009% (geomean) here and 0.61% on the one-process-per-arm scorer |
 | **One process per arm, full score, A B (A B A B)** | nothing within the run; relies on per-arm warmup | changes outside the loaded file (toolchain, other modules, env), final confirmation |
 | Isolated single-op loop | nothing about the surrounding workload | ranking arms of equal occupancy and equal cache behaviour only |
 
@@ -137,7 +137,7 @@ regress is in `flydsl_gemm_autotune.md`.
 
 - **Ablate every component on the full table, including an all-off arm**: BASE → each one off → all
   off → BASE again. Turning off one at a time makes two compensating components look like two
-  winners. *(field)* Two tile pickers, removed one at a time, priced at 1.6% together; removing both
+  winners. *(field)* Removing two tile pickers one at a time cost 1.31% and 0.32% (1.6% summed); removing both
   while keeping the machinery they enabled lost 3.0% — more than reverting the whole change (2.1%).
   The machinery was net negative without its lever.
 - Keep a change only if its price exceeds the BASE-to-BASE drift and its sign agrees across cells.

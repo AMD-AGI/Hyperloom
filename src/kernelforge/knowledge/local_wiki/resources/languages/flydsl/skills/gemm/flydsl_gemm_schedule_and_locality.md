@@ -17,7 +17,8 @@ sources:
 # Wave placement, XCD order, scheduling and epilogue in a FlyDSL GEMM
 
 > Each section here is a place where the obvious move measured in the wrong direction. Read the rule,
-> then check whether your kernel is in the regime it was measured in.
+> then check whether your kernel is in the regime it was measured in. "GH" is Primus-Turbo's
+> `primus_turbo/flydsl/utils/gemm_helper.py` at main `7615a5a2`.
 >
 > Numbers marked *(field)* are measured values. Use them for direction and order of magnitude, not as
 > targets.
@@ -60,12 +61,12 @@ Topology and the basic swizzle are in `../../../../common_methodology/optimizati
 The GEMM-specific rules:
 
 **Decide by what co-resident workgroups reuse.**
-- Each tile streams a **private slab** larger than one XCD's L2: keep the workgroups that share a slab on the same XCD at the same time — cluster across all 8
-  XCDs.
+- Each group of tiles streams **a slab of its own** (shared inside the group, not across the grid) that is larger
+  than one XCD's L2: keep the group's workgroups on the same XCD at the same time — cluster across all 8 XCDs.
 - All tiles read a **shared slice**: clustering by XCD only fragments the
   sharing; the hardware round-robin (`block_id % 8`) with a narrow group-major band wins.
 
-*(field)* Porting one kernel's winning band/XCD setting to another kernel gave −0.8% to −5.7%. Predict the direction from the reuse class, then sweep 3–5 points on every shape class
+*(field)* Porting one kernel's winning band/XCD setting to another kernel made it 0.8% to 5.7% slower. Predict the direction from the reuse class, then sweep 3–5 points on every shape class
 you are scored on.
 
 **How Turbo orders tiles** (Primus-Turbo main `7615a5a2`, `primus_turbo/flydsl/utils/gemm_helper.py` = GH):
@@ -140,7 +141,7 @@ order. For 4 independent MFMAs and 4 global loads:
 - with no hints the order is `L L L L M M M M`;
 - `(mfma 1, vmem 1) × 4` gives `M L M L M L M L`;
 - `(mfma 1, vmem 3) × 4` front-loads the loads: `M L L L M L M M`;
-- two groups only give `M L L M L L M M`: the head is pinned and the tail left free;
+- `(mfma 1, vmem 2) × 2` gives `M L L M L L M M`: the groups pin the head and the leftover MFMAs follow;
 - the compiler prints no warning in any case.
 Read the scheduled ISA after changing a hint table.
 
@@ -161,11 +162,12 @@ load also waits for every earlier store. Consequences:
 **Write a wait as "what may still be in flight", not as a formula of the block shape.** At a phase
 barrier, leave outstanding only the fills that nothing reads before a later phase, and only the
 `ds_read`s whose consumers come after the barrier. Then race the pair:
-- *(field)* On one whole loop, `(vmcnt, lgkmcnt)` of `(10, 9)` and `(16, 15)` were both raced, the
-  deeper one only for K ≥ 8192, with a 2% adoption margin. At `lgkmcnt` ≥ 15 or `vmcnt` ≥ 20 that kernel
-  raced.
-- `lgkmcnt` 15 is the encoding limit of the 4-bit field, not a tuning boundary. The race threshold is
-  per kernel: another whole loop was fastest at 12 and still repeatable at 15.
+- *(field)* On one whole loop, the autotune race offers `(vmcnt, lgkmcnt)` of `(10, 9)` and `(16, 15)`, the
+  deeper pair only for K ≥ 8192 and adopted only at a 2% margin (`_wl_opts`, `_WL_MARGIN`,
+  `gemm_mxfp4_kernel.py:3208, 3274`).
+- `lgkmcnt` 15 is the encoding limit of the 4-bit field, not a tuning boundary. The depth at which a wait
+  stops being bitwise repeatable is per kernel: another whole loop was fastest at 12 and still repeatable at
+  15. Prove any deeper setting by repetition (`flydsl_gemm_correctness.md` §3).
 - *(field)* The lgkm-side partial drain carried over between kernels and precisions (+0.8%). A one-`s_nop`
   pad after the barrier helped MXFP4 and was worth 0.00% on fp8. Port the lgkm side first.
 

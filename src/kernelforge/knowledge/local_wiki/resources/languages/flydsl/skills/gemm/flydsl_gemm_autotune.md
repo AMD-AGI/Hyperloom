@@ -32,7 +32,7 @@ sources:
 For each candidate `(cfg, factory)`:
 1. Build it. Run it once on scratch output. Drop it if it raises, or if the first 1024 outputs are not
    finite. A geometry that does not hold for the shape simply leaves the race.
-2. Run 200 throwaway launches of the leading candidate, so the clock is up before anything is timed
+2. Run 200 throwaway launches of the first candidate in the list (the one timed first), so the clock is up before anything is timed
    (`_PICK_RAMP_ITERS`, FP8:80).
 3. Time every candidate over forward and reversed passes, three round trips, and keep each candidate's
    minimum (`_pick_dense_candidate`, FP8:3067).

@@ -22,7 +22,8 @@ sources:
 > Numbers marked *(field)* are measured values. Use them for direction and order of magnitude, not as
 > targets. ISA statements were checked with `llvm-mc` / `llc -mcpu=gfx950`. "PS" is FlyDSL's
 > `kernels/gemm/preshuffle_gemm.py`; "GH", "PR" and "FP4" are Primus-Turbo's `utils/gemm_helper.py`,
-> `utils/prims.py` and `gemm/gemm_mxfp4_kernel.py` under `primus_turbo/flydsl/` at main `7615a5a2`.
+> `utils/prims.py` and `gemm/gemm_mxfp4_kernel.py` under `primus_turbo/flydsl/` at main `7615a5a2`. "A16" is
+> FlyDSL's `kernels/gemm/gemm_a16w16_gfx950.py`.
 
 ## Route here when
 - An LDS, bank-conflict, swizzle or `lgkmcnt` question in a GEMM.
@@ -93,8 +94,8 @@ phase.
   took about 250 to `vmcnt(0)`. The lgkm count retires before the data arrives, so `lgkmcnt(0)` alone
   does not make a flat load's data ready. Keep hot-loop pointers in the buffer or global address space.
 - `lgkmcnt` also counts scalar memory loads, which return out of order. A long stall on
-  `s_waitcnt lgkmcnt(0)` may be an `s_load`, not LDS; keep scalar loads out of that window rather than
-  "hiding" LDS latency behind them.
+  `s_waitcnt lgkmcnt(0)` may be an `s_load`, not LDS; keep scalar loads out of that window instead of issuing
+  them there to overlap with the LDS wait.
 - LDS data operands may be AGPRs on gfx950 (`ds_read_b32 a0, v1` and `ds_write_b128 v1, a[0:3]`
   assemble); only the address must be a VGPR.
 - `lgkmcnt` is a 4-bit field (max 15) and `vmcnt` a 6-bit field (max 63).
@@ -195,9 +196,9 @@ at most 4 GiB.
   overflows the int32 shape pack.
 - Check SNR on both sides of the 2³¹-element threshold. Equal SNR means there is no overflow break.
 
-## 9. K-major operands: hardware transpose reads
+## 9. K-row operands: hardware transpose reads
 
-- `ds_read_b64_tr_b8` (fp8) and `ds_read_b64_tr_b16` (bf16) read a K-major tile from LDS directly into MFMA
+- `ds_read_b64_tr_b8` (fp8) and `ds_read_b64_tr_b16` (bf16) read a K-row tile (stored `[K, ·]`) from LDS directly into MFMA
   operand order (gfx950 only). Turbo runs NN and TN natively with them, with no transposed copy of either
   operand (`S2RLoaderTr`, GH:1831-1963).
 - Pack the four reads of one fragment onto one base VGPR with immediate offsets. One address VGPR
@@ -234,7 +235,7 @@ at most 4 GiB.
 - **Scales can skip LDS.** Turbo's MXFP4 loads them with `buffer_load_dwordx4` straight into pinned VGPRs
   (FP4:1393-1417). The LDS path delayed consumption by the refill-ahead distance, so a direct load
   must offset its K position by that lag.
-- **Do the scale preshuffle in the same launch.** One `@flyc.jit` host stub launches the preshuffle kernel
+- **Do the scale preshuffle in the same host call.** One `@flyc.jit` host stub launches the preshuffle kernel
   and then the GEMM, so the scales are repacked in stream order with no extra Python dispatch
   (`build_preshuffle_ab_kernel`, GH:2115-2122, 2262). A caller that reuses weights can preshuffle their
   scales once (`preshuffle_mxfp4_scales`, FP4:4877).

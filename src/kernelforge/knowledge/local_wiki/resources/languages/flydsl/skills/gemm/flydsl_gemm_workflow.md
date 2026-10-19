@@ -60,7 +60,7 @@ A kernel with incidental MFMA is not a GEMM, and GEMM advice will not help it.
 ## Step 2 — let the evidence pick the problem
 
 First do the arithmetic that needs no profile: tiles, dispatch rounds and last-round fill
-(`flydsl_gemm_grid_pricing.md` §1). Then rank the evidence: wall time across shapes, an ATT trace
+(`flydsl_gemm_grid_pricing.md` §1). Then gather the evidence in this order: wall time across shapes, an ATT trace
 (`vmcnt`, `lgkmcnt`, `s_barrier`, `ds_*`, `buffer_load_*`, `v_mfma_*`), and the ISA hot loop.
 
 | What the evidence shows | What it usually means |

@@ -35,7 +35,8 @@ sources:
   pairing two columns into one dword already reaches the request floor. Wider stores only save
   instructions.
 - **Pairing pays `64 B ÷ (W × 2 B)` for a W-wide fragment.** For 32-wide MFMA fragments, the scalar store
-  already covers 64 B, so pairing gains nothing there (*(field)* +1.3% against +2.8–3.5% on 16-wide).
+  already covers 64 B, so pairing has no request savings left there. *(field)* It gained +1.3%, against
+  +2.8–3.5% on 16-wide fragments.
 - **At the power cap, store savings show up as clock, not as wall time inside a tile.** *(field)* Deleting a
   GEMM's whole epilogue at the power cap moved a same-process wall probe by 0 ± 1 pp, while the
   benchmark gained. Price store changes with `TCP_TCC_WRITE_REQ` (the mechanism) plus the real benchmark (the
@@ -50,8 +51,9 @@ Run three ablations of the epilogue:
 
 Only (1) moving means the store is byte- or bandwidth-bound, and width or reorder work will not help.
 *(field)* Ablation (2) gave +0.8%, (3) gave −0.5% and (1) gave −20.3%, so the store was
-byte-bound. Check that an ablation arm writes the same `M×N×2` bytes to the same rows. A probe that
-collapses four rows into one also cuts the bytes about 6×, and reads as a false request win.
+byte-bound. Check that an ablation arm writes the same `M×N×2` bytes to the same rows. *(field)* A
+probe that collapsed four rows into one segment also cut the written bytes about 6×, and read as a false
+request win.
 
 *(field)* The "best" epilogue does not carry over between shape families. A permlane wide store was optimal on
 dense 8192²×4096 (16 KB rows, `N % 256 == 0`). The same store was 0.7–1.3% slower on an NT shape with
@@ -129,8 +131,8 @@ At one wave per SIMD nothing overlaps the epilogue unless you put it inside MFMA
   order is keeping (FP8:72-73).
 - For a beta=1 burst too large for L2, use device scope `sc0|sc1|nt` (aux=19). Turbo switches at 26 MB
   (`_cstore_aux`, FP8:74-77, 1885). That threshold is a measured value.
-- **The sign is shape-dependent, so race it.** *(field)* In the MXFP8 GEMM, `nt` cut the wide cells by 4.6%
-  and 3.0% and cost 0.9–1.9% on narrow cells whose slabs were already L2-resident. It is raced at a 1%
+- **The sign is shape-dependent, so race it.** *(field)* In the MXFP8 GEMM, `nt` cut the wide shapes by 4.6%
+  and 3.0% and cost 0.9–1.9% on narrow shapes whose slabs were already L2-resident. It is raced at a 1%
   margin, not pinned (MX8:968-974).
 - **Never mark byte-granular scale stores (E8M0) non-temporal.** They rely on L2 merging the write masks.
   *(field)* In the MXFP8 cast kernels that cost 15–40%.
@@ -155,7 +157,7 @@ At one wave per SIMD nothing overlaps the epilogue unless you put it inside MFMA
 
 ## 7. beta = 1 (accumulate into C)
 
-- Pipeline the read-back: load quadrant i+1 of C behind quadrant i's store (`_store_quadrants`, GH:1528).
+- Pipeline the read-back: load quadrant i+1 of C while quadrant i's store is in flight (`_store_quadrants`, GH:1528).
   Add in f32 so the result is rounded once.
 - **Compile and race against a scratch output.** Compiling runs the kernel once, which would accumulate
   into the caller's C twice (`compile_with_scratch_out`, GH:86-95). Turbo races at beta=0 and rebuilds the
@@ -178,8 +180,8 @@ At one wave per SIMD nothing overlaps the epilogue unless you put it inside MFMA
 - **Measure how much VALU the main loop can absorb before moving work into it.** Insert N dependent FMAs in
   the K-loop gaps with a side-effect sink. *(field)* At occupancy 1, the first 8 FMAs were 65% absorbed and the
   next 8 only 25%. The free pool was about 38% of the epilogue, about 4.8× less than a static estimate.
-- **Two co-resident workgroups (occupancy 2) need `LDS ≤ 80 KiB` and `arch + AGPR ≤ 256` per wave for a
-  4-wave workgroup.** Check both before planning to hide the epilogue behind a second workgroup.
+- **Two co-resident workgroups (occupancy 2) need `LDS ≤ 80 KiB` per workgroup and
+  `arch + AGPR ≤ 256` registers per wave, for 4-wave workgroups.** Check both before planning to hide the epilogue behind a second workgroup.
 - **Make fused operands meet in one lane.** For GLU (B = gate‖up, `[2I, K]`), point the second B pool at the
   *up* band, `I` weight rows further in, instead of at the next columns. `gate[m, j]` and `up[m, j]` then land
   in the same lane at the same fragment index, and the epilogue pairs them without a shuffle (FP4:2281-2283,
