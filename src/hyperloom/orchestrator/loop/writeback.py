@@ -3015,7 +3015,6 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 "validated": False,
                 "reason": repr(exc),
             }
-            geak_result = self.shared_state.geak_result if isinstance(self.shared_state.geak_result, dict) else {}
         if not bool(fallback_result.get("validated")):
             from ..phases.geak_rebench import INCOMPARABLE_REVALIDATION
 
