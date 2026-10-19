@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
 from hyperloom.common import io as _common_io
 from hyperloom.common.coerce import to_float, to_unix
@@ -274,6 +274,66 @@ class AcceptedMetrics:
     e2e_norm_intvty_p90: float | None = None
 
 
+class _AxisGaps(NamedTuple):
+    """Our gap to the matched target row on each axis; ``None`` where the axis cannot be compared."""
+
+    throughput_gap_pct: float | None
+    tpot_ratio: float | None
+    interactivity_gap_pct: float | None
+
+
+def _throughput_gap_pct(target: float | None, ours: Any) -> float | None:
+    """Percent by which our throughput/GPU trails a positive target."""
+    return (target - ours) / target * 100.0 if target and ours and target > 0 else None
+
+
+def _tpot_ratio(target: float | None, ours: Any) -> float | None:
+    """Our TPOT over a positive target TPOT."""
+    return ours / target if target and ours and target > 0 else None
+
+
+def _interactivity_gap_pct(target: float | None, ours: float | None) -> float | None:
+    """Percent by which our interactivity trails the target."""
+    return (target - ours) / target * 100.0 if target and ours else None
+
+
+def _synthetic_primary_gap(gaps: _AxisGaps) -> str:
+    """Latency when our TPOT excess, in percent, exceeds the throughput gap (or zero if that is unknown)."""
+    if gaps.tpot_ratio is not None and gaps.throughput_gap_pct is not None:
+        if (gaps.tpot_ratio - 1.0) * 100.0 > gaps.throughput_gap_pct:
+            return "latency"
+    elif gaps.tpot_ratio is not None and gaps.tpot_ratio > 1.0:
+        return "latency"
+    return "throughput"
+
+
+def _agentx_primary_gap(gaps: _AxisGaps) -> str | None:
+    """Latency when interactivity trails at least as much as throughput, else throughput; ``None`` if neither trails."""
+    if max(gaps.throughput_gap_pct or 0, gaps.interactivity_gap_pct or 0) > 0:
+        return "latency" if (gaps.interactivity_gap_pct or 0) >= (gaps.throughput_gap_pct or 0) else "throughput"
+    return None
+
+
+def _agentx_comparison_status(
+    gaps: _AxisGaps, row: dict[str, Any], target: dict[str, Any], conc: int | None
+) -> dict[str, Any]:
+    """The AgentX status fields of a gap; logs the requested and offered concurrencies when an axis is missing."""
+    available = gaps.throughput_gap_pct is not None or gaps.interactivity_gap_pct is not None
+    reason: ComparisonReason | None = (
+        None if available else "measurement_unavailable" if row else "concurrency_mismatch"
+    )
+    if gaps.throughput_gap_pct is None or gaps.interactivity_gap_pct is None:
+        log.warning(
+            "AgentX comparison: reason=%s requested_conc=%s target_concs=%s throughput_gap=%s interactivity_gap=%s",
+            reason,
+            conc,
+            [r.get("conc") for r in target.get("per_conc", [])],
+            gaps.throughput_gap_pct,
+            gaps.interactivity_gap_pct,
+        )
+    return {"benchmark_mode": "agentx", "status": "ok" if available else "unavailable", "reason": reason}
+
+
 def gap_analysis(
     target: dict[str, Any] | None,
     ours: AcceptedMetrics,
@@ -307,55 +367,21 @@ def gap_analysis(
             for value in (tgt_tput, tgt_inter, to_float(our_tput_per_gpu), to_float(ours.e2e_norm_intvty_p90))
         ]
         our_tpot_ms = None
-
-    throughput_gap_pct: float | None = None
-    if tgt_tput and our_tput_per_gpu and tgt_tput > 0:
-        throughput_gap_pct = (tgt_tput - our_tput_per_gpu) / tgt_tput * 100.0
-
-    tpot_ratio: float | None = None
-    if tgt_tpot and our_tpot_ms and tgt_tpot > 0:
-        tpot_ratio = our_tpot_ms / tgt_tpot
-
-    interactivity_gap_pct: float | None = None
-    if tgt_inter and our_inter:
-        interactivity_gap_pct = (tgt_inter - our_inter) / tgt_inter * 100.0
-
-    primary_gap: str | None = "throughput"
-    if tpot_ratio is not None and throughput_gap_pct is not None:
-        if (tpot_ratio - 1.0) * 100.0 > throughput_gap_pct:
-            primary_gap = "latency"
-    elif tpot_ratio is not None and tpot_ratio > 1.0:
-        primary_gap = "latency"
-
-    if agentx:
-        primary_gap = None
-        if max(throughput_gap_pct or 0, interactivity_gap_pct or 0) > 0:
-            primary_gap = "latency" if (interactivity_gap_pct or 0) >= (throughput_gap_pct or 0) else "throughput"
-
+    gaps = _AxisGaps(
+        throughput_gap_pct=_throughput_gap_pct(tgt_tput, our_tput_per_gpu),
+        tpot_ratio=_tpot_ratio(tgt_tpot, our_tpot_ms),
+        interactivity_gap_pct=_interactivity_gap_pct(tgt_inter, our_inter),
+    )
     gap: dict[str, Any] = {
-        "throughput_gap_pct": throughput_gap_pct,
-        "tpot_ratio": tpot_ratio,
-        "interactivity_gap_pct": interactivity_gap_pct,
-        "primary_gap": primary_gap,
+        "throughput_gap_pct": gaps.throughput_gap_pct,
+        "tpot_ratio": gaps.tpot_ratio,
+        "interactivity_gap_pct": gaps.interactivity_gap_pct,
+        "primary_gap": _agentx_primary_gap(gaps) if agentx else _synthetic_primary_gap(gaps),
         "target_conc": _to_num(row.get("conc")),
         "source": row.get("source"),
     }
-
     if agentx:
-        available = throughput_gap_pct is not None or interactivity_gap_pct is not None
-        reason: ComparisonReason | None = (
-            None if available else "measurement_unavailable" if row else "concurrency_mismatch"
-        )
-        if throughput_gap_pct is None or interactivity_gap_pct is None:
-            log.warning(
-                "AgentX comparison: reason=%s requested_conc=%s target_concs=%s throughput_gap=%s interactivity_gap=%s",
-                reason,
-                conc,
-                [r.get("conc") for r in target.get("per_conc", [])],
-                throughput_gap_pct,
-                interactivity_gap_pct,
-            )
-        gap.update(benchmark_mode="agentx", status="ok" if available else "unavailable", reason=reason)
+        gap.update(_agentx_comparison_status(gaps, row, target, conc))
     return gap
 
 
@@ -486,15 +512,8 @@ def _tokens(text: str) -> set[str]:
     return out
 
 
-def match_variants_to_priors(
-    variants: list[dict[str, Any]],
-    hints: list[dict[str, Any]],
-    *,
-    primary_gap: str | None = None,
-) -> dict[str, dict[str, Any]]:
-    """Annotate which variants align with proven priors (advisory; informs ordering only). Returns ``{name: {hints, latency_aligned}}`` for variants matching a hint or a dominant latency gap; ``hints`` lists the most shared content words first."""
-    out: dict[str, dict[str, Any]] = {}
-    latency_dominant = str(primary_gap or "").strip().lower() == "latency"
+def _hint_tokens(hints: list[dict[str, Any]]) -> list[tuple[str, set[str]]]:
+    """Each usable hint's claim with the content words of the claim and its domain tags."""
     hint_tokens: list[tuple[str, set[str]]] = []
     for h in hints or []:
         if not isinstance(h, dict):
@@ -507,18 +526,35 @@ def match_variants_to_priors(
             toks |= _tokens(tag)
         if toks:
             hint_tokens.append((what, toks))
+    return hint_tokens
+
+
+def _variant_tokens(variant: dict[str, Any]) -> set[str]:
+    """Content words of a variant's name, server args, description and domain tags."""
+    text = " ".join(
+        str(variant.get(k) or "") for k in ("name", "extra_server_args", "candidate_extra_server_args", "description")
+    )
+    text += " " + " ".join(str(t) for t in (variant.get("domain_tags") or []))
+    return _tokens(text)
+
+
+def match_variants_to_priors(
+    variants: list[dict[str, Any]],
+    hints: list[dict[str, Any]],
+    *,
+    primary_gap: str | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Annotate which variants align with proven priors (advisory; informs ordering only). Returns ``{name: {hints, latency_aligned}}`` for variants matching a hint or a dominant latency gap; ``hints`` lists the most shared content words first."""
+    out: dict[str, dict[str, Any]] = {}
+    latency_dominant = str(primary_gap or "").strip().lower() == "latency"
+    hint_tokens = _hint_tokens(hints)
     for variant in variants or []:
         if not isinstance(variant, dict):
             continue
         name = str(variant.get("name") or "").strip()
         if not name:
             continue
-        text = " ".join(
-            str(variant.get(k) or "")
-            for k in ("name", "extra_server_args", "candidate_extra_server_args", "description")
-        )
-        text += " " + " ".join(str(t) for t in (variant.get("domain_tags") or []))
-        vtoks = _tokens(text)
+        vtoks = _variant_tokens(variant)
         overlaps = [(len(vtoks & toks), what) for what, toks in hint_tokens]
         matched_hints = [what for shared, what in sorted(overlaps, key=lambda pair: -pair[0]) if shared]
         latency_aligned = bool(latency_dominant and any(kw in vtoks for kw in _LATENCY_DIRECTION_KEYWORDS))

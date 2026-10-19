@@ -61,6 +61,21 @@ def _tunable_flags(argv: list[str], framework: str) -> str:
     return shlex.join(retained)
 
 
+def _proxy_runtime_env(argv: list[str], observed: Mapping[str, Any], explicit_env: Mapping[str, Any]) -> dict[str, Any]:
+    runtime = dict(observed)
+    for name, value in explicit_env.items():
+        if value is None:
+            runtime.pop(name, None)
+        else:
+            runtime[name] = value
+    if argv and Path(argv[0]).is_absolute():
+        executable_dir = str(Path(argv[0]).parent)
+        runtime["PATH"] = ":".join(part for part in (executable_dir, runtime.get("PATH", "")) if part)
+    for name in ("HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
+        runtime.pop(name, None)
+    return runtime
+
+
 def seed_native_geak_proxy(
     handoff: dict[str, Any], *, benchmark: Mapping[str, Any], measurement: Mapping[str, Any]
 ) -> None:
@@ -79,18 +94,8 @@ def seed_native_geak_proxy(
     if not isinstance(argv, list) or not all(isinstance(arg, str) for arg in argv):
         raise ValueError("Native AgentX GEAK server launch argv is missing")
     flags = _tunable_flags(argv, str(handoff.get("framework") or ""))
-    runtime = dict(evidence.get("runtime_environment") or {})
     explicit_env = evidence.get("effective_env") or {}
-    for name, value in explicit_env.items():
-        if value is None:
-            runtime.pop(name, None)
-        else:
-            runtime[name] = value
-    if argv and Path(argv[0]).is_absolute():
-        executable_dir = str(Path(argv[0]).parent)
-        runtime["PATH"] = ":".join(part for part in (executable_dir, runtime.get("PATH", "")) if part)
-    for name in ("HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
-        runtime.pop(name, None)
+    runtime = _proxy_runtime_env(argv, evidence.get("runtime_environment") or {}, explicit_env)
     spec = copy.deepcopy(handoff.get("baseline_env_spec") or {})
     config = spec.setdefault("config", {})
     config.update({"server_launch_flags": flags, "extra_server_args": "", "extra_envs": runtime})
