@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -158,11 +157,11 @@ def resolve_default_relay_config(
     *,
     blockage_threshold: int = 3,
 ) -> AgentRelayConfig:
-    """Build one profile per provider: the selected primary, plus every provider with a configured model.
+    """Build one profile per registered provider, the selected one first as primary.
 
-    The primary keeps the model the run already resolved (``--model`` or the provider's model variable). Any other
-    registered provider joins only when its own model variable names a model; one without is left out rather than
-    given a guessed default, since a guessed deployment name fails the startup probe or runs an unintended model.
+    Every model follows the rule the primary already uses: ``--model`` for the primary, else the provider's model
+    variable, else the registry's ``default_model``. A model the gateway does not serve fails the startup probe and
+    leaves that profile unavailable rather than running something else.
     """
     from kernelforge.agent_backends.registry import list_agent_providers
 
@@ -172,11 +171,7 @@ def resolve_default_relay_config(
     for provider in list_agent_providers():
         if provider == primary.provider:
             continue
-        model = resolve_agent_model(provider)
-        if not model:
-            print(f"  Agent profile: {provider} not configured (no model set for this provider)", file=sys.stderr)
-            continue
-        runtime = strict_config.agent_runtime_for(provider, model)
+        runtime = strict_config.agent_runtime_for(provider, resolve_agent_model(provider))
         profiles.append(AgentProfile(runtime.provider, runtime.provider, runtime.model, runtime.reasoning_effort))
     return AgentRelayConfig(
         primary_profile_id=primary.provider,

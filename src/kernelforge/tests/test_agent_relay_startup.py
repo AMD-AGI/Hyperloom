@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 import kernelforge.agent_backends.registry as registry
+from kernelforge.agent_backends.registry import get_agent_provider
 from kernelforge.cli.relay import (
     build_search_actor_pool,
     probe_agent_profiles,
@@ -70,20 +71,22 @@ def test_primary_keeps_an_explicit_model_over_its_variable(monkeypatch, tmp_path
     assert [profile.provider for profile in relay_config.profiles] == ["claude", "codex"]
 
 
-def test_provider_without_a_model_variable_is_not_a_relay_profile(monkeypatch, tmp_path, capsys):
-    monkeypatch.setenv("CLAUDE_MODEL", "claude-opus-5")
+def test_unset_model_variables_fall_back_to_registry_defaults(monkeypatch, tmp_path):
+    monkeypatch.delenv("CLAUDE_MODEL", raising=False)
     monkeypatch.delenv("CODEX_MODEL", raising=False)
 
     relay_config = resolve_default_relay_config(
         Config(
             workspace=str(tmp_path),
             agent_backend="claude",
-            agent_model="claude-opus-5",
+            agent_model="",
         )
     )
 
-    assert [profile.profile_id for profile in relay_config.profiles] == ["claude"]
-    assert "codex not configured" in capsys.readouterr().err
+    assert [(profile.profile_id, profile.model) for profile in relay_config.profiles] == [
+        ("claude", get_agent_provider("claude").default_model),
+        ("codex", get_agent_provider("codex").default_model),
+    ]
 
 
 def test_executable_override_stays_with_the_primary_provider(tmp_path):
