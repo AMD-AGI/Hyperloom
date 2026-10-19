@@ -221,6 +221,17 @@ def _parse_tuner_results(
     return results
 
 
+def _rejected_argument(stdout: str, stderr: str) -> str | None:
+    """The line where argparse rejected an argument, or None when it rejected none."""
+    combined = f"{stderr or ''}\n{stdout or ''}"
+    if _UNRECOGNIZED_ARG_MARKER not in combined:
+        return None
+    return next(
+        (ln.strip() for ln in combined.splitlines() if _UNRECOGNIZED_ARG_MARKER in ln),
+        _UNRECOGNIZED_ARG_MARKER,
+    )
+
+
 @dataclass(frozen=True)
 class _BatchRun:
     """The grouped tuning batch: its artifact, how many shapes it was given, its budget and how it exited."""
@@ -362,12 +373,75 @@ class SglangDenseBf16Tuner(BaseTuner):
         tuner_script = _resolve_tuner_script(aiter_root)
         assert tuner_script is not None
 
+        self._warn_about_unread_inputs()
+        untuned_csv, n_expected = self._write_untuned_csv()
+
+        tuned_csv = self.work_dir / "tuned_dense_bf16.csv"
+        profile_csv = self.work_dir / "profile_dense_bf16.csv"
+        # This tuner judges the run by how many rows landed on disk, precisely because the exit code cannot be
+        # trusted.
+        for stale in (tuned_csv, profile_csv):
+            try:
+                stale.unlink(missing_ok=True)
+            except OSError as exc:
+                log.warning("could not clear stale %s: %s", stale, exc)
+        batch_timeout = self._batch_timeout_s(n_expected)
+        tail = self._tuner_args(untuned_csv, tuned_csv, profile_csv, batch_timeout)
+
+        # Ask the script what it accepts before spending minutes on it.
+        filtered = filter_args(tail, probe_script(tuner_script))
+        if not filtered.ok:
+            return TuneResult(
+                tuner_name=self.name,
+                status="failed",
+                error=(
+                    f"{tuner_script} does not accept "
+                    f"{', '.join(filtered.rejected_required)}; without it the tuner has "
+                    "no candidates to search"
+                ),
+                error_class="unsupported_argument",
+                expected_shapes=n_expected,
+            )
+
+        cmd = ["python3", str(tuner_script), *filtered.args]
+
+        # Run from the script's directory: its sibling modules are imported by bare name.
+        cwd = tuner_script.parent
+
+        rc, stdout, stderr = run_subprocess(
+            cmd,
+            cwd=cwd,
+            timeout_s=self.ctx.timeout_s,
+            log_file=self.work_dir / "tune.log",
+        )
+
+        if rc == 124:
+            return self._salvage_timed_out_batch(_BatchRun(tuned_csv, n_expected, batch_timeout, rc), profile_csv)
+
+        rejected = _rejected_argument(stdout, stderr)
+        if rejected is not None:
+            return TuneResult(
+                tuner_name=self.name,
+                status="failed",
+                error=f"{tuner_script} rejected an argument: {rejected}",
+                error_class="unsupported_argument",
+                expected_shapes=n_expected,
+            )
+
+        not_finished = _NOT_FINISHED_MARKER in (stdout or "") or _NOT_FINISHED_MARKER in (stderr or "")
+        return self._judge_exited_batch(
+            _BatchRun(tuned_csv, n_expected, batch_timeout, rc, not_finished=not_finished),
+            profile_csv,
+            stderr,
+        )
+
+    def _write_untuned_csv(self) -> tuple[Path, int]:
+        """Write the shapes to tune, from demand when there is any, and say how many there are."""
         # Always bf16, whatever the checkpoint says: sglang is run with --dtype bf16, so an fp16 checkpoint is still
         # served through the bf16 GEMM and tuning it as fp16 would key the table on a dtype the runtime never looks
         # up.
         dtype_str = "torch.bfloat16"
 
-        self._warn_about_unread_inputs()
         nk_shapes = self._nk_shapes()
 
         m_values = _compute_m_values(self.ctx.conc, thorough=self.ctx.thorough)
@@ -404,18 +478,10 @@ class SglangDenseBf16Tuner(BaseTuner):
                 self.work_dir,
                 dtype=dtype_str,
             )
+        return untuned_csv, n_expected
 
-        tuned_csv = self.work_dir / "tuned_dense_bf16.csv"
-        profile_csv = self.work_dir / "profile_dense_bf16.csv"
-        # This tuner judges the run by how many rows landed on disk, precisely because the exit code cannot be
-        # trusted.
-        for stale in (tuned_csv, profile_csv):
-            try:
-                stale.unlink(missing_ok=True)
-            except OSError as exc:
-                log.warning("could not clear stale %s: %s", stale, exc)
-        batch_timeout = self._batch_timeout_s(n_expected)
-
+    def _tuner_args(self, untuned_csv: Path, tuned_csv: Path, profile_csv: Path, batch_timeout: int) -> list[str]:
+        """The tuner's flags for the grouped batch, before the script's --help has vetted them."""
         # `hipblaslt` is the only libtype gated on TWO conditions: matching --libtype is not enough, --with-hipblaslt
         # must be set as well (gemm_a16w16_tune.py: `if with_hipblaslt and ("all" in libtype or "hipblaslt" in
         # libtype)`).
@@ -427,7 +493,7 @@ class SglangDenseBf16Tuner(BaseTuner):
             libtype_args = ["--libtype", "hipblaslt,torch", "--with-hipblaslt"]
             iters, warmup = min(self.ctx.iters, 50), min(self.ctx.warmup, 10)
 
-        tail = [
+        return [
             "-i",
             str(untuned_csv),
             "-o",
@@ -451,87 +517,47 @@ class SglangDenseBf16Tuner(BaseTuner):
             *libtype_args,
         ]
 
-        # Ask the script what it accepts before spending minutes on it.
-        filtered = filter_args(tail, probe_script(tuner_script))
-        if not filtered.ok:
+    def _salvage_timed_out_batch(self, batch: _BatchRun, profile_csv: Path) -> TuneResult:
+        """Keep the rows a batch killed by the outer timeout had already written, or fail it as timed out."""
+        # Killed by the outer timeout -- but the tuner writes rows as it goes, so some shapes may already be on
+        # disk.
+        tuned_csv, n_expected = batch.tuned_csv, batch.n_expected
+        accuracy = drop_inaccurate_rows(tuned_csv)
+        self._dropped_inaccurate = accuracy.dropped
+        salvaged = _parse_tuner_results(tuned_csv, _parse_profile_defaults(profile_csv))
+        if salvaged and not accuracy.completed:
             return TuneResult(
                 tuner_name=self.name,
                 status="failed",
                 error=(
-                    f"{tuner_script} does not accept "
-                    f"{', '.join(filtered.rejected_required)}; without it the tuner has "
-                    "no candidates to search"
+                    f"Tuning timed out after {self.ctx.timeout_s}s and aiter's accuracy figures "
+                    f"were not applied to {tuned_csv}: {accuracy.reason}"
                 ),
-                error_class="unsupported_argument",
+                error_class="accuracy_filter_incomplete",
                 expected_shapes=n_expected,
             )
-
-        cmd = ["python3", str(tuner_script), *filtered.args]
-
-        # Run from the script's directory: its sibling modules are imported by bare name.
-        cwd = tuner_script.parent
-
-        rc, stdout, stderr = run_subprocess(
-            cmd,
-            cwd=cwd,
-            timeout_s=self.ctx.timeout_s,
-            log_file=self.work_dir / "tune.log",
+        if salvaged:
+            log.warning(
+                "Dense BF16: timed out after %ds but %d of %d shapes were already written; keeping them",
+                self.ctx.timeout_s,
+                len(salvaged),
+                n_expected,
+            )
+            return self._build_result(salvaged, batch, forced_status="partial_output")
+        return TuneResult(
+            tuner_name=self.name,
+            status="failed",
+            error=f"Tuning timed out after {self.ctx.timeout_s}s with no rows written",
+            error_class="timeout",
+            expected_shapes=n_expected,
         )
 
-        if rc == 124:
-            # Killed by the outer timeout -- but the tuner writes rows as it goes, so some shapes may already be on
-            # disk.
-            accuracy = drop_inaccurate_rows(tuned_csv)
-            self._dropped_inaccurate = accuracy.dropped
-            salvaged = _parse_tuner_results(tuned_csv, _parse_profile_defaults(profile_csv))
-            if salvaged and not accuracy.completed:
-                return TuneResult(
-                    tuner_name=self.name,
-                    status="failed",
-                    error=(
-                        f"Tuning timed out after {self.ctx.timeout_s}s and aiter's accuracy figures "
-                        f"were not applied to {tuned_csv}: {accuracy.reason}"
-                    ),
-                    error_class="accuracy_filter_incomplete",
-                    expected_shapes=n_expected,
-                )
-            if salvaged:
-                log.warning(
-                    "Dense BF16: timed out after %ds but %d of %d shapes were already written; keeping them",
-                    self.ctx.timeout_s,
-                    len(salvaged),
-                    n_expected,
-                )
-                return self._build_result(
-                    salvaged,
-                    _BatchRun(tuned_csv, n_expected, batch_timeout, rc),
-                    forced_status="partial_output",
-                )
-            return TuneResult(
-                tuner_name=self.name,
-                status="failed",
-                error=f"Tuning timed out after {self.ctx.timeout_s}s with no rows written",
-                error_class="timeout",
-                expected_shapes=n_expected,
-            )
-
-        combined = f"{stderr or ''}\n{stdout or ''}"
-        if _UNRECOGNIZED_ARG_MARKER in combined:
-            rejected = next(
-                (ln.strip() for ln in combined.splitlines() if _UNRECOGNIZED_ARG_MARKER in ln),
-                _UNRECOGNIZED_ARG_MARKER,
-            )
-            return TuneResult(
-                tuner_name=self.name,
-                status="failed",
-                error=f"{tuner_script} rejected an argument: {rejected}",
-                error_class="unsupported_argument",
-                expected_shapes=n_expected,
-            )
-
+    def _judge_exited_batch(self, batch: _BatchRun, profile_csv: Path, stderr: str) -> TuneResult:
+        """Judge a batch that exited on its own by the rows it left in the artifact."""
         # The exit code cannot decide success here. gemm_a16w16_tune.py returns 1 even when every shape tuned, and the
         # gemm_tuner.py shim rewrites that same 1 into a 0 -- so failing on `rc != 0` throws away good results, while
         # trusting `rc == 0` accepts an empty run.
+        tuned_csv, n_expected = batch.tuned_csv, batch.n_expected
         defaults = _parse_profile_defaults(profile_csv)
         # Before anything reads the artifact: this file IS what gets deployed, so a row aiter measured as wrong must
         # not survive to serving.
@@ -539,11 +565,10 @@ class SglangDenseBf16Tuner(BaseTuner):
         self._dropped_inaccurate = accuracy.dropped
         shape_results = _parse_tuner_results(tuned_csv, defaults)
         total = len(shape_results)
-        not_finished = _NOT_FINISHED_MARKER in (stdout or "") or _NOT_FINISHED_MARKER in (stderr or "")
 
         if total == 0:
-            detail = f"rc={rc}"
-            if not_finished:
+            detail = f"rc={batch.rc}"
+            if batch.not_finished:
                 detail += f", aiter reported {_NOT_FINISHED_MARKER}"
             return TuneResult(
                 tuner_name=self.name,
@@ -564,10 +589,7 @@ class SglangDenseBf16Tuner(BaseTuner):
                 expected_shapes=n_expected,
             )
 
-        return self._build_result(
-            shape_results,
-            _BatchRun(tuned_csv, n_expected, batch_timeout, rc, not_finished=not_finished),
-        )
+        return self._build_result(shape_results, batch)
 
     def _build_result(
         self,
