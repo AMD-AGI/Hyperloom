@@ -358,6 +358,17 @@ def _prepare(mapping: CollectMapping, unit: dict[str, Any], base: Path) -> _Proj
     return projected
 
 
+def _project_unit(mapping: CollectMapping, unit: dict[str, Any], unit_id: str, base: Path) -> _Projected | SkippedUnit:
+    try:
+        return _prepare(mapping, unit, base)
+    except _Skip as skip:
+        return SkippedUnit(unit_id, skip.reason)
+    except EvaluationError as exc:
+        return SkippedUnit(unit_id, f"mapping evaluation failed: {exc}")
+    except SchemaValidationError as exc:
+        return SkippedUnit(unit_id, f"schema validation failed: {exc}")
+
+
 def _with_paths(values: Mapping[str, FieldValue], files: Mapping[str, Path]) -> dict[str, SessionValue]:
     """``values`` as a session takes them: each ``FileRef`` as the local file it was made from."""
 
@@ -486,16 +497,9 @@ def collect(
         if blocked:
             skipped.append(SkippedUnit(unit_id, blocked))
             continue
-        try:
-            projected = _prepare(compiled, unit, base)
-        except _Skip as skip:
-            skipped.append(SkippedUnit(unit_id, skip.reason))
-            continue
-        except EvaluationError as exc:
-            skipped.append(SkippedUnit(unit_id, f"mapping evaluation failed: {exc}"))
-            continue
-        except SchemaValidationError as exc:
-            skipped.append(SkippedUnit(unit_id, f"schema validation failed: {exc}"))
+        projected = _project_unit(compiled, unit, unit_id, base)
+        if isinstance(projected, SkippedUnit):
+            skipped.append(projected)
             continue
         experience = projected.experience
         if target is None:

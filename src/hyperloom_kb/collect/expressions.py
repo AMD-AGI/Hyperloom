@@ -448,7 +448,7 @@ def _binding_name(value: Any, where: str) -> str:
     return value
 
 
-def _compile_call(node: Mapping[str, Any], names: frozenset[str], where: str) -> Expression:
+def _call_head(node: Mapping[str, Any], where: str) -> str:
     heads = [key for key in node if key in BUILTINS]
     if len(heads) != 1:
         raise MappingError(
@@ -460,6 +460,11 @@ def _compile_call(node: Mapping[str, Any], names: frozenset[str], where: str) ->
     extra = sorted(str(key) for key in node if key not in allowed)
     if extra:
         raise MappingError(f"{where}: {head} does not accept {', '.join(extra)}")
+    return head
+
+
+def _compile_call(node: Mapping[str, Any], names: frozenset[str], where: str) -> Expression:
+    head = _call_head(node, where)
     location = f"{where}.{head}"
     argument = node[head]
     if head in UNARY:
