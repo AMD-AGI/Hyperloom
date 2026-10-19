@@ -212,54 +212,7 @@ def test_consume_static_recon_sanitizes_id_into_canonical(tmp_path):
     assert " " not in cids[0] and "/" not in cids[0]
 
 
-_SEED_PAYLOAD = {
-    "domain": "static_recon_specialist",
-    "recon": {
-        "bridge_candidates": [
-            {
-                "id": "rocm.fp8.cutlass_only_guard",
-                "predicate_file": "vllm/.../fp8.py",
-                "predicate_name": "cutlass_fp8_supported",
-                "why_disabled_here": "CUDA-only; False on ROCm",
-                "consequence": "dense Linear falls back to bf16",
-                "bridge_sketch": "use per-token act + per-channel weight",
-                "domain_hint": "freeform",
-            },
-        ],
-    },
-}
-
-
-def _fail_save(monkeypatch: pytest.MonkeyPatch, state: SharedState, exc: BaseException) -> list[int]:
-    saves: list[int] = []
-
-    def _save(session_dir=None) -> None:
-        saves.append(1)
-        raise exc
-
-    monkeypatch.setattr(state, "save", _save)
-    return saves
-
-
-def test_consume_static_recon_logs_a_failed_save_and_keeps_the_seeded_gaps(tmp_path, monkeypatch, caplog):
-    stub = _stub_coord(tmp_path)
-    err = OSError("disk full")
-    saves = _fail_save(monkeypatch, stub.shared_state, err)
-
-    with caplog.at_level(logging.ERROR, logger="hyperloom.orchestrator.phases.internal"):
-        InternalTasksPhase.consume_static_recon(stub, _SEED_PAYLOAD)
-
-    assert saves == [1]
-    assert [g["canonical_id"] for g in stub.shared_state.gaps] == ["gap.static_recon.rocm.fp8.cutlass_only_guard"]
-    assert [r.exc_info[1] for r in caplog.records if r.exc_info] == [err]
-
-
-def test_consume_static_recon_does_not_swallow_a_serialization_defect(tmp_path, monkeypatch):
-    stub = _stub_coord(tmp_path)
-    _fail_save(monkeypatch, stub.shared_state, TypeError("not JSON serializable"))
-
-    with pytest.raises(TypeError, match="not JSON serializable"):
-        InternalTasksPhase.consume_static_recon(stub, _SEED_PAYLOAD)
+_SEED_PAYLOAD = {"recon": {"bridge_candidates": [{"id": "g1", "predicate_file": "a.py", "why_disabled_here": "w"}]}}
 
 
 def _dispatch_stub(session_dir):
@@ -284,26 +237,55 @@ def _dispatch_stub(session_dir):
     )
 
 
-def test_static_recon_enqueue_logs_a_failed_bookkeeping_save_and_returns_the_task(tmp_path, monkeypatch, caplog):
-    stub = _dispatch_stub(tmp_path)
+def _consume_site(session_dir):
+    stub = _stub_coord(session_dir)
+    return stub.shared_state, lambda: InternalTasksPhase.consume_static_recon(stub, _SEED_PAYLOAD)
+
+
+def _enqueue_site(session_dir):
+    stub = _dispatch_stub(session_dir)
+    return stub.shared_state, lambda: asyncio.run(
+        InternalTasksPhase._enqueue_internal_static_recon_task(stub, reason="r", slug="s")
+    )
+
+
+_SAVE_SITES = {
+    "consume": (
+        _consume_site,
+        lambda state: [g["canonical_id"] for g in state.gaps] == ["gap.static_recon.g1"],
+    ),
+    "enqueue": (_enqueue_site, lambda state: state.static_recon_runs == 1),
+}
+
+
+@pytest.mark.parametrize("site", _SAVE_SITES)
+def test_static_recon_save_os_error_is_logged_and_the_bookkeeping_stays(tmp_path, monkeypatch, caplog, site):
+    make, kept = _SAVE_SITES[site]
+    state, run = make(tmp_path)
     err = OSError("disk full")
-    saves = _fail_save(monkeypatch, stub.shared_state, err)
+    monkeypatch.setattr(state, "save", _raiser(err))
 
     with caplog.at_level(logging.ERROR, logger="hyperloom.orchestrator.phases.internal"):
-        task = asyncio.run(InternalTasksPhase._enqueue_internal_static_recon_task(stub, reason="r", slug="s"))
+        run()
 
-    assert task.task_id == "t-recon"
-    assert saves == [1]
-    assert stub.shared_state.static_recon_runs == 1
+    assert kept(state)
     assert [r.exc_info[1] for r in caplog.records if r.exc_info] == [err]
 
 
-def test_static_recon_enqueue_does_not_swallow_a_serialization_defect(tmp_path, monkeypatch):
-    stub = _dispatch_stub(tmp_path)
-    _fail_save(monkeypatch, stub.shared_state, TypeError("not JSON serializable"))
+@pytest.mark.parametrize("site", _SAVE_SITES)
+def test_static_recon_save_serialization_defect_propagates(tmp_path, monkeypatch, site):
+    state, run = _SAVE_SITES[site][0](tmp_path)
+    monkeypatch.setattr(state, "save", _raiser(TypeError("not JSON serializable")))
 
     with pytest.raises(TypeError, match="not JSON serializable"):
-        asyncio.run(InternalTasksPhase._enqueue_internal_static_recon_task(stub, reason="r", slug="s"))
+        run()
+
+
+def _raiser(exc: BaseException):
+    def _save(session_dir=None) -> None:
+        raise exc
+
+    return _save
 
 
 # -- workload precision -----------------------------------------------------

@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import subprocess
 
 import httpx
@@ -70,114 +69,64 @@ def serve(monkeypatch: pytest.MonkeyPatch):
     def _install(routes: dict[str, list[object]], state: dict[str, object]) -> list[str]:
         calls: list[str] = []
         monkeypatch.setattr(life, "_read_state", lambda: state)
+        monkeypatch.setattr(life, "is_multi_node", lambda: True)
         monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: _Client(routes, calls))
         return calls
 
     return _install
 
 
-_OK_HEALTH = _Resp(200)
-_MODELS = _Resp(200, {"data": [{"id": "m"}]})
-_COMPLETION = _Resp(200, {"usage": {"completion_tokens": 8}})
+_OK = _Resp(200)
+_BASE = {
+    "health": [_OK],
+    "models": [_Resp(200, {"data": [{"id": "m"}]})],
+    "completions": [_Resp(200, {"usage": {"completion_tokens": 8}})],
+}
 _INFERA = {"backend": "infera", "service_url": "http://front:8000"}
-
-
-def test_profile_trigger_logs_a_transport_failure_and_continues(serve, monkeypatch, caplog) -> None:
-    monkeypatch.setattr(life, "is_multi_node", lambda: True)
-    serve({"stop": [httpx.ConnectError("refused")]}, _INFERA)
-
-    with caplog.at_level(logging.WARNING, logger=life.log.name):
-        asyncio.run(life.trigger_infera_engine_profile("stop"))
-
-    assert [r.getMessage() for r in caplog.records] == [
-        "infera profile stop -> http://front:8000/v1/admin/profile/stop failed (refused); continuing"
-    ]
-
-
-def test_profile_trigger_lets_a_non_transport_failure_propagate(serve, monkeypatch) -> None:
-    monkeypatch.setattr(life, "is_multi_node", lambda: True)
-    serve({"stop": [RuntimeError("client bug")]}, _INFERA)
-
-    with pytest.raises(RuntimeError, match="client bug"):
-        asyncio.run(life.trigger_infera_engine_profile("stop"))
-
-
 _WORKERS = {"prefill_pods": [{"podIP": "10.0.0.1", "podId": "p0"}]}
 
 
-def test_worker_wait_polls_through_a_transport_failure(serve) -> None:
-    calls = serve({"health": [httpx.ConnectError("refused"), _OK_HEALTH]}, _WORKERS)
-
-    assert asyncio.run(life._wait_for_workers_ready_async(timeout_s=600, poll_every_s=1)) is None
-    assert calls == ["health", "health"]
+def _profile() -> None:
+    asyncio.run(life.trigger_infera_engine_profile("stop"))
 
 
-def test_worker_wait_lets_a_non_transport_failure_propagate(serve) -> None:
-    serve({"health": [RuntimeError("client bug"), _OK_HEALTH]}, _WORKERS)
-
-    with pytest.raises(RuntimeError, match="client bug"):
-        asyncio.run(life._wait_for_workers_ready_async(timeout_s=600, poll_every_s=1))
+def _workers() -> None:
+    asyncio.run(life._wait_for_workers_ready_async(timeout_s=600, poll_every_s=1))
 
 
-@pytest.fixture
-def one_completion(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("HYPERLOOM_MN_COMPLETION_PROBE_COUNT", "1")
-
-
-def _health_wait() -> None:
+def _health() -> None:
     asyncio.run(life._wait_for_server_health_async(timeout_s=600, poll_every_s=1))
 
 
-def test_health_wait_polls_through_a_health_transport_failure(serve) -> None:
-    calls = serve({"health": [httpx.ReadTimeout("slow"), _OK_HEALTH]}, {"service_url": "http://front:8000"})
-
-    _health_wait()
-
-    assert calls == ["health", "health"]
-
-
-def test_health_wait_polls_through_a_models_transport_failure(serve, one_completion) -> None:
-    calls = serve(
-        {
-            "health": [_OK_HEALTH],
-            "models": [httpx.ConnectError("refused"), _MODELS],
-            "completions": [_COMPLETION],
-        },
-        _INFERA,
-    )
-
-    _health_wait()
-
-    assert calls == ["health", "models", "health", "models", "completions"]
+# site -> (state, routes, call, endpoints requested when its first request fails once)
+_SITES = {
+    "profile": (_INFERA, {"stop": [_OK]}, _profile, ["stop"]),
+    "workers": (_WORKERS, {"health": [_OK]}, _workers, ["health", "health"]),
+    "health": ({"service_url": "http://front:8000"}, {"health": [_OK]}, _health, ["health", "health"]),
+    "models": (_INFERA, _BASE, _health, ["health", "models", "health", "models", "completions"]),
+    "completions": (_INFERA, _BASE, _health, ["health", "models", "completions", "health", "models", "completions"]),
+}
 
 
-def test_health_wait_polls_through_a_completion_transport_failure(serve, one_completion) -> None:
-    calls = serve(
-        {
-            "health": [_OK_HEALTH],
-            "models": [_MODELS],
-            "completions": [httpx.ReadTimeout("slow"), _COMPLETION],
-        },
-        _INFERA,
-    )
-
-    _health_wait()
-
-    assert calls == ["health", "models", "completions", "health", "models", "completions"]
+def _run_site(serve, monkeypatch, site: str, failure: BaseException) -> list[str]:
+    state, base, call, expected = _SITES[site]
+    monkeypatch.setenv("HYPERLOOM_MN_COMPLETION_PROBE_COUNT", "1")
+    stage = "stop" if site == "profile" else "health" if site in ("workers", "health") else site
+    calls = serve({**base, stage: [failure, *base[stage]]}, state)
+    call()
+    return calls
 
 
-@pytest.mark.parametrize("stage", ["health", "models", "completions"])
-def test_health_wait_lets_a_non_transport_failure_propagate(serve, one_completion, stage) -> None:
-    routes: dict[str, list[object]] = {
-        "health": [_OK_HEALTH],
-        "models": [_MODELS],
-        "completions": [_COMPLETION],
-    }
-    routes[stage] = [RuntimeError("client bug"), *routes[stage]]
-    serve(routes, _INFERA)
+@pytest.mark.parametrize("failure", [httpx.ConnectError("refused"), httpx.ReadTimeout("slow")])
+@pytest.mark.parametrize("site", _SITES)
+def test_probes_poll_through_a_transport_failure(serve, monkeypatch, site, failure) -> None:
+    assert _run_site(serve, monkeypatch, site, failure) == _SITES[site][3]
 
+
+@pytest.mark.parametrize("site", _SITES)
+def test_probes_let_a_non_transport_failure_propagate(serve, monkeypatch, site) -> None:
     with pytest.raises(RuntimeError, match="client bug"):
-        _health_wait()
+        _run_site(serve, monkeypatch, site, RuntimeError("client bug"))
 
 
 _SSH_STATE = {
@@ -213,22 +162,21 @@ def _ssh_answering(failure_for: str, error: BaseException):
     return _fake
 
 
+def _pods_with_first(**overrides) -> dict:
+    first = {"podIP": "10.0.0.1", "podId": "p0", **overrides}
+    return {**_SSH_STATE, "prefill_pods": [first, *_SSH_STATE["prefill_pods"][1:]]}
+
+
 @pytest.mark.parametrize(
-    "error",
-    [OSError("ssh missing"), subprocess.TimeoutExpired(cmd="ssh", timeout=60)],
+    ("state", "error"),
+    [
+        (_SSH_STATE, OSError("ssh missing")),
+        (_SSH_STATE, subprocess.TimeoutExpired(cmd="ssh", timeout=60)),
+        (_pods_with_first(sshPort="not-a-port"), OSError("unused")),
+    ],
 )
-def test_log_sweep_skips_a_pod_whose_ssh_cannot_run(collect, error) -> None:
-    assert collect(_SSH_STATE, _ssh_answering("10.0.0.1", error)) == ["prefill_p1.log"]
-
-
-@pytest.mark.parametrize("port", ["not-a-port"])
-def test_log_sweep_skips_a_pod_with_an_unusable_ssh_port(collect, port) -> None:
-    state = {
-        **_SSH_STATE,
-        "prefill_pods": [{"podIP": "10.0.0.1", "podId": "p0", "sshPort": port}, *_SSH_STATE["prefill_pods"][1:]],
-    }
-
-    assert collect(state, _ssh_answering("none", OSError("unused"))) == ["prefill_p1.log"]
+def test_log_sweep_skips_a_pod_whose_ssh_cannot_run(collect, state, error) -> None:
+    assert collect(state, _ssh_answering("10.0.0.1", error)) == ["prefill_p1.log"]
 
 
 def test_log_sweep_lets_an_unexpected_ssh_failure_propagate(collect) -> None:
