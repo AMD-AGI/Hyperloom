@@ -17,6 +17,8 @@ import pytest
 from hyperloom.orchestrator.enablement.runtime.build_actions import TargetedBuildAction
 from hyperloom.orchestrator.enablement.runtime.targeted_build import (
     _driver_main,
+    _load_result_json,
+    _read_build_system_requires,
     run_aiter_build,
     run_sgl_kernel_build,
     run_vllm_source_build,
@@ -1099,34 +1101,37 @@ _RECIPES = {
     "vllm_source": (run_vllm_source_build, _vllm_action, _make_rocm_run),
 }
 
+# stage -> (failure_class, summary prefix, expected exception instances)
+_STAGES = {
+    "disk": (
+        "preflight_disk",
+        "disk preflight raised: ",
+        (OSError("no space"), ValueError("bad disk floor")),
+    ),
+    "workspace": (
+        "compile_error",
+        "workspace preparation failed: ",
+        (
+            OSError("no space"),
+            subprocess.CalledProcessError(128, ["git", "clone"]),
+            subprocess.TimeoutExpired(cmd="git clone", timeout=1800),
+        ),
+    ),
+    "constraints": (
+        "preflight_toolchain",
+        "ROCm constraint probe failed: ",
+        (
+            OSError("python vanished"),
+            subprocess.TimeoutExpired(cmd="probe", timeout=30),
+            RuntimeError("could not determine torch version"),
+        ),
+    ),
+}
+_EXPECTED = [(stage, exc) for stage, (_, _, excs) in _STAGES.items() for exc in excs]
+_EXPECTED_IDS = [f"{stage}-{type(exc).__name__}" for stage, exc in _EXPECTED]
 
-def _run_recipe(recipe, monkeypatch, tmp_path, *, run=None, disk=_noop_disk):
-    build, make_action, make_run = _RECIPES[recipe]
-    wt = tmp_path / "wt"
-    (wt / "sgl-kernel").mkdir(parents=True)
-    (wt / "python").mkdir()
-    venv = tmp_path / "venv"
-    (venv / "bin").mkdir(parents=True)
-    _patch_isolation(monkeypatch, wt, venv)
-    return build(
-        make_action(),
-        str(tmp_path / "attempt"),
-        run=run or make_run(),
-        git=_make_git(),
-        disk_preflight_fn=disk,
-    )
 
-
-def _raising(exc):
-    def _fn(*_a, **_kw):
-        raise exc
-
-    return _fn
-
-
-def _run_failing_on(needle, exc, recipe):
-    ok_run = _RECIPES[recipe][2]()
-
+def _failing_on(needle, exc, ok_run):
     def _run(argv, **kw):
         if needle in " ".join(str(a) for a in argv):
             raise exc
@@ -1135,175 +1140,111 @@ def _run_failing_on(needle, exc, recipe):
     return _run
 
 
-@pytest.mark.parametrize("recipe", list(_RECIPES))
-@pytest.mark.parametrize("failure", [OSError("no space"), ValueError("bad disk floor")], ids=["oserror", "valueerror"])
-def test_a_disk_preflight_that_cannot_run_fails_the_build(monkeypatch, tmp_path, recipe, failure):
-    result = _run_recipe(recipe, monkeypatch, tmp_path, disk=_raising(failure))
-    assert result.ok is False
-    assert result.failure_class == "preflight_disk"
-    assert result.failure_summary == f"disk preflight raised: {failure!r}"
-
-
-@pytest.mark.parametrize("recipe", list(_RECIPES))
-def test_an_unexpected_disk_preflight_failure_propagates(monkeypatch, tmp_path, recipe):
-    with pytest.raises(TypeError, match="bad preflight"):
-        _run_recipe(recipe, monkeypatch, tmp_path, disk=_raising(TypeError("bad preflight")))
-
-
-_WORKSPACE_FAILURES = (
-    OSError("no space"),
-    subprocess.CalledProcessError(128, ["git", "clone"]),
-    subprocess.TimeoutExpired(cmd="git clone", timeout=1800),
-)
-
-
-@pytest.mark.parametrize("recipe", list(_RECIPES))
-@pytest.mark.parametrize("failure", _WORKSPACE_FAILURES, ids=["oserror", "called-process", "timeout"])
-def test_a_workspace_that_cannot_be_prepared_fails_the_build(monkeypatch, tmp_path, recipe, failure):
+def _run_recipe(recipe, monkeypatch, tmp_path, *, stage, exc):
+    """Run a recipe with ``exc`` injected at ``stage`` (a ``_STAGES`` key or the vLLM build-requires pre-install)."""
     import hyperloom.agents.framework.isolation as iso_mod
 
-    monkeypatch.setattr(iso_mod, "prepare_repo_cache", _raising(failure))
     build, make_action, make_run = _RECIPES[recipe]
-    result = build(
-        make_action(), str(tmp_path / "attempt"), run=make_run(), git=_make_git(), disk_preflight_fn=_noop_disk
-    )
-    assert result.ok is False
-    assert result.failure_class == "compile_error"
-    assert result.failure_summary == f"workspace preparation failed: {failure!r}"
-
-
-@pytest.mark.parametrize("recipe", list(_RECIPES))
-def test_an_unexpected_workspace_failure_propagates(monkeypatch, tmp_path, recipe):
-    import hyperloom.agents.framework.isolation as iso_mod
-
-    monkeypatch.setattr(iso_mod, "prepare_repo_cache", _raising(TypeError("bad repo url")))
-    build, make_action, make_run = _RECIPES[recipe]
-    with pytest.raises(TypeError, match="bad repo url"):
-        build(make_action(), str(tmp_path / "attempt"), run=make_run(), git=_make_git(), disk_preflight_fn=_noop_disk)
-
-
-_CONSTRAINT_FAILURES = (
-    OSError("python vanished"),
-    subprocess.TimeoutExpired(cmd="probe", timeout=30),
-    RuntimeError("could not determine torch version"),
-)
-
-
-@pytest.mark.parametrize("recipe", list(_RECIPES))
-@pytest.mark.parametrize("failure", _CONSTRAINT_FAILURES, ids=["oserror", "timeout", "runtimeerror"])
-def test_a_constraint_probe_that_cannot_run_fails_the_build(monkeypatch, tmp_path, recipe, failure):
-    run = _run_failing_on("named={'torch'", failure, recipe)
-    result = _run_recipe(recipe, monkeypatch, tmp_path, run=run)
-    assert result.ok is False
-    assert result.failure_class == "preflight_toolchain"
-    assert result.failure_summary == f"ROCm constraint probe failed: {failure!r}"
-
-
-@pytest.mark.parametrize("recipe", list(_RECIPES))
-def test_an_unexpected_constraint_probe_failure_propagates(monkeypatch, tmp_path, recipe):
-    run = _run_failing_on("named={'torch'", TypeError("bad probe"), recipe)
-    with pytest.raises(TypeError, match="bad probe"):
-        _run_recipe(recipe, monkeypatch, tmp_path, run=run)
-
-
-def _vllm_tree(tmp_path):
     wt = tmp_path / "wt"
-    (wt / "vllm").mkdir(parents=True)
+    (wt / "sgl-kernel").mkdir(parents=True)
+    (wt / "python").mkdir()
+    (wt / "vllm").mkdir()
     (wt / "vllm" / "_C.so").write_bytes(b"\x7fELF")
     (wt / "pyproject.toml").write_text('[build-system]\nrequires = ["setuptools>=61"]\n', encoding="utf-8")
     venv = tmp_path / "venv"
     (venv / "bin").mkdir(parents=True)
-    return wt, venv
+    _patch_isolation(monkeypatch, wt, venv)
+
+    def _raise(*_a, **_kw):
+        raise exc
+
+    disk, run = _noop_disk, make_run()
+    if stage == "disk":
+        disk = _raise
+    elif stage == "workspace":
+        monkeypatch.setattr(iso_mod, "prepare_repo_cache", _raise)
+    elif stage == "constraints":
+        run = _failing_on("named={'torch'", exc, run)
+    elif stage == "build_requires":
+        run = _failing_on("pip install setuptools>=61", exc, run)
+    return build(make_action(), str(tmp_path / "attempt"), run=run, git=_make_git(), disk_preflight_fn=disk)
 
 
-def _build_vllm(tmp_path, run):
-    return run_vllm_source_build(
-        _vllm_action(), str(tmp_path / "attempt"), run=run, git=_make_git(), disk_preflight_fn=_noop_disk
-    )
+@pytest.mark.parametrize("recipe", list(_RECIPES))
+@pytest.mark.parametrize(("stage", "failure"), _EXPECTED, ids=_EXPECTED_IDS)
+def test_an_expected_setup_failure_fails_the_build(monkeypatch, tmp_path, recipe, stage, failure):
+    failure_class, prefix, _ = _STAGES[stage]
+    result = _run_recipe(recipe, monkeypatch, tmp_path, stage=stage, exc=failure)
+    assert result.ok is False
+    assert result.failure_class == failure_class
+    assert result.failure_summary == f"{prefix}{failure!r}"
+
+
+_UNEXPECTED = [(r, s) for r in _RECIPES for s in _STAGES] + [("vllm_source", "build_requires")]
+
+
+@pytest.mark.parametrize(("recipe", "stage"), _UNEXPECTED)
+def test_an_unexpected_setup_failure_propagates(monkeypatch, tmp_path, recipe, stage):
+    if stage == "build_requires":
+        pytest.importorskip("tomllib")
+    with pytest.raises(TypeError, match="unexpected setup failure"):
+        _run_recipe(recipe, monkeypatch, tmp_path, stage=stage, exc=TypeError("unexpected setup failure"))
 
 
 def test_a_build_requires_pre_install_that_cannot_spawn_is_skipped(monkeypatch, tmp_path):
     pytest.importorskip("tomllib")
-    wt, venv = _vllm_tree(tmp_path)
-    _patch_isolation(monkeypatch, wt, venv)
-    result = _build_vllm(tmp_path, _run_failing_on("pip install setuptools>=61", OSError("no pip"), "vllm_source"))
+    result = _run_recipe("vllm_source", monkeypatch, tmp_path, stage="build_requires", exc=OSError("no pip"))
     assert result.ok is True
     assert result.failure_class == "ok"
-
-
-def test_an_unexpected_build_requires_failure_propagates(monkeypatch, tmp_path):
-    pytest.importorskip("tomllib")
-    wt, venv = _vllm_tree(tmp_path)
-    _patch_isolation(monkeypatch, wt, venv)
-    run = _run_failing_on("pip install setuptools>=61", TypeError("bad argv"), "vllm_source")
-    with pytest.raises(TypeError, match="bad argv"):
-        _build_vllm(tmp_path, run)
 
 
 # Build artifacts read back from disk
 
 
-def test_load_result_json_reads_a_written_result(tmp_path):
-    from hyperloom.orchestrator.enablement.runtime.build_actions import BuildResult
-    from hyperloom.orchestrator.enablement.runtime.targeted_build import _load_result_json
-
-    expected = BuildResult(ok=False, attempt_root=str(tmp_path), failure_class="compile_error", error="boom")
-    (tmp_path / "result.json").write_text(json.dumps(expected.to_state()), encoding="utf-8")
-    assert _load_result_json(str(tmp_path)) == expected
-
-
 @pytest.mark.parametrize("content", [None, b"{not json", b"\xff\xfe\x00"], ids=["missing", "corrupt", "not-utf8"])
 def test_load_result_json_is_none_when_the_result_cannot_be_read(tmp_path, content):
-    from hyperloom.orchestrator.enablement.runtime.targeted_build import _load_result_json
-
     if content is not None:
         (tmp_path / "result.json").write_bytes(content)
-    assert _load_result_json(str(tmp_path)) is None
+    loaded = _load_result_json(str(tmp_path))
+    assert loaded is None
 
 
 def test_load_result_json_propagates_a_result_of_the_wrong_shape(tmp_path):
-    from hyperloom.orchestrator.enablement.runtime.targeted_build import _load_result_json
-
     (tmp_path / "result.json").write_text("[1]", encoding="utf-8")
     with pytest.raises(AttributeError, match="'list' object has no attribute 'get'"):
         _load_result_json(str(tmp_path))
 
 
-def test_build_system_requires_drops_the_torch_pins(tmp_path):
-    pytest.importorskip("tomllib")
-    from hyperloom.orchestrator.enablement.runtime.targeted_build import _read_build_system_requires
-
-    (tmp_path / "pyproject.toml").write_text(
-        '[build-system]\nrequires = ["setuptools>=61", "torch==2.9", "torchvision"]\n', encoding="utf-8"
-    )
-    assert _read_build_system_requires(tmp_path) == ["setuptools>=61", "torchvision"]
+_PINNED = b'[build-system]\nrequires = ["setuptools>=61", "torch==2.9", "torchvision"]\n'
 
 
 @pytest.mark.parametrize(
-    "content", [None, b"[build-system", b"\xff\xfe\x00"], ids=["missing", "invalid-toml", "not-utf8"]
+    ("content", "expected"),
+    [(_PINNED, ["setuptools>=61", "torchvision"]), (None, []), (b"[build-system", []), (b"\xff\xfe\x00", [])],
+    ids=["torch-pins-dropped", "missing", "invalid-toml", "not-utf8"],
 )
-def test_build_system_requires_is_empty_when_the_pyproject_cannot_be_read(tmp_path, content):
+def test_build_system_requires_reads_the_pyproject_or_is_empty(tmp_path, content, expected):
     pytest.importorskip("tomllib")
-    from hyperloom.orchestrator.enablement.runtime.targeted_build import _read_build_system_requires
-
     if content is not None:
         (tmp_path / "pyproject.toml").write_bytes(content)
-    assert _read_build_system_requires(tmp_path) == []
+    requires = _read_build_system_requires(tmp_path)
+    assert requires == expected
 
 
 def test_build_system_requires_is_empty_without_tomllib(monkeypatch, tmp_path):
-    from hyperloom.orchestrator.enablement.runtime.targeted_build import _read_build_system_requires
-
-    (tmp_path / "pyproject.toml").write_text('[build-system]\nrequires = ["setuptools"]\n', encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_bytes(_PINNED)
     monkeypatch.setitem(sys.modules, "tomllib", None)
-    assert _read_build_system_requires(tmp_path) == []
+    requires = _read_build_system_requires(tmp_path)
+    assert requires == []
 
 
 def test_build_system_requires_propagates_an_unexpected_parser_failure(monkeypatch, tmp_path):
     tomllib = pytest.importorskip("tomllib")
-    from hyperloom.orchestrator.enablement.runtime.targeted_build import _read_build_system_requires
+    (tmp_path / "pyproject.toml").write_bytes(_PINNED)
 
-    (tmp_path / "pyproject.toml").write_text('[build-system]\nrequires = ["setuptools"]\n', encoding="utf-8")
-    monkeypatch.setattr(tomllib, "loads", _raising(RuntimeError("parser exploded")))
+    def _explode(*_a, **_kw):
+        raise RuntimeError("parser exploded")
+
+    monkeypatch.setattr(tomllib, "loads", _explode)
     with pytest.raises(RuntimeError, match="parser exploded"):
         _read_build_system_requires(tmp_path)
