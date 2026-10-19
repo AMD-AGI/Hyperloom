@@ -32,7 +32,7 @@ import yaml
 
 from hyperloom.common.coerce import to_str_list
 from hyperloom.inference_optimizer.runtime_environment import prepend_launch_path
-from hyperloom.common.env import is_truthy
+from hyperloom.common.env import env_bool, env_flag, is_truthy
 from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.common.perf_metric import (
     AGENTX_KEEP_P50_THRESHOLD_PCT,
@@ -65,10 +65,12 @@ from ._profile_capture import (
     _AtomTracelensCaps,
     _ProfileConfig,
     _ProfileKnobs,
+    _ProfileTarget,
     _fit_profile_capture_window,
     _profiler_bound_holds,
     _profiler_flag_value,
     _shape_profile_trace,
+    profile_target,
 )
 from hyperloom.inference_optimizer.grid_server_args import (
     compact_json_server_args,
@@ -91,6 +93,8 @@ from ._server_patcher import (
 from hyperloom.inference_optimizer.model_config_utils import (
     _fp8_is_per_channel_per_token,
     _load_model_config_dict,
+    _model_is_gemma2,
+    _sparse_kv_block_size,
 )
 
 log = logging.getLogger(__name__)
@@ -1231,6 +1235,37 @@ def _settle_tracelens_patch(envs: dict[str, str], framework: str) -> _TracelensP
     return _TracelensPatch(sglang_sitecustomize=sitecustomize, applied=False)
 
 
+def _shape_discovery_enabled(bench: dict[str, Any]) -> bool:
+    """Whether this profile may ask the server to record kernel shapes.
+
+    Shape discovery balloons an eager + with_stack trace, so
+    HYPERLOOM_PROFILE_SHAPE_DISCOVERY turns it off wholesale. Gemma2 crashes
+    CUDA-graph capture with it, so the model gates it too;
+    HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE=1 skips only that second gate.
+    """
+    if not env_flag("HYPERLOOM_PROFILE_SHAPE_DISCOVERY", default=True):
+        return False
+    if env_bool("HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE"):
+        return True
+    model = str(bench.get("model") or "")
+    if not _model_is_gemma2(model):
+        return True
+    log.info(
+        "Gemma2 roofline: disabling shape-discovery to avoid "
+        "CUDA-graph capture crash (hipErrorStreamCapture"
+        "Unsupported); CUDA graph + profiling kept. Set "
+        "HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE=1 to override.",
+    )
+    if _load_model_config_dict(model) is None:
+        log.warning(
+            "Gemma2 detected via path heuristic (no readable "
+            "config.json at %r); shape-discovery skip may be "
+            "imprecise.",
+            model,
+        )
+    return False
+
+
 def _apply_profile_config(envs: dict[str, str], bench: dict[str, Any], shape: _WorkloadShape) -> _ProfileConfig:
     """Shape a non-scriptable profile run, and report what it capped.
 
@@ -1246,17 +1281,18 @@ def _apply_profile_config(envs: dict[str, str], bench: dict[str, Any], shape: _W
     # The profile server runs at the resolved profile OSL, decoupled from --osl.
     envs["OSL"] = window.osl_val
     framework = str(bench.get("framework") or "").lower()
+    target = profile_target(framework)
     patch = _settle_tracelens_patch(envs, framework)
     return _shape_profile_trace(
         envs,
-        bench,
         config._replace(osl_val=window.osl_val, profile_num_prompts=window.num_prompts),
         _ProfileKnobs(
-            framework=framework,
+            target=target,
             delay_iters=window.delay_iters,
             max_iters=window.max_iters,
             sglang_sitecustomize=patch.sglang_sitecustomize,
             tracelens_patch_ok=patch.applied,
+            shape_discovery=target is _ProfileTarget.REQUEST_BODY and _shape_discovery_enabled(bench),
         ),
     )
 
@@ -1294,12 +1330,12 @@ def _publish_quality_reference(
 
     Magpie forwards only ``benchmark.envs`` to the wrapper subprocess, so the
     reference is re-injected at this single scriptable choke point or the shipped
-    empty YAML default silently skips the gate. What the reference holds is the
-    workload's business -- an xDiT image, an operator's own artifact -- so the
-    default path under ``session_dir()`` is a convention, not a contract. The
-    baseline ESTABLISHES the reference, so a stale prior-session file cannot
-    mislead it; every other variant only COMPARES, so a degraded variant can never
-    overwrite it; a profile neither gates nor writes.
+    empty YAML default silently skips the gate. What it holds is the workload's
+    business -- an xDiT image, an operator's own artifact -- so the default path
+    under ``session_dir()`` is a convention, not a contract. The baseline
+    ESTABLISHES the reference, so a stale prior-session file cannot mislead it;
+    every other variant only COMPARES, so a degraded one can never overwrite it;
+    a profile neither gates nor writes.
     """
     if not framework_registry.is_scriptable(bench.get("framework")):
         return
@@ -1352,20 +1388,44 @@ def _publish_xdit_model_resolution(
         envs["XDIT_ATTENTION_BACKEND"] = os.environ.get("XDIT_ATTENTION_BACKEND", "").strip() or "aiter"
 
 
+def _pin_sparse_kv_block_size(envs: dict[str, str], workload: _Workload) -> None:
+    """Pin the KV-cache block size a sparse-attention model can actually allocate.
+
+    Models like MiniMax-M3 (MSA) place the main K/V and the indexer side-cache in
+    one KV-cache group whose sparse backends only accept the model's
+    ``sparse_attention_config.sparse_block_size``; vLLM's default ``--block-size
+    16`` has no common block size with it, so KV-cache init aborts and baseline,
+    roofline and every explore variant crash at startup. Pinning it here makes it
+    ride EXTRA_VLLM_ARGS on every path, including roofline, which seeds from the
+    current-best delta. vLLM-only: sglang rejects ``--block-size``. An unreadable
+    config (an uncached hub id) injects nothing.
+    """
+    if "vllm" not in str(workload.bench.get("framework") or "").lower():
+        return
+    block_size = _sparse_kv_block_size(str(workload.model_path or workload.bench.get("model") or ""))
+    if not block_size:
+        return
+    add_server_arg_unless_pinned(
+        envs,
+        workload.bench.get("framework"),
+        f"--block-size {block_size}",
+        pinned_by=("block-size", "block_size"),
+    )
+
+
 def _pin_model_derived_envs(envs: dict[str, str], workload: _Workload) -> None:
     """Pin the client and kernel settings this model's own configuration calls for.
 
-    The MI300X bench scripts always launch the SERVER with ``--trust-remote-code``,
-    so a custom-tokenizer model's CLIENT has to load the same remote code or
-    transformers raises mid-warmup; and trusting remote code is not enough when
-    transformers cannot map the ``model_type`` at all, so the client is also told
-    which loader to use. The third pin is sglang's FP8 fast path: a dense FP8
-    checkpoint with per-channel weight and per-token (dynamic) activation falls
-    into the slow unfused ``_apply_fallback_scaled_mm`` in ``apply_fp8_linear``
-    unless this env flips ``use_per_token_if_dynamic`` on and routes the GEMM to
-    aiter's CK ``gemm_a8w8_bpreshuffle``; it is scoped to sglang + fp8 + gfx942 +
-    that exact quant scheme, so per-tensor and block-scale FP8 are never touched.
-    Every pin is a setdefault, so an operator opt-out always wins.
+    The bench scripts always launch the SERVER with ``--trust-remote-code``, so a
+    custom-tokenizer model's CLIENT has to load the same remote code or
+    transformers raises mid-warmup -- and that is not enough when transformers
+    cannot map the ``model_type`` at all, so the client is told which loader to
+    use. The last pin is sglang's FP8 fast path: without it a per-channel weight
+    + per-token (dynamic) activation checkpoint takes the slow unfused
+    ``_apply_fallback_scaled_mm`` instead of aiter's CK
+    ``gemm_a8w8_bpreshuffle``; scoped to that exact quant scheme on gfx942, so
+    per-tensor and block-scale FP8 are never touched. Every pin is a setdefault,
+    so an operator opt-out always wins.
     """
     from hyperloom.inference_optimizer.gpu_types import _resolve_amd_gpu_type
 
@@ -1408,7 +1468,8 @@ def _apply_framework_envs(
     )
     _publish_xdit_model_resolution(envs, workload.bench, establish_quality_ref=establish_quality_ref)
     model_basename = Path(str(workload.model_path or os.environ.get("MODEL_PATH", ""))).name.lower()
-    pin_model_launch_workarounds(envs, workload.bench, workload.model_path, model_basename)
+    pin_model_launch_workarounds(envs, workload.bench, model_basename)
+    _pin_sparse_kv_block_size(envs, workload)
     _pin_model_derived_envs(envs, workload)
     return model_basename
 

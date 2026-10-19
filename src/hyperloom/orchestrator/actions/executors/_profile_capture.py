@@ -18,13 +18,10 @@ import os
 import re
 import subprocess
 from functools import cache
+from enum import Enum
 from typing import Any, Mapping, NamedTuple, Sequence
 
-from hyperloom.common.env import env_bool, env_flag, is_truthy
-from hyperloom.inference_optimizer.model_config_utils import (
-    _load_model_config_dict,
-    _model_is_gemma2,
-)
+from hyperloom.common.env import is_truthy
 from hyperloom.inference_optimizer.runtime_environment import prepend_launch_path
 from ._benchmark_interpreter import _resolve_probe_python
 
@@ -202,14 +199,35 @@ class _ProfileConfig(NamedTuple):
     profile_num_prompts: int | None = None
 
 
-class _ProfileKnobs(NamedTuple):
-    """What the capture window and the patched framework settled for a profile."""
+class _ProfileTarget(Enum):
+    """The capture mechanism a framework offers a profile run."""
 
-    framework: str
+    #: ATOM drives its own iteration count over HTTP, via atom_mi*x.sh.
+    ATOM_HTTP = "atom_http"
+    #: vLLM takes a capture window through its own ``--profiler-config.*`` flags.
+    VLLM_PROFILER = "vllm_profiler"
+    #: SGLang and the other serving frameworks take a ``/start_profile`` body.
+    REQUEST_BODY = "request_body"
+
+
+def profile_target(framework: str) -> _ProfileTarget:
+    """The capture mechanism this framework offers."""
+    if "atom" in framework:
+        return _ProfileTarget.ATOM_HTTP
+    if "vllm" in framework:
+        return _ProfileTarget.VLLM_PROFILER
+    return _ProfileTarget.REQUEST_BODY
+
+
+class _ProfileKnobs(NamedTuple):
+    """What the capture window, the patched framework and the model settled for a profile."""
+
+    target: _ProfileTarget
     delay_iters: int
     max_iters: int
     sglang_sitecustomize: bool
     tracelens_patch_ok: bool
+    shape_discovery: bool
 
 
 class _ProfileWindow(NamedTuple):
@@ -391,37 +409,6 @@ def _profile_request_body(envs: Mapping[str, Any]) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _shape_discovery_enabled(bench: Mapping[str, Any]) -> bool:
-    """Whether this profile asks the server to record kernel shapes.
-
-    Shape discovery balloons an eager + with_stack trace, so
-    HYPERLOOM_PROFILE_SHAPE_DISCOVERY turns it off wholesale. Gemma2 crashes
-    CUDA-graph capture with it, so the model gates it too;
-    HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE=1 skips only that second gate.
-    """
-    if not env_flag("HYPERLOOM_PROFILE_SHAPE_DISCOVERY", default=True):
-        return False
-    if env_bool("HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE"):
-        return True
-    model = str(bench.get("model") or "")
-    if not _model_is_gemma2(model):
-        return True
-    log.info(
-        "Gemma2 roofline: disabling shape-discovery to avoid "
-        "CUDA-graph capture crash (hipErrorStreamCapture"
-        "Unsupported); CUDA graph + profiling kept. Set "
-        "HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE=1 to override.",
-    )
-    if _load_model_config_dict(model) is None:
-        log.warning(
-            "Gemma2 detected via path heuristic (no readable "
-            "config.json at %r); shape-discovery skip may be "
-            "imprecise.",
-            model,
-        )
-    return False
-
-
 def _publish_shape_tool_path(envs: dict[str, str], body: dict[str, Any], *, shape_discovery: bool) -> None:
     """Point an unpatched SGLang at the kernel-shape tool and record the body it takes.
 
@@ -475,45 +462,36 @@ def _publish_patched_shape_discovery(
             envs["EXTRA_SGLANG_ARGS"] = f"{existing_sglang} --enable-shape-discovery-for-cuda-graph-profile".strip()
 
 
-def _request_sglang_profile_annotations(
-    envs: dict[str, str],
-    bench: dict[str, Any],
-    knobs: _ProfileKnobs,
-) -> None:
+def _request_sglang_profile_annotations(envs: dict[str, str], knobs: _ProfileKnobs) -> None:
     """Ask the SGLang server for the capture window and annotations this profile needs."""
     body = _profile_request_body(envs)
     # Always override start_step/num_steps (the template has CONC=8 placeholders).
     body["start_step"] = knobs.delay_iters
     body["num_steps"] = knobs.max_iters
-    shape_discovery = _shape_discovery_enabled(bench)
     if knobs.sglang_sitecustomize:
-        _publish_shape_tool_path(envs, body, shape_discovery=shape_discovery)
+        _publish_shape_tool_path(envs, body, shape_discovery=knobs.shape_discovery)
     else:
         _publish_patched_shape_discovery(
             envs,
             body,
-            shape_discovery=shape_discovery,
+            shape_discovery=knobs.shape_discovery,
             tracelens_patch_ok=knobs.tracelens_patch_ok,
         )
 
 
-def _shape_profile_trace(
-    envs: dict[str, str],
-    bench: dict[str, Any],
-    config: _ProfileConfig,
-    knobs: _ProfileKnobs,
-) -> _ProfileConfig:
-    """Shape the trace a profile run captures, per framework.
+def _shape_profile_trace(envs: dict[str, str], config: _ProfileConfig, knobs: _ProfileKnobs) -> _ProfileConfig:
+    """Shape the trace a profile run captures, through the mechanism its framework offers.
 
     ATOM drives its own iteration count, so the request count is pinned to the
     concurrency and the caps come from TraceLens; the serving frameworks take a
-    capture window instead, written into the flags their profiler reads.
+    capture window instead, written into the flags or the request body their
+    profiler reads.
     """
-    if "atom" in knobs.framework:
+    if knobs.target is _ProfileTarget.ATOM_HTTP:
         # ATOM has no delay/max-iteration window; extra prompts only grow
         # the HTTP-bracketed trace. Force NUM_PROMPTS=CONC.
         return config._replace(atom_caps=_atom_tracelens_caps(), profile_num_prompts=config.conc_val)
-    if "vllm" in knobs.framework:
+    if knobs.target is _ProfileTarget.VLLM_PROFILER:
         return _bound_vllm_profiler_capture(envs, config, knobs)
-    _request_sglang_profile_annotations(envs, bench, knobs)
+    _request_sglang_profile_annotations(envs, knobs)
     return config
