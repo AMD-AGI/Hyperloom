@@ -48,8 +48,6 @@ layers =
 ignore_imports =
     hyperloom.**.tests.** -> **
     kernelforge.tests.** -> **
-    kernelforge.**.tests.** -> **
-    kernelforge.conftest -> **
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._aiter_jit
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._partition_shape
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._subprocess_kill
@@ -121,8 +119,6 @@ forbidden_modules =
 ignore_imports =
     hyperloom.**.tests.** -> **
     kernelforge.tests.** -> **
-    kernelforge.**.tests.** -> **
-    kernelforge.conftest -> **
 unmatched_ignore_imports_alerting = none
 
 
@@ -148,8 +144,6 @@ forbidden_modules =
 ignore_imports =
     hyperloom.**.tests.** -> **
     kernelforge.tests.** -> **
-    kernelforge.**.tests.** -> **
-    kernelforge.conftest -> **
 unmatched_ignore_imports_alerting = none
 
 
@@ -176,8 +170,6 @@ forbidden_modules =
 ignore_imports =
     hyperloom.**.tests.** -> **
     kernelforge.tests.** -> **
-    kernelforge.**.tests.** -> **
-    kernelforge.conftest -> **
 unmatched_ignore_imports_alerting = none
 
 
@@ -194,8 +186,6 @@ forbidden_modules =
 ignore_imports =
     hyperloom.**.tests.** -> **
     kernelforge.tests.** -> **
-    kernelforge.**.tests.** -> **
-    kernelforge.conftest -> **
 unmatched_ignore_imports_alerting = none
 
 
@@ -210,8 +200,6 @@ modules =
 ignore_imports =
     hyperloom.**.tests.** -> **
     kernelforge.tests.** -> **
-    kernelforge.**.tests.** -> **
-    kernelforge.conftest -> **
 unmatched_ignore_imports_alerting = none
 
 
@@ -232,8 +220,6 @@ modules =
 ignore_imports =
     hyperloom.**.tests.** -> **
     kernelforge.tests.** -> **
-    kernelforge.**.tests.** -> **
-    kernelforge.conftest -> **
 unmatched_ignore_imports_alerting = none
 
 
@@ -251,8 +237,6 @@ allow_indirect_imports = True
 ignore_imports =
     hyperloom.**.tests.** -> **
     kernelforge.tests.** -> **
-    kernelforge.**.tests.** -> **
-    kernelforge.conftest -> **
 unmatched_ignore_imports_alerting = none
 
 
@@ -267,8 +251,6 @@ ancestors =
 ignore_imports =
     hyperloom.**.tests.** -> **
     kernelforge.tests.** -> **
-    kernelforge.**.tests.** -> **
-    kernelforge.conftest -> **
     hyperloom.common.llm_config -> hyperloom.common.claude_oneshot
     hyperloom.inference_optimizer.breakdown.critic_reviews -> hyperloom.inference_optimizer.breakdown.collectors._common
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._aiter_jit

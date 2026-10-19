@@ -24,7 +24,7 @@ from kernelforge.knowledge.kb_store.record_store import (
 )
 
 from kernelforge.tests.test_rewrite_by_flydsl_kb import InMemoryKBStore, _remote_config
-from kernelforge.conftest import kb_store_run_config as _remote_config_with_token
+from kernelforge.tests.conftest import kb_store_run_config as _remote_config_with_token
 from kernelforge.knowledge.kb_store.identity.run import LoopKernel
 from kernelforge.loop.knowledge_integration import WarmStartHarness
 

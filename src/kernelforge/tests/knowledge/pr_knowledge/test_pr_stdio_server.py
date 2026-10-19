@@ -15,7 +15,7 @@ from kernelforge.knowledge.pr_knowledge.search import PRLifecycle, PRReference, 
 from kernelforge.mcp_server import pr_stdio_server as server
 from kernelforge.mcp_server import stdio_transport
 
-from kernelforge.conftest import SRC_ROOT
+from kernelforge.tests.conftest import SRC_ROOT
 
 
 def _call(method, params=None):

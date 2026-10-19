@@ -167,7 +167,7 @@ class TestDropInaccurateRows:
         assert csv_path.read_text(encoding="utf-8").strip() == _HDR
 
     def test_dropped_rows_reach_the_result(self, tmp_path, monkeypatch):
-        from kernelforge.gemm_tune.tests.test_sglang_dense_bf16 import _prep, _run
+        from kernelforge.tests.gemm_tune.test_sglang_dense_bf16 import _prep, _run
 
         _prefix = "gfx950,256,{m},4096,4096,False,torch.bfloat16,torch.bfloat16,False,False"
         rows = [
@@ -188,7 +188,7 @@ class TestDropInaccurateRows:
     def test_an_unfiltered_table_is_not_deployed(self, tmp_path, monkeypatch):
         # Every row tuned fine, but one carries no accuracy figure: the run has no evidence the table is correct, so
         # it must not hand the artifact to serving.
-        from kernelforge.gemm_tune.tests.test_sglang_dense_bf16 import _prep, _run
+        from kernelforge.tests.gemm_tune.test_sglang_dense_bf16 import _prep, _run
 
         _prefix = "gfx950,256,{m},4096,4096,False,torch.bfloat16,torch.bfloat16,False,False"
         rows = [

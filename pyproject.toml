@@ -159,8 +159,8 @@ hyperloom-kb-collect = "hyperloom_kb.collect.cli:main"
 # subdirectories that are NOT packages. ``packages.find.exclude`` keeps
 # ``*.tests`` out of the *package* list, but the sweep then re-added the very
 # same files as package *data*: the wheel shipped 627 test entries before forge
-# was vendored and 833 after (all of ``kernelforge/tests/`` and
-# ``kernelforge/gemm_tune/tests/``). ``scripts/check_wheel_contents.py`` has
+# was vendored and 833 after (all under ``kernelforge/tests/``).
+# ``scripts/check_wheel_contents.py`` has
 # been reporting this; it is the ``packaging.yml`` wheel-contents job.
 #
 # Turning the sweep off makes ``[tool.setuptools.package-data]`` below the sole
