@@ -1,5 +1,5 @@
 <!-- Vendored from ROCm/FlyDSL@dd8373349:docs/architecture_guide.md -->
-# Architecture & compilation pipeline guide
+# Architecture & Compilation Pipeline Guide
 
 This guide covers the FlyDSL project structure, compilation stages, key abstractions, and environment configuration.
 
@@ -16,7 +16,7 @@ This guide covers the FlyDSL project structure, compilation stages, key abstract
 
 ---
 
-## 1. Project structure
+## 1. Project Structure
 
 ```
 FlyDSL/
@@ -151,9 +151,9 @@ The Fly dialect (`include/flydsl/Dialect/Fly/`) provides the MLIR-level layout a
 
 ---
 
-## 3. Compilation pipeline
+## 3. Compilation Pipeline
 
-### 3.1 High-level flow
+### 3.1 High-Level Flow
 
 ```
 Python Function (@flyc.kernel / @flyc.jit)
@@ -199,7 +199,7 @@ Python Function (@flyc.kernel / @flyc.jit)
    JITCFunction (ExecutionEngine)
 ```
 
-### 3.2 Pipeline stages in detail
+### 3.2 Pipeline Stages in Detail
 
 The pipeline is built by `RocmBackend._pipeline_parts()` in
 `python/flydsl/compiler/backends/rocm.py`. The orchestrator
@@ -251,7 +251,7 @@ When `FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1`, Stage B appends
 outlining happens during Python tracing, when `@flyc.kernel` emits
 `gpu.func` ops directly into a `gpu.container_module`.
 
-### 3.3 JIT compilation flow
+### 3.3 JIT Compilation Flow
 
 When a `@flyc.jit` function is called:
 
@@ -267,9 +267,9 @@ When a `@flyc.jit` function is called:
 
 ---
 
-## 4. Key abstractions
+## 4. Key Abstractions
 
-### 4.1 `@flyc.jit` — Host launcher
+### 4.1 `@flyc.jit` — Host Launcher
 
 Decorates a Python function as a JIT-compiled host launcher:
 
@@ -290,7 +290,7 @@ Key behaviors:
 - `Stream` parameters pass a CUDA/HIP stream to the GPU runtime.
 - When called inside an existing MLIR context, the function acts as a normal composable function.
 
-### 4.2 `@flyc.kernel` — GPU kernel
+### 4.2 `@flyc.kernel` — GPU Kernel
 
 Decorates a Python function as a GPU kernel:
 
@@ -331,7 +331,7 @@ Wraps MLIR's `ExecutionEngine` for JIT execution:
 - Supports packed calling convention via `ctypes`.
 - Provides `.print_ir()` for debugging compiled or original IR.
 
-### 4.5 `DslType` / `JitArgument` protocols
+### 4.5 `DslType` / `JitArgument` Protocols
 
 Extensible type system for mapping Python values to MLIR:
 
@@ -371,9 +371,9 @@ Transforms Python control flow to MLIR ops at the AST level:
 
 ---
 
-## 5. Environment variables
+## 5. Environment Variables
 
-### 5.1 Compilation options (`FLYDSL_COMPILE_*`)
+### 5.1 Compilation Options (`FLYDSL_COMPILE_*`)
 
 | Variable | Default | Description |
 |---|---|---|
@@ -381,7 +381,7 @@ Transforms Python control flow to MLIR ops at the AST level:
 | `COMPILE_ONLY` | `0` | If `1`, compile without creating an executor. Returns `None`. |
 | `ARCH` | auto-detect | Override target GPU architecture (e.g., `gfx942`, `gfx950`). |
 
-### 5.2 Debug options (`FLYDSL_DEBUG_*`)
+### 5.2 Debug Options (`FLYDSL_DEBUG_*`)
 
 | Variable | Default | Description |
 |---|---|---|
@@ -395,14 +395,14 @@ Transforms Python control flow to MLIR ops at the AST level:
 | `FLYDSL_DEBUG_ENABLE_VERIFIER` | `true` | Verify IR module. |
 | `FLYDSL_DEBUG_LOG_LEVEL` | `WARNING` | Logging level (DEBUG, INFO, WARNING, ERROR). |
 
-### 5.3 Runtime options (`FLYDSL_RUNTIME_*`)
+### 5.3 Runtime Options (`FLYDSL_RUNTIME_*`)
 
 | Variable | Default | Description |
 |---|---|---|
 | `FLYDSL_RUNTIME_CACHE_DIR` | `~/.flydsl/cache` | Directory for caching compiled kernels. |
 | `FLYDSL_RUNTIME_ENABLE_CACHE` | `true` | Enable kernel disk caching (in-memory cache is always active). |
 
-### 5.4 Architecture detection priority
+### 5.4 Architecture Detection Priority
 
 `get_rocm_arch()` in `runtime/device.py` checks in the following order:
 1. `FLYDSL_GPU_ARCH` env var
@@ -412,7 +412,7 @@ Transforms Python control flow to MLIR ops at the AST level:
 
 ---
 
-## 6. Target hardware
+## 6. Target Hardware
 
 | Architecture | GPU | LDS per CU | Notes |
 |---|---|---|---|
@@ -424,7 +424,7 @@ Transforms Python control flow to MLIR ops at the AST level:
 
 ---
 
-## 7. IR dump workflow
+## 7. IR Dump Workflow
 
 Enable with `FLYDSL_DUMP_IR=1`:
 
@@ -464,7 +464,7 @@ If `FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1`, the debug-info pass adds an extra numbere
 
 ---
 
-## 8. Source files
+## 8. Source Files
 
 | File | Description |
 |---|---|

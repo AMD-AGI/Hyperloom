@@ -1,9 +1,9 @@
 <!-- Vendored from ROCm/FlyDSL@dd8373349:docs/kernel_authoring_guide.md, with KernelForge corrections -->
-# Kernel authoring guide
+# Kernel Authoring Guide
 
 This guide covers writing GPU kernels with FlyDSL: the `@flyc.jit` and `@flyc.kernel` decorators, expression API, launch configuration, shared memory, and synchronization. It documents the `@flyc.kernel`/`@flyc.jit` API from `flydsl.compiler` and `flydsl.expr` (`python/flydsl/`).
 
-## Quick reference
+## Quick Reference
 
 | Concept | API | Description |
 |---|---|---|
@@ -23,7 +23,7 @@ This guide covers writing GPU kernels with FlyDSL: the `@flyc.jit` and `@flyc.ke
 
 ---
 
-## 1. Basic kernel pattern
+## 1. Basic Kernel Pattern
 
 ### 1.1 `@flyc.kernel` + `@flyc.jit`
 
@@ -67,7 +67,7 @@ C = torch.empty(1024, device="cuda", dtype=torch.float32)
 vec_add(A, B, C, 1024)
 ```
 
-### 1.2 How it works
+### 1.2 How It Works
 
 1. `@flyc.kernel` wraps the function as a `KernelFunction`
 2. `@flyc.jit` wraps the function as a `JitFunction`
@@ -83,7 +83,7 @@ vec_add(A, B, C, 1024)
 
 ---
 
-## 2. Parameter types
+## 2. Parameter Types
 
 ### 2.1 `fx.Tensor`
 
@@ -137,7 +137,7 @@ stream = torch.cuda.Stream()
 launch(data, stream=fx.Stream(stream))
 ```
 
-### 2.5 Custom argument types
+### 2.5 Custom Argument Types
 
 Register new Python types for the JIT boundary:
 
@@ -158,7 +158,7 @@ class MyCustomAdaptor:
 
 ---
 
-## 3. Thread / block hierarchy
+## 3. Thread / Block Hierarchy
 
 ```python
 from flydsl.expr import gpu
@@ -187,7 +187,7 @@ raw_bid = gpu.block_id("x")
 
 ## 4. Expression API (`flydsl.expr`)
 
-### 4.1 Arithmetic and numeric types
+### 4.1 Arithmetic and Numeric Types
 
 ```python
 import flydsl.expr as fx
@@ -224,7 +224,7 @@ Use `fx.max` / `fx.min` for type-dispatched extrema and `fx.ceildiv` for
 overflow-safe integer ceil division. `fx.maxnumf` intentionally retains
 non-NaN-wins semantics, and `fx.ceil_div` remains the layout/int-tuple API.
 
-### 4.2 Vector values (`Vector`)
+### 4.2 Vector Values (`Vector`)
 
 ```python
 from flydsl.expr.typing import Vector as Vec
@@ -243,7 +243,7 @@ as_bf16 = vec.to(fx.BFloat16)
 
 ### 4.3 ROCm intrinsics (`fx.rocdl`)
 
-#### High-level helpers
+#### High-Level Helpers
 
 ```python
 from flydsl.expr import rocdl
@@ -263,7 +263,7 @@ copy_op = rocdl.BufferCopy32b()    # 32-bit buffer copy
 See [gfx1250 WMMA & TDM atoms](#gfx1250-wmma--tdm-atoms-wave32) below for the
 gfx1250 WMMA (incl. MX-scaled) MMA atoms and the TDM async copy atom.
 
-#### MFMA instructions
+#### MFMA Instructions
 
 Signature: `(result_type, [a, b, c, cbsz, abid, blgp])` — trailing ints default to 0.
 
@@ -279,7 +279,7 @@ result = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
 )
 ```
 
-#### Instruction scheduling barriers
+#### Instruction Scheduling Barriers
 
 Control instruction scheduling for performance tuning:
 
@@ -294,7 +294,7 @@ Each
 helper is `sched_group_barrier(mask, cnt, 0)` (`python/flydsl/expr/rocdl/__init__.py:152-168`): an
 ordering hint to the scheduler that waits for nothing. Waiting is `rocdl.s_waitcnt(vmcnt=…, lgkmcnt=…)`.
 
-#### Math intrinsics
+#### Math Intrinsics
 
 Single-instruction hardware math (guaranteed 1 VALU cycle, lower precision than `math.*`):
 
@@ -306,7 +306,7 @@ result = rocdl.exp2(T.f32, x)
 result = rocdl.rcp(T.f32, x)
 ```
 
-#### Low-level ops
+#### Low-Level Ops
 
 ```python
 # Warp shuffle
@@ -409,9 +409,9 @@ addrspace_int = gpu.smem_space(int=True)
 
 ---
 
-## 5. Control flow
+## 5. Control Flow
 
-### 5.1 Python loops
+### 5.1 Python Loops
 
 The `ASTRewriter` transforms Python `for` loops:
 
@@ -444,7 +444,7 @@ def my_kernel(data: fx.Tensor, N: fx.Constexpr[int]):
 
 ---
 
-## 6. Shared memory (LDS)
+## 6. Shared Memory (LDS)
 
 ### 6.1 `fx.SharedAllocator` + `@fx.struct`
 
@@ -488,7 +488,7 @@ tracks byte offsets manually (`_align` / `finalize` / `get_base`) and its
 `finalize()` must be called inside the `gpu.module` body. Prefer
 `fx.SharedAllocator` for new kernels.
 
-### 6.3 LDS capacity
+### 6.3 LDS Capacity
 
 | Architecture | LDS per CU |
 |---|---|
@@ -499,7 +499,7 @@ tracks byte offsets manually (`_align` / `finalize` / `get_base`) and its
 
 ---
 
-## 7. Launch configuration
+## 7. Launch Configuration
 
 ### 7.1 `KernelLauncher.launch()`
 
@@ -519,7 +519,7 @@ Grid and block dimensions accept:
 - `ir.Value` — dynamic MLIR value
 - Tuple of 1–3 values — missing dimensions default to 1
 
-### 7.2 Dynamic grid/block dimensions
+### 7.2 Dynamic Grid/Block Dimensions
 
 ```python
 @flyc.jit
@@ -547,7 +547,7 @@ gpu.barrier()
 
 ## 9. Compilation and caching
 
-### 9.1 Automatic caching
+### 9.1 Automatic Caching
 
 JIT-compiled functions are cached automatically:
 
@@ -555,7 +555,7 @@ JIT-compiled functions are cached automatically:
 - **Disk cache** — stored in `~/.flydsl/cache/` (configurable via `FLYDSL_RUNTIME_CACHE_DIR`)
 - **Cache key** includes: source code hash, dependency sources, closure values, FlyDSL version, LLVM version
 
-### 9.2 Cache invalidation
+### 9.2 Cache Invalidation
 
 The cache is invalidated when:
 - Source code of the function or its dependencies changes
@@ -563,7 +563,7 @@ The cache is invalidated when:
 - `Constexpr` values change
 - FlyDSL or LLVM version changes
 
-### 9.3 Disk cache invalidation
+### 9.3 Disk Cache Invalidation
 
 The JIT disk cache auto-invalidates when kernel source code or closure values change. Set `FLYDSL_RUNTIME_ENABLE_CACHE=0` only when modifying C++ passes or non-closure helper functions:
 
@@ -571,7 +571,7 @@ The JIT disk cache auto-invalidates when kernel source code or closure values ch
 FLYDSL_RUNTIME_ENABLE_CACHE=0 python my_script.py  # or: rm -rf ~/.flydsl/cache
 ```
 
-### 9.4 Compile-only mode
+### 9.4 Compile-Only Mode
 
 ```bash
 COMPILE_ONLY=1 python my_script.py
@@ -598,7 +598,7 @@ compiled_func.print_ir()              # compiled MLIR IR
 compiled_func.print_ir(compiled=False) # original IR before passes
 ```
 
-### 10.3 AST diff
+### 10.3 AST Diff
 
 ```bash
 FLYDSL_DEBUG_AST_DIFF=1 python my_script.py
@@ -608,7 +608,7 @@ Shows the diff between original and rewritten AST for debugging control flow tra
 
 ---
 
-## 11. Complete example: Preshuffle GEMM
+## 11. Complete Example: Preshuffle GEMM
 
 From `kernels/gemm/preshuffle_gemm.py`:
 
@@ -669,7 +669,7 @@ one compiled kernel serves any `M`. Select output post-processing with
 
 ---
 
-## 12. Decision tree
+## 12. Decision Tree
 
 ```
 Writing a new kernel?
@@ -700,7 +700,7 @@ Writing a new kernel?
 
 ---
 
-## 13. Source files
+## 13. Source Files
 
 | File | Description |
 |---|---|

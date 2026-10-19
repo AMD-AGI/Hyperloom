@@ -114,4 +114,4 @@ what changed in the disassembly, you have not changed anything.
 - `AMDGCN_ENABLE_DUMP` / `ds_read_b128` / `global_load_dwordx4` / `OPTIMIZE_EPILOGUE`: https://rocm.docs.amd.com/en/latest/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
 - `HIPOptions` / `knobs.amd.dump_amdgcn` / `use_buffer_ops`: https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
 - AMDGPU backend (`s_waitcnt`, buffer descriptors, resource-usage attrs): https://llvm.org/docs/AMDGPUUsage.html
-- Occupancy math (512 regs/SIMD; the page says 16-register blocks, gfx950 allocates in 8 — `hardware/mi350_execution.md`): https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
+- Occupancy math on MI355X (512 regs/SIMD, VGPRs in groups of 8): https://rocm.blogs.amd.com/software-tools-optimization/occupancy-math-mi355x/README.html
