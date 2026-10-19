@@ -706,8 +706,7 @@ function-lines src/hyperloom/orchestrator/knowledge/recipe_journal.py::RecipeJou
 function-lines src/hyperloom/orchestrator/knowledge/recipe_journal.py::RecipeJournalCollaborator.finalize_recipe_and_journal 240
 function-lines src/hyperloom/orchestrator/knowledge/recipe_journal.py::RecipeJournalCollaborator.kb_amend_recipe 140
 function-lines src/hyperloom/orchestrator/knowledge/recipe_journal.py::_record_config_attempts 140
-function-lines src/hyperloom/orchestrator/knowledge/recipe_kb/local_store.py::LocalRecipeStore.put_recipe 133
-function-lines src/hyperloom/orchestrator/knowledge/recipe_kb/schema.py::Recipe.from_dict 102
+function-lines src/hyperloom/orchestrator/knowledge/recipe_kb/local_store.py::LocalRecipeStore.put_recipe 102
 function-lines src/hyperloom/orchestrator/knowledge/recipe_kb_t0.py::_build_warm_start_context 102
 function-lines src/hyperloom/orchestrator/knowledge/recipe_kb_t0.py::_cascade_warm_start_search 123
 function-lines src/hyperloom/orchestrator/knowledge/recipe_kb_t0.py::_find_config_donor 85
