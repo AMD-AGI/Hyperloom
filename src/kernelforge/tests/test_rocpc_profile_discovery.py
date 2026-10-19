@@ -200,3 +200,101 @@ def test_torch_import_preflight_allows_a_working_profiler(rocpc_profile, monkeyp
 
     assert ok
     assert msg == ""
+
+
+def test_a_loaded_module_without_a_spec_names_no_wheel_root(rocpc_profile, monkeypatch) -> None:
+    # find_spec raises ValueError for a sys.modules entry whose __spec__ is None.
+    monkeypatch.setitem(sys.modules, "_rocm_profiler", ModuleType("_rocm_profiler"))
+
+    assert rocpc_profile._rocm_profiler_wheel_roots() == []
+
+
+def test_an_unexpected_find_spec_error_propagates_from_the_wheel_lookup(rocpc_profile, monkeypatch) -> None:
+    def boom(name):
+        raise RuntimeError("meta path finder exploded")
+
+    monkeypatch.setattr(importlib.util, "find_spec", boom)
+
+    with pytest.raises(RuntimeError, match="meta path finder exploded"):
+        rocpc_profile._rocm_profiler_wheel_roots()
+
+
+def test_the_runtime_root_lookup_skips_a_spec_less_package_and_tries_the_next(
+    rocpc_profile, tmp_path, monkeypatch
+) -> None:
+    site = tmp_path / "site-packages"
+    core = site / "_rocm_sdk_core"
+    (core / "lib" / "rocprofiler-sdk").mkdir(parents=True)
+    (core / "__init__.py").write_text("", encoding="utf-8")
+    monkeypatch.delenv("ROCM_PATH", raising=False)
+    monkeypatch.setitem(sys.modules, "_rocm_sdk_devel", ModuleType("_rocm_sdk_devel"))
+    monkeypatch.syspath_prepend(str(site))
+
+    assert rocpc_profile._rocm_profiler_runtime_root() == str(core)
+
+
+def test_an_unexpected_find_spec_error_propagates_from_the_runtime_root_lookup(rocpc_profile, monkeypatch) -> None:
+    def boom(name):
+        raise RuntimeError("meta path finder exploded")
+
+    monkeypatch.delenv("ROCM_PATH", raising=False)
+    monkeypatch.setattr(importlib.util, "find_spec", boom)
+
+    with pytest.raises(RuntimeError, match="meta path finder exploded"):
+        rocpc_profile._rocm_profiler_runtime_root()
+
+
+def test_a_missing_interpreter_cannot_run_rocpc(rocpc_profile, tmp_path) -> None:
+    assert rocpc_profile._python_can_run_rocpc(str(tmp_path / "no-such-python"), str(tmp_path)) is False
+
+
+def test_a_hung_probe_cannot_run_rocpc(rocpc_profile, tmp_path, monkeypatch) -> None:
+    def hang(cmd, **_kwargs):
+        raise subprocess.TimeoutExpired(cmd, 60)
+
+    monkeypatch.setattr(rocpc_profile.subprocess, "run", hang)
+
+    assert rocpc_profile._python_can_run_rocpc("python3", str(tmp_path)) is False
+
+
+def test_an_unexpected_probe_error_propagates(rocpc_profile, tmp_path, monkeypatch) -> None:
+    def broken(cmd, **_kwargs):
+        raise TypeError("run signature drifted")
+
+    monkeypatch.setattr(rocpc_profile.subprocess, "run", broken)
+
+    with pytest.raises(TypeError, match="run signature drifted"):
+        rocpc_profile._python_can_run_rocpc("python3", str(tmp_path))
+
+
+class _HungProc:
+    """A child whose output never drains, before or after the kill."""
+
+    pid = 4242
+
+    def __init__(self, second_failure: Exception) -> None:
+        self._second_failure = second_failure
+        self._calls = 0
+
+    def communicate(self, timeout=None):
+        self._calls += 1
+        if self._calls == 1:
+            raise subprocess.TimeoutExpired("rocprof-compute", timeout)
+        raise self._second_failure
+
+
+def _run_hung(rocpc_profile, monkeypatch, second_failure: Exception):
+    monkeypatch.setattr(rocpc_profile.subprocess, "Popen", lambda *_a, **_k: _HungProc(second_failure))
+    monkeypatch.setattr(rocpc_profile, "_kill_tree", lambda _pid: None)
+    return rocpc_profile._run("python3", "/libexec", ["analyze"], timeout=5)
+
+
+def test_a_timeout_whose_output_never_drains_still_reports_exit_124(rocpc_profile, monkeypatch) -> None:
+    result = _run_hung(rocpc_profile, monkeypatch, subprocess.TimeoutExpired("rocprof-compute", 30))
+
+    assert result == (124, "TIMEOUT after 5s")
+
+
+def test_an_unexpected_drain_error_after_the_kill_propagates(rocpc_profile, monkeypatch) -> None:
+    with pytest.raises(RuntimeError, match="pipe handler broke"):
+        _run_hung(rocpc_profile, monkeypatch, RuntimeError("pipe handler broke"))
