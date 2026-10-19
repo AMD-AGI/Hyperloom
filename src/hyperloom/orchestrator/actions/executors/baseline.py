@@ -163,6 +163,9 @@ _WARMUP_ROUND_DIR = "warmup_round"
 _MEASURE_ROUND_DIR = "measure_round"
 _DOUBLE_RUN_ROUND_DIRS = (_WARMUP_ROUND_DIR, _MEASURE_ROUND_DIR)
 
+# Magpie writes the benchmark's own report under this name in the workspace it creates.
+_BENCHMARK_REPORT_NAME = "benchmark_report.json"
+
 # Markers identifying a MoE quant scheme with no implementation for the ``--moe-runner-backend`` in use:
 # ``create_moe_runner`` falls through without building a runner and the first forward pass dies (e.g. Quark MXFP4 on
 # triton).
@@ -3255,7 +3258,7 @@ class BenchmarkRunExecutor:
         workspace: Path,
     ) -> dict[str, Any]:
         """Name why this round produced no usable measurement and report it as the round's failure."""
-        report_path = workspace / "benchmark_report.json"
+        report_path = workspace / _BENCHMARK_REPORT_NAME
         tail = (outcome.stderr or outcome.stdout or "")[-2000:]
         death_or_tail = outcome.server_init_dead_error if outcome.server_init_dead else tail
         if outcome.registry_mismatch:
@@ -3273,7 +3276,7 @@ class BenchmarkRunExecutor:
             error = tail
         elif not report_path.exists():
             error_class = "no_report"
-            error = f"benchmark_report.json missing under {workspace}"
+            error = f"{_BENCHMARK_REPORT_NAME} missing under {workspace}"
         else:
             error_class = "invalid_measurement"
             error = "benchmark report did not contain positive throughput and completed requests"
@@ -3303,7 +3306,7 @@ class BenchmarkRunExecutor:
         """Refuse a measurement whose process exited nonzero before it served the protocol it recorded."""
         if outcome.returncode == 0:
             return None
-        report_path = workspace / "benchmark_report.json"
+        report_path = workspace / _BENCHMARK_REPORT_NAME
         nonzero_error = redact_secret_values((outcome.stderr or outcome.stdout or "")[-2000:])
         if not served_complete_protocol(measurement):
             return {
@@ -3432,7 +3435,7 @@ class BenchmarkRunExecutor:
                 output_dir=round_.output_dir,
                 harvested=harvested,
             )
-        report_path = workspace / "benchmark_report.json"
+        report_path = workspace / _BENCHMARK_REPORT_NAME
         report = _loaded_benchmark_report(report_path)
         measurement = extract_benchmark_measurement(
             report,
@@ -3468,7 +3471,7 @@ class BenchmarkRunExecutor:
         workspace: Path,
     ) -> dict[str, Any]:
         """The round's measurement, with where every artifact it produced landed."""
-        report_path = workspace / "benchmark_report.json"
+        report_path = workspace / _BENCHMARK_REPORT_NAME
         return {
             "status": "succeeded",
             **measurement,
