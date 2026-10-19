@@ -20,8 +20,8 @@ it. The runtime's specialist sessions come from
 a :data:`SpecialistSessions`: :func:`model_backed_sessions` runs each branch's specialist as an agent CLI in a
 worktree of its own, briefed by the session's :class:`SessionBriefs`, whose warm-start leads the session binds once
 PRELUDE has read them. :func:`load_peers` reads the measurement host, checks the image holds the framework package
-those worktrees branch off and resolves that CLI first, and refuses when any cannot be had, so the command line fails
-before it creates anything.
+those worktrees branch off and resolves that CLI and the price of its model first, and refuses when any cannot be
+had, so the command line fails before it creates anything.
 
 The toolbox, its measurement points and the agent sessions load the main flow's runtime, so they are imported inside
 the functions that use them: importing this module, the command line or the session loads none of it.
@@ -40,6 +40,7 @@ from typing import TYPE_CHECKING
 
 from hyperloom.common.llm_config import preferred_agent_backend, provider_model_defaults, resolve_forge_llm_model
 from hyperloom.common.model_paths import resolve_serving_model_path
+from hyperloom_multibranch.contracts.llm_prices import UnpricedModel, price_of
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.notebook.interfaces import BranchLogStore, CommitQuery
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
@@ -261,7 +262,8 @@ def machine_parallel_tests(tp: int) -> int:
 
 def specialist_command(env: Mapping[str, str]) -> AgentCommand:
     """The agent CLI every specialist of a session runs: the backend ``env`` is credentialed for, found on its
-    ``PATH``, on the model ``env`` names for it; raises :class:`PeersUnavailable` when that CLI is not installed."""
+    ``PATH``, on the model ``env`` names for it; raises :class:`PeersUnavailable` when that CLI is not installed or
+    the price sheet has no rate for that model, whose spend could then not be recorded."""
 
     from hyperloom_multibranch.specialist.agent_session import AgentCommand
 
@@ -270,6 +272,10 @@ def specialist_command(env: Mapping[str, str]) -> AgentCommand:
     if executable is None:
         raise PeersUnavailable(f"the {backend} CLI the specialists run is not on PATH")
     model = resolve_forge_llm_model(backend, env={**env, **provider_model_defaults(env)})
+    try:
+        price_of(model)
+    except UnpricedModel as exc:
+        raise PeersUnavailable(f"the specialists' model cannot be priced: {exc}") from exc
     return AgentCommand(backend, executable, model)
 
 

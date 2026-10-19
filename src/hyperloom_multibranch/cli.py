@@ -23,7 +23,7 @@ PRELUDE reads warm-start leads from and CLOSE writes the final recipe back to is
 directory; the measurement pins must be readable, the image the session runs on named by both
 ``HYPERLOOM_ACTIVE_IMAGE_REF`` and ``HYPERLOOM_ACTIVE_IMAGE_DIGEST`` included; the framework's package must be
 installed in the image; the agent CLI the specialists run must be installed; and the price sheet must have a rate for
-the model the judge and the patch resolver ask.
+the model the specialists run on and for the one the judge and the patch resolver ask.
 A session uses no Experience KB, whatever ``HYPERLOOM_KB_URL`` names (see
 :data:`~hyperloom_multibranch.scheduling.mb_fakes.MB_FAKE_EXPERIENCE_KB`).
 """

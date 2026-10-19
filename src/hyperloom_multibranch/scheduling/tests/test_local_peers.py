@@ -167,14 +167,25 @@ def test_the_specialists_run_the_agent_cli_found_on_path(tmp_path: Path) -> None
     cli.write_text("#!/bin/sh\nexit 0\n")
     cli.chmod(0o755)
 
-    command = specialist_command({"PATH": str(tmp_path), "ANTHROPIC_API_KEY": "dummy", "CLAUDE_MODEL": "m-1"})
+    command = specialist_command(
+        {"PATH": str(tmp_path), "ANTHROPIC_API_KEY": "dummy", "CLAUDE_MODEL": "claude-sonnet-5-5"}
+    )
 
-    assert (command.backend, command.executable, command.model) == ("claude", str(cli), "m-1")
+    assert (command.backend, command.executable, command.model) == ("claude", str(cli), "claude-sonnet-5-5")
 
 
 def test_without_the_agent_cli_the_peers_are_refused(tmp_path: Path) -> None:
     with pytest.raises(PeersUnavailable, match="claude CLI the specialists run is not on PATH"):
         specialist_command({"PATH": str(tmp_path), "ANTHROPIC_API_KEY": "dummy"})
+
+
+def test_a_specialist_model_the_price_sheet_lacks_refuses_the_peers(tmp_path: Path) -> None:
+    cli = tmp_path / "claude"
+    cli.write_text("#!/bin/sh\nexit 0\n")
+    cli.chmod(0o755)
+
+    with pytest.raises(PeersUnavailable, match="specialists' model cannot be priced.*'no-such-model'"):
+        specialist_command({"PATH": str(tmp_path), "ANTHROPIC_API_KEY": "dummy", "CLAUDE_MODEL": "no-such-model"})
 
 
 @pytest.fixture

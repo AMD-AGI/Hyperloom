@@ -12,7 +12,13 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.common.llm_config import AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX, DEFAULT_CLAUDE_MODEL
+from hyperloom.common.llm_config import (
+    AGENT_BACKEND_CLAUDE,
+    AGENT_BACKEND_CODEX,
+    ANTHROPIC_CREDENTIAL_ENV_ORDER,
+    DEFAULT_CLAUDE_MODEL,
+    DEFAULT_CODEX_MODEL,
+)
 from hyperloom.common.perf_metric import GRADED_INTVTY_P50
 from hyperloom.measure import compile as compile_module
 from hyperloom.measure.compile import PackageBase
@@ -299,17 +305,44 @@ def test_an_unnamed_image_fails_loudly_before_creating_anything(
     assert not any(tmp_path.iterdir())
 
 
+def _codex_specialists(monkeypatch: pytest.MonkeyPatch, model: str) -> None:
+    """Credential only the OpenAI side, so the specialists run the codex CLI on ``model`` while the judge keeps
+    ``CLAUDE_MODEL``."""
+
+    for name in (*ANTHROPIC_CREDENTIAL_ENV_ORDER, "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "dummy")
+    monkeypatch.setenv("CODEX_MODEL", model)
+
+
 @pytest.mark.usefixtures("ready_environment", "agent_cli")
 def test_a_judge_model_without_a_price_fails_loudly_before_creating_anything(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    _codex_specialists(monkeypatch, DEFAULT_CODEX_MODEL)
     monkeypatch.setenv("CLAUDE_MODEL", "no-such-model")
 
     assert cli.main(["run", *WORKLOAD_ARGS]) == cli.EXIT_FAILED
 
     captured = capsys.readouterr()
     assert "cannot run a session" in captured.err and "no-such-model" in captured.err
+    assert "specialists" not in captured.err
+    assert captured.out == ""
+    assert not any(tmp_path.iterdir())
+
+
+@pytest.mark.usefixtures("ready_environment", "agent_cli")
+def test_a_specialist_model_without_a_price_fails_loudly_before_creating_anything(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    _codex_specialists(monkeypatch, "no-such-model")
+
+    assert cli.main(["run", *WORKLOAD_ARGS]) == cli.EXIT_FAILED
+
+    captured = capsys.readouterr()
+    assert "specialists' model cannot be priced" in captured.err and "no-such-model" in captured.err
     assert captured.out == ""
     assert not any(tmp_path.iterdir())
 
