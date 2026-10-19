@@ -43,7 +43,6 @@ from hyperloom.common.env import EnvValueError
 from hyperloom.common.perf_metric import agentx_enabled
 from hyperloom.inference_optimizer.session.paths import workspace_root
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient, RemoteRecipeConfigurationError
-from hyperloom_multibranch.contracts.llm_prices import UnpricedModel
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.rulegate.critic import LlmCritic, anthropic_critic
@@ -219,8 +218,7 @@ def require_rsi_archive(env: MutableMapping[str, str]) -> None:
 
 
 def session_services(recipe_kb: RemoteRecipeClient | None) -> SessionServices:
-    """The judge, the patch resolver and the fix critic on the default model, and ``recipe_kb``; raises
-    :class:`UnpricedModel` for a model the price sheet does not list, before any session directory exists."""
+    """The judge, the patch resolver and the fix critic on the default model, and ``recipe_kb``."""
 
     model = default_model()
     judge = anthropic_completion(model, component=PROG, operation="judge")
@@ -270,7 +268,7 @@ def main(argv: list[str] | None = None) -> int:
         require_rsi_archive(os.environ)
         peer_factory = load_peers(settings.workload)
         services = session_services(recipe_kb)
-    except (EnvironmentIncomplete, PeersUnavailable, UnpricedModel) as exc:
+    except (EnvironmentIncomplete, PeersUnavailable) as exc:
         print(f"{PROG}: cannot run a session, {exc}", file=sys.stderr)
         return EXIT_FAILED
     return run_session(settings, peer_factory, services)

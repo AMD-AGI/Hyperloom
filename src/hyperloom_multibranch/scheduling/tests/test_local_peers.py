@@ -181,13 +181,17 @@ def test_without_the_agent_cli_the_peers_are_refused(tmp_path: Path) -> None:
         specialist_command({"PATH": str(tmp_path), "ANTHROPIC_API_KEY": "dummy"})
 
 
-def test_a_specialist_model_the_price_sheet_lacks_refuses_the_peers(tmp_path: Path) -> None:
+def test_a_specialist_model_the_price_sheet_lacks_runs_on_its_tokens_and_says_so(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     cli = tmp_path / "claude"
     cli.write_text("#!/bin/sh\nexit 0\n")
     cli.chmod(0o755)
 
-    with pytest.raises(PeersUnavailable, match="specialists' model cannot be priced.*'no-such-model'"):
-        specialist_command({"PATH": str(tmp_path), "ANTHROPIC_API_KEY": "dummy", "CLAUDE_MODEL": "no-such-model"})
+    command = specialist_command({"PATH": str(tmp_path), "ANTHROPIC_API_KEY": "dummy", "CLAUDE_MODEL": "glm-5-3"})
+
+    assert command.model == "glm-5-3"
+    assert "the specialists run on glm-5-3, which the price sheet does not list" in caplog.text
 
 
 @pytest.fixture

@@ -15,7 +15,7 @@ import pytest
 from claude_agent_sdk import ClaudeSDKError
 
 from hyperloom.common.llm_config import AnthropicCompletionRequest, AnthropicMessageResult
-from hyperloom_multibranch.contracts.llm_prices import TokenCounts, UnpricedModel, price_of
+from hyperloom_multibranch.contracts.llm_prices import TokenCounts, price_of
 from hyperloom_multibranch.contracts.notebook.records import LlmUsage, LlmUsageRecord
 from hyperloom_multibranch.contracts.notebook.vocab import UsageSource
 from hyperloom_multibranch.scheduling import llm
@@ -81,9 +81,15 @@ async def test_a_reply_without_usable_counts_used_no_tokens(monkeypatch: pytest.
     assert reply == llm.CompletionReply("reply", TokenCounts(), 0.0)
 
 
-def test_a_model_the_price_sheet_does_not_list_is_refused_when_the_completion_is_built() -> None:
-    with pytest.raises(UnpricedModel, match="no-such-model"):
-        llm.anthropic_completion("no-such-model", component="c", operation="judge")
+async def test_a_model_the_price_sheet_does_not_list_replies_with_its_tokens_and_no_cost(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _answering(monkeypatch, {"input_tokens": 40, "cache_read_input_tokens": 900, "output_tokens": 25})
+
+    reply = await llm.anthropic_completion("glm-5-3", component="c", operation="judge")("sys", "user")
+
+    assert reply == llm.CompletionReply("reply", TokenCounts(input=40, output=25, cache_read=900), None)
+    assert "judge runs on glm-5-3, which the price sheet does not list" in caplog.text
 
 
 class _Usages:

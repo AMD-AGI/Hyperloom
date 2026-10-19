@@ -6,7 +6,8 @@
 The sheet is ``llm_prices.json`` beside this module: the gateway's rate per million tokens of each model a session
 may run, for uncached input, output, cache reads and cache writes (5-minute, and 1-hour where the gateway lists one).
 A model is looked up by its name with case, dots, a date suffix and a ``[...]`` variant suffix ignored, so
-``Claude-Opus-5.5``, ``claude-opus-5-5`` and ``claude-opus-5-5-20261001`` are one model.
+``Claude-Opus-5.5``, ``claude-opus-5-5`` and ``claude-opus-5-5-20261001`` are one model. A model the sheet does not
+list, such as one served on premises, has no price: its usage is recorded as tokens only.
 """
 
 from __future__ import annotations
@@ -21,10 +22,6 @@ from pathlib import Path
 PRICE_SHEET = Path(__file__).with_name("llm_prices.json")
 PER_TOKENS = 1_000_000
 _SUFFIXES = re.compile(r"(\[[^\]]*\]|-\d{8})$")
-
-
-class UnpricedModel(ValueError):
-    """A model the price sheet has no rate for."""
 
 
 @dataclass(frozen=True)
@@ -94,12 +91,9 @@ def model_key(model: str) -> str:
     return _SUFFIXES.sub("", model.strip().lower()).replace(".", "-")
 
 
-def price_of(model: str) -> ModelPrice:
-    """The gateway's rates for ``model``; raises :class:`UnpricedModel` for a model the sheet does not list."""
-    found = _sheet().get(model_key(model))
-    if found is None:
-        raise UnpricedModel(f"the price sheet ({PRICE_SHEET.name}) has no rate for model {model!r}")
-    return found
+def price_of(model: str) -> ModelPrice | None:
+    """The gateway's rates for ``model``, ``None`` for a model the sheet does not list."""
+    return _sheet().get(model_key(model))
 
 
 def _count(usage: Mapping[str, object], key: str) -> int:
@@ -113,4 +107,4 @@ def _sheet() -> dict[str, ModelPrice]:
     return {name: ModelPrice(**rates) for name, rates in models.items()}
 
 
-__all__ = ["PER_TOKENS", "PRICE_SHEET", "ModelPrice", "TokenCounts", "UnpricedModel", "model_key", "price_of"]
+__all__ = ["PER_TOKENS", "PRICE_SHEET", "ModelPrice", "TokenCounts", "model_key", "price_of"]

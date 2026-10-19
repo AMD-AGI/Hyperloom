@@ -182,7 +182,7 @@ async def test_a_session_that_ends_as_it_should_is_followed_by_a_fresh_one(rig):
     assert rig.worktree.head() == rig.root
 
 
-async def test_each_launch_records_its_tokens_at_the_gateway_s_rates_however_it_ended(rig, caplog):
+async def test_each_launch_records_its_tokens_at_the_gateway_s_rates_however_it_ended(rig):
     session = rig.session(command=AgentCommand("claude", "claude", model="claude-opus-5-5"))
     running = asyncio.create_task(session.run())
     await _until(lambda: len(rig.runner.specs) == 1, "the first launch")
@@ -199,8 +199,7 @@ async def test_each_launch_records_its_tokens_at_the_gateway_s_rates_however_it_
     first, killed = (record.usage for record in (await rig.notebook.snapshot()).llm_usage)
     assert first == LlmUsage(BRANCH, UsageSource.SPECIALIST, first.cost_usd, TokenCounts(1_000, 100), "sess-1")
     assert first.cost_usd == pytest.approx((1_000 * 4 + 100 * 20) / 1e6)
-    assert (killed.cost_usd, killed.tokens.input) == (pytest.approx(4.0), 1_000_000)
-    assert "'claude-unknown-1', which has no price" in caplog.text
+    assert (killed.cost_usd, killed.tokens) == (None, TokenCounts(input=1_000_000))
 
 
 async def test_each_launch_shows_the_brief_rebuilt_at_the_head_it_starts_at(rig):

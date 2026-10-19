@@ -6,13 +6,14 @@ what they cost out.
 
 The judge and the integrator's patch resolver take a :data:`Completion` through their constructors, so tests hand
 them a deterministic stand-in; production builds one with :func:`anthropic_completion` over ``llm_config``, priced
-from the price sheet. A call that fails raises :class:`CompletionFailed` whatever the transport, so the callers name
+from the price sheet when it lists the model. A call that fails raises :class:`CompletionFailed` whatever the transport, so the callers name
 one error. :func:`recorded` writes what each reply cost to the notebook as the scheduler's own LLM usage.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
@@ -35,11 +36,13 @@ from hyperloom_multibranch.contracts.notebook.vocab import UsageSource
 class CompletionReply:
     text: str
     tokens: TokenCounts
-    cost_usd: float
+    cost_usd: float | None
 
 
 #: ``(system, user) -> reply``; raises :class:`CompletionFailed` when the call fails.
 Completion = Callable[[str, str], Awaitable[CompletionReply]]
+
+logger = logging.getLogger(__name__)
 
 COMPLETION_MAX_TOKENS = 8192
 # src/hyperloom/orchestrator/kernel/patch_conflict_merge.py _LLM_CONNECT_TIMEOUT_S / _LLM_TIMEOUT_S: httpx's
@@ -87,9 +90,12 @@ def recorded(completion: Completion, notebook: UsageSink, source: UsageSource) -
 
 def anthropic_completion(model: str, *, component: str, operation: str) -> Completion:
     """A :data:`Completion` over ``llm_config``'s Anthropic transport, tagged with ``component`` and ``operation``,
-    each reply priced at ``model``'s rates; raises :class:`UnpricedModel` for a model the price sheet does not list."""
+    each reply priced at ``model``'s rates; a model the price sheet does not list gives replies with no cost, which
+    no dollar cap counts, and says so once here."""
 
     price = price_of(model)
+    if price is None:
+        logger.warning("%s runs on %s, which the price sheet does not list: it records tokens only", operation, model)
     errors = _transport_errors()
     timeout = build_http_timeout(connect=MB_LLM_CONNECT_TIMEOUT_SECONDS, read=MB_LLM_READ_TIMEOUT_SECONDS)
 
@@ -108,7 +114,7 @@ def anthropic_completion(model: str, *, component: str, operation: str) -> Compl
             raise CompletionFailed(f"{operation} call failed: {type(exc).__name__}: {exc}") from exc
         usage = result.usage if isinstance(result.usage, Mapping) else {}
         tokens = TokenCounts.from_anthropic_usage(usage)
-        return CompletionReply(result.text, tokens, price.cost_usd(tokens))
+        return CompletionReply(result.text, tokens, None if price is None else price.cost_usd(tokens))
 
     return complete
 

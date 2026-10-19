@@ -320,36 +320,31 @@ def _codex_specialists(monkeypatch: pytest.MonkeyPatch, model: str) -> None:
     monkeypatch.setenv("CODEX_MODEL", model)
 
 
-@pytest.mark.usefixtures("ready_environment", "agent_cli")
-def test_a_judge_model_without_a_price_fails_loudly_before_creating_anything(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize(
+    ("judge", "specialists", "warned"),
+    [
+        ("no-such-model", DEFAULT_CODEX_MODEL, "judge runs on no-such-model"),
+        (DEFAULT_CLAUDE_MODEL, "no-such-model", "the specialists run on no-such-model"),
+    ],
+)
+@pytest.mark.usefixtures("ready_environment")
+def test_a_model_without_a_price_runs_the_session_on_its_tokens_and_says_so(
+    judge: str,
+    specialists: str,
+    warned: str,
+    agent_cli: list[RunSettings],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    _codex_specialists(monkeypatch, DEFAULT_CODEX_MODEL)
-    monkeypatch.setenv("CLAUDE_MODEL", "no-such-model")
+    _codex_specialists(monkeypatch, specialists)
+    monkeypatch.setenv("CLAUDE_MODEL", judge)
 
-    assert cli.main(["run", *WORKLOAD_ARGS]) == cli.EXIT_FAILED
+    assert cli.main(["run", *WORKLOAD_ARGS]) == 0
 
-    captured = capsys.readouterr()
-    assert "cannot run a session" in captured.err and "no-such-model" in captured.err
-    assert "specialists" not in captured.err
-    assert captured.out == ""
-    assert not any(tmp_path.iterdir())
-
-
-@pytest.mark.usefixtures("ready_environment", "agent_cli")
-def test_a_specialist_model_without_a_price_fails_loudly_before_creating_anything(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    _codex_specialists(monkeypatch, "no-such-model")
-
-    assert cli.main(["run", *WORKLOAD_ARGS]) == cli.EXIT_FAILED
-
-    captured = capsys.readouterr()
-    assert "specialists' model cannot be priced" in captured.err and "no-such-model" in captured.err
-    assert captured.out == ""
-    assert not any(tmp_path.iterdir())
+    assert len(agent_cli) == 1
+    assert f"{warned}, which the price sheet does not list" in caplog.text
 
 
 @pytest.mark.usefixtures("ready_environment", "agent_cli")

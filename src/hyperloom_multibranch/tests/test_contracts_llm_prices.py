@@ -4,7 +4,7 @@
 import pytest
 
 from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL
-from hyperloom_multibranch.contracts.llm_prices import ModelPrice, TokenCounts, UnpricedModel, model_key, price_of
+from hyperloom_multibranch.contracts.llm_prices import ModelPrice, TokenCounts, model_key, price_of
 
 
 @pytest.mark.parametrize(
@@ -20,9 +20,8 @@ def test_every_default_model_a_session_runs_has_a_price():
         assert price_of(model).input > 0
 
 
-def test_a_model_the_sheet_does_not_list_is_refused_by_name():
-    with pytest.raises(UnpricedModel, match="'claude-opus-9'"):
-        price_of("claude-opus-9")
+def test_a_model_the_sheet_does_not_list_has_no_price():
+    assert price_of("glm-5-3") is None
 
 
 def test_each_kind_of_token_is_billed_at_its_own_rate():

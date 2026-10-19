@@ -35,7 +35,7 @@ from hyperloom.orchestrator.specialists.agent_runner import (
     AgentStatus,
     McpEndpoint,
 )
-from hyperloom_multibranch.contracts.llm_prices import ModelPrice, UnpricedModel, price_of
+from hyperloom_multibranch.contracts.llm_prices import TokenCounts, price_of
 from hyperloom_multibranch.contracts.notebook.interfaces import BranchLogStore, UsageSink
 from hyperloom_multibranch.contracts.notebook.records import LlmUsage
 from hyperloom_multibranch.contracts.notebook.vocab import UsageSource
@@ -273,20 +273,17 @@ class AgentSession:
         used = await asyncio.to_thread(launch_usage, self._place.workspace / PROCESS_LOG)
         if not used.tokens:
             return
-        cost = sum(self._price(model).cost_usd(tokens) for model, tokens in used.tokens.items())
-        usage = LlmUsage(self._start.branch, UsageSource.SPECIALIST, cost, used.total, used.session_id)
+        usage = LlmUsage(
+            self._start.branch, UsageSource.SPECIALIST, self._cost(used.tokens), used.total, used.session_id
+        )
         await self._place.notebook.record_llm_usage(usage)
 
-    def _price(self, model: str) -> ModelPrice:
-        """The rates of a call's model; a model the sheet lacks is billed at the launch's own model's, loudly."""
-        own = self._setup.command.model
-        try:
-            return price_of(model or own)
-        except UnpricedModel:
-            logger.error(
-                "the specialist of %s called %r, which has no price; billed as %r", self._start.branch, model, own
-            )
-            return price_of(own)
+    def _cost(self, tokens: Mapping[str, TokenCounts]) -> float | None:
+        """What a launch's calls cost, ``None`` when one of their models has no price."""
+        prices = [(price_of(model or self._setup.command.model), counts) for model, counts in tokens.items()]
+        if any(price is None for price, _ in prices):
+            return None
+        return sum(price.cost_usd(counts) for price, counts in prices if price is not None)
 
 
 def _describe(status: AgentStatus, seconds: float) -> str:
