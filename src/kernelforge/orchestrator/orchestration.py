@@ -28,20 +28,18 @@ from kernelforge.orchestrator.agent_response import (
     validated_agent_text,
 )
 from kernelforge.orchestrator.contracts import (
-    CaseEvidence,
     DispatchIntent,
     DispatchPlan,
-    EvidenceRef,
     LaneGround,
     OrchestrationContext,
     OrchestrationRunResult,
     PlanCriticOutcome,
     SynthesizedPlan,
-    SpecialistAssignment,
     SpecialistDefinition,
     SpecialistOutcome,
     SpecialistRound,
 )
+from kernelforge.orchestrator.dispatch_binding import bind_dispatch
 from kernelforge.orchestrator.specialists import (
     SpecialistAgent,
     SpecialistPool,
@@ -96,46 +94,6 @@ def _as_bool(value: object) -> tuple[bool, bool]:
     if value is None or isinstance(value, bool):
         return bool(value), True
     return False, False
-
-
-_GLOBAL_EVIDENCE_KINDS = {
-    "analysis_artifact_catalog",
-    "analysis_bundle",
-    "analysis_cumulative_diff",
-    "analysis_summary",
-    "analysis_source_map",
-    "analysis_workflow",
-    "latest_lesson",
-    "supervisor_guidance",
-}
-_PROFILED_CASE_FLAGS = {
-    "analysis_profiled",
-    "analysis_profile_incremental",
-    "analysis_checkpoint_profile_interpretation",
-    "analysis_checkpoint_normalized_only",
-    "analysis_checkpoint_raw_profile_only",
-}
-
-
-def _case_evidence_refs(case: CaseEvidence) -> dict[str, EvidenceRef]:
-    """The evidence one scored case hands every specialist assigned to it, keyed by path."""
-    measurement = EvidenceRef(
-        kind="measurement",
-        path=f"case:{case.case_id}",
-        summary=(f"Canonical timing and Analysis flags for {case.case_id}."),
-    )
-    refs = {measurement.path: measurement}
-    if case.profile_summary_path:
-        if _PROFILED_CASE_FLAGS.isdisjoint(case.flags):
-            kind, label = "analysis_interpretation", "Analysis interpretation"
-        else:
-            kind, label = "profile", "Measured profile"
-        refs[case.profile_summary_path] = EvidenceRef(
-            kind=kind,
-            path=case.profile_summary_path,
-            summary=label + f" for {case.case_id}. Flags: " + f"{', '.join(case.flags) or '(none)'}.",
-        )
-    return refs
 
 
 @dataclass(frozen=True)
@@ -490,14 +448,13 @@ class OrchestrationAgent:
         intents: Sequence[DispatchIntent],
         notes: list[str],
     ) -> DispatchPlan:
-        case_evidence = {case.case_id: _case_evidence_refs(case) for case in context.cases}
-        case_ids = tuple(case_evidence)
+        case_ids = tuple(case.case_id for case in context.cases)
         merged: dict[str, dict[str, object]] = {}
         for intent in intents:
             if intent.role_id not in definitions:
                 notes.append(f"dropped unknown role {intent.role_id!r}")
                 continue
-            selected_cases = [case_id for case_id in intent.target_case_ids if case_id in case_evidence]
+            selected_cases = [case_id for case_id in intent.target_case_ids if case_id in case_ids]
             if not selected_cases:
                 selected_cases = list(case_ids)
                 notes.append(f"bound role {intent.role_id!r} to all scored cases")
@@ -529,34 +486,10 @@ class OrchestrationAgent:
             ]
             notes.append(f"added missing cases to {first_role!r}: {', '.join(missing)}")
 
-        global_refs = {
-            reference.path: reference for reference in context.evidence_refs if reference.kind in _GLOBAL_EVIDENCE_KINDS
-        }
-        source_ref = EvidenceRef(
-            kind="source_map",
-            path=context.source_map_path,
-            summary="Current source map or anchor source.",
-        )
-        assignments = []
-        for index, (role_id, item) in enumerate(merged.items(), start=1):
-            refs = {**global_refs, source_ref.path: source_ref}
-            target_cases = tuple(item["case_ids"])
-            for case_id in target_cases:
-                refs.update(case_evidence[case_id])
-            assignments.append(
-                SpecialistAssignment(
-                    assignment_id=f"{role_id}-{index}",
-                    role_id=role_id,
-                    target_case_ids=target_cases,
-                    evidence_refs=tuple(refs.values()),
-                    reason=str(item["reason"]),
-                )
-            )
-        return DispatchPlan(
-            analysis_commit=context.analysis_commit,
-            assignments=tuple(assignments),
-            normalization_notes=tuple(notes),
-        )
+        resolved = [
+            DispatchIntent(role_id, tuple(item["case_ids"]), str(item["reason"])) for role_id, item in merged.items()
+        ]
+        return bind_dispatch(context, resolved, notes)
 
     async def _synthesize_optimization_plan_result(
         self,
