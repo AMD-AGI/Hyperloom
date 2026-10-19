@@ -225,6 +225,16 @@ def total_tput_of(snapshot: Mapping[str, float] | None) -> float:
     return axis_of(snapshot, GRADED_TOTAL)
 
 
+def baseline_on_axis(state: Any, objective: str) -> float | None:
+    """The session baseline read on *objective*'s axis, or None when that axis was not measured."""
+    # A ledger divides by this, so an output baseline must never stand in for an interactivity objective.
+    if objective in INTVTY_OBJECTIVES:
+        value = axis_of(getattr(state, "baseline_perf", None), objective)
+    else:
+        value = float(getattr(state, "baseline_tput", 0.0) or 0.0)
+    return value if value > 0 else None
+
+
 def graded_axes_of(source: Mapping[str, Any] | None) -> dict[str, float]:
     """The graded axes *source* carries, for stamping onto a winner record."""
     # A KEEP's ``current_best`` becomes the next candidate's anchor, and an anchor missing an axis degrades the whole
@@ -506,6 +516,7 @@ __all__ = [
     "VERDICT_REVERT",
     "agentx_active",
     "axis_of",
+    "baseline_on_axis",
     "graded_axes_of",
     "graded_metric_key",
     "holds_within_band",
