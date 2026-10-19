@@ -80,28 +80,6 @@ def cid_to_path_components(
     return (model, hardware, framework_name, model_type, architectures, framework_version, precision)
 
 
-def canonical_id_from_components(
-    *,
-    model: str,
-    hardware: str,
-    framework_name: str,
-    model_type: str = "",
-    architectures: "str | list[str]" = "",
-    framework_version: str,
-    precision: str,
-) -> str:
-    """Inverse of :func:`cid_to_path_components` — pass-through to :func:`recipe_canonical_id` for symmetry / discoverability."""
-    return recipe_canonical_id(
-        model=model,
-        hardware=hardware,
-        framework_name=framework_name,
-        model_type=model_type,
-        architectures=architectures,
-        framework_version=framework_version,
-        precision=precision,
-    )
-
-
 def canonical_id_for_path(*, root: Path, recipe_dir: Path) -> str:
     """Build the canonical id for the recipe directory at ``recipe_dir``."""
     try:
@@ -118,7 +96,7 @@ def canonical_id_for_path(*, root: Path, recipe_dir: Path) -> str:
             f"expected {CANONICAL_ID_DIMENSIONS} levels under root, got {len(parts)}: {parts!r}",
         )
     model, hardware, framework_name, model_type, architectures, framework_version, precision = parts
-    return canonical_id_from_components(
+    return recipe_canonical_id(
         model=model,
         hardware=hardware,
         framework_name=framework_name,
@@ -141,7 +119,6 @@ __all__ = [
     "DEFAULT_PRECISION_SLUG",
     "InvalidCanonicalIdError",
     "canonical_id_for_path",
-    "canonical_id_from_components",
     "canonical_labels",
     "cid_to_path_components",
     "detect_framework_version",

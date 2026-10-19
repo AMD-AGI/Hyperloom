@@ -13,7 +13,7 @@ import pytest
 
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session.session_paths import trajectory_dir
-from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.coordinator import Coordinator, RunOptions
 from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
 from hyperloom.inference_optimizer.trace import langfuse_emitter as lfe
 from hyperloom.inference_optimizer.trace import trajectory_projection as trajmap
@@ -269,7 +269,7 @@ async def test_coordinator_run_is_one_session_span(session_dir):
         backends={"orchestration": MockBackend(silent, name="o"), "critic": MockBackend(silent, name="c")},
     )
     try:
-        assert await c.run(max_ticks=2) == "max_ticks"
+        assert await c.run(options=RunOptions(max_ticks=2)) == "max_ticks"
     finally:
         await c.stop()
     sessions = [r for r in _rows(session_dir) if r["event_type"] == tt.EVENT_SESSION]

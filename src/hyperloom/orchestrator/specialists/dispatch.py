@@ -9,7 +9,7 @@ import asyncio
 import logging as _logging
 import os
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, NamedTuple
 
 from hyperloom.common.env import env_flag
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
@@ -69,6 +69,13 @@ FORCE_STALLED_KEEP_ROUNDS: int = 12
 
 # Gap id for the custom dispatch when the ledger has no gap yet.
 CUSTOM_SESSION_GAP_ID: str = "gap.custom.session"
+
+
+class ClassifiedFailure(NamedTuple):
+    """A specialist attempt's classified failure type and the reason it carried."""
+
+    ftype: SpecialistFailureType
+    error: str
 
 
 class SpecialistDispatchCollaborator(CoordinatorCollaborator):
@@ -343,8 +350,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         if attempt >= cap:
             await self._record_specialist_retry_exhausted(
                 task=task,
-                ftype=ftype,
-                error=error,
+                failure=ClassifiedFailure(ftype=ftype, error=error),
                 attempts_used=attempt,
                 cap=cap,
                 detail="retry cap reached",
@@ -386,8 +392,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             # Retry slot already taken: let normal bookkeeping record this attempt.
             await self._record_specialist_retry_exhausted(
                 task=task,
-                ftype=ftype,
-                error=error,
+                failure=ClassifiedFailure(ftype=ftype, error=error),
                 attempts_used=attempt,
                 cap=cap,
                 detail="retry slot already taken",
@@ -433,8 +438,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         self,
         *,
         task: "Task",
-        ftype: SpecialistFailureType,
-        error: str,
+        failure: ClassifiedFailure,
         attempts_used: int,
         cap: int,
         detail: str,
@@ -443,8 +447,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
 
         Args:
             task: The specialist task whose final attempt failed.
-            ftype: The classified failure type.
-            error: The failure reason carried by the attempt.
+            failure: The classified failure type and the reason the attempt carried.
             attempts_used: Retry attempts already spent.
             cap: Configured retry ceiling.
             detail: Why no further retry was scheduled.
@@ -460,15 +463,15 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 "gap_canonical_id": str(params.get("gap_canonical_id") or ""),
                 "attempts_used": attempts_used,
                 "max_attempts": cap,
-                "failure_type": ftype.value,
-                "reason": error[:200],
+                "failure_type": failure.ftype.value,
+                "reason": failure.error[:200],
                 "detail": detail,
             },
         )
         log.warning(
             "specialist auto-retry exhausted: task=%s failure=%s attempts=%d/%d (%s)",
             task.task_id,
-            ftype.value,
+            failure.ftype.value,
             attempts_used,
             cap,
             detail,

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
 from hyperloom.orchestrator.bus.gpu_pool import GPU_LEASE_TTL_GRACE
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
@@ -34,7 +34,7 @@ def _build_coord(tmp_path: Path, *, gpu_capacity: int) -> Coordinator:
         session_dir=tmp_path,
         backends=backends,
         role_registry=default_role_registry(),
-        knowledge_plane=None,
+        advisory=AdvisoryServices(knowledge_plane=None),
     )
 
 
