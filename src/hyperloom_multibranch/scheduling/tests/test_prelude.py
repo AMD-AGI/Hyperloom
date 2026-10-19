@@ -25,7 +25,7 @@ from hyperloom.measure.compile import LocalBlobStore
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.notebook import LocalNotebook
-from hyperloom_multibranch.notebook.knowledge.warm_start import RecipeReader
+from hyperloom_multibranch.notebook.knowledge.warm_start import RecipeDownloader
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.scheduling.budget import HardStop, SessionBudget
 from hyperloom_multibranch.scheduling.clock import Clock
@@ -35,7 +35,13 @@ from hyperloom_multibranch.scheduling.decisions import DecisionLog
 from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
 from hyperloom_multibranch.rulegate.service import BASELINE_TESTS, GateService
-from hyperloom_multibranch.scheduling.prelude import Prelude, PreludeFailed, PreludeResult, prelude_argv
+from hyperloom_multibranch.scheduling.prelude import (
+    Prelude,
+    PreludeFailed,
+    PreludeResult,
+    WarmStartSource,
+    prelude_argv,
+)
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry, RegisteredProcess
 from hyperloom_multibranch.scheduling.requests import SessionTests
 from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, Workload
@@ -126,7 +132,7 @@ def _prelude(
     processes: ProcessRegistry,
     peers: PreludePeers,
     clock: Clock | None = None,
-    recipe_kb: RecipeReader | None = None,
+    recipe_kb: RecipeDownloader | None = None,
 ) -> Prelude:
     clock = clock or _clock()
     roster = Roster(RosterCaps(1, 1, 1), layout.roster, clock)
@@ -135,7 +141,8 @@ def _prelude(
     context = SchedulerContext(
         layout, roster, _notebook(layout), decisions, processes, clock, desk, RecordedReservations()
     )
-    return Prelude(context, peers.repo, peers.gate, peers.tests, recipe_kb=recipe_kb)
+    warm_start = None if recipe_kb is None else WarmStartSource(recipe_kb, LocalBlobStore(layout.blobs))
+    return Prelude(context, peers.repo, peers.gate, peers.tests, warm_start=warm_start)
 
 
 def _warm_start_decision(layout: SessionLayout) -> dict[str, Any]:
@@ -299,7 +306,9 @@ async def test_a_patch_off_the_framework_checkout_is_kept_in_the_prelude_dir_and
     assert detail["unexpressed_patches"] == {str(copy): str(site_packages)}
 
 
-async def test_the_recipe_kb_champions_for_the_profile_become_warm_start_leads(tmp_path: Path) -> None:
+async def test_the_recipe_kb_champions_for_the_profile_become_warm_start_leads_prepared_for_replay(
+    tmp_path: Path,
+) -> None:
     layout = _layout(tmp_path)
     kb = OneChampionKB()
     budget = SessionBudget.from_hours(2.0, NOW)
@@ -314,6 +323,8 @@ async def test_the_recipe_kb_champions_for_the_profile_become_warm_start_leads(t
         12.0,
     )
     assert kb.searched[0]["match"]["hardware"] == result.profile.hardware
+    assert lead.replay is not None and lead.replay.recipe is None
+    assert lead.replay.launch.server_args == "--enable-expert-parallel"
     assert _warm_start_decision(layout) == {"leads": [lead.describe()], "unread": ""}
 
 
@@ -322,7 +333,7 @@ async def test_the_recipe_kb_champions_for_the_profile_become_warm_start_leads(t
     [(None, "no Recipe KB is configured"), (OneChampionKB(unreachable=True), "KBStoreError: connection refused")],
 )
 async def test_without_a_readable_recipe_kb_the_session_roots_with_no_leads(
-    recipe_kb: RecipeReader | None, unread: str, tmp_path: Path
+    recipe_kb: RecipeDownloader | None, unread: str, tmp_path: Path
 ) -> None:
     layout = _layout(tmp_path)
     budget = SessionBudget.from_hours(2.0, NOW)

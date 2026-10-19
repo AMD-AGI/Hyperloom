@@ -304,6 +304,7 @@ async def test_the_real_peers_live_inside_the_session_directory(built: _Built) -
     layout, setup, peers, wiring = built.layout, built.setup, built.peers, built.wiring
     assert (wiring.setup, wiring.repo, wiring.briefs) == (setup, peers.repo, peers.briefs)
     assert isinstance(peers.lifecycle, SpecialistRuntime) and peers.briefs.warm == ()
+    assert peers.briefs.repo is peers.repo
     assert isinstance(peers.toolbox, LocalHostedToolbox) and isinstance(peers.repo, GitExperimentRepo)
     assert (layout.toolbox / "canonical" / "canonical.yaml").is_file()
     assert not (layout.toolbox / "measurement-config.json").exists()

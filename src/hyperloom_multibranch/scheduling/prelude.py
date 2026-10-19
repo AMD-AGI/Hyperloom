@@ -9,8 +9,9 @@ whose kept patches go to the session's blob store and which the experiment repos
 the session profile is written. What the child kept that a recipe cannot express does not fail PRELUDE: the root
 recipe names it as ``unexpressed``, and kept patches outside the framework checkout are copied to ``MB-prelude/``. The
 Recipe KB's champions for that profile are read as warm-start leads for the
-specialists; no Recipe KB, or none of its champions in this session's scope, gives none, and a KB that cannot be read
-is recorded and gives none either. The baseline every recorded value is anchored to is measured through the toolbox in a
+specialists, the best of them prepared for replay on the root's image, their files in the session's blob store; no
+Recipe KB, or none of its champions in this session's scope, gives none, and a KB that cannot be read is recorded and
+gives none either. The baseline every recorded value is anchored to is measured through the toolbox in a
 second step, once the caller has put the integration branch on the roster and given the toolbox its K: as many tests
 of the root as the rule gate asks for, from which the gate writes the baseline and its bar.
 
@@ -33,7 +34,7 @@ from hyperloom.common.io import atomic_write_json
 from hyperloom.contracts.measurement import Purpose, TestKind
 from hyperloom.contracts.recipe import PatchRef, Recipe
 from hyperloom.inference_optimizer.model_config_utils import summarize_model_config
-from hyperloom.measure.compile import BlobError
+from hyperloom.measure.compile import BlobError, BlobStore
 from hyperloom.orchestrator.knowledge.remote_recipe.client import KBStoreError
 from hyperloom_multibranch.contracts.gate import NotMeasured, SessionGate
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
@@ -41,7 +42,13 @@ from hyperloom_multibranch.contracts.notebook.records import LineageEvent, Sessi
 from hyperloom_multibranch.contracts.notebook.vocab import LineageKind
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
-from hyperloom_multibranch.notebook.knowledge.warm_start import RecipeReader, WarmLead, warm_leads
+from hyperloom_multibranch.notebook.knowledge.warm_start import (
+    RecipeDownloader,
+    ReplayTarget,
+    WarmLead,
+    replay_leads,
+    warm_leads,
+)
 from hyperloom_multibranch.scheduling.budget import BudgetExhausted, HardStop, SessionBudget
 from hyperloom_multibranch.scheduling.context import SchedulerContext
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind
@@ -83,6 +90,14 @@ class PreludeFailed(RuntimeError):
 
 
 @dataclass(frozen=True)
+class WarmStartSource:
+    """The Recipe KB the warm-start leads are read from and the session's blob store their replays' files go into."""
+
+    recipe_kb: RecipeDownloader
+    blobs: BlobStore
+
+
+@dataclass(frozen=True)
 class PreludeResult:
     """The root commit the session starts from, the profile it runs on, the Recipe KB's leads for it and the upper
     bound of the GPU seconds the main-flow child used; the rest is in the notebook and ``MB-prelude/``."""
@@ -111,7 +126,7 @@ def prelude_argv(workload: Workload, max_hours: float, launch_info: Path) -> tup
 
 
 class Prelude:
-    """Runs PRELUDE for one session; ``recipe_kb`` is ``None`` when no Recipe KB is configured."""
+    """Runs PRELUDE for one session; ``warm_start`` is ``None`` when no Recipe KB is configured."""
 
     def __init__(
         self,
@@ -120,10 +135,10 @@ class Prelude:
         gate: SessionGate,
         tests: SessionTests,
         *,
-        recipe_kb: RecipeReader | None,
+        warm_start: WarmStartSource | None,
     ) -> None:
         self._layout = context.layout
-        self._recipe_kb = recipe_kb
+        self._warm_start_source = warm_start
         self._processes = context.processes
         self._notebook = context.notebook
         self._repo = repo
@@ -173,16 +188,20 @@ class Prelude:
                 },
             )
         )
-        return PreludeResult(root, profile, await self._warm_start(profile), child_gpu_seconds)
+        return PreludeResult(root, profile, await self._warm_start(profile, recipe), child_gpu_seconds)
 
-    async def _warm_start(self, profile: SessionProfile) -> tuple[WarmLead, ...]:
-        """The Recipe KB's leads for ``profile``; the ``PRELUDE`` decision names them, or why the KB was not read."""
+    async def _warm_start(self, profile: SessionProfile, root: Recipe) -> tuple[WarmLead, ...]:
+        """The Recipe KB's leads for ``profile``, the best prepared for replay on ``root``; the ``PRELUDE`` decision
+        names them, or why the KB was not read."""
 
+        source = self._warm_start_source
         leads: tuple[WarmLead, ...] = ()
-        unread = "no Recipe KB is configured" if self._recipe_kb is None else ""
-        if self._recipe_kb is not None:
+        unread = "no Recipe KB is configured" if source is None else ""
+        if source is not None:
+            target = ReplayTarget(root, source.blobs, self._layout.warm_start)
             try:
-                leads = await asyncio.to_thread(warm_leads, self._recipe_kb, profile)
+                found = await asyncio.to_thread(warm_leads, source.recipe_kb, profile)
+                leads = await asyncio.to_thread(replay_leads, source.recipe_kb, profile, found, target)
             except KBStoreError as exc:
                 unread = f"{type(exc).__name__}: {exc}"
         detail = {"leads": [lead.describe() for lead in leads], "unread": unread}
@@ -307,4 +326,4 @@ def _session_profile(
     )
 
 
-__all__ = ["PreludeFailed", "Prelude", "PreludeResult", "prelude_argv"]
+__all__ = ["PreludeFailed", "Prelude", "PreludeResult", "WarmStartSource", "prelude_argv"]

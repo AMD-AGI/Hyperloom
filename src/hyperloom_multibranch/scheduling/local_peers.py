@@ -10,18 +10,17 @@ environment compiler reads, like the repository, from the session's blob store a
 on; its learnings tool recalls this session's learnings only, as MB1 runs on no Experience KB
 (:func:`~hyperloom_multibranch.scheduling.mb_fakes.mb_fake_learning_recall`). Every test is measured on a
 :class:`MeasurementHost`: this machine's cards, the image the launcher names in ``HYPERLOOM_ACTIVE_IMAGE_REF`` and
-``HYPERLOOM_ACTIVE_IMAGE_DIGEST`` and the tool commits Hyperloom pins. The gate's
-session service and the specialist runtime judge on one rule, :func:`workload_rule`; the runtime settles through a
-rule gate that asks the scheduler's fork desk for branches, and the MCP service's ``request_repair`` and
-``decline_repair`` conclude a blocked candidate through the same gate, which the scheduler has land each fork it
-admits and record each fork and repair it voids. A specialist declares a correctness fix with the MCP service's
-``fix_case``; the runtime proves it with the repro runner the regression set uses and has the setup's critic review
-it. The runtime's specialist sessions come from
-a :data:`SpecialistSessions`: :func:`model_backed_sessions` runs each branch's specialist as an agent CLI in a
-worktree of its own, briefed by the session's :class:`SessionBriefs`, whose warm-start leads the session binds once
-PRELUDE has read them. :func:`load_peers` reads the measurement host, checks the image holds the framework package
-those worktrees branch off and resolves that CLI and the price of its model first, and refuses when any cannot be
-had, so the command line fails before it creates anything.
+``HYPERLOOM_ACTIVE_IMAGE_DIGEST`` and the tool commits Hyperloom pins. The gate's session service and the specialist
+runtime judge on one rule, :func:`workload_rule`; the runtime settles through a rule gate that asks the scheduler's fork
+desk for branches, and the MCP service's ``request_repair`` and ``decline_repair`` conclude a blocked candidate through
+the same gate, which the scheduler has land each fork it admits and record each fork and repair it voids. A specialist
+declares a correctness fix with the MCP service's ``fix_case``; the runtime proves it with the repro runner the
+regression set uses and has the setup's critic review it. The runtime's specialist sessions come from a
+:data:`SpecialistSessions`: :func:`model_backed_sessions` runs each branch's specialist as an agent CLI in a worktree of
+its own, briefed by the session's :class:`SessionBriefs`, whose warm-start leads the session binds once PRELUDE has read
+them and which reads the repository for a replay's branch head. :func:`load_peers` reads the measurement host, checks
+the image holds the framework package those worktrees branch off and resolves that CLI and the price of its model first,
+and refuses when any cannot be had, so the command line fails before it creates anything.
 
 The toolbox, its measurement points and the agent sessions load the main flow's runtime, so they are imported inside
 the functions that use them: importing this module, the command line or the session loads none of it.
@@ -194,6 +193,7 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
         LocalNotebook(layout.notebook, Writer(Role.OBSERVER, BRIEFS_READER)),
         metric=workload.metric,
         learnings=learnings,
+        repo=repo,
     )
     tool_options = SpecialistToolOptions(
         claim_ttl_seconds=CLAIM_TTL_SECONDS,

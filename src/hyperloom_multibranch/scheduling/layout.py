@@ -47,6 +47,7 @@ PRELUDE_CHILD_FILE = "MB-prelude-child.json"
 ROOT_RECIPE_FILE = "MB-root-recipe.json"
 PRELUDE_LOG_FILE = "MB-prelude.log"
 PRELUDE_PATCHES_DIR = "MB-unexpressed-patches"
+WARM_START_DIR = "MB-warm-start"
 MERGES_FILE = "MB-merges.jsonl"
 REPORT_FILE = "MB-report.json"
 REPORT_MARKDOWN_FILE = "MB-report.md"
@@ -174,6 +175,11 @@ class SessionLayout:
     def prelude_patches(self) -> Path:
         """The kept patches the root recipe names as unexpressed, copied out of the child session."""
         return self.prelude / PRELUDE_PATCHES_DIR
+
+    @property
+    def warm_start(self) -> Path:
+        """The Recipe KB champions' files PRELUDE downloads for replay, one directory per champion."""
+        return self.prelude / WARM_START_DIR
 
     @property
     def merges(self) -> Path:

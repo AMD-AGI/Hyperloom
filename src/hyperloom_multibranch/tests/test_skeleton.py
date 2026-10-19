@@ -299,7 +299,7 @@ class Stage:
         )
         runtime.refusing = self.refusing
         self.toolbox, self.repo, self.setup = toolbox, repo, setup
-        self.briefs = SessionBriefs(self.handle(Role.OBSERVER))
+        self.briefs = SessionBriefs(self.handle(Role.OBSERVER), repo=repo)
         mcp = McpServer(McpServerConfig(host_token="t" * MIN_TOKEN_LENGTH), campaign=setup.layout.session_id)
         gate = session_gate(
             self.handle(Role.GATE), toolbox, rule, polling=Polling(VIRTUAL_POLL_SECONDS, self.time.sleep)
@@ -554,7 +554,9 @@ async def test_an_agentx_session_is_judged_on_p50_interactivity_and_validated_at
     assert json.loads(stage.layout.manifest.read_text())["metric"] == GRADED_INTVTY_P50
 
 
-async def test_the_specialists_are_briefed_on_the_warm_start_leads_prelude_read(tmp_path: Path) -> None:
+async def test_the_specialists_are_briefed_on_the_warm_start_leads_prelude_read_and_replay_them_on_their_head(
+    tmp_path: Path,
+) -> None:
     stage = _stage(tmp_path, child=child_with_patch(tmp_path))
     stage.recipe_kb = OneChampionKB()
 
@@ -563,6 +565,8 @@ async def test_the_specialists_are_briefed_on_the_warm_start_leads_prelude_read(
     [lead] = stage.briefs.warm
     assert (lead.canonical_id, lead.server_args) == ("inference:champion", "--enable-expert-parallel")
     assert stage.recipe_kb.searched
+    replay = await stage.briefs.for_branch(INTEGRATION_BRANCH).warm_replay(lead.canonical_id)
+    assert replay is not None and replay.parent_commit == await stage.repo.head(INTEGRATION_BRANCH)
 
 
 async def test_a_failed_prelude_skips_to_close(tmp_path: Path) -> None:
