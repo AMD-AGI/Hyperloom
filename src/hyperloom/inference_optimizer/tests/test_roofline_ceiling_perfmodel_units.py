@@ -36,35 +36,29 @@ def test_gemm_bytes_separates_activation_from_weight_precision():
 def test_sdpa_flops_counts_both_matmuls():
     b, n_q, h_q, n_kv, h_kv, d = 2, 3, 8, 5, 2, 64
     expected = b * h_q * (2.0 * n_q * n_kv * d) * 2
-    assert rc._sdpa_flops(b, n_q, h_q, n_kv, h_kv, d, d, causal=False) == expected
+    assert rc._sdpa_flops(rc._SdpaShape(b, n_q, h_q, n_kv, h_kv, d, d), causal=False) == expected
 
 
 def test_causal_masking_halves_prefill_attention_only():
     """Halved when the two lengths match; decode (N_Q=1) is untouched."""
-    args = (2, 7, 8, 7, 2, 64, 64)
-    assert rc._sdpa_flops(*args, causal=True) == rc._sdpa_flops(*args, causal=False) / 2.0
+    prefill = rc._SdpaShape(2, 7, 8, 7, 2, 64, 64)
+    assert rc._sdpa_flops(prefill, causal=True) == rc._sdpa_flops(prefill, causal=False) / 2.0
 
-    decode = (2, 1, 8, 7, 2, 64, 64)
-    assert rc._sdpa_flops(*decode, causal=True) == rc._sdpa_flops(*decode, causal=False)
+    decode = rc._SdpaShape(2, 1, 8, 7, 2, 64, 64)
+    assert rc._sdpa_flops(decode, causal=True) == rc._sdpa_flops(decode, causal=False)
 
 
 def test_sdpa_bytes_reads_kv_at_the_kv_head_count():
     """GQA is the point of the split: K/V are sized by H_KV, Q and out by H_Q."""
     b, n_q, h_q, n_kv, h_kv, d, bpe = 2, 3, 8, 5, 2, 64, 2.0
     expected = (b * n_q * h_q * d + b * n_kv * h_kv * d * 2 + b * n_q * h_q * d) * bpe
-    assert rc._sdpa_bytes(b, n_q, h_q, n_kv, h_kv, d, d, False, bpe) == expected
-
-
-def test_sdpa_bytes_ignores_causal():
-    """Causal masking skips compute, not the KV read."""
-    args = (2, 7, 8, 7, 2, 64, 64)
-    assert rc._sdpa_bytes(*args, True, 2.0) == rc._sdpa_bytes(*args, False, 2.0)
+    assert rc._sdpa_bytes(rc._SdpaShape(b, n_q, h_q, n_kv, h_kv, d, d), bpe) == expected
 
 
 def test_fused_moe_flops_counts_gate_up_down_and_aggregation():
     m, k, n, topk = 4, 16, 32, 2
     expected = 2.0 * m * k * n * topk * 2 + 2.0 * m * k * n * topk + m * k * (2 * topk - 1)
-    assert rc._fused_moe_flops(M=m, K=k, N=n, topk=topk) == expected
+    assert rc._fused_moe_flops(rc._MoeShape(M=m, K=k, N=n, num_experts=8, topk=topk)) == expected
 
 
 def test_fused_moe_active_experts_saturate_with_batch_size():
@@ -73,7 +67,8 @@ def test_fused_moe_active_experts_saturate_with_batch_size():
 
     def _expert_bytes(m):
         # Subtract the activation terms to leave the expert-weight reads.
-        return rc._fused_moe_bytes(M=m, K=k, N=n, num_experts=num_experts, topk=topk, weight_bpe=bpe) - 2 * m * k * bpe
+        shape = rc._MoeShape(M=m, K=k, N=n, num_experts=num_experts, topk=topk)
+        return rc._fused_moe_bytes(shape, weight_bpe=bpe) - 2 * m * k * bpe
 
     one_token = _expert_bytes(1)
     assert one_token == pytest.approx(topk * n * k * bpe * 3)
@@ -84,8 +79,8 @@ def test_fused_moe_active_experts_saturate_with_batch_size():
 
 
 def test_fused_moe_bytes_defaults_activations_to_the_weight_width():
-    shape = dict(M=4, K=16, N=32, num_experts=8, topk=2)
-    assert rc._fused_moe_bytes(**shape, weight_bpe=1.0) == rc._fused_moe_bytes(**shape, weight_bpe=1.0, act_bpe=1.0)
+    shape = rc._MoeShape(M=4, K=16, N=32, num_experts=8, topk=2)
+    assert rc._fused_moe_bytes(shape, weight_bpe=1.0) == rc._fused_moe_bytes(shape, weight_bpe=1.0, act_bpe=1.0)
 
 
 # ---- compute_roofline_from_perfmodel ----
@@ -113,15 +108,13 @@ _UNSET = object()
 
 
 def _perfmodel(meta=_UNSET, **over):
-    kw = dict(
-        meta=_dense_meta() if meta is _UNSET else meta,
-        gpu_type="mi300x",
-        concurrency=8,
-        isl=128,
-        osl=64,
-    )
+    kw = dict(gpu_type="mi300x", num_gpus=1, precision_tag="bf16", concurrency=8, isl=128, osl=64)
     kw.update(over)
-    return rc.compute_roofline_from_perfmodel(**kw)
+    return rc.compute_roofline_from_perfmodel(
+        meta=_dense_meta() if meta is _UNSET else meta,
+        target=rc.ComputeTarget(gpu_type=kw["gpu_type"], num_gpus=kw["num_gpus"], precision_tag=kw["precision_tag"]),
+        shape=rc.DecodeShape(isl=kw["isl"], osl=kw["osl"], concurrency=kw["concurrency"]),
+    )
 
 
 def test_perfmodel_breaks_a_dense_forward_into_its_operators():
@@ -451,7 +444,9 @@ def test_perfmodel_sizes_the_moe_op_at_the_latent_expert_width(tmp_path):
             num_attention_heads=8,
         )
         b = rc.compute_roofline_from_perfmodel(
-            meta=meta, gpu_type="mi355x", concurrency=8, isl=1024, osl=128, num_gpus=1, precision_tag="mxfp4"
+            meta=meta,
+            target=rc.ComputeTarget(gpu_type="mi355x", num_gpus=1, precision_tag="mxfp4"),
+            shape=rc.DecodeShape(isl=1024, osl=128, concurrency=8),
         )
         return next(o for o in b.ops if o.name == "moe_fused")
 
@@ -499,7 +494,9 @@ def test_perfmodel_attributes_the_moe_ffn_for_a_quark_checkpoint(tmp_path):
     expert_elems = 4 * 512 * 3 * 512 * 2048
     meta = rc.load_model_meta(_write_model(tmp_path / "m", cfg, weight_bytes=int(expert_elems * 0.5 * 1.15)))
     breakdown = rc.compute_roofline_from_perfmodel(
-        meta=meta, gpu_type="mi355x", concurrency=64, isl=8192, osl=1024, num_gpus=8, precision_tag="mxfp4"
+        meta=meta,
+        target=rc.ComputeTarget(gpu_type="mi355x", num_gpus=8, precision_tag="mxfp4"),
+        shape=rc.DecodeShape(isl=8192, osl=1024, concurrency=64),
     )
 
     ops = {o.name: o.pct_time for o in breakdown.ops}
@@ -915,9 +912,7 @@ def test_compute_compute_bound_ceiling_fallback_and_degrade_to_zero(monkeypatch)
     # achievable (100.0) must win over vendor (500.0).
     expected = (100.0 * 1e12 * 2) / (2.0 * active / 2.0)
     got = rc.compute_compute_bound_ceiling_tok_per_sec(
-        gpu_type="mi300x",
-        num_gpus=2,
-        precision_tag="bf16",
+        rc.ComputeTarget(gpu_type="mi300x", num_gpus=2, precision_tag="bf16"),
         active_weight_bytes=active,
         weight_bytes=weight,
         weight_dtype_bytes=2.0,
@@ -926,9 +921,7 @@ def test_compute_compute_bound_ceiling_fallback_and_degrade_to_zero(monkeypatch)
 
     # active→total-weight fallback (active_weight_bytes=0 falls back to weight_bytes).
     fallback = rc.compute_compute_bound_ceiling_tok_per_sec(
-        gpu_type="mi300x",
-        num_gpus=2,
-        precision_tag="bf16",
+        rc.ComputeTarget(gpu_type="mi300x", num_gpus=2, precision_tag="bf16"),
         active_weight_bytes=0,
         weight_bytes=weight,
         weight_dtype_bytes=2.0,
@@ -940,9 +933,7 @@ def test_compute_compute_bound_ceiling_fallback_and_degrade_to_zero(monkeypatch)
     monkeypatch.setattr(rc, "_resolve_achievable_tflops", lambda _gpu, _tag: 0.0)
     monkeypatch.setattr(rc, "_resolve_peak_tflops", lambda _gpu, _tag: 200.0)
     vendor_fallback = rc.compute_compute_bound_ceiling_tok_per_sec(
-        gpu_type="mi300x",
-        num_gpus=1,
-        precision_tag="bf16",
+        rc.ComputeTarget(gpu_type="mi300x", num_gpus=1, precision_tag="bf16"),
         active_weight_bytes=active,
         weight_bytes=weight,
         weight_dtype_bytes=2.0,
@@ -954,9 +945,7 @@ def test_compute_compute_bound_ceiling_fallback_and_degrade_to_zero(monkeypatch)
     monkeypatch.setattr(rc, "_resolve_peak_tflops", lambda _gpu, _tag: 0.0)
     assert (
         rc.compute_compute_bound_ceiling_tok_per_sec(
-            gpu_type="unknown-gpu",
-            num_gpus=1,
-            precision_tag="bf16",
+            rc.ComputeTarget(gpu_type="unknown-gpu", num_gpus=1, precision_tag="bf16"),
             active_weight_bytes=active,
             weight_bytes=weight,
             weight_dtype_bytes=2.0,
@@ -966,9 +955,7 @@ def test_compute_compute_bound_ceiling_fallback_and_degrade_to_zero(monkeypatch)
     monkeypatch.setattr(rc, "_resolve_achievable_tflops", lambda _gpu, _tag: 100.0)
     assert (
         rc.compute_compute_bound_ceiling_tok_per_sec(
-            gpu_type="mi300x",
-            num_gpus=1,
-            precision_tag="bf16",
+            rc.ComputeTarget(gpu_type="mi300x", num_gpus=1, precision_tag="bf16"),
             active_weight_bytes=0,
             weight_bytes=0,
             weight_dtype_bytes=2.0,
@@ -977,9 +964,7 @@ def test_compute_compute_bound_ceiling_fallback_and_degrade_to_zero(monkeypatch)
     )
     assert (
         rc.compute_compute_bound_ceiling_tok_per_sec(
-            gpu_type="mi300x",
-            num_gpus=1,
-            precision_tag="bf16",
+            rc.ComputeTarget(gpu_type="mi300x", num_gpus=1, precision_tag="bf16"),
             active_weight_bytes=active,
             weight_bytes=weight,
             weight_dtype_bytes=0.0,
