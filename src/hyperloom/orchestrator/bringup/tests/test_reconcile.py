@@ -141,7 +141,7 @@ async def test_a_round_whose_holder_cannot_be_confirmed_dead_still_releases(db):
 
     settled = await rounds.get("round-spec-1")
     assert settled.outcome == ""
-    assert settled.excludes_at(_NOW + 10.0) is True
+    assert settled.state == OPEN
     assert state.stop_reason == "", "an unobservable reap does not end the session"
 
 
@@ -155,7 +155,6 @@ async def test_age_never_requests_a_reap_of_a_running_holder(db):
 
     settled = await rounds.get("round-spec-1")
     assert settled.state == OPEN
-    assert settled.excludes_at(_NOW + 10.0) is True
     assert state.stop_reason == ""
 
 

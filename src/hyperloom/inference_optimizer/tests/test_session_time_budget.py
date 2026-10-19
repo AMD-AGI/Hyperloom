@@ -50,7 +50,6 @@ from hyperloom.orchestrator.roles import Backend, MockBackend, ScriptedPlan
 from hyperloom.orchestrator.state.shared_state import SharedState, effective_closing_grace_sec
 from hyperloom.orchestrator.state.task_registry import Task
 
-from ._dispatch_helpers import pump_until_settled
 
 # The costliest action the catalogue prices, so a short budget cannot fit it.
 _EXPENSIVE_ACTION = "conc_sweep"
@@ -536,42 +535,6 @@ class TestPreDispatchBackstop:
         )
         assert await coord.dispatcher._cancel_queued_task_over_budget(task) is False
         assert (await coord.tasks.get(task.task_id)).state == "queued"
-
-    @pytest.mark.asyncio
-    async def test_a_queued_recover_is_retired_even_when_the_budget_is_spent(
-        self,
-        coord: Coordinator,
-    ):
-        """Legacy rows settle as unsupported, not as attempted recovery or budget failure."""
-        _set_budget(coord, minutes=600)
-        coord.sub.executor_registry.pop("recover", None)
-        task, _ = await coord.tasks.create_or_return_existing(
-            kind="recover",
-            params={},
-            idempotency_key="q-recover",
-        )
-        _set_budget(coord, minutes=600, elapsed_min=600.0)
-
-        await pump_until_settled(coord.dispatcher)
-
-        row = await coord.tasks.get(task.task_id)
-        assert row.state == "cancelled"
-        assert [(step["from"], step["to"]) for step in row.history] == [("queued", "cancelled")]
-        assert row.history[-1]["evidence"] == {
-            "reason": "unsupported_action",
-            "cleanup_confirmed": True,
-            "outcome": {
-                "task_id": task.task_id,
-                "state": "cancelled",
-                "result": {"status": "cancelled", "error_class": "unsupported_action"},
-                "error": "recover is no longer supported",
-                "error_class": "unsupported_action",
-            },
-        }
-        assert not await coord.locks.lane_holders()
-        assert not coord.dispatcher._inflight_actions
-        failures = list(getattr(coord.shared_state, "last_action_failures", []) or [])
-        assert not [failure for failure in failures if failure.get("action") == "recover"]
 
     @pytest.mark.asyncio
     async def test_a_queued_targeted_build_is_dropped_when_the_budget_is_spent(
@@ -1183,25 +1146,6 @@ async def test_stop_defers_db_close_until_pending_worker_cleanup(coord, monkeypa
         assert await reopened.fetchone("SELECT 1 FROM leases WHERE task_id=?", (task.task_id,)) is None
     finally:
         reopened.close()
-
-
-@pytest.mark.asyncio
-async def test_retired_queued_recover_emits_cancelled_result_without_failure(coord):
-    coord.sub.executor_registry.pop("recover", None)
-    task = await coord.tasks.create(
-        kind="recover", params={}, idempotency_key="retired-queued", requires_lanes=["server_lifecycle"]
-    )
-    await coord.locks.acquire_many(
-        ["server_lifecycle"], holder_id="occupied", task_id="occupied", action="baseline", ttl_sec=60
-    )
-    await pump_until_settled(coord.dispatcher)
-    assert (await coord.tasks.get(task.task_id)).state == "cancelled"
-    event = await coord.db.fetchone("SELECT payload FROM events WHERE topic='delegated_result'")
-    assert event is not None
-    import json
-
-    assert json.loads(event["payload"])["state"] == "cancelled"
-    assert (await coord.locks.lane_holders())["server_lifecycle"] == 1
 
 
 @pytest.mark.asyncio

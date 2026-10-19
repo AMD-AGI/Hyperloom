@@ -614,11 +614,6 @@ def processes_under(directory: str | os.PathLike[str]) -> set[int]:
     return set(survey.owned) | set(survey.foreign)
 
 
-def owned_processes_under(directory: str | os.PathLike[str]) -> set[int]:
-    """The processes working inside a directory that this campaign started."""
-    return set(_survey(os.path.realpath(directory)).owned)
-
-
 async def reap_processes_under(directory: str | os.PathLike[str], *, description: str) -> ReapReport:
     """Terminate this campaign's processes working under ``directory``."""
     resolved = os.path.realpath(directory)
@@ -647,7 +642,6 @@ __all__ = [
     "ReapReport",
     "device_holders",
     "install_child_subreaper",
-    "owned_processes_under",
     "processes_under",
     "reap_processes_under",
     "still_holding_device",

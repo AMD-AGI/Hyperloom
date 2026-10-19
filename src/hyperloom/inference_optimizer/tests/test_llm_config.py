@@ -24,7 +24,6 @@ from hyperloom.common.llm_config import (
     chat_completion,
     anthropic_messages,
     apply_reasoning_effort,
-    aresponse,
     build_http_timeout,
     claude_sdk_env_options,
     deepseek_compat_env,
@@ -1006,7 +1005,10 @@ def _record_anthropic_client_timeouts(monkeypatch: pytest.MonkeyPatch) -> list[o
 
 def test_a_one_shot_http_completion_waits_the_callers_timeout_s(monkeypatch):
     seen = _record_anthropic_client_timeouts(monkeypatch)
-    llm_config.anthropic_completion(model="m", messages=[], max_tokens=16, env={_ANTHROPIC_KEY: "k"}, timeout_s=60.0)
+    llm_config.anthropic_completion(
+        request=llm_config.AnthropicCompletionRequest(model="m", messages=[], max_tokens=16, timeout_s=60.0),
+        env={_ANTHROPIC_KEY: "k"},
+    )
     assert seen == [60.0]
 
 
@@ -1014,7 +1016,8 @@ def test_a_one_shot_http_completion_waits_the_callers_timeout_s(monkeypatch):
 async def test_an_async_one_shot_http_completion_waits_the_callers_timeout_s(monkeypatch):
     seen = _record_anthropic_client_timeouts(monkeypatch)
     await llm_config.aanthropic_completion(
-        model="m", messages=[], max_tokens=16, env={_ANTHROPIC_KEY: "k"}, timeout_s=60.0
+        request=llm_config.AnthropicCompletionRequest(model="m", messages=[], max_tokens=16, timeout_s=60.0),
+        env={_ANTHROPIC_KEY: "k"},
     )
     assert seen == [60.0]
 
@@ -1023,7 +1026,10 @@ def test_an_explicit_http_timeout_outranks_timeout_s(monkeypatch):
     seen = _record_anthropic_client_timeouts(monkeypatch)
     sentinel = object()
     llm_config.anthropic_completion(
-        model="m", messages=[], max_tokens=16, env={_ANTHROPIC_KEY: "k"}, timeout=sentinel, timeout_s=60.0
+        request=llm_config.AnthropicCompletionRequest(
+            model="m", messages=[], max_tokens=16, timeout=sentinel, timeout_s=60.0
+        ),
+        env={_ANTHROPIC_KEY: "k"},
     )
     assert seen == [sentinel]
 
@@ -1150,119 +1156,6 @@ def test_chat_completion_does_not_request_a_stream():
     client = _SyncStubClient(types.SimpleNamespace(choices=[choice]))
     chat_completion(client, model="m", messages=[])
     assert "stream" not in client.completions.calls[0]
-
-
-# ---- aresponse ----
-class _StubResponses:
-    def __init__(self, outcome: Any) -> None:
-        self._outcome = outcome
-        self.calls: list[dict[str, Any]] = []
-
-    async def create(self, **params: Any) -> Any:
-        self.calls.append(params)
-        if isinstance(self._outcome, BaseException):
-            raise self._outcome
-        return self._outcome
-
-
-class _StubResponsesClient:
-    def __init__(self, outcome: Any) -> None:
-        self.responses = _StubResponses(outcome)
-
-
-def _message_item(text: str, *, citations: list[str] | None = None) -> dict[str, Any]:
-    annotations = [{"type": "url_citation", "url": u} for u in (citations or [])]
-    return {
-        "type": "message",
-        "content": [{"type": "output_text", "text": text, "annotations": annotations}],
-    }
-
-
-@pytest.mark.asyncio
-async def test_aresponse_flattens_text_citations_status_and_tokens():
-    resp = {
-        "output": [
-            {"type": "reasoning", "content": []},
-            {"type": "web_search_call", "action": {"query": "x"}},
-            _message_item("the answer", citations=["https://a.example", "https://b.example"]),
-        ],
-        "status": "completed",
-        "usage": {"input_tokens": 11, "output_tokens": 7},
-    }
-    client = _StubResponsesClient(resp)
-    result = await aresponse(client, model="m", input="prompt")
-    assert result.text == "the answer"
-    assert result.citations == ["https://a.example", "https://b.example"]
-    assert result.status == "completed"
-    assert (result.input_tokens, result.output_tokens) == (11, 7)
-    assert client.responses.calls == [{"model": "m", "input": "prompt"}]
-
-
-@pytest.mark.asyncio
-async def test_aresponse_joins_multiple_message_items_with_newlines():
-    resp = {"output": [_message_item("first"), _message_item("second")]}
-    result = await aresponse(_StubResponsesClient(resp), model="m")
-    assert result.text == "first\nsecond"
-
-
-@pytest.mark.asyncio
-async def test_aresponse_skips_non_output_text_content_blocks():
-    resp = {
-        "output": [
-            {
-                "type": "message",
-                "content": [
-                    {"type": "refusal", "text": "ignored"},
-                    {"type": "output_text", "text": "kept", "annotations": []},
-                ],
-            }
-        ]
-    }
-    result = await aresponse(_StubResponsesClient(resp), model="m")
-    assert (result.text, result.citations) == ("kept", [])
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("resp", [{"output": []}, {}])
-async def test_aresponse_tolerates_empty_output_and_missing_usage(resp):
-    result = await aresponse(_StubResponsesClient(resp), model="m")
-    assert result.text == ""
-    assert result.citations == []
-    assert result.status is None
-    assert (result.input_tokens, result.output_tokens) == (0, 0)
-
-
-@pytest.mark.asyncio
-async def test_aresponse_reads_attribute_carrying_sdk_objects():
-    """The real SDK returns pydantic models, not dicts."""
-    block = types.SimpleNamespace(
-        type="output_text",
-        text="from sdk",
-        annotations=[types.SimpleNamespace(type="url_citation", url="https://sdk.example")],
-    )
-    resp = types.SimpleNamespace(
-        output=[types.SimpleNamespace(type="message", content=[block])],
-        status="incomplete",
-        usage=types.SimpleNamespace(input_tokens=3, output_tokens=4),
-    )
-    result = await aresponse(_StubResponsesClient(resp), model="m")
-    assert result.text == "from sdk"
-    assert result.citations == ["https://sdk.example"]
-    assert result.status == "incomplete"
-    assert (result.input_tokens, result.output_tokens) == (3, 4)
-
-
-@pytest.mark.asyncio
-async def test_aresponse_treats_unusable_token_counts_as_zero():
-    resp = {"output": [], "usage": {"input_tokens": "abc", "output_tokens": None}}
-    result = await aresponse(_StubResponsesClient(resp), model="m")
-    assert (result.input_tokens, result.output_tokens) == (0, 0)
-
-
-@pytest.mark.asyncio
-async def test_aresponse_propagates_transport_errors():
-    with pytest.raises(RuntimeError, match="gateway down"):
-        await aresponse(_StubResponsesClient(RuntimeError("gateway down")), model="m")
 
 
 # ---- client-ownership guard ----
@@ -1495,10 +1388,9 @@ def test_anthropic_completion_posts_to_the_messages_api_when_a_key_is_configured
     monkeypatch.setattr(llm_config, "get_anthropic_client", lambda **_kw: client)
 
     result = llm_config.anthropic_completion(
-        model="claude-opus-5",
-        messages=[{"role": "user", "content": "hi"}],
-        max_tokens=64,
-        system="sys",
+        request=llm_config.AnthropicCompletionRequest(
+            model="claude-opus-5", messages=[{"role": "user", "content": "hi"}], max_tokens=64, system="sys"
+        ),
         env={_ANTHROPIC_KEY: "sk-ant-key"},
     )
 
@@ -1519,10 +1411,9 @@ def test_anthropic_completion_sends_temperature_on_the_http_path(monkeypatch):
     monkeypatch.setattr(llm_config, "get_anthropic_client", lambda **_kw: client)
 
     llm_config.anthropic_completion(
-        model="claude-opus-5",
-        messages=[{"role": "user", "content": "hi"}],
-        max_tokens=8,
-        temperature=0.2,
+        request=llm_config.AnthropicCompletionRequest(
+            model="claude-opus-5", messages=[{"role": "user", "content": "hi"}], max_tokens=8, temperature=0.2
+        ),
         env={_ANTHROPIC_KEY: "sk-ant-key"},
     )
 
@@ -1535,9 +1426,9 @@ def test_anthropic_completion_omits_temperature_when_unset(monkeypatch):
     monkeypatch.setattr(llm_config, "get_anthropic_client", lambda **_kw: client)
 
     llm_config.anthropic_completion(
-        model="claude-opus-5",
-        messages=[{"role": "user", "content": "hi"}],
-        max_tokens=8,
+        request=llm_config.AnthropicCompletionRequest(
+            model="claude-opus-5", messages=[{"role": "user", "content": "hi"}], max_tokens=8
+        ),
         env={_ANTHROPIC_KEY: "sk-ant-key"},
     )
 
@@ -1547,10 +1438,9 @@ def test_anthropic_completion_omits_temperature_when_unset(monkeypatch):
 def test_anthropic_completion_drops_temperature_on_the_cli_path(fake_one_shot):
     """The CLI has no temperature knob, so the argument is accepted and ignored rather than raising -- one entry point, two transports, same signature."""
     llm_config.anthropic_completion(
-        model="claude-opus-5",
-        messages=[{"role": "user", "content": "hi"}],
-        max_tokens=8,
-        temperature=0.2,
+        request=llm_config.AnthropicCompletionRequest(
+            model="claude-opus-5", messages=[{"role": "user", "content": "hi"}], max_tokens=8, temperature=0.2
+        ),
         env={_OAUTH_ENV: _OAUTH_VALUE},
     )
 
@@ -1562,9 +1452,9 @@ def test_anthropic_completion_omits_an_absent_system_prompt(monkeypatch):
     monkeypatch.setattr(llm_config, "get_anthropic_client", lambda **_kw: client)
 
     llm_config.anthropic_completion(
-        model="claude-opus-5",
-        messages=[{"role": "user", "content": "hi"}],
-        max_tokens=8,
+        request=llm_config.AnthropicCompletionRequest(
+            model="claude-opus-5", messages=[{"role": "user", "content": "hi"}], max_tokens=8
+        ),
         env={_ANTHROPIC_KEY: "sk-ant-key"},
     )
 
@@ -1578,12 +1468,14 @@ def test_anthropic_completion_drives_the_claude_cli_for_a_subscription_token(mon
     monkeypatch.setattr(llm_config, "get_anthropic_client", _refuse)
 
     result = llm_config.anthropic_completion(
-        model="claude-opus-5",
-        messages=[{"role": "user", "content": "hi"}],
-        max_tokens=64,
-        system="sys",
+        request=llm_config.AnthropicCompletionRequest(
+            model="claude-opus-5",
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=64,
+            system="sys",
+            timeout_s=12.0,
+        ),
         env={_OAUTH_ENV: _OAUTH_VALUE},
-        timeout_s=12.0,
     )
 
     assert result.text == "cli reply"
@@ -1603,9 +1495,9 @@ def test_anthropic_completion_hands_the_cli_the_caller_env(fake_one_shot):
     caller_env = {_OAUTH_ENV: _OAUTH_VALUE, "ANTHROPIC_BASE_URL": "https://gw.example"}
 
     llm_config.anthropic_completion(
-        model="claude-opus-5",
-        messages=[{"role": "user", "content": "hi"}],
-        max_tokens=8,
+        request=llm_config.AnthropicCompletionRequest(
+            model="claude-opus-5", messages=[{"role": "user", "content": "hi"}], max_tokens=8
+        ),
         env=caller_env,
     )
 
@@ -1617,9 +1509,9 @@ async def test_aanthropic_completion_hands_the_cli_the_caller_env(fake_one_shot)
     caller_env = {_OAUTH_ENV: _OAUTH_VALUE}
 
     await llm_config.aanthropic_completion(
-        model="claude-opus-5",
-        messages=[{"role": "user", "content": "hi"}],
-        max_tokens=8,
+        request=llm_config.AnthropicCompletionRequest(
+            model="claude-opus-5", messages=[{"role": "user", "content": "hi"}], max_tokens=8
+        ),
         env=caller_env,
     )
 
@@ -1628,9 +1520,9 @@ async def test_aanthropic_completion_hands_the_cli_the_caller_env(fake_one_shot)
 
 def test_anthropic_completion_keeps_the_cli_default_budget_when_unset(fake_one_shot):
     llm_config.anthropic_completion(
-        model="claude-opus-5",
-        messages=[{"role": "user", "content": "hi"}],
-        max_tokens=8,
+        request=llm_config.AnthropicCompletionRequest(
+            model="claude-opus-5", messages=[{"role": "user", "content": "hi"}], max_tokens=8
+        ),
         env={_OAUTH_ENV: _OAUTH_VALUE},
     )
     assert fake_one_shot.instances[0].timeout_s == 60.0
@@ -1639,9 +1531,9 @@ def test_anthropic_completion_keeps_the_cli_default_budget_when_unset(fake_one_s
 def test_anthropic_completion_raises_when_no_credential_is_configured():
     with pytest.raises(LLMConfigError) as excinfo:
         llm_config.anthropic_completion(
-            model="claude-opus-5",
-            messages=[{"role": "user", "content": "hi"}],
-            max_tokens=8,
+            request=llm_config.AnthropicCompletionRequest(
+                model="claude-opus-5", messages=[{"role": "user", "content": "hi"}], max_tokens=8
+            ),
             env={},
         )
     message = str(excinfo.value)
@@ -1655,9 +1547,9 @@ async def test_aanthropic_completion_posts_to_the_messages_api_and_closes(monkey
     monkeypatch.setattr(llm_config, "get_async_anthropic_client", lambda **_kw: client)
 
     result = await llm_config.aanthropic_completion(
-        model="claude-opus-5",
-        messages=[{"role": "user", "content": "hi"}],
-        max_tokens=64,
+        request=llm_config.AnthropicCompletionRequest(
+            model="claude-opus-5", messages=[{"role": "user", "content": "hi"}], max_tokens=64
+        ),
         env={_ANTHROPIC_KEY: "sk-ant-key"},
     )
 
@@ -1674,9 +1566,9 @@ async def test_aanthropic_completion_drives_the_claude_cli_for_a_subscription_to
     monkeypatch.setattr(llm_config, "get_async_anthropic_client", _refuse)
 
     result = await llm_config.aanthropic_completion(
-        model="claude-opus-5",
-        messages=[{"role": "user", "content": "hi"}],
-        max_tokens=64,
+        request=llm_config.AnthropicCompletionRequest(
+            model="claude-opus-5", messages=[{"role": "user", "content": "hi"}], max_tokens=64
+        ),
         env={_OAUTH_ENV: _OAUTH_VALUE},
     )
 
@@ -1688,9 +1580,9 @@ async def test_aanthropic_completion_drives_the_claude_cli_for_a_subscription_to
 async def test_aanthropic_completion_raises_when_no_credential_is_configured():
     with pytest.raises(LLMConfigError):
         await llm_config.aanthropic_completion(
-            model="claude-opus-5",
-            messages=[{"role": "user", "content": "hi"}],
-            max_tokens=8,
+            request=llm_config.AnthropicCompletionRequest(
+                model="claude-opus-5", messages=[{"role": "user", "content": "hi"}], max_tokens=8
+            ),
             env={},
         )
 
@@ -1701,9 +1593,9 @@ def test_anthropic_completion_reads_the_ambient_environment_by_default(monkeypat
     monkeypatch.setenv(_OAUTH_ENV, _OAUTH_VALUE)
 
     result = llm_config.anthropic_completion(
-        model="claude-opus-5",
-        messages=[{"role": "user", "content": "hi"}],
-        max_tokens=8,
+        request=llm_config.AnthropicCompletionRequest(
+            model="claude-opus-5", messages=[{"role": "user", "content": "hi"}], max_tokens=8
+        )
     )
 
     assert result.text == "cli reply"

@@ -7,16 +7,19 @@ from __future__ import annotations
 
 import json
 
+from kernelforge.fusion.discover import DiscoveryTarget
 from kernelforge.fusion import calibration as cal
-from kernelforge.fusion.diagnose import diagnose_from_shares, load_op_bytes_from_kineto_trace
+from kernelforge.fusion.diagnose import TraceProfile, diagnose_from_shares, load_op_bytes_from_kineto_trace
 from kernelforge.fusion.discover import parse_discovered_recipes
-from kernelforge.fusion.locate import build_recipes, covered_by_vllm_compile_pass
+from kernelforge.fusion.locate import FrameworkInstall, build_recipes, covered_by_vllm_compile_pass
 from kernelforge.fusion.patterns import PATTERNS, match_patterns
 from kernelforge.fusion.vllm_passes import PassState
 
 
-def _candidate_diag(shares, busy=0.21, **kw):
-    return diagnose_from_shares(shares, busy_fraction_of_wall=busy, **kw)
+def _candidate_diag(shares, busy=0.21, category_bytes_share=None, **kw):
+    return diagnose_from_shares(
+        TraceProfile(shares, busy_fraction_of_wall=busy, category_bytes_share=category_bytes_share), **kw
+    )
 
 
 class TestCalibration:
@@ -101,7 +104,7 @@ class TestSourceFilteringInLocate:
         body = "hidden_states = hidden_states + residual\nx = RMSNorm(2048)\n"
         model, root = _fake_sglang(tmp_path, "eagerlm", body)
         d = _candidate_diag({"gemm": 0.5, "add": 0.18, "rmsnorm": 0.12})
-        recipes = build_recipes(d, model_path=model, framework="sglang", framework_root=root)
+        recipes = build_recipes(d, install=FrameworkInstall(framework="sglang", framework_root=root), model_path=model)
         residual = next((r for r in recipes if r.pattern_id == "residual_add_rmsnorm"), None)
         assert residual is not None and residual.source_confirmed is True
         assert residual.already_satisfied is False
@@ -111,7 +114,7 @@ class TestSourceFilteringInLocate:
         body = "y, residual = self.input_layernorm(hidden_states, residual)\n"
         model, root = _fake_sglang(tmp_path, "fusedlm", body)
         d = _candidate_diag({"gemm": 0.5, "add": 0.18, "rmsnorm": 0.12})
-        recipes = build_recipes(d, model_path=model, framework="sglang", framework_root=root)
+        recipes = build_recipes(d, install=FrameworkInstall(framework="sglang", framework_root=root), model_path=model)
         assert all(r.pattern_id != "residual_add_rmsnorm" for r in recipes)
 
     def test_wrong_model_source_drops_pattern(self, tmp_path):
@@ -119,14 +122,19 @@ class TestSourceFilteringInLocate:
         body = "def forward(self, x):\n    return self.mlp(x)\n"
         model, root = _fake_sglang(tmp_path, "otherlm", body)
         d = _candidate_diag({"gemm": 0.5, "add": 0.18, "rmsnorm": 0.12})
-        recipes = build_recipes(d, model_path=model, framework="sglang", framework_root=root)
+        recipes = build_recipes(d, install=FrameworkInstall(framework="sglang", framework_root=root), model_path=model)
         assert all(r.pattern_id != "residual_add_rmsnorm" for r in recipes)
 
     def test_include_unconfirmed_keeps_annotated(self, tmp_path):
         body = "y, residual = self.input_layernorm(hidden_states, residual)\n"
         model, root = _fake_sglang(tmp_path, "fusedlm2", body)
         d = _candidate_diag({"gemm": 0.5, "add": 0.18, "rmsnorm": 0.12})
-        recipes = build_recipes(d, model_path=model, framework="sglang", framework_root=root, include_unconfirmed=True)
+        recipes = build_recipes(
+            d,
+            install=FrameworkInstall(framework="sglang", framework_root=root),
+            model_path=model,
+            include_unconfirmed=True,
+        )
         residual = next((r for r in recipes if r.pattern_id == "residual_add_rmsnorm"), None)
         assert residual is not None and residual.already_satisfied is True
 
@@ -196,7 +204,7 @@ class TestMemShareWiredIntoRecipes:
             {"gemm": 0.5, "add": 0.18, "rmsnorm": 0.12},
             category_bytes_share={"gemm": 0.6, "add": 0.10, "rmsnorm": 0.08},
         )
-        recipes = build_recipes(d, model_path=model, framework="sglang", framework_root=root)
+        recipes = build_recipes(d, install=FrameworkInstall(framework="sglang", framework_root=root), model_path=model)
         r = next(r for r in recipes if r.pattern_id == "residual_add_rmsnorm")
         assert abs(r.mem_share - 0.18) < 1e-9  # add + rmsnorm bytes share
         expected = cal.predict_cuda_graph_on_gain(r.trigger_share, mem_share=0.18)
@@ -206,7 +214,7 @@ class TestMemShareWiredIntoRecipes:
         body = "hidden_states = hidden_states + residual\nx = RMSNorm(2048)\n"
         model, root = _fake_sglang(tmp_path, "memlm2", body)
         d = _candidate_diag({"gemm": 0.5, "add": 0.18, "rmsnorm": 0.12})  # no bytes
-        recipes = build_recipes(d, model_path=model, framework="sglang", framework_root=root)
+        recipes = build_recipes(d, install=FrameworkInstall(framework="sglang", framework_root=root), model_path=model)
         r = next(r for r in recipes if r.pattern_id == "residual_add_rmsnorm")
         assert r.mem_share == 0.0  # default-safe
 
@@ -264,13 +272,17 @@ class TestCompilePassGateInRoutes:
         # vLLM: qk_norm_rope is an ENABLED compile pass -> dropped as already-satisfied.
         model_v, root_v = _fake_vllm(tmp_path / "v", "qklm", body)
         dv = _candidate_diag(shares)
-        rv = build_recipes(dv, model_path=model_v, framework="vllm", framework_root=root_v, pass_probe=_pass_enabled)
+        rv = build_recipes(
+            dv,
+            install=FrameworkInstall(framework="vllm", framework_root=root_v, pass_probe=_pass_enabled),
+            model_path=model_v,
+        )
         assert all(r.pattern_id != "qk_norm_rope" for r in rv)
         assert all(r.candidate_kind != "compile_pass" for r in rv)
         # sglang: no compile passes -> the pattern survives (control).
         model_s, root_s = _fake_sglang(tmp_path / "s", "qklm", body)
         ds = _candidate_diag(shares)
-        rs = build_recipes(ds, model_path=model_s, framework="sglang", framework_root=root_s)
+        rs = build_recipes(ds, install=FrameworkInstall(framework="sglang", framework_root=root_s), model_path=model_s)
         assert any(r.pattern_id == "qk_norm_rope" for r in rs)
 
     def test_discovery_route_drops_compile_covered_proposal(self):
@@ -293,9 +305,20 @@ class TestCompilePassGateInRoutes:
         )
         # vLLM route drops the rope+kvcache proposal (fuse_rope_kvcache is enabled).
         rv = parse_discovered_recipes(
-            payload, model_type="m", framework="vllm", source_file="/x.py", shapes={}, pass_probe=_pass_enabled
+            payload,
+            DiscoveryTarget(
+                model_type="m",
+                install=FrameworkInstall(framework="vllm", pass_probe=_pass_enabled),
+                source_file="/x.py",
+                shapes={},
+            ),
         )
         assert [r.pattern_id for r in rv] == ["llm:keep_me"]
         # sglang route keeps both (no compile passes there).
-        rs = parse_discovered_recipes(payload, model_type="m", framework="sglang", source_file="/x.py", shapes={})
+        rs = parse_discovered_recipes(
+            payload,
+            DiscoveryTarget(
+                model_type="m", install=FrameworkInstall(framework="sglang"), source_file="/x.py", shapes={}
+            ),
+        )
         assert {r.pattern_id for r in rs} == {"llm:rope_kv", "llm:keep_me"}

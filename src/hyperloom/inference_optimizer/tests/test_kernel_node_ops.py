@@ -252,57 +252,6 @@ def test_apply_rejects_backup_dir_outside_root(patch_env, capsys):
     assert "backup_dir" in payload["error"]
 
 
-def test_bench_rejects_absolute_and_parent_staging_paths(tmp_path, capsys):
-    # Staged files must be workspace-relative with no '..'.
-    k = _load("kno_bench_traversal")
-    ns = argparse.Namespace(
-        workspace=str(tmp_path / "ws"),
-        bench_command="true",
-        files_b64_json=json.dumps({"../escape.txt": _b64("x")}),
-        result_glob="*.json",
-        timeout_sec=10,
-    )
-    rc = k._do_bench(ns)
-    payload = _last_json(capsys)
-    assert rc == 1 and payload["status"] == "failed"
-    assert ".." in payload["error"] or "relative" in payload["error"]
-
-
-def test_bench_stages_files_runs_and_collects_artifacts(tmp_path, capsys):
-    k = _load("kno_bench_ok")
-    ns = argparse.Namespace(
-        workspace=str(tmp_path / "ws"),
-        bench_command="cat kernel.txt > /dev/null; echo '{\"tput\": 42}' > result.json",
-        files_b64_json=json.dumps({"kernel.txt": _b64("kernel body")}),
-        result_glob="*.json",
-        timeout_sec=30,
-    )
-    rc = k._do_bench(ns)
-    payload = _last_json(capsys)
-    assert rc == 0 and payload["status"] == "ok"
-    assert payload["returncode"] == 0
-    assert any(a["path"].endswith("result.json") for a in payload["artifacts"])
-    art = next(a for a in payload["artifacts"] if a["path"].endswith("result.json"))
-    assert art["content"] == {"tput": 42}  # JSON artifacts parsed inline
-    # The staged kernel file landed inside the workspace.
-    assert (tmp_path / "ws" / "kernel.txt").read_text(encoding="utf-8") == "kernel body"
-
-
-def test_bench_invalid_files_json_fails(tmp_path, capsys):
-    k = _load("kno_bench_badjson")
-    ns = argparse.Namespace(
-        workspace=str(tmp_path / "ws"),
-        bench_command="true",
-        files_b64_json="{not json",
-        result_glob="*.json",
-        timeout_sec=10,
-    )
-    rc = k._do_bench(ns)
-    payload = _last_json(capsys)
-    assert rc == 1 and payload["status"] == "failed"
-    assert "JSON" in payload["error"]
-
-
 def test_finalize_deletes_only_backups_inside_the_kernel_root(patch_env, capsys):
     """Accepting a patch clears its backups; a path outside the root is refused."""
     _fw, bak = patch_env

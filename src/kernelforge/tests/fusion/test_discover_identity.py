@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import json
 
+from kernelforge.fusion.locate import FrameworkInstall
+from kernelforge.fusion.discover import DiscoveryTarget
 from kernelforge.fusion.discover import parse_discovered_recipes
 from kernelforge.fusion.locate import PassState
 
@@ -28,12 +30,12 @@ def _claimable(flag: str) -> PassState:
 def _parse(payload: list[dict], *, framework: str = "vllm", probe=None):
     return parse_discovered_recipes(
         json.dumps(payload),
-        model_type="qwen3",
-        framework=framework,
-        source_file=SOURCE,
-        shapes=SHAPES,
-        pass_probe=probe or _claimable,
-        framework_root="",
+        DiscoveryTarget(
+            model_type="qwen3",
+            install=FrameworkInstall(framework=framework, framework_root="", pass_probe=probe or _claimable),
+            source_file=SOURCE,
+            shapes=SHAPES,
+        ),
     )
 
 
@@ -91,11 +93,12 @@ def test_the_gate_still_sees_the_prose_when_traits_are_omitted():
     }
     recipes = parse_discovered_recipes(
         json.dumps([proposal]),
-        model_type="qwen3",
-        framework="vllm",
-        source_file="/sp/vllm/models/qwen3.py",
-        shapes={},
-        pass_probe=claimable,
+        DiscoveryTarget(
+            model_type="qwen3",
+            install=FrameworkInstall(framework="vllm", pass_probe=claimable),
+            source_file="/sp/vllm/models/qwen3.py",
+            shapes={},
+        ),
     )
     assert recipes[0].candidate_kind == "compile_pass"
 

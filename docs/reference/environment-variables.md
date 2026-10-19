@@ -565,11 +565,6 @@ Infera external mode requires `HYPERLOOM_MN_EXT_SSH_KEY` plus at least one
 `*_IPS` list, or the run fails fast at startup. RayJob external mode ignores
 the SSH / IP vars and uses `HYPERLOOM_MN_EXT_HEAD_IP` for restarts.
 
-Multi-node SSH fanout creates session-scoped keys under the active session
-directory. Treat `mn_id_ed25519` and `mn_id_ed25519.pub` as sensitive session
-artifacts: keep the session directory on an access-controlled filesystem and
-do not publish it unchanged in support bundles.
-
 ---
 
 ## Quantization prelude
@@ -708,7 +703,6 @@ The following variables configure the Critic and knowledge base components.
 |---------------------------------------|------------------------|--------------------------------------------------------------------------------------------------------------------------------------|
 | `KNOWLEDGE_STORE_MODE`                | `local`                | Exclusive Recipe backend: `local` or `remote`. Ambient KB Store or GBrain credentials do not select remote mode. |
 | `KNOWLEDGE_LOCAL_ROOT`                | `$USER_DATA_PATH/knowledge`, otherwise `~/.cache/hyperloom/knowledge` | Local Recipe/KG root. It is not used for Recipe data in remote mode. |
-| `HYPERLOOM_`<br>`LOCAL_KB_ROOT`       | Unset                  | Deprecated explicit local Recipe root compatibility input, overridden by `--local-kb-root`; explicit use skips automatic legacy migration. |
 | `INFERENCE_OPTIMIZER_`<br>`FA_KB_PATH` | `$USER_DATA_PATH/framework-kb`, otherwise `/workspace/hyperloom/framework-kb` | Framework KB root, holding the lessons ledger the FRAMEWORK phase reads and writes. The orchestrator's KB reader and writeback both resolve through it. The withdrawn `FRAMEWORK_AGENT_KB_DIR` is ignored with a warning naming the resolved root. On first start-up an existing partition under the legacy `$USER_DATA_PATH/kb` is copied across once; a copy that fails warns and leaves the phase to cold-start. |
 | `KB_STORE_URL`                        | Local Recipe mode: `https://global.primus-safe.amd.com/knowledge-base`; remote mode: unset | Unified KB Service endpoint. Local Recipe mode uses the default only for co-hosted PR Monitor access; IR-3 disables PR Monitor without disabling local Recipe storage when the endpoint is unreachable. Remote Recipe mode requires an explicit value, selects the current Recipe View, replays its Config, Patch, and Kernel columns, then writes one final session at CLOSE. PR Monitor is available at `${KB_STORE_URL}/pr-monitor/v1` (REST/IR-3/Framework/KernelForge) and `${KB_STORE_URL}/pr-monitor/mcp/` (specialist MCP). |
 | `KB_STORE_TOKEN`                      | Unset                  | KB Store bearer token. Required when `KNOWLEDGE_STORE_MODE=remote`; transport failures during the final write are non-fatal. |
@@ -815,46 +809,10 @@ Primary switch (default **off**) for live Langfuse trace push.
   timestamp (`end == start`), so Langfuse shows no meaningful per-Generation
   duration — counts/usage are accurate, latency is not captured.
 
-### `token_usage` section (in `session_breakdown.json`)
-
-Every breakdown carries a top-level `token_usage` section: a promoted,
-discoverable rollup of LLM token spend derived from the per-call ledger
-(`reports/trace/llm_calls.jsonl` + `ext/*.jsonl`). It is purely derived from
-`decision_trace.token_rollup`, so it always reconciles with that section. No
-env var controls it; it is always present (zeroed on pre-trace sessions).
-
-* `session_total`: whole-session total across every call. Three counter
-  families are kept apart because they are billed and interpreted differently:
-  visible tokens (`total_in` / `total_out`), cache tokens
-  (`total_cache_creation` / `total_cache_read`), and hidden reasoning output
-  (`total_reasoning_out` — reported by reasoning models, absent from the reply
-  text and therefore *not* part of `total_out`). Two convenience figures sit on
-  top: `total_in_out` (visible prompt + completion only) and `grand_total`
-  (visible + all cache tokens + reasoning output — the all-in figure).
-* `by_component`: per-agent breakdown (orchestration / kernel / critic /
-  specialist / proposal_scorer / geak / forge / …), each with the same
-  convenience totals.
-* `by_phase`: per-phase breakdown (PRELUDE / ENABLEMENT / FRAMEWORK_AGENT / KERNEL_AGENT / SWEEP / CLOSE).
-* `attribution`: `attributed_to_decisions` vs `unattributed` split plus
-  `attributed_calls_pct`. Only calls that carry a `task_id` / `dyn_id` joining
-  to a KEEP/REVERT or dynamic_action decision (for example, specialist subprocess
-  turns) are attributed; orchestration / kernel / critic / proposal_scorer
-  turns are LLM-internal and land in `unattributed` (this is expected, not a
-  gap in the data).
-* `timeline`: each `action_timeline` row annotated with the tokens that join
-  to it on `task_id`. Rows whose action has no LLM spend show `tokens: null`
-  (rather than a zero bucket) to make the sparsity explicit.
-
-To get the single "total tokens for this run" number, read
-`token_usage.session_total.grand_total` (all-in: visible + cache + reasoning)
-or `.total_in_out` (visible prompt+completion only). Read
-`.total_reasoning_out` on its own when comparing a reasoning model against a
-non-reasoning one — the latter reports `0` there.
-
 ### Gateway attribution (`HYPERLOOM_LLM_ATTRIBUTION`)
 
-`token_usage` above is Hyperloom's own account of its spend, assembled from
-calls that report themselves to the ledger. The gateway keeps a second account,
+The per-call ledger (`reports/trace/llm_calls.jsonl`) is Hyperloom's own account
+of its spend, assembled from calls that report themselves. The gateway keeps a second account,
 from the calls it actually metered, and the two disagree whenever a component
 spends without a ledger producer. This variable makes the gateway's account
 readable along the same axes, by tagging every outbound call with who made it.
@@ -872,8 +830,8 @@ Each call then carries, on headers that gateway understands:
 |-------|-------|
 | `application` | Always `hyperloom`, to separate this product's spend on a shared gateway. |
 | `session` | `CLAW_SESSION_ID`, the same id `session_breakdown.json` records — this is what joins the two accounts. |
-| `component` | The producer, from the same vocabulary as `token_usage.by_component`. |
-| `phase` | The phase the run had reached, matching `token_usage.by_phase`. |
+| `component` | The producer, e.g. `orchestration`, `kernel`, `critic`, `specialist`. |
+| `phase` | The phase the run had reached. |
 | `type` | The action executing inside that phase, e.g. `kernel_opt`. |
 | `operation` | What the individual call was for, e.g. `generate_candidate`. |
 
@@ -881,7 +839,7 @@ For LiteLLM these arrive as `x-litellm-tags` (a comma-separated list landing in
 the `request_tags` column of `LiteLLM_SpendLogs`) and `x-litellm-trace-id` (the
 session id, which sets the `session_id` column and propagates to nested calls).
 A spend report can then be grouped by component or phase, or reconciled against
-`token_usage` for one session.
+the call ledger for one session.
 
 Fields with per-call cardinality (a task or kernel id) are deliberately not in
 the tag list: one tag per task would give the rollup as many buckets as there

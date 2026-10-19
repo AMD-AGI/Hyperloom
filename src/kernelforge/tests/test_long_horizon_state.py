@@ -437,7 +437,7 @@ def test_apply_iteration_non_keep_increments_stall_then_stalled_phase():
     assert state.phase == PHASE_STALLED
 
 
-def test_an_api_error_is_counted_apart_from_a_revert_and_leaves_the_stall_alone():
+def test_an_api_error_is_not_counted_as_a_revert_and_leaves_the_stall_alone():
     """A gateway outage measured nothing, so it is not an optimization outcome."""
     state = RunState()
     apply_iteration(
@@ -466,32 +466,12 @@ def test_an_api_error_is_counted_apart_from_a_revert_and_leaves_the_stall_alone(
             stall_threshold=3,
         )
 
-    assert state.cumulative.api_errors == 3
     assert state.cumulative.reverted == 1, "an outage is not a rejected candidate"
     assert state.cumulative.kept == 0
-    # iterations stays the loop's own count: kept + reverted + api_errors.
+    # iterations stays the loop's own count, outages included.
     assert state.cumulative.iterations == 4
     assert state.stall.no_improvement_iters == 1, "only the real attempt counts"
     assert state.phase != PHASE_STALLED
-
-
-def test_api_error_counters_survive_save_load(tmp_path):
-    store = LoopStateStore(str(tmp_path))
-    state = store.load()
-    apply_iteration(
-        state,
-        iteration=1,
-        decision="API_ERROR",
-        kept=False,
-        wall_ms=None,
-        commit_hash="",
-        plan="",
-        baseline_wall_ms=1.0,
-        best_wall_ms=1.0,
-    )
-    store.save(state)
-
-    assert LoopStateStore(str(tmp_path)).load().cumulative.api_errors == 1
 
 
 def test_orchestration_circuit_opens_and_half_open_probe_is_single_shot():

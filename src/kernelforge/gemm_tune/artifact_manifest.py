@@ -66,15 +66,9 @@ def build_artifact_manifest(
     results: list,
     *,
     shape_manifest_path: str | Path | None = None,
-    gpu_type: str = "",
-    framework: str = "",
-    precision: str = "",
-    quant_type: str = "",
-    tp: int = 1,
     tuner_lib_version: str = "",
-    generated_at: str = "",
 ) -> dict[str, Any]:
-    """Assemble the TuningArtifactManifest dict from a TuneReport + results."""
+    """Assemble the TuningArtifactManifest dict from a TuneReport + results; provenance is the report's run context."""
     source_block, manifest = _source_manifest_block(shape_manifest_path)
 
     tuners: list[dict[str, Any]] = []
@@ -100,15 +94,15 @@ def build_artifact_manifest(
         # already-written manifests, and the invocation it once named is recorded by "version" + schema_version.
         "tool": "forge-gemm-tune",
         "version": __version__,
-        "generated_at": generated_at,
+        "generated_at": report.finished_at,
         "micro_decision": getattr(report, "micro_decision", ""),
         "requires_e2e_validation": getattr(report, "requires_e2e_validation", True),
         "provenance": {
-            "gpu_type": gpu_type or None,
-            "framework": framework or None,
-            "precision": precision or None,
-            "quant_type": quant_type or None,
-            "tp": tp,
+            "gpu_type": report.gpu_type or None,
+            "framework": report.framework or None,
+            "precision": report.precision or None,
+            "quant_type": report.quant_type or None,
+            "tp": report.tp,
             "tuner_lib_version": tuner_lib_version or None,
         },
         "recommended_env": dict(getattr(report, "recommended_env", {}) or {}),

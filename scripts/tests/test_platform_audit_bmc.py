@@ -18,6 +18,7 @@ def _load():
     spec = importlib.util.spec_from_file_location("platform_audit_bmc", _SCRIPT)
     assert spec and spec.loader
     mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)
     return mod
 

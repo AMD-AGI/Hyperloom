@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
-from kernelforge.fusion.driver_shim import write_driver
+from kernelforge.fusion.driver_shim import DriverSpec, write_driver
 from kernelforge.fusion.models import Recipe, ValidationResult
 from kernelforge.fusion.shadow_repo import SHADOW_BRANCH
 from kernelforge.fusion.harness_contract import trace_kernels_block
@@ -219,21 +219,52 @@ def _safe_artifact_id(value: str, max_length: int = 80) -> str:
     return f"{safe[:prefix_length].rstrip('._-')}_{digest}"
 
 
+@dataclass(frozen=True)
+class CampaignRuntime:
+    """The device a campaign runs on, the arch it writes for, and the agent runtime its loop is told to use."""
+
+    gpu: str = "0"
+    gpu_target: str = ""
+    model: str = ""
+    agent_backend: str = ""
+    agent_sandbox_mode: str = ""
+
+
+@dataclass(frozen=True)
+class CampaignWorkspace:
+    """The checkout a campaign edits, the git environment that reaches its shadow repo, and its artifact dir."""
+
+    root: str
+    output_dir: str
+    git_env: dict[str, str] | None = None
+
+
+@dataclass(frozen=True)
+class CampaignBrief:
+    """What the loop's implementer is told: the harness, prior lessons, the fused module and what is tracked."""
+
+    harness_path: str
+    experience: str = ""
+    fused_module: str = ""
+    repo_scope: bool = False
+    tracked_roots: Sequence[str] = ()
+
+
+@dataclass(frozen=True)
+class CampaignPaths:
+    """The files one forge-loop campaign runs from and writes to."""
+
+    workspace: str
+    driver_path: str
+    experiments_dir: str
+    result_json: str
+    program_md_file: str
+
+
 def build_forge_loop_command(
     recipe: Recipe,
-    *,
-    workspace: str,
-    driver_path: str,
-    experiments_dir: str,
-    result_json: str,
-    program_md_file: str,
-    gpu_target: str = "",
-    max_hours: float = DEFAULT_MAX_HOURS,
-    snr_threshold: float = DEFAULT_SNR_THRESHOLD_DB,
-    supervisor_backend: str = "",
-    model: str = "",
-    agent_backend: str = "",
-    agent_sandbox_mode: str = "",
+    paths: CampaignPaths,
+    runtime: CampaignRuntime = CampaignRuntime(),
     fused_module: str = "",
 ) -> list[str]:
     """Assemble the forge-loop invocation for one recipe."""
@@ -252,21 +283,21 @@ def build_forge_loop_command(
     cmd = _forge_loop_argv() + [
         "forge-loop",
         "--workspace",
-        workspace,
+        paths.workspace,
         "--kernel",
         recipe.source_file,
         "--driver",
-        driver_path,
+        paths.driver_path,
         "--experiments-dir",
-        experiments_dir,
+        paths.experiments_dir,
         "--result-json",
-        result_json,
+        paths.result_json,
         "--program-md-file",
-        program_md_file,
+        paths.program_md_file,
         "--snr-threshold",
-        str(snr_threshold),
+        str(DEFAULT_SNR_THRESHOLD_DB),
         "--max-hours",
-        str(max(1.0, max_hours)),
+        str(max(1.0, DEFAULT_MAX_HOURS)),
         "--kernel-backend",
         FUSION_KERNEL_BACKEND,
         # The loop refuses a workspace on an unnamed, main or master branch.
@@ -289,44 +320,30 @@ def build_forge_loop_command(
         "--lanes",
         "1",
     ]
-    if gpu_target:
-        cmd += ["--gpu-target", gpu_target]
-    if supervisor_backend:
-        cmd += ["--supervisor-backend", supervisor_backend]
-    if model:
-        cmd += ["--model", model]
+    if runtime.gpu_target:
+        cmd += ["--gpu-target", runtime.gpu_target]
+    if runtime.model:
+        cmd += ["--model", runtime.model]
     # The loop resolves its runtime from Config defaults, so a provider or sandbox the caller chose would silently
     # become `bypass` in the process that actually edits the framework.
-    if agent_backend:
-        cmd += ["--agent-backend", agent_backend]
-    if agent_sandbox_mode:
-        cmd += ["--agent-sandbox-mode", agent_sandbox_mode]
+    if runtime.agent_backend:
+        cmd += ["--agent-backend", runtime.agent_backend]
+    if runtime.agent_sandbox_mode:
+        cmd += ["--agent-sandbox-mode", runtime.agent_sandbox_mode]
     return cmd
 
 
 def run_recipe_campaign(
     recipe: Recipe,
-    *,
-    workspace: str,
-    harness_path: str,
-    output_dir: str,
-    experience: str = "",
-    gpu: str = "0",
-    gpu_target: str = "",
-    max_hours: float = DEFAULT_MAX_HOURS,
+    workspace: CampaignWorkspace,
+    brief: CampaignBrief,
+    runtime: CampaignRuntime = CampaignRuntime(),
     target_speedup: float = DEFAULT_TARGET_SPEEDUP,
-    snr_threshold: float = DEFAULT_SNR_THRESHOLD_DB,
-    supervisor_backend: str = "",
-    model: str = "",
-    agent_backend: str = "",
-    agent_sandbox_mode: str = "",
-    shadow_env: dict[str, str] | None = None,
-    fused_module: str = "",
-    repo_scope: bool = False,
-    tracked_roots: Sequence[str] = (),
 ) -> CampaignOutcome:
     """Author and validate one recipe by running a forge-loop campaign."""
-    out = Path(output_dir)
+    root, shadow_env = workspace.root, workspace.git_env
+    harness_path, fused_module = brief.harness_path, brief.fused_module
+    out = Path(workspace.output_dir)
     out.mkdir(parents=True, exist_ok=True)
     stem = _safe_artifact_id(recipe.pattern_id)
 
@@ -335,27 +352,19 @@ def run_recipe_campaign(
     Path(report_log).unlink(missing_ok=True)
     driver_path = write_driver(
         out / f"driver_{stem}.py",
-        harness_path,
-        env_flags,
-        report_log=report_log,
-        case_id=stem,
-        fused_module=fused_module,
-        workspace=workspace,
-        git_env=shadow_env,
+        DriverSpec(
+            harness_path,
+            env_flags,
+            report_log=report_log,
+            case_id=stem,
+            fused_module=fused_module,
+            workspace=root,
+            git_env=shadow_env,
+        ),
     )
 
     program_md_file = str(out / f"program_{stem}.md")
-    Path(program_md_file).write_text(
-        build_campaign_program_md(
-            recipe,
-            harness_path=harness_path,
-            experience=experience,
-            fused_module=fused_module,
-            repo_scope=repo_scope,
-            tracked_roots=tracked_roots,
-        ),
-        encoding="utf-8",
-    )
+    Path(program_md_file).write_text(build_campaign_program_md(recipe, brief), encoding="utf-8")
 
     # Removed before the run, not just written after it: a campaign that dies without writing one would otherwise hand
     # the previous run's KEEP back.
@@ -363,23 +372,19 @@ def run_recipe_campaign(
     Path(result_json).unlink(missing_ok=True)
     cmd = build_forge_loop_command(
         recipe,
-        workspace=workspace,
-        driver_path=driver_path,
-        experiments_dir=str(out / "forge_experiments"),
-        result_json=result_json,
-        program_md_file=program_md_file,
-        gpu_target=gpu_target,
-        max_hours=max_hours,
-        snr_threshold=snr_threshold,
-        supervisor_backend=supervisor_backend,
-        model=model,
-        agent_backend=agent_backend,
-        agent_sandbox_mode=agent_sandbox_mode,
+        CampaignPaths(
+            workspace=root,
+            driver_path=driver_path,
+            experiments_dir=str(out / "forge_experiments"),
+            result_json=result_json,
+            program_md_file=program_md_file,
+        ),
+        runtime,
         fused_module=fused_module,
     )
 
     env = dict(os.environ)
-    env["HIP_VISIBLE_DEVICES"] = gpu
+    env["HIP_VISIBLE_DEVICES"] = runtime.gpu
     env.update(shadow_env or {})
     log.info("forge-loop campaign for %s: %s", recipe.pattern_id, " ".join(cmd))
 
@@ -390,7 +395,7 @@ def run_recipe_campaign(
         # would go on holding the GPU and editing the framework after the parent reported a failure.
         proc = subprocess.Popen(
             cmd,
-            cwd=workspace,
+            cwd=root,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -417,7 +422,7 @@ def run_recipe_campaign(
             target_speedup,
             _read_harness_reports(report_log),
             committed_tree=committed_tree_id(
-                workspace,
+                root,
                 str(payload.get("best_commit") or "").strip(),
                 env=shadow_env,
             ),
@@ -426,16 +431,10 @@ def run_recipe_campaign(
     )
 
 
-def build_campaign_program_md(
-    recipe: Recipe,
-    *,
-    harness_path: str,
-    experience: str = "",
-    fused_module: str = "",
-    repo_scope: bool = False,
-    tracked_roots: Sequence[str] = (),
-) -> str:
+def build_campaign_program_md(recipe: Recipe, brief: CampaignBrief) -> str:
     """The task document handed to the loop's implementer for one recipe."""
+    harness_path, experience, fused_module = brief.harness_path, brief.experience, brief.fused_module
+    repo_scope, tracked_roots = brief.repo_scope, brief.tracked_roots
     hints = "\n".join(f"  - {h}" for h in recipe.source_hints) or "  (none recorded)"
     shapes = json.dumps(recipe.shapes or {}, indent=2, sort_keys=True)
     experience_block = f"\n## What earlier attempts established\n{experience}\n" if experience else ""

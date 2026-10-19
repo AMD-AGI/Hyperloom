@@ -37,6 +37,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
     STEP_PROPOSED,
     STEP_REAUTHORED,
     STEP_REVIEWED,
+    GateVerdict,
     make_framework_recorder,
     producer_for_provenance,
 )
@@ -227,12 +228,12 @@ def test_a_second_leg_does_not_overwrite_the_first(_bound_session):
     first.record_proposal("p-1", arm=ARM_CONFIG, producer=PRODUCER_ORCHESTRATION)
     first.record_proposal_step("p-1", step=STEP_PROPOSED)
     first.record_attempt("a-1", arm=ARM_CONFIG)
-    first.record_attempt_gate("a-1", "tput_valid", passed=True)
+    first.record_attempt_gate("a-1", GateVerdict(gate="tput_valid", passed=True))
 
     second = make_framework_recorder(macro_cycle=0)
     second.record_plateau(arm=ARM_CONFIG, path=PLATEAU_PATH_EXIT, triggered=True, inputs={"empty_streak": 2})
     second.record_proposal_step("p-1", step=STEP_ATTEMPTED)
-    second.record_attempt_gate("a-1", "keep_threshold", passed=False)
+    second.record_attempt_gate("a-1", GateVerdict(gate="keep_threshold", passed=False))
     second.finish(exit_reason="both_arms_plateaued")
 
     ext = _ext(_bound_session)
@@ -274,7 +275,7 @@ def test_url_shaped_ids_survive_the_fragment_key(_bound_session):
     recorder.record_proposal(url, arm=ARM_SOURCE, producer=PRODUCER_SPECIALIST, source_ref=url)
     recorder.record_proposal_step(url, step=STEP_PROPOSED)
     recorder.record_attempt(url + "#a1", arm=ARM_SOURCE, proposal_ref=url, outcome="revert")
-    recorder.record_attempt_gate(url + "#a1", "keep_threshold", passed=False)
+    recorder.record_attempt_gate(url + "#a1", GateVerdict(gate="keep_threshold", passed=False))
     recorder.settle_proposal(url, disposition=DISPOSITION_ATTEMPTED)
     recorder.finish(exit_reason="budget")
 
@@ -300,8 +301,8 @@ def test_ids_differing_only_by_the_separator_stay_distinct(_bound_session):
 def test_unreached_gate_writes_no_row(_bound_session):
     recorder = make_framework_recorder(macro_cycle=0)
     recorder.record_attempt("a-1", arm=ARM_CONFIG, outcome="revert")
-    recorder.record_attempt_gate("a-1", "tput_valid", passed=True, observed=95.0)
-    recorder.record_attempt_gate("a-1", "keep_threshold", passed=False, observed=1.0, threshold=3.0)
+    recorder.record_attempt_gate("a-1", GateVerdict(gate="tput_valid", passed=True, observed=95.0))
+    recorder.record_attempt_gate("a-1", GateVerdict(gate="keep_threshold", passed=False, observed=1.0, threshold=3.0))
     recorder.finish(exit_reason="budget")
 
     attempt = _ext(_bound_session)["attempts"][0]
@@ -312,9 +313,9 @@ def test_unreached_gate_writes_no_row(_bound_session):
 def test_re_ruling_a_gate_keeps_its_position(_bound_session):
     recorder = make_framework_recorder(macro_cycle=0)
     recorder.record_attempt("a-1", arm=ARM_SOURCE, outcome="revert")
-    recorder.record_attempt_gate("a-1", "accuracy", passed=None, reason="eval pending")
-    recorder.record_attempt_gate("a-1", "keep_threshold", passed=True, observed=6.0, threshold=3.0)
-    recorder.record_attempt_gate("a-1", "accuracy", passed=False, observed=0.71, threshold=0.80)
+    recorder.record_attempt_gate("a-1", GateVerdict(gate="accuracy", passed=None, reason="eval pending"))
+    recorder.record_attempt_gate("a-1", GateVerdict(gate="keep_threshold", passed=True, observed=6.0, threshold=3.0))
+    recorder.record_attempt_gate("a-1", GateVerdict(gate="accuracy", passed=False, observed=0.71, threshold=0.80))
     recorder.finish(exit_reason="budget")
 
     attempt = _ext(_bound_session)["attempts"][0]
@@ -326,8 +327,8 @@ def test_re_ruling_a_gate_keeps_its_position(_bound_session):
 def test_outright_failure_outranks_an_unresolved_gate(_bound_session):
     recorder = make_framework_recorder(macro_cycle=0)
     recorder.record_attempt("a-1", arm=ARM_SOURCE, outcome="revert")
-    recorder.record_attempt_gate("a-1", "accuracy", passed=None, reason="eval produced no score")
-    recorder.record_attempt_gate("a-1", "keep_threshold", passed=False, observed=0.4, threshold=3.0)
+    recorder.record_attempt_gate("a-1", GateVerdict(gate="accuracy", passed=None, reason="eval produced no score"))
+    recorder.record_attempt_gate("a-1", GateVerdict(gate="keep_threshold", passed=False, observed=0.4, threshold=3.0))
     recorder.finish(exit_reason="budget")
 
     assert _ext(_bound_session)["attempts"][0]["blocked_by"] == "keep_threshold"
@@ -336,7 +337,7 @@ def test_outright_failure_outranks_an_unresolved_gate(_bound_session):
 def test_unresolved_gate_blocks_when_nothing_else_failed(_bound_session):
     recorder = make_framework_recorder(macro_cycle=0)
     recorder.record_attempt("a-1", arm=ARM_SOURCE, outcome="revert")
-    recorder.record_attempt_gate("a-1", "accuracy", passed=None, reason="eval produced no score")
+    recorder.record_attempt_gate("a-1", GateVerdict(gate="accuracy", passed=None, reason="eval produced no score"))
     recorder.finish(exit_reason="budget")
 
     assert _ext(_bound_session)["attempts"][0]["blocked_by"] == "accuracy"

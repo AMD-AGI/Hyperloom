@@ -42,22 +42,6 @@ def _pid_alive(pid: int | None) -> bool:
     return True
 
 
-def read_owner(session_dir: Path) -> dict[str, Any] | None:
-    """Read the lock file's owner metadata without acquiring the lock."""
-    path = session_paths.optimizer_lock_path(session_dir)
-    try:
-        raw = path.read_text(encoding="utf-8").strip()
-    except (OSError, UnicodeDecodeError):
-        return None
-    if not raw:
-        return None
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        return None
-    return data if isinstance(data, dict) else None
-
-
 class SessionAlreadyRunning(RuntimeError):
     """Raised when another live optimizer already owns the session."""
 
@@ -206,4 +190,4 @@ class SessionLock:
         self.release()
 
 
-__all__ = ["SessionAlreadyRunning", "SessionLock", "read_owner"]
+__all__ = ["SessionAlreadyRunning", "SessionLock"]

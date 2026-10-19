@@ -47,11 +47,6 @@ def _find_repo_root() -> Path | None:
 #: repository metadata must skip when this is ``None`` rather than guess a depth.
 REPO_ROOT = _find_repo_root()
 
-requires_repo_root = pytest.mark.skipif(
-    REPO_ROOT is None,
-    reason="needs the source checkout (pyproject.toml + src/)",
-)
-
 
 @pytest.fixture
 def repo_root() -> Path:

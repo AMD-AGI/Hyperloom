@@ -10,6 +10,7 @@ from collections.abc import Collection, Iterator, Mapping
 from contextlib import contextmanager
 from functools import partial
 from pathlib import Path
+from dataclasses import dataclass, field
 from typing import Any, BinaryIO, Protocol
 
 from hyperloom_kb.database import Database, WriteSource
@@ -215,16 +216,24 @@ class SyncLedger:
             )
 
 
+@dataclass
+class _SyncTally:
+    """What one push or pull batch did with the Experiences it handled: counts by status, and the ones rejected."""
+
+    counts: Counter[str] = field(default_factory=Counter)
+    rejected: list[JsonValue] = field(default_factory=list)
+
+
 def _report(
     status: str,
     global_url: str,
-    counts: Counter[str] | None = None,
-    rejected: list[JsonValue] | None = None,
+    tally: _SyncTally | None = None,
     *,
     has_more: bool = False,
     error: str = "",
 ) -> dict[str, JsonValue]:
-    counts = counts or Counter()
+    tally = tally or _SyncTally()
+    counts = tally.counts
     report: dict[str, JsonValue] = {
         "status": status,
         "global_url": global_url,
@@ -232,7 +241,7 @@ def _report(
         "unchanged": counts["unchanged"],
         "skipped": counts["skipped"],
         "held_back": counts["held_back"],
-        "rejected": rejected or [],
+        "rejected": tally.rejected,
         "has_more": has_more,
     }
     if error:
@@ -330,19 +339,17 @@ class GlobalSync:
             self._ledger.forget(url)
             return {"global_url": url, "forgotten_kb_id": forgotten}
 
-    def _send(
-        self, target: RemoteClient, experience: Experience, counts: Counter[str], rejected: list[JsonValue]
-    ) -> str:
+    def _send(self, target: RemoteClient, experience: Experience, tally: _SyncTally) -> str:
         """Write one Experience to the global KB; returns the error that should stop this push, if any."""
 
         declaration = self._service.declaration_for(experience.schema_ref)
         files = {ref.sha256: self._service.file_path(ref) for ref in experience.files()}
         try:
-            counts[target.write(experience, declaration=declaration, files=files).status] += 1
+            tally.counts[target.write(experience, declaration=declaration, files=files).status] += 1
         except RemoteClientError as exc:
             if exc.retryable:
                 return str(exc)
-            rejected.append({"experience_id": experience.id, "detail": str(exc)})
+            tally.rejected.append({"experience_id": experience.id, "detail": str(exc)})
             return ""
         self._ledger.note_on_global(target.config.base_url, experience.schema_ref, (experience.id,))
         return ""
@@ -358,32 +365,31 @@ class GlobalSync:
                 return _report("incomplete", url, error=str(exc))
             except SyncRefused as exc:
                 return _report("refused", url, error=str(exc))
-            counts: Counter[str] = Counter()
-            rejected: list[JsonValue] = []
+            tally = _SyncTally()
             for experience_id in self._ledger.held_back(url):
                 experience = self._service.held(experience_id)
                 if not self._service.is_pushable(experience):
                     continue
-                error = self._send(target, experience, counts, rejected)
+                error = self._send(target, experience, tally)
                 if error:
-                    return _report("incomplete", url, counts, rejected, error=error)
+                    return _report("incomplete", url, tally, error=error)
                 self._ledger.release(url, experience_id)
             position, _ = self._ledger.cursor(url, _PUSH)
             records, _, has_more = self._service.records_after(position, SYNC_BATCH)
             for sequence, experience in records:
                 if self._ledger.pulled(experience.id):
-                    counts["skipped"] += 1
+                    tally.counts["skipped"] += 1
                 elif not self._service.is_pushable(experience):
                     self._ledger.hold_back(url, experience.id)
-                    counts["held_back"] += 1
+                    tally.counts["held_back"] += 1
                 else:
-                    error = self._send(target, experience, counts, rejected)
+                    error = self._send(target, experience, tally)
                     if error:
                         self._ledger.advance(url, _PUSH, position)
-                        return _report("incomplete", url, counts, rejected, error=error)
+                        return _report("incomplete", url, tally, error=error)
                 position = sequence
             self._ledger.advance(url, _PUSH, position)
-            return _report("completed", url, counts, rejected, has_more=has_more)
+            return _report("completed", url, tally, has_more=has_more)
 
     def pull(self, schema_ref: str) -> dict[str, JsonValue]:
         """Bring ``schema_ref``'s state to everything the global KB holds of it, one batch per call.
@@ -425,8 +431,7 @@ class GlobalSync:
             if not self._ledger.pull_in_progress(url, schema_ref):
                 saved = self._service.begin_pull(schema_ref)
                 self._service.bring_in(schema_ref, self._ledger.on_global(url, schema_ref))
-            counts: Counter[str] = Counter()
-            rejected: list[JsonValue] = []
+            tally = _SyncTally()
             fetched: list[str] = []
             # Where the next batch resumes: past this page, or past the last record handled before a file that could
             # not be fetched yet.
@@ -443,14 +448,14 @@ class GlobalSync:
                     if exc.retryable:
                         resume, resume_id, error = reached, reached_id, str(exc)
                         break
-                    rejected.append({"experience_id": _record_id(item), "detail": str(exc)})
+                    tally.rejected.append({"experience_id": _record_id(item), "detail": str(exc)})
                 except (KeyError, TypeError, ValueError, StorageContractError) as exc:
-                    rejected.append({"experience_id": _record_id(item), "detail": str(exc)})
+                    tally.rejected.append({"experience_id": _record_id(item), "detail": str(exc)})
                 else:
                     if status == "created":
                         self._ledger.mark_pulled(experience.id)
                     fetched.append(experience.id)
-                    counts[status] += 1
+                    tally.counts[status] += 1
                 sequence = item.get("sequence")
                 reached = sequence if isinstance(sequence, int) and not isinstance(sequence, bool) else reached
                 reached_id = _record_id(item)
@@ -463,8 +468,7 @@ class GlobalSync:
                 **_report(
                     "incomplete" if error else "completed",
                     url,
-                    counts,
-                    rejected,
+                    tally,
                     has_more=bool(error) or page.has_more,
                     error=error,
                 ),

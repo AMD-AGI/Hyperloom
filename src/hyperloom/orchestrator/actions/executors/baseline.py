@@ -59,12 +59,7 @@ from ..stop_attribution import (
     StoppedByTheRun,
 )
 from . import _server_lifecycle as _lifecycle
-from ._aiter_jit import (
-    AITER_JIT_PROBE_PATHS,
-    BASELINE_COLD_START_TIMEOUT_SEC,
-    COLD_START_KERNEL_THRESHOLD,
-    is_aiter_jit_registry_mismatch,
-)
+from ._aiter_jit import is_aiter_jit_registry_mismatch
 from ._launch_evidence import build_launch_evidence, persist_launch_evidence
 
 # The grid module is the namespace the helpers both benching arms share ended up in: how a sentinel returncode reads
@@ -756,10 +751,6 @@ def nonzero_output_signature(err_class: str, proc_stdout: str | None, proc_stder
         return ""
     text = " ".join(_SIGNATURE_VOLATILE_RE.sub("#", text).split())
     return f"{err_class}|{hashlib.sha256(text.encode('utf-8')).hexdigest()}"
-
-
-# Cold-start settings and probes live in ``_aiter_jit`` and are re-exported above for callers/tests that import them
-# from this module.
 
 
 def _set_materialized_run_eval(config_path: Path, *, enabled: bool) -> None:
@@ -4381,10 +4372,7 @@ baseline_executor = BaselineExecutor()
 
 
 __all__ = [
-    "AITER_JIT_PROBE_PATHS",
-    "BASELINE_COLD_START_TIMEOUT_SEC",
     "BaselineExecutor",
     "BenchmarkRunExecutor",
-    "COLD_START_KERNEL_THRESHOLD",
     "baseline_executor",
 ]

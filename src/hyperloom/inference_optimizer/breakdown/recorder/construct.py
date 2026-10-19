@@ -12,10 +12,11 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from typing import Any
 
 from .event_rows import rows_for_event
-from .event_timeline import finish_event
+from .event_timeline import EventHeader, finish_event
 from .recorder_warnings import RECORDING_ERRORS, note_failure
 
 log = logging.getLogger(__name__)
@@ -43,11 +44,9 @@ def event_header(parts: Mapping[str, list[dict[str, Any]]], section: str, event:
 
 
 def republish_closed_event(
-    event: str,
+    header: EventHeader,
     *,
     section: str,
-    event_type: str,
-    kind: str,
     load_parts: Callable[[], Mapping[str, Any]],
     assemble: Callable[..., tuple[dict[str, Any], str]],
     end_time: Callable[[Mapping[str, Any], dict[str, Any]], str],
@@ -65,20 +64,17 @@ def republish_closed_event(
 
     try:
         parts = load_parts()
-        header = event_header(parts, section, event)
-        closed_end = end_time(parts, header)
+        stored = event_header(parts, section, header.event)
+        closed_end = end_time(parts, stored)
         if not closed_end:
             return
-        ext, derived = assemble(parts, event=event)
+        ext, derived = assemble(parts, event=header.event)
         finish_event(
-            event_type=event_type,
-            event=event,
-            sequence=timeline_sequence(header),
+            replace(header, start_time=str(stored.get("start_time") or "")),
+            sequence=timeline_sequence(stored),
             status=derived,
             ext=ext,
-            kind=kind,
-            start_time=str(header.get("start_time") or ""),
             end_time=closed_end,
         )
     except RECORDING_ERRORS as exc:
-        note_failure(section=section, error=exc, detail=f"re-publishing closed event {event}")
+        note_failure(section=section, error=exc, detail=f"re-publishing closed event {header.event}")

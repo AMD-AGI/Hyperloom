@@ -41,9 +41,9 @@ class FakeClient:
     def __init__(self) -> None:
         self.calls = []
 
-    def read(self, decision, context, *, schema_ref, render_budget_chars):
-        assert (schema_ref, render_budget_chars) == (_SCHEMA, RENDER_BUDGET_CHARS)
-        self.calls.append((decision, context))
+    def read(self, query):
+        assert (query.schema_ref, query.render_budget_chars) == (_SCHEMA, RENDER_BUDGET_CHARS)
+        self.calls.append((query.decision, query.context))
         return SimpleNamespace(
             read_id=f"read-{len(self.calls)}",
             status="completed",
@@ -211,7 +211,7 @@ def test_a_change_reaches_the_prompt_whole_as_the_service_rendered_it(tmp_path) 
     block = f"=== Relevant Experience KB ===\nExperience {_FIRST}\nRecord:\n{record}"
 
     class _Client:
-        def read(self, decision, context, **_options):
+        def read(self, _query):
             return SimpleNamespace(
                 read_id="read-1",
                 status="completed",
@@ -255,8 +255,8 @@ def test_a_service_that_keeps_failing_reads_stops_being_read_for_the_session(tmp
     calls = []
 
     class _Client:
-        def read(self, decision, context, **_options):
-            calls.append(decision)
+        def read(self, query):
+            calls.append(query.decision)
             status = next(statuses)
             return SimpleNamespace(
                 read_id=f"read-{len(calls)}",

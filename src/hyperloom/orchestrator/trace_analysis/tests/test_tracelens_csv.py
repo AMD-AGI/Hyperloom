@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import gzip
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -1550,15 +1549,15 @@ def test_run_tracelens_skill_openai_only_uses_codex_tool_runner(tmp_path, monkey
 
     assert len(calls) == 1
     call = calls[0]
-    assert call["model"] == "gpt-5.5"
+    assert call["config"].model == "gpt-5.5"
     # The session works out of the TraceLens root so the skill's command-prefix cache and relative paths resolve as
     # they do on the Claude path.
-    assert call["cwd"] == tmp_path
+    assert call["config"].cwd == tmp_path
     # The output dir is the only extra writable root: nothing else is mutable.
-    assert call["writable_roots"] == (output_dir,)
-    assert call["timeout_sec"] == 30 * 60.0
+    assert call["config"].writable_roots == (output_dir,)
+    assert call["request"].timeout_sec == 30 * 60.0
     assert "TraceLens analysis runner" in call["developer_instructions"]
-    assert str(tmp_path / "skill.md") in call["prompt"]
+    assert str(tmp_path / "skill.md") in call["request"].prompt
 
 
 def test_run_tracelens_skill_codex_grants_the_capture_folder_write_access(tmp_path, monkeypatch):
@@ -1602,7 +1601,7 @@ def test_run_tracelens_skill_codex_grants_the_capture_folder_write_access(tmp_pa
         )
     )
 
-    assert calls[0]["writable_roots"] == (output_dir, capture_folder)
+    assert calls[0]["config"].writable_roots == (output_dir, capture_folder)
 
 
 def test_run_tracelens_skill_codex_floors_the_turn_timeout(tmp_path, monkeypatch):
@@ -1637,7 +1636,7 @@ def test_run_tracelens_skill_codex_floors_the_turn_timeout(tmp_path, monkeypatch
         )
     )
 
-    assert calls[0]["timeout_sec"] == 60.0
+    assert calls[0]["request"].timeout_sec == 60.0
 
 
 def test_run_tracelens_skill_codex_raises_when_report_missing(tmp_path, monkeypatch):
@@ -2547,39 +2546,6 @@ def test_unpatched_sglang_capture_sorts_behind_the_workload_trace(tmp_path):
     assert traces[0] == real
 
 
-def test_skip_split_route_analyses_the_promoted_candidate(tmp_path):
-    """The promotion must hold on the route xDiT actually takes."""
-    from unittest.mock import patch
-
-    trace_dir = tmp_path / "torch_trace"
-    trace_dir.mkdir()
-    empty = _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=0, cpu_events=400)
-    populated = _rank_trace(trace_dir / "rank_1.trace.json.gz", kernels=12)
-
-    # The skill runs in-process, so the analysed trace never reaches a subprocess argv the way the splitter's does --
-    # the skill's own arguments are the only place the promotion is observable.
-    class _StopAfterSkillDispatch(Exception):
-        """Ends the run once the skill's input trace has been recorded."""
-
-    seen: list[Path] = []
-
-    async def fake_skill(*, trace_path, **_kw):
-        seen.append(trace_path)
-        raise _StopAfterSkillDispatch(trace_path.name)
-
-    with patch.object(tla, "run_tracelens_skill", fake_skill):
-        captured = _drive_main_over_capture_dir(
-            tmp_path,
-            trace_dir,
-            extra_argv=["--skip-split", "--use-llm-orchestrator"],
-        )
-
-    assert _find_splitter_cmd(captured) is None, "--skip-split must skip the splitter"
-    assert seen, "the TraceLens skill was never reached"
-    assert seen[0] == populated, f"analysed {seen[0].name}, expected {populated.name}"
-    assert empty not in seen
-
-
 def test_capture_under_an_ancestor_named_trace_split_still_orders_correctly(tmp_path):
     """An ancestor directory name must not flatten the whole ranking."""
     trace_dir = tmp_path / "trace_split" / "run" / "torch_trace"
@@ -3023,208 +2989,6 @@ def test_parse_launcher_path_returns_none_for_empty_and_garbage():
 def test_parse_launcher_path_swallows_deep_dict_repr():
     payload = "{'entry_point': " + "(" * 9000 + "'a.py(1): f'" + ")" * 9000 + "}"
     assert tlr._parse_launcher_path(payload) == ("", None, None)
-
-
-# _resolve_launcher_to_abs_source — TraceLens launcher path → absolute file.
-
-
-def _seed_pkg(tmp_path, pkg: str, relpath: str, funcs: tuple[str, ...] = ()) -> Path:
-    """Create ``<tmp_path>/<pkg>/<relpath>`` (with optional top-level ``def`` names) and return the absolute file."""
-    target = tmp_path / pkg / relpath
-    target.parent.mkdir(parents=True, exist_ok=True)
-    body = ["# stub for resolver tests\n"]
-    for fn in funcs:
-        body.append(f"def {fn}(*args, **kwargs):\n    pass\n")
-    target.write_text("".join(body), encoding="utf-8")
-    return target
-
-
-def test_resolve_launcher_via_env_override(tmp_path, monkeypatch):
-    """``$HYPERLOOM_FRAMEWORK_SOURCE_ROOTS`` is the highest-priority resolver source (no import needed)."""
-    target = _seed_pkg(
-        tmp_path,
-        "aiter",
-        "ops/rmsnorm.py",
-        funcs=("rmsnorm2d_fwd",),
-    )
-    monkeypatch.setenv(
-        tlr._FRAMEWORK_SOURCE_ROOTS_ENV,
-        f"aiter={tmp_path}",
-    )
-
-    resolved = tlr._resolve_launcher_to_abs_source(
-        "aiter/ops/rmsnorm.py(62): rmsnorm2d_fwd",
-    )
-    assert resolved is not None
-    abs_path, line, func = resolved
-    assert abs_path == str(target)
-    assert line == 62
-    assert func == "rmsnorm2d_fwd"
-
-
-def test_resolve_launcher_via_importlib_spec(monkeypatch):
-    """With no env override, ``find_spec`` resolves the absolute origin (tested via stdlib ``unittest/case.py``)."""
-    monkeypatch.delenv(tlr._FRAMEWORK_SOURCE_ROOTS_ENV, raising=False)
-    resolved = tlr._resolve_launcher_to_abs_source(
-        "unittest/case.py(1): expectedFailure",
-    )
-    assert resolved is not None
-    abs_path, line, func = resolved
-    assert os.path.isabs(abs_path) and abs_path.endswith("unittest/case.py")
-    assert line == 1
-    assert func == "expectedFailure"
-
-
-def test_resolve_launcher_via_hardcoded_fallback(tmp_path, monkeypatch):
-    """When the package isn't importable but a hardcoded fallback root holds the file, the resolver still succeeds."""
-    monkeypatch.delenv(tlr._FRAMEWORK_SOURCE_ROOTS_ENV, raising=False)
-
-    # Seed a fake aiter checkout and point the fallback table at it (package not importable).
-    _seed_pkg(
-        tmp_path,
-        "aiter_pinned_xfx",
-        "ops/rmsnorm.py",
-        funcs=("rmsnorm2d_fwd_with_add",),
-    )
-    monkeypatch.setattr(
-        tlr,
-        "_FRAMEWORK_PKG_FALLBACK_ROOTS",
-        {"aiter_pinned_xfx": (str(tmp_path),)},
-    )
-    # Force find_spec to miss so the fallback table is exercised.
-    monkeypatch.setattr(tlr, "_package_root_parent", lambda pkg: None)
-
-    resolved = tlr._resolve_launcher_to_abs_source(
-        "aiter_pinned_xfx/ops/rmsnorm.py(76): rmsnorm2d_fwd_with_add",
-    )
-    assert resolved is not None
-    abs_path, line, func = resolved
-    assert abs_path == str(tmp_path / "aiter_pinned_xfx" / "ops" / "rmsnorm.py")
-    assert line == 76
-    assert func == "rmsnorm2d_fwd_with_add"
-
-
-def test_resolve_launcher_splits_an_absolute_annotated_path():
-    """Absolute launchers keep their path while separating line and function."""
-    assert tlr._resolve_launcher_to_abs_source(
-        "/sgl-workspace/aiter/aiter/ops/rmsnorm.py(62): fn",
-    ) == (
-        "/sgl-workspace/aiter/aiter/ops/rmsnorm.py",
-        62,
-        "fn",
-    )
-
-
-def test_resolve_launcher_returns_none_for_placeholders_and_misses():
-    """Placeholders, empty strings, and unresolvable packages collapse to None (no fabricated path)."""
-    assert tlr._resolve_launcher_to_abs_source("") is None
-    assert tlr._resolve_launcher_to_abs_source("—") is None
-    # Unresolvable package → None; caller falls back to the verbatim string.
-    assert (
-        tlr._resolve_launcher_to_abs_source(
-            "definitely_not_a_real_pkg_8x9z/foo.py(1): fn",
-        )
-        is None
-    )
-
-
-def test_resolve_launcher_rejects_when_function_not_in_file(tmp_path, monkeypatch):
-    """AST guard: when the resolved ``.py`` exists but lacks the launcher's function, the resolver refuses it."""
-    # Seed a .py file that does NOT define rmsnorm2d_fwd.
-    target = tmp_path / "aiter_shadowed_xyz" / "ops" / "rmsnorm.py"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(
-        "def some_other_function():\n    pass\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setenv(
-        tlr._FRAMEWORK_SOURCE_ROOTS_ENV,
-        f"aiter_shadowed_xyz={tmp_path}",
-    )
-    # No fallback paths so the bad-symbol path is rejected outright.
-    monkeypatch.setattr(tlr, "_package_root_parent", lambda pkg: None)
-    monkeypatch.setattr(tlr, "_FRAMEWORK_PKG_FALLBACK_ROOTS", {})
-
-    assert (
-        tlr._resolve_launcher_to_abs_source(
-            "aiter_shadowed_xyz/ops/rmsnorm.py(62): rmsnorm2d_fwd",
-        )
-        is None
-    )
-
-
-def test_resolve_launcher_ast_check_falls_through_to_next_root(tmp_path, monkeypatch):
-    """When the first candidate root holds a stub that fails AST validation, the resolver MUST keep walking the candidate list instead of short-circuiting — otherwise a single bad spec (shadowed pkg / stale wheel) permanently masks the real source on the fallback path."""
-    bad_root = tmp_path / "bad"
-    good_root = tmp_path / "good"
-    bad_target = bad_root / "aiter_pinned_qrs" / "ops" / "rmsnorm.py"
-    bad_target.parent.mkdir(parents=True, exist_ok=True)
-    bad_target.write_text("def not_it():\n    pass\n", encoding="utf-8")
-    good_target = good_root / "aiter_pinned_qrs" / "ops" / "rmsnorm.py"
-    good_target.parent.mkdir(parents=True, exist_ok=True)
-    good_target.write_text(
-        "def rmsnorm2d_fwd(x):\n    return x\n",
-        encoding="utf-8",
-    )
-
-    monkeypatch.delenv(tlr._FRAMEWORK_SOURCE_ROOTS_ENV, raising=False)
-    monkeypatch.setattr(tlr, "_package_root_parent", lambda pkg: None)
-    monkeypatch.setattr(
-        tlr,
-        "_FRAMEWORK_PKG_FALLBACK_ROOTS",
-        {"aiter_pinned_qrs": (str(bad_root), str(good_root))},
-    )
-
-    resolved = tlr._resolve_launcher_to_abs_source(
-        "aiter_pinned_qrs/ops/rmsnorm.py(76): rmsnorm2d_fwd",
-    )
-    assert resolved is not None
-    abs_path, line, func = resolved
-    assert abs_path == str(good_target)
-    assert line == 76
-    assert func == "rmsnorm2d_fwd"
-
-
-def test_resolve_launcher_skips_ast_check_for_non_py_sources(tmp_path, monkeypatch):
-    """AST validation only applies to Python sources; HIP/CUDA refs pass existence-only validation."""
-    target = tmp_path / "aiter_hipxyz" / "csrc" / "rms_hip.cu"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text("// device code\n", encoding="utf-8")
-    monkeypatch.setenv(
-        tlr._FRAMEWORK_SOURCE_ROOTS_ENV,
-        f"aiter_hipxyz={tmp_path}",
-    )
-
-    resolved = tlr._resolve_launcher_to_abs_source(
-        "aiter_hipxyz/csrc/rms_hip.cu#L42",
-    )
-    assert resolved is not None
-    abs_path, line, func = resolved
-    assert abs_path == str(target)
-    assert line == 42
-    assert func is None
-
-
-def test_resolve_launcher_skips_unparseable_env_entries(tmp_path, monkeypatch):
-    """Malformed env entries are silently skipped; the one valid entry still wins."""
-    target = _seed_pkg(
-        tmp_path,
-        "vllm",
-        "model_executor/models/qwen.py",
-        funcs=("forward",),
-    )
-    monkeypatch.setenv(
-        tlr._FRAMEWORK_SOURCE_ROOTS_ENV,
-        # First two entries are malformed (skipped); the third is the valid one.
-        f"junk_without_equals,=/just/value,vllm={tmp_path}",
-    )
-
-    resolved = tlr._resolve_launcher_to_abs_source(
-        "vllm/model_executor/models/qwen.py(10): forward",
-    )
-    assert resolved is not None
-    abs_path, _, _ = resolved
-    assert abs_path == str(target)
 
 
 def test_function_line_from_ast_finds_def_lineno(tmp_path):
@@ -4175,45 +3939,6 @@ def test_infer_analysis_mode_unknown_framework_stays_default():
     """Frameworks outside the canonical set fall back to ``default``."""
     assert tlr.infer_analysis_mode("trtllm", "") == "default"
     assert tlr.infer_analysis_mode("", "") == "default"
-
-
-# atom entries present in _FRAMEWORK_PKG_FALLBACK_ROOTS
-def test_framework_pkg_fallback_roots_has_atom_entry():
-    """The atom fallback roots must include ``/app/ATOM`` plus a site-packages variant."""
-    table = tlr._FRAMEWORK_PKG_FALLBACK_ROOTS
-    assert "atom" in table, "atom missing from _FRAMEWORK_PKG_FALLBACK_ROOTS"
-    roots = table["atom"]
-    assert "/app/ATOM" in roots
-    assert any("site-packages" in r or "dist-packages" in r for r in roots), (
-        f"atom fallback roots lack a site-packages entry: {roots!r}"
-    )
-
-
-def test_resolve_launcher_via_atom_fallback_root(tmp_path, monkeypatch):
-    """End-to-end: a relative atom path resolves against the atom fallback root when import atom doesn't fire."""
-    monkeypatch.delenv(tlr._FRAMEWORK_SOURCE_ROOTS_ENV, raising=False)
-    _seed_pkg(
-        tmp_path,
-        "atom",
-        "model_engine/model_runner.py",
-        funcs=("forward",),
-    )
-    monkeypatch.setattr(
-        tlr,
-        "_FRAMEWORK_PKG_FALLBACK_ROOTS",
-        {"atom": (str(tmp_path),)},
-    )
-    # Force find_spec to miss so the test exercises the fallback path.
-    monkeypatch.setattr(tlr, "_package_root_parent", lambda pkg: None)
-
-    resolved = tlr._resolve_launcher_to_abs_source(
-        "atom/model_engine/model_runner.py(125): forward",
-    )
-    assert resolved is not None
-    abs_path, line, func = resolved
-    assert abs_path == str(tmp_path / "atom" / "model_engine" / "model_runner.py")
-    assert line == 125
-    assert func == "forward"
 
 
 # The wrapper that merely *launches* the kernel — must never be the source.

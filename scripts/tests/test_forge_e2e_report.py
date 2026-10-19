@@ -63,16 +63,18 @@ def test_success_report_includes_timing_and_effect_metrics() -> None:
     }
 
     body = report.render_report(
-        result_label="✅ Succeeded",
+        report.ForgeE2ERun(
+            result_label="✅ Succeeded",
+            max_hours="1.0",
+            max_iters="100",
+            gpus="1",
+            head_ref="ci/forge-e2e-path-gate",
+            head_sha="f8fb6e2d",
+            session_id="d14d455d",
+            details_url="https://example.test/run",
+        ),
         detail=detail,
         forge_result=forge_result,
-        max_hours="1.0",
-        max_iters="100",
-        gpus="1",
-        head_ref="ci/forge-e2e-path-gate",
-        head_sha="f8fb6e2d",
-        session_id="d14d455d",
-        details_url="https://example.test/run",
     )
 
     assert "| queue → dispatch | 30s |" in body
@@ -88,16 +90,18 @@ def test_success_report_includes_timing_and_effect_metrics() -> None:
 
 def test_missing_logs_degrade_to_timing_only() -> None:
     body = report.render_report(
-        result_label="❌ Failed",
+        report.ForgeE2ERun(
+            result_label="❌ Failed",
+            max_hours="1.0",
+            max_iters="100",
+            gpus="1",
+            head_ref="branch",
+            head_sha="deadbeef",
+            session_id="session",
+            error="platform failed",
+        ),
         detail={},
         forge_result=None,
-        max_hours="1.0",
-        max_iters="100",
-        gpus="1",
-        head_ref="branch",
-        head_sha="deadbeef",
-        session_id="session",
-        error="platform failed",
         now=datetime(2026, 8, 31, tzinfo=timezone.utc),
     )
 

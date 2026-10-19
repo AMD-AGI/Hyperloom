@@ -49,7 +49,7 @@ import importlib.util
 import os
 import re
 import subprocess
-from dataclasses import dataclass
+from dataclasses import KW_ONLY, dataclass, field
 from pathlib import Path
 from typing import Any, Optional, Protocol, Sequence, runtime_checkable
 
@@ -159,17 +159,6 @@ def _explicit_fatal_error(server_log_text: str) -> str:
     return ""
 
 
-def serving_failure_blames_kernel(reason: str) -> bool:
-    """Whether a serving failure is evidence against the KERNEL.
-
-    Only a GPU fault is. Everything else -- an engine that will not initialize, a
-    missing dependency, a config the install rejects -- is a soft fail that the
-    author cannot fix by re-authoring, and telling it otherwise spends the whole
-    attempt budget rewriting a kernel that was never at fault.
-    """
-    return _contains_marker(reason or "", _SERVING_CRASH_MARKERS)
-
-
 def _is_vllm_framework(framework: str) -> bool:
     return (framework or "").strip().lower() in ("vllm", "vllm-aiter")
 
@@ -246,21 +235,6 @@ def _is_hard_gpu_fault(text: str) -> bool:
     return _contains_marker(text or "", _HARD_GPU_FAULT_MARKERS)
 
 
-def classify_serving_smoke_failure(reason: str) -> str:
-    """Reason-only fallback for callers that kept no verdict.
-
-    Prefer :class:`SmokeVerdict` from :func:`serving_smoke_verdict`: this can only
-    see the message, so it recognizes explicit GPU-fault evidence and treats
-    everything else -- boot failures, OOM, probe/transport errors -- as the
-    environment, which Hyperloom's formal e2e serving is the KEEP/REVERT gate for.
-    """
-    if _is_hard_gpu_fault(reason or ""):
-        return "kernel_fault"
-    if "decode bench timed out" in (reason or "").casefold():
-        return "kernel_fault"
-    return "env_or_boot"
-
-
 def _hip_visible_devices(gpu: str, tp: int) -> str:
     """Devices the smoke server may use.
 
@@ -281,17 +255,46 @@ def _hip_visible_devices(gpu: str, tp: int) -> str:
     return ",".join(str(start + i) for i in range(n))
 
 
-def _serving_smoke_launch_cmd(
-    framework: str,
-    model_path: str,
-    port: int,
-    server_extra: str,
-    *,
-    launcher_exe: str = "",
-    tp: int = 1,
-    block_size: Optional[int] = None,
-    max_model_len: int = 4096,
-) -> list[str]:
+@dataclass(frozen=True)
+class SmokeServer:
+    """The server a serving smoke boots: model, fusion flags, framework install, device, port and session shape.
+
+    ``framework_root`` is the tree the fusion was applied to, which the server must be the one importing.
+    """
+
+    model_path: str
+    env_flags: dict
+    framework: str = "sglang"
+    gpu: str = "0"
+    port: int = 8977
+    server_extra: str = ""
+    framework_root: str = ""
+    launcher_exe: str = ""
+    tp: int = 1
+    block_size: Optional[int] = None
+    max_model_len: int = 4096
+
+
+@dataclass(frozen=True)
+class DecodeLoad:
+    """The decode traffic a serving smoke drives through the live server."""
+
+    isl: int = 512
+    osl: int = 64
+    num_prompts: int = 16
+    conc: int = 16
+
+
+@dataclass(frozen=True)
+class _LiveServer:
+    """A smoke server that has been launched: its process, its log, and the port it answers on."""
+
+    process: subprocess.Popen
+    log_path: str
+    port: int
+
+
+def _serving_smoke_launch_cmd(server: SmokeServer) -> list[str]:
     """Framework-specific serve launch command for the serving smoke.
 
     vLLM and SGLang have different launchers and flags; the smoke must use the one
@@ -303,26 +306,26 @@ def _serving_smoke_launch_cmd(
     ``tp`` / ``block_size`` / ``max_model_len`` must match the session serving
     command (sparse vLLM dies on the default block size 16).
     """
-    extra = [p for p in (server_extra or "").split() if p]
-    tp_n = max(1, int(tp or 1))
-    mml = int(max_model_len) if max_model_len else 4096
-    if _is_vllm_framework(framework):
+    extra = [p for p in (server.server_extra or "").split() if p]
+    tp_n = max(1, int(server.tp or 1))
+    mml = int(server.max_model_len) if server.max_model_len else 4096
+    if _is_vllm_framework(server.framework):
         cmd = [
-            launcher_exe or "vllm",
+            server.launcher_exe or "vllm",
             "serve",
-            model_path,
+            server.model_path,
             "--host",
             "0.0.0.0",
             "--port",
-            str(port),
+            str(server.port),
             "--tensor-parallel-size",
             str(tp_n),
             "--trust-remote-code",
             "--max-model-len",
             str(mml),
         ]
-        if block_size:
-            cmd.extend(["--block-size", str(int(block_size))])
+        if server.block_size:
+            cmd.extend(["--block-size", str(int(server.block_size))])
         cmd.extend(extra)
         return cmd
     return [
@@ -330,11 +333,11 @@ def _serving_smoke_launch_cmd(
         "-m",
         "sglang.launch_server",
         "--model-path",
-        model_path,
+        server.model_path,
         "--host",
         "0.0.0.0",
         "--port",
-        str(port),
+        str(server.port),
         "--trust-remote-code",
         "--tp",
         str(tp_n),
@@ -371,11 +374,7 @@ def pass_activation_evidence(log_text: str) -> tuple[Optional[bool], list[str]]:
 
 def _vllm_decode_probe(
     port: int,
-    *,
-    isl: int,
-    osl: int,
-    num_prompts: int,
-    conc: int,
+    load: DecodeLoad,
     timeout_s: int,
     metrics: Optional[dict] = None,
 ) -> tuple[bool, str]:
@@ -393,6 +392,7 @@ def _vllm_decode_probe(
     import urllib.request as _rq
     from concurrent.futures import ThreadPoolExecutor
 
+    isl, osl = load.isl, load.osl
     base = f"http://127.0.0.1:{port}"
     try:
         with _rq.urlopen(f"{base}/v1/models", timeout=30) as r:
@@ -404,8 +404,8 @@ def _vllm_decode_probe(
         return False, f"/v1/models probe error: {type(e).__name__}: {e}"
 
     prompt = "The quick brown fox " * max(1, isl // 4)
-    n = max(16, min(int(num_prompts), 64))
-    workers = max(1, min(int(conc), 8))
+    n = max(16, min(int(load.num_prompts), 64))
+    workers = max(1, min(int(load.conc), 8))
 
     tokens: list[int] = []
 
@@ -518,7 +518,7 @@ def _free_vram_fraction(gpu: str, *, _run=None) -> Optional[float]:
     return 1.0 - int(used[idx]) / 100.0
 
 
-def gpu_is_free_enough(gpu: str, *, need: float = 0.5, _probe=None) -> tuple[bool, str]:
+def gpu_is_free_enough(gpu: str, *, _probe=None) -> tuple[bool, str]:
     """Whether the card has room for a server, before one is launched.
 
     A card still held by a previous stage fails the launch with an allocator
@@ -535,7 +535,7 @@ def gpu_is_free_enough(gpu: str, *, need: float = 0.5, _probe=None) -> tuple[boo
     free = probe(gpu)
     if free is None:
         return True, ""
-    if free >= need:
+    if free >= 0.5:
         return True, ""
     return False, (
         f"GPU {gpu} has only {free * 100:.0f}% of its memory free before the server "
@@ -544,22 +544,18 @@ def gpu_is_free_enough(gpu: str, *, need: float = 0.5, _probe=None) -> tuple[boo
     )
 
 
-def serving_smoke(
-    model_path: str,
-    env_flags: dict,
-    **kwargs,
-) -> tuple[bool, str]:
+def serving_smoke(server: SmokeServer, **kwargs) -> tuple[bool, str]:
     """``(ok, reason)`` view of :func:`serving_smoke_verdict`.
 
     Kept for callers that only ask "did it serve" (the compile-pass A/B arms).
     Anything deciding KEEP/REVERT must use the verdict instead, so the attribution
     comes from the stage that failed rather than from this string.
     """
-    verdict = serving_smoke_verdict(model_path, env_flags, **kwargs)
+    verdict = serving_smoke_verdict(server, **kwargs)
     return verdict.ok, verdict.reason
 
 
-def _serving_smoke_env(framework: str, env_flags: dict, gpu: str, tp: int) -> dict[str, str]:
+def _serving_smoke_env(server: SmokeServer) -> dict[str, str]:
     """The environment the smoke server boots under, with the fusion flags applied.
 
     AITER is opt-in per framework contract: ``vllm-aiter`` := vLLM with AITER on;
@@ -568,13 +564,13 @@ def _serving_smoke_env(framework: str, env_flags: dict, gpu: str, tp: int) -> di
     ``kernelforge.gemm_tune``.
     """
     env = dict(os.environ)
-    env["HIP_VISIBLE_DEVICES"] = _hip_visible_devices(gpu, tp)
-    fw = (framework or "").strip().lower()
+    env["HIP_VISIBLE_DEVICES"] = _hip_visible_devices(server.gpu, server.tp)
+    fw = (server.framework or "").strip().lower()
     if fw == "vllm-aiter":
         env.setdefault("VLLM_ROCM_USE_AITER", "1")
-    elif not _is_vllm_framework(framework):
+    elif not _is_vllm_framework(server.framework):
         env.setdefault("SGLANG_USE_AITER", "1")
-    env.update({str(key): str(value) for key, value in (env_flags or {}).items()})
+    env.update({str(key): str(value) for key, value in (server.env_flags or {}).items()})
     return env
 
 
@@ -624,21 +620,14 @@ def _decode_crash_verdict(server: subprocess.Popen, tail: str) -> SmokeVerdict |
 
 
 def _vllm_decode_verdict(
-    server: subprocess.Popen,
-    slog: str,
-    *,
-    port: int,
-    isl: int,
-    osl: int,
-    num_prompts: int,
-    conc: int,
+    live: _LiveServer,
+    load: DecodeLoad,
     timeout_s: int,
     metrics: Optional[dict],
 ) -> SmokeVerdict:
     """Run the vLLM decode probe against the live server and judge what came back."""
-    probe_ok, probe_detail = _vllm_decode_probe(
-        port, isl=isl, osl=osl, num_prompts=num_prompts, conc=conc, timeout_s=timeout_s, metrics=metrics
-    )
+    server, slog = live.process, live.log_path
+    probe_ok, probe_detail = _vllm_decode_probe(live.port, load, timeout_s, metrics)
     tail = _tail_text(slog)
     if metrics is not None:
         # Read the WHOLE log: pass activation is logged at compile time, long before the tail window.
@@ -656,18 +645,13 @@ def _vllm_decode_verdict(
 
 
 def _sglang_decode_verdict(
-    server: subprocess.Popen,
-    slog: str,
+    live: _LiveServer,
     env: dict[str, str],
-    *,
-    port: int,
-    isl: int,
-    osl: int,
-    num_prompts: int,
-    conc: int,
+    load: DecodeLoad,
     timeout_s: int,
 ) -> SmokeVerdict:
     """Run the SGLang decode bench against the live server and judge what came back."""
+    server, slog = live.process, live.log_path
     try:
         bench = subprocess.run(
             [
@@ -679,17 +663,17 @@ def _sglang_decode_verdict(
                 "--host",
                 "127.0.0.1",
                 "--port",
-                str(port),
+                str(live.port),
                 "--dataset-name",
                 "random",
                 "--random-input-len",
-                str(isl),
+                str(load.isl),
                 "--random-output-len",
-                str(osl),
+                str(load.osl),
                 "--num-prompts",
-                str(num_prompts),
+                str(load.num_prompts),
                 "--max-concurrency",
-                str(conc),
+                str(load.conc),
                 "--random-range-ratio",
                 "1.0",
             ],
@@ -723,25 +707,12 @@ def _sglang_decode_verdict(
 
 
 def serving_smoke_verdict(
-    model_path: str,
-    env_flags: dict,
+    server: SmokeServer,
+    load: DecodeLoad = DecodeLoad(),
     *,
-    framework: str = "sglang",
-    gpu: str = "0",
-    port: int = 8977,
-    isl: int = 512,
-    osl: int = 64,
-    num_prompts: int = 16,
-    conc: int = 16,
-    server_extra: str = "",
-    framework_root: str = "",
     timeout_s: int = 1200,
     log_path: Optional[str] = None,
-    launcher_exe: str = "",
     metrics: Optional[dict] = None,
-    tp: int = 1,
-    block_size: Optional[int] = None,
-    max_model_len: int = 4096,
 ) -> SmokeVerdict:
     """CUDA-graph-ON serving smoke: does the fused kernel survive REAL decode?
 
@@ -755,8 +726,8 @@ def serving_smoke_verdict(
     ledger so the NEXT author attempt fixes the CUDA-graph bug -- but only when
     ``blames_kernel``, because re-authoring cannot fix an environment.
 
-    ``framework`` selects the launcher/probe (``vllm`` / ``vllm-aiter`` vs ``sglang``);
-    it MUST match the target framework or the server never boots. ``launcher_exe``
+    ``server.framework`` selects the launcher/probe (``vllm`` / ``vllm-aiter`` vs ``sglang``);
+    it MUST match the target framework or the server never boots. ``server.launcher_exe``
     pins WHICH install serves (else the first one on ``PATH`` wins, which need not
     be the install that was probed and edited).
 
@@ -767,42 +738,33 @@ def serving_smoke_verdict(
     import signal
     import time as _time
 
-    is_vllm = _is_vllm_framework(framework)
-    same_tree, mismatch = framework_tree_is_the_imported_one(framework_root, framework)
+    is_vllm = _is_vllm_framework(server.framework)
+    same_tree, mismatch = framework_tree_is_the_imported_one(server.framework_root, server.framework)
     if not same_tree:
         return SmokeVerdict(False, mismatch, SMOKE_STAGE_FRAMEWORK_MISMATCH)
 
-    roomy, busy = gpu_is_free_enough(str(gpu))
+    roomy, busy = gpu_is_free_enough(str(server.gpu))
     if not roomy:
         return SmokeVerdict(False, busy, SMOKE_STAGE_GPU_BUSY)
 
-    env = _serving_smoke_env(framework, env_flags, gpu, tp)
+    env = _serving_smoke_env(server)
 
-    slog = log_path or str(_runtime_dir("serving_smoke") / f"server_{port}.log")
+    slog = log_path or str(_runtime_dir("serving_smoke") / f"server_{server.port}.log")
     if metrics is not None:
         metrics["server_log"] = slog
-    cmd = _serving_smoke_launch_cmd(
-        framework,
-        model_path,
-        port,
-        server_extra,
-        launcher_exe=launcher_exe,
-        tp=tp,
-        block_size=block_size,
-        max_model_len=max_model_len,
-    )
+    cmd = _serving_smoke_launch_cmd(server)
     # Wrap the WHOLE harness: any failure returns a verdict instead of raising (a
     # serving-check must NEVER crash the loop) and the server is ALWAYS killed. Only
     # a stage that saw a GPU fault sets ``blames_kernel``, so the ledger distills the
     # CUDA-graph lesson exactly when re-authoring can act on it.
-    server = None
+    process = None
     fh: object = None
     try:
         try:
             fh = open(slog, "w")
         except OSError:
             fh = subprocess.DEVNULL
-        server = subprocess.Popen(
+        process = subprocess.Popen(
             cmd,
             env=env,
             stdout=fh,  # type: ignore[arg-type]
@@ -811,34 +773,15 @@ def serving_smoke_verdict(
             cwd=str(_runtime_dir("serving_smoke")),
         )
 
-        not_ready = _await_server_ready(server, slog, timeout_s)
+        not_ready = _await_server_ready(process, slog, timeout_s)
         if not_ready is not None:
             return not_ready
 
         # Exercise the fused kernel in the real CUDA-graph decode loop.
+        live = _LiveServer(process, slog, server.port)
         if is_vllm:
-            return _vllm_decode_verdict(
-                server,
-                slog,
-                port=port,
-                isl=isl,
-                osl=osl,
-                num_prompts=num_prompts,
-                conc=conc,
-                timeout_s=timeout_s,
-                metrics=metrics,
-            )
-        return _sglang_decode_verdict(
-            server,
-            slog,
-            env,
-            port=port,
-            isl=isl,
-            osl=osl,
-            num_prompts=num_prompts,
-            conc=conc,
-            timeout_s=timeout_s,
-        )
+            return _vllm_decode_verdict(live, load, timeout_s, metrics)
+        return _sglang_decode_verdict(live, env, load, timeout_s)
     except Exception as e:  # noqa: BLE001 — a harness error is a soft-fail, never a crash.
         return SmokeVerdict(
             False,
@@ -846,9 +789,9 @@ def serving_smoke_verdict(
             SMOKE_STAGE_HARNESS_ERROR,
         )
     finally:
-        if server is not None:
+        if process is not None:
             with contextlib.suppress(ProcessLookupError, OSError):
-                os.killpg(os.getpgid(server.pid), signal.SIGKILL)
+                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
         if hasattr(fh, "close"):
             fh.close()
         _time.sleep(2)
@@ -1444,6 +1387,7 @@ def validate_recipe(
     )
 
 
+@dataclass(eq=False)
 class HarnessKernelRunner:
     """Production :class:`KernelValidationRunner` backed by an author-written harness.
 
@@ -1465,23 +1409,14 @@ class HarnessKernelRunner:
          "skipped": bool, "skip_reason": str}
     """
 
-    def __init__(
-        self,
-        harness_path: str,
-        *,
-        workdir: str = ".",
-        framework_root: str = "",
-        gpu: str = "0",
-        env_flags: Optional[dict[str, str]] = None,
-        timeout_s: int = 1800,
-    ):
-        self.harness_path = harness_path
-        self.workdir = workdir
-        self.framework_root = framework_root
-        self.gpu = gpu
-        self.env_flags = dict(env_flags or {})
-        self.timeout_s = timeout_s
-        self._cache: Optional[dict] = None
+    harness_path: str
+    _: KW_ONLY
+    workdir: str = "."
+    framework_root: str = ""
+    gpu: str = "0"
+    env_flags: dict[str, str] = field(default_factory=dict)
+    timeout_s: int = 1800
+    _cache: Optional[dict] = field(default=None, init=False, repr=False)
 
     def _load(self, recipe: Recipe) -> dict:
         """Run the harness once (cached) and return its parsed JSON dict."""
