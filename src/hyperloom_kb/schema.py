@@ -406,16 +406,20 @@ class FieldDeclaration:
                 raise SchemaValidationError(f"field {name!r}: a file's content is not searched")
             object.__setattr__(self, "search", weight)
         if self.role is not None:
-            if not isinstance(self.role, FieldRole):
-                raise SchemaValidationError(f"field {name!r} has an invalid role")
-            if self.many:
-                raise SchemaValidationError(f"field {name!r}: a field with a role holds one value")
-            if self.role is FieldRole.DECISION and (self.kind is not FieldKind.STRING or not values):
-                raise SchemaValidationError(f"field {name!r}: the decision is a string field with declared values")
-            if self.role is FieldRole.MEASUREMENT and self.kind is not FieldKind.NUMBER:
-                raise SchemaValidationError(f"field {name!r}: the measurement is a number field")
-            if self.role is FieldRole.SUMMARY and self.kind not in {FieldKind.STRING, FieldKind.TEXT}:
-                raise SchemaValidationError(f"field {name!r}: the summary is a string or text field")
+            self._check_role()
+
+    def _check_role(self) -> None:
+        name = self.name
+        if not isinstance(self.role, FieldRole):
+            raise SchemaValidationError(f"field {name!r} has an invalid role")
+        if self.many:
+            raise SchemaValidationError(f"field {name!r}: a field with a role holds one value")
+        if self.role is FieldRole.DECISION and (self.kind is not FieldKind.STRING or not self.values):
+            raise SchemaValidationError(f"field {name!r}: the decision is a string field with declared values")
+        if self.role is FieldRole.MEASUREMENT and self.kind is not FieldKind.NUMBER:
+            raise SchemaValidationError(f"field {name!r}: the measurement is a number field")
+        if self.role is FieldRole.SUMMARY and self.kind not in {FieldKind.STRING, FieldKind.TEXT}:
+            raise SchemaValidationError(f"field {name!r}: the summary is a string or text field")
 
     def validate(self, value: FieldValue, where: str) -> None:
         """Check one present value against this field's kind."""
