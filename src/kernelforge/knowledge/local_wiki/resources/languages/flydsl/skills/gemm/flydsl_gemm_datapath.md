@@ -13,6 +13,8 @@ sources:
   - ROCm/FlyDSL@dd8373349:python/flydsl/expr/gpu.py:157
   - ROCm/FlyDSL@dd8373349:python/flydsl/expr/rocdl/universal.py:59
   - ROCm/FlyDSL@dd8373349:python/flydsl/expr/rocdl/cdna4.py:42
+  - https://rocm.blogs.amd.com/software-tools-optimization/cdna4-gemm-kernels/README.html
+  - https://github.com/nod-ai/amd-shark-ai/blob/main/docs/amdgpu_kernel_optimization_guide.md
   - AMD-AGI/Primus-Turbo@7615a5a2:primus_turbo/flydsl/utils/gemm_helper.py
   - AMD-AGI/Primus-Turbo@7615a5a2:primus_turbo/flydsl/utils/prims.py
   - AMD-AGI/Primus-Turbo@7615a5a2:primus_turbo/flydsl/gemm/gemm_mxfp4_kernel.py
@@ -82,10 +84,13 @@ overlays `ab` and `c`). `SmemAllocator` / `SmemPtr` are legacy.
 Treating every LDS symptom as a swizzle problem wastes the most time: check the write-to-read distance before
 the layout.
 
-gfx950 LDS has 64 banks of 4 bytes; bank = `(byte_addr / 4) mod 64`. For a 32-bit access whose lane
-stride is `s` dwords, the lanes of one issue phase touch `64 / gcd(s, 64)` distinct banks. A 128-byte
-row stride (`s = 32`) lands every lane on two banks — a heavy conflict. Wider accesses (`ds_read_b64`,
-`b128`) serve fewer lanes per phase; do the same count per phase.
+gfx950 LDS has 64 banks of 4 bytes; bank = `(byte_addr / 4) mod 64`. A read is served in phases and
+conflicts count within a phase: `ds_read_b32` is one phase of all 64 lanes, `b64` two phases of 32
+consecutive lanes, `b128` four phases of 16 lanes in a non-consecutive pattern (lane sets in
+`../../../../hardware/mi350_lds.md`). For a `ds_read_b32` whose lane stride is `s` dwords, the 64 lanes
+touch `64 / gcd(s, 64)` distinct banks: a 128-byte row stride (`s = 32`) lands every lane on two banks, a
+32-way conflict. For `b64`/`b128`, count the stride in 8- or 16-byte units: with one row per lane, an odd
+stride keeps every phase on distinct banks.
 
 - **Swizzle or pad.** XOR swizzle when the access pattern is regular and LDS headroom is tight; padding when
   a small stride bump removes the conflict and the swizzle arithmetic would clutter the address code.

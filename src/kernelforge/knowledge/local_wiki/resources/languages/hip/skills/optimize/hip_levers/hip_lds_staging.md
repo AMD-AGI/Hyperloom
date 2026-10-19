@@ -8,6 +8,8 @@ sources:
   - https://rocm.docs.amd.com/projects/HIP/en/latest/understand/hardware_implementation.html
   - https://llvm.org/docs/AMDGPUUsage.html
   - https://github.com/iree-org/iree/issues/23765
+  - https://rocm.blogs.amd.com/software-tools-optimization/cdna4-gemm-kernels/README.html
+  - https://github.com/nod-ai/amd-shark-ai/blob/main/docs/amdgpu_kernel_optimization_guide.md
 ---
 
 # LDS staging
@@ -35,8 +37,10 @@ conflicts, register staging you did not need, and missing wait counters.
 > **The 32 → 64 bank change invalidates every inherited swizzle.** A padding or XOR pattern tuned for
 > 32 banks does *not* guarantee conflict-freedom on 64. Re-derive it.
 
-A wavefront issues memory for **64 lanes** in **half-waves of 32**. Within a half-wave, lanes hitting
-the same bank at *different* addresses serialize; same *address* is a free broadcast.
+A wave's LDS read is served in **phases**: on gfx950 `ds_read_b32` is one phase of all 64 lanes, `b64`
+two phases of 32 consecutive lanes, `b128` four phases of 16 lanes in a non-consecutive pattern (lane
+sets in `../../../../../hardware/mi350_lds.md`); write phases are not documented. Within a phase, lanes
+hitting the same bank at *different* addresses serialize; same *address* is a free broadcast.
 
 ```cpp
 __shared__ float tile[64][64];      // 16 KiB — static LDS
@@ -50,18 +54,21 @@ k<<<grid, block, (BM*BK + BK*BN)*sizeof(__bf16), stream>>>();
 
 **Pad the inner dimension** — `__shared__ float tile[64][64+1];` breaks the stride that maps a column
 onto one bank. Choose the pad so the row stride, counted in units of the per-lane read width (4 B for
-`ds_read_b32`, 8 B for `b64`, 16 B for `b128`), is **odd**: lane `r` reading row `r` starts at bank
-`floor((r · stride_bytes + col_bytes) / 4) mod 64`, and an odd stride keeps the lanes read together on
-distinct banks. `stride mod 64 != 0` is not enough (an 80-dword stride reaches 4 banks). **Keep the read
-aligned** so `ds_read_b128` still fires: one extra read-width unit (`+1` f32 for `b32`, `+8` bf16 for
-`b128`) usually does both. A pad that fixes conflicts and breaks vectorization is a net loss.
+`ds_read_b32`, 8 B for `b64`, 16 B for `b128`), is **odd**: with one row per lane (lane `r` starts at
+bank `floor((r · stride_bytes + col_bytes) / 4) mod 64`), an odd stride keeps every gfx950 read phase on
+distinct banks, for `b32`, `b64` and `b128`. `stride mod 64 != 0` is not enough (an 80-dword stride
+reaches 4 banks). **Keep the read aligned** so `ds_read_b128` still fires: one extra read-width unit
+(`+1` f32 for `b32`, `+8` bf16 for `b128`) usually does both. A pad that fixes conflicts and breaks
+vectorization is a net loss. For column-wise reads such as MFMA fragments the `b128` phase pattern makes
+padding hard to use; swizzle instead.
 
 **XOR-swizzle the column index** for transpose-heavy and MFMA-staging patterns. This is the standard
 GEMM fix, costs no extra LDS, and is **required** when using direct-to-LDS. One IREE study measured
 removing it: **201 M bank conflicts, −28% TFLOPS**.
 
-**Use 128-bit LDS access.** Throughput per wave: 4-byte accesses reach ~50% of peak (8 cycles/64
-lanes); 16-byte reach ~80% (20 cycles). **Vectorize.**
+**Use 128-bit LDS access.** A single wave peaks at 64 B/cycle through the 64-byte port a SIMD pair
+shares, a quarter of the LDS's 256 B/clk: 4-byte accesses take 8 cycles for 64 lanes (50% of that
+per-wave peak), 16-byte accesses 20 cycles (80%). **Vectorize.**
 
 ```cpp
 float4 v = *reinterpret_cast<float4*>(&tile[r][c]);   // -> ds_read_b128
@@ -172,3 +179,5 @@ With `global_load_lds` the staging VGPRs disappear entirely.
 - `global_load_lds` gating, swizzle requirement, 201 M conflicts / −28%: https://github.com/iree-org/iree/issues/23765
 - `s_waitcnt` vmcnt/lgkmcnt/asynccnt, `ds` builtins: https://llvm.org/docs/AMDGPUUsage.html
 - CDNA4 LDS 160 KiB / 256 B/clk: https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/white-papers/amd-cdna-4-architecture-whitepaper.pdf
+- Per-wave LDS throughput (64 B/cycle port; 8 / 20 cycles for 4- / 16-byte accesses; the page does not tie these to a CDNA generation): https://rocm.docs.amd.com/projects/HIP/en/latest/understand/hardware_implementation.html
+- gfx950 LDS read phases per width: https://rocm.blogs.amd.com/software-tools-optimization/cdna4-gemm-kernels/README.html ; https://github.com/nod-ai/amd-shark-ai/blob/main/docs/amdgpu_kernel_optimization_guide.md

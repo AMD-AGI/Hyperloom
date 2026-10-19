@@ -4,6 +4,9 @@ kind: hardware
 topic: lds
 gens: [gfx950]
 updated: 2026-08-28
+sources:
+  - https://rocm.blogs.amd.com/software-tools-optimization/cdna4-gemm-kernels/README.html
+  - https://github.com/nod-ai/amd-shark-ai/blob/main/docs/amdgpu_kernel_optimization_guide.md
 ---
 
 # LDS — capacity, banks, staging
@@ -32,7 +35,17 @@ direct-to-LDS, and read-with-transpose is new.
 
 ## Bank conflicts
 
-A wave issues LDS in **half-waves of 32 lanes**. Within a half-wave:
+A wave's LDS read is served in **phases**, and bank conflicts count only within a phase. gfx950 read
+phases, from AMD's ROCm blog "FP8 GEMM Optimization on AMD CDNA4 Architecture" and nod-ai's AMDGPU kernel
+optimization guide (URLs in `sources:`):
+
+| Read | Phases | Lanes in each phase |
+|---|---|---|
+| `ds_read_b32` | 1 | T0–T63 |
+| `ds_read_b64` | 2 | T0–T31 · T32–T63 |
+| `ds_read_b128` | 4 | {T0–3, T12–15, T20–23, T24–27} · {T32–35, T44–47, T52–55, T56–59} · {T4–7, T8–11, T16–19, T28–31} · {T36–39, T40–43, T48–51, T60–63} |
+
+Each phase covers 256 B (64 banks × 4 B). Write phases are not documented for gfx950. Within a phase:
 
 - Lanes hitting the **same address** in a bank → **broadcast, free**.
 - Lanes hitting **different addresses** in the **same bank** → **N-way conflict**, serialized into
@@ -59,14 +72,15 @@ outstanding LDS/scalar ops you need, which is what makes deep prefetch overlap e
 
 ### Padding
 Choose `PAD` so the row stride, counted in units of the per-lane read width (4 B for `ds_read_b32`, 8 B
-for `b64`, 16 B for `b128`), is **odd**. Lane `r` reading row `r` starts at bank
-`floor((r · stride_bytes + col_bytes) / 4) mod 64`; with an odd stride the lanes read together never
-share a bank, however the hardware groups them. `stride mod 64 != 0` is not enough: an 80-dword stride
-reaches 4 banks, and fp16 128+1 (64.5 dwords) is 2-way for 2-byte reads. The pad must also keep the read
-aligned, so one extra read-width unit is the usual choice: `+1` for f32 with `b32`, `+8` for bf16 or
-`+16` for fp8 with `ds_read_b128` on a row that is an even number of 16 B units. A pad
-that removes conflicts and breaks vectorization is a net loss. Cost is a little wasted LDS, which the
-160 KiB budget absorbs easily.
+for `b64`, 16 B for `b128`), is **odd**. With one row per lane (lane `r` starts at bank
+`floor((r · stride_bytes + col_bytes) / 4) mod 64`), an odd stride keeps every gfx950 read phase
+(above) on distinct banks, for `b32`, `b64` and `b128`. `stride mod 64 != 0` is not enough: an 80-dword
+stride reaches 4 banks, and fp16 128+1 (64.5 dwords) puts lanes 0 and 1 on bank 0. The pad must also
+keep the read aligned, so one extra read-width unit is the usual choice: `+1` for f32 with `b32`, `+8`
+for bf16 or `+16` for fp8 with `ds_read_b128` on a row that is an even number of 16 B units. A pad that
+removes conflicts and breaks vectorization is a net loss. For column-wise reads such as MFMA fragments,
+the `b128` phase pattern makes padding hard to use; prefer the XOR swizzle below. Cost is a little
+wasted LDS, which the 160 KiB budget absorbs easily.
 
 ### XOR swizzle (preferred for GEMM)
 `col' = col ^ (row & mask)` — permute the column index by the row so every lane in a `ds_read`/
