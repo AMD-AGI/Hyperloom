@@ -42,10 +42,10 @@ class SearchActorBuildContext:
     program_md: str
     specialist_definitions: dict
     critic_enabled: bool
-    relay_enabled: bool
-    primary_provider: str
     usage: Any = None
     supervisor_backend: str = ""
+    relay_enabled: bool = False
+    primary_provider: str = ""
 
     def build(self, profile: AgentProfile) -> SearchActorBundle:
         """Build and probe all profile-bound planning and implementation services."""
@@ -170,12 +170,14 @@ def _borrowed_line_options(provider: str) -> dict:
 
 
 def probe_agent_profiles(
-    relay_config: AgentRelayConfig,
+    relay_config: AgentRelayConfig | None,
     *,
     config: Config,
     workspace: str,
-) -> AgentAvailabilitySnapshot:
-    """Probe every exact provider/model pair before optimization setup begins."""
+) -> AgentAvailabilitySnapshot | None:
+    """Probe every exact provider/model pair before optimization setup begins; ``None`` for a campaign without relay."""
+    if relay_config is None:
+        return None
     from kernelforge.agent_backends.registry import (
         create_registered_backend,
         get_agent_provider,
@@ -297,6 +299,76 @@ def build_search_actor_pool(
     )
 
 
+@dataclass(frozen=True)
+class SearchActorStartup:
+    """The session's search actors, and whether the campaign relays between them."""
+
+    pool: SearchActorPool
+    relay_enabled: bool
+
+    @property
+    def start_bundle(self) -> SearchActorBundle:
+        return self.pool.bundle(self.pool.start_profile_id)
+
+    @property
+    def loop_search_actors(self) -> SearchActorPool | None:
+        """What the loop switches between; ``None`` keeps a campaign without relay on its single actor."""
+        return self.pool if self.relay_enabled else None
+
+    def analysis_config(self, config: Config) -> Config:
+        """The shared Analysis Agent runs on the profile the session starts on."""
+        if not self.relay_enabled:
+            return config
+        primary = self.pool.config.primary_profile.provider
+        return config_for_profile(config, self.start_bundle.profile, primary_provider=primary)
+
+
+def start_search_actors(
+    campaign_relay: AgentRelayConfig | None,
+    builder: SearchActorBuildContext,
+    *,
+    availability: AgentAvailabilitySnapshot | None,
+) -> SearchActorStartup:
+    """Build every runnable profile's search actor, choose the start profile, and report both.
+
+    A campaign without relay runs the configured provider as its only profile, with provider fallback allowed.
+    Raises ``ValueError`` when no profile the session may start on can run.
+    """
+    relay_enabled = campaign_relay is not None
+    relay_config = campaign_relay or _single_profile_relay(builder.config)
+    primary_provider = relay_config.primary_profile.provider
+    pool = build_search_actor_pool(
+        relay_config,
+        bundle_factory=replace(builder, relay_enabled=relay_enabled, primary_provider=primary_provider).build,
+        availability=availability,
+        fallback_provider=builder.config.agent_fallback_provider,
+    )
+    _report_search_actors(pool, relay_enabled=relay_enabled)
+    return SearchActorStartup(pool, relay_enabled)
+
+
+def _single_profile_relay(config: Config) -> AgentRelayConfig:
+    runtime = config.agent_runtime()
+    profile = AgentProfile(runtime.provider, runtime.provider, runtime.model, runtime.reasoning_effort)
+    return AgentRelayConfig(primary_profile_id=profile.profile_id, profiles=(profile,))
+
+
+def _report_search_actors(pool: SearchActorPool, *, relay_enabled: bool) -> None:
+    for profile_id, status in pool.availability.profiles.items():
+        state = "available" if status.available else f"unavailable ({status.reason})"
+        print(f"  Agent profile: {profile_id} / {status.model}: {state}")
+    if pool.start_profile_id != pool.config.primary_profile_id:
+        print(
+            f"  WARNING: primary Agent profile {pool.config.primary_profile_id} is unavailable; "
+            f"starting on fallback profile {pool.start_profile_id}"
+        )
+    if relay_enabled and not relay_switch_possible(pool.availability):
+        print(
+            "  WARNING: model relay disabled for this session: only one Agent profile passed its startup check "
+            "(reasons above); a search blockage falls back to the Supervisor"
+        )
+
+
 def relay_switch_possible(availability: AgentAvailabilitySnapshot) -> bool:
     """Whether at least two profiles passed the startup check, so a blockage has somewhere to switch to."""
     return sum(1 for status in availability.profiles.values() if status.available) >= 2
@@ -333,10 +405,12 @@ def _provider_is_available(registration) -> tuple[bool, str]:
 
 __all__ = [
     "SearchActorBuildContext",
+    "SearchActorStartup",
     "agent_relay_summary",
     "build_search_actor_pool",
     "config_for_profile",
     "probe_agent_profiles",
     "relay_switch_possible",
     "resolve_default_relay_config",
+    "start_search_actors",
 ]

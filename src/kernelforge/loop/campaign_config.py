@@ -460,6 +460,16 @@ class CampaignInputs:
     agent_relay: AgentRelayConfig | None = None
 
 
+def _normalized_sources(workspace: Path, kernel: str, source_files: str) -> list[str]:
+    """Workspace-relative source files, kernel first, without duplicates."""
+    normalized: list[str] = []
+    for raw_path in [kernel, *parse_list(source_files)]:
+        relative = _relative_file(workspace, raw_path, "source file")
+        if relative not in normalized:
+            normalized.append(relative)
+    return normalized
+
+
 def create_campaign_config(
     workspace_dir: str,
     inputs: CampaignInputs,
@@ -473,11 +483,7 @@ def create_campaign_config(
     kernel_path = _relative_file(workspace, kernel, "kernel")
     driver_path = _driver_reference(workspace, driver)
 
-    normalized_sources: list[str] = []
-    for raw_path in [kernel, *parse_list(inputs.source_files)]:
-        relative = _relative_file(workspace, raw_path, "source file")
-        if relative not in normalized_sources:
-            normalized_sources.append(relative)
+    normalized_sources = _normalized_sources(workspace, kernel, inputs.source_files)
 
     dirty = _git_value(
         workspace,

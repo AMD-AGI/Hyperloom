@@ -46,7 +46,7 @@ from kernelforge.cli.publication import (
     _remote_publication_view,
     _warm_start_publication_covers,
 )
-from kernelforge.cli.relay import agent_relay_summary, relay_switch_possible
+from kernelforge.cli.relay import agent_relay_summary
 from kernelforge.cli.session_budget import _forge_session_timeout_sec, _is_long_horizon
 from kernelforge.config import Config
 from kernelforge.knowledge.kb_store.config import KnowledgeConfig
@@ -1683,11 +1683,9 @@ def forge_loop(request: ForgeLoopRequest):
         knowledge_config=knowledge_config,
         **overrides,
     )
-    startup_availability = None
-    if campaign.agent_relay is not None:
-        from kernelforge.cli.relay import probe_agent_profiles
+    from kernelforge.cli.relay import probe_agent_profiles
 
-        startup_availability = probe_agent_profiles(campaign.agent_relay, config=config, workspace=str(workspace))
+    startup_availability = probe_agent_profiles(campaign.agent_relay, config=config, workspace=str(workspace))
     # Two roots by design: resume artifacts (run_state/candidates/best) always live under
     # <workspace>/forge_experiments (campaign_root); diagnostics and the external-recovery checkpoint go to
     # --experiments-dir when the caller supplies a distinct one (e.g. Hyperloom's output dir), else campaign_root.
@@ -1925,19 +1923,10 @@ def forge_loop(request: ForgeLoopRequest):
             insession_gate=gate_on,
         ),
     )
-    from kernelforge.cli.relay import SearchActorBuildContext, build_search_actor_pool, config_for_profile
-    from kernelforge.loop.agent_relay import AgentProfile, AgentRelayConfig
+    from kernelforge.cli.relay import SearchActorBuildContext, start_search_actors
+    from kernelforge.orchestrator.analysis import make_analysis_agent_service
     from kernelforge.orchestrator.orchestration import default_specialist_definitions
 
-    relay_config = campaign.agent_relay
-    if relay_config is None:
-        primary_profile = AgentProfile(
-            selected_runtime.provider,
-            selected_runtime.provider,
-            selected_runtime.model,
-            selected_runtime.reasoning_effort,
-        )
-        relay_config = AgentRelayConfig(primary_profile_id=primary_profile.profile_id, profiles=(primary_profile,))
     specialist_definitions = default_specialist_definitions()
     actor_builder = SearchActorBuildContext(
         config=config,
@@ -1947,46 +1936,19 @@ def forge_loop(request: ForgeLoopRequest):
         program_md=program_md,
         specialist_definitions=specialist_definitions,
         critic_enabled=critic_enabled,
-        relay_enabled=campaign.agent_relay is not None,
-        primary_provider=relay_config.primary_profile.provider,
         usage=usage,
         supervisor_backend=request.roles.supervisor_backend,
     )
     try:
-        search_actors = build_search_actor_pool(
-            relay_config,
-            bundle_factory=actor_builder.build,
-            availability=startup_availability,
-            fallback_provider=config.agent_fallback_provider,
-        )
+        actors = start_search_actors(campaign.agent_relay, actor_builder, availability=startup_availability)
     except (OSError, RuntimeError, ValueError) as error:
         raise click.ClickException(f"Agent startup availability check failed: {error}") from error
-    start_bundle = search_actors.bundle(search_actors.start_profile_id)
+    start_bundle = actors.start_bundle
     effective_implementer = start_bundle.profile.provider
     effective_implementer_model = start_bundle.profile.model
-    for profile_id, status in search_actors.availability.profiles.items():
-        state = "available" if status.available else f"unavailable ({status.reason})"
-        print(f"  Agent profile: {profile_id} / {status.model}: {state}")
-    if search_actors.start_profile_id != relay_config.primary_profile_id:
-        print(
-            f"  WARNING: primary Agent profile {relay_config.primary_profile_id} is unavailable; "
-            f"starting on fallback profile {search_actors.start_profile_id}"
-        )
-    if campaign.agent_relay is not None and not relay_switch_possible(search_actors.availability):
-        print(
-            "  WARNING: model relay disabled for this session: only one Agent profile passed its startup check "
-            "(reasons above); a search blockage falls back to the Supervisor"
-        )
 
-    from kernelforge.orchestrator.analysis import make_analysis_agent_service
-
-    analysis_config = (
-        config_for_profile(config, start_bundle.profile, primary_provider=relay_config.primary_profile.provider)
-        if campaign.agent_relay is not None
-        else config
-    )
     analysis_service = make_analysis_agent_service(
-        config=analysis_config,
+        config=actors.analysis_config(config),
         usage=usage,
         timeout_sec=profile_timeout_sec,
         profiling_enabled=profiling_enabled,
@@ -2020,7 +1982,7 @@ def forge_loop(request: ForgeLoopRequest):
                 analysis_service=analysis_service,
                 orchestration_service=start_bundle.orchestration_service,
                 supervisor_fn=start_bundle.supervisor_fn,
-                search_actors=(search_actors if campaign.agent_relay is not None else None),
+                search_actors=actors.loop_search_actors,
             ),
             callbacks=LoopCallbacks(
                 on_best_committed=_checkpoint_on_best_committed,

@@ -21,7 +21,7 @@ import textwrap
 import time
 import traceback
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -61,27 +61,16 @@ from kernelforge.loop.jit_rebuild import (
     tracked_source_changes,
 )
 from kernelforge.loop.analysis_runtime import AnalysisRuntimeMixin
+from kernelforge.loop.relay_runtime import RelayRuntimeMixin
 from kernelforge.loop.search_policy import (
     MARGINAL_GAIN_SCAN_WINDOW,
     MARGINAL_GAIN_WINDOW,
     NO_CHANGES_STREAK_WINDOW,
-    OBJECTIVE_DISCOVER_NEW_MECHANISM,
-    SEARCH_MODE_DIVERSIFY,
     SEARCH_MODE_EXPLOIT,
     RecentProgress,
     SearchPolicyDecision,
     SearchPolicyEngine,
     SearchState,
-)
-from kernelforge.loop.agent_relay import (
-    INTERVENTION_SUPERVISOR,
-    apply_profile_switch,
-    apply_relay_iteration_outcome,
-    apply_supervisor_fallback,
-    invalidate_profile,
-    relay_blockage_reached,
-    select_relay_intervention,
-    select_replacement_for_unavailable,
 )
 from kernelforge.loop.search_actors import SearchActorPool
 from kernelforge.loop.round_budget import (
@@ -651,6 +640,19 @@ class LoopCallbacks:
     on_best_ready: Any = None
 
 
+def _with_search_actor(agents: LoopAgents, bundle) -> LoopAgents:
+    """The loop's agents with the planning and implementation actor taken from one relay profile, if any."""
+    if bundle is None:
+        return agents
+    return replace(
+        agents,
+        agent_fn=bundle.agent_fn,
+        agent_factory=bundle.agent_factory,
+        orchestration_service=bundle.orchestration_service,
+        supervisor_fn=bundle.supervisor_fn,
+    )
+
+
 def _verdict_of(result: "IterationResult", decision: str, plan: str) -> IterationVerdict:
     """The run-state verdict of one decided iteration."""
     return IterationVerdict(
@@ -732,7 +734,7 @@ class WindowGain:
             )
 
 
-class IterationLoop(AnalysisRuntimeMixin):
+class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
     """Autonomous kernel optimization loop."""
 
     def __init__(
@@ -3684,35 +3686,6 @@ class IterationLoop(AnalysisRuntimeMixin):
         ):
             raise RuntimeError("failed to publish validated warm-start best artifact")
 
-    def _apply_relay_outcome(
-        self,
-        result: IterationResult,
-        decision_label: str,
-    ) -> None:
-        """Reduce attributed search progress and invalidate an exhausted API profile."""
-        apply_relay_iteration_outcome(
-            self.run_state.agent_relay,
-            decision=decision_label,
-            kept=result.kept,
-            producer_profile_id=result.agent_profile_id,
-        )
-        if decision_label != "API_ERROR" or not result.agent_profile_id:
-            return
-        reason = result.validation_summary or "Agent API retries exhausted"
-        invalidate_profile(
-            self.run_state.agent_availability_snapshot,
-            result.agent_profile_id,
-            reason,
-        )
-        self.state_store.append_event(
-            make_event(
-                "relay_profile_invalidated",
-                result.iteration,
-                agent_profile_id=result.agent_profile_id,
-                reason=reason,
-            )
-        )
-
     def _apply_new_iteration_outcome(
         self,
         result: IterationResult,
@@ -3882,18 +3855,6 @@ class IterationLoop(AnalysisRuntimeMixin):
             is_new_best=result.kept,
             diversification_cycle_completed=(self.run_state.diversification_cycle_completed),
         )
-
-    def _handoff_agent_provenance(self, session_sink: dict) -> dict:
-        """Resolve producer identity once for the immutable handoff."""
-        profile_id = str(session_sink.get("agent_profile_id") or "")
-        profile = self.run_state.agent_availability_snapshot.profiles.get(profile_id)
-        return {
-            "agent_profile_id": profile_id,
-            "agent_provider": profile.provider if profile is not None else "",
-            "agent_model": profile.model if profile is not None else "",
-            "blockage_epoch": int(session_sink.get("blockage_epoch") or 0),
-            "intervention_kind": str(session_sink.get("intervention_kind") or ""),
-        }
 
     def _record_iteration_handoff(
         self,
@@ -4385,17 +4346,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                 window_gain_ratio=window_gain.ratio,
             ),
         )
-        relay = self.run_state.agent_relay
-        if relay.switch_iteration == iteration and relay.intervention_kind not in {
-            "",
-            INTERVENTION_SUPERVISOR,
-        }:
-            decision = SearchPolicyDecision(
-                mode=SEARCH_MODE_DIVERSIFY,
-                reason_codes=("AGENT_RELAY_BLOCKAGE",),
-                objective_kind=OBJECTIVE_DISCOVER_NEW_MECHANISM,
-                residence_iterations_remaining=0,
-            )
+        decision = self._relay_search_policy(iteration, decision)
         previous_mode = self.run_state.search_mode
         previous_reasons = tuple(self.run_state.search_reason_codes)
         self.run_state.search_mode = decision.mode
@@ -4705,18 +4656,7 @@ class IterationLoop(AnalysisRuntimeMixin):
         published = self._load_lane_plans(planned_iteration)
         if published is None:
             return None
-        try:
-            manifest = json.loads(self._lane_plan_manifest_path(planned_iteration).read_text(encoding="utf-8"))
-            planned_profile_id = str(manifest.get("agent_profile_id") or "")
-        except (OSError, ValueError, TypeError):
-            return None
-        active_profile_id = self.run_state.agent_relay.active_profile_id
-        if active_profile_id and planned_profile_id != active_profile_id:
-            print(
-                f"  [lanes] iteration {planned_iteration} belongs to "
-                f"{planned_profile_id or 'a legacy profile'}, not active "
-                f"profile {active_profile_id}; planning this round afresh"
-            )
+        if not self._lane_plans_match_active_profile(planned_iteration):
             return None
         planned_commit, plans = published
         if len(plans) < 2:
@@ -6053,22 +5993,6 @@ class IterationLoop(AnalysisRuntimeMixin):
             optimization_plan_executable=optimization_plan_executable,
         )
 
-    def _bind_session_producer(self, session_sink: dict, profile_id: str) -> None:
-        """Record the producer and the relay window it ran in, before the outcome can reset that window."""
-        relay = self.run_state.agent_relay
-        session_sink["agent_profile_id"] = profile_id
-        session_sink["blockage_epoch"] = relay.blockage_epoch
-        session_sink["intervention_kind"] = relay.intervention_kind
-
-    def _stamp_result_profile(self, result: IterationResult, session_sink: dict) -> None:
-        """Attach immutable producer provenance before the outcome is persisted."""
-        result.agent_profile_id = str(session_sink.get("agent_profile_id") or "")
-        result.blockage_epoch = int(session_sink.get("blockage_epoch") or 0)
-        profile = self.run_state.agent_availability_snapshot.profiles.get(result.agent_profile_id)
-        if profile is not None:
-            result.agent_provider = profile.provider
-            result.agent_model = profile.model
-
     async def _abandon_iteration(
         self,
         result: IterationResult,
@@ -6224,159 +6148,39 @@ class IterationLoop(AnalysisRuntimeMixin):
             )
         return history
 
-    def _bootstrap_search_actor(
-        self,
-        search_actors: SearchActorPool | None,
-        agent_fn,
-        agent_factory,
-        orchestration_service,
-        supervisor_fn,
-    ) -> tuple:
-        """Use the persisted active profile while campaign recovery initializes."""
-        if search_actors is None:
-            return agent_fn, agent_factory, orchestration_service, supervisor_fn
-        active = self.run_state.agent_relay.active_profile_id or search_actors.start_profile_id
-        profile_id = active if search_actors.has_bundle(active) else search_actors.start_profile_id
-        bundle = search_actors.bundle(profile_id)
-        return bundle.agent_fn, bundle.agent_factory, bundle.orchestration_service, bundle.supervisor_fn
-
-    def _record_agent_availability(self, search_actors: SearchActorPool | None) -> None:
-        """Persist the process-start snapshot after the session index advances."""
-        if search_actors is None:
-            return
-        snapshot = copy.deepcopy(search_actors.availability)
-        snapshot.session_index = self.run_state.session_index
-        self.run_state.agent_availability_snapshot = snapshot
-        if not self.run_state.agent_relay.active_profile_id:
-            self.run_state.agent_relay.active_profile_id = search_actors.start_profile_id
-        self.state_store.append_event(
-            make_event(
-                "agent_availability_snapshot",
-                self.run_state.iteration,
-                snapshot=asdict(snapshot),
-                start_profile_id=search_actors.start_profile_id,
-            )
-        )
-
-    def _activate_search_actor(self, iteration: int, search_actors: SearchActorPool) -> tuple:
-        bundle, force_supervisor = self._prepare_search_actor(iteration, search_actors)
-        return (
-            bundle.agent_fn,
-            bundle.agent_factory,
-            bundle.orchestration_service,
-            bundle.supervisor_fn,
-            force_supervisor,
-        )
-
     def _initialize_campaign_runtime(self, usage) -> None:
         """Initialize process-local stores and candidate queues for one session."""
         self.start_time = time.time()
         self.results = []
         self._usage = usage
+
+        # Safety net: if the kernel is an aiter HIP kernel, force it to recompile from the current source
+        # (AITER_REBUILD) so the agent's edits are never silently ignored via aiter's prebuilt in-tree .so.
         force_jit_rebuild(self._jit_source_files())
+
+        # Cross-iteration objective ledger: records each iteration's net diff, measured outcome, and real error
+        # signatures, then feeds concise toolchain observations and recent entries into the next prompt.
         self.ledger = ExperienceLedger(self.ic.workspace_dir)
+
+        # Per-iteration lesson documents.
         self.lessons = LessonStore(self.ic.workspace_dir)
         self.handoff_store = HandoffStore(self.ic.workspace_dir)
+
+        # Full-fidelity candidate archive: persists each iteration's WHOLE solution (kernel snapshot + diff + full
+        # profile + measurements + decision) so a later iteration can read back any prior attempt's real code.
         self.archive = CandidateArchive(self.ic.workspace_dir, self.ic.kernel_file)
         self.best_publisher = BestResultPublisher(self.ic.workspace_dir)
-        self._lane_queue = []
-        self._last_lane_plans = []
+        # Candidates from one concurrent fan-out, spent one per iteration so each is measured and judged on its own by
+        # the ordinary decision path.
+        self._lane_queue: list[LaneResult] = []
+        self._last_lane_plans: list[str] = []
+        # Stacked iterations run back to back so far.
         self._merge_precedence_streak = 0
+        # A device the campaign may not measure on, recorded by whichever iteration found it and re-checked by every
+        # iteration after it.
         self.device_hazard = DeviceHazardLog(self.ic.workspace_dir)
 
-    def _select_boundary_intervention(self, search_actors: SearchActorPool):
-        """The intervention this boundary needs, if any, and the event type that records why."""
-        relay = self.run_state.agent_relay
-        availability = self.run_state.agent_availability_snapshot
-        status = availability.profiles.get(relay.active_profile_id)
-        runnable = search_actors.has_bundle(relay.active_profile_id) and bool(status and status.available)
-        if not runnable:
-            replacement = select_replacement_for_unavailable(
-                relay,
-                profiles=search_actors.profiles,
-                availability=availability,
-            )
-            if replacement is not None:
-                return replacement, "relay_profile_unavailable"
-            if not search_actors.has_bundle(relay.active_profile_id):
-                raise RuntimeError(f"no Agent profile can run: {relay.active_profile_id} has no search actor")
-        if not relay_blockage_reached(relay, threshold=search_actors.blockage_threshold):
-            return None, ""
-        intervention = select_relay_intervention(relay, profiles=search_actors.profiles, availability=availability)
-        return intervention, "relay_blockage_detected"
-
-    def _prepare_search_actor(
-        self,
-        iteration: int,
-        search_actors: SearchActorPool,
-    ) -> tuple[object, bool]:
-        """Select and durably switch the complete search actor at a clean boundary."""
-        relay = self.run_state.agent_relay
-        if not relay.active_profile_id:
-            relay.active_profile_id = search_actors.start_profile_id
-            self.state_store.save(self.run_state)
-        intervention, event_type = self._select_boundary_intervention(search_actors)
-        if intervention is None:
-            return search_actors.bundle(relay.active_profile_id), False
-        self.state_store.append_event(
-            make_event(
-                event_type,
-                iteration,
-                active_profile_id=relay.active_profile_id,
-                streak=relay.active_no_improvement_streak,
-                selected_intervention=intervention.kind,
-                target_profile_id=intervention.target_profile_id or None,
-                reason=intervention.reason,
-            )
-        )
-        if intervention.kind == INTERVENTION_SUPERVISOR:
-            apply_supervisor_fallback(
-                relay,
-                intervention=intervention,
-                iteration=iteration,
-            )
-            self.state_store.save(self.run_state)
-            return search_actors.bundle(relay.active_profile_id), True
-
-        if self._pending_keep_path.exists():
-            raise RuntimeError("cannot switch Agent profile while pending KEEP exists")
-        if self._working_tree_diff().strip():
-            raise RuntimeError("cannot switch Agent profile with a tracked candidate diff")
-        apply_profile_switch(
-            relay,
-            intervention=intervention,
-            iteration=iteration,
-        )
-        self.run_state.last_critic = CriticRuling()
-        self._lane_queue = []
-        self._persist_lane_queue()
-        self._last_lane_plans = []
-        self.state_store.save(self.run_state)
-        self.state_store.append_event(
-            make_event(
-                "relay_profile_switched",
-                iteration,
-                previous_profile_id=relay.previous_profile_id,
-                active_profile_id=relay.active_profile_id,
-                intervention_kind=relay.intervention_kind,
-                blockage_epoch=relay.blockage_epoch,
-                reason=relay.switch_reason,
-            )
-        )
-        if self.monitor is not None:
-            self.monitor.no_improve_streak = 0
-        return search_actors.bundle(relay.active_profile_id), False
-
-    async def _open_iteration(
-        self,
-        *,
-        iteration,
-        digest,
-        supervisor_fn,
-        analysis_service,
-        relay_managed: bool = False,
-        force_supervisor: bool = False,
-    ) -> None:
+    async def _open_iteration(self, *, iteration, digest, supervisor_fn, analysis_service) -> None:
         """Resolve evidence, review the trajectory and re-scope what this iteration owns.
 
         Analysis resolves before any Supervisor or planning call, so both read
@@ -6388,11 +6192,7 @@ class IterationLoop(AnalysisRuntimeMixin):
         supervisor_due = False
         supervisor_reason = ""
         if self.monitor is not None and supervisor_fn is not None:
-            if force_supervisor:
-                supervisor_due = True
-                supervisor_reason = self.run_state.agent_relay.switch_reason
-            elif not relay_managed:
-                supervisor_due, supervisor_reason = self.monitor.should_intervene(iteration)
+            supervisor_due, supervisor_reason = self._supervisor_due(iteration)
 
         # Resolve Analysis before any Supervisor or planning call.
         if analysis_service is not None:
@@ -6453,9 +6253,7 @@ class IterationLoop(AnalysisRuntimeMixin):
         """Run the autonomous iteration loop."""
         import functools
 
-        agent_fn, agent_factory, supervisor_fn = agents.agent_fn, agents.agent_factory, agents.supervisor_fn
-        analysis_service, orchestration_service = agents.analysis_service, agents.orchestration_service
-        search_actors = agents.search_actors
+        self._search_actors = agents.search_actors
 
         global print
         print = functools.partial(print, flush=True)  # noqa: A001 - deliberate flush-on-print rebind
@@ -6466,13 +6264,9 @@ class IterationLoop(AnalysisRuntimeMixin):
         self.state_store = LoopStateStore(self.ic.workspace_dir)
         state_exists = self.state_store.state_path.exists()
         self.run_state = self.state_store.load()
-        agent_fn, agent_factory, orchestration_service, supervisor_fn = self._bootstrap_search_actor(
-            search_actors,
-            agent_fn,
-            agent_factory,
-            orchestration_service,
-            supervisor_fn,
-        )
+        actors = _with_search_actor(agents, self._session_start_bundle())
+        agent_fn, agent_factory, supervisor_fn = actors.agent_fn, actors.agent_factory, actors.supervisor_fn
+        analysis_service, orchestration_service = actors.analysis_service, actors.orchestration_service
         current_ruling_path = latest_supervisor_ruling_path(self.ic.workspace_dir)
         self._supervisor_ruling = load_latest_supervisor_ruling(self.ic.workspace_dir) if self.resume else ""
 
@@ -6505,7 +6299,7 @@ class IterationLoop(AnalysisRuntimeMixin):
         self._set_state_identity(self.run_state)
         self._stage_validated_warm_start_state()
         start_session(self.run_state)
-        self._record_agent_availability(search_actors)
+        self._record_agent_availability()
         self.experiment = self.tracker.create_segment(
             CampaignSegment(self.run_state.campaign_id, next_segment_index, parent_experiment_id),
             ExperimentSubject(
@@ -6572,11 +6366,9 @@ class IterationLoop(AnalysisRuntimeMixin):
             if stop:
                 break
 
-            force_supervisor = False
-            if search_actors is not None:
-                agent_fn, agent_factory, orchestration_service, supervisor_fn, force_supervisor = (
-                    self._activate_search_actor(iteration, search_actors)
-                )
+            actors = _with_search_actor(actors, self._iteration_bundle(iteration))
+            agent_fn, agent_factory, supervisor_fn = actors.agent_fn, actors.agent_factory, actors.supervisor_fn
+            orchestration_service = actors.orchestration_service
 
             # Price the round before anything is spent on it.
             self._close_round()
@@ -6593,8 +6385,6 @@ class IterationLoop(AnalysisRuntimeMixin):
                 digest=digest,
                 supervisor_fn=supervisor_fn,
                 analysis_service=analysis_service,
-                relay_managed=search_actors is not None,
-                force_supervisor=force_supervisor,
             )
 
             # Agent proposes modification

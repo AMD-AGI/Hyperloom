@@ -212,6 +212,8 @@ def _install_cli_fakes(monkeypatch, tmp_path):
     monkeypatch.setattr(forge_loop_command.Config, "from_env", staticmethod(fake_from_env))
 
     def fake_probe_agent_profiles(relay_config, **_kwargs):
+        if relay_config is None:
+            return None
         providers = {profile.provider: ProviderAvailability(available=True) for profile in relay_config.profiles}
         profiles = {
             profile.profile_id: ProfileAvailability(

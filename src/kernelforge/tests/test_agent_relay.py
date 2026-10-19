@@ -16,7 +16,8 @@ from kernelforge.loop.agent_relay import (
     ProfileAvailability,
     ProviderAvailability,
     apply_profile_switch,
-    apply_relay_iteration_outcome,
+    apply_relay_keep,
+    apply_relay_search_outcome,
     apply_supervisor_fallback,
     invalidate_profile,
     migrate_run_state_relay_fields,
@@ -84,10 +85,9 @@ def _snapshot(*, codex: bool = True, sonnet: bool = True) -> AgentAvailabilitySn
 def test_search_failures_advance_the_active_profile_streak(decision):
     state = AgentRelayState(active_profile_id="claude_opus")
 
-    apply_relay_iteration_outcome(
+    apply_relay_search_outcome(
         state,
         decision=decision,
-        kept=False,
         producer_profile_id="claude_opus",
     )
 
@@ -110,10 +110,9 @@ def test_infrastructure_failures_do_not_advance_the_streak(decision):
         active_no_improvement_streak=2,
     )
 
-    apply_relay_iteration_outcome(
+    apply_relay_search_outcome(
         state,
         decision=decision,
-        kept=False,
         producer_profile_id="claude_opus",
     )
 
@@ -123,10 +122,9 @@ def test_infrastructure_failures_do_not_advance_the_streak(decision):
 def test_outcome_from_another_profile_does_not_change_the_active_streak():
     state = AgentRelayState(active_profile_id="claude_opus")
 
-    apply_relay_iteration_outcome(
+    apply_relay_search_outcome(
         state,
         decision="REVERT_PERF",
-        kept=False,
         producer_profile_id="codex_gpt",
     )
 
@@ -140,21 +138,15 @@ def test_three_search_failures_reach_blockage_and_keep_resets_the_epoch():
         intervention_kind=INTERVENTION_CROSS_HARNESS,
     )
     for _ in range(3):
-        apply_relay_iteration_outcome(
+        apply_relay_search_outcome(
             state,
             decision="REVERT_PERF",
-            kept=False,
             producer_profile_id="claude_opus",
         )
 
     assert relay_blockage_reached(state, threshold=3)
 
-    apply_relay_iteration_outcome(
-        state,
-        decision="KEEP",
-        kept=True,
-        producer_profile_id="claude_opus",
-    )
+    apply_relay_keep(state)
 
     assert state.active_no_improvement_streak == 0
     assert state.profiles_tried_since_keep == []
@@ -323,7 +315,10 @@ def _search_actor_pool() -> SearchActorPool:
 def test_iteration_boundary_switches_before_the_next_actor_runs(tmp_path):
     loop = _loop_for_boundary(tmp_path, streak=3)
 
-    bundle, force_supervisor = loop._prepare_search_actor(4, _search_actor_pool())
+    pool = _search_actor_pool()
+    loop._search_actors = pool
+    bundle = loop._prepare_search_actor(4, pool)
+    force_supervisor, _reason = loop._supervisor_due(4)
 
     assert bundle.profile.profile_id == "codex_gpt"
     assert force_supervisor is False
@@ -353,7 +348,9 @@ def test_iteration_boundary_uses_supervisor_when_no_alternate_is_available(tmp_p
         },
     )
 
-    bundle, force_supervisor = loop._prepare_search_actor(4, pool)
+    loop._search_actors = pool
+    bundle = loop._prepare_search_actor(4, pool)
+    force_supervisor, _reason = loop._supervisor_due(4)
 
     assert bundle.profile.profile_id == "claude_opus"
     assert force_supervisor is True
@@ -366,12 +363,7 @@ def test_keep_after_a_switch_keeps_the_intervention_in_its_provenance(tmp_path):
     session_sink: dict = {}
     loop._bind_session_producer(session_sink, loop.run_state.agent_relay.active_profile_id)
 
-    apply_relay_iteration_outcome(
-        loop.run_state.agent_relay,
-        decision="KEEP",
-        kept=True,
-        producer_profile_id="codex_gpt",
-    )
+    apply_relay_keep(loop.run_state.agent_relay)
     result = SimpleNamespace(agent_profile_id="", blockage_epoch=0, agent_provider="", agent_model="")
     loop._stamp_result_profile(result, session_sink)
     provenance = loop._handoff_agent_provenance(session_sink)
@@ -431,7 +423,9 @@ def test_a_resumed_session_moves_off_an_active_profile_it_cannot_run(tmp_path):
         start_profile_id="claude_opus",
     )
 
-    bundle, force_supervisor = loop._prepare_search_actor(3, pool)
+    loop._search_actors = pool
+    bundle = loop._prepare_search_actor(3, pool)
+    force_supervisor, _reason = loop._supervisor_due(3)
 
     assert bundle.profile.profile_id == "claude_opus"
     assert force_supervisor is False
@@ -445,7 +439,10 @@ def test_a_resumed_session_moves_off_an_active_profile_it_cannot_run(tmp_path):
 def test_a_runnable_profile_below_the_threshold_needs_no_intervention(tmp_path):
     loop = _loop_for_boundary(tmp_path, streak=2)
 
-    bundle, force_supervisor = loop._prepare_search_actor(3, _search_actor_pool())
+    pool = _search_actor_pool()
+    loop._search_actors = pool
+    bundle = loop._prepare_search_actor(3, pool)
+    force_supervisor, _reason = loop._supervisor_due(3)
 
     assert bundle.profile.profile_id == "claude_opus"
     assert force_supervisor is False

@@ -192,22 +192,24 @@ def decision_counts_toward_blockage(decision: str) -> bool:
     return normalized not in _NON_SEARCH_DECISIONS
 
 
-def apply_relay_iteration_outcome(
+def apply_relay_keep(state: AgentRelayState) -> AgentRelayState:
+    """A KEEP ends the blockage epoch: the streak and the profiles tried since the last KEEP start over."""
+    state.active_no_improvement_streak = 0
+    state.profiles_tried_since_keep = []
+    state.intervention_kind = ""
+    state.previous_profile_id = ""
+    state.switch_iteration = 0
+    state.switch_reason = ""
+    return state
+
+
+def apply_relay_search_outcome(
     state: AgentRelayState,
     *,
     decision: str,
-    kept: bool,
     producer_profile_id: str,
 ) -> AgentRelayState:
-    """Reduce one attributed iteration outcome into relay state."""
-    if kept:
-        state.active_no_improvement_streak = 0
-        state.profiles_tried_since_keep = []
-        state.intervention_kind = ""
-        state.previous_profile_id = ""
-        state.switch_iteration = 0
-        state.switch_reason = ""
-        return state
+    """Advance the active profile's streak by one non-KEEP outcome it produced and that counts as search."""
     if producer_profile_id and producer_profile_id != state.active_profile_id:
         return state
     if decision_counts_toward_blockage(decision):
@@ -458,7 +460,8 @@ __all__ = [
     "ProviderAvailability",
     "RelayIntervention",
     "apply_profile_switch",
-    "apply_relay_iteration_outcome",
+    "apply_relay_keep",
+    "apply_relay_search_outcome",
     "apply_supervisor_fallback",
     "decision_counts_toward_blockage",
     "invalidate_profile",
