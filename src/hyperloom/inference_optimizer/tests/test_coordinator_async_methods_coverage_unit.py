@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -497,6 +498,105 @@ async def test_compose_prompt_puts_the_trajectory_review_under_the_plateau_advis
     assert (
         "=== Plateau advisory ===\n<plateau_advisory_block>\n=== Trajectory review (advisory) ===\n<trajectory>"
     ) in prompt
+
+
+@pytest.mark.asyncio
+async def test_compose_prompt_goes_out_without_the_trajectory_review_when_the_digest_fails(
+    coord: Coordinator,
+    monkeypatch,
+    caplog,
+) -> None:
+    from hyperloom.orchestrator.knowledge import trajectory_reviewer
+
+    _stub_advisories(coord, monkeypatch)
+
+    def _digest_fails(*_a, **_k):
+        raise RuntimeError("journal unreadable")
+
+    monkeypatch.setattr(trajectory_reviewer, "build_trajectory_digest", _digest_fails)
+
+    with caplog.at_level("ERROR"):
+        prompt = await coord.conversation.compose_prompt("orchestration")
+
+    assert "=== Plateau advisory ===\n<plateau_advisory_block>" in prompt
+    assert "=== Trajectory review (advisory) ===" not in prompt
+    assert [r.getMessage() for r in caplog.records if r.levelname == "ERROR"] == [
+        "Coordinator: trajectory review failed"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_trajectory_reviewer_task_is_seeded_without_a_digest_when_the_digest_fails(
+    coord: Coordinator,
+    monkeypatch,
+    caplog,
+) -> None:
+    from hyperloom.orchestrator.knowledge import trajectory_reviewer
+
+    def _digest_fails(*_a, **_k):
+        raise RuntimeError("journal unreadable")
+
+    created: list[dict] = []
+
+    async def _create_or_return_existing(**kwargs):
+        created.append(kwargs["params"])
+        return SimpleNamespace(task_id="t-1"), False
+
+    async def _warm(_params):
+        return None
+
+    monkeypatch.setattr(trajectory_reviewer, "build_trajectory_digest", _digest_fails)
+    monkeypatch.setattr(coord.conversation, "plateau_advisory_block", lambda: "plateau")
+    monkeypatch.setattr(coord.specialist_dispatch, "warm_specialist_params", _warm)
+    monkeypatch.setattr(coord.gpu_lanes, "framework_authoring_lanes_ttl", lambda params, *, base_ttl_sec: ([], 60))
+    monkeypatch.setattr(coord.tasks, "create_or_return_existing", _create_or_return_existing)
+
+    with caplog.at_level("ERROR"):
+        await coord.phase_internal.maybe_enqueue_trajectory_reviewer()
+
+    (params,) = created
+    assert params["gap_symptom"].endswith("exhausted ones).\n(no digest)")
+    assert params.get("gap_evidence") is None
+    assert [r.getMessage() for r in caplog.records if r.levelname == "ERROR"] == [
+        "Coordinator: trajectory review digest failed"
+    ]
+
+
+def test_primary_gap_lookup_failure_propagates(coord: Coordinator, monkeypatch) -> None:
+    from hyperloom.inference_optimizer.baseline_comparison import research_hints as rh
+
+    def _unreadable(_session_dir):
+        raise RuntimeError("target unreadable")
+
+    monkeypatch.setattr(rh, "load_competitor_target", _unreadable)
+    coord.shared_state.target_advisory_enabled = True
+
+    with pytest.raises(RuntimeError, match="target unreadable"):
+        coord.conversation._current_primary_gap()
+
+
+@pytest.mark.parametrize("failing", ["load_hints", "load_competitor_target"])
+def test_priors_match_advisory_logs_one_failure_and_yields_no_block(
+    coord: Coordinator, monkeypatch, caplog, failing: str
+) -> None:
+    from hyperloom.inference_optimizer.baseline_comparison import research_hints as rh
+
+    def _unreadable(_session_dir):
+        raise RuntimeError("hints unreadable")
+
+    monkeypatch.setattr(coord.conversation, "_recent_proposed_variants", lambda: [{"name": "v"}])
+    monkeypatch.setattr(rh, "load_hints", lambda _session_dir: {})
+    monkeypatch.setattr(rh, "load_competitor_target", lambda _session_dir: None)
+    monkeypatch.setattr(rh, failing, _unreadable)
+    coord.shared_state.target_advisory_enabled = True
+
+    with caplog.at_level("ERROR"):
+        block = coord.conversation._priors_match_advisory_block()
+
+    assert block == ""
+    assert [r.getMessage() for r in caplog.records if r.levelname == "ERROR"] == [
+        "Coordinator: priors-match advisory failed"
+    ]
 
 
 # -- advisory blocks -------------------------------------------------------

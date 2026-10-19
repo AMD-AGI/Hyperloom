@@ -248,7 +248,8 @@ class InternalTasksPhase(CoordinatorCollaborator):
                 self.session_dir,
                 state,
             )
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
+            log.exception("Coordinator: trajectory review digest failed")
             digest = ""
         direction, _pct = self._coord.conversation.dominant_roofline_direction()
         from hyperloom.inference_optimizer.roofline_snapshot import BOTTLENECK_DOMAIN_HINTS
