@@ -10,7 +10,7 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from hyperloom.common.checkpoint_quant import WeightDeclaration, weight_declarations
 from hyperloom.inference_optimizer.model_config_utils import _merge_config_scopes
@@ -731,39 +731,45 @@ def compute_kv_bytes_per_token(
     return int(2 * num_layers * num_kv_heads * head_dim * kv_dtype_bytes)
 
 
+@dataclass(frozen=True)
+class DecodeShape:
+    """The serving shape a decode ceiling is evaluated at: input/output sequence lengths and concurrent requests."""
+
+    isl: int
+    osl: int
+    concurrency: int
+
+
+@dataclass(frozen=True)
+class ComputeTarget:
+    """The GPUs a compute ceiling is resolved for: the spec key, how many serve the model, and the TFLOPS precision."""
+
+    gpu_type: str
+    num_gpus: int
+    precision_tag: str
+
+
 def compute_theoretical_peak_output_tok_per_sec(
-    *,
-    gpu_type: str,
-    num_gpus: int,
-    weight_bytes: int,
-    num_layers: int,
-    num_kv_heads: int,
-    head_dim: int,
-    kv_dtype_bytes: float,
-    isl: int,
-    osl: int,
-    concurrency: int,
-    active_weight_bytes: int = 0,
-    num_experts: int = 0,
-    experts_per_tok: int = 0,
-    expert_weight_bytes: int = 0,
+    meta: ModelMeta, shape: DecodeShape, *, gpu_type: str, num_gpus: int, kv_dtype_bytes: float
 ) -> float:
-    """Decode-only memory-bound ceiling for ``output_throughput`` (returns 0.0, never raises, on unknown gpu_type / degenerate divisor). ``active_weight_bytes`` shrinks per-token IO for MoE."""
+    """Decode-only memory-bound ceiling for ``output_throughput`` (returns 0.0, never raises, on unknown gpu_type / degenerate divisor). ``meta.active_weight_bytes`` shrinks per-token IO for MoE."""
     spec = HW_SPECS.get((gpu_type or "").strip().lower())
     if spec is None:
         return 0.0
     bw_total_bytes_per_sec = spec["hbm_bw_gbps"] * 1e9 * max(num_gpus, 1)
-    batch = max(concurrency, 1)
+    batch = max(shape.concurrency, 1)
     kv_bytes = compute_kv_bytes_per_token(
-        num_layers=num_layers,
-        num_kv_heads=num_kv_heads,
-        head_dim=head_dim,
+        num_layers=meta.num_layers,
+        num_kv_heads=meta.num_kv_heads,
+        head_dim=meta.head_dim,
         kv_dtype_bytes=kv_dtype_bytes,
     )
     # Average KV-cache length during decode (isl + half of osl).
-    kv_seq_len = max(int(isl) + int(osl) // 2, 1)
+    kv_seq_len = max(int(shape.isl) + int(shape.osl) // 2, 1)
     # Per-decode-step weight IO; MoE uses the coupon activated-expert fraction ``1-(1-k/n)^B``; dense reads full
     # ``weight_bytes`` each step.
+    weight_bytes, active_weight_bytes = meta.weight_bytes, meta.active_weight_bytes
+    num_experts, experts_per_tok, expert_weight_bytes = meta.num_experts, meta.experts_per_tok, meta.expert_weight_bytes
     if num_experts > 0 and experts_per_tok > 0 and expert_weight_bytes > 0:
         non_expert_bytes = max(int(weight_bytes) - int(expert_weight_bytes), 0)
         activated_fraction = 1.0 - (1.0 - experts_per_tok / num_experts) ** batch
@@ -779,23 +785,19 @@ def compute_theoretical_peak_output_tok_per_sec(
 
 
 def compute_compute_bound_ceiling_tok_per_sec(
-    *,
-    gpu_type: str,
-    num_gpus: int,
-    precision_tag: str,
-    active_weight_bytes: int,
-    weight_bytes: int,
-    weight_dtype_bytes: float,
+    target: ComputeTarget, *, active_weight_bytes: int, weight_bytes: int, weight_dtype_bytes: float
 ) -> float:
     """Decode-only compute-bound ceiling for ``output_throughput``."""
-    peak_tflops = _resolve_achievable_tflops(gpu_type, precision_tag) or _resolve_peak_tflops(gpu_type, precision_tag)
+    peak_tflops = _resolve_achievable_tflops(target.gpu_type, target.precision_tag) or _resolve_peak_tflops(
+        target.gpu_type, target.precision_tag
+    )
     if peak_tflops <= 0 or weight_dtype_bytes <= 0:
         return 0.0
     # B=1 per-token figure; fall back to dense weight_bytes when active is missing.
     active_b1 = int(active_weight_bytes) if active_weight_bytes and active_weight_bytes > 0 else int(weight_bytes)
     if active_b1 <= 0:
         return 0.0
-    peak_flops_total = peak_tflops * 1e12 * max(num_gpus, 1)
+    peak_flops_total = peak_tflops * 1e12 * max(target.num_gpus, 1)
     flops_per_token = 2.0 * active_b1 / float(weight_dtype_bytes)
     if flops_per_token <= 0:
         return 0.0
@@ -877,7 +879,16 @@ def compute_diffusion_mem_img_per_sec(*, gpu_type: str, num_gpus: int, weight_by
     return 1.0 / total_s if total_s > 0 else 0.0
 
 
-def _read_diffusion_dit_meta(model_path: str, *, height: int = 0, width: int = 0) -> tuple[int, int, int, int] | None:
+class DitGeometry(NamedTuple):
+    """The DiT transformer shape the diffusion compute ceiling counts FLOPs for."""
+
+    params: int
+    latent_tokens: int
+    num_layers: int
+    hidden_size: int
+
+
+def _read_diffusion_dit_meta(model_path: str, *, height: int = 0, width: int = 0) -> DitGeometry | None:
     """DiT transformer shape from ``<model>/transformer/config.json`` for the compute-bound diffusion ceiling."""
     try:
         cfg = json.loads((Path(model_path) / "transformer" / "config.json").read_text(encoding="utf-8"))
@@ -926,7 +937,7 @@ def _read_diffusion_dit_meta(model_path: str, *, height: int = 0, width: int = 0
     dit_params = 12 * param_layer_units * hidden * hidden
     if dit_params <= 0:
         return None
-    return dit_params, latent_tokens, total_layers, hidden
+    return DitGeometry(dit_params, latent_tokens, total_layers, hidden)
 
 
 def _diffusion_latent_tokens_from_resolution(
@@ -949,27 +960,20 @@ def _diffusion_latent_tokens_from_resolution(
     return (height // downscale) * (width // downscale)
 
 
-def compute_diffusion_compute_img_per_sec(
-    *,
-    gpu_type: str,
-    num_gpus: int,
-    precision_tag: str,
-    dit_params: int,
-    latent_tokens: int,
-    num_layers: int,
-    hidden_size: int,
-    num_steps: int,
-) -> float:
+def compute_diffusion_compute_img_per_sec(target: ComputeTarget, dit: DitGeometry, *, num_steps: int) -> float:
     """Compute-roofline ceiling for diffusion image throughput (images/sec)."""
-    peak_tflops = _resolve_achievable_tflops(gpu_type, precision_tag) or _resolve_peak_tflops(gpu_type, precision_tag)
-    if peak_tflops <= 0 or dit_params <= 0 or latent_tokens <= 0 or num_steps <= 0:
+    peak_tflops = _resolve_achievable_tflops(target.gpu_type, target.precision_tag) or _resolve_peak_tflops(
+        target.gpu_type, target.precision_tag
+    )
+    latent_tokens = dit.latent_tokens
+    if peak_tflops <= 0 or dit.params <= 0 or latent_tokens <= 0 or num_steps <= 0:
         return 0.0
-    linear = 2.0 * dit_params * latent_tokens
-    attn = 4.0 * max(num_layers, 0) * (latent_tokens**2) * max(hidden_size, 0)
+    linear = 2.0 * dit.params * latent_tokens
+    attn = 4.0 * max(dit.num_layers, 0) * (latent_tokens**2) * max(dit.hidden_size, 0)
     flops_per_image = num_steps * (linear + attn)
     if flops_per_image <= 0:
         return 0.0
-    peak_flops = peak_tflops * 1e12 * max(num_gpus, 1)
+    peak_flops = peak_tflops * 1e12 * max(target.num_gpus, 1)
     return peak_flops / flops_per_image
 
 
@@ -1001,21 +1005,17 @@ def _compute_diffusion_breakdown_from_state(state: Any, runtime: RuntimeWorkload
     cmp_img_s = 0.0
     mem_bytes = meta_bytes
     if dit is not None:
-        dit_params, latent_tokens, num_layers, hidden = dit
-        dit_weight_bytes = int(dit_params * _resolve_dtype_bytes(runtime.precision or "bf16"))
+        dit_weight_bytes = int(dit.params * _resolve_dtype_bytes(runtime.precision or "bf16"))
         if dit_weight_bytes > 0:
             mem_bytes = dit_weight_bytes
         # ``latent_tokens == 0`` means the geometry read resolved the weights but not the sequence length, so the
         # memory bound above still holds.
-        if latent_tokens > 0:
+        if dit.latent_tokens > 0:
             cmp_img_s = compute_diffusion_compute_img_per_sec(
-                gpu_type=runtime.gpu_type,
-                num_gpus=runtime.tp,
-                precision_tag=runtime.precision or "bf16",
-                dit_params=dit_params,
-                latent_tokens=latent_tokens,
-                num_layers=num_layers,
-                hidden_size=hidden,
+                ComputeTarget(
+                    gpu_type=runtime.gpu_type, num_gpus=runtime.tp, precision_tag=runtime.precision or "bf16"
+                ),
+                dit,
                 num_steps=num_steps,
             )
     mem_img_s = compute_diffusion_mem_img_per_sec(
@@ -1046,33 +1046,24 @@ def compute_roofline_breakdown_from_state(
     )
     if meta is None:
         return _EMPTY_BREAKDOWN
-    gpu_type = runtime.gpu_type
-    num_gpus = runtime.tp
-    concurrency = runtime.concurrency
     # Rescale weights to the dtype the run actually read.
     rt = resolve_runtime_dtype(state, meta, arm=arm)
     meta = apply_runtime_dtype(meta, rt)
-    precision_tag = rt.compute_precision_tag or runtime.precision or "bf16"
+    target = ComputeTarget(
+        gpu_type=runtime.gpu_type,
+        num_gpus=runtime.tp,
+        precision_tag=rt.compute_precision_tag or runtime.precision or "bf16",
+    )
+    shape = DecodeShape(isl=runtime.isl, osl=runtime.osl, concurrency=runtime.concurrency)
     mem = compute_theoretical_peak_output_tok_per_sec(
-        gpu_type=gpu_type,
-        num_gpus=num_gpus,
-        weight_bytes=meta.weight_bytes,
-        active_weight_bytes=meta.active_weight_bytes,
-        num_experts=meta.num_experts,
-        experts_per_tok=meta.experts_per_tok,
-        expert_weight_bytes=meta.expert_weight_bytes,
-        num_layers=meta.num_layers,
-        num_kv_heads=meta.num_kv_heads,
-        head_dim=meta.head_dim,
+        meta,
+        shape,
+        gpu_type=target.gpu_type,
+        num_gpus=target.num_gpus,
         kv_dtype_bytes=_activation_kv_dtype_bytes(meta),
-        isl=runtime.isl,
-        osl=runtime.osl,
-        concurrency=concurrency,
     )
     cmp = compute_compute_bound_ceiling_tok_per_sec(
-        gpu_type=gpu_type,
-        num_gpus=num_gpus,
-        precision_tag=precision_tag,
+        target,
         active_weight_bytes=meta.active_weight_bytes,
         weight_bytes=meta.weight_bytes,
         weight_dtype_bytes=meta.weight_dtype_bytes,
@@ -1083,15 +1074,7 @@ def compute_roofline_breakdown_from_state(
     legacy = RooflineBreakdown(mem, cmp, peak, bound_kind)
 
     # Prefer the bottom-up PerfModel peak; legacy is the fallback.
-    pm_bd = compute_roofline_from_perfmodel(
-        meta=meta,
-        gpu_type=gpu_type,
-        concurrency=concurrency,
-        isl=runtime.isl,
-        osl=runtime.osl,
-        num_gpus=num_gpus,
-        precision_tag=precision_tag,
-    )
+    pm_bd = compute_roofline_from_perfmodel(meta=meta, target=target, shape=shape)
     if pm_bd is not None and pm_bd.decode_tok_per_s > 0:
         return RooflineBreakdown(
             mem_tok_per_sec=pm_bd.decode_mem_tok_per_s,
@@ -1174,24 +1157,28 @@ def resolve_compute_peak_provenance(gpu_type: str | None, precision_tag: str | N
 import dataclasses as _dc
 
 
-def _fused_moe_flops(*, M: int, K: int, N: int, topk: int) -> float:
+@_dc.dataclass(frozen=True)
+class _MoeShape:
+    """One MoE FFN forward: ``M`` tokens of width ``K`` routed to ``topk`` of ``num_experts`` experts of width ``N``."""
+
+    M: int
+    K: int
+    N: int
+    num_experts: int
+    topk: int
+
+
+def _fused_moe_flops(shape: _MoeShape) -> float:
     """FLOPs for one gated SwiGLU MoE forward (gate+up+down projections)."""
+    M, K, N, topk = shape.M, shape.K, shape.N, shape.topk
     return 2.0 * M * K * N * topk * 2 + 2.0 * M * K * N * topk + M * K * (2 * topk - 1)
 
 
-def _fused_moe_bytes(
-    *,
-    M: int,
-    K: int,
-    N: int,
-    num_experts: int,
-    topk: int,
-    weight_bpe: float,
-    act_bpe: float | None = None,
-) -> float:
+def _fused_moe_bytes(shape: _MoeShape, *, weight_bpe: float, act_bpe: float | None = None) -> float:
     """HBM bytes for one gated SwiGLU MoE forward using the coupon-collector active-expert count, inlined from TraceLens FusedMoE.bytes_func."""
     if act_bpe is None:
         act_bpe = weight_bpe
+    M, K, N, num_experts, topk = shape.M, shape.K, shape.N, shape.num_experts, shape.topk
     e_active = num_experts * (1.0 - ((num_experts - topk) / num_experts) ** M)
     return (
         M * K * act_bpe  # input read
@@ -1246,61 +1233,51 @@ def _gemm_bytes(
     return M * K * a + K * N * weight_bpe + M * N * a
 
 
-def _sdpa_flops(
-    B: int,
-    N_Q: int,
-    H_Q: int,
-    N_KV: int,
-    H_KV: int,
-    d_h_qk: int,
-    d_h_v: int,
-    causal: bool,
-) -> float:
+@_dc.dataclass(frozen=True)
+class _SdpaShape:
+    """One attention call: batch ``B``, query/KV lengths and head counts, and the QK / V head widths."""
+
+    B: int
+    N_Q: int
+    H_Q: int
+    N_KV: int
+    H_KV: int
+    d_h_qk: int
+    d_h_v: int
+
+
+def _sdpa_flops(shape: _SdpaShape, causal: bool) -> float:
     """FLOPs for scaled dot-product attention."""
-    flops_qk = B * H_Q * (2.0 * N_Q * N_KV * d_h_qk)
-    flops_pv = B * H_Q * (2.0 * N_Q * d_h_v * N_KV)
+    B, N_Q, H_Q, N_KV = shape.B, shape.N_Q, shape.H_Q, shape.N_KV
+    flops_qk = B * H_Q * (2.0 * N_Q * N_KV * shape.d_h_qk)
+    flops_pv = B * H_Q * (2.0 * N_Q * shape.d_h_v * N_KV)
     total = flops_qk + flops_pv
     if causal and N_Q == N_KV:
         total /= 2.0
     return total
 
 
-def _sdpa_bytes(
-    B: int,
-    N_Q: int,
-    H_Q: int,
-    N_KV: int,
-    H_KV: int,
-    d_h_qk: int,
-    d_h_v: int,
-    causal: bool,
-    bpe: float,
-) -> float:
-    """HBM bytes for SDPA: read Q, K, V + write output."""
+def _sdpa_bytes(shape: _SdpaShape, bpe: float) -> float:
+    """HBM bytes for SDPA: read Q, K, V + write output; causal masking skips compute, not reads."""
+    s = shape
     elems = (
-        B * N_Q * H_Q * d_h_qk  # Q read
-        + B * N_KV * H_KV * d_h_qk  # K read
-        + B * N_KV * H_KV * d_h_v  # V read
-        + B * N_Q * H_Q * d_h_v  # output write
+        s.B * s.N_Q * s.H_Q * s.d_h_qk  # Q read
+        + s.B * s.N_KV * s.H_KV * s.d_h_qk  # K read
+        + s.B * s.N_KV * s.H_KV * s.d_h_v  # V read
+        + s.B * s.N_Q * s.H_Q * s.d_h_v  # output write
     )
     return float(elems) * bpe
 
 
 def compute_roofline_from_perfmodel(
-    *,
-    meta: "ModelMeta",
-    gpu_type: str,
-    concurrency: int,
-    isl: int,
-    osl: int,
-    num_gpus: int = 1,
-    precision_tag: str = "bf16",
+    *, meta: "ModelMeta", target: ComputeTarget, shape: DecodeShape
 ) -> "PerfModelBreakdown | None":
     """Bottom-up decode + prefill roofline using inlined GEMM/SDPA formulas."""
     if meta is None:
         return None
     if not meta.hidden_size or not meta.num_attention_heads:
         return None
+    gpu_type, num_gpus, precision_tag = target.gpu_type, target.num_gpus, target.precision_tag
     gpu_key = (gpu_type or "").strip().lower()
     spec = HW_SPECS_ACHIEVABLE.get(gpu_key) or HW_SPECS.get(gpu_key)
     if spec is None:
@@ -1396,16 +1373,11 @@ def compute_roofline_from_perfmodel(
         if is_moe and n_moe_layers > 0:
             # Latent-MoE decoders run the experts below the residual width.
             moe_hidden = meta.moe_hidden_size or hidden
-            fl_moe = _fused_moe_flops(M=M, K=moe_hidden, N=meta.moe_intermediate_size, topk=meta.experts_per_tok)
-            by_moe = _fused_moe_bytes(
-                M=M,
-                K=moe_hidden,
-                N=meta.moe_intermediate_size,
-                num_experts=meta.num_experts,
-                topk=meta.experts_per_tok,
-                weight_bpe=expert_bpe,
-                act_bpe=act_bpe,
+            moe = _MoeShape(
+                M=M, K=moe_hidden, N=meta.moe_intermediate_size, num_experts=meta.num_experts, topk=meta.experts_per_tok
             )
+            fl_moe = _fused_moe_flops(moe)
+            by_moe = _fused_moe_bytes(moe, weight_bpe=expert_bpe, act_bpe=act_bpe)
             t_moe, side_moe, t_mem_moe, t_cmp_moe = _roofline_time(fl_moe, by_moe)
             total_t += t_moe * n_moe_layers
             total_mem_t += t_mem_moe * n_moe_layers
@@ -1422,9 +1394,9 @@ def compute_roofline_from_perfmodel(
                 )
             )
         # SDPA
-        causal = s_q == s_kv
-        fl_s = _sdpa_flops(batch, s_q, n_q_heads, s_kv, n_kv_heads, hd, hd, causal)
-        by_s = _sdpa_bytes(batch, s_q, n_q_heads, s_kv, n_kv_heads, hd, hd, causal, act_bpe)
+        attn = _SdpaShape(B=batch, N_Q=s_q, H_Q=n_q_heads, N_KV=s_kv, H_KV=n_kv_heads, d_h_qk=hd, d_h_v=hd)
+        fl_s = _sdpa_flops(attn, causal=s_q == s_kv)
+        by_s = _sdpa_bytes(attn, act_bpe)
         t_s, side_s, t_mem_s, t_cmp_s = _roofline_time(fl_s, by_s)
         total_t += t_s * n_layers
         total_mem_t += t_mem_s * n_layers
@@ -1445,8 +1417,9 @@ def compute_roofline_from_perfmodel(
             op_rows = [_dc.replace(op, pct_time=op.time_s / total_t) for op in op_rows]
         return total_t, total_mem_t, total_cmp_t, op_rows
 
-    batch = max(concurrency, 1)
-    kv_seq = max(int(isl) + int(osl) // 2, 1)
+    isl = shape.isl
+    batch = max(shape.concurrency, 1)
+    kv_seq = max(int(isl) + int(shape.osl) // 2, 1)
     t_dec, t_dec_mem, t_dec_cmp, ops_dec = _forward(batch, 1, kv_seq)
     t_pre, _, _, _ = _forward(1, max(int(isl), 1), max(int(isl), 1))
 

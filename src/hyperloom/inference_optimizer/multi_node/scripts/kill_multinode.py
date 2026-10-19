@@ -14,6 +14,7 @@ import socket
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import ray
@@ -30,6 +31,9 @@ _DEFAULT_DIST_INIT_PORT = 29500
 # to K*grace in the grace phase. main() does not know K per node (each actor globs its own remote pid_dir), so budget
 # the ray.get timeout for this many pid files/node (ranks + prefill/decode/router).
 _GRACE_PID_BUDGET = 16
+
+# Per-card VRAM wait when this pod's footprint cannot be attributed.
+_GPU_FALLBACK_TIMEOUT_S = 45.0
 
 
 def _log(msg: str) -> None:
@@ -336,7 +340,6 @@ def _wait_gpu_reclaim(
     gpu_footprint_mb: float,
     gpu_free_threshold_mb: float,
     gpu_free_timeout_s: float,
-    gpu_fallback_timeout_s: float,
 ) -> None:
     """Wait for the VRAM this pod held to come back, and record what did not."""
     if gpu_total_before_mb is not None and gpu_footprint_mb:
@@ -352,22 +355,28 @@ def _wait_gpu_reclaim(
             )
         return
     # Fallback (footprint unattributable): coarse per-card threshold wait, time-boxed at
-    # gpu_fallback_timeout_s so an unrelated co-tenant GPU cannot stall teardown.
-    busy = _wait_gpu_free(gpu_free_threshold_mb, gpu_fallback_timeout_s)
+    # _GPU_FALLBACK_TIMEOUT_S so an unrelated co-tenant GPU cannot stall teardown.
+    busy = _wait_gpu_free(gpu_free_threshold_mb, _GPU_FALLBACK_TIMEOUT_S)
     if busy:
         summary["gpu_busy"] = [str(mb) for mb in busy]
-        _log(f"WARN GPUs still hold VRAM after {gpu_fallback_timeout_s:.0f}s (MiB): {busy}")
+        _log(f"WARN GPUs still hold VRAM after {_GPU_FALLBACK_TIMEOUT_S:.0f}s (MiB): {busy}")
+
+
+@dataclass(frozen=True)
+class KillWaits:
+    """How long a pod's kill waits for its pids to exit, its ports to drain and its VRAM to come back."""
+
+    death_timeout_s: float = 30.0
+    port_timeout_s: float = 60.0
+    gpu_free_threshold_mb: float = 2048.0
+    gpu_free_timeout_s: float = 120.0
 
 
 def _kill_remote(
     pid_dir: str,
     grace_sec: int,
     drain_ports: list[int] | None = None,
-    death_timeout_s: float = 30.0,
-    port_timeout_s: float = 60.0,
-    gpu_free_threshold_mb: float = 2048.0,
-    gpu_free_timeout_s: float = 120.0,
-    gpu_fallback_timeout_s: float = 45.0,
+    waits: KillWaits = KillWaits(),
 ) -> dict:
     """Kill the rank_*/prefill_*/decode_*/router* PID-file processes under ``pid_dir`` on this pod; returns a per-PID summary."""
     summary: dict[str, list] = {
@@ -400,23 +409,22 @@ def _kill_remote(
 
     # Block until the signalled processes truly exit, then until the rendezvous/serving ports drain.
     if killed_pids:
-        still = _wait_pids_gone(killed_pids, death_timeout_s)
+        still = _wait_pids_gone(killed_pids, waits.death_timeout_s)
         if still:
             summary["still_alive"] = [str(pid) for pid in still]
-            _log(f"WARN pids still alive after {death_timeout_s:.0f}s: {still}")
+            _log(f"WARN pids still alive after {waits.death_timeout_s:.0f}s: {still}")
     if drain_ports:
-        busy = _wait_ports_free(list(drain_ports), port_timeout_s)
+        busy = _wait_ports_free(list(drain_ports), waits.port_timeout_s)
         if busy:
             summary["ports_busy"] = [str(port) for port in busy]
-            _log(f"WARN ports still bound after {port_timeout_s:.0f}s: {busy}")
+            _log(f"WARN ports still bound after {waits.port_timeout_s:.0f}s: {busy}")
     if killed_pids:
         _wait_gpu_reclaim(
             summary,
             gpu_total_before_mb=gpu_total_before_mb,
             gpu_footprint_mb=gpu_footprint_mb,
-            gpu_free_threshold_mb=gpu_free_threshold_mb,
-            gpu_free_timeout_s=gpu_free_timeout_s,
-            gpu_fallback_timeout_s=gpu_fallback_timeout_s,
+            gpu_free_threshold_mb=waits.gpu_free_threshold_mb,
+            gpu_free_timeout_s=waits.gpu_free_timeout_s,
         )
 
     return summary
@@ -489,10 +497,7 @@ def main() -> int:
             args.pid_dir,
             args.grace_sec,
             drain_ports,
-            args.death_timeout,
-            args.port_timeout,
-            args.gpu_free_threshold_mb,
-            args.gpu_free_timeout,
+            KillWaits(args.death_timeout, args.port_timeout, args.gpu_free_threshold_mb, args.gpu_free_timeout),
         )
         refs.append((node_id[:16], ref))
 

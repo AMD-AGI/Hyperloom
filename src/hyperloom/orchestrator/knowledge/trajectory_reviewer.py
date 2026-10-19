@@ -28,9 +28,11 @@ def _load_journal_entries(session_dir: Path, shared_state: Any) -> list[Any]:
     """Return journal entries (empty on miss); header fields are read-only here."""
     journal = Journal.load_or_create(
         session_dir,
-        session_id=str(getattr(shared_state, "session_id", "") or ""),
-        model=str(getattr(shared_state, "model_name", "") or ""),
-        hardware=str(getattr(shared_state, "hardware", "") or ""),
+        Journal(
+            session_id=str(getattr(shared_state, "session_id", "") or ""),
+            model=str(getattr(shared_state, "model_name", "") or ""),
+            hardware=str(getattr(shared_state, "hardware", "") or ""),
+        ),
     )
     return list(getattr(journal, "entries", []) or [])
 

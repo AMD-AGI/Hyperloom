@@ -159,7 +159,7 @@ def test_build_trajectory_digest_with_dead_clusters(tmp_path):
         JournalEntry,
     )
 
-    journal = Journal.load_or_create(tmp_path, session_id="s1", model="m", hardware="h")
+    journal = Journal.load_or_create(tmp_path, Journal(session_id="s1", model="m", hardware="h"))
     for i in range(3):
         journal.append_entry(
             JournalEntry(

@@ -201,10 +201,9 @@ def ensure(
     python_exe: str | None = None,
     pip_extra: tuple[str, ...] | list[str] = (),
     check_only: bool = False,
-    dry_run: bool = False,
     root: Path | None = None,
 ) -> Outcome:
-    """Install whatever ``framework``'s manifest declares and is not present."""
+    """Install whatever ``framework``'s manifest declares and is not present; ``check_only`` only lists it."""
     key = _framework_key(framework)
     outcome = Outcome(framework=key)
     if not key:
@@ -229,7 +228,7 @@ def ensure(
     outcome.already_present = [r.spec for r in requirements if r not in missing]
     if not missing:
         return outcome
-    if check_only or dry_run:
+    if check_only:
         outcome.would_install = [r.spec for r in missing]
         return outcome
 
@@ -319,8 +318,7 @@ def main(argv: list[str] | None = None) -> int:
             args.framework,
             python_exe=args.python_exe,
             pip_extra=tuple(args.pip_extra or ()),
-            check_only=args.check_only,
-            dry_run=args.dry_run,
+            check_only=args.check_only or args.dry_run,
         )
     except TorchClobberedError as exc:
         print(f"{args.prefix}: FATAL {exc}", file=sys.stderr)

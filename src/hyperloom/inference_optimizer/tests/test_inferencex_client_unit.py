@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from hyperloom.inference_optimizer.baseline_comparison import inferencex_client as ix
+from hyperloom.inference_optimizer.baseline_comparison.types import BaselineQuery
 
 
 # ---- env resolvers --------------------------------------------------------
@@ -207,24 +208,26 @@ def test_fetch_rows_retries_then_none(monkeypatch):
 # ---- find_reference_rows --------------------------------------------------
 def test_find_reference_rows_strict_shape_and_hardware():
     rows = [_bench_row(), _bench_row(hardware="mi300x"), _bench_row(isl=8192), _bench_row(osl=8192)]
-    out = ix.find_reference_rows(rows, hardware="b300", isl=1024, osl=1024)
+    out = ix.find_reference_rows(rows, BaselineQuery(model="", gpu="b300", isl=1024, osl=1024))
     assert len(out) == 1
     assert out[0]["hardware"] == "b300"
 
 
 def test_find_reference_rows_case_insensitive_hardware():
-    out = ix.find_reference_rows([_bench_row(hardware="B300")], hardware="b300", isl=1024, osl=1024)
+    out = ix.find_reference_rows([_bench_row(hardware="B300")], BaselineQuery(model="", gpu="b300", isl=1024, osl=1024))
     assert len(out) == 1
 
 
 def test_find_reference_rows_precision_is_hard_filter():
     rows = [_bench_row(precision="fp8"), _bench_row(precision="fp4")]
     # Exact precision keeps only that precision.
-    assert len(ix.find_reference_rows(rows, hardware="b300", isl=1024, osl=1024, precision="fp4")) == 1
+    assert (
+        len(ix.find_reference_rows(rows, BaselineQuery(model="", gpu="b300", isl=1024, osl=1024, precision="fp4"))) == 1
+    )
     # Unavailable precision drops everything (never substitutes another precision).
-    assert ix.find_reference_rows(rows, hardware="b300", isl=1024, osl=1024, precision="bf16") == []
+    assert ix.find_reference_rows(rows, BaselineQuery(model="", gpu="b300", isl=1024, osl=1024, precision="bf16")) == []
     # Empty precision leaves the precision dimension unconstrained.
-    assert len(ix.find_reference_rows(rows, hardware="b300", isl=1024, osl=1024, precision="")) == 2
+    assert len(ix.find_reference_rows(rows, BaselineQuery(model="", gpu="b300", isl=1024, osl=1024, precision=""))) == 2
 
 
 def test_find_reference_rows_excludes_disagg_and_multinode():
@@ -233,18 +236,18 @@ def test_find_reference_rows_excludes_disagg_and_multinode():
         _bench_row(disagg=True, metrics={"tput_per_gpu": 999999.0}),
         _bench_row(is_multinode=True, metrics={"tput_per_gpu": 888888.0}),
     ]
-    out = ix.find_reference_rows(rows, hardware="b300", isl=1024, osl=1024)
+    out = ix.find_reference_rows(rows, BaselineQuery(model="", gpu="b300", isl=1024, osl=1024))
     assert len(out) == 1
     assert out[0]["metrics"]["tput_per_gpu"] == 100.0
 
 
 def test_find_reference_rows_missing_topology_fields_treated_single_node():
     row = {"hardware": "b300", "isl": 1024, "osl": 1024, "metrics": {"tput_per_gpu": 5.0}}
-    assert len(ix.find_reference_rows([row], hardware="b300", isl=1024, osl=1024)) == 1
+    assert len(ix.find_reference_rows([row], BaselineQuery(model="", gpu="b300", isl=1024, osl=1024))) == 1
 
 
 def test_find_reference_rows_empty_when_no_shape_match():
-    assert ix.find_reference_rows([_bench_row()], hardware="b300", isl=2048, osl=2048) == []
+    assert ix.find_reference_rows([_bench_row()], BaselineQuery(model="", gpu="b300", isl=2048, osl=2048)) == []
 
 
 @pytest.mark.parametrize("isl,osl", [(None, None), (1024, 8192)])
@@ -252,7 +255,9 @@ def test_agentx_matches_explicit_agentic_rows_without_fixed_lengths(isl, osl):
     agentic = _bench_row(benchmark_type="agentic_traces", isl=None, osl=None)
     rows = [agentic, _bench_row(benchmark_type="single_turn"), _bench_row(isl=None, osl=None)]
 
-    assert ix.find_reference_rows(rows, hardware="b300", isl=isl, osl=osl, benchmark_mode="agentx") == [agentic]
+    assert ix.find_reference_rows(
+        rows, BaselineQuery(model="", gpu="b300", isl=isl, osl=osl, benchmark_mode="agentx")
+    ) == [agentic]
 
 
 def test_agentx_still_filters_hardware_precision_and_topology():
@@ -271,14 +276,17 @@ def test_agentx_still_filters_hardware_precision_and_topology():
     ]
 
     assert ix.find_reference_rows(
-        rows, hardware="B300", isl=None, osl=None, precision="FP4", benchmark_mode="agentx"
+        rows, BaselineQuery(model="", gpu="B300", isl=None, osl=None, precision="FP4", benchmark_mode="agentx")
     ) == [matching]
 
 
 def test_synthetic_preserves_shape_filter_without_workload_type_restriction():
     rows = [_bench_row(), _bench_row(benchmark_type="single_turn"), _bench_row(benchmark_type="unknown")]
     different_shape = _bench_row(benchmark_type="agentic_traces", isl=None, osl=None)
-    assert ix.find_reference_rows([*rows, different_shape], hardware="b300", isl=1024, osl=1024) == rows
+    assert (
+        ix.find_reference_rows([*rows, different_shape], BaselineQuery(model="", gpu="b300", isl=1024, osl=1024))
+        == rows
+    )
 
 
 # ---- fetch_agentic_interactivity -------------------------------------------
