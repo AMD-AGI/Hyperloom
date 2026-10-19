@@ -533,21 +533,21 @@ class Coordinator:
         """
         r = self.__dict__.get("_reconciler")
         if r is None:
-            from ..bringup.reconcile import Reconciler
+            from ..bringup.reconcile import ReconcileLinks, Reconciler, ReconcileStores
 
             r = Reconciler(
-                rounds=self.rounds,
-                tasks=self.tasks,
-                locks=self.locks,
-                shared_state=self.shared_state,
-                resources=self.policy.resources,
-                # A callable, not a captured mapping: the resume replay rebuilds
-                # its contents, so a snapshot taken here would be pre-replay.
-                proposals=lambda: self.state.pending_proposals,
-                session_dir=self.session_dir,
-                # The window a revalidation holds is closed by the writeback when
-                # its result is booked; this pass only closes one nobody will.
-                result_pending=lambda task_id: self.dispatcher.owes_result(task_id),
+                ReconcileStores(rounds=self.rounds, tasks=self.tasks, locks=self.locks),
+                self.shared_state,
+                links=ReconcileLinks(
+                    resources=self.policy.resources,
+                    # A callable, not a captured mapping: the resume replay rebuilds
+                    # its contents, so a snapshot taken here would be pre-replay.
+                    proposals=lambda: self.state.pending_proposals,
+                    session_dir=self.session_dir,
+                    # The window a revalidation holds is closed by the writeback when
+                    # its result is booked; this pass only closes one nobody will.
+                    result_pending=lambda task_id: self.dispatcher.owes_result(task_id),
+                ),
             )
             self.__dict__["_reconciler"] = r
         return r

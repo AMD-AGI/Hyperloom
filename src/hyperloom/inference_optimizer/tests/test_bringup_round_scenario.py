@@ -16,7 +16,7 @@ from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALO
 from hyperloom.inference_optimizer.session.session_paths import reports_dir
 from hyperloom.orchestrator.actions.executors import baseline as bl
 from hyperloom.orchestrator.bringup import load_boot_observation
-from hyperloom.orchestrator.bringup.reconcile import Reconciler
+from hyperloom.orchestrator.bringup.reconcile import ReconcileLimits, Reconciler, ReconcileStores
 from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager, SqliteLeaseBackend
 from hyperloom.orchestrator.bus.storage import SqliteConnection
 from hyperloom.orchestrator.bus.storage.schema import ensure_schema
@@ -281,11 +281,9 @@ async def test_a_bringup_round_peels_two_blockers_and_lands_one_observation_per_
         # open a second round while the first is still held: the repair pass is
         # what ends it, and it runs before anything is admitted.
         await Reconciler(
-            rounds=rounds,
-            tasks=tasks,
-            locks=ResourceLockManager(SqliteLeaseBackend(rounds.db)),
-            shared_state=None,
-            terminal_holder_cap_sec=0.0,
+            ReconcileStores(rounds=rounds, tasks=tasks, locks=ResourceLockManager(SqliteLeaseBackend(rounds.db))),
+            None,
+            limits=ReconcileLimits(terminal_holder_cap_sec=0.0),
         ).run(time.time())
         # A confirmed kill keeps excluding until the reap grace passes: the
         # kernel has not torn the address space down when the signal returns,
