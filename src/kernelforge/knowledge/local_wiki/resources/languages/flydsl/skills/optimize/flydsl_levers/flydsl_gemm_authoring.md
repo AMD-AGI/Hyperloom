@@ -3,7 +3,7 @@ title: FlyDSL — optimizing a GEMM you wrote yourself
 kind: language
 lever: flydsl_gemm_authoring
 gens: [gfx950]
-updated: 2026-08-28
+updated: 2026-10-19
 ---
 
 # Optimizing a hand-written FlyDSL GEMM
@@ -34,6 +34,8 @@ The conversation has already narrowed to GEMM structure. Concretely, when the op
 | Writing your first FlyDSL kernel | `../../../API_docs/flydsl-tile-programming.md` |
 | The kernel is wrong, not slow | `../../bottleneck/debug-flydsl-kernel.md` |
 | Not GEMM, or the bottleneck is still unidentified | `flydsl_authoring_method.md` |
+| Choosing the tile, split-K or a boundary body; pricing an idea before building it | `flydsl_gemm_grid_pricing.md` |
+| Wave mapping, XCD tile order, `sched_barrier` masks, epilogue fusion cost | `flydsl_gemm_schedule_and_locality.md` |
 
 **And two questions to settle before authoring anything:** does a shipped family already cover this
 shape (`flydsl_kernel_library.md`), and is FlyDSL even the backend aiter will dispatch to
@@ -90,7 +92,8 @@ note which one, because the fix differs.
 
 For irregular shapes, pick a tile that holds up across the whole benchmarked range rather than the one
 that wins on your favourite shape. A tile that is 10% better on one M and unusable on the next is not
-an optimization. Aim the grid at **256 CUs**.
+an optimization. Aim the grid at **256 CUs** — and count how full the last dispatch round is before
+choosing between a wider and a narrower tile (`flydsl_gemm_grid_pricing.md` §1).
 
 ## LDS staging
 Three questions, each with a different answer:
@@ -191,4 +194,5 @@ same choice for you (`flydsl_knob_space.md`).
 `flydsl_authoring_method.md` (the general workflow this specializes) ·
 `flydsl_knob_space.md` (the shipped kernels' arguments) ·
 `flydsl_kernel_library.md` (check before authoring) ·
+`flydsl_gemm_grid_pricing.md` · `flydsl_gemm_schedule_and_locality.md` ·
 `../../../../../hardware/mi350_lds.md` · `../../../../../hardware/mi350_matrix_core.md`
