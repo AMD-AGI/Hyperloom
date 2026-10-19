@@ -1687,7 +1687,7 @@ async def _round_exiting_after_setup(tmp_path: Path, monkeypatch, *, arrange, pa
     from types import SimpleNamespace
 
     from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
-    from hyperloom.orchestrator.enablement.recipe.setup_ledger import build_execution_row
+    from hyperloom.orchestrator.enablement.recipe.setup_ledger import SetupExecution, build_execution_row
     from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 
     session_dir = tmp_path / "session"
@@ -1699,12 +1699,14 @@ async def _round_exiting_after_setup(tmp_path: Path, monkeypatch, *, arrange, pa
     def _installed(commands, *, cwd, log_dir, ledger):
         cmd, source = commands[0]
         row = build_execution_row(
-            seq=ledger.seq_start + 1,
-            round_task_id=ledger.round_task_id,
-            cmd_index=0,
-            cmd=cmd,
-            source=source,
-            outcome="applied",
+            SetupExecution(
+                seq=ledger.seq_start + 1,
+                round_task_id=ledger.round_task_id,
+                cmd_index=0,
+                cmd=cmd,
+                source=source,
+                outcome="applied",
+            ),
             env={},
         )
         ledger.on_execution(row)

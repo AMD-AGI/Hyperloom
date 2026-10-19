@@ -34,7 +34,7 @@ from hyperloom.orchestrator.enablement.recipe.projections import (
 )
 from hyperloom.orchestrator.enablement.recipe.steps import command_digest
 from hyperloom.orchestrator.enablement.recipe.sufficiency import REASON_BLOCKS, _BUILTIN_REQUIRED_INPUTS
-from hyperloom.orchestrator.enablement.recipe.setup_ledger import build_execution_row
+from hyperloom.orchestrator.enablement.recipe.setup_ledger import SetupExecution, build_execution_row
 from hyperloom.orchestrator.enablement.runtime import targeted_build
 from hyperloom.orchestrator.enablement.runtime.build_actions import TargetedBuildAction
 from hyperloom.orchestrator.state.shared_state import EnablementRound
@@ -59,12 +59,7 @@ def _decide(enablement=None, section=None, delivered=None):
 
 def _row(cmd="pip install foo", *, seq=1, outcome="applied", task="r1", env=None):
     return build_execution_row(
-        seq=seq,
-        round_task_id=task,
-        cmd_index=0,
-        cmd=cmd,
-        source="proposed",
-        outcome=outcome,
+        SetupExecution(seq=seq, round_task_id=task, cmd_index=0, cmd=cmd, source="proposed", outcome=outcome),
         env=env,
         fs_root=NO_FS,
     )
