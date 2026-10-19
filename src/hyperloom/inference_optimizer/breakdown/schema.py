@@ -156,7 +156,7 @@ class V6GradedAxes(TypedDict, total=False):
     Every axis is present on every measurement, ``None`` where nothing measured
     it: absent would be indistinguishable from an axis the framework failed to
     report, and zero reads as "measured, and it was zero". A synthetic run
-    carries nulls throughout.
+    carries nulls for the AgentX-only axes; ``output_tput_per_gpu`` is set whenever the TP degree is known.
     """
 
     e2e_norm_intvty_p90: float | None
