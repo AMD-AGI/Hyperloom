@@ -287,6 +287,39 @@ def unsupported_capability_reason(variant: "GridVariant") -> str | None:
     return _probe_vllm_aiter_shared_expert_unsupported()
 
 
+# Env vars whose value names a config file the serving stack reads unconditionally: aiter's tuned-GEMM loader skips
+# its merge default and pd.read_csv's exactly the AITER_CONFIG_* path when one is set, so a missing file kills the
+# server at config load instead of falling back to the default table. Values that are not file paths (e.g. geak's
+# JSON-payload AITER_CONFIG) do not carry the trailing underscore and stay untouched.
+_FILE_REFERENCING_ENV_PREFIXES: tuple[str, ...] = ("AITER_CONFIG_",)
+
+
+def ungrounded_env_file_reason(variant: "GridVariant") -> str | None:
+    """Return a drop reason if an extra_envs value names a config file that does not exist, else ``None``.
+
+    Grounds file-like env values the same way ``vet_patches`` grounds patch targets: a proposal may point a config
+    env at an artifact only a later (possibly rejected) authoring step would create, and the benchmark would boot a
+    server that dies at config load. The check is existence-only; anything already on disk (a promoted, durable
+    artifact) passes. A set value is a ``:``-joined list of paths (see ``csvs_aiter_will_load``), so every
+    non-empty element must exist, not only the first.
+    """
+    for raw_key, raw_value in (getattr(variant, "extra_envs", None) or {}).items():
+        key = str(raw_key or "").strip().upper()
+        if not key.startswith(_FILE_REFERENCING_ENV_PREFIXES):
+            continue
+        value = str(raw_value or "").strip()
+        if not value:
+            continue
+        missing = [p for p in (part.strip() for part in value.split(":")) if p and not Path(p).is_file()]
+        if missing:
+            return (
+                f"{key} points at {value}, whose element(s) {':'.join(missing)} do not exist; the server would read it "
+                "unconditionally and die at config load. Point it at a file a stage authored "
+                "(e.g. a promoted tuned-GEMM CSV) or leave it unset to use the default config table."
+            )
+    return None
+
+
 # Sanitization for LLM-supplied overrides (benchmark_script / result_dir): reject path separators / shell
 # metacharacters, raising ``ValueError`` instead of running an unsafe subprocess.
 _SCRIPT_NAME_RE = re.compile(r"^[A-Za-z0-9_.\-]+\.sh$")
@@ -1074,7 +1107,7 @@ async def run_grid(
             server_log = slot / "server.log"
             # Capability fast-fail: drop a variant whose env flag the build cannot honour before booting a doomed server,
             # still recording the failure so the LLM learns not to re-pick it.
-            cap_reason = unsupported_capability_reason(variant)
+            cap_reason = unsupported_capability_reason(variant) or ungrounded_env_file_reason(variant)
             if cap_reason:
                 log.warning(
                     "grid_runner: variant %d/%d name=%s aborted: capability_unsupported: %s",
