@@ -5,8 +5,9 @@ description: >
   Symptom-indexed: start from what you observed, land on the cause. Covers the stale-cache
   false negative and what the JIT cache key does not see, shape-dependent bounds baked from
   host integers, softmax -inf arithmetic, partition/stride addressing, FP8 error budgets,
-  the range vs range_constexpr split, non-short-circuit and/or in traced code, loop-carried
-  state typing, buffer_load offset units, and barrier divergence. Use when a FlyDSL kernel produces incorrect output or fails to build.
+  the three loop forms and what each carries, non-short-circuit and/or in traced code,
+  buffer_load offset units, and barrier divergence. Use when a FlyDSL kernel produces
+  incorrect output or fails to build.
   Usage: /debug-flydsl-kernel
 allowed-tools: Read Edit Bash Grep Glob Agent
 ---
@@ -49,8 +50,12 @@ v0.3.2 (`python/flydsl/compiler/jit_function.py`) the key of a `@flyc.jit` call 
 
 So these changes do **not** invalidate a compiled kernel: methods of a helper class you instantiate
 inside the kernel, plain helpers in another directory (a kernel in `kernels/gemm/` calling into
-`kernels/common/` is one), a `dict` / `list` / object captured by closure (or anything inside it), and
-environment variables your own code reads. Edits there need `FLYDSL_EXTRA_SOURCE_DIRS` pointing at the
+`kernels/common/` is one), functions reached through a module attribute (`buffer_ops.buffer_load`), a
+`dict` / `list` / object captured by closure (or anything inside it), and environment variables your
+own code reads. Checked on FlyDSL 0.3.2 with one cache directory and two processes: a kernel that
+stores `cfg["v"]` from a closure `dict` returned 1.0 when the second process asked for 2.0 and no new
+cache entry appeared, while the same kernel reading a closure `float` recompiled and returned 2.0; a
+raw-tensor kernel launched at 8, 16 and 24 rows produced one cache entry. Edits there need `FLYDSL_EXTRA_SOURCE_DIRS` pointing at the
 helper directory, `FLYDSL_RUNTIME_ENABLE_CACHE=0` (disables the disk cache; the in-memory cache stays),
 or a clean cache.
 
@@ -219,17 +224,31 @@ that is easy to mistake for quantization noise.
 
 ## 5. Won't compile
 
-### `range()` versus `range_constexpr()`
-The AST rewriter turns a runtime `range()` into an MLIR loop, so the induction variable becomes an
-`ArithValue` and can no longer index a Python list. Compile-time loops need `range_constexpr`:
+### The three loop forms
+Only `range_constexpr` unrolls. Both `range` forms become a runtime `scf.for`, so the induction
+variable is an SSA value and cannot index a Python list:
 
 ```python
-for i in range(4):            # WRONG: i is an ArithValue
+for i in range(4):            # WRONG if i indexes a Python list: i is an SSA value
     result[i] = ...
 
 for i in range_constexpr(4):  # CORRECT: i is a Python int
     result[i] = ...
 ```
+
+What each form carries across iterations, in FlyDSL 0.3.2 (`compiler/ast_rewriter.py`; each row was
+checked by tracing a probe kernel and reading `00_origin.mlir`):
+
+| Form | Lowers to | Loop-carried state | Bounds |
+|---|---|---|---|
+| `range_constexpr(n)` | unrolled at trace time | none needed | Python `int` |
+| `range(a, b, s)` | `scf.for` on `i32` | **inferred**: every name bound before the loop and reassigned in the body becomes an `iter_arg`, so `data = next_data` is carried | Python `int` or `fx.Int32`; `fx.Int64` raises `TypeError: for-loop start must be i32, got i64` |
+| `range(a, b, s, init=[...])` | `scf.for` on `index` with explicit `iter_args` | only what you `yield`; rebinding a Python name in the body is not carried | Python `int` is fine (becomes an index constant), as is `fx.Int32` / `fx.Int64` |
+
+Older guidance — that Python-int bounds unroll the loop and silently drop `init=`, or that a Python
+rebinding is never a phi — described FlyDSL before 0.3; a probe with `range(0, 15, 1, init=[acc])`
+emits `scf.for %arg2 = %c0 to %c15 step %c1 iter_args(...)`. A name that is `None` before a runtime
+loop and assigned inside it raises `TypeError`: give it a typed initial value.
 
 ### Runtime versus compile-time conditionals
 Runtime comparisons in a Python `if` are supported — the rewriter lowers dynamic conditions to
@@ -237,12 +256,12 @@ Runtime comparisons in a Python `if` are supported — the rewriter lowers dynam
 
 ```python
 tid  = gpu.thread_id("x")
-lane = tid % fx.Index(64)
+lane = tid % fx.Int32(64)
 
-if lane == fx.Index(0):                       # lowered to scf.IfOp
+if lane == fx.Int32(0):                       # lowered to scf.IfOp
     fx.printf("lane zero")
 
-val = (lane < fx.Index(8)).select(good, zero) # runtime predicate for select
+val = (lane < fx.Int32(8)).select(good, zero) # runtime predicate for select
 ```
 
 Only reach for `arith.cmpi(arith.CmpIPredicate.slt, …)` when you are deliberately constructing
@@ -283,17 +302,10 @@ kernel — restart the process, and keep sources
 frozen for the lifetime of a process that compiles lazily.
 
 ### Loop-carried state typing
-Keep loop-carried state in FlyDSL's own types (`fx.Int32`, `fx.Float32`, `Vector`, `ArithValue`) and
-unwrap only where a low-level helper demands a raw `ir.Value`:
-
-```python
-def _unwrap(v):
-    return v.ir_value() if hasattr(v, "ir_value") else v
-
-init_state = [_unwrap(v) for v in [val1, val2, vec_val]]
-```
-
-Supported state types: `f32` scalar, vector values, `i32`, `i64`, `index`.
+Pass FlyDSL values (`fx.Int32`, `fx.Float32`, `Vector`) straight into `init=` and `yield`: the rewriter
+converts them with `as_ir_value` itself. Unwrap to a raw `ir.Value` only where a low-level helper
+demands one. Every slot keeps one MLIR type across `init`, the per-iteration `state`, `yield` and the
+post-loop results.
 
 ### `buffer_load` offset units
 The offset is counted in units of `dtype`, not bytes. For FP8 data whose addresses you computed in
@@ -354,7 +366,7 @@ sudo amdgpu-reset       # or reboot
 - [ ] Cleared `~/.flydsl` after the last code change
 - [ ] Edits outside the cache key (helper classes, other-directory helpers, closure dicts) re-run uncached
 - [ ] Shape-dependent bounds and addresses come from traced arguments, not host integers
-- [ ] `range_constexpr()` for every compile-time loop
+- [ ] `range_constexpr()` wherever the induction variable indexes a Python structure
 - [ ] No `const_expr` on a runtime GPU value (`lane`, `warp_id`, `thread_id`)
 - [ ] `buffer_load` offset units match `dtype` (bytes ÷ 4 for `i32`)
 - [ ] Vector stores pass `Vector` values, not scalars

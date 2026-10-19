@@ -3,7 +3,7 @@ title: FlyDSL — authoring a kernel, structure before parameters
 kind: language
 lever: flydsl_authoring_method
 gens: [gfx950]
-updated: 2026-08-28
+updated: 2026-10-19
 ---
 
 # Authoring method
@@ -32,8 +32,9 @@ GEMM-like kernel, go to `flydsl_gemm_authoring.md`.
    **Multiple kernels sharing data is a fusion opportunity.**
 3. **Imported helpers** (`flydsl.utils`, `flydsl.expr`) — reusable building blocks.
 4. The **test harness** — which shapes, dtypes and modes are actually benchmarked.
-5. If you plan to rewrite loops or memory paths, review `range_constexpr()` vs `range(..., init=...)`,
-   `buffer_ops`, and `SmemAllocator` semantics **before** editing.
+5. If you plan to rewrite loops or memory paths, review the three loop forms
+   (`../../bottleneck/debug-flydsl-kernel.md` § The three loop forms), buffer-tensor bounds
+   (`fx.rocdl.make_buffer_tensor`) and the kernel's LDS allocator **before** editing.
 
 ## Step 2 — classify, and know when to stop
 
@@ -75,19 +76,19 @@ Single-kernel, single-pass, or already `fused_*` → skip to Tier 2.
   level — do not add stages.**
 
 **FlyDSL refactor guardrails**
-- `range_constexpr()` is for compile-time unrolling only. Runtime-carried state needs
-  `range(..., init=...)` so FlyDSL lowers to `scf.for`.
-- `scf.for` bounds must be `arith.index()` values, not Python ints; `init`/`yield` values must be raw
-  MLIR `ir.Value`s.
+- `range_constexpr()` is the only loop form that unrolls. Both `range` forms lower to `scf.for`: without
+  `init=` the carried state is inferred from the names the body reassigns (bounds `int` or `fx.Int32`);
+  with `init=` only yielded values are carried (Python-int bounds are fine).
 - Keep loop-carried state **positionally aligned** across `init`, per-iteration `state`, `yield`, and
   post-loop results — same slot, same meaning, same MLIR type throughout.
-- If an `SmemPtr` view created inside a loop body is reused in the epilogue, **clear `_view_cache`**
-  before reusing it outside the loop, or you get SSA dominance errors.
+- Legacy kernels only: if an `SmemPtr` view created inside a loop body is reused in the epilogue,
+  **clear `_view_cache`** before reusing it outside the loop, or you get SSA dominance errors.
 
 ### Tier 2 — memory hierarchy
 
 - **LDS staging** — only when the same global data is read multiple times **across threads in the same
-  workgroup**. Use `SmemAllocator` / `SmemPtr` from `flydsl.utils.smem_allocator`.
+  workgroup**. Allocate with `fx.SharedAllocator().allocate(<@fx.struct>).peek()`; `SmemAllocator` /
+  `SmemPtr` are legacy.
 - **Vectorized access** — widest loads/stores matching the element type (`vec(8, ...)`, `vec(4, ...)`).
 - **Overlap loads with compute** — move global loads earlier; `sched_barrier` to control interleaving.
   **Only helps when there is MFMA or non-trivial ALU work to overlap with.**
@@ -179,12 +180,14 @@ codegen-affecting refactor. When varying `Constexpr` values across recompiles, p
 | Vector/tile alignment | matches the kernel's access patterns |
 
 **FlyDSL memory contracts**
-- `buffer_ops.buffer_load` / `buffer_store` offsets are in **elements, not bytes.** Recompute address
-  units whenever a rewrite changes dtype, packing or vector width.
+- Legacy `buffer_ops.buffer_load` / `buffer_store` (now `kernels/common/buffer_ops.py`, not in the
+  `flydsl` wheel) take offsets in **elements, not bytes.** Recompute address units whenever a rewrite
+  changes dtype, packing or vector width.
 - Packed FP8/INT4 reinterpreted through `dtype=T.i32` — divide byte addresses by the new element width.
-- New or resized LDS allocations go through `SmemAllocator`, and `allocator.finalize()` must still
-  happen in the GPU module body.
-- Moving `SmemPtr` views across loop/region boundaries — re-check cached-view lifetime and dominance.
+- New or resized LDS goes into the kernel's `@fx.struct` storage; with `SharedAllocator(static=True)`
+  the backend places the fields, so field order is not a layout you control.
+- Legacy `SmemAllocator` kernels: `allocator.finalize()` must still run in the GPU module body, and
+  `SmemPtr` views moved across loop/region boundaries need their cached view re-checked.
 
 ## Step 4 — validate
 
@@ -212,9 +215,9 @@ codegen-affecting refactor. When varying `Constexpr` values across recompiles, p
 
 ## Key APIs
 - Device kernel `@flyc.kernel` · host launcher `@flyc.jit`
-- Control flow: `range_constexpr()` · `range(..., init=...)` · `arith.index()`
+- Control flow: `range_constexpr()` · `range(...)` · `range(..., init=...)` · `const_expr()`
 - Intrinsics: `flydsl.expr.rocdl` — MFMA, exp2, rcp, `sched_barrier`, `sched_mfma`
-- Shared memory: `SmemAllocator` / `SmemPtr` from `flydsl.utils.smem_allocator`
+- Shared memory: `fx.SharedAllocator` over an `@fx.struct` (legacy: `SmemAllocator` / `SmemPtr`)
 - Types: `T.f16`, `T.bf16`, `T.f32`, `T.i32`, `T.vec(...)` from `flydsl.expr.typing`
 - Buffer ops: `fx.rocdl.make_buffer_tensor`, `fx.make_copy_atom`, `buffer_ops.buffer_load`/`buffer_store`
 - IR/ISA: `FLYDSL_DUMP_IR=1`, `FLYDSL_DUMP_DIR=...`, `final_isa.s`

@@ -284,11 +284,15 @@ result = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
 Control instruction scheduling for performance tuning:
 
 ```python
-rocdl.sched_mfma(cnt)    # wait for cnt MFMA instructions to complete
-rocdl.sched_vmem(cnt)    # wait for cnt VMEM reads to complete
-rocdl.sched_dsrd(cnt)    # wait for cnt DS (LDS) reads to complete
-rocdl.sched_dswr(cnt)    # wait for cnt DS (LDS) writes to complete
+rocdl.sched_mfma(cnt)    # schedule group: the next cnt MFMA instructions
+rocdl.sched_vmem(cnt)    # schedule group: the next cnt VMEM reads (mask 0x020; stores are 0x040)
+rocdl.sched_dsrd(cnt)    # schedule group: the next cnt DS (LDS) reads
+rocdl.sched_dswr(cnt)    # schedule group: the next cnt DS (LDS) writes
 ```
+
+*(KernelForge correction — upstream v0.3.2 comments these as "wait for cnt … to complete".)* Each
+helper is `sched_group_barrier(mask, cnt, 0)` (`python/flydsl/expr/rocdl/__init__.py:152-168`): an
+ordering hint to the scheduler that waits for nothing. Waiting is `rocdl.s_waitcnt(vmcnt=…, lgkmcnt=…)`.
 
 #### Math intrinsics
 
