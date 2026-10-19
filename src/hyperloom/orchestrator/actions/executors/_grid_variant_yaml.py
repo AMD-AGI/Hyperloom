@@ -15,11 +15,11 @@ from hyperloom.common.benchmark_config import is_magpie_agentx
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env_safety import BLOCKED_EXTERNAL_ENV_NAMES
 from hyperloom.inference_optimizer.grid_server_args import (
+    SGLANG_MOE_RUNNER_BACKEND_RE,
     compose_server_args,
     moe_runner_requires_aiter,
     server_args_env_name,
-    _shell_safe_dedupe as _shell_safe_dedupe,
-    _SGLANG_MOE_RUNNER_BACKEND_RE as _SGLANG_MOE_RUNNER_BACKEND_RE,
+    shell_safe_dedupe,
 )
 from hyperloom.inference_optimizer.runtime_environment import apply_runtime_override
 
@@ -62,7 +62,7 @@ def _runnable_moe_backend_args(combined: str, *, args_env: str, model_path: str 
     was seeded with or from an explicitly authored variant, and a quant scheme implemented
     only on the aiter runner crashes on the first forward pass under any other.
     """
-    if not combined or not _SGLANG_MOE_RUNNER_BACKEND_RE.search(combined):
+    if not combined or not SGLANG_MOE_RUNNER_BACKEND_RE.search(combined):
         return combined
     if args_env != "EXTRA_SGLANG_ARGS" or not moe_runner_requires_aiter(combined, model_path):
         return combined
@@ -165,7 +165,7 @@ def _build_variant_yaml(
     )
     combined = _runnable_moe_backend_args(combined, args_env=extra_args_env, model_path=model_path, variant=variant)
     if combined:
-        envs[extra_args_env] = _shell_safe_dedupe(combined)
+        envs[extra_args_env] = shell_safe_dedupe(combined)
     elif extra_args_env in envs or variant.args_mode == "replace" or base_args_mode == "replace":
         envs[extra_args_env] = ""
     base_envs = _apply_variant_env(envs, variant, base_extra_envs, base_unset_envs)

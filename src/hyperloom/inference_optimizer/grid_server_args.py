@@ -472,7 +472,7 @@ def dedup_vllm_server_args(
     return " ".join(kept)
 
 
-def _shell_safe_dedupe(args: str) -> str:
+def shell_safe_dedupe(args: str) -> str:
     """Last-wins dedupe for single-token-valued flags only."""
     if not args.strip():
         return ""
@@ -774,7 +774,7 @@ def inject_sglang_attention_backend(
 _SGLANG_MOE_RUNNER_BACKEND_FLAG = "--moe-runner-backend"
 
 # Matches space- or equals-separated form without false-matching a longer flag.
-_SGLANG_MOE_RUNNER_BACKEND_RE = re.compile(r"--moe-runner-backend(?:[=\s]|$)")
+SGLANG_MOE_RUNNER_BACKEND_RE = re.compile(r"--moe-runner-backend(?:[=\s]|$)")
 
 # sglang MoE schemes whose ``create_moe_runner`` only builds a runner for the aiter backend (the others fall through
 # to a bare ``pass``, so the first forward pass dies on a missing ``runner``).

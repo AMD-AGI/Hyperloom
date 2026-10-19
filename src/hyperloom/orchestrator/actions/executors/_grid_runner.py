@@ -79,16 +79,14 @@ from hyperloom.inference_optimizer.grid_server_args import (
     server_args_env_name as server_args_env_name,
     merge_server_args as merge_server_args,
     compose_server_args as compose_server_args,
+    shell_safe_dedupe as shell_safe_dedupe,
+    SGLANG_MOE_RUNNER_BACKEND_RE as SGLANG_MOE_RUNNER_BACKEND_RE,
     moe_runner_requires_aiter as moe_runner_requires_aiter,
 )
 from ._grid_variant_yaml import (
     _build_variant_yaml as _build_variant_yaml,
     variant_conc as variant_conc,
 )
-
-# The argument-env composer and the MoE-backend pattern, through the module that composes with them.
-from ._grid_variant_yaml import _shell_safe_dedupe as _shell_safe_dedupe
-from ._grid_variant_yaml import _SGLANG_MOE_RUNNER_BACKEND_RE as _SGLANG_MOE_RUNNER_BACKEND_RE
 from ._grid_variant_filter import (
     resolve_skip_spec as resolve_skip_spec,
     _MN_PARAMS_PRIORITY as _MN_PARAMS_PRIORITY,
@@ -533,7 +531,7 @@ def _resolve_mn_effective_server_args(
             _fallback_inherited_args = str(_base_envs.get(_base_framework_env) or "")
         except Exception:  # noqa: BLE001 - best-effort parity fallback
             _fallback_inherited_args = ""
-        return _shell_safe_dedupe(
+        return shell_safe_dedupe(
             compose_server_args(
                 inherited_args="" if str(base_args_mode).strip().lower() == "replace" else _fallback_inherited_args,
                 base_extra_args=base_extra_args,
@@ -1993,7 +1991,7 @@ __all__ = [
     "stopped_by_the_run",
     # Re-exported from the sibling modules to keep the namespace intact.
     "_resolve_probe_python",
-    "_SGLANG_MOE_RUNNER_BACKEND_RE",
+    "SGLANG_MOE_RUNNER_BACKEND_RE",
     "moe_runner_requires_aiter",
     "resolve_skip_spec",
     "_MN_PARAMS_PRIORITY",
