@@ -846,6 +846,71 @@ def _iter_log_tails(root: Path, *, max_bytes: int, limit: int = 64) -> Iterator[
         return
 
 
+class _BenchmarkRound(NamedTuple):
+    """One benchmark subprocess: where it runs, what it runs, and the facts its result is read against."""
+
+    config_path: Path
+    materialized_config_path: Path
+    output_dir: Path
+    result_dir: Path
+    ctx: RunnerContext
+    ctx_extra: Mapping[str, Any]
+    cmd: list[str]
+    env: dict[str, Any]
+    framework: str
+    watchdog_server_log: str | None
+    capture_meta: dict[str, Any]
+    timeout_sec: int
+    silence_timeout_sec: Any
+    session_deadline_sec: Any
+    serving_lease: Any
+    server_already_ready: bool
+    run_eval_disabled: bool
+
+
+class _BenchmarkOutput(NamedTuple):
+    """What the benchmark subprocess itself returned."""
+
+    returncode: Any
+    stdout: Any
+    stderr: Any
+    runtime_sec: float
+
+
+class _BenchmarkOutcome(NamedTuple):
+    """What one benchmark subprocess left behind, and what its server log says about it."""
+
+    failure: dict[str, Any] | None
+    returncode: Any
+    stdout: Any
+    stderr: Any
+    runtime_sec: float
+    started_unix: float
+    workspaces_before: Any
+    boot_observation_ref: Any
+    server_init_dead: bool
+    server_init_dead_error: str
+    registry_mismatch: Any
+    cuda_graph_capture_failed: Any
+
+
+def _refused_benchmark(failure: dict[str, Any]) -> _BenchmarkOutcome:
+    """A round that produced no measurement, carrying the failure its caller reports."""
+    return _BenchmarkOutcome(failure, None, "", "", 0.0, 0.0, (), None, False, "", None, None)
+
+
+def _loaded_benchmark_report(report_path: Path) -> dict[str, Any] | None:
+    """The benchmark's own JSON report, or ``None`` when it is absent or unreadable."""
+    if not report_path.exists():
+        return None
+    try:
+        with report_path.open(encoding="utf-8") as handle:
+            loaded = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return None
+    return loaded if isinstance(loaded, dict) else None
+
+
 class _BenchProcess(NamedTuple):
     """What the benchmark subprocess left behind, and what the server did under it."""
 
@@ -2841,6 +2906,610 @@ class BenchmarkRunExecutor:
             **capture_meta,
         }
 
+    async def _restart_multi_node_server(
+        self,
+        round_: _BenchmarkRound,
+        *,
+        server_args: str,
+        resolved_model: str,
+    ) -> dict[str, Any] | None:
+        """Give a multi-node round a fresh sglang/vllm server, reporting a restart that failed."""
+        from ._multi_node_server_lifecycle import (
+            ServerRestartFailed,
+            restart_server_for_round,
+        )
+
+        if round_.ctx_extra.get("mn_round_restarted"):
+            return None
+        try:
+            # Merge the reference base UNDER the per-task args (last-wins) so a multi-node per-round restart
+            # carries the same reference flags the single-node materialized YAML does.
+            from ._grid_runner import merge_server_args
+            from ._workload_envs import resolve_reference_launch
+
+            ref_args, ref_envs, _ = resolve_reference_launch()
+            # Fold in the operator ``--server-args`` (``INFERENCE_OPTIMIZER_SERVER_ARGS``).
+            operator_args = os.environ.get("INFERENCE_OPTIMIZER_SERVER_ARGS", "").strip()
+            base = ref_args
+            if operator_args:
+                base = merge_server_args(base, operator_args) if base else operator_args
+            # Base on ``server_args`` (carries the one-shot cuda-graph eager-fallback flag when armed) so the MN
+            # per-round restart keeps that fallback too.
+            env = {str(k): str(v) for k, v in ref_envs.items()}
+            # PD knobs auto-resolved by the helper from $PD_* env, falling back to state.json.
+            await restart_server_for_round(
+                extra_server_args=merge_server_args(base, server_args) if base else server_args,
+                extra_env=env or None,
+                framework=os.environ.get("FRAMEWORK") or None,
+                model_path=resolved_model or None,
+                tp=int(os.environ.get("TP") or 0) or None,
+                ep=int(os.environ.get("EP") or 0) or None,
+            )
+        except ServerRestartFailed as exc:
+            return {
+                "status": "failed",
+                "error_class": "mn_server_restart_failed",
+                "error": str(exc),
+                "output_dir": str(round_.output_dir),
+            }
+        return None
+
+    async def _multi_node_warmup_result(
+        self,
+        round_: _BenchmarkRound,
+        round_warnings: list[str],
+    ) -> dict[str, Any] | None:
+        """Run the multi-node warmup pass, reporting a result only when it ends the round."""
+        from ._multi_node_env import (
+            is_multi_node,
+            mn_bench_warmup_enabled,
+        )
+
+        if not (is_multi_node() and mn_bench_warmup_enabled() and not round_.ctx_extra.get("mn_round_restarted")):
+            return None
+        return await self._mn_warmup_pass(
+            cmd=round_.cmd,
+            env=round_.env,
+            output_dir=round_.output_dir,
+            framework=round_.framework,
+            timeout_sec=round_.timeout_sec,
+            session_deadline_sec=round_.session_deadline_sec,
+            silence_timeout_sec=round_.silence_timeout_sec,
+            capture_meta=round_.capture_meta,
+            round_warnings=round_warnings,
+            ctx_extra=round_.ctx_extra,
+        )
+
+    @staticmethod
+    def _server_is_already_ready(round_: _BenchmarkRound) -> bool:
+        """Whether this round attaches to a server that is already up rather than booting one."""
+        from ._multi_node_env import is_multi_node
+
+        return bool(round_.server_already_ready or round_.ctx_extra.get("server_already_ready") or is_multi_node())
+
+    def _record_bringup(
+        self,
+        round_: _BenchmarkRound,
+        attempt_index: int,
+        workspaces_before: Any,
+        *,
+        wrapper_stderr: str = "",
+        wrapper_stdout: str = "",
+    ) -> str:
+        """Observe this attempt's boot once and name it on every later result.
+
+        Args:
+            round_: The round whose boot is being classified.
+            attempt_index: This attempt's index under the round's output dir.
+            workspaces_before: The workspaces that existed before the subprocess started.
+            wrapper_stderr: The launcher's stderr, fallback evidence.
+            wrapper_stdout: The launcher's stdout, fallback evidence.
+
+        Returns:
+            str: The server log text that was classified.
+        """
+        from ...bringup import observe_bringup, write_boot_observation
+
+        # Magpie writes the server log into the workspace it creates, not to $SERVER_LOG.
+        workspace = select_run_workspace(round_.output_dir, known_before=workspaces_before)
+        log_path = workspace / "server.log" if workspace is not None else round_.output_dir / "server.log"
+        read = read_bringup_log(log_path)
+        verdict = observe_bringup(
+            server_log=read.text,
+            server_elapsed_sec=server_child_elapsed_sec(read.text),
+            wrapper_stderr=wrapper_stderr,
+            wrapper_stdout=wrapper_stdout,
+            session_dir=self.session_dir,
+        )
+        round_.capture_meta["boot_observation_path"] = write_boot_observation(
+            verdict.observation,
+            session_dir=self.session_dir,
+            output_dir=round_.output_dir,
+            attempt=attempt_index,
+        )
+        round_.capture_meta["boot_observation_degraded"] = read.degraded
+        return read.text
+
+    async def _sweep_stale_aiter_locks(self, round_: _BenchmarkRound) -> None:
+        """Reap aiter JIT locks orphaned by a dead process before this round boots a server over them."""
+        if not self.benchmark_watchdog or self._server_is_already_ready(round_):
+            return
+        from ._aiter_jit import sweep_stale_aiter_locks_if_dead
+
+        lock_sweep = await asyncio.to_thread(sweep_stale_aiter_locks_if_dead)
+        if lock_sweep.get("deleted"):
+            log.warning(
+                "baseline_executor: reaped %d orphaned aiter JIT lock(s) before server launch",
+                lock_sweep["deleted"],
+            )
+
+    async def _launch_benchmark(self, round_: _BenchmarkRound, started_unix: float) -> _BenchmarkOutput:
+        """Run Magpie to completion.
+
+        Launched via ``run_with_session_kill`` so the whole descendant tree is torn down on every exit path
+        (plain subprocess.run leaks daemonized server processes).
+        """
+        server_ready = self._server_is_already_ready(round_)
+        if round_.serving_lease is not None:
+            # Ray-managed GPU execution (§12 T1): run inside the lease's actor (holds num_gpus across this run's
+            # rounds).
+            from ._ray_backend import strip_visible_devices_from_config
+
+            ray_cmd = build_benchmark_command(
+                python_exe=self.magpie_python,
+                config_path=strip_visible_devices_from_config(round_.config_path),
+                output_dir=round_.output_dir,
+            )
+            # No liveness callback is possible here: the round runs inside a Ray actor in another process
+            # (potentially on another node) and only its final ``(rc, stdout, stderr)`` crosses back, so there is
+            # nothing local to call per line of child output.
+            returncode, stdout, stderr = await asyncio.to_thread(
+                round_.serving_lease.run_session_kill,
+                ray_cmd,
+                env=round_.env,
+                cwd=str(round_.output_dir),
+                timeout=round_.timeout_sec,
+                silence_timeout_sec=round_.silence_timeout_sec,
+                server_already_ready=server_ready,
+                server_log_path=round_.watchdog_server_log,
+                session_remaining_sec=session_deadline_to_remaining_sec(round_.session_deadline_sec),
+            )
+            return _BenchmarkOutput(returncode, stdout, stderr, max(0.0, time.time() - started_unix))
+        async with heartbeat_while_output_flows(
+            unit="baseline_round",
+            label="benchmark",
+        ) as activity:
+            proc = await asyncio.to_thread(
+                run_with_session_kill,
+                round_.cmd,
+                env=round_.env,
+                cwd=str(round_.output_dir),
+                timeout=round_.timeout_sec,
+                silence_timeout_sec=round_.silence_timeout_sec,
+                server_already_ready=server_ready,
+                server_log_path=round_.watchdog_server_log,
+                on_output=activity.note,
+                session_deadline_sec=round_.session_deadline_sec,
+            )
+        return _BenchmarkOutput(
+            proc.returncode,
+            proc.stdout,
+            proc.stderr,
+            max(
+                0.0,
+                time.time() - started_unix,
+            ),
+        )
+
+    @staticmethod
+    def _timeout_failure(
+        round_: _BenchmarkRound,
+        started_unix: float,
+        workspaces_before: Any,
+        exc: subprocess.TimeoutExpired,
+    ) -> dict[str, Any]:
+        """Report a round the timeout reaped, harvesting whatever it leaked on the way out."""
+        destination = select_run_workspace(round_.output_dir, known_before=workspaces_before) or round_.output_dir
+        harvested = harvest_leaked_artifacts(
+            destination,
+            subprocess_started_unix=started_unix,
+        )
+        return {
+            "status": "failed",
+            "error_class": "timeout",
+            "error": f"baseline benchmark exceeded {round_.timeout_sec}s: {exc}",
+            "output_dir": str(round_.output_dir),
+            "harvested_artifacts": [str(dst) for _, dst in harvested],
+            "nonfatal_warnings": [f"harvested_leaked_artifact:{src}" for src, _ in harvested],
+            **round_.capture_meta,
+        }
+
+    @staticmethod
+    def _detokenizer_stall_failure(
+        round_: _BenchmarkRound,
+        output: _BenchmarkOutput,
+        started_unix: float,
+        workspaces_before: Any,
+    ) -> dict[str, Any]:
+        """Report a round the detokenizer-stall watchdog reaped: the server came up healthy, then went silent."""
+        destination = select_run_workspace(round_.output_dir, known_before=workspaces_before) or round_.output_dir
+        harvested = harvest_leaked_artifacts(
+            destination,
+            subprocess_started_unix=started_unix,
+        )
+        log.warning(
+            "baseline_executor: detokenizer-stall watchdog reaped run "
+            "(server ready but log went silent); error_class=detokenizer_stall."
+        )
+        return {
+            "status": "failed",
+            "error_class": "detokenizer_stall",
+            "returncode": output.returncode,
+            "error": (
+                "server reported ready but emitted no log output (hung "
+                "engine / detokenizer stall); reaped by the "
+                "detokenizer-stall watchdog. See server.log."
+            ),
+            "subprocess_runtime_sec": round(output.runtime_sec, 2),
+            "output_dir": str(round_.output_dir),
+            "harvested_artifacts": [str(dst) for _, dst in harvested],
+            "nonfatal_warnings": [f"harvested_leaked_artifact:{src}" for src, _ in harvested],
+            **round_.capture_meta,
+        }
+
+    @staticmethod
+    def _benchmark_outcome(
+        round_: _BenchmarkRound,
+        output: _BenchmarkOutput,
+        started_unix: float,
+        workspaces_before: Any,
+        server_log_text: str,
+    ) -> _BenchmarkOutcome:
+        """Read the server log back for the classifications every failure branch below is decided on.
+
+        When the server's engine/worker bootstrap dies, the root cause is in server.log, not Magpie's
+        stdout/stderr tail, and the liveness watchdog may have reaped the hung parent with
+        ``SERVER_DEAD_RETURNCODE``. Detected once here and reused so the failure is classified
+        ``server_init_dead``. Backend-agnostic (vLLM + SGLang). The same read answers whether the wall is the
+        recoverable cuda-graph capture one (OOM-rooted ones excluded) that arms the one-shot eager retry.
+        """
+        death_excerpt = server_log_death_excerpt(str(round_.output_dir / "server.log"))
+        stderr, stdout = output.stderr or "", output.stdout or ""
+        return _BenchmarkOutcome(
+            None,
+            output.returncode,
+            output.stdout,
+            output.stderr,
+            output.runtime_sec,
+            started_unix,
+            workspaces_before,
+            round_.capture_meta["boot_observation_path"],
+            death_excerpt is not None or output.returncode == SERVER_DEAD_RETURNCODE,
+            death_excerpt or ("server engine/worker init failed (reaped by liveness watchdog); see server.log"),
+            is_aiter_jit_registry_mismatch(server_log_text, stderr, stdout),
+            _is_cuda_graph_capture_failure(server_log_text, stderr, stdout),
+        )
+
+    async def _observed_benchmark_outcome(self, round_: _BenchmarkRound) -> _BenchmarkOutcome:
+        """Launch the benchmark and classify its exit, or report whatever refused it a measurement."""
+        workspaces_before = snapshot_workspaces(round_.output_dir)
+        started_unix = time.time()
+        # Anchor the Magpie parent process cwd to the per-task output_dir.
+        round_.output_dir.mkdir(parents=True, exist_ok=True)
+        # A reused output_dir may still hold a previous attempt's server.log,
+        # whose terminal init markers would be read as this attempt's, and the
+        # ready stamp beside it would make this attempt's boot look like it
+        # never happened.
+        attempt_index = open_bringup_attempt(round_.output_dir)
+        clear_server_ready_stamp(str(round_.output_dir / "server.log"))
+        refusal = self._preflight_server_argv(
+            config_path=round_.config_path,
+            framework=round_.framework,
+            launch_env=round_.env,
+            output_dir=round_.output_dir,
+            attempt=attempt_index,
+            capture_meta=round_.capture_meta,
+        )
+        if refusal is not None:
+            return _refused_benchmark(refusal)
+        await self._sweep_stale_aiter_locks(round_)
+        try:
+            output = await self._launch_benchmark(round_, started_unix)
+        except subprocess.TimeoutExpired as exc:
+            # A reaped timeout carries no wrapper streams; the server log is
+            # the whole of the evidence.
+            self._record_bringup(round_, attempt_index, workspaces_before)
+            return _refused_benchmark(self._timeout_failure(round_, started_unix, workspaces_before, exc))
+        server_log_text = self._record_bringup(
+            round_,
+            attempt_index,
+            workspaces_before,
+            wrapper_stderr=output.stderr or "",
+            wrapper_stdout=output.stdout or "",
+        )
+        stopped = stopped_by_the_run(output.returncode)
+        if stopped is not None:
+            return _refused_benchmark(
+                _stopped_round_result(
+                    stopped,
+                    round_label="measured round",
+                    returncode=output.returncode,
+                    runtime_sec=output.runtime_sec,
+                    output_dir=round_.output_dir,
+                    capture_meta=round_.capture_meta,
+                )
+            )
+        # Detokenizer-stall watchdog reap: the server came up healthy but went silent for the stall grace window
+        # (hung engine / wedged detokenizer).
+        if output.returncode == DETOKENIZER_STALL_RETURNCODE:
+            return _refused_benchmark(self._detokenizer_stall_failure(round_, output, started_unix, workspaces_before))
+        return self._benchmark_outcome(round_, output, started_unix, workspaces_before, server_log_text)
+
+    @staticmethod
+    def _failed_measurement_result(
+        round_: _BenchmarkRound,
+        outcome: _BenchmarkOutcome,
+        measurement: dict[str, Any],
+        warnings: list[str],
+        workspace: Path,
+    ) -> dict[str, Any]:
+        """Name why this round produced no usable measurement and report it as the round's failure."""
+        report_path = workspace / "benchmark_report.json"
+        tail = (outcome.stderr or outcome.stdout or "")[-2000:]
+        death_or_tail = outcome.server_init_dead_error if outcome.server_init_dead else tail
+        if outcome.registry_mismatch:
+            error_class, error = "aiter_jit_registry_mismatch", death_or_tail
+        elif outcome.cuda_graph_capture_failed:
+            error_class, error = "cuda_graph_capture_failed", death_or_tail
+        elif outcome.server_init_dead:
+            error_class, error = "server_init_dead", outcome.server_init_dead_error
+        elif outcome.returncode != 0:
+            error_class = _classify_subprocess_error(
+                outcome.runtime_sec,
+                tail,
+                outcome.returncode,
+            )
+            error = tail
+        elif not report_path.exists():
+            error_class = "no_report"
+            error = f"benchmark_report.json missing under {workspace}"
+        else:
+            error_class = "invalid_measurement"
+            error = "benchmark report did not contain positive throughput and completed requests"
+        return {
+            "status": "failed",
+            "error_class": error_class,
+            "returncode": outcome.returncode,
+            "error": redact_secret_values(error),
+            "output_signature": nonzero_output_signature(error_class, outcome.stdout, outcome.stderr),
+            "output_dir": str(round_.output_dir),
+            "workspace": str(workspace),
+            "report_path": str(report_path) if report_path.exists() else None,
+            "reported_success": measurement.get("reported_success"),
+            "subprocess_runtime_sec": round(outcome.runtime_sec, 2),
+            "nonfatal_warnings": warnings,
+            **round_.capture_meta,
+        }
+
+    @staticmethod
+    def _refuse_nonzero_exit_without_complete_protocol(
+        round_: _BenchmarkRound,
+        outcome: _BenchmarkOutcome,
+        measurement: dict[str, Any],
+        warnings: list[str],
+        workspace: Path,
+    ) -> dict[str, Any] | None:
+        """Refuse a measurement whose process exited nonzero before it served the protocol it recorded."""
+        if outcome.returncode == 0:
+            return None
+        report_path = workspace / "benchmark_report.json"
+        nonzero_error = redact_secret_values((outcome.stderr or outcome.stdout or "")[-2000:])
+        if not served_complete_protocol(measurement):
+            return {
+                "status": "failed",
+                "error_class": "magpie_nonzero_after_valid_measurement",
+                "returncode": outcome.returncode,
+                "error": nonzero_error,
+                "output_dir": str(round_.output_dir),
+                "workspace": str(workspace),
+                "report_path": str(report_path) if report_path.exists() else None,
+                "reported_success": measurement.get("reported_success"),
+                "subprocess_runtime_sec": round(outcome.runtime_sec, 2),
+                "nonfatal_warnings": warnings,
+                **round_.capture_meta,
+            }
+        # The round served every request the client recorded as requested,
+        # so the exit code is not evidence against the measurement. The
+        # cause stays on the result rather than only in the log.
+        warnings.append(f"nonzero_rc_after_complete_protocol:{outcome.returncode}")
+        log.warning(
+            "baseline_executor: magpie exited %d after serving its whole protocol (%s of %s requests); "
+            "keeping the measurement: %s",
+            outcome.returncode,
+            measurement.get("completed_requests"),
+            measurement.get("requested_requests"),
+            nonzero_error,
+        )
+        return None
+
+    def _stamp_round_quality(
+        self,
+        round_: _BenchmarkRound,
+        result: dict[str, Any],
+        report: dict[str, Any] | None,
+        warnings: list[str],
+    ) -> None:
+        """Read this round's accuracy eval back onto its result, and report what the round measured."""
+        from hyperloom.inference_optimizer import framework_registry
+
+        # Parse accuracy eval results (GSM8K for serving, or the image-quality gate for scriptable frameworks).
+        eval_framework = (report or {}).get("framework") or os.environ.get("FRAMEWORK") or None
+        # RUN_EVAL gates ONLY the serving lm-eval GSM8K run.
+        eval_scriptable = framework_registry.is_scriptable(eval_framework)
+        shared_state = (getattr(round_.ctx, "extra", None) or {}).get("shared_state") or self.shared_state
+        benchmark_mode = str(getattr(shared_state, "benchmark_mode", "") or "")
+        if round_.run_eval_disabled and not eval_scriptable and not is_agentx_mode(benchmark_mode):
+            # Serving RUN_EVAL was off this run (eval-failure fallback or ``disable_run_eval``), so lm-eval did not
+            # execute and there is no fresh accuracy to read.
+            log.info(
+                "baseline_executor: RUN_EVAL disabled this run (serving); skipping accuracy parse (no lm-eval executed)"
+            )
+        else:
+            self._attach_round_accuracy(result, round_.result_dir, eval_framework, benchmark_mode)
+        log.info(
+            "baseline_executor: %s %.1f %s (output) e2el=%.1fms",
+            "success_with_warning" if warnings else "success",
+            result["output_throughput"],
+            framework_registry.throughput_unit(eval_framework),
+            result["e2el_mean_ms"] or 0.0,
+        )
+
+    @staticmethod
+    def _attach_round_accuracy(
+        result: dict[str, Any],
+        result_dir: Path,
+        eval_framework: Any,
+        benchmark_mode: str,
+    ) -> None:
+        """Read the accuracy eval this round wrote and carry its verdict onto the round's result."""
+        from ._accuracy_gate import eval_probe_summary, parse_eval_results, read_eval_probe
+
+        # Search from ``$RESULT_DIR`` so serving runs survive benchmark_lib.sh moving/cleaning
+        # ``$EVAL_RESULT_DIR`` and scriptable quality gates still resolve from Magpie's benchmark reports.
+        eval_data = parse_eval_results(
+            result_dir,
+            framework=eval_framework,
+            benchmark_mode=benchmark_mode,
+        )
+        if eval_data.get("accuracy") is not None:
+            result["accuracy"] = eval_data["accuracy"]
+            result["accuracy_task"] = eval_data.get("task", "gsm8k")
+            result["accuracy_metric"] = eval_data.get("metric", "")
+            result["accuracy_source"] = eval_data.get("source_file", "")
+            log.info("baseline_executor: accuracy=%.4f (%s)", result["accuracy"], result["accuracy_task"])
+        else:
+            log.warning("baseline_executor: accuracy eval not found: %s", eval_data.get("error", "unknown"))
+        # Records why the score is ~0; the score itself is already correct.
+        eval_probe = read_eval_probe(result_dir)
+        if eval_probe:
+            result["eval_probe"] = eval_probe
+            log.warning("baseline_executor: %s", eval_probe_summary(eval_probe))
+
+    async def _round_result_from_workspace(
+        self,
+        round_: _BenchmarkRound,
+        outcome: _BenchmarkOutcome,
+        round_warnings: list[str],
+    ) -> dict[str, Any]:
+        """Turn the workspace the benchmark left behind into this round's result."""
+        workspace = select_run_workspace(round_.output_dir, known_before=outcome.workspaces_before)
+        # Always-on artifact harvest: copy wrapper-side leaks into the task workspace so failure-path diagnostics
+        # survive; mtime gating rejects stale prior-run leaks.
+        harvested = harvest_leaked_artifacts(
+            workspace if workspace is not None else round_.output_dir,
+            subprocess_started_unix=outcome.started_unix,
+        )
+        if harvested:
+            log.info(
+                "baseline_executor: harvested %d leaked artifact(s) into workspace: %s",
+                len(harvested),
+                ", ".join(str(src.name) for src, _ in harvested),
+            )
+        if workspace is None:
+            return self._no_workspace_failure(
+                _BenchProcess(
+                    returncode=outcome.returncode,
+                    stdout=outcome.stdout,
+                    stderr=outcome.stderr,
+                    runtime_sec=outcome.runtime_sec,
+                    server_init_dead=outcome.server_init_dead,
+                    server_init_dead_error=outcome.server_init_dead_error,
+                    registry_mismatch=outcome.registry_mismatch,
+                    cuda_graph_capture_failed=outcome.cuda_graph_capture_failed,
+                    capture_meta=round_.capture_meta,
+                ),
+                output_dir=round_.output_dir,
+                harvested=harvested,
+            )
+        report_path = workspace / "benchmark_report.json"
+        report = _loaded_benchmark_report(report_path)
+        measurement = extract_benchmark_measurement(
+            report,
+            config_path=round_.config_path,
+            workspace=workspace,
+            subprocess_started_unix=outcome.started_unix,
+        )
+        warnings = round_warnings + list(measurement.pop("nonfatal_warnings", []) or [])
+        for leak_src, _ in harvested:
+            warnings.append(f"harvested_leaked_artifact:{leak_src}")
+        if not self._measurement_succeeded(measurement):
+            return self._failed_measurement_result(round_, outcome, measurement, warnings, workspace)
+        refused = self._refuse_nonzero_exit_without_complete_protocol(round_, outcome, measurement, warnings, workspace)
+        if refused is not None:
+            return refused
+        result = self._succeeded_round_result(round_, outcome, measurement, warnings, workspace)
+        await asyncio.to_thread(
+            _attach_baseline_launch_evidence,
+            result,
+            config_path=round_.materialized_config_path,
+            output_dir=round_.output_dir,
+            framework=round_.framework,
+        )
+        self._stamp_round_quality(round_, result, report, warnings)
+        return result
+
+    @staticmethod
+    def _succeeded_round_result(
+        round_: _BenchmarkRound,
+        outcome: _BenchmarkOutcome,
+        measurement: dict[str, Any],
+        warnings: list[str],
+        workspace: Path,
+    ) -> dict[str, Any]:
+        """The round's measurement, with where every artifact it produced landed."""
+        report_path = workspace / "benchmark_report.json"
+        return {
+            "status": "succeeded",
+            **measurement,
+            "nonfatal_warnings": warnings,
+            "returncode": outcome.returncode,
+            "output_dir": str(round_.output_dir),
+            "result_dir": str(round_.result_dir),
+            "report_path": str(report_path) if report_path.exists() else None,
+            "workspace": str(workspace),
+            # Materialized YAML for THIS baseline.
+            "materialized_config": str(round_.materialized_config_path),
+            # Magpie subprocess wall-clock (success path only).
+            "subprocess_runtime_sec": round(outcome.runtime_sec, 2),
+            # The benchmark's own share of that wall-clock, boot excluded.
+            "post_ready_runtime_sec": _round_post_ready_sec(
+                round_.watchdog_server_log,
+                started_unix=outcome.started_unix,
+                runtime_sec=outcome.runtime_sec,
+            ),
+            # Authoritative (materialized-config) view of whether the serving lm-eval ran this run.
+            "run_eval_disabled": bool(round_.run_eval_disabled),
+            # Where this round's boot observation landed, and whether the log
+            # it was classified from could be read.
+            "boot_observation_path": outcome.boot_observation_ref,
+            "boot_observation_degraded": round_.capture_meta.get("boot_observation_degraded", ""),
+        }
+
+    async def _measured_round_result(self, round_: _BenchmarkRound) -> dict[str, Any]:
+        """Run the benchmark subprocess and turn what it left behind into this round's result."""
+        from ._multi_node_env import log_mn_banner
+
+        log_mn_banner("baseline_executor", log, output_dir=str(round_.output_dir))
+        log.info("baseline_executor: launching Magpie cmd=%s output_dir=%s", round_.cmd, round_.output_dir)
+        round_warnings: list[str] = []
+        warmup_result = await self._multi_node_warmup_result(round_, round_warnings)
+        if warmup_result is not None:
+            return warmup_result
+        outcome = await self._observed_benchmark_outcome(round_)
+        if outcome.failure is not None:
+            return outcome.failure
+        return await self._round_result_from_workspace(round_, outcome, round_warnings)
+
     async def _run_single_benchmark(
         self,
         *,
@@ -2883,502 +3552,48 @@ class BenchmarkRunExecutor:
             or str(params.get("framework") or "").strip().lower()
             or os.environ.get("FRAMEWORK", "").strip().lower()
         )
-        watchdog_server_log = _watchdog_server_log_path(output_dir, framework)
-
         # Multi-node (--nodes >= 2): inject MAGPIE_RUN_PHASE=client + BENCHMARK_BASE_URL so Magpie skips its server
         # launch and targets the RayJob head.
         from ._multi_node_env import magpie_remote_env
 
         env.update(magpie_remote_env())
-
-        # Multi-node only: restart sglang/vllm per round for a fresh server.
-        from ._multi_node_server_lifecycle import (
-            ServerRestartFailed,
-            restart_server_for_round,
-        )
-
         ctx_extra = getattr(ctx, "extra", None) or {}
         # The session's wall-clock budget, resolved per round rather than once per task: a baseline runs up to three
         # of them, and a warmup that overran has already spent budget the ones after it were counting on.
-        _session_state = ctx_extra.get("shared_state") or self.shared_state
-        session_deadline_sec, _ = session_grid_bounds(_session_state)
+        session_deadline_sec, _ = session_grid_bounds(ctx_extra.get("shared_state") or self.shared_state)
         silence_timeout_sec = None
         if self.benchmark_watchdog:
             silence_timeout_sec, timeout_sec = resolve_benchmark_timeouts()
             env["PYTHONUNBUFFERED"] = "1"
             sync_benchmark_timeout(config_path, timeout_sec)
-        if not ctx_extra.get("mn_round_restarted"):
-            try:
-                # Merge the reference base UNDER the per-task args (last-wins) so a multi-node per-round restart
-                # carries the same reference flags the single-node materialized YAML does.
-                from ._grid_runner import merge_server_args
-                from ._workload_envs import resolve_reference_launch
-
-                _mn_ref_args, _mn_ref_envs, _ = resolve_reference_launch()
-                # Base on effective_extra_server_args (carries the one-shot cuda-graph eager-fallback flag when armed)
-                # so the MN per-round restart keeps that fallback too.
-                _mn_task_args = effective_extra_server_args
-                # Fold in the operator ``--server-args`` (``INFERENCE_OPTIMIZER_SERVER_ARGS``).
-                _mn_operator_args = os.environ.get("INFERENCE_OPTIMIZER_SERVER_ARGS", "").strip()
-                _mn_base = _mn_ref_args
-                if _mn_operator_args:
-                    _mn_base = merge_server_args(_mn_base, _mn_operator_args) if _mn_base else _mn_operator_args
-                _mn_server_args = merge_server_args(_mn_base, _mn_task_args) if _mn_base else _mn_task_args
-                _mn_env = {str(k): str(v) for k, v in _mn_ref_envs.items()}
-                # PD knobs auto-resolved by the helper from $PD_* env, falling back to state.json.
-                await restart_server_for_round(
-                    extra_server_args=_mn_server_args,
-                    extra_env=_mn_env or None,
-                    framework=os.environ.get("FRAMEWORK") or None,
-                    model_path=resolved_model or None,
-                    tp=int(os.environ.get("TP") or 0) or None,
-                    ep=int(os.environ.get("EP") or 0) or None,
-                )
-            except ServerRestartFailed as exc:
-                return {
-                    "status": "failed",
-                    "error_class": "mn_server_restart_failed",
-                    "error": str(exc),
-                    "output_dir": str(output_dir),
-                }
-
-        from ._multi_node_env import log_mn_banner
-
-        log_mn_banner("baseline_executor", log, output_dir=str(output_dir))
-        log.info("baseline_executor: launching Magpie cmd=%s output_dir=%s", cmd, output_dir)
-
-        # Magpie launched via ``run_with_session_kill`` so the whole descendant tree is torn down on every exit path
-        # (plain subprocess.run leaks daemonized server processes).
-        from ._multi_node_env import (
-            is_multi_node as _mn_imn,
-            mn_bench_warmup_enabled as _mn_warm,
-        )
-
-        round_warnings: list[str] = []
-        if _mn_imn() and _mn_warm() and not ctx_extra.get("mn_round_restarted"):
-            _mn_warm_result = await self._mn_warmup_pass(
-                cmd=cmd,
-                env=env,
-                output_dir=output_dir,
-                framework=framework,
-                timeout_sec=timeout_sec,
-                session_deadline_sec=session_deadline_sec,
-                silence_timeout_sec=silence_timeout_sec,
-                capture_meta=capture_meta,
-                round_warnings=round_warnings,
-                ctx_extra=ctx_extra,
-            )
-            if _mn_warm_result is not None:
-                return _mn_warm_result
-
-        workspaces_before = snapshot_workspaces(output_dir)
-        subprocess_started_unix = time.time()
-        # Anchor the Magpie parent process cwd to the per-task output_dir.
-        output_dir.mkdir(parents=True, exist_ok=True)
-        # A reused output_dir may still hold a previous attempt's server.log,
-        # whose terminal init markers would be read as this attempt's.
-        server_log = output_dir / "server.log"
-        attempt_index = open_bringup_attempt(output_dir)
-        # And the ready stamp beside it: a previous attempt's would make this
-        # attempt's boot look like it never happened.
-        clear_server_ready_stamp(str(server_log))
-
-        def record_bringup(*, wrapper_stderr: str = "", wrapper_stdout: str = "") -> str:
-            """Observe this attempt's boot once and name it on every later result.
-
-            Args:
-                wrapper_stderr: The launcher's stderr, fallback evidence.
-                wrapper_stdout: The launcher's stdout, fallback evidence.
-
-            Returns:
-                str: The server log text that was classified.
-            """
-            from ...bringup import observe_bringup, write_boot_observation
-
-            # Magpie writes the server log into the workspace it creates, not to $SERVER_LOG.
-            workspace = select_run_workspace(output_dir, known_before=workspaces_before)
-            read = read_bringup_log(workspace / "server.log" if workspace is not None else server_log)
-            verdict = observe_bringup(
-                server_log=read.text,
-                server_elapsed_sec=server_child_elapsed_sec(read.text),
-                wrapper_stderr=wrapper_stderr,
-                wrapper_stdout=wrapper_stdout,
-                session_dir=self.session_dir,
-            )
-            capture_meta["boot_observation_path"] = write_boot_observation(
-                verdict.observation,
-                session_dir=self.session_dir,
-                output_dir=output_dir,
-                attempt=attempt_index,
-            )
-            capture_meta["boot_observation_degraded"] = read.degraded
-            return read.text
-
-        refusal = self._preflight_server_argv(
+        round_ = _BenchmarkRound(
             config_path=config_path,
-            framework=framework,
-            launch_env=env,
+            materialized_config_path=materialized_config_path,
             output_dir=output_dir,
-            attempt=attempt_index,
+            result_dir=result_dir,
+            ctx=ctx,
+            ctx_extra=ctx_extra,
+            cmd=cmd,
+            env=env,
+            framework=framework,
+            watchdog_server_log=_watchdog_server_log_path(output_dir, framework),
             capture_meta=capture_meta,
+            timeout_sec=timeout_sec,
+            silence_timeout_sec=silence_timeout_sec,
+            session_deadline_sec=session_deadline_sec,
+            serving_lease=serving_lease,
+            server_already_ready=server_already_ready,
+            run_eval_disabled=run_eval_disabled,
         )
-        if refusal is not None:
-            return refusal
-
-        if self.benchmark_watchdog and not (server_already_ready or ctx_extra.get("server_already_ready") or _mn_imn()):
-            from ._aiter_jit import sweep_stale_aiter_locks_if_dead
-
-            lock_sweep = await asyncio.to_thread(sweep_stale_aiter_locks_if_dead)
-            if lock_sweep.get("deleted"):
-                log.warning(
-                    "baseline_executor: reaped %d orphaned aiter JIT lock(s) before server launch",
-                    lock_sweep["deleted"],
-                )
-
-        try:
-            if serving_lease is not None:
-                # Ray-managed GPU execution (§12 T1): run inside the lease's actor (holds num_gpus across this run's
-                # rounds).
-                from ._ray_backend import strip_visible_devices_from_config
-
-                ray_config_path = strip_visible_devices_from_config(config_path)
-                ray_cmd = build_benchmark_command(
-                    python_exe=self.magpie_python,
-                    config_path=ray_config_path,
-                    output_dir=output_dir,
-                )
-                # No liveness callback is possible here: the round runs inside a Ray actor in another process
-                # (potentially on another node) and only its final ``(rc, stdout, stderr)`` crosses back, so there is
-                # nothing local to call per line of child output.
-                proc_returncode, proc_stdout, proc_stderr = await asyncio.to_thread(
-                    serving_lease.run_session_kill,
-                    ray_cmd,
-                    env=env,
-                    cwd=str(output_dir),
-                    timeout=timeout_sec,
-                    silence_timeout_sec=silence_timeout_sec,
-                    server_already_ready=bool(
-                        server_already_ready or ctx_extra.get("server_already_ready") or _mn_imn()
-                    ),
-                    server_log_path=watchdog_server_log,
-                    session_remaining_sec=session_deadline_to_remaining_sec(session_deadline_sec),
-                )
-                subprocess_runtime_sec = max(0.0, time.time() - subprocess_started_unix)
-            else:
-                async with heartbeat_while_output_flows(
-                    unit="baseline_round",
-                    label="benchmark",
-                ) as activity:
-                    proc = await asyncio.to_thread(
-                        run_with_session_kill,
-                        cmd,
-                        env=env,
-                        cwd=str(output_dir),
-                        timeout=timeout_sec,
-                        silence_timeout_sec=silence_timeout_sec,
-                        server_already_ready=bool(
-                            server_already_ready or ctx_extra.get("server_already_ready") or _mn_imn()
-                        ),
-                        server_log_path=watchdog_server_log,
-                        on_output=activity.note,
-                        session_deadline_sec=session_deadline_sec,
-                    )
-                subprocess_runtime_sec = max(
-                    0.0,
-                    time.time() - subprocess_started_unix,
-                )
-                proc_returncode = proc.returncode
-                proc_stdout = proc.stdout
-                proc_stderr = proc.stderr
-        except subprocess.TimeoutExpired as exc:
-            # A reaped timeout carries no wrapper streams; the server log is
-            # the whole of the evidence.
-            record_bringup()
-            timeout_destination = select_run_workspace(output_dir, known_before=workspaces_before) or output_dir
-            timeout_harvested = harvest_leaked_artifacts(
-                timeout_destination,
-                subprocess_started_unix=subprocess_started_unix,
-            )
-            return {
-                "status": "failed",
-                "error_class": "timeout",
-                "error": f"baseline benchmark exceeded {timeout_sec}s: {exc}",
-                "output_dir": str(output_dir),
-                "harvested_artifacts": [str(dst) for _, dst in timeout_harvested],
-                "nonfatal_warnings": [f"harvested_leaked_artifact:{src}" for src, _ in timeout_harvested],
-                **capture_meta,
-            }
-
-        server_log_text = record_bringup(
-            wrapper_stderr=proc_stderr or "",
-            wrapper_stdout=proc_stdout or "",
+        # Multi-node only: restart sglang/vllm per round for a fresh server.
+        restart_failure = await self._restart_multi_node_server(
+            round_,
+            server_args=effective_extra_server_args,
+            resolved_model=resolved_model,
         )
-        boot_observation_ref = capture_meta["boot_observation_path"]
-
-        stopped = stopped_by_the_run(proc_returncode)
-        if stopped is not None:
-            return _stopped_round_result(
-                stopped,
-                round_label="measured round",
-                returncode=proc_returncode,
-                runtime_sec=subprocess_runtime_sec,
-                output_dir=output_dir,
-                capture_meta=capture_meta,
-            )
-
-        # Detokenizer-stall watchdog reap: the server came up healthy but went silent for the stall grace window (hung
-        # engine / wedged detokenizer).
-        if proc_returncode == DETOKENIZER_STALL_RETURNCODE:
-            stall_destination = select_run_workspace(output_dir, known_before=workspaces_before) or output_dir
-            stall_harvested = harvest_leaked_artifacts(
-                stall_destination,
-                subprocess_started_unix=subprocess_started_unix,
-            )
-            log.warning(
-                "baseline_executor: detokenizer-stall watchdog reaped run "
-                "(server ready but log went silent); error_class=detokenizer_stall."
-            )
-            return {
-                "status": "failed",
-                "error_class": "detokenizer_stall",
-                "returncode": proc_returncode,
-                "error": (
-                    "server reported ready but emitted no log output (hung "
-                    "engine / detokenizer stall); reaped by the "
-                    "detokenizer-stall watchdog. See server.log."
-                ),
-                "subprocess_runtime_sec": round(subprocess_runtime_sec, 2),
-                "output_dir": str(output_dir),
-                "harvested_artifacts": [str(dst) for _, dst in stall_harvested],
-                "nonfatal_warnings": [f"harvested_leaked_artifact:{src}" for src, _ in stall_harvested],
-                **capture_meta,
-            }
-
-        # When the server's engine/worker bootstrap dies, the root cause is in
-        # server.log, not Magpie's stdout/stderr tail, and the liveness watchdog
-        # may have reaped the hung parent with ``SERVER_DEAD_RETURNCODE``. Detect
-        # that once here and reuse it across the failure branches so the failure
-        # is classified ``server_init_dead``. Backend-agnostic (vLLM + SGLang).
-        server_death_excerpt = server_log_death_excerpt(str(server_log))
-        server_init_dead = server_death_excerpt is not None or proc_returncode == SERVER_DEAD_RETURNCODE
-        server_init_dead_error = server_death_excerpt or (
-            "server engine/worker init failed (reaped by liveness watchdog); see server.log"
-        )
-
-        registry_mismatch = is_aiter_jit_registry_mismatch(
-            server_log_text,
-            proc_stderr or "",
-            proc_stdout or "",
-        )
-        # The same read that produced the observation answers whether the wall
-        # is the recoverable cuda-graph capture one (OOM-rooted ones excluded)
-        # that arms the one-shot eager retry below.
-        cuda_graph_capture_failed = _is_cuda_graph_capture_failure(
-            server_log_text,
-            proc_stderr or "",
-            proc_stdout or "",
-        )
-
-        workspace = select_run_workspace(output_dir, known_before=workspaces_before)
-        # Always-on artifact harvest: copy wrapper-side leaks into the task workspace so failure-path diagnostics
-        # survive; mtime gating rejects stale prior-run leaks.
-        harvest_destination = workspace if workspace is not None else output_dir
-        harvested = harvest_leaked_artifacts(
-            harvest_destination,
-            subprocess_started_unix=subprocess_started_unix,
-        )
-        if harvested:
-            log.info(
-                "baseline_executor: harvested %d leaked artifact(s) into workspace: %s",
-                len(harvested),
-                ", ".join(str(src.name) for src, _ in harvested),
-            )
-        if workspace is None:
-            return self._no_workspace_failure(
-                _BenchProcess(
-                    returncode=proc_returncode,
-                    stdout=proc_stdout,
-                    stderr=proc_stderr,
-                    runtime_sec=subprocess_runtime_sec,
-                    server_init_dead=server_init_dead,
-                    server_init_dead_error=server_init_dead_error,
-                    registry_mismatch=registry_mismatch,
-                    cuda_graph_capture_failed=cuda_graph_capture_failed,
-                    capture_meta=capture_meta,
-                ),
-                output_dir=output_dir,
-                harvested=harvested,
-            )
-        report_path = workspace / "benchmark_report.json"
-        report: dict[str, Any] | None = None
-        if report_path.exists():
-            try:
-                with report_path.open(encoding="utf-8") as f:
-                    loaded = json.load(f)
-                report = loaded if isinstance(loaded, dict) else None
-            except (OSError, json.JSONDecodeError):
-                report = None
-
-        measurement = extract_benchmark_measurement(
-            report,
-            config_path=config_path,
-            workspace=workspace,
-            subprocess_started_unix=subprocess_started_unix,
-        )
-        warnings = round_warnings + list(measurement.pop("nonfatal_warnings", []) or [])
-        for leak_src, _ in harvested:
-            warnings.append(f"harvested_leaked_artifact:{leak_src}")
-
-        if not self._measurement_succeeded(measurement):
-            if registry_mismatch:
-                error_class = "aiter_jit_registry_mismatch"
-                error = server_init_dead_error if server_init_dead else ((proc_stderr or proc_stdout or "")[-2000:])
-            elif cuda_graph_capture_failed:
-                error_class = "cuda_graph_capture_failed"
-                error = server_init_dead_error if server_init_dead else ((proc_stderr or proc_stdout or "")[-2000:])
-            elif server_init_dead:
-                error_class = "server_init_dead"
-                error = server_init_dead_error
-            elif proc_returncode != 0:
-                tail = (proc_stderr or proc_stdout or "")[-2000:]
-                error_class = _classify_subprocess_error(
-                    subprocess_runtime_sec,
-                    tail,
-                    proc_returncode,
-                )
-                error = tail
-            elif not report_path.exists():
-                error_class = "no_report"
-                error = f"benchmark_report.json missing under {workspace}"
-            else:
-                error_class = "invalid_measurement"
-                error = "benchmark report did not contain positive throughput and completed requests"
-            error = redact_secret_values(error)
-            return {
-                "status": "failed",
-                "error_class": error_class,
-                "returncode": proc_returncode,
-                "error": error,
-                "output_signature": nonzero_output_signature(error_class, proc_stdout, proc_stderr),
-                "output_dir": str(output_dir),
-                "workspace": str(workspace),
-                "report_path": str(report_path) if report_path.exists() else None,
-                "reported_success": measurement.get("reported_success"),
-                "subprocess_runtime_sec": round(subprocess_runtime_sec, 2),
-                "nonfatal_warnings": warnings,
-                **capture_meta,
-            }
-
-        nonzero_error = redact_secret_values((proc_stderr or proc_stdout or "")[-2000:])
-        if proc_returncode != 0:
-            if not served_complete_protocol(measurement):
-                return {
-                    "status": "failed",
-                    "error_class": "magpie_nonzero_after_valid_measurement",
-                    "returncode": proc_returncode,
-                    "error": nonzero_error,
-                    "output_dir": str(output_dir),
-                    "workspace": str(workspace),
-                    "report_path": str(report_path) if report_path.exists() else None,
-                    "reported_success": measurement.get("reported_success"),
-                    "subprocess_runtime_sec": round(subprocess_runtime_sec, 2),
-                    "nonfatal_warnings": warnings,
-                    **capture_meta,
-                }
-            # The round served every request the client recorded as requested,
-            # so the exit code is not evidence against the measurement. The
-            # cause stays on the result rather than only in the log.
-            warnings.append(f"nonzero_rc_after_complete_protocol:{proc_returncode}")
-            log.warning(
-                "baseline_executor: magpie exited %d after serving its whole protocol (%s of %s requests); "
-                "keeping the measurement: %s",
-                proc_returncode,
-                measurement.get("completed_requests"),
-                measurement.get("requested_requests"),
-                nonzero_error,
-            )
-
-        result = {
-            "status": "succeeded",
-            **measurement,
-            "nonfatal_warnings": warnings,
-            "returncode": proc_returncode,
-            "output_dir": str(output_dir),
-            "result_dir": str(result_dir),
-            "report_path": str(report_path) if report_path.exists() else None,
-            "workspace": str(workspace),
-            # Materialized YAML for THIS baseline.
-            "materialized_config": str(materialized_config_path),
-            # Magpie subprocess wall-clock (success path only).
-            "subprocess_runtime_sec": round(subprocess_runtime_sec, 2),
-            # The benchmark's own share of that wall-clock, boot excluded.
-            "post_ready_runtime_sec": _round_post_ready_sec(
-                watchdog_server_log,
-                started_unix=subprocess_started_unix,
-                runtime_sec=subprocess_runtime_sec,
-            ),
-            # Authoritative (materialized-config) view of whether the serving lm-eval ran this run.
-            "run_eval_disabled": bool(run_eval_disabled),
-            # Where this round's boot observation landed, and whether the log
-            # it was classified from could be read.
-            "boot_observation_path": boot_observation_ref,
-            "boot_observation_degraded": capture_meta.get("boot_observation_degraded", ""),
-        }
-        await asyncio.to_thread(
-            _attach_baseline_launch_evidence,
-            result,
-            config_path=materialized_config_path,
-            output_dir=output_dir,
-            framework=framework,
-        )
-
-        # Parse accuracy eval results (GSM8K for serving, or the image-quality gate for scriptable frameworks).
-        eval_framework = (report or {}).get("framework") or os.environ.get("FRAMEWORK") or None
-        from hyperloom.inference_optimizer import framework_registry
-
-        # RUN_EVAL gates ONLY the serving lm-eval GSM8K run.
-        eval_scriptable = framework_registry.is_scriptable(eval_framework)
-        shared_state = (getattr(ctx, "extra", None) or {}).get("shared_state") or self.shared_state
-        benchmark_mode = str(getattr(shared_state, "benchmark_mode", "") or "")
-        if run_eval_disabled and not eval_scriptable and not is_agentx_mode(benchmark_mode):
-            # Serving RUN_EVAL was off this run (eval-failure fallback or ``disable_run_eval``), so lm-eval did not
-            # execute and there is no fresh accuracy to read.
-            log.info(
-                "baseline_executor: RUN_EVAL disabled this run (serving); skipping accuracy parse (no lm-eval executed)"
-            )
-        else:
-            from ._accuracy_gate import eval_probe_summary, parse_eval_results, read_eval_probe
-
-            # Search from ``$RESULT_DIR`` so serving runs survive benchmark_lib.sh moving/cleaning
-            # ``$EVAL_RESULT_DIR`` and scriptable quality gates still resolve from Magpie's benchmark reports.
-            eval_search_root = result_dir
-            eval_data = parse_eval_results(
-                eval_search_root,
-                framework=eval_framework,
-                benchmark_mode=benchmark_mode,
-            )
-            if eval_data.get("accuracy") is not None:
-                result["accuracy"] = eval_data["accuracy"]
-                result["accuracy_task"] = eval_data.get("task", "gsm8k")
-                result["accuracy_metric"] = eval_data.get("metric", "")
-                result["accuracy_source"] = eval_data.get("source_file", "")
-                log.info("baseline_executor: accuracy=%.4f (%s)", result["accuracy"], result["accuracy_task"])
-            else:
-                log.warning("baseline_executor: accuracy eval not found: %s", eval_data.get("error", "unknown"))
-            # Records why the score is ~0; the score itself is already correct.
-            eval_probe = read_eval_probe(eval_search_root)
-            if eval_probe:
-                result["eval_probe"] = eval_probe
-                log.warning("baseline_executor: %s", eval_probe_summary(eval_probe))
-
-        log.info(
-            "baseline_executor: %s %.1f %s (output) e2el=%.1fms",
-            "success_with_warning" if warnings else "success",
-            result["output_throughput"],
-            framework_registry.throughput_unit(eval_framework),
-            result["e2el_mean_ms"] or 0.0,
-        )
-        return result
+        if restart_failure is not None:
+            return restart_failure
+        return await self._measured_round_result(round_)
 
     def _no_workspace_failure(
         self,
