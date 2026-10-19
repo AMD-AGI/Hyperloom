@@ -33,6 +33,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
 
 from . import machine_state as _phase_state
 from hyperloom.inference_optimizer.grid_server_args import merge_cumulative_extra_server_args
+from hyperloom.inference_optimizer.inferencex_checkout import pick_tree
 from hyperloom.inference_optimizer.session.optimization_journal import (
     KIND_OTHER,
     derive_journal_outcome,
@@ -2146,14 +2147,13 @@ class PreludePhase(CoordinatorCollaborator):
         """
         outcome = settlement.outcome
         recorder = settlement.recorder
-        params = settlement.params
         promoted, promotion = self._resolve_promoted_recipe_checkout(settlement.result, settlement.task)
         if not promoted:
             return self._refuse_unpromoted_checkout(settlement, promotion)
         promoted_checkout = (
             str(promotion.get("target_repo") or "").strip() if promotion.get("status") == "promoted" else ""
         )
-        patch_refs = self._replayed_patch_refs(settlement.result, params)
+        patch_refs = self._replayed_patch_refs(settlement.result, settlement.params)
         if recorder is not None:
             recorder.record_gate(
                 GATE_PROMOTION,
@@ -2163,12 +2163,13 @@ class PreludePhase(CoordinatorCollaborator):
         if (refused := self._refuse_replay_without_params(settlement, measurement, patch_refs)) is not None:
             return refused
         entry_extra = self._replayed_stack_entry(settlement, measurement, promoted_checkout, patch_refs)
+        state = self.shared_state
         # Resume safety: do not clobber existing stack entries.
-        self.shared_state.optimization_stack = list(self.shared_state.optimization_stack or [])
+        state.optimization_stack = list(state.optimization_stack or [])
         # A prior promote owns the outcome; re-running would re-journal it.
         already_pushed = any(
             isinstance(entry, dict) and entry.get("action") == "replay_warm_recipe"
-            for entry in self.shared_state.optimization_stack
+            for entry in state.optimization_stack
         )
         if not already_pushed and not self._lift_replayed_config(settlement, measurement, entry_extra):
             # Cleared the keep threshold against the baseline yet did not
@@ -2179,8 +2180,7 @@ class PreludePhase(CoordinatorCollaborator):
             )
         if promoted_checkout:
             outcome["active_framework_root"] = promoted_checkout
-            # Resume re-points $INFERENCEX_PATH at this checkout, and stops the run when it has since vanished.
-            self.shared_state.active_inferencex_path = promoted_checkout
+            state.active_inferencex_path = pick_tree(promotion["target_repos"], state.active_inferencex_path)
         outcome["status"] = "reproduced"
         outcome.pop("replayed_patch_refs", None)
         if patch_refs:
