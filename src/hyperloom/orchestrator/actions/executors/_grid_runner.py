@@ -13,8 +13,10 @@ import re
 import shutil
 import subprocess
 import time
+from collections.abc import Sequence
+from enum import Enum, auto
 from pathlib import Path
-from typing import Any, Callable, NamedTuple
+from typing import Any, Callable, NamedTuple, NoReturn
 
 import yaml
 
@@ -123,12 +125,24 @@ def _validate_magpie_python_override(value: str) -> str:
     return str(resolved)
 
 
-class _VariantAborted(Exception):
-    """A variant ended before it reached its benchmark, carrying the result that records why."""
+class _Halt(Enum):
+    """What one variant's end means for the rest of the grid: walk on, stop unless told otherwise, or stop."""
 
-    def __init__(self, result: VariantResult) -> None:
-        super().__init__(result.error_class or "variant_aborted")
+    CONTINUE = auto()
+    ON_FAILURE = auto()
+    STOP = auto()
+
+
+class _VariantAborted(Exception):
+    """A variant ended before its result was assembled, carrying what the grid records for it."""
+
+    def __init__(
+        self, result: VariantResult, *, halt: _Halt = _Halt.ON_FAILURE, trailing: Sequence[VariantResult] = ()
+    ) -> None:
+        super().__init__(result.error_class)
         self.result = result
+        self.halt = halt
+        self.trailing = tuple(trailing)
 
 
 def _resolve_session_dir() -> Path:
@@ -829,6 +843,21 @@ def _variant_rounds(variant_expected_sec: Any, auto_warmup_requested: bool) -> _
     return _RoundBudget(warmup=_mn_warmup_rounds, total=variant_rounds)
 
 
+class _RoundAttempt(NamedTuple):
+    """One variant's run of one round, and what it left behind.
+
+    ``server_survivors`` are the servers the variant booted that outlived its teardown.
+    """
+
+    idx: int
+    variant: GridVariant
+    slot: Path
+    returncode: int | None
+    started_unix: float
+    server_log: Path
+    server_survivors: list[int]
+
+
 async def run_grid(
     *,
     base_yaml_path: Path,
@@ -933,63 +962,55 @@ async def run_grid(
         """Report the variant that just landed."""
         await report_progress(**_variant_progress_note(grid, results, idx))
 
-    def _record_round_stop(
+    def _abort_on_round_stop(
         stopped: StoppedByTheRun,
+        attempt: _RoundAttempt,
         *,
-        idx: int,
-        variant: GridVariant,
-        slot: Path,
         round_label: str,
-        returncode: int | None,
-        started_unix: float,
-        server_log: Path,
-        server_survivors: list[int],
-    ) -> bool:
-        """Record a round the run stopped and say whether the grid is over.
-
-        ``server_survivors`` are the servers the variant booted that outlived its teardown.
-        """
-        if returncode == SESSION_TIME_EXHAUSTED_RETURNCODE:
+    ) -> NoReturn:
+        """End the variant on a round the run stopped."""
+        if attempt.returncode == SESSION_TIME_EXHAUSTED_RETURNCODE:
             stopped = deadline_stop
-        runtime_sec = round(max(0.0, time.time() - started_unix), 2)
+        runtime_sec = round(max(0.0, time.time() - attempt.started_unix), 2)
         log.warning(
             "grid_runner: variant %d/%d name=%s %s round reaped after %.1fs: %s; recorded as skipped, not failed",
-            idx + 1,
+            attempt.idx + 1,
             len(grid),
-            variant.name,
+            attempt.variant.name,
             round_label,
             runtime_sec,
             stopped.interrupted,
         )
         teardown = "tree reaped"
-        if server_survivors:
-            teardown += f", but server pid(s) {', '.join(map(str, server_survivors))} survived SIGKILL"
+        if attempt.server_survivors:
+            teardown += f", but server pid(s) {', '.join(map(str, attempt.server_survivors))} survived SIGKILL"
         _write_variant_abort_marker(
-            slot,
-            variant_name=variant.name,
+            attempt.slot,
+            variant_name=attempt.variant.name,
             error_class=stopped.error_class,
             error_summary=f"{stopped.interrupted}; {teardown}",
-            extra_args=variant.extra_server_args,
+            extra_args=attempt.variant.extra_server_args,
         )
-        results.append(
+        ends_the_batch = stopped.ends_the_batch
+        raise _VariantAborted(
             VariantResult(
-                name=variant.name,
-                extra_server_args=variant.extra_server_args,
-                extra_envs=dict(variant.extra_envs),
+                name=attempt.variant.name,
+                extra_server_args=attempt.variant.extra_server_args,
+                extra_envs=dict(attempt.variant.extra_envs),
                 status="skipped",
-                returncode=returncode,
+                returncode=attempt.returncode,
                 runtime_sec=runtime_sec,
                 error=stopped.interrupted,
                 error_class=stopped.error_class,
-                server_log_path=_measurement_server_log_path(server_log, slot=slot),
-                note=variant.note,
-                nonfatal_warnings=[f"server_survived_teardown:{pid}" for pid in server_survivors],
-            )
+                server_log_path=_measurement_server_log_path(attempt.server_log, slot=attempt.slot),
+                note=attempt.variant.note,
+                nonfatal_warnings=[f"server_survived_teardown:{pid}" for pid in attempt.server_survivors],
+            ),
+            halt=_Halt.STOP if ends_the_batch else _Halt.ON_FAILURE,
+            trailing=[_not_run_skip_result(rest, stopped) for rest in grid[attempt.idx + 1 :]]
+            if ends_the_batch
+            else (),
         )
-        if stopped.ends_the_batch:
-            results.extend(_not_run_skip_result(rest, stopped) for rest in grid[idx + 1 :])
-            return True
-        return not keep_going_on_failure
 
     _budget = _variant_rounds(variant_expected_sec, auto_warmup_requested)
     _mn_warmup_rounds, variant_rounds = _budget.warmup, _budget.total
@@ -1253,21 +1274,19 @@ async def run_grid(
                 warmup_stopped = stopped_by_the_run(warmup_rc)
                 if warmup_stopped is not None:
                     warmup_survivors = _teardown_variant_server(slot, lifecycle)
-                    grid_is_over = _record_round_stop(
+                    _abort_on_round_stop(
                         warmup_stopped,
-                        idx=i,
-                        variant=variant,
-                        slot=slot,
+                        _RoundAttempt(
+                            idx=i,
+                            variant=variant,
+                            slot=slot,
+                            returncode=warmup_rc,
+                            started_unix=warmup_started_unix,
+                            server_log=warmup_server_log,
+                            server_survivors=warmup_survivors,
+                        ),
                         round_label="warmup",
-                        returncode=warmup_rc,
-                        started_unix=warmup_started_unix,
-                        server_log=warmup_server_log,
-                        server_survivors=warmup_survivors,
                     )
-                    await _report_finished_variant(i)
-                    if grid_is_over:
-                        break
-                    continue
 
                 warmup_run_ws = select_run_workspace(warmup_slot, known_before=warmup_workspaces_before)
                 warmup_workspace = warmup_run_ws if warmup_run_ws is not None else warmup_slot
@@ -1455,21 +1474,19 @@ async def run_grid(
                 _mn_warm_stopped = stopped_by_the_run(_mn_warm_rc)
                 if _mn_warm_stopped is not None:
                     _mn_warm_survivors = _teardown_variant_server(slot, lifecycle if auto_warmup else None)
-                    grid_is_over = _record_round_stop(
+                    _abort_on_round_stop(
                         _mn_warm_stopped,
-                        idx=i,
-                        variant=variant,
-                        slot=slot,
+                        _RoundAttempt(
+                            idx=i,
+                            variant=variant,
+                            slot=slot,
+                            returncode=_mn_warm_rc,
+                            started_unix=_mn_warm_started_unix,
+                            server_log=_mn_warm_slot / "server.log",
+                            server_survivors=_mn_warm_survivors,
+                        ),
                         round_label="mn_warmup",
-                        returncode=_mn_warm_rc,
-                        started_unix=_mn_warm_started_unix,
-                        server_log=_mn_warm_slot / "server.log",
-                        server_survivors=_mn_warm_survivors,
                     )
-                    await _report_finished_variant(i)
-                    if grid_is_over:
-                        break
-                    continue
 
             # Snapshot wall-clock before launch so the salvage path can mtime-gate leak destinations per-variant.
             slot_workspaces_before = snapshot_workspaces(slot)
@@ -1658,21 +1675,19 @@ async def run_grid(
 
             stopped = stopped_by_the_run(rc)
             if stopped is not None:
-                grid_is_over = _record_round_stop(
+                _abort_on_round_stop(
                     stopped,
-                    idx=i,
-                    variant=variant,
-                    slot=slot,
+                    _RoundAttempt(
+                        idx=i,
+                        variant=variant,
+                        slot=slot,
+                        returncode=rc,
+                        started_unix=variant_started_unix,
+                        server_log=server_log,
+                        server_survivors=round_survivors,
+                    ),
                     round_label="measured",
-                    returncode=rc,
-                    started_unix=variant_started_unix,
-                    server_log=server_log,
-                    server_survivors=round_survivors,
                 )
-                await _report_finished_variant(i)
-                if grid_is_over:
-                    break
-                continue
 
             workspace = select_run_workspace(slot, known_before=slot_workspaces_before)
             # Always-on artifact harvest so each slot keeps its server.log / gpu_metrics / profile relay for Robustness
@@ -1714,21 +1729,8 @@ async def run_grid(
                     error_summary=no_ws_error_summary,
                     extra_args=variant.extra_server_args,
                 )
-                results.append(
-                    VariantResult(
-                        name=variant.name,
-                        extra_server_args=variant.extra_server_args,
-                        extra_envs=dict(variant.extra_envs),
-                        status="failed",
-                        returncode=rc,
-                        error=no_ws_error_summary,
-                        error_class=no_ws_error_class,
-                        server_log_path=_existing_log_path(server_log),
-                        nonfatal_warnings=harvest_tags,
-                        note=variant.note,
-                    )
-                )
-                await _report_finished_variant(i)
+                no_ws_halt = _Halt.ON_FAILURE if rc != 0 else _Halt.CONTINUE
+                no_ws_trailing: list[VariantResult] = []
                 if agentx_preflight_abort:
                     # Environment, not variant.
                     log.error(
@@ -1741,9 +1743,10 @@ async def run_grid(
                         len(grid) - (i + 1),
                         no_ws_error_summary,
                     )
+                    no_ws_halt = _Halt.STOP
                     # Recorded rather than dropped: a grid that just returns fewer points than it declared reads as a grid
                     # that was that size.
-                    results.extend(
+                    no_ws_trailing = [
                         VariantResult(
                             name=rest.name,
                             extra_server_args=rest.extra_server_args,
@@ -1754,11 +1757,23 @@ async def run_grid(
                             note=rest.note,
                         )
                         for rest in grid[i + 1 :]
-                    )
-                    break
-                if rc != 0 and not keep_going_on_failure:
-                    break
-                continue
+                    ]
+                raise _VariantAborted(
+                    VariantResult(
+                        name=variant.name,
+                        extra_server_args=variant.extra_server_args,
+                        extra_envs=dict(variant.extra_envs),
+                        status="failed",
+                        returncode=rc,
+                        error=no_ws_error_summary,
+                        error_class=no_ws_error_class,
+                        server_log_path=_existing_log_path(server_log),
+                        nonfatal_warnings=harvest_tags,
+                        note=variant.note,
+                    ),
+                    halt=no_ws_halt,
+                    trailing=no_ws_trailing,
+                )
             report_path = workspace / "benchmark_report.json"
             report, measurement = await _settled_measurement(
                 workspace,
@@ -1816,7 +1831,7 @@ async def run_grid(
                     error_summary=error,
                     extra_args=variant.extra_server_args,
                 )
-                results.append(
+                raise _VariantAborted(
                     VariantResult(
                         name=variant.name,
                         extra_server_args=variant.extra_server_args,
@@ -1832,12 +1847,9 @@ async def run_grid(
                         error_class=invalid_class,
                         server_log_path=_existing_log_path(server_log),
                         note=variant.note,
-                    )
+                    ),
+                    halt=_Halt.ON_FAILURE if rc != 0 else _Halt.CONTINUE,
                 )
-                await _report_finished_variant(i)
-                if rc != 0 and not keep_going_on_failure:
-                    break
-                continue
 
             if rc != 0:
                 nonzero_error = redact_secret_values((stderr or stdout)[-2000:])
@@ -1936,7 +1948,8 @@ async def run_grid(
         except _VariantAborted as abort:
             results.append(abort.result)
             await _report_finished_variant(i)
-            if not keep_going_on_failure:
+            results.extend(abort.trailing)
+            if abort.halt is _Halt.STOP or (abort.halt is _Halt.ON_FAILURE and not keep_going_on_failure):
                 break
     await asyncio.to_thread(
         _attach_grid_launch_evidence,
