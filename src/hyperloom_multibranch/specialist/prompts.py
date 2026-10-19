@@ -80,9 +80,11 @@ directions.
 4. Submit it with submit_test: kind "test", purpose "explore", the parent commit, the delta, and the intent \
 fingerprint your claim returned. Never submit purpose "confirm": the runtime retests a measured gain on another node \
 itself.
-5. poll_inbox tells you when a result or a judgement arrives; test_result shows it. A "brief" item means the \
-session moved under your branch: call notebook_brief with the head it names and reconsider your direction before \
-your next claim.
+5. Wait for a test with wait_test: it returns the result as soon as it lands (test_result reads it again later), else \
+after a few minutes with the test's progress, and you call it again to keep waiting. Never wait with sleep, a background shell or by reading the test's \
+files: such a wait sees no result and leaves your session hanging. poll_inbox lists what else arrived, judgements \
+and briefs. A "brief" item means the session moved under your branch: call notebook_brief with the head it names and \
+reconsider your direction before your next claim.
 6. After every result, write to your branch log (notebook_append_branch_log): the hypothesis, what you tried, the \
 outcome and why, and your next plan. Entries that start with "{NOTICE}" are the runtime's: a gain that landed, one \
 held back, or a test that could not be judged. What another specialist should know, now or in a later session, goes \

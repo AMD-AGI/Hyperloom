@@ -33,6 +33,7 @@ TOOLS = (
     "worktree_check",
     "worktree_patch",
     "submit_test",
+    "wait_test",
     "poll_inbox",
     "test_result",
     "notebook_append_branch_log",
@@ -73,6 +74,13 @@ def test_the_role_profiles_through_a_profile_test_and_tracelens_never_roofline()
     assert 'submit_test with kind "profile", purpose "profile"' in prompt
     assert 'start_analysis with tool "tracelens" and that test\'s id as profile_request_id' in prompt
     assert "roofline" not in prompt
+
+
+def test_the_role_waits_for_a_test_only_through_wait_test():
+    prompt = role_prompt(WORKLOAD)
+
+    assert "Wait for a test with wait_test" in prompt
+    assert "Never wait with sleep, a background shell or by reading the test's files" in prompt
 
 
 def test_the_role_says_a_brief_item_asks_for_the_brief_again_before_the_next_claim():
