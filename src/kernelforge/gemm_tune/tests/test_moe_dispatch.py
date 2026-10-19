@@ -9,7 +9,7 @@ import logging
 import os
 import shutil
 import sys
-from types import ModuleType, SimpleNamespace
+from types import ModuleType
 
 import pytest
 
@@ -328,18 +328,12 @@ class TestTheAttemptPutsTheProcessBack:
         adapter.close()
         assert not workdir.exists()
 
-    def test_an_absent_aiter_leaves_nothing_to_drop(self, monkeypatch):
-        monkeypatch.setitem(sys.modules, "aiter", None)
-        adapter = dp._FusedMoeAdapter()
-        workdir = adapter._workdir
-        adapter.close()
-        assert not workdir.exists()
-
-    def test_an_aiter_that_cannot_load_its_library_leaves_nothing_to_drop(self, monkeypatch):
+    @staticmethod
+    def _adapter_whose_cache_import_raises(monkeypatch, failure):
         core = ModuleType("aiter.jit.core")
 
         def unloadable(name):
-            raise OSError("libamdhip64.so.6: cannot open shared object file")
+            raise failure
 
         core.__getattr__ = unloadable
         for name, module in (
@@ -348,29 +342,22 @@ class TestTheAttemptPutsTheProcessBack:
             ("aiter.jit.core", core),
         ):
             monkeypatch.setitem(sys.modules, name, module)
-        adapter = dp._FusedMoeAdapter()
-        workdir = adapter._workdir
+        return dp._FusedMoeAdapter()
+
+    @pytest.mark.parametrize(
+        "failure",
+        [ImportError("no module named aiter"), OSError("libamdhip64.so.6: cannot open shared object file")],
+        ids=lambda failure: type(failure).__name__,
+    )
+    def test_an_aiter_that_cannot_load_leaves_nothing_to_drop(self, monkeypatch, failure):
+        adapter = self._adapter_whose_cache_import_raises(monkeypatch, failure)
         adapter.close()
-        assert not workdir.exists()
+        assert not adapter._workdir.exists()
 
-    def test_a_broken_aiter_cache_drop_is_not_swallowed(self, monkeypatch):
-        cache = SimpleNamespace(cache_clear=lambda: None)
-        core = ModuleType("aiter.jit.core")
-        core.AITER_CONFIGS = SimpleNamespace(get_config_file=cache)
-        for name, module in (
-            ("aiter", ModuleType("aiter")),
-            ("aiter.jit", ModuleType("aiter.jit")),
-            ("aiter.jit.core", core),
-        ):
-            monkeypatch.setitem(sys.modules, name, module)
-
-        def broken():
-            raise RuntimeError("fused_moe import broke")
-
-        adapter = dp._FusedMoeAdapter()
-        monkeypatch.setattr(adapter, "_fused_moe", broken)
+    def test_an_unexpected_cache_drop_error_is_not_swallowed(self, monkeypatch):
+        adapter = self._adapter_whose_cache_import_raises(monkeypatch, TypeError("aiter config API drifted"))
         try:
-            with pytest.raises(RuntimeError, match="fused_moe import broke"):
+            with pytest.raises(TypeError, match="^aiter config API drifted$"):
                 adapter.close()
         finally:
             shutil.rmtree(adapter._workdir, ignore_errors=True)

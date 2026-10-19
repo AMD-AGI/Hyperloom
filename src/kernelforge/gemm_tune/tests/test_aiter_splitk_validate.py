@@ -33,17 +33,14 @@ def test_none_when_control_fails(monkeypatch):
     assert max_supported_splitk((64, 5120, 5120)) is None
 
 
-def test_none_when_control_cannot_import_aiter(monkeypatch):
-    def missing(m, n, k, sk, device="cuda"):
-        raise ImportError("no module named aiter")
-
-    _probe(monkeypatch, missing)
-    assert max_supported_splitk((64, 5120, 5120)) is None
-
-
-def test_none_when_control_cannot_load_a_library(monkeypatch):
+@pytest.mark.parametrize(
+    "failure",
+    [ImportError("no module named aiter"), OSError("libamdhip64.so.6: cannot open shared object file")],
+    ids=lambda failure: type(failure).__name__,
+)
+def test_none_when_control_cannot_load_aiter(monkeypatch, failure):
     def unloadable(m, n, k, sk, device="cuda"):
-        raise OSError("libamdhip64.so.6: cannot open shared object file")
+        raise failure
 
     _probe(monkeypatch, unloadable)
     assert max_supported_splitk((64, 5120, 5120)) is None
@@ -54,7 +51,7 @@ def test_control_propagates_unexpected_errors(monkeypatch):
         raise TypeError("probe signature drifted")
 
     _probe(monkeypatch, buggy)
-    with pytest.raises(TypeError, match="probe signature drifted"):
+    with pytest.raises(TypeError, match="^probe signature drifted$"):
         max_supported_splitk((64, 5120, 5120))
 
 

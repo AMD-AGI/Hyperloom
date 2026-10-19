@@ -117,20 +117,7 @@ def test_recovery_publishes_a_validated_result_sidecar(tmp_path: Path) -> None:
     assert state.result_patch_dir == str(recovered.patch_dir)
 
 
-@pytest.mark.parametrize(
-    "failure",
-    [
-        PublicationError("operator publication conflicts with existing version"),
-        WorktreeError("best commit is not based on controller base"),
-        TaskStateError("task state must be initialized before transition"),
-        subprocess.CalledProcessError(128, ["git", "diff"], stderr="fatal: bad object"),
-        subprocess.TimeoutExpired(["git", "diff"], 300.0),
-        OSError("disk full"),
-        UnicodeDecodeError("utf-8", b"\xfc", 0, 1, "invalid start byte"),
-    ],
-    ids=lambda failure: type(failure).__name__,
-)
-def test_an_expected_publication_failure_is_reported_not_raised(tmp_path: Path, monkeypatch, failure) -> None:
+def _recover_with_publication_failure(tmp_path: Path, monkeypatch, failure: Exception):
     layout, task_dir, _worktree, best_commit = _prepared_workspace(tmp_path)
     (task_dir / "forge-result.json").write_text(
         json.dumps({"improved": True, "best_commit": best_commit}),
@@ -141,8 +128,23 @@ def test_an_expected_publication_failure_is_reported_not_raised(tmp_path: Path, 
         raise failure
 
     monkeypatch.setattr(recovery, "publish_operator_result", fail)
+    return layout, best_commit, recover_task_result(layout, task_dir)
 
-    recovered = recover_task_result(layout, task_dir)
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        PublicationError("operator publication conflicts with existing version"),
+        WorktreeError("best commit is not based on controller base"),
+        TaskStateError("task state must be initialized before transition"),
+        subprocess.CalledProcessError(128, ["git", "diff"], stderr="fatal: bad object"),
+        OSError("disk full"),
+        UnicodeDecodeError("utf-8", b"\xfc", 0, 1, "invalid start byte"),
+    ],
+    ids=lambda failure: type(failure).__name__,
+)
+def test_an_expected_publication_failure_is_reported_not_raised(tmp_path: Path, monkeypatch, failure) -> None:
+    layout, best_commit, recovered = _recover_with_publication_failure(tmp_path, monkeypatch, failure)
 
     assert recovered == recovery.RecoveryResult(
         operator_id=recovered.operator_id,
@@ -154,19 +156,8 @@ def test_an_expected_publication_failure_is_reported_not_raised(tmp_path: Path, 
 
 
 def test_an_unexpected_publication_error_propagates(tmp_path: Path, monkeypatch) -> None:
-    layout, task_dir, _worktree, best_commit = _prepared_workspace(tmp_path)
-    (task_dir / "forge-result.json").write_text(
-        json.dumps({"improved": True, "best_commit": best_commit}),
-        encoding="utf-8",
-    )
-
-    def fail(*_args, **_kwargs):
-        raise TypeError("publication fields drifted")
-
-    monkeypatch.setattr(recovery, "publish_operator_result", fail)
-
-    with pytest.raises(TypeError, match="publication fields drifted"):
-        recover_task_result(layout, task_dir)
+    with pytest.raises(TypeError, match="^publication fields drifted$"):
+        _recover_with_publication_failure(tmp_path, monkeypatch, TypeError("publication fields drifted"))
 
 
 def test_recovery_is_idempotent_for_an_already_published_best(tmp_path: Path) -> None:

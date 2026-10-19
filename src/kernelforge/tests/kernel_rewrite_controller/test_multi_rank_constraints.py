@@ -13,7 +13,6 @@ budget with them.
 from __future__ import annotations
 
 import json
-import importlib.abc
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -237,59 +236,35 @@ def test_an_empty_mask_reports_zero_rather_than_unknown(monkeypatch) -> None:
     assert dispatcher._visible_gpu_count() != dispatcher.GPU_COUNT_UNKNOWN
 
 
-def _fake_torch(monkeypatch, device_count) -> None:
+def _visible_count_with_failing_probe(monkeypatch, failure: Exception) -> int:
+    monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+
+    def device_count():
+        raise failure
+
     torch = ModuleType("torch")
     torch.cuda = SimpleNamespace(device_count=device_count)
     monkeypatch.setitem(sys.modules, "torch", torch)
+    return dispatcher._visible_gpu_count()
 
 
-def test_a_host_without_torch_reports_an_unknown_count(monkeypatch) -> None:
-    monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
-    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-    monkeypatch.setitem(sys.modules, "torch", None)
-
-    assert dispatcher._visible_gpu_count() == dispatcher.GPU_COUNT_UNKNOWN
-
-
-def test_a_driver_failure_reports_an_unknown_count(monkeypatch) -> None:
-    monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
-    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-
-    def no_driver():
-        raise RuntimeError("no HIP driver")
-
-    _fake_torch(monkeypatch, no_driver)
-
-    assert dispatcher._visible_gpu_count() == dispatcher.GPU_COUNT_UNKNOWN
-
-
-def test_a_torch_that_cannot_load_its_library_reports_an_unknown_count(monkeypatch) -> None:
-    monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
-    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-
-    class _LoaderFailure(importlib.abc.MetaPathFinder):
-        def find_spec(self, fullname, path=None, target=None):
-            if fullname == "torch":
-                raise OSError("libamdhip64.so.6: cannot open shared object file")
-            return
-
-    monkeypatch.delitem(sys.modules, "torch", raising=False)
-    monkeypatch.setattr(sys, "meta_path", [_LoaderFailure(), *sys.meta_path])
-
-    assert dispatcher._visible_gpu_count() == dispatcher.GPU_COUNT_UNKNOWN
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ImportError("torch is not installed"),
+        OSError("libamdhip64.so.6: cannot open shared object file"),
+        RuntimeError("no HIP driver"),
+    ],
+    ids=lambda failure: type(failure).__name__,
+)
+def test_an_expected_probe_failure_reports_an_unknown_count(monkeypatch, failure) -> None:
+    assert _visible_count_with_failing_probe(monkeypatch, failure) == dispatcher.GPU_COUNT_UNKNOWN
 
 
 def test_an_unexpected_probe_error_is_not_read_as_an_unknown_count(monkeypatch) -> None:
-    monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
-    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-
-    def broken():
-        raise TypeError("device_count signature drifted")
-
-    _fake_torch(monkeypatch, broken)
-
-    with pytest.raises(TypeError, match="device_count signature drifted"):
-        dispatcher._visible_gpu_count()
+    with pytest.raises(TypeError, match="^device_count signature drifted$"):
+        _visible_count_with_failing_probe(monkeypatch, TypeError("device_count signature drifted"))
 
 
 # --- the parallelism suffix ---------------------------------------------------
