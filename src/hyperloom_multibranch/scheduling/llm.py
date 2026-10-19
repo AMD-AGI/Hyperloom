@@ -78,7 +78,7 @@ def recorded(completion: Completion, notebook: UsageSink, source: UsageSource) -
 
     async def complete(system: str, user: str) -> CompletionReply:
         reply = await completion(system, user)
-        usage = LlmUsage("", source, reply.cost_usd, reply.tokens.prompt, reply.tokens.output)
+        usage = LlmUsage("", source, reply.cost_usd, reply.tokens)
         await notebook.record_llm_usage(usage)
         return reply
 

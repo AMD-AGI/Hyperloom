@@ -33,6 +33,7 @@ from hyperloom_multibranch.contracts.notebook.records import (
     StartupBrief,
     TestRecord,
     TriedDirection,
+    priced_usd,
 )
 from hyperloom_multibranch.contracts.notebook.vocab import (
     INTEGRATION_BRANCH,
@@ -248,7 +249,7 @@ def progress(state: NotebookState, view: LineageView) -> tuple[BranchProgress, .
                 gpu_seconds=sum(result.gpu_seconds for result in results),
                 head_value=_value_or_empty(state, view, branch.head_commit),
                 judged_since_commit=judged_since_commit(records, view, branch.branch),
-                llm_usd=sum(item.usage.cost_usd for item in state.llm_usage if item.usage.branch == branch.branch),
+                llm_usd=priced_usd(item.usage for item in state.llm_usage if item.usage.branch == branch.branch),
             )
         )
     return tuple(found)

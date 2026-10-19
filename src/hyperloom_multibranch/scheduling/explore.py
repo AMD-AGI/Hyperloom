@@ -38,7 +38,7 @@ from dataclasses import dataclass
 
 from hyperloom_multibranch.contracts.lifecycle import SpecialistLifecycle, SpecialistStatus
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
-from hyperloom_multibranch.contracts.notebook.records import BranchProgress
+from hyperloom_multibranch.contracts.notebook.records import BranchProgress, priced_usd
 from hyperloom_multibranch.notebook.rsi.frontier import FrontierScoring
 from hyperloom_multibranch.notebook.rsi.session import judge_history
 from hyperloom_multibranch.scheduling.budget import MB_SECONDS_PER_HOUR
@@ -277,7 +277,7 @@ class Explorer:
             prelude_gpu_hours_upper_bound=window.prelude_gpu_seconds_upper_bound / MB_SECONDS_PER_HOUR,
             specialist_llm_usd=sum(row.llm_usd for row in progress),
             max_llm_usd=None if window.max_llm_usd == math.inf else window.max_llm_usd,
-            scheduler_llm_usd=sum(record.usage.cost_usd for record in snapshot.llm_usage if not record.usage.branch),
+            scheduler_llm_usd=priced_usd(record.usage for record in snapshot.llm_usage if not record.usage.branch),
             specialists=await self._specialist_states(),
         )
         try:

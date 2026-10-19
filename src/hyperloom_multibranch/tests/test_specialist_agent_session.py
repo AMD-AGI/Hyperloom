@@ -14,6 +14,7 @@ from hyperloom.measure.compile import LocalBlobStore, PackageBase
 from hyperloom.orchestrator.specialists.agent_runner import AgentHandle, AgentStatus, LocalAgentRunner
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.notebook import Role, Writer
+from hyperloom_multibranch.contracts.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent, LlmUsage
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, LineageKind, UsageSource
 from hyperloom_multibranch.contracts.toolbox import SpecialistGrant
@@ -196,9 +197,9 @@ async def test_each_launch_records_its_tokens_at_the_gateway_s_rates_however_it_
     await asyncio.wait_for(running, 1)
 
     first, killed = (record.usage for record in (await rig.notebook.snapshot()).llm_usage)
-    assert first == LlmUsage(BRANCH, UsageSource.SPECIALIST, first.cost_usd, 1_000, 100, "sess-1")
+    assert first == LlmUsage(BRANCH, UsageSource.SPECIALIST, first.cost_usd, TokenCounts(1_000, 100), "sess-1")
     assert first.cost_usd == pytest.approx((1_000 * 4 + 100 * 20) / 1e6)
-    assert (killed.cost_usd, killed.input_tokens) == (pytest.approx(4.0), 1_000_000)
+    assert (killed.cost_usd, killed.tokens.input) == (pytest.approx(4.0), 1_000_000)
     assert "'claude-unknown-1', which has no price" in caplog.text
 
 

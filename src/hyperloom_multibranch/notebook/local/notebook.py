@@ -650,8 +650,11 @@ class LocalNotebook(
                 raise WriterNotAllowed(f"a specialist runtime records its specialist's spend, not the {usage.source}'s")
         elif usage.branch or usage.source is UsageSource.SPECIALIST:
             raise WriterNotAllowed("the scheduler records its own judge's and resolver's spend, with no branch")
+        tokens = usage.tokens
+        cost = "unpriced" if usage.cost_usd is None else f"${usage.cost_usd:.4f}"
         summary = (
-            f"llm usage/{usage.source.value}: ${usage.cost_usd:.4f}, {usage.input_tokens}+{usage.output_tokens} tokens"
+            f"llm usage/{usage.source.value}: {cost}, {tokens.input} in + {tokens.output} out + {tokens.cache_read} "
+            f"cache read + {tokens.cache_write + tokens.cache_write_1h} cache write tokens"
         )
         written = self._append(EntryKind.LLM_USAGE, usage, branch=usage.branch, parent="", summary=summary)
         return LlmUsageRecord(written.entry_id, written.at, usage)

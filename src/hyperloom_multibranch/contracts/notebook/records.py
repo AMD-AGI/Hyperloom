@@ -11,6 +11,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
 from hyperloom.contracts.recipe import RecipeDelta
+from hyperloom_multibranch.contracts.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.notebook.peers import (
     BranchLogEntry,
     Intent,
@@ -304,21 +305,25 @@ class LearningRecord:
 
 @dataclass(frozen=True)
 class LlmUsage:
-    """What one LLM launch or call cost: ``branch`` is the branch whose specialist spent it, empty for the scheduler's
-    own judge or resolver; ``launch`` names the CLI session it came from, to trace it back."""
+    """What one LLM launch or call used: ``branch`` is the branch whose specialist spent it, empty for the scheduler's
+    own judge or resolver; ``tokens`` are its tokens by how they are billed; ``cost_usd`` is what they cost, ``None``
+    for a model the price sheet does not list; ``launch`` names the CLI session it came from, to trace it back."""
 
     branch: str
     source: UsageSource
-    cost_usd: float
-    input_tokens: int = 0
-    output_tokens: int = 0
+    cost_usd: float | None
+    tokens: TokenCounts = TokenCounts()
     launch: str = ""
 
     def __post_init__(self) -> None:
-        if not math.isfinite(self.cost_usd) or self.cost_usd < 0:
+        if self.cost_usd is not None and (not math.isfinite(self.cost_usd) or self.cost_usd < 0):
             raise ValueError(f"an LLM cost is a finite amount of dollars, at least 0, not {self.cost_usd!r}")
-        if self.input_tokens < 0 or self.output_tokens < 0:
-            raise ValueError("token counts are at least 0")
+
+
+def priced_usd(usages: Iterable[LlmUsage]) -> float:
+    """What ``usages`` cost; an unpriced model's usage adds its tokens to the record but nothing to the dollars."""
+
+    return sum(usage.cost_usd for usage in usages if usage.cost_usd is not None)
 
 
 @dataclass(frozen=True)
@@ -614,9 +619,9 @@ class NotebookSnapshot:
 
     @property
     def llm_usd(self) -> float:
-        """What every LLM launch and call recorded cost, the scheduler's own included."""
+        """What every priced LLM launch and call recorded cost, the scheduler's own included."""
 
-        return sum(record.usage.cost_usd for record in self.llm_usage)
+        return priced_usd(record.usage for record in self.llm_usage)
 
     @property
     def environment_changes(self) -> tuple[EnvironmentChange, ...]:
@@ -661,6 +666,7 @@ __all__ = [
     "LineageEvent",
     "LineageView",
     "LlmUsage",
+    "priced_usd",
     "LlmUsageRecord",
     "ManifestFingerprint",
     "MergeAttempt",

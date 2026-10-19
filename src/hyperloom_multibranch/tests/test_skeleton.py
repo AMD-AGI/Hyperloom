@@ -499,9 +499,7 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
     spends = [_judge_state(prompt)["spend"] for prompt in _judge_prompts(stage)]
     assert [spend["scheduler_llm_usd"] for spend in spends[:2]] == [0.0, JUDGE_USD]
     usages = [record.usage for record in (await observer.snapshot()).llm_usage]
-    assert (
-        usages == [LlmUsage("", UsageSource.JUDGE, JUDGE_USD, JUDGE_TOKENS.prompt, JUDGE_TOKENS.output)] * judge_calls
-    )
+    assert usages == [LlmUsage("", UsageSource.JUDGE, JUDGE_USD, JUDGE_TOKENS)] * judge_calls
     assert all(spend["explore_gpu_hours"] is None for spend in spends)
     [rooted] = [row for row in _decisions(stage) if row["reason"] == "root committed"]
     prelude_hours = round(rooted["detail"]["child_gpu_seconds_upper_bound"] / MB_SECONDS_PER_HOUR, 3)

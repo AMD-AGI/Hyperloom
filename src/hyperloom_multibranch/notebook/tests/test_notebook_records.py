@@ -36,6 +36,7 @@ from hyperloom_multibranch.contracts.notebook.peers import (
     Validity,
     Verdict,
 )
+from hyperloom_multibranch.contracts.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.notebook.records import (
     BaselineRecord,
     Learning,
@@ -472,19 +473,25 @@ async def test_a_specialist_records_its_own_llm_spend_and_the_scheduler_its_judg
     await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, "s1", from_commit="c0"))
     await _tested(open_as, "r1")
 
-    spent = await runtime.record_llm_usage(LlmUsage("s1", UsageSource.SPECIALIST, 1.25, 90_000, 4_000, "launch-1"))
+    tokens = TokenCounts(input=1_000, output=4_000, cache_read=80_000, cache_write=9_000)
+    spent = await runtime.record_llm_usage(LlmUsage("s1", UsageSource.SPECIALIST, 1.25, tokens, "launch-1"))
     await runtime.record_llm_usage(LlmUsage("s1", UsageSource.SPECIALIST, 0.5))
+    unpriced = await runtime.record_llm_usage(LlmUsage("s1", UsageSource.SPECIALIST, None, tokens))
     await scheduler.record_llm_usage(LlmUsage("", UsageSource.JUDGE, 0.125))
     await scheduler.record_llm_usage(LlmUsage("", UsageSource.RESOLVER, 0.125))
+    await scheduler.record_llm_usage(LlmUsage("", UsageSource.JUDGE, None, tokens))
     snapshot = await scheduler.snapshot()
     rows = {row.branch: row for row in snapshot.progress}
 
     assert (spent.usage.launch, snapshot.llm_usage[0]) == ("launch-1", spent)
+    assert snapshot.llm_usage[2] == unpriced and unpriced.usage.tokens == tokens
     assert [record.usage.source for record in snapshot.llm_usage] == [
+        UsageSource.SPECIALIST,
         UsageSource.SPECIALIST,
         UsageSource.SPECIALIST,
         UsageSource.JUDGE,
         UsageSource.RESOLVER,
+        UsageSource.JUDGE,
     ]
     assert (rows["s1"].llm_usd, rows[INTEGRATION_BRANCH].llm_usd, snapshot.llm_usd) == (1.75, 0.0, 2.0)
     assert snapshot.gpu_hours == pytest.approx(600.0 / 3600.0)
@@ -507,12 +514,10 @@ async def test_llm_spend_is_recorded_only_by_whoever_spent_it(
         await open_as(role, branch).record_llm_usage(usage)
 
 
-@pytest.mark.parametrize(
-    "fields", [{"cost_usd": -0.01}, {"cost_usd": float("nan")}, {"cost_usd": float("inf")}, {"input_tokens": -1}]
-)
-def test_an_llm_cost_is_a_finite_amount_and_token_counts_are_not_negative(fields: dict[str, float]) -> None:
+@pytest.mark.parametrize("cost", [-0.01, float("nan"), float("inf")])
+def test_an_llm_cost_is_a_finite_amount(cost: float) -> None:
     with pytest.raises(ValueError):
-        LlmUsage(**{"branch": "s1", "source": UsageSource.SPECIALIST, "cost_usd": 1.0, **fields})
+        LlmUsage("s1", UsageSource.SPECIALIST, cost)
 
 
 def _ran_on(request_id: str, node: str, **facts: object) -> TestResult:

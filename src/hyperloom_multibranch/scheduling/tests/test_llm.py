@@ -110,7 +110,7 @@ async def test_a_recorded_completion_writes_each_reply_s_cost_as_the_scheduler_s
     failing = False
     assert (await recorded("sys", "user")).text == "r"
 
-    assert usages.recorded == [LlmUsage("", UsageSource.RESOLVER, 0.25, input_tokens=57, output_tokens=3)]
+    assert usages.recorded == [LlmUsage("", UsageSource.RESOLVER, 0.25, TokenCounts(input=7, output=3, cache_read=50))]
 
 
 @pytest.mark.parametrize(

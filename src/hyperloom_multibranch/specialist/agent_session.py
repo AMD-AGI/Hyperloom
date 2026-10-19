@@ -274,8 +274,7 @@ class AgentSession:
         if not used.tokens:
             return
         cost = sum(self._price(model).cost_usd(tokens) for model, tokens in used.tokens.items())
-        total = used.total
-        usage = LlmUsage(self._start.branch, UsageSource.SPECIALIST, cost, total.prompt, total.output, used.session_id)
+        usage = LlmUsage(self._start.branch, UsageSource.SPECIALIST, cost, used.total, used.session_id)
         await self._place.notebook.record_llm_usage(usage)
 
     def _price(self, model: str) -> ModelPrice:
