@@ -149,16 +149,34 @@ def bind_source_evidence(config_path: Path, patches: list[dict[str, Any]]) -> No
 
 
 def enable_profile(config_path: Path) -> None:
-    """Apply the fixed-sequence TraceLens profile setup to this rendered copy.
+    """Prepare TraceLens instrumentation while leaving native capture policy to Magpie."""
+    from ._profile_setup import apply_sglang_shape_tool, patch_for_profile, shape_discovery_enabled
 
-    The accepted session YAML is left unchanged. Patching, the kernel-shape tool,
-    and the capture window come from the same code the fixed-sequence route uses.
-    """
     config = yaml.safe_load(config_path.read_text(encoding=_ENCODING))
     bench = config["benchmark"]
-    from ._profile_setup import prepare_profile
-
-    prepare_profile(bench, bench.setdefault("envs", {}), write_workload=False)
+    framework = str(bench["framework"]).lower()
+    patch_ok, sitecustomize = patch_for_profile(bench.setdefault("envs", {}), framework)
+    apply_launch_changes(bench, LaunchChanges())
+    launch = bench["agentx"]["launch_overrides"]
+    server_env = launch["env"]
+    profile_env: dict[str, str] = {}
+    detailed = patch_ok
+    if sitecustomize:
+        shape_env = dict(server_env)
+        if "PYTHONPATH" in launch["unset_env"]:
+            shape_env["PYTHONPATH"] = ""
+        detailed = apply_sglang_shape_tool(shape_env, {}, shape_discovery=shape_discovery_enabled(bench))
+        profile_env.update(
+            (name, str(shape_env[name])) for name in ("PYTHONPATH", "TRACELENS_SHAPE_DISCOVERY") if name in shape_env
+        )
+    if framework == "vllm":
+        name = "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS"
+        inherited = "1200" if name in launch["unset_env"] else os.environ.get(name, "1200")
+        profile_env[name] = str(max(1200, int(server_env.get(name, inherited))))
+    apply_launch_changes(bench, LaunchChanges(env=profile_env))
+    torch_profiler = bench.setdefault("profiler", {}).setdefault("torch_profiler", {})
+    torch_profiler["enabled"] = True
+    torch_profiler.setdefault("detailed_annotations", detailed)
     config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_ENCODING)
 
 

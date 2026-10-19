@@ -19,6 +19,9 @@ from hyperloom.common.coerce import to_int
 from hyperloom.common.model_paths import resolve_local_model_dir
 
 
+log = logging.getLogger(__name__)
+
+
 _MAXPOS_CONFIG_KEYS = (
     "max_position_embeddings",
     "n_positions",
@@ -588,7 +591,7 @@ def summarize_model_config(model_path: str) -> dict:
     return out
 
 
-def _model_is_gemma2(model_path: str) -> bool:
+def model_is_gemma2(model_path: str) -> bool:
     """Best-effort detect a Gemma2 model from config.json (top level or text_config)."""
     data = _load_model_config_dict(model_path)
     if data is not None:
@@ -596,7 +599,13 @@ def _model_is_gemma2(model_path: str) -> bool:
             return True
         if _config_has_model_identity(data):
             return False
-    return _path_looks_like_gemma2(model_path)
+    matched = _path_looks_like_gemma2(model_path)
+    if matched and data is None:
+        log.warning(
+            "Gemma2 detected via path heuristic (no readable config.json at %r); shape-discovery skip may be imprecise.",
+            model_path,
+        )
+    return matched
 
 
 def _sparse_kv_block_size(model_path: str) -> int | None:

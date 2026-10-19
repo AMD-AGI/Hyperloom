@@ -12,7 +12,7 @@ import pytest
 import yaml
 
 from hyperloom.inference_optimizer.framework_registry import names, server_args_env_name
-from hyperloom.orchestrator.actions.executors import _grid_runner, _workload_envs
+from hyperloom.orchestrator.actions.executors import _grid_runner, _profile_setup, _workload_envs
 from hyperloom.orchestrator.actions.executors._grid_base import GridVariant
 from hyperloom.orchestrator.actions.executors._server_argv import (
     ServerArgv,
@@ -40,10 +40,9 @@ _COMPOSERS = (
     (_grid_runner, "_build_variant_yaml"),
 )
 
-#: The functions allowed to write the argument env: the two composers, the two
-#: helpers they delegate a step to -- the per-flag merge every injection goes
-#: through and the final guards -- all of which run above the seal, plus the
-#: seal itself and the re-seal a repair is written back through.
+#: Argument writers are the composers, their profile/merge/guard helpers, and
+#: the final seal. The profile helper call chain is checked below; repairs write
+#: back through the re-seal.
 _WRITERS = frozenset(
     {
         "materialize_config_with_envs",
@@ -52,6 +51,9 @@ _WRITERS = frozenset(
         "_build_variant_yaml",
         "seal_server_argv",
         "reseal_config_argv",
+        "_apply_vllm_profile",
+        "_apply_sglang_profile",
+        "apply_atom_profile_caps",
     }
 )
 
@@ -158,6 +160,38 @@ def test_every_write_inside_a_composer_happens_above_the_seal(module, name):
     seal_line = _seal_call(_function(module, name).body)[1].lineno
     late = [lineno for function, lineno in _argument_env_writes(source) if function == name and lineno > seal_line]
     assert not late, f"{name} writes the argument env after the seal at line {seal_line}, at line(s) {late}"
+
+
+def test_profile_argument_writers_only_run_through_the_sealed_composer():
+    """Every profile argument mutation reaches the fixed-sequence final seal."""
+    owners = {
+        "_apply_vllm_profile": (_profile_setup, "_apply_framework_profile"),
+        "_apply_sglang_profile": (_profile_setup, "_apply_framework_profile"),
+        "_apply_framework_profile": (_profile_setup, "prepare_profile"),
+        "prepare_profile": (_workload_envs, "materialize_config_with_envs"),
+        "apply_atom_profile_caps": (_workload_envs, "materialize_config_with_envs"),
+    }
+    calls = {name: [] for name in owners}
+    for path in sorted(_PACKAGE.rglob("*.py")):
+        if "/tests/" in str(path):
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            for call in ast.walk(node):
+                if not isinstance(call, ast.Call):
+                    continue
+                name = call.func.id if isinstance(call.func, ast.Name) else getattr(call.func, "attr", "")
+                if name in calls:
+                    calls[name].append((path, node.name, call.lineno))
+    seal_line = _seal_call(_function(_workload_envs, "materialize_config_with_envs").body)[1].lineno
+    for name, (module, function) in owners.items():
+        assert calls[name], f"{name} is no longer composed"
+        for path, caller, line in calls[name]:
+            assert (path, caller) == (Path(module.__file__), function), f"unsealed call to {name}: {path}:{line}"
+            if module is _workload_envs:
+                assert line < seal_line
 
 
 def test_the_census_sees_a_writer_that_renames_everything_it_touches():

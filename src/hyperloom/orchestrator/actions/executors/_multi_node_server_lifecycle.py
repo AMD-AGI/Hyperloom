@@ -360,7 +360,7 @@ async def restart_server_for_round(
             # (roofline vs sglang_gc_patch) follows this controller's shape mode;
             # sglang_gc_patch only matters while capturing, so it waits for a profiling round.
             from ._server_patcher import resolve_sglang_patch_set
-            from ._workload_envs import _tracelens_patch_enabled
+            from ._profile_setup import _tracelens_patch_enabled
 
             patch_set = resolve_sglang_patch_set()
             if patch_set == "graph-capture" and not torch_profiler_dir:

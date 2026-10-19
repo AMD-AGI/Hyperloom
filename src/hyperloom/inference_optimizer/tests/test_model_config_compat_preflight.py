@@ -913,7 +913,7 @@ def test_model_is_gemma2_falls_back_to_path_on_residual_config(tmp_path):
     m = tmp_path / "google-gemma-2-9b-it"
     m.mkdir()
     (m / "config.json").write_text("{}", encoding="utf-8")
-    assert mcu._model_is_gemma2(str(m)) is True
+    assert mcu.model_is_gemma2(str(m)) is True
 
 
 def test_model_is_gemma2_trusts_identified_non_gemma_config(tmp_path):
@@ -931,7 +931,7 @@ def test_model_is_gemma2_trusts_identified_non_gemma_config(tmp_path):
         ),
         encoding="utf-8",
     )
-    assert mcu._model_is_gemma2(str(m)) is False
+    assert mcu.model_is_gemma2(str(m)) is False
 
 
 def test_model_is_gemma2_detects_nested_text_config(tmp_path):
@@ -948,7 +948,7 @@ def test_model_is_gemma2_detects_nested_text_config(tmp_path):
         ),
         encoding="utf-8",
     )
-    assert mcu._model_is_gemma2(str(m)) is True
+    assert mcu.model_is_gemma2(str(m)) is True
 
 
 def test_detect_unregistered_custom_config_blocks(tmp_path):

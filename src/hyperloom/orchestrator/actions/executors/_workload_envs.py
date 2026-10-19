@@ -25,15 +25,13 @@ import os
 import re
 import shutil
 import subprocess
-from functools import cache
 from pathlib import Path
-from typing import Any, Mapping, NamedTuple
+from typing import Any, Mapping
 
 import yaml
 
 from hyperloom.common.coerce import to_str_list
 from hyperloom.inference_optimizer.runtime_environment import prepend_launch_path
-from hyperloom.common.env import is_truthy
 from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.common.perf_metric import (
     AGENTX_KEEP_P50_THRESHOLD_PCT,
@@ -60,7 +58,6 @@ from hyperloom.inference_optimizer.session.paths import asset_root
 from hyperloom.inference_optimizer.framework_paths import ENV_FLYDSL_EXTRA_SOURCE_DIRS
 from hyperloom.inference_optimizer.framework_paths import GENERIC_FRAMEWORK_ROOT_ENV
 from hyperloom.inference_optimizer.framework_paths import flydsl_extra_source_dirs
-from ._benchmark_interpreter import _resolve_probe_python
 from hyperloom.inference_optimizer.grid_server_args import (
     compact_json_server_args,
     dedup_vllm_server_args,
@@ -75,6 +72,7 @@ from hyperloom.inference_optimizer.grid_server_args import validate_server_args_
 from hyperloom.inference_optimizer import framework_registry
 from ._recipe_script import launcher_overwritten_envs
 from ._server_argv import add_server_arg_unless_pinned, seal_server_argv
+from ._profile_setup import _AtomTracelensCaps, _profiler_bound_holds, _profiler_flag_value
 from hyperloom.inference_optimizer.model_config_utils import (
     _fp8_is_per_channel_per_token,
     _load_model_config_dict,
@@ -94,83 +92,12 @@ _GFX942_GPU_TYPES = frozenset(board for board, (arch, _cus) in AMD_GPU_DISPATCH_
 # retry that is supposed to launch without it.
 _MOE_RUNNER_BACKEND_RE = re.compile(r"(?:^|\s)--moe-runner-backend(?:(?:[=\s]+)(?!--)\S+)?")
 
-# Profile-phase capture defaults. Trace size scales with captured decode steps;
-# an oversized capture serializes too slowly and kills the engine. 128 steps is
-# serialization-safe on a large TP=8 MoE. Tunable via
-# HYPERLOOM_PROFILE_MAX_STEPS_CAP.
-_DEFAULT_PROFILE_MAX_STEPS = 128
-# Default profile OSL ceiling when --profile-osl / PROFILE_OSL is unset: the
-# profile reuses min(served OSL, this) so its trace stays light.
-_PROFILE_DEFAULT_OSL = 1024
 # SGLang graph-capture profiling flag shipped by the profile YAML, and the
 # eager flag that makes it a no-op. Literals rather than an import from
 # ``baseline``: that module imports this one, so the dependency only goes one
 # way.
 _SGLANG_PROFILE_CUDA_GRAPH_FLAG = "--enable-profile-cuda-graph"
 _SGLANG_DISABLE_CUDA_GRAPH_FLAG = "--disable-cuda-graph"
-# ``HYPERLOOM_PROFILE_DEGRADED_REASON`` value meaning the TraceLens runtime patch
-# was attempted and did not apply. Distinct from "never attempted": patching can
-# be disabled for an image that already ships the patch.
-_TRACELENS_PATCH_UNAVAILABLE = "tracelens_runtime_patch_unavailable"
-
-# Installed ATOM (docker) TraceLens knobs. One subprocess; cached for the process.
-_ATOM_CAPS_PROBE = (
-    "import argparse\n"
-    "from atom.model_engine.arg_utils import EngineArgs\n"
-    "from atom.utils import envs\n"
-    "p = argparse.ArgumentParser(); EngineArgs.add_cli_args(p)\n"
-    "h = p.format_help()\n"
-    'print(int("--mark-trace" in h))\n'
-    'print(int(hasattr(envs, "ATOM_ENABLE_DETAILED_ANNOTATION")))\n'
-    'print(int(hasattr(envs, "ATOM_PROFILER_MORE")))\n'
-)
-
-
-class _AtomTracelensCaps(NamedTuple):
-    """Installed-atom support for TraceLens profile knobs."""
-
-    mark_trace: bool
-    detailed_annotation: bool
-    profiler_more: bool
-
-
-_ATOM_CAPS_NONE = _AtomTracelensCaps(False, False, False)
-
-
-@cache
-def _atom_tracelens_caps() -> _AtomTracelensCaps:
-    """Probe the installed atom for ``--mark-trace`` and annotation envs.
-
-    Fail-soft: import / help / parse errors return all-false so an older ATOM
-    argparse never sees ``--mark-trace``. Cached after the first call.
-    """
-    try:
-        proc = subprocess.run(
-            [_resolve_probe_python("atom"), "-c", _ATOM_CAPS_PROBE],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        log.warning(
-            "atom TraceLens caps probe failed (%s); omitting --mark-trace / annotation envs",
-            exc,
-        )
-        return _ATOM_CAPS_NONE
-    lines = [ln.strip() for ln in (proc.stdout or "").splitlines() if ln.strip()]
-    if proc.returncode != 0 or len(lines) < 3 or any(ln not in {"0", "1"} for ln in lines[:3]):
-        log.warning(
-            "atom TraceLens caps probe unavailable (exit=%s); omitting --mark-trace / annotation envs",
-            proc.returncode,
-        )
-        return _ATOM_CAPS_NONE
-    return _AtomTracelensCaps(
-        mark_trace=lines[0] == "1",
-        detailed_annotation=lines[1] == "1",
-        profiler_more=lines[2] == "1",
-    )
-
-
 # Quality-reference env names, in resolution order. Every scriptable workload
 # needs this gate, so the contract is the framework-neutral ``HYPERLOOM_`` pair.
 # The ``XDIT_`` pair predates ``--framework custom`` and is still both read and
@@ -957,30 +884,6 @@ def _visible_gpu_count() -> int:
     return 0
 
 
-def _tracelens_patch_enabled() -> bool:
-    """Read the ``HYPERLOOM_ENABLE_PATCH`` kill switch (default on).
-
-    Set ``HYPERLOOM_ENABLE_PATCH=0`` to disable runtime patching of vLLM /
-    SGLang. Default on because the patches are backward-compatible.
-
-    With the switch off, no *server flag* that only a patched build accepts is
-    injected (vLLM ``--profiler-config.detailed_trace_annotation``, SGLang
-    ``--enable-shape-discovery-for-cuda-graph-profile``), because an unpatched
-    argparse rejects them. The SGLang ``PROFILE_EXTRA_BODY`` annotations
-    (``shape_discovery`` / ``detailed_annotations``) are a different case and are
-    **kept**: they ride the ``/start_profile`` API, which an unpatched server
-    accepts, and the switch is also how a pre-patched image opts out of runtime
-    patching while still supporting them. Only a patch that was *attempted and
-    failed* clears them, which is why that gate reads
-    ``HYPERLOOM_PROFILE_DEGRADED_REASON`` (set solely on the attempted-and-failed
-    path) rather than ``tracelens_patch_ok``.
-
-    Returns:
-        True when runtime patching is enabled (default), else False.
-    """
-    return os.environ.get("HYPERLOOM_ENABLE_PATCH", "1").strip() != "0"
-
-
 def _coerce_workload_int_env(env_key: str, raw: str) -> int:
     """Coerce workload env values, accepting ``CONC`` comma ladders."""
     text = str(raw or "").strip()
@@ -1010,55 +913,6 @@ def default_baseline_config() -> Path:
         return source
     fw = os.environ.get("FRAMEWORK") or framework_registry.DEFAULT_FRAMEWORK
     return asset_root() / "assets" / "configs" / framework_registry.shipped_config_name("baseline", fw)
-
-
-_PROFILER_FLAG_RE = re.compile(r"--profiler-config\.(\w+)[=\s]+(\S+)")
-
-
-def _profiler_flag_value(server_args: str, name: str) -> str | None:
-    """The value vLLM would resolve for ``--profiler-config.<name>``, or None.
-
-    Returns the LAST occurrence, because repeated flags are how this layer overrides
-    earlier ones and vLLM's argparse resolves them last-wins. Accepts both
-    ``--flag value`` and ``--flag=value``. Regex rather than tokenization: this runs
-    after JSON-valued flags have been compacted, and one unbalanced quote must not
-    take the whole guard down with it.
-    """
-    value: str | None = None
-    for match in _PROFILER_FLAG_RE.finditer(server_args or ""):
-        if match.group(1) == name:
-            value = match.group(2)
-    return value
-
-
-def _profiler_bound_holds(name: str, value: str | None, *, cap: int) -> bool:
-    """Whether the value already present keeps this flag's guarantee.
-
-    Name-only matching is not enough for the two flags that decide whether the
-    capture is bounded at all: vLLM reads ``max_iterations`` of 0 (or absent) as "no
-    limit", and a frontend profiler left on tracks no iterations and captures the
-    entire ``start_profile``..``stop_profile`` range. A guard that accepted those
-    would report success while the run stayed unbounded, which is worse than not
-    guarding -- the warning would send the next investigation the wrong way. The
-    summary table is the same kind of flag: only an explicit false keeps vLLM from
-    building it after the trace is written.
-
-    Every other flag only decides what the trace contains or where it lands, so its
-    presence is the whole contract.
-    """
-    if value is None:
-        return False
-    if name == "max_iterations":
-        try:
-            iterations = int(value)
-        except ValueError:
-            return False
-        return 0 < iterations <= cap
-    if name == "ignore_frontend":
-        return is_truthy(value)
-    if name == "torch_profiler_dump_cuda_time_total":
-        return not is_truthy(value)
-    return True
 
 
 def _finalize_framework_server_args(
@@ -1134,34 +988,6 @@ def _finalize_framework_server_args(
     resolved_server_args = validate_server_args_shell_safe(resolved_server_args)
     if resolved_server_args:
         envs[framework_env] = resolved_server_args
-
-
-def _profile_steps_cap(policy_env: Mapping[str, Any]) -> int:
-    raw = str(policy_env.get("HYPERLOOM_PROFILE_MAX_STEPS_CAP") or "").strip()
-    try:
-        cap = int(raw or _DEFAULT_PROFILE_MAX_STEPS)
-    except ValueError:
-        cap = _DEFAULT_PROFILE_MAX_STEPS
-    return cap if cap > 0 else _DEFAULT_PROFILE_MAX_STEPS
-
-
-def _profile_capture_window(
-    policy_env: Mapping[str, Any], *, cap: int, delay_iters: int = 0, steady_floor: int | None = None
-) -> tuple[int, int]:
-    """Resolve the synthetic workload's capture steps and delay."""
-    override = str(policy_env.get("HYPERLOOM_PROFILE_MAX_ITERS") or "").strip()
-    if not override.isdigit() or int(override) <= 0:
-        return delay_iters, cap
-    max_iters = int(override)
-    try:
-        delay_iters = max(0, int(policy_env.get("HYPERLOOM_PROFILE_DELAY_ITERS") or 8))
-    except ValueError:
-        delay_iters = 8
-    if steady_floor is not None and max_iters < steady_floor:
-        log.warning("HYPERLOOM_PROFILE_MAX_ITERS=%d is below the steady-state floor of %d", max_iters, steady_floor)
-    elif max_iters > cap:
-        log.warning("HYPERLOOM_PROFILE_MAX_ITERS=%d exceeds the serialization-safe cap of %d", max_iters, cap)
-    return delay_iters, max_iters
 
 
 def prepare_grid_benchmark_config(config_path: Path, output_dir: Path, **overrides: Any) -> Path:
@@ -1458,7 +1284,7 @@ def materialize_config_with_envs(
     if is_profile and not _is_scriptable_profile:
         from ._profile_setup import prepare_profile
 
-        outcome = prepare_profile(bench, envs, write_workload=True)
+        outcome = prepare_profile(bench, envs)
         profile_num_prompts = outcome.num_prompts
         atom_caps = outcome.atom_caps
         pending_vllm_profiler_flags = outcome.vllm_flags
