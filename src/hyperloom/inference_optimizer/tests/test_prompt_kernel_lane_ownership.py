@@ -26,6 +26,9 @@ from hyperloom.orchestrator.phases import machine_state as _ps
 from hyperloom.orchestrator.prompts.prompt_builder import (
     build_orchestration_prompt,
     default_enabled_actions,
+    PromptAssets,
+    PromptCycle,
+    SessionContext,
 )
 
 
@@ -41,14 +44,16 @@ def kernel_prompt() -> str:
     return build_orchestration_prompt(
         action_registry=ACTION_CATALOGUE,
         enabled_actions=default_enabled_actions(no_kernel=False),
-        framework="sglang",
-        kernel_enabled=True,
-        framework_agent_phase_enabled=True,
-        objective_kind="gain_pct",
-        objective_value=15.0,
-        max_minutes=480,
-        phase=_ps.PHASE_KERNEL_AGENT,
-        rules_fragment_path=asset_system_prompts_dir() / "orchestration.md",
+        session=SessionContext(
+            framework="sglang",
+            kernel_enabled=True,
+            framework_agent_phase_enabled=True,
+            objective_kind="gain_pct",
+            objective_value=15.0,
+            max_minutes=480,
+        ),
+        cycle=PromptCycle(phase=_ps.PHASE_KERNEL_AGENT),
+        assets=PromptAssets(rules_fragment_path=asset_system_prompts_dir() / "orchestration.md"),
     )
 
 

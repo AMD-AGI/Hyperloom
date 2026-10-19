@@ -338,9 +338,9 @@ async def test_agentx_executor_uses_persisted_model_and_precision(session_dir, m
 
     monkeypatch.setattr(ta, "analyze", analyze)
     await TargetAnalysisExecutor(compare_against_gpu="b300")(ctx)
-    assert captured[0]["model_path"] == "/models/GLM-5.2-MXFP4"
-    assert captured[0]["precision"] == "mxfp4"
-    assert captured[0]["benchmark_mode"] == "agentx"
+    assert captured[0]["request"].model_path == "/models/GLM-5.2-MXFP4"
+    assert captured[0]["request"].precision == "mxfp4"
+    assert captured[0]["request"].benchmark_mode == "agentx"
 
 
 @pytest.mark.asyncio
@@ -363,7 +363,7 @@ async def test_agentx_explicit_precision_override_wins_over_stale_state(session_
 
     monkeypatch.setattr(ta, "analyze", analyze)
     await TargetAnalysisExecutor(compare_against_gpu="b300")(ctx)
-    assert captured[0]["precision"] == "bf16"
+    assert captured[0]["request"].precision == "bf16"
     assert ctx.extra["shared_state"].precision == "fp8"
 
 

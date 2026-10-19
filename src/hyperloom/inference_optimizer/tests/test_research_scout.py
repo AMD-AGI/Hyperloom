@@ -121,7 +121,7 @@ async def test_internal_research_scout_task_is_readonly(tmp_path: Path):
         MockTurn,
         ScriptedPlan,
     )
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
 
     state = SharedState(session_id="research-scout-readonly")
     state.register_seen_pr_ids(["https://pr/seen"])
@@ -149,7 +149,7 @@ async def test_internal_research_scout_task_is_readonly(tmp_path: Path):
         session_dir=tmp_path,
         backends=backends,
         role_registry=default_role_registry(),
-        knowledge_plane=None,
+        advisory=AdvisoryServices(knowledge_plane=None),
     )
 
     task = await coord.phase_internal._enqueue_internal_research_scout_task(

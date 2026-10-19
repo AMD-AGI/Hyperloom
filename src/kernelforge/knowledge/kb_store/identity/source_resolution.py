@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from kernelforge.knowledge.kb_store.identity.implementation import canonical_owner_framework
@@ -16,6 +17,16 @@ log = logging.getLogger(__name__)
 _UNKNOWN = "unknown"
 _FRAMEWORKS = ("aiter", "sglang", "vllm")
 _NO_FRAMEWORK_SENTINELS = {"standalone", "none", "unknown"}
+
+
+@dataclass(frozen=True)
+class KernelSources:
+    """The kernel file, its text, and the other sources its operation may be defined in."""
+
+    kernel_path: str
+    kernel_source: str
+    source_files: list[str] | None = None
+    source_contents: dict[str, str] | None = None
 
 
 def resolve_operation(kernel_source: str, kernel_path: str, target_functions: list[str] | None = None) -> str:
@@ -127,27 +138,24 @@ def find_defining_path(
 
 
 def infer_source_owner_framework(
+    sources: KernelSources,
     *,
-    kernel_path: str,
-    kernel_source: str,
     target_functions: list[str] | None = None,
-    source_files: list[str] | None = None,
     framework_override: str = "",
-    source_contents: dict[str, str] | None = None,
     concrete_operation: str = "",
 ) -> str:
     """Resolve the canonical framework that owns the concrete operation."""
     operation = concrete_operation or resolve_operation(
-        kernel_source,
-        kernel_path,
+        sources.kernel_source,
+        sources.kernel_path,
         target_functions=target_functions,
     )
     defining_path = find_defining_path(
         operation,
-        kernel_path,
-        kernel_source,
-        source_files,
-        source_contents=source_contents,
+        sources.kernel_path,
+        sources.kernel_source,
+        sources.source_files,
+        source_contents=sources.source_contents,
     )
     return detect_framework(
         defining_path,
@@ -156,6 +164,7 @@ def infer_source_owner_framework(
 
 
 __all__ = [
+    "KernelSources",
     "detect_backend_language",
     "detect_framework",
     "find_defining_path",

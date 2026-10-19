@@ -32,13 +32,7 @@ def test_coerce_helpers_tolerate_bad_values():
 
 def test_build_report_without_raw_leaves_metrics_none():
     report = br.build_report(
-        None,
-        framework="vllm",
-        model="/models/x",
-        success=False,
-        workspace_dir="/ws",
-        execution_time=1.0,
-        errors=["boom"],
+        br.ReportSubject("vllm", "/models/x"), br.RunOutcome(False, ["boom"]), workspace_dir="/ws", execution_time=1.0
     )
     assert report["success"] is False
     assert report["throughput"] is None
@@ -51,10 +45,8 @@ def test_build_report_without_raw_leaves_metrics_none():
 
 def test_build_report_model_falls_back_to_raw_model_id():
     report = br.build_report(
-        {"model_id": "raw-model", "output_throughput": 1.0},
-        framework="vllm",
-        model="",
-        success=True,
+        br.ReportSubject("vllm", ""),
+        br.RunOutcome(True, raw_result={"model_id": "raw-model", "output_throughput": 1.0}),
         workspace_dir="/ws",
         execution_time=1.0,
     )
@@ -63,19 +55,20 @@ def test_build_report_model_falls_back_to_raw_model_id():
 
 def test_build_report_carries_scriptable_extras_and_analysis():
     report = br.build_report(
-        {
-            "output_throughput": 1.5,
-            "workload_kind": "scriptable",
-            "throughput_unit": "img/s",
-            "quality_gate": {"passed": True},
-            "latency_s": 0.66,
-        },
-        framework="xdit",
-        model="/models/flux",
-        success=True,
+        br.ReportSubject("xdit", "/models/flux"),
+        br.RunOutcome(
+            True,
+            raw_result={
+                "output_throughput": 1.5,
+                "workload_kind": "scriptable",
+                "throughput_unit": "img/s",
+                "quality_gate": {"passed": True},
+                "latency_s": 0.66,
+            },
+            analysis={"failure_root_cause": "oom"},
+        ),
         workspace_dir="/ws",
         execution_time=2.0,
-        analysis={"failure_root_cause": "oom"},
     )
     assert report["workload_kind"] == "scriptable"
     assert report["throughput_unit"] == "img/s"
@@ -141,13 +134,10 @@ def test_write_log_aliases_aggregates_phase_logs(tmp_path):
 
 def test_write_report_emits_all_artifacts(tmp_path):
     report = br.build_report(
-        {"output_throughput": 700.0, "completed": 40, "duration": 30.0},
-        framework="sglang",
-        model="/models/x",
-        success=True,
+        br.ReportSubject("sglang", "/models/x", profiling_enabled=True),
+        br.RunOutcome(True, raw_result={"output_throughput": 700.0, "completed": 40, "duration": 30.0}),
         workspace_dir=str(tmp_path),
         execution_time=30.0,
-        profiling_enabled=True,
     )
     path = br.write_report(tmp_path, report)
     assert path == tmp_path / "benchmark_report.json"

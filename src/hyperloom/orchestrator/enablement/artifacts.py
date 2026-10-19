@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from hyperloom.common.io import WriteOptions, atomic_write_text
 from hyperloom.inference_optimizer.grid_server_args import strip_benchmark_harness_flags
+from hyperloom.inference_optimizer.reference_script import ServingTarget
 from hyperloom.inference_optimizer.session.session_paths import (
     enablement_dir,
     enablement_round_dir,
@@ -160,10 +161,7 @@ def write_setting_script(
     enablement: "EnablementRound",
     framework: str,
     *,
-    model: str | None = None,
-    tp: int | None = None,
-    max_model_len: int | None = None,
-    gpu_type: str | None = None,
+    target: ServingTarget = ServingTarget(),
 ) -> str:
     """Write ``reports/enablement/enablement_setting.sh`` and the setup script it runs.
 
@@ -171,7 +169,7 @@ def write_setting_script(
     environment can be reproduced on its own; this script runs it and then
     launches with the accepted envs and server args.
     """
-    from hyperloom.inference_optimizer.reference_script import render_reference_script
+    from hyperloom.inference_optimizer.reference_script import LaunchSettings, render_reference_script
 
     from .setup_script import SETUP_SCRIPT_NAME, write_setup_script
 
@@ -179,13 +177,12 @@ def write_setting_script(
     accepted_cfg = dict(enablement.accepted_config or {})
     text = render_reference_script(
         framework=framework,
-        # The accepted config can carry a harness flag the measurement ran with; an exported recipe must not.
-        server_args=strip_benchmark_harness_flags(str(accepted_cfg.get("extra_server_args") or "").strip()),
-        envs={str(k): str(v) for k, v in (accepted_cfg.get("extra_envs") or {}).items()},
-        model=model,
-        tp=tp,
-        max_model_len=max_model_len,
-        gpu_type=gpu_type,
+        launch=LaunchSettings(
+            # The accepted config can carry a harness flag the measurement ran with; an exported recipe must not.
+            server_args=strip_benchmark_harness_flags(str(accepted_cfg.get("extra_server_args") or "").strip()),
+            envs={str(k): str(v) for k, v in (accepted_cfg.get("extra_envs") or {}).items()},
+        ),
+        target=target,
         setup_script=SETUP_SCRIPT_NAME,
     )
     out = enablement_dir(Path(session_dir)) / "enablement_setting.sh"

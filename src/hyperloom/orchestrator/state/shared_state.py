@@ -10,6 +10,7 @@ import logging
 import os
 import shlex
 import time
+import traceback
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, fields
@@ -277,6 +278,20 @@ _LIFECYCLE_CAP = 500
 
 # Experience KB injection log cap (orchestration and specialist rows share it).
 _KB_INJECTIONS_CAP = 20
+
+
+@dataclass(frozen=True)
+class KbInjection:
+    """One Experience KB block injected into a prompt, as ``record_experience_kb_injection`` stores it."""
+
+    consumer: str
+    read_id: str
+    experience_ids: list[str]
+    experiences: list[dict[str, Any]]
+    prompt_block: str
+    domain: str = ""
+    gap_canonical_id: str = ""
+
 
 # roofline_snapshots history cap (record_trace_analyze).
 _ROOFLINE_SNAPSHOTS_CAP = 50
@@ -1201,20 +1216,24 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         try:
             cb = self.current_best or {}
             if cb:
-                from hyperloom.inference_optimizer.reference_script import render_reference_script
+                from hyperloom.inference_optimizer import reference_script
 
-                text = render_reference_script(
+                text = reference_script.render_reference_script(
                     framework=str(self.framework or os.environ.get("FRAMEWORK", "sglang")),
-                    server_args=str(cb.get("extra_server_args") or ""),
-                    envs=dict(cb.get("extra_envs") or {}),
-                    overlay_pythonpath=str(cb.get("final_overlay") or ""),
-                    unset_envs=to_str_list(cb.get("unset_envs")),
-                    remove_args=to_str_list(cb.get("remove_args")),
-                    args_mode=str(cb.get("args_mode") or "append"),
-                    model=self.reference_model or os.environ.get("MODEL_PATH"),
-                    tp=int(self.tp or 0) or None,
-                    max_model_len=int(self.max_model_len or 0) or None,
-                    gpu_type=str(self.gpu_type or os.environ.get("GPU_TYPE", "")) or None,
+                    launch=reference_script.LaunchSettings(
+                        server_args=str(cb.get("extra_server_args") or ""),
+                        envs=dict(cb.get("extra_envs") or {}),
+                        overlay_pythonpath=str(cb.get("final_overlay") or ""),
+                        unset_envs=to_str_list(cb.get("unset_envs")),
+                        remove_args=to_str_list(cb.get("remove_args")),
+                        args_mode=str(cb.get("args_mode") or "append"),
+                    ),
+                    target=reference_script.ServingTarget(
+                        model=self.reference_model or os.environ.get("MODEL_PATH"),
+                        tp=int(self.tp or 0) or None,
+                        max_model_len=int(self.max_model_len or 0) or None,
+                        gpu_type=str(self.gpu_type or os.environ.get("GPU_TYPE", "")) or None,
+                    ),
                 )
                 (Path(session_dir) / "current_setting.sh").write_text(
                     text,
@@ -1501,41 +1520,31 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             return True
         return False
 
-    def record_experience_kb_injection(
-        self,
-        *,
-        consumer: str,
-        read_id: str,
-        experience_ids: list[str],
-        experiences: list[dict[str, Any]],
-        prompt_block: str,
-        domain: str = "",
-        gap_canonical_id: str = "",
-    ) -> bool:
+    def record_experience_kb_injection(self, injection: KbInjection) -> bool:
         """Record an injected Experience KB block.
 
         Orchestration re-reads every tick, so its row is skipped when it injects the same Experiences as the last
         orchestration row; every specialist dispatch is its own injection and always records.
         """
-        if consumer == "orchestration":
+        if injection.consumer == "orchestration":
             last = next(
-                (row for row in reversed(self.experience_kb_injections) if row.get("consumer") == consumer),
+                (row for row in reversed(self.experience_kb_injections) if row.get("consumer") == injection.consumer),
                 {},
             )
-            if sorted(last.get("experience_ids") or []) == sorted(experience_ids):
+            if sorted(last.get("experience_ids") or []) == sorted(injection.experience_ids):
                 return False
         self.experience_kb_injections.append(
             {
                 "tick": int(self.tick),
                 "phase": self.phase,
                 "ts": datetime.now(timezone.utc).isoformat(),
-                "consumer": consumer,
-                "domain": domain,
-                "gap_canonical_id": gap_canonical_id,
-                "read_id": read_id,
-                "experience_ids": list(experience_ids),
-                "experiences": [dict(item) for item in experiences],
-                "prompt_block": prompt_block,
+                "consumer": injection.consumer,
+                "domain": injection.domain,
+                "gap_canonical_id": injection.gap_canonical_id,
+                "read_id": injection.read_id,
+                "experience_ids": list(injection.experience_ids),
+                "experiences": [dict(item) for item in injection.experiences],
+                "prompt_block": injection.prompt_block,
             }
         )
         del self.experience_kb_injections[:-_KB_INJECTIONS_CAP]
@@ -1587,9 +1596,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         *,
         tick: int,
         stage: str,
-        exc_type: str,
-        message: str,
-        traceback_text: str,
+        exc: BaseException,
         agent: str = "",
     ) -> dict[str, Any]:
         """Persist a compact Coordinator exception summary for postmortems."""
@@ -1598,9 +1605,9 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             "ts": now_iso(),
             "stage": str(stage or ""),
             "agent": str(agent or ""),
-            "type": str(exc_type or ""),
-            "message": str(message or "")[:1000],
-            "traceback": str(traceback_text or "")[:12000],
+            "type": type(exc).__name__,
+            "message": str(exc)[:1000],
+            "traceback": "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))[:12000],
         }
         self.last_tick_exception = entry
         return entry
@@ -1999,6 +2006,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
                 compute_roofline_breakdown_from_state,
             )
             from hyperloom.inference_optimizer.roofline_snapshot import (
+                RooflineReading,
                 attach_perfmodel_breakdown,
                 build_roofline_snapshot,
             )
@@ -2020,12 +2028,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             snapshot_id=None,
             ts=ts_iso,
             analysis_md_path="",
-            theoretical_peak_tok_per_sec=peak_tput,
-            achieved_tok_per_sec=achieved,
-            mem_ceiling_tok_per_sec=float(breakdown.mem_tok_per_sec or 0.0),
-            cmp_ceiling_tok_per_sec=float(breakdown.cmp_tok_per_sec or 0.0),
-            bound_kind=breakdown.bound_kind,
-            throughput_unit=self._roofline_throughput_unit(),
+            reading=RooflineReading(breakdown, achieved, self._roofline_throughput_unit()),
             framework=str(getattr(self, "framework", "") or ""),
         )
         # Mark provenance: this is the baseline-arm ceiling backup, not a trace-derived snapshot.
@@ -2146,14 +2149,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             "ts": ts_iso,
         }
 
-        self._append_roofline_snapshot_history(
-            payload=payload,
-            snapshot_id=snapshot_id,
-            ts_iso=ts_iso,
-            analysis_md_path=analysis_md_path,
-            trace_input=trace_input,
-            kernel_roofline_path=kernel_roofline_path,
-        )
+        self._append_roofline_snapshot_history(payload)
 
     def _read_session_roofline_report(
         self,
@@ -2266,22 +2262,20 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
                 reusable_ids.append(str(kid))
         return summary, kernel_roofline, reusable_ids
 
-    def _append_roofline_snapshot_history(
-        self,
-        *,
-        payload: dict[str, Any],
-        snapshot_id: int,
-        ts_iso: str,
-        analysis_md_path: str,
-        trace_input: str,
-        kernel_roofline_path: str,
-    ) -> None:
-        """Append a compact roofline snapshot for report-side comparison; best-effort, failures never block the
-        canonical write above.
+    def _append_roofline_snapshot_history(self, payload: dict[str, Any]) -> None:
+        """Append a compact roofline snapshot of ``last_trace_analyze`` for report-side comparison; best-effort,
+        failures never block the canonical write above.
         """
+        latest = self.last_trace_analyze
+        snapshot_id = latest["roofline_snapshot_id"]
+        ts_iso = latest["ts"]
+        analysis_md_path = latest["analysis_md_path"]
+        trace_input = latest["trace_input"]
+        kernel_roofline_path = latest["kernel_roofline_path"]
         # Append compact history for report-side Roofline Comparison; best-effort.
         try:
             from hyperloom.inference_optimizer.roofline_snapshot import (
+                RooflineReading,
                 attach_perfmodel_breakdown,
                 build_roofline_snapshot,
             )
@@ -2321,7 +2315,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
                 self,
                 arm=snapshot_arm,
             )
-            peak_tput = float(breakdown.peak_tok_per_sec or 0.0)
             # Scriptable/diffusion has no tok/s decode ceiling; surface the compute-latency roofline (measured
             # per-image e2e latency vs the ideal floor from the sidecar).
             fw = str(getattr(self, "framework", "") or "")
@@ -2330,15 +2323,14 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
                 snapshot_id=snapshot_id,
                 ts=ts_iso,
                 analysis_md_path=str(analysis_md_path),
-                theoretical_peak_tok_per_sec=peak_tput,
-                achieved_tok_per_sec=achieved_tput,
-                mem_ceiling_tok_per_sec=float(breakdown.mem_tok_per_sec or 0.0),
-                cmp_ceiling_tok_per_sec=float(breakdown.cmp_tok_per_sec or 0.0),
-                bound_kind=breakdown.bound_kind,
-                throughput_unit=self._roofline_throughput_unit(),
+                reading=RooflineReading(
+                    ceiling=breakdown,
+                    achieved_tok_per_sec=achieved_tput,
+                    throughput_unit=self._roofline_throughput_unit(),
+                    e2e_mean_ms=e2e_mean_ms,
+                    roofline_ideal_ms=roofline_ideal_ms,
+                ),
                 framework=fw,
-                e2e_mean_ms=e2e_mean_ms,
-                roofline_ideal_ms=roofline_ideal_ms,
             )
             # Per-op PerfModel breakdown for dashboard visualization.
             attach_perfmodel_breakdown(history_entry, self, arm=snapshot_arm)

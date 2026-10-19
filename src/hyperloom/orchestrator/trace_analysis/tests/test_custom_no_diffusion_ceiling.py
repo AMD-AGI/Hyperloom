@@ -71,11 +71,10 @@ def _write_reports_for(tmp_path, framework):
     )
     return tl.write_reports(
         run_dir,
-        trace_input_type="file",
-        trace_files=[trace],
+        tl.TraceInputs(input_type="file", files=[trace]),
         candidates=[],
         args=args,
-        existing_report_path=analysis_md,
+        outcome=tl.OrchestratorOutcome(report_path=analysis_md),
     )
 
 

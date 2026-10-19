@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -361,20 +362,33 @@ def _merge_framework_calls(reports: list[dict[str, Any]]) -> dict[str, dict[str,
     return merged
 
 
+@dataclass(frozen=True)
+class _SiteTiming:
+    """How often and how long one merged site ran per rank, and whether it stopped before the hot loop."""
+
+    count: int
+    wall_s: float
+    wall_pct: float
+    setup_phase: bool = False
+    last_call_s: float | None = None
+    hot_loop_start_s: float | None = None
+
+
 def _candidate(
     *,
     category: str,
     site: str,
     signal: str,
-    count: int,
-    wall_s: float,
-    wall_pct: float,
+    timing: _SiteTiming,
     extra: dict[str, Any] | None = None,
-    setup_phase: bool = False,
-    last_call_s: float | None = None,
-    hot_loop_start_s: float | None = None,
 ) -> dict[str, Any]:
     """Assemble one rewrite candidate row."""
+    count = timing.count
+    wall_s = timing.wall_s
+    wall_pct = timing.wall_pct
+    setup_phase = timing.setup_phase
+    last_call_s = timing.last_call_s
+    hot_loop_start_s = timing.hot_loop_start_s
     row: dict[str, Any] = {
         "category": category,
         "taxonomy": _CATEGORY_TAXONOMY.get(category, "?"),
@@ -422,23 +436,19 @@ def _host_call_candidates(
         wall = float(entry["wall_s_per_rank"])
         pct = (wall / denom * 100.0) if denom else 0.0
         setup_phase = _stops_before_hot_loop(entry, hot_loop_start)
+        timing = _SiteTiming(
+            count, wall, pct, setup_phase=setup_phase, last_call_s=entry.get("last_s"), hot_loop_start_s=hot_loop_start
+        )
         if api in _OBJECT_COLLECTIVE_APIS:
             out.append(
                 _candidate(
                     category=CATEGORY_HOST_ROUND_TRIP,
                     site=entry["site"],
-                    signal=(
-                        f"{api} called {count} times per rank, {wall:.2f}s host wall "
-                        f"({pct:.1f}% of the run). Object collectives pickle through "
-                        f"the host, so every call is a round-trip."
-                    ),
-                    count=count,
-                    wall_s=wall,
-                    wall_pct=pct,
+                    signal=f"{api} called {count} times per rank, {wall:.2f}s host wall "
+                    f"({pct:.1f}% of the run). Object collectives pickle through "
+                    f"the host, so every call is a round-trip.",
+                    timing=timing,
                     extra={"api": api, "callers": sorted(entry["callers"])},
-                    setup_phase=setup_phase,
-                    last_call_s=entry.get("last_s"),
-                    hot_loop_start_s=hot_loop_start,
                 )
             )
         elif api in _HOST_SYNC_APIS:
@@ -446,18 +456,11 @@ def _host_call_candidates(
                 _candidate(
                     category=CATEGORY_HOST_SYNC,
                     site=entry["site"],
-                    signal=(
-                        f"{api} called {count} times per rank, {wall:.2f}s host wall "
-                        f"({pct:.1f}% of the run). Each call stalls the pipeline until "
-                        f"the device catches up."
-                    ),
-                    count=count,
-                    wall_s=wall,
-                    wall_pct=pct,
+                    signal=f"{api} called {count} times per rank, {wall:.2f}s host wall "
+                    f"({pct:.1f}% of the run). Each call stalls the pipeline until "
+                    f"the device catches up.",
+                    timing=timing,
                     extra={"api": api, "callers": sorted(entry["callers"])},
-                    setup_phase=setup_phase,
-                    last_call_s=entry.get("last_s"),
-                    hot_loop_start_s=hot_loop_start,
                 )
             )
         elif api in _H2D_APIS:
@@ -466,18 +469,11 @@ def _host_call_candidates(
                 _candidate(
                     category=CATEGORY_DEVICE_RESIDENT,
                     site=entry["site"],
-                    signal=(
-                        f"{api} performed {count} host-to-device copies per rank "
-                        f"({mib:.1f} MiB, {wall:.2f}s, {pct:.1f}% of the run) from a "
-                        f"CPU-resident source."
-                    ),
-                    count=count,
-                    wall_s=wall,
-                    wall_pct=pct,
+                    signal=f"{api} performed {count} host-to-device copies per rank "
+                    f"({mib:.1f} MiB, {wall:.2f}s, {pct:.1f}% of the run) from a "
+                    f"CPU-resident source.",
+                    timing=timing,
                     extra={"api": api, "mib_per_rank": _round(mib, 2), "callers": sorted(entry["callers"])},
-                    setup_phase=setup_phase,
-                    last_call_s=entry.get("last_s"),
-                    hot_loop_start_s=hot_loop_start,
                 )
             )
     out.extend(_fusion_candidates(merged, wall_seconds, hot_loop_start))
@@ -511,23 +507,24 @@ def _fusion_candidates(
         wall = float(entry["wall_s_per_rank"])
         pct = (wall / denom * 100.0) if denom else 0.0
         setup_phase = _stops_before_hot_loop(entry, hot_loop_start)
+        timing = _SiteTiming(
+            int(entry["count_per_rank"]),
+            wall,
+            pct,
+            setup_phase=setup_phase,
+            last_call_s=entry.get("last_s"),
+            hot_loop_start_s=hot_loop_start,
+        )
         for function, lines in sorted(fusable.items()):
             out.append(
                 _candidate(
                     category=CATEGORY_FUSE_COLLECTIVES,
                     site=function,
-                    signal=(
-                        f"{api} is issued from {len(lines)} separate lines in "
-                        f"{function} with one identical payload shape "
-                        f"({shape_sigs[0]}); {int(entry['count_per_rank'])} calls per "
-                        f"rank total, {wall:.2f}s ({pct:.1f}% of the run)."
-                    ),
-                    count=int(entry["count_per_rank"]),
-                    wall_s=wall,
-                    wall_pct=pct,
-                    setup_phase=setup_phase,
-                    last_call_s=entry.get("last_s"),
-                    hot_loop_start_s=hot_loop_start,
+                    signal=f"{api} is issued from {len(lines)} separate lines in "
+                    f"{function} with one identical payload shape "
+                    f"({shape_sigs[0]}); {int(entry['count_per_rank'])} calls per "
+                    f"rank total, {wall:.2f}s ({pct:.1f}% of the run).",
+                    timing=timing,
                     extra={
                         "api": api,
                         "call_lines": sorted(lines),
@@ -557,33 +554,29 @@ def _framework_call_candidates(
         wall = float(entry["wall_s_per_rank"])
         pct = (wall / denom * 100.0) if denom else 0.0
         setup_phase = _stops_before_hot_loop(entry, hot_loop_start)
+        timing = _SiteTiming(
+            count, wall, pct, setup_phase=setup_phase, last_call_s=entry.get("last_s"), hot_loop_start_s=hot_loop_start
+        )
         if strict >= MIN_STRICT_REPEAT_RATE:
             out.append(
                 _candidate(
                     category=CATEGORY_MEMOIZE,
                     site=entry["function"],
-                    signal=(
-                        f"called {count} times per rank ({wall:.2f}s, {pct:.1f}% of the "
-                        f"run); {strict * 100:.0f}% of sampled calls repeated an "
-                        f"argument identity already seen, so that share of the work is "
-                        f"recomputation of a value the process already had. Only "
-                        f"actionable if the callee is a PURE function of its arguments — "
-                        f"the probe cannot tell purity, and a coarse-grained method (a "
-                        f"module's forward, anything that mutates state or reads a "
-                        f"global) will show the same repeat rate while being impossible "
-                        f"to memoize. Check before rewriting."
-                    ),
-                    count=count,
-                    wall_s=wall,
-                    wall_pct=pct,
+                    signal=f"called {count} times per rank ({wall:.2f}s, {pct:.1f}% of the "
+                    f"run); {strict * 100:.0f}% of sampled calls repeated an "
+                    f"argument identity already seen, so that share of the work is "
+                    f"recomputation of a value the process already had. Only "
+                    f"actionable if the callee is a PURE function of its arguments — "
+                    f"the probe cannot tell purity, and a coarse-grained method (a "
+                    f"module's forward, anything that mutates state or reads a "
+                    f"global) will show the same repeat rate while being impossible "
+                    f"to memoize. Check before rewriting.",
+                    timing=timing,
                     extra={
                         "strict_repeat_rate": strict,
                         "loose_repeat_rate": loose,
                         "arg_samples": int(entry["arg_samples"]),
                     },
-                    setup_phase=setup_phase,
-                    last_call_s=entry.get("last_s"),
-                    hot_loop_start_s=hot_loop_start,
                 )
             )
         elif loose >= MIN_LOOSE_REPEAT_RATE:
@@ -592,28 +585,21 @@ def _framework_call_candidates(
                 _candidate(
                     category=CATEGORY_HOIST,
                     site=entry["function"],
-                    signal=(
-                        f"called {count} times per rank ({wall:.2f}s, {pct:.1f}% of the "
-                        f"run); {loose * 100:.0f}% of sampled calls repeated an argument "
-                        f"shape/dtype/device signature but only {strict * 100:.0f}% "
-                        f"received the same tensor object again. The arguments look like "
-                        f"the same value rebuilt every iteration, so memoizing this alone "
-                        f"would never hit. Confirm against the source: the probe does not "
-                        f"read tensor contents, because doing so would inject the very "
-                        f"host stalls it measures."
-                    ),
-                    count=count,
-                    wall_s=wall,
-                    wall_pct=pct,
+                    signal=f"called {count} times per rank ({wall:.2f}s, {pct:.1f}% of the "
+                    f"run); {loose * 100:.0f}% of sampled calls repeated an argument "
+                    f"shape/dtype/device signature but only {strict * 100:.0f}% "
+                    f"received the same tensor object again. The arguments look like "
+                    f"the same value rebuilt every iteration, so memoizing this alone "
+                    f"would never hit. Confirm against the source: the probe does not "
+                    f"read tensor contents, because doing so would inject the very "
+                    f"host stalls it measures.",
+                    timing=timing,
                     extra={
                         "strict_repeat_rate": strict,
                         "loose_repeat_rate": loose,
                         "arg_samples": int(entry["arg_samples"]),
                         "enabler": pure_enabler,
                     },
-                    setup_phase=setup_phase,
-                    last_call_s=entry.get("last_s"),
-                    hot_loop_start_s=hot_loop_start,
                 )
             )
     return out

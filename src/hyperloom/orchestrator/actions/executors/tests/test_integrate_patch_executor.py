@@ -24,6 +24,7 @@ from hyperloom.orchestrator.actions.executors import _setup_replay as sr_mod
 from hyperloom.orchestrator.actions.executors._accuracy_gate import framework_run_eval_envs
 from hyperloom.orchestrator.actions.executors.integrate_patch import (
     IntegratePatchExecutor,
+    _PatchBench,
     _apply_patch_no_git,
     _git_apply,
     _git_apply_reverse,
@@ -666,7 +667,7 @@ async def test_upstream_resolve_threads_attempt_and_preserves_fetch_failure(tmp_
             "patches_applied": [],
             "patches_reverted": [],
             "patch_source_mode": "diff_url",
-            "workspace": str(captured[0]["output_root"]),
+            "workspace": str(captured[0]["dest"].parent),
         }
     else:
         assert result["status"] == "no_patches"
@@ -1002,7 +1003,7 @@ async def test_executor_rejects_inapplicable_aiter_model_config(
         encoding="utf-8",
     )
 
-    async def _should_not_benchmark(**_kwargs):
+    async def _should_not_benchmark(*_args, **_kwargs):
         raise AssertionError("an inapplicable placeholder artifact reached the benchmark")
 
     executor = IntegratePatchExecutor(session_dir=session_dir)
@@ -1177,7 +1178,7 @@ async def _run_enablement_integrate(
     after_text = after_log or (boot_log_for(None) if booted else wall)
     before_text = before_log or ("" if booted else wall)
 
-    async def _fake_bench(**_kwargs):
+    async def _fake_bench(*_args, **_kwargs):
         bench_result = {
             "output_throughput": 137.0 if booted else 0.0,
             # A measurement exists only where the client completed requests, so
@@ -1198,7 +1199,7 @@ async def _run_enablement_integrate(
             "timed_out": False,
         }
 
-    async def _noop_kb(**_kwargs):
+    async def _noop_kb(*_args, **_kwargs):
         return None
 
     monkeypatch.setattr(executor, "_bench_patch", _fake_bench)
@@ -1539,7 +1540,7 @@ async def test_enablement_zero_patch_round_does_not_erase_prior_accepted_work(tm
 
     executor = IntegratePatchExecutor(session_dir=session_dir)
 
-    async def _noop_kb(**_kwargs):
+    async def _noop_kb(*_args, **_kwargs):
         return None
 
     monkeypatch.setattr(executor, "_maybe_write_framework_kb_record", _noop_kb)
@@ -1547,7 +1548,7 @@ async def test_enablement_zero_patch_round_does_not_erase_prior_accepted_work(tm
     # Round 1: apply the patch and accept as advanced (not yet runnable).
     new_gap = "MissingKernelError: kernel not found\n"
 
-    async def _fake_bench_round1(**_kwargs):
+    async def _fake_bench_round1(*_args, **_kwargs):
         return {
             "output_throughput": 0.0,
             "error": new_gap,
@@ -1569,7 +1570,7 @@ async def test_enablement_zero_patch_round_does_not_erase_prior_accepted_work(tm
     assert (framework_root / "src.py").read_text().endswith("return 2\n")
 
     # Round 2: env-only round that ends up reverting (no gain, still not runnable).
-    async def _fake_bench_round2(**_kwargs):
+    async def _fake_bench_round2(*_args, **_kwargs):
         return {
             "output_throughput": 0.0,
             "error": new_gap,
@@ -1611,7 +1612,7 @@ async def test_enablement_replays_setup_commands_before_boot(tmp_path: Path, mon
 
     monkeypatch.setattr(sr_mod, "run_setup_commands", _spy_run_setup)
 
-    async def _fake_bench(**_kwargs):
+    async def _fake_bench(*_args, **_kwargs):
         return {
             "output_throughput": 150.0,
             "completed_requests": 12,
@@ -1623,7 +1624,7 @@ async def test_enablement_replays_setup_commands_before_boot(tmp_path: Path, mon
             "timed_out": False,
         }
 
-    async def _noop_kb(**_kwargs):
+    async def _noop_kb(*_args, **_kwargs):
         return None
 
     monkeypatch.setattr(executor, "_bench_patch", _fake_bench)
@@ -1686,7 +1687,7 @@ async def _round_exiting_after_setup(tmp_path: Path, monkeypatch, *, arrange, pa
     from types import SimpleNamespace
 
     from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
-    from hyperloom.orchestrator.enablement.recipe.setup_ledger import build_execution_row
+    from hyperloom.orchestrator.enablement.recipe.setup_ledger import SetupExecution, build_execution_row
     from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 
     session_dir = tmp_path / "session"
@@ -1695,18 +1696,20 @@ async def _round_exiting_after_setup(tmp_path: Path, monkeypatch, *, arrange, pa
     init_git_repo(repo)
     _write_specialist_workspace(session_dir, "t-spec-ledger", patch_contents=patch_contents or [_VALID_PATCH])
 
-    def _installed(commands, *, cwd, log_dir, round_task_id, seq_start, on_execution):
+    def _installed(commands, *, cwd, log_dir, ledger):
         cmd, source = commands[0]
         row = build_execution_row(
-            seq=seq_start + 1,
-            round_task_id=round_task_id,
-            cmd_index=0,
-            cmd=cmd,
-            source=source,
-            outcome="applied",
+            SetupExecution(
+                seq=ledger.seq_start + 1,
+                round_task_id=ledger.round_task_id,
+                cmd_index=0,
+                cmd=cmd,
+                source=source,
+                outcome="applied",
+            ),
             env={},
         )
-        on_execution(row)
+        ledger.on_execution(row)
         return [cmd]
 
     monkeypatch.setattr(sr_mod, "run_setup_commands", _installed)
@@ -1837,7 +1840,7 @@ async def test_base_sha_is_captured_before_the_setup_commands_run(tmp_path: Path
         ["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
     ).stdout.strip()
 
-    def _installing_commits(commands, *, cwd, log_dir, round_task_id, seq_start, on_execution):
+    def _installing_commits(commands, *, cwd, log_dir, ledger):
         # What an install into the framework checkout does to its HEAD.
         (repo / "installed.py").write_text("x = 1\n", encoding="utf-8")
         git_commit_all(repo, "install")
@@ -1899,7 +1902,7 @@ async def test_base_sha_of_an_explicit_root_predates_the_setup_commands(tmp_path
         ["git", "-C", str(explicit_root), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
     ).stdout.strip()
 
-    def _installing_commits(commands, *, cwd, log_dir, round_task_id, seq_start, on_execution):
+    def _installing_commits(commands, *, cwd, log_dir, ledger):
         (explicit_root / "installed.py").write_text("x = 1\n", encoding="utf-8")
         git_commit_all(explicit_root, "install")
         return [cmd for cmd, _source in commands]
@@ -1980,7 +1983,7 @@ async def test_setup_replay_runs_off_the_event_loop_thread(tmp_path: Path, monke
     seen: dict[str, int] = {}
     loop_ident = threading.get_ident()
 
-    def _spy_run_setup(commands, *, cwd, log_dir, round_task_id, seq_start, on_execution):
+    def _spy_run_setup(commands, *, cwd, log_dir, ledger):
         seen["ident"] = threading.get_ident()
         return []
 
@@ -2124,11 +2127,13 @@ async def test_bench_patch_holds_and_closes_serving_lease(tmp_path: Path):
         patch.object(_ray_serving, "maybe_serving_lease", return_value=lease),
     ):
         await executor._bench_patch(
-            params={"config_path": str(config_path)},
-            output_root=tmp_path / "out",
+            _PatchBench(
+                params={"config_path": str(config_path)},
+                output_root=tmp_path / "out",
+                specialist_task_id="task-abcd1234",
+            ),
             extra_server_args_applied="",
             extra_envs_applied={},
-            specialist_task_id="task-abcd1234",
         )
 
     assert captured["serving_lease"] is lease
@@ -2167,15 +2172,17 @@ async def test_bench_patch_routes_variant_args_and_envs_separately(tmp_path: Pat
         patch.object(_ray_serving, "maybe_serving_lease", return_value=None),
     ):
         await executor._bench_patch(
-            params={
-                "config_path": str(config_path),
-                "base_extra_args": "--base-flag value",
-                "base_extra_envs": {"BASE_ENV": "1"},
-            },
-            output_root=tmp_path / "out",
+            _PatchBench(
+                params={
+                    "config_path": str(config_path),
+                    "base_extra_args": "--base-flag value",
+                    "base_extra_envs": {"BASE_ENV": "1"},
+                },
+                output_root=tmp_path / "out",
+                specialist_task_id="task-explicit",
+            ),
             extra_server_args_applied=extra_args,
             extra_envs_applied={"VLLM_ROCM_USE_AITER": "1"},
-            specialist_task_id="task-explicit",
         )
 
     variant = captured["grid"][0]
@@ -2236,11 +2243,13 @@ async def test_bench_patch_preserves_measurement_and_protocol(tmp_path: Path, mo
     monkeypatch.setattr(_ray_serving, "maybe_serving_lease", lambda **_kwargs: None)
     executor = IntegratePatchExecutor(session_dir=tmp_path)
     bench, gate = await executor._bench_patch(
-        params={"config_path": str(config_path), "framework": "vllm", "base_extra_args": "--async-scheduling"},
-        output_root=tmp_path / "out",
+        _PatchBench(
+            params={"config_path": str(config_path), "framework": "vllm", "base_extra_args": "--async-scheduling"},
+            output_root=tmp_path / "out",
+            specialist_task_id="task-measurement",
+        ),
         extra_server_args_applied=measured.extra_server_args,
         extra_envs_applied={**measured.extra_envs, "RUN_EVAL": "true"},
-        specialist_task_id="task-measurement",
     )
 
     assert bench["total_token_throughput"] == 25000.0
@@ -2446,14 +2455,14 @@ async def test_executor_rebinds_base_from_live_current_best(tmp_path: Path, monk
 
     captured_bench: dict[str, Any] = {}
 
-    async def _fake_bench(**kwargs):
-        captured_bench["base_tput"] = kwargs.get("params", {}).get("base_tput")
-        captured_bench["base_extra_args"] = kwargs.get("params", {}).get("base_extra_args")
-        captured_bench["base_extra_envs"] = kwargs.get("params", {}).get("base_extra_envs")
+    async def _fake_bench(bench, **kwargs):
+        captured_bench["base_tput"] = bench.params.get("base_tput")
+        captured_bench["base_extra_args"] = bench.params.get("base_extra_args")
+        captured_bench["base_extra_envs"] = bench.params.get("base_extra_envs")
         # Simulate 3801 — below the explore winner 4616.
         return {"output_throughput": 3801.0, "error": ""}, {"accuracy_pass": None}
 
-    async def _noop_kb(**_kwargs):
+    async def _noop_kb(*_args, **_kwargs):
         return None
 
     monkeypatch.setattr(executor, "_bench_patch", _fake_bench)
@@ -2568,11 +2577,9 @@ async def test_bench_patch_captures_effective_config(
         patch.object(ip_mod, "prepare_grid_benchmark_config", return_value=config_path),
     ):
         bench, _ = await executor._bench_patch(
-            params=task_params,
-            output_root=tmp_path / "out",
+            _PatchBench(params=task_params, output_root=tmp_path / "out", specialist_task_id="task-abcd1234"),
             extra_server_args_applied=params.get("extra_server_args_applied", ""),
             extra_envs_applied=params.get("extra_envs_applied", {}),
-            specialist_task_id="task-abcd1234",
             unset_envs=params.get("unset_envs"),
         )
 

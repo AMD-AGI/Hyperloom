@@ -26,7 +26,7 @@ from hyperloom.orchestrator.roles.mock_backend import (
     MockTurn,
     ScriptedPlan,
 )
-from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
 from hyperloom.orchestrator.kernel.patch_lifecycle import lifecycle_complete
 from hyperloom.orchestrator.phases import machine_state
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -1215,7 +1215,7 @@ async def test_phase_transition_into_sweep_enqueues_conc_sweep_e2e(tmp_path: Pat
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        knowledge_plane=None,
+        advisory=AdvisoryServices(knowledge_plane=None),
     )
     # Seed state at KERNEL boundary as if a kernel_no_more_leverage just fired
     coord.shared_state.phase = "KERNEL"
@@ -1265,7 +1265,7 @@ async def test_phase_transition_explore_to_sweep_no_kernel_mode(tmp_path: Path):
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        knowledge_plane=None,
+        advisory=AdvisoryServices(knowledge_plane=None),
     )
     coord.shared_state.kernel_enabled = False
     coord.shared_state.phase_history = [

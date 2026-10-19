@@ -23,11 +23,12 @@ import subprocess
 import sys
 import uuid
 import zlib
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from collections.abc import Callable
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from hyperloom.common.io import JsonFormat, atomic_write_json
 from hyperloom.common.timeutil import now_iso
@@ -47,8 +48,9 @@ try:
 except ImportError:
     _aiter_jit_core = None
 
-from .tracelens_arch_benchmark import normalize_platform, populate_gpu_arch_json
+from .tracelens_arch_benchmark import internal_extension_arch_json, normalize_platform, populate_gpu_arch_json
 from .tracelens_skill_runner import (
+    TraceLensSkillRequest,
     aggregate_by_source_function,
     discover_capture_folder,
     extract_compute_pct_from_analysis_md,
@@ -251,7 +253,7 @@ def _graph_coverage_from_raw_trace(trace_path: str | Path | None) -> dict[str, A
     try:
         from . import _bypass_trace_reader as _reader
 
-        analyze = _reader.analyze_trace(str(trace_path), top_k=1, emit_launches=False)
+        analyze = _reader.analyze_trace(str(trace_path), _reader.TraceAnalysisOptions(top_k=1, emit_launches=False))
         if analyze.get("truncated"):
             return {}
         cov = analyze.get("graph_coverage") if isinstance(analyze, dict) else None
@@ -514,66 +516,69 @@ RUNTIME_API_NAMES = {
 DEFAULT_TRACELENS_INTERNAL_ROOT = ""
 
 
-def update_status(
-    status_path: Path,
-    *,
-    state: str,
-    current_step: str,
-    log_path: Path,
-    artifact_paths: dict[str, str],
-    run_id: str,
-    started_at: str,
-    error: str | None = None,
-) -> None:
-    """Atomically write a tracelens_analysis run-status JSON file.
+@dataclass(frozen=True)
+class RunStatus:
+    """The status file one tracelens_analysis run keeps current.
 
-    Captures the current run state, recent log tail, and (on terminal
-    states) the wall-clock duration so downstream collectors can build a
-    timeline event.
-
-    Args:
-        status_path (Path): Destination status JSON file.
-        state (str): Current run state (e.g. ``running``, ``succeeded``).
-        current_step (str): Human-readable label of the active step.
-        log_path (Path): Log file whose size/tail are recorded.
-        artifact_paths (dict[str, str]): Map of artifact names to paths.
-        run_id (str): Unique identifier for this run.
-        started_at (str): ISO-8601 start time used to compute duration.
-        error (str | None): Error message recorded when the run failed.
+    Attributes:
+        status_path: Destination status JSON file.
+        log_path: Log file whose size/tail are recorded.
+        artifact_paths: Map of artifact names to paths, read at each write.
+        run_id: Unique identifier for this run.
+        started_at: ISO-8601 start time used to compute duration.
     """
-    updated_at = now_iso(timespec="auto")
-    payload: dict[str, Any] = {
-        "tool": "tracelens_analysis",
-        "run_id": run_id,
-        "state": state,
-        "current_step": current_step,
-        "pid": os.getpid(),
-        "started_at": started_at,
-        "updated_at": updated_at,
-        "log_path": str(log_path),
-        "artifact_paths": artifact_paths,
-        "offset_bytes": log_path.stat().st_size if log_path.exists() else 0,
-        "last_lines": read_last_lines(log_path),
-    }
-    # Emit ended_at + duration_seconds on terminal states for the timeline.
-    if state in ("succeeded", "failed", "aborted", "cancelled"):
-        payload["ended_at"] = updated_at
-        try:
-            start_dt = datetime.fromisoformat(started_at)
-            end_dt = datetime.fromisoformat(updated_at)
-            if start_dt.tzinfo is None:
-                start_dt = start_dt.replace(tzinfo=timezone.utc)
-            if end_dt.tzinfo is None:
-                end_dt = end_dt.replace(tzinfo=timezone.utc)
-            payload["duration_seconds"] = max(
-                0.0,
-                (end_dt - start_dt).total_seconds(),
-            )
-        except (ValueError, TypeError):
-            payload["duration_seconds"] = None
-    if error:
-        payload["error"] = error
-    atomic_write_json(status_path, payload, fmt=JsonFormat(trailing_newline=True))
+
+    status_path: Path
+    log_path: Path
+    artifact_paths: dict[str, str]
+    run_id: str
+    started_at: str
+
+    def write(self, *, state: str, current_step: str, error: str | None = None) -> None:
+        """Atomically write the run-status JSON file.
+
+        Captures the current run state, recent log tail, and (on terminal
+        states) the wall-clock duration so downstream collectors can build a
+        timeline event.
+
+        Args:
+            state (str): Current run state (e.g. ``running``, ``succeeded``).
+            current_step (str): Human-readable label of the active step.
+            error (str | None): Error message recorded when the run failed.
+        """
+        updated_at = now_iso(timespec="auto")
+        payload: dict[str, Any] = {
+            "tool": "tracelens_analysis",
+            "run_id": self.run_id,
+            "state": state,
+            "current_step": current_step,
+            "pid": os.getpid(),
+            "started_at": self.started_at,
+            "updated_at": updated_at,
+            "log_path": str(self.log_path),
+            "artifact_paths": self.artifact_paths,
+            "offset_bytes": self.log_path.stat().st_size if self.log_path.exists() else 0,
+            "last_lines": read_last_lines(self.log_path),
+        }
+        # Emit ended_at + duration_seconds on terminal states for the timeline.
+        if state in ("succeeded", "failed", "aborted", "cancelled"):
+            payload["ended_at"] = updated_at
+            try:
+                start_dt = datetime.fromisoformat(self.started_at)
+                end_dt = datetime.fromisoformat(updated_at)
+                if start_dt.tzinfo is None:
+                    start_dt = start_dt.replace(tzinfo=timezone.utc)
+                if end_dt.tzinfo is None:
+                    end_dt = end_dt.replace(tzinfo=timezone.utc)
+                payload["duration_seconds"] = max(
+                    0.0,
+                    (end_dt - start_dt).total_seconds(),
+                )
+            except (ValueError, TypeError):
+                payload["duration_seconds"] = None
+        if error:
+            payload["error"] = error
+        atomic_write_json(self.status_path, payload, fmt=JsonFormat(trailing_newline=True))
 
 
 def open_json(path: Path) -> dict[str, Any]:
@@ -787,7 +792,14 @@ def _trace_input_sort_key(path: Path, root: Path | None = None) -> tuple[int, in
     return (1, -size, name)
 
 
-def discover_trace_inputs(trace_input: Path) -> tuple[str, list[Path]]:
+class TraceInputs(NamedTuple):
+    """The trace files a trace input resolves to."""
+
+    input_type: str
+    files: list[Path]
+
+
+def discover_trace_inputs(trace_input: Path) -> TraceInputs:
     """Resolve a trace input path into a list of trace files.
 
     Accepts either a single trace file or a capture directory; directories
@@ -798,7 +810,7 @@ def discover_trace_inputs(trace_input: Path) -> tuple[str, list[Path]]:
         trace_input (Path): A trace file or a capture directory.
 
     Returns:
-        tuple[str, list[Path]]: ``("file", [path])`` for a single file or
+        TraceInputs: ``("file", [path])`` for a single file or
             ``("capture_dir", paths)`` for a directory.
 
     Raises:
@@ -806,7 +818,7 @@ def discover_trace_inputs(trace_input: Path) -> tuple[str, list[Path]]:
             found under a supplied directory.
     """
     if trace_input.is_file():
-        return "file", [trace_input]
+        return TraceInputs("file", [trace_input])
     if not trace_input.is_dir():
         raise FileNotFoundError(f"trace_input does not exist: {trace_input}")
 
@@ -823,7 +835,7 @@ def discover_trace_inputs(trace_input: Path) -> tuple[str, list[Path]]:
     unique.sort(key=lambda p: _trace_input_sort_key(p, trace_input))
     if not unique:
         raise FileNotFoundError(f"no trace files found under capture directory: {trace_input}")
-    return "capture_dir", unique
+    return TraceInputs("capture_dir", unique)
 
 
 def is_kernel_event(event: dict[str, Any]) -> bool:
@@ -2830,10 +2842,6 @@ def _finalize_candidates(
     top: list[dict[str, Any]],
     *,
     perf_report_csv_dir: Path | str | None = None,
-    framework: str | None = None,
-    log_path: Path | str | None = None,
-    source_resolution_out: Path | str | None = None,
-    model_name: str = "",
 ) -> list[dict[str, Any]]:
     """Apply host-only post-processing to reader-resolved candidate rows.
 
@@ -2845,8 +2853,6 @@ def _finalize_candidates(
         top: The candidate rows to finalize (mutated in place).
         perf_report_csv_dir: Optional CSV directory used to populate each
             item's ``tracelens_category`` and recover missing shapes.
-        framework: Explicit trace framework, recorded in the resolution artifact.
-        model_name: Runtime model identity recorded in the resolution artifact.
 
     Returns:
         The finalized candidate list (the same ``top`` object).
@@ -2946,14 +2952,6 @@ def _finalize_candidates(
         item["runtime_generated_kernel"] = is_runtime_generated_kernel(item["name"], item.get("source_file", ""))
         _stamp_candidate_metadata(item, op_cat_map)
     _apply_vendor_operator_playbook_grouping(top)
-    if source_resolution_out:
-        write_source_resolution_artifact(
-            top,
-            source_resolution_out,
-            framework=framework or "",
-            model_name=model_name,
-            log_path=log_path,
-        )
     return top
 
 
@@ -3817,12 +3815,19 @@ def build_task_groups(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return aggregate_by_source_function(reusable)
 
 
+@dataclass(frozen=True)
+class AuditSubject:
+    """The trace and platform an audit summary describes."""
+
+    trace_input: str
+    framework: str = ""
+    target_platform: str = ""
+
+
 def build_audit_summary(
     candidates: list[dict[str, Any]],
+    subject: AuditSubject,
     *,
-    trace_input: str,
-    framework: str = "",
-    target_platform: str = "",
     task_groups: list[dict[str, Any]] | None = None,
     trace_health_warnings: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -3833,9 +3838,7 @@ def build_audit_summary(
 
     Args:
         candidates: The hot-kernel candidate rows.
-        trace_input: The trace input path recorded in the summary.
-        framework: Optional framework name recorded in the summary.
-        target_platform: Optional target platform recorded in the summary.
+        subject: The trace input path, framework and target platform recorded in the summary.
         task_groups: Optional task-group projections to include.
         trace_health_warnings: Optional trace-health warnings to include.
 
@@ -3889,9 +3892,9 @@ def build_audit_summary(
         )
     return {
         "generated_at": now_iso(timespec="auto"),
-        "trace_input": trace_input,
-        "framework": framework,
-        "target_platform": target_platform,
+        "trace_input": subject.trace_input,
+        "framework": subject.framework,
+        "target_platform": subject.target_platform,
         "task_count": len(tasks),
         "skipped_count": len(skipped),
         "task_group_count": len(group_entries),
@@ -3903,15 +3906,25 @@ def build_audit_summary(
     }
 
 
+@dataclass(frozen=True)
+class OrchestratorOutcome:
+    """What the TraceLens SDK orchestrator left for the report writer.
+
+    Attributes:
+        report_path: The ``analysis.md`` it produced, if any.
+        health_warnings: Trace-health warnings accumulated before and during the run.
+    """
+
+    report_path: Path | None = None
+    health_warnings: list[dict[str, Any]] | None = None
+
+
 def write_reports(
     run_dir: Path,
-    *,
-    trace_input_type: str,
-    trace_files: list[Path],
+    trace_inputs: TraceInputs,
     candidates: list[dict[str, Any]],
     args: argparse.Namespace,
-    existing_report_path: Path | None = None,
-    trace_health_warnings: list[dict[str, Any]] | None = None,
+    outcome: OrchestratorOutcome = OrchestratorOutcome(),
 ) -> dict[str, str]:
     """Write Hyperloom-owned sidecar JSONs and surface the upstream ``analysis.md``.
 
@@ -3919,12 +3932,12 @@ def write_reports(
 
     Args:
         run_dir: The per-run output directory to write sidecars into.
-        trace_input_type: Whether the trace input is a file or capture dir.
-        trace_files: The resolved trace files for the manifest.
+        trace_inputs: Whether the trace input is a file or capture dir, and the
+            resolved trace files for the manifest.
         candidates: The finalized hot-kernel candidate rows.
         args: Parsed CLI args carrying model/framework/platform settings.
-        existing_report_path: Optional pre-existing report path to surface.
-        trace_health_warnings: Optional trace-health warnings to record.
+        outcome: The pre-existing report path to surface and the trace-health
+            warnings to record.
 
     Returns:
         A mapping of report name to its written/surfaced path.
@@ -3933,6 +3946,7 @@ def write_reports(
         RuntimeError: When the orchestrator did not produce ``analysis.md``
             (rather than fabricating a report).
     """
+    existing_report_path = outcome.report_path
     tracelens_dir = run_dir / "tracelens"
     (tracelens_dir / "system_findings").mkdir(parents=True, exist_ok=True)
     (tracelens_dir / "category_findings").mkdir(parents=True, exist_ok=True)
@@ -3940,8 +3954,8 @@ def write_reports(
 
     manifest = {
         "trace_input": str(Path(args.trace_input).resolve()),
-        "trace_input_type": trace_input_type,
-        "trace_files": [str(p) for p in trace_files],
+        "trace_input_type": trace_inputs.input_type,
+        "trace_files": [str(p) for p in trace_inputs.files],
         "created_at": now_iso(timespec="auto"),
     }
     # Aggregate reusable candidates into source-function task groups.
@@ -3951,7 +3965,7 @@ def write_reports(
         "framework": args.framework,
         "target_platform": args.target_platform,
         "analysis_mode": args.analysis_mode,
-        "trace_input_type": trace_input_type,
+        "trace_input_type": trace_inputs.input_type,
         "hot_kernels": candidates,
         "task_groups": task_groups,
         "source": "tracelens_analysis",
@@ -3978,18 +3992,20 @@ def write_reports(
     # Per-run audit sidecar (tasks routed vs skipped w/ reason).
     summary = build_audit_summary(
         candidates,
-        trace_input=str(Path(args.trace_input).resolve()),
-        framework=str(args.framework or ""),
-        target_platform=str(args.target_platform or ""),
+        AuditSubject(
+            trace_input=str(Path(args.trace_input).resolve()),
+            framework=str(args.framework or ""),
+            target_platform=str(args.target_platform or ""),
+        ),
         task_groups=task_groups,
-        trace_health_warnings=trace_health_warnings,
+        trace_health_warnings=outcome.health_warnings,
     )
     summary_path = tracelens_dir / "summary.json"
     atomic_write_json(summary_path, summary, fmt=JsonFormat(trailing_newline=True))
 
     missing_trace_report = existing_report_path is None or not existing_report_path.exists()
     trace_quality_blocked = any(
-        isinstance(w, dict) and w.get("code") == "trace_split_no_steady_state" for w in (trace_health_warnings or [])
+        isinstance(w, dict) and w.get("code") == "trace_split_no_steady_state" for w in (outcome.health_warnings or [])
     )
     if missing_trace_report:
         if not getattr(args, "dry_run", False):
@@ -4018,7 +4034,7 @@ def write_reports(
     )
     kernel_roofline_payload = build_kernel_roofline_payload(
         trace_input=str(Path(args.trace_input).resolve()),
-        trace_input_type=trace_input_type,
+        trace_input_type=trace_inputs.input_type,
         analysis_md_path=(str(existing_report_path) if existing_report_path else ""),
         kernel_candidates_path=str(kernel_candidates_path),
         candidates=candidates,
@@ -4279,11 +4295,18 @@ def _validate_selected_chunk(
         )
 
 
+@dataclass(frozen=True)
+class TraceSplitJob:
+    """The input trace, output directory and TraceLens checkout one splitter run works with."""
+
+    analysis_trace_path: Path
+    split_dir: Path
+    tl_root: Path
+
+
 def _run_trace_split(
     args,
-    analysis_trace_path: "Path",
-    split_dir: "Path",
-    tl_root: "Path",
+    job: TraceSplitJob,
     log_path: "Path",
     health_warnings: "list[dict]",
 ) -> "tuple[Path, dict]":
@@ -4304,6 +4327,8 @@ def _run_trace_split(
         RuntimeError: On splitter failure, no chunks, missing mode, or
             low-quality chunk with a better alternate.
     """
+    analysis_trace_path = job.analysis_trace_path
+    split_dir = job.split_dir
     split_dir.mkdir(parents=True, exist_ok=True)
     split_num_steps = max(8, int(args.split_num_steps or 32))
     split_input_path = analysis_trace_path
@@ -4316,7 +4341,7 @@ def _run_trace_split(
     )
     split_rc = run_command(
         split_cmd,
-        cwd=tl_root,
+        cwd=job.tl_root,
         log_path=log_path,
         timeout_s=max(60, int(getattr(args, "budget_minutes", 60) * 60)),
     )
@@ -4367,6 +4392,28 @@ def _trajectory_scope(args: argparse.Namespace) -> contextlib.AbstractContextMan
         tick=args.trajectory_tick,
         task_id=args.trajectory_task_id or None,
         parent_span_id=args.trajectory_parent_span_id or None,
+    )
+
+
+def _gpu_arch_json(
+    args: argparse.Namespace, *, tl_root: Path, tl_internal_root: Path | None, log_path: Path
+) -> Path | None:
+    """The arch JSON roofline reads: the bundled spec under the internal extension, else bundled, measured or fallback."""
+    arch_benchmark_timeout_s = _resolve_arch_benchmark_timeout_s()
+    if tl_internal_root is not None:
+        return internal_extension_arch_json(args.target_platform, log=lambda msg: append_log(log_path, msg))
+    return populate_gpu_arch_json(
+        tracelens_root=tl_root,
+        platform=args.target_platform,
+        log=lambda msg: append_log(log_path, msg),
+        run_command=lambda cmd, *, cwd, timeout_s, env=None: run_command(
+            cmd,
+            cwd=cwd,
+            log_path=log_path,
+            timeout_s=timeout_s,
+            env=env,
+        ),
+        timeout_s=arch_benchmark_timeout_s,
     )
 
 
@@ -4573,6 +4620,7 @@ def main() -> int:
     log_path = run_dir / "logs" / "tracelens_analysis" / f"{run_id}.log"
     status_path = run_dir / "status" / "tracelens_analysis" / f"{run_id}.json"
     artifacts: dict[str, str] = {}
+    run_status = RunStatus(status_path, log_path, artifacts, run_id, started_at)
     agent_candidates: list[dict[str, Any]] | None = None
     agent_report_path: Path | None = None
     allow_empty_candidates = False
@@ -4646,17 +4694,13 @@ def main() -> int:
         )
 
     try:
-        update_status(
-            status_path,
+        run_status.write(
             state="running",
             current_step="discover_trace_input",
-            log_path=log_path,
-            artifact_paths=artifacts,
-            run_id=run_id,
-            started_at=started_at,
         )
         trace_input = Path(args.trace_input).expanduser().resolve()
-        trace_input_type, trace_files = discover_trace_inputs(trace_input)
+        trace_inputs = discover_trace_inputs(trace_input)
+        trace_input_type, trace_files = trace_inputs
         append_log(log_path, f"trace_input_type={trace_input_type}")
         append_log(log_path, f"trace_files={len(trace_files)}")
         run_meta["preflight"].update(
@@ -4812,14 +4856,9 @@ def main() -> int:
                 )
 
         if not args.dry_run:
-            update_status(
-                status_path,
+            run_status.write(
                 state="running",
                 current_step="check_tracelens_dependencies",
-                log_path=log_path,
-                artifact_paths=artifacts,
-                run_id=run_id,
-                started_at=started_at,
             )
             tl_root_arg = (args.tracelens_root or "").strip()
             if not tl_root_arg:
@@ -4889,30 +4928,11 @@ def main() -> int:
             # Backfill MAF for the open-source TraceLens path: measure the
             # missing arch/MAF spec on an idle GPU before report generation,
             # unless the internal extension (which backfills MAF) is enabled.
-            update_status(
-                status_path,
+            run_status.write(
                 state="running",
                 current_step="populate_gpu_arch_json",
-                log_path=log_path,
-                artifact_paths=artifacts,
-                run_id=run_id,
-                started_at=started_at,
             )
-            arch_benchmark_timeout_s = _resolve_arch_benchmark_timeout_s()
-            gpu_arch_path = populate_gpu_arch_json(
-                tracelens_root=tl_root,
-                platform=args.target_platform,
-                internal_extension_enabled=tl_internal_root is not None,
-                log=lambda msg: append_log(log_path, msg),
-                run_command=lambda cmd, *, cwd, timeout_s, env=None: run_command(
-                    cmd,
-                    cwd=cwd,
-                    log_path=log_path,
-                    timeout_s=timeout_s,
-                    env=env,
-                ),
-                timeout_s=arch_benchmark_timeout_s,
-            )
+            gpu_arch_path = _gpu_arch_json(args, tl_root=tl_root, tl_internal_root=tl_internal_root, log_path=log_path)
             if gpu_arch_path is not None:
                 artifacts["tracelens_gpu_arch_json"] = str(gpu_arch_path)
 
@@ -4930,21 +4950,14 @@ def main() -> int:
             # chunk may drop the graph-launch runtime events the detector needs.
             raw_trace_path = analysis_trace_path
             trace_split_blocked = False
-            update_status(
-                status_path,
+            run_status.write(
                 state="running",
                 current_step="split_trace",
-                log_path=log_path,
-                artifact_paths=artifacts,
-                run_id=run_id,
-                started_at=started_at,
             )
             split_dir = tracelens_dir / "trace_split"
             cli_trace_path, split_meta = _run_trace_split(
                 args,
-                analysis_trace_path,
-                split_dir,
-                tl_root,
+                TraceSplitJob(analysis_trace_path, split_dir, tl_root),
                 log_path,
                 trace_health_warnings,
             )
@@ -5010,28 +5023,25 @@ def main() -> int:
                 )
 
             if args.use_llm_orchestrator and not trace_split_blocked:
-                update_status(
-                    status_path,
+                run_status.write(
                     state="running",
                     current_step="run_tracelens_sdk_orchestrator",
-                    log_path=log_path,
-                    artifact_paths=artifacts,
-                    run_id=run_id,
-                    started_at=started_at,
                 )
                 try:
                     with _trajectory_scope(args):
                         skill_result = asyncio.run(
                             run_tracelens_skill(
-                                skill_path=skill,
-                                trace_path=cli_trace_path,
-                                output_dir=tracelens_dir,
-                                tracelens_root=tl_root,
-                                tracelens_internal_root=tl_internal_root,
-                                platform=args.target_platform,
-                                framework=args.framework,
-                                analysis_mode=args.analysis_mode,
-                                capture_folder=capture_folder,
+                                TraceLensSkillRequest(
+                                    skill_path=skill,
+                                    trace_path=cli_trace_path,
+                                    output_dir=tracelens_dir,
+                                    tracelens_root=tl_root,
+                                    tracelens_internal_root=tl_internal_root,
+                                    platform=args.target_platform,
+                                    framework=args.framework,
+                                    analysis_mode=args.analysis_mode,
+                                    capture_folder=capture_folder,
+                                ),
                                 budget_minutes=args.budget_minutes,
                                 model=_resolve_tracelens_model(),
                                 log=lambda msg: append_log(log_path, msg),
@@ -5158,10 +5168,13 @@ def main() -> int:
                         agent_candidates = _finalize_candidates(
                             raw_agent_candidates,
                             perf_report_csv_dir=(skill_result.output_dir / "perf_report_csvs"),
-                            framework=args.framework or None,
-                            log_path=log_path,
-                            source_resolution_out=(run_dir / _KSC.SOURCE_RESOLUTION_FILENAME),
+                        )
+                        write_source_resolution_artifact(
+                            agent_candidates,
+                            run_dir / _KSC.SOURCE_RESOLUTION_FILENAME,
+                            framework=args.framework or "",
                             model_name=args.model_name,
+                            log_path=log_path,
                         )
                         append_log(
                             log_path,
@@ -5188,14 +5201,9 @@ def main() -> int:
         else:
             append_log(log_path, "[dry-run] skipping TraceLens install and external CLI")
 
-        update_status(
-            status_path,
+        run_status.write(
             state="running",
             current_step="extract_hot_kernels",
-            log_path=log_path,
-            artifact_paths=artifacts,
-            run_id=run_id,
-            started_at=started_at,
         )
         # Production candidates come only from the orchestrator's analysis.json.
         candidates = agent_candidates
@@ -5245,12 +5253,10 @@ def main() -> int:
         artifacts.update(
             write_reports(
                 run_dir,
-                trace_input_type=trace_input_type,
-                trace_files=trace_files,
-                candidates=candidates,
-                args=args,
-                existing_report_path=agent_report_path,
-                trace_health_warnings=trace_health_warnings,
+                trace_inputs,
+                candidates,
+                args,
+                OrchestratorOutcome(agent_report_path, trace_health_warnings),
             )
         )
         artifacts["cli_log_path"] = str(log_path)
@@ -5300,27 +5306,17 @@ def main() -> int:
             },
             fmt=JsonFormat(trailing_newline=True),
         )
-        update_status(
-            status_path,
+        run_status.write(
             state="succeeded",
             current_step="done",
-            log_path=log_path,
-            artifact_paths=artifacts,
-            run_id=run_id,
-            started_at=started_at,
         )
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
     except Exception as exc:  # noqa: BLE001 - top-level barrier; logged and reported
         append_log(log_path, f"[error] {type(exc).__name__}: {exc}")
-        update_status(
-            status_path,
+        run_status.write(
             state="failed",
             current_step="failed",
-            log_path=log_path,
-            artifact_paths=artifacts,
-            run_id=run_id,
-            started_at=started_at,
             error=f"{type(exc).__name__}: {exc}",
         )
         # Include trace_health_warnings accumulated pre-exception for auto-recovery.

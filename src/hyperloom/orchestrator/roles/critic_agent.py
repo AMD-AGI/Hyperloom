@@ -13,7 +13,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import TYPE_CHECKING, Any, Callable, Literal
 
 from hyperloom.common.framework_arm import review_row_id
 from hyperloom.common.llm_config import (
@@ -44,11 +44,14 @@ from hyperloom.inference_optimizer.session.session_paths import allocate_turn_wo
 from hyperloom.common.token_usage import uncached_input_tokens
 from hyperloom.inference_optimizer.trace._row_utils import coerce_optional_int
 from hyperloom.inference_optimizer.trace.conversation_trace import ConversationRecord, append_conversation
-from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, append_llm_call, new_call_id
+from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, LLMCallSite, append_llm_call, new_call_id
 from hyperloom.inference_optimizer.trace.parse_usage import reasoning_output_tokens
 from hyperloom.inference_optimizer.trace.trajectory_trace import current_context
 from .base import BackendError, BackendTurnResult, LLMCallFailed, build_chat_messages, parse_call_timeout_env
 from ._runtime_bridge import RuntimeCall, RuntimeCaller, invoke_runtime_cli
+
+if TYPE_CHECKING:
+    from hyperloom.inference_optimizer.breakdown.recorder.critic_out import CriticIteration
 
 
 log = logging.getLogger(__name__)
@@ -684,30 +687,10 @@ class CriticAgentBackend:
             }
         )
 
-        # Record this critic iteration before the workdir can be pruned.
-        try:
-            from hyperloom.inference_optimizer.breakdown.recorder import critic_out
+        from hyperloom.inference_optimizer.breakdown.recorder import critic_out
 
-            critic_out.record_critic_iteration(
-                self.session_dir,
-                critic_out.CriticIteration(
-                    iter_n=turn_idx,
-                    request=request,
-                    judge_bundle=judge_bundle,
-                    review=review,
-                    emit=emit,
-                    workdir=workdir,
-                    kb_priors=kb_priors_trace,
-                ),
-            )
-        except Exception:  # noqa: BLE001
-            pass
-
-        # Attach what each ruling was grounded in to the ruling itself, on the
-        # proposal it judged. Done here because these are the turn's own facts:
-        # the artifacts are this runtime's files, and a KB write's result only
-        # comes back on the emit.
-        self._record_review_evidence(
+        iteration = critic_out.CriticIteration(
+            iter_n=turn_idx,
             request=request,
             judge_bundle=judge_bundle,
             review=review,
@@ -715,6 +698,17 @@ class CriticAgentBackend:
             workdir=workdir,
             kb_priors=kb_priors_trace,
         )
+        # Record this critic iteration before the workdir can be pruned.
+        try:
+            critic_out.record_critic_iteration(self.session_dir, iteration)
+        except Exception:  # noqa: BLE001
+            pass
+
+        # Attach what each ruling was grounded in to the ruling itself, on the
+        # proposal it judged. Done here because these are the turn's own facts:
+        # the artifacts are this runtime's files, and a KB write's result only
+        # comes back on the emit.
+        self._record_review_evidence(iteration)
 
         # Mirror the KB integration trace into Langfuse (opt-in, best-effort).
         self._mirror_kb_trace_to_langfuse(
@@ -834,16 +828,7 @@ class CriticAgentBackend:
         except Exception:
             log.debug("critic_agent: langfuse kb mirror failed", exc_info=True)
 
-    def _record_review_evidence(
-        self,
-        *,
-        request: dict[str, Any],
-        judge_bundle: dict[str, Any],
-        review: dict[str, Any] | None,
-        emit: dict[str, Any],
-        workdir: Path,
-        kb_priors: dict[str, Any],
-    ) -> None:
+    def _record_review_evidence(self, iteration: CriticIteration) -> None:
         """Record what each of this turn's rulings was grounded in.
 
         Written onto the proposal each verdict targets, because a ruling and
@@ -857,23 +842,20 @@ class CriticAgentBackend:
         report the write six times.
 
         Args:
-            request (dict[str, Any]): The review request, read for the cycle.
-            judge_bundle (dict[str, Any]): The bundle reviewed, read for the
-                row each verdict's target is recorded under.
-            review (dict[str, Any] | None): The parsed review object.
-            emit (dict[str, Any]): The commit emit, read for the KB writes.
-            workdir (Path): This turn's workdir, holding the artifacts.
-            kb_priors (dict[str, Any]): The priors trace for the turn.
+            iteration (CriticIteration): The turn's review request (read for
+                the cycle), reviewed bundle (read for the row each verdict's
+                target is recorded under), parsed review, commit emit (read for
+                the KB writes), workdir holding the artifacts, and priors trace.
         """
         from hyperloom.inference_optimizer.breakdown.recorder.framework_event import record_review_evidence
 
-        context = request.get("context") if isinstance(request.get("context"), dict) else {}
+        context = iteration.request.get("context") if isinstance(iteration.request.get("context"), dict) else {}
         macro_cycle = context.get("macro_cycle")
         if macro_cycle is None:
             return
-        subjects = _review_subjects(judge_bundle)
+        subjects = _review_subjects(iteration.judge_bundle)
         writes: dict[str, dict[str, Any]] = {}
-        for write in emit.get("kb_writes") or []:
+        for write in iteration.emit.get("kb_writes") or []:
             if not isinstance(write, dict):
                 continue
             target = str(write.get("target_proposal_msg_id") or "")
@@ -885,7 +867,7 @@ class CriticAgentBackend:
                     "detail": str(result.get("detail") or result.get("error") or ""),
                 }
         artifacts = {
-            name: str(workdir / filename)
+            name: str(iteration.workdir / filename)
             for name, filename in (
                 ("request_path", "request.json"),
                 ("judge_bundle_path", "judge_bundle.json"),
@@ -893,15 +875,15 @@ class CriticAgentBackend:
                 ("emit_path", "emit.json"),
             )
         }
-        for verdict in (review or {}).get("review_verdicts") or []:
+        for verdict in (iteration.review or {}).get("review_verdicts") or []:
             if not isinstance(verdict, dict):
                 continue
             target = str(verdict.get("target_proposal_msg_id") or "")
             if not target:
                 continue
             kb: dict[str, Any] = {"persist_requested": bool(verdict.get("persist_to_kb"))}
-            if kb_priors:
-                kb["priors"] = kb_priors
+            if iteration.kb_priors:
+                kb["priors"] = iteration.kb_priors
             if target in writes:
                 kb["write"] = writes[target]
             record_review_evidence(
@@ -1225,16 +1207,15 @@ class CriticAgentBackend:
     ) -> None:
         """Append one ``llm_calls.jsonl`` row for a call that never returned."""
         try:
-            record = LLMCallRecord.for_failure(
+            site = LLMCallSite(
                 session_id=self.session_dir.name,
                 component="critic",
                 role="critic",
-                error=error,
-                call_id=call_id,
-                model=self._review_model,
                 tick=self._trace_tick,
                 phase=self._trace_phase,
-                latency_ms=latency_ms,
+            )
+            record = LLMCallRecord.for_failure(
+                site, error, model=self._review_model, call_id=call_id, latency_ms=latency_ms
             )
             append_llm_call(session_dir=self.session_dir, record=record)
         except Exception:

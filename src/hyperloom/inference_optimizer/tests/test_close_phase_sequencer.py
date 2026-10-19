@@ -30,7 +30,7 @@ from hyperloom.orchestrator.roles.mock_backend import (
     MockTurn,
     ScriptedPlan,
 )
-from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator, RunOptions
 from hyperloom.orchestrator.phases import machine_state
 from hyperloom.orchestrator.phases.machine import Transition
 from hyperloom.orchestrator.phases.close import (
@@ -856,7 +856,7 @@ async def test_phase_transition_into_close_runs_sequencer_e2e(tmp_path: Path):
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        knowledge_plane=None,
+        advisory=AdvisoryServices(knowledge_plane=None),
     )
     # Seed state at SWEEP boundary.
     coord.shared_state.phase = "SWEEP"
@@ -908,7 +908,7 @@ class TestEveryTerminalReachesAWrittenReport:
             session_dir=session_dir,
             backends={name: MockBackend(idle) for name in ("orchestration", "critic")},
             role_registry=default_role_registry(),
-            knowledge_plane=None,
+            advisory=AdvisoryServices(knowledge_plane=None),
         )
 
     @pytest.mark.asyncio
@@ -920,7 +920,7 @@ class TestEveryTerminalReachesAWrittenReport:
 
         monkeypatch.setattr(coord.phase_machine, "advance_phase_if_needed", _cannot_advance)
         try:
-            reason = await coord.run(max_ticks=1, max_minutes=60, closing_grace_sec=0.0)
+            reason = await coord.run(options=RunOptions(max_minutes=60, max_ticks=1, closing_grace_sec=0.0))
         finally:
             await coord.stop()
 
@@ -1091,7 +1091,7 @@ class TestEveryTerminalReachesAWrittenReport:
         coord.shared_state.elapsed_charged_sec = 120 * 60.0
 
         try:
-            reason = await coord.run(max_minutes=60, closing_grace_sec=0.0, max_ticks=4)
+            reason = await coord.run(options=RunOptions(max_minutes=60, max_ticks=4, closing_grace_sec=0.0))
         finally:
             await coord.stop()
 
@@ -1154,7 +1154,7 @@ async def test_the_sequencer_delivers_the_finished_close_section_in_the_package(
             "critic": MockBackend(idle_plan),
         },
         role_registry=default_role_registry(),
-        knowledge_plane=None,
+        advisory=AdvisoryServices(knowledge_plane=None),
     )
     coord.shared_state.phase = "SWEEP"
     coord.shared_state.phase_history = [{"to_phase": "SWEEP", "evidence": {}, "reason": "kernel_no_more_leverage"}]
@@ -1195,7 +1195,7 @@ async def test_recipe_kb_t4_hook_short_circuits_when_sequencer_done(tmp_path: Pa
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        knowledge_plane=KnowledgePlane(recipe_kb=_StubRecipeKB()),
+        advisory=AdvisoryServices(knowledge_plane=KnowledgePlane(recipe_kb=_StubRecipeKB())),
     )
     coord.shared_state.recipe_kb_session_id = "sid-stop-skip"
     coord.shared_state.close_sequence_done = True
@@ -1219,7 +1219,7 @@ async def test_recipe_kb_t4_hook_still_runs_when_sequencer_not_done(tmp_path: Pa
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        knowledge_plane=KnowledgePlane(recipe_kb=_StubRecipeKB()),
+        advisory=AdvisoryServices(knowledge_plane=KnowledgePlane(recipe_kb=_StubRecipeKB())),
     )
     coord.shared_state.recipe_kb_session_id = "sid-fallback"
     coord.shared_state.close_sequence_done = False
@@ -1254,7 +1254,7 @@ async def test_recipe_kb_t4_hook_remote_runs_without_recipe_kb_or_sid(
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        knowledge_plane=None,
+        advisory=AdvisoryServices(knowledge_plane=None),
     )
     coord.shared_state.recipe_kb_session_id = ""
     coord.shared_state.close_sequence_done = False
@@ -1295,7 +1295,7 @@ async def test_recipe_kb_t4_hook_remote_skips_when_close_sequence_done(tmp_path:
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        knowledge_plane=KnowledgePlane(config=config),
+        advisory=AdvisoryServices(knowledge_plane=KnowledgePlane(config=config)),
     )
     coord.shared_state.recipe_kb_session_id = ""
     coord.shared_state.close_sequence_done = True
@@ -1336,7 +1336,7 @@ async def test_recipe_kb_t4_hook_retries_failed_finalize_after_close(
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        knowledge_plane=KnowledgePlane(config=config),
+        advisory=AdvisoryServices(knowledge_plane=KnowledgePlane(config=config)),
     )
     coord.shared_state.close_sequence_done = True
     coord.shared_state.recipe_finalize_status = "failed"
@@ -1373,7 +1373,7 @@ async def test_recipe_kb_t4_hook_local_skips_without_recipe_kb(tmp_path: Path):
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        knowledge_plane=KnowledgePlane(config=config),
+        advisory=AdvisoryServices(knowledge_plane=KnowledgePlane(config=config)),
     )
     coord.shared_state.recipe_kb_session_id = "local-session"
     coord.shared_state.close_sequence_done = False
@@ -1408,7 +1408,7 @@ async def test_recipe_kb_t4_hook_local_skips_without_recipe_kb_sid(tmp_path: Pat
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        knowledge_plane=KnowledgePlane(config=config, recipe_kb=_StubRecipeKB()),
+        advisory=AdvisoryServices(knowledge_plane=KnowledgePlane(config=config, recipe_kb=_StubRecipeKB())),
     )
     coord.shared_state.recipe_kb_session_id = "  "
     coord.shared_state.close_sequence_done = False
