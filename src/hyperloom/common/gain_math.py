@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, NamedTuple
 
 from hyperloom.common.coerce import to_float
 from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_TOTAL, graded_axes_of, holds_within_band
@@ -31,6 +31,57 @@ def incremental_gain_pct(new: float, ref: float) -> float | None:
     if ref <= 0:
         return None
     return (new - ref) / ref * 100.0
+
+
+class _GuardReading(NamedTuple):
+    """The guard axis as each side of one concurrency pair measured it, and whether the optimized side held it."""
+
+    baseline: float | None
+    optimized: float | None
+    holds: bool | None
+
+
+def _speedup(baseline: float | None, optimized: float | None) -> float | None:
+    """``optimized / baseline`` when both sides measured a positive value, else None."""
+    if baseline is not None and baseline > 0 and optimized is not None and optimized > 0:
+        return optimized / baseline
+    return None
+
+
+def _read_guard(
+    baseline: dict[str, Any], optimized: dict[str, Any], guard_axis: str, noise_pct: float | None
+) -> _GuardReading:
+    """Read *guard_axis* off both points of a pair; nothing is read when there is no guard axis."""
+    if not guard_axis:
+        return _GuardReading(None, None, None)
+    # ``graded_axes_of`` is what normalises the sweep's ``total_token_throughput`` onto GRADED_TOTAL, so the
+    # guard cannot read a differently-named axis as an absent one.
+    base_axes = graded_axes_of(baseline)
+    opt_axes = graded_axes_of(optimized)
+    holds: bool | None = None
+    if base_axes.get(guard_axis) and opt_axes.get(guard_axis):
+        holds = holds_within_band(opt_axes, base_axes, guard_axis, noise_pct=noise_pct)
+    return _GuardReading(base_axes.get(guard_axis), opt_axes.get(guard_axis), holds)
+
+
+def _speedup_stats(rows: list[dict[str, Any]], speedups: list[float]) -> dict[str, Any]:
+    """The best rung, and the median and mean of the speedups the pairs produced."""
+    best_idx, best_val = max(
+        ((i, r["speedup"]) for i, r in enumerate(rows) if isinstance(r.get("speedup"), float)),
+        key=lambda x: x[1],
+    )
+    sorted_sp = sorted(speedups)
+    n = len(sorted_sp)
+    median = sorted_sp[n // 2] if n % 2 == 1 else 0.5 * (sorted_sp[n // 2 - 1] + sorted_sp[n // 2])
+    return {
+        "best_conc": rows[best_idx]["conc"],
+        "best_speedup": round(best_val, 4),
+        # The headline rung is the best on the objective alone. Whether the session's own KEEP rule would
+        # have accepted it is a second fact, and the two disagreeing is worth seeing rather than resolving.
+        "best_conc_guard_holds": rows[best_idx]["guard_holds"],
+        "median_speedup": round(median, 4),
+        "mean_speedup": round(sum(speedups) / len(speedups), 4),
+    }
 
 
 def conc_pair_comparison(
@@ -61,8 +112,6 @@ def conc_pair_comparison(
     by_conc_o = {_norm_conc(p): p for p in optimized_points}
     rows: list[dict[str, Any]] = []
     speedups: list[float] = []
-    successful_pairs = 0
-    failed_pairs = 0
     for c in sorted(
         set(by_conc_b) | set(by_conc_o), key=lambda x: (0, x) if isinstance(x, (int, float)) else (1, str(x))
     ):
@@ -70,22 +119,12 @@ def conc_pair_comparison(
         o = by_conc_o.get(c) or {}
         bt = to_float(b.get(metric_key))
         ot = to_float(o.get(metric_key))
-        speedup: float | None = None
+        speedup = _speedup(bt, ot)
         delta_pct: float | None = None
-        if bt is not None and bt > 0 and ot is not None and ot > 0:
-            speedup = ot / bt
+        if speedup is not None:
             delta_pct = (speedup - 1.0) * 100.0
             speedups.append(speedup)
-            successful_pairs += 1
-        else:
-            failed_pairs += 1
-        # ``graded_axes_of`` is what normalises the sweep's ``total_token_throughput`` onto GRADED_TOTAL, so the
-        # guard cannot read a differently-named axis as an absent one.
-        base_axes = graded_axes_of(b) if guard_axis else {}
-        opt_axes = graded_axes_of(o) if guard_axis else {}
-        guard_holds: bool | None = None
-        if guard_axis and base_axes.get(guard_axis) and opt_axes.get(guard_axis):
-            guard_holds = holds_within_band(opt_axes, base_axes, guard_axis, noise_pct=guard_noise_pct)
+        guard = _read_guard(b, o, guard_axis, guard_noise_pct)
         rows.append(
             {
                 "conc": c,
@@ -100,9 +139,9 @@ def conc_pair_comparison(
                 # The guard axis beside the objective, so the frontier this rung sits on is readable rather than
                 # only the one number it was ranked by. Null off the interactivity objective, and null when a side
                 # did not measure the axis -- which is not the same as a rung that measured it and fell outside.
-                "baseline_guard": base_axes.get(guard_axis) if guard_axis else None,
-                "optimized_guard": opt_axes.get(guard_axis) if guard_axis else None,
-                "guard_holds": guard_holds,
+                "baseline_guard": guard.baseline,
+                "optimized_guard": guard.optimized,
+                "guard_holds": guard.holds,
             }
         )
     summary: dict[str, Any] = {
@@ -110,8 +149,8 @@ def conc_pair_comparison(
         # The axis held beside the objective, empty off the interactivity objective. Named here so a reader of
         # ``best_conc_guard_holds`` does not have to infer which axis the verdict is about.
         "guard_axis": guard_axis,
-        "successful_pairs": successful_pairs,
-        "failed_pairs": failed_pairs,
+        "successful_pairs": len(speedups),
+        "failed_pairs": len(rows) - len(speedups),
         "best_conc": None,
         "best_speedup": None,
         "best_conc_guard_holds": None,
@@ -119,24 +158,7 @@ def conc_pair_comparison(
         "mean_speedup": None,
     }
     if speedups:
-        best_idx, best_val = max(
-            ((i, r["speedup"]) for i, r in enumerate(rows) if isinstance(r.get("speedup"), float)),
-            key=lambda x: x[1],
-        )
-        sorted_sp = sorted(speedups)
-        n = len(sorted_sp)
-        median = sorted_sp[n // 2] if n % 2 == 1 else 0.5 * (sorted_sp[n // 2 - 1] + sorted_sp[n // 2])
-        summary.update(
-            {
-                "best_conc": rows[best_idx]["conc"],
-                "best_speedup": round(best_val, 4),
-                # The headline rung is the best on the objective alone. Whether the session's own KEEP rule would
-                # have accepted it is a second fact, and the two disagreeing is worth seeing rather than resolving.
-                "best_conc_guard_holds": rows[best_idx]["guard_holds"],
-                "median_speedup": round(median, 4),
-                "mean_speedup": round(sum(speedups) / len(speedups), 4),
-            }
-        )
+        summary.update(_speedup_stats(rows, speedups))
     return rows, summary
 
 

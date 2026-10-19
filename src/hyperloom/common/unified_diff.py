@@ -67,14 +67,19 @@ def parse_unified_diff(patch_text: str) -> list[FileChange]:
             continue
         if raw.startswith("@@"):
             continue
-        if raw.startswith("+") and not raw.startswith("+++"):
-            current.added.append(raw[1:])
-        elif raw.startswith("-") and not raw.startswith("---"):
-            current.removed.append(raw[1:])
-        elif raw.startswith(" "):
-            current.context.append(raw[1:])
+        _record_hunk_line(current, raw)
     # Drop empty/placeholder sections.
     return [c for c in changes if c.path and c.path != _DEV_NULL]
+
+
+def _record_hunk_line(change: FileChange, raw: str) -> None:
+    """File one hunk body line under the change's added, removed or context lines; any other line is ignored."""
+    if raw.startswith("+") and not raw.startswith("+++"):
+        change.added.append(raw[1:])
+    elif raw.startswith("-") and not raw.startswith("---"):
+        change.removed.append(raw[1:])
+    elif raw.startswith(" "):
+        change.context.append(raw[1:])
 
 
 def touched_paths(patch_text: str) -> list[str]:
