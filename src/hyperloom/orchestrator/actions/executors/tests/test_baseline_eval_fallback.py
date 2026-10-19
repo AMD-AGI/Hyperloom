@@ -1131,6 +1131,7 @@ def test_after_materialize_applies_eval_concurrency_compat(tmp_path):
     """The compat patch is re-asserted against the exact checkout that runs."""
     ix = tmp_path / "ix"
     (ix / "benchmarks").mkdir(parents=True)
+    (ix / "benchmarks" / "benchmark_lib.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
     cfg = _materialized_cfg(tmp_path, run_eval="true", inferencex_path=str(ix))
     seen: list[str | None] = []
 
@@ -1139,9 +1140,12 @@ def test_after_materialize_applies_eval_concurrency_compat(tmp_path):
         return True
 
     executor = BaselineExecutor()
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.ensure_eval_concurrency_compat",
-        side_effect=fake_compat,
+    with (
+        patch("hyperloom.orchestrator.actions.executors.baseline.failed_patch_anchors_in", return_value=[]),
+        patch(
+            "hyperloom.orchestrator.actions.executors.baseline.ensure_eval_concurrency_compat",
+            side_effect=fake_compat,
+        ),
     ):
         assert executor._after_materialize_config(cfg, tmp_path) is None
 
@@ -1152,6 +1156,7 @@ def test_after_materialize_fails_loudly_when_flag_unpatchable(tmp_path):
     """Fail LOUDLY, never warn-and-continue: an unstrippable flag guarantees the benchmark aborts in run_lm_eval, so short-circuit before the server boots."""
     ix = tmp_path / "ix"
     (ix / "benchmarks").mkdir(parents=True)
+    (ix / "benchmarks" / "benchmark_lib.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
     cfg = _materialized_cfg(tmp_path, run_eval="true", inferencex_path=str(ix))
 
     executor = BaselineExecutor()
@@ -1176,6 +1181,7 @@ def test_after_materialize_skips_compat_gate_when_eval_disabled(tmp_path):
     """
     ix = tmp_path / "ix"
     (ix / "benchmarks").mkdir(parents=True)
+    (ix / "benchmarks" / "benchmark_lib.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
     cfg = _materialized_cfg(tmp_path, run_eval="false", inferencex_path=str(ix))
     calls: list[int] = []
 
@@ -1197,6 +1203,7 @@ def test_after_materialize_compat_exception_is_not_swallowed(tmp_path):
     """An exception from the patcher must surface as the same loud failure, not as a silent 'best-effort skip'."""
     ix = tmp_path / "ix"
     (ix / "benchmarks").mkdir(parents=True)
+    (ix / "benchmarks" / "benchmark_lib.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
     cfg = _materialized_cfg(tmp_path, run_eval="true", inferencex_path=str(ix))
 
     executor = BaselineExecutor()
