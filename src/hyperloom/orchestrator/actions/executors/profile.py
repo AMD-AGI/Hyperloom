@@ -10,7 +10,7 @@ import json
 import logging
 import os
 import tempfile
-import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -252,13 +252,20 @@ def _probe_check_rows(certificate: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
+@dataclass(frozen=True)
+class _TraceProbe:
+    """One self-certification probe over a trace dir: where it ran, and its certificate or why it produced none."""
+
+    trace_dir: Path
+    framework: str
+    certificate: dict[str, Any] | None = None
+    error: str = ""
+
+
 def _build_trace_validate(
     health: dict[str, Any],
+    probe: _TraceProbe,
     *,
-    trace_dir: Path,
-    framework: str,
-    certificate: dict[str, Any] | None = None,
-    probe_error: str = "",
     preflight: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assemble the profile-stage trace validation block.
@@ -269,20 +276,20 @@ def _build_trace_validate(
     checks = [row for row in (health.get("checks") or []) if isinstance(row, dict)]
     if isinstance(preflight, dict):
         checks = [preflight] + checks
-    certificate = certificate or {}
+    certificate = probe.certificate or {}
     if certificate:
         checks = checks + _probe_check_rows(certificate)
         probe_status = "ok"
     else:
-        probe_status = "failed" if probe_error else "skipped"
+        probe_status = "failed" if probe.error else "skipped"
     return {
         "schema_version": certificate.get("schema_version"),
         "probe_version": certificate.get("probe_version"),
         "probe_status": probe_status,
-        "probe_error": str(probe_error or ""),
+        "probe_error": str(probe.error or ""),
         "checked_at": now_iso(timespec="seconds"),
-        "trace_dir": str(trace_dir),
-        "framework": str(framework or ""),
+        "trace_dir": str(probe.trace_dir),
+        "framework": str(probe.framework or ""),
         "verdict": certificate.get("verdict") or {},
         "trace_dir_level": certificate.get("trace_dir_level") or {},
         "rank_level": certificate.get("rank_level") or [],
@@ -786,8 +793,10 @@ class ProfileExecutor(BenchmarkRunExecutor):
         self._instrumentation_preflight: dict[str, Any] | None = None
 
     def _resolve_default_config(self) -> Path:
-        """Pick the profile yaml for $FRAMEWORK."""
-        return _default_profile_config()
+        """Use the session workload for native AgentX diagnostics."""
+        from hyperloom.common.benchmark_config import benchmark_config_path
+
+        return benchmark_config_path() or _default_profile_config()
 
     def _resolve_mn_round_trace_root(self, ctx) -> str:
         """Return the shared torch-trace base dir for multi-node, or ''."""
@@ -823,7 +832,7 @@ class ProfileExecutor(BenchmarkRunExecutor):
         or ``""`` when the probe is not armed.
         """
         from . import _framework_rewrite_evidence as _evidence
-        from ._workload_envs import prepend_launch_path
+        from hyperloom.inference_optimizer.runtime_environment import prepend_launch_path
 
         asset_dir = _evidence.probe_asset_dir()
         if not asset_dir.is_dir():
@@ -888,6 +897,11 @@ class ProfileExecutor(BenchmarkRunExecutor):
         output_dir: Path,
     ) -> dict[str, Any] | None:
         """Arm the host probe, then patch the InferenceX checkout Magpie will execute."""
+        from .magpie_agentx import enable_profile, native_config
+
+        if native_config(config_path):
+            enable_profile(config_path)
+            return None
         try:
             self._host_probe_dir = self._inject_host_probe(config_path, output_dir)
             self._host_probe_status = ""
@@ -925,13 +939,10 @@ class ProfileExecutor(BenchmarkRunExecutor):
         framework = ""
         if isinstance(bench, dict):
             framework = str(bench.get("framework") or "").strip().lower()
-        # Scriptable diffusion (xDiT) has no InferenceX server; it profiles via its own torch.profiler schedule.
         from hyperloom.inference_optimizer import framework_registry
 
         if framework_registry.is_scriptable(framework):
-            # The baked-profiler verifier is xDiT/xfuser-specific (it inspects xfuser's base_model.py).
             if str(framework or "").strip().lower() == "xdit":
-                # Recorded but still non-fatal: a warning that nothing keeps is a warning nobody reads.
                 patchers["xdit_profiler_baked"] = verify_xdit_profiler_baked()
                 _note_instrumentation()
             return None
@@ -946,8 +957,6 @@ class ProfileExecutor(BenchmarkRunExecutor):
                 "INFERENCEX_PATH configured; skipping InferenceX profile "
                 "patch validation"
             )
-            # ``None`` rather than ``False``: not run at all is a different fact from run and failed, and only the
-            # latter says the checkout is broken.
             patchers["inferencex"] = None
             _note_instrumentation()
             return None
@@ -959,7 +968,6 @@ class ProfileExecutor(BenchmarkRunExecutor):
         serving_ok = ensure_benchmark_serving_patched(ix_root)
         patchers["benchmark_serving"] = serving_ok
         lib_path = ix_root / "benchmarks" / "benchmark_lib.sh"
-        # Resolved, not fixed: upstream moved the implementation under ``infx/`` and left the old
         # path as a forwarding shim, which never carries the sentinel however well the patch landed.
         # Scoped to ``ix_root`` like ``lib_path`` above: this gate speaks for the tree Magpie runs.
         serving_path = benchmark_serving_path_in(ix_root)
@@ -1048,14 +1056,8 @@ class ProfileExecutor(BenchmarkRunExecutor):
 
     async def __call__(self, ctx) -> dict[str, Any]:
         """Run the profiling action for the given context."""
-        # atom: the Magpie atom wrapper bridges PROFILE=1 to atom's --torch-profiler-dir and writes standard
-        # *.pt.trace.json.gz, so the executor falls through to the sglang/vllm path.
         params = ctx.task.params or {}
-        # Merge current_best.extra_server_args (stamped into base_extra_args) with caller args, dropping compile flags
-        # that break profiling.
-        base_args = _sanitize_profile_server_args(
-            str(params.get("base_extra_args") or "").strip(),
-        )
+        base_args = _sanitize_profile_server_args(str(params.get("base_extra_args") or "").strip())
         caller_args = _sanitize_profile_server_args(str(params.get("extra_server_args") or ""))
         from ._grid_runner import merge_server_args
 
@@ -1087,74 +1089,34 @@ class ProfileExecutor(BenchmarkRunExecutor):
         shared_state = (extra.get("shared_state") if isinstance(extra, dict) else None) or getattr(
             self, "shared_state", None
         )
-        from ._workload_envs import agentx_active
+        from hyperloom.common.benchmark_config import configured_benchmark, is_magpie_agentx
 
-        agentx_session = agentx_active(shared_state)
+        if is_magpie_agentx(configured_benchmark()):
+            return await self._run_native_profile(ctx)
         if not (params.get("output_dir") or extra.get("workspace")):
             output_dir = self._resolve_workspace(ctx, "profile")
             output_dir.mkdir(parents=True, exist_ok=True)
-            # Stash so the benchmark round picks it up via ctx.extra.
             if extra is None:
                 ctx.extra = {"workspace": str(output_dir)}
                 extra = ctx.extra
             else:
                 extra["workspace"] = str(output_dir)
-
-        capture_id = ""
-        capture_status_path: Path | None = None
-        trace_manifest_path: Path | None = None
-        if agentx_session:
-            profile_output_dir = self._resolve_workspace(ctx, "profile")
-            capture_id = uuid.uuid4().hex
-            capture_dir = profile_output_dir / "agentx-profile" / capture_id
-            capture_dir.mkdir(parents=True, exist_ok=True)
-            capture_status_path = capture_dir / "capture-status.json"
-            trace_manifest_path = capture_dir / "trace-manifest.json"
-            capture_envs = dict(params.get("extra_envs") or {})
-            capture_envs["AGENTX_CAPTURE_ID"] = capture_id
-            capture_envs["AGENTX_CAPTURE_STATUS_PATH"] = str(capture_status_path)
-            params["extra_envs"] = capture_envs
-
-        # Mtime gate for the multi-node shared-trace-dir layout: captured before super().__call__ so this round's
-        # traces are newer than the watermark.
         import time as _time
 
         task_started_unix = _time.time()
-
-        # Multi-node banner (silent for single-node) surfacing the round's dir.
         from ._multi_node_env import log_mn_banner
 
-        log_mn_banner(
-            "profile_executor",
-            log,
-            trace_dir=self._resolve_mn_round_trace_root(ctx),
-        )
-
-        # Multi-node only: pre-restart the server with this round's profiler dir, marking
-        # ``ctx.extra['mn_round_restarted']`` so the benchmark round skips a second restart.
+        log_mn_banner("profile_executor", log, trace_dir=self._resolve_mn_round_trace_root(ctx))
         round_trace_root = self._resolve_mn_round_trace_root(ctx)
-        if round_trace_root and agentx_session:
-            return {
-                "status": "failed",
-                "error_class": "agentx_multi_node_profile_unsupported",
-                "error": (
-                    "AgentX multi-node profiling is not phase-gated; refusing the legacy fixed wall-clock capture path"
-                ),
-                "trace_dir": round_trace_root,
-            }
         if round_trace_root:
-            from ._multi_node_server_lifecycle import (
-                ServerRestartFailed,
-                restart_server_for_round,
-            )
+            from ._multi_node_server_lifecycle import ServerRestartFailed, restart_server_for_round
 
             try:
-                # PD knobs auto-resolved from $PD_* env (see baseline.py).
                 await restart_server_for_round(
                     extra_server_args=str(params.get("extra_server_args") or ""),
                     torch_profiler_dir=round_trace_root,
                     framework=os.environ.get("FRAMEWORK") or None,
-                    model_path=(str(params.get("model_path") or "").strip() or os.environ.get("MODEL_PATH") or None),
+                    model_path=str(params.get("model_path") or "").strip() or os.environ.get("MODEL_PATH") or None,
                     tp=int(os.environ.get("TP") or 0) or None,
                     ep=int(os.environ.get("EP") or 0) or None,
                 )
@@ -1167,9 +1129,6 @@ class ProfileExecutor(BenchmarkRunExecutor):
                 }
             if isinstance(extra, dict):
                 extra["mn_round_restarted"] = True
-
-        # InferenceX patching (``ensure_benchmark_lib_patched`` / ``ensure_benchmark_serving_patched``) happens in the
-        # ``_after_materialize_config`` hook, which covers the exact InferenceX checkout Magpie will execute.
         from ._multi_node_server_lifecycle import trigger_infera_engine_profile
 
         prof_body: dict[str, Any] = {}
@@ -1181,17 +1140,10 @@ class ProfileExecutor(BenchmarkRunExecutor):
                 prof_body = parsed
         except (ValueError, TypeError):
             prof_body = {}
-        # The sglang disaggregated scheduler crashes (``TypeError: unsupported operand type(s) for +=: 'NoneType' and
-        # 'int'`` -> SIGQUIT, server disconnects, no trace) when start_profile carries the step-window / stage-split
-        # params that the single-node InferenceX PROFILE_EXTRA_BODY normally sets (``profile_by_stage`` /
-        # ``merge_profiles`` / ``num_steps`` / ``start_step``).
         _SAFE_PROFILE_KEYS = ("output_dir",)
-        prof_body = {k: v for k, v in prof_body.items() if k in _SAFE_PROFILE_KEYS}
-        # Pin the trace output dir explicitly: the disagg workers may not carry SGLANG_TORCH_PROFILER_DIR, so without
-        # output_dir sglang writes nowhere the sandbox can read.
+        prof_body = {k: v for (k, v) in prof_body.items() if k in _SAFE_PROFILE_KEYS}
         if round_trace_root:
             prof_body.setdefault("output_dir", round_trace_root)
-        # Bounded profiling window.
         import asyncio as _asyncio
 
         warmup_s = float(os.environ.get("HYPERLOOM_MN_PROFILE_WARMUP_S", "60") or 60)
@@ -1211,68 +1163,18 @@ class ProfileExecutor(BenchmarkRunExecutor):
         try:
             result = await super().__call__(ctx)
         finally:
-            # Magpie ended (or raised): wind the window task down so profiling is never left running open-ended.
             if not prof_task.done():
                 prof_task.cancel()
                 try:
                     await prof_task
-                except (_asyncio.CancelledError, Exception):  # noqa: BLE001
-                    pass
+                except (_asyncio.CancelledError, OSError, RuntimeError, ValueError) as exc:
+                    log.debug("profile_executor: bounded profile task ended during cleanup: %r", exc)
             if _prof_started.get("v"):
-                # start fired but stop didn't (window task cancelled mid-run because Magpie finished first) -> ensure
-                # a matching stop.
                 await trigger_infera_engine_profile("stop")
-
-        # Merge the per-rank host-probe reports into the rewrite-evidence document.
         self._collect_rewrite_evidence(result)
-
-        # Augment with trace_dir.
         workspace_str = result.get("workspace")
-        agentx_profile = agentx_session or "submission_valid" in result
-        capture_status: dict[str, Any] | None = None
-        if agentx_profile and capture_status_path is not None:
-            if capture_status_path.is_file():
-                try:
-                    parsed_capture_status = json.loads(capture_status_path.read_text(encoding="utf-8"))
-                    if not isinstance(parsed_capture_status, dict):
-                        raise ValueError("capture status must be a JSON object")
-                    if str(parsed_capture_status.get("capture_id") or "") != capture_id:
-                        raise ValueError("capture status id does not match this profile invocation")
-                    capture_status = parsed_capture_status
-                    result["trace_capture_status"] = str(parsed_capture_status.get("status") or "")
-                    result["trace_capture"] = parsed_capture_status
-                    result["trace_capture_status_path"] = str(capture_status_path)
-                except (OSError, ValueError, TypeError) as exc:
-                    capture_status = {
-                        "status": "failed",
-                        "reason": "capture_status_unreadable",
-                        "error": f"{type(exc).__name__}: {exc}",
-                    }
-                    result["trace_capture_status"] = "failed"
-                    result["trace_capture"] = capture_status
-        measurement_status = str(result.get("status") or "")
-        if agentx_profile:
-            result["measurement_status"] = measurement_status
-        skip_trace_discovery = agentx_profile and measurement_status != "succeeded"
-        if agentx_profile and not round_trace_root and capture_status is None:
-            if measurement_status == "succeeded":
-                capture_status = {
-                    "status": "failed",
-                    "reason": "capture_status_missing",
-                }
-                result["trace_capture_status"] = "missing"
-                result["trace_capture"] = capture_status
-                log.error("profile_executor: AgentX profile produced no current-round capture-status.json")
-            else:
-                result["trace_capture_status"] = "not_reached"
-                result["trace_input_ready"] = False
         tensor_parallel_size: int | None = None
-        for raw_tp in (
-            result.get("tp"),
-            params.get("tp"),
-            getattr(shared_state, "tp", None),
-            os.environ.get("TP"),
-        ):
+        for raw_tp in (result.get("tp"), params.get("tp"), getattr(shared_state, "tp", None), os.environ.get("TP")):
             try:
                 parsed_tp = int(raw_tp or 0)
             except (TypeError, ValueError):
@@ -1281,8 +1183,6 @@ class ProfileExecutor(BenchmarkRunExecutor):
                 tensor_parallel_size = parsed_tp
                 break
         if round_trace_root:
-            # Multi-node: traces land at the shared wekafs base dir (not the workspace-local
-            # ``_candidate_trace_dirs``).
             trace_dir = Path(round_trace_root)
             if trace_dir.is_dir():
                 all_files = sorted(trace_dir.glob("*.trace.json.gz"))
@@ -1299,24 +1199,8 @@ class ProfileExecutor(BenchmarkRunExecutor):
                         except OSError:
                             return 0
 
-                    if agentx_profile:
-                        main_trace = _preferred_main_trace_path(
-                            trace_dir,
-                            trace_files,
-                            require_single_rank=True,
-                            tensor_parallel_size=tensor_parallel_size,
-                        )
-                        if main_trace is not None:
-                            result["main_trace_path"] = str(main_trace)
-                            selected_rank = _trace_rank(main_trace)
-                            result["primary_rank"] = selected_rank
-                            result["profile_trace_selection_reason"] = (
-                                "primary_rank_trace" if selected_rank is not None else "single_trace_compatibility"
-                            )
-                    else:
-                        # The shared round dir can contain a small warmup capture beside the real GPU-rich trace.
-                        main_trace = max(trace_files, key=_safe_size)
-                        result["main_trace_path"] = str(main_trace)
+                    main_trace = max(trace_files, key=_safe_size)
+                    result["main_trace_path"] = str(main_trace)
                     log.info(
                         "profile_executor: multi-node main trace selected: %s (%d candidate traces this round)",
                         main_trace.name if main_trace is not None else "<none>",
@@ -1324,33 +1208,24 @@ class ProfileExecutor(BenchmarkRunExecutor):
                     )
                 elif all_files:
                     log.warning(
-                        "profile_executor: multi-node trace dir %s has "
-                        "%d historical trace(s) but none with mtime >= "
-                        "%.0f (this round's start); sglang may have "
-                        "skipped /start_profile or the trace flush is "
-                        "lagging",
+                        "profile_executor: multi-node trace dir %s has %d historical trace(s) but none with mtime >= %.0f (this round's start); sglang may have skipped /start_profile or the trace flush is lagging",
                         trace_dir,
                         len(all_files),
                         task_started_unix,
                     )
                 else:
                     log.warning(
-                        "profile_executor: multi-node trace dir %s exists "
-                        "but no .trace.json.gz files found yet (server "
-                        "pods may still be flushing)",
+                        "profile_executor: multi-node trace dir %s exists but no .trace.json.gz files found yet (server pods may still be flushing)",
                         trace_dir,
                     )
             else:
                 result["trace_dir"] = None
                 result["trace_files"] = []
                 log.warning(
-                    "profile_executor: round trace dir %s does not exist "
-                    "after magpie completed; check sglang server logs for "
-                    "torch profiler errors",
+                    "profile_executor: round trace dir %s does not exist after magpie completed; check sglang server logs for torch profiler errors",
                     round_trace_root,
                 )
-        elif workspace_str and not skip_trace_discovery:
-            # Single-node branch: multi-candidate trace discovery.
+        elif workspace_str:
             workspace = Path(workspace_str)
             selected_trace_dir: Path | None = None
             selected_trace_files: list[Path] = []
@@ -1360,82 +1235,47 @@ class ProfileExecutor(BenchmarkRunExecutor):
             for trace_dir in candidate_trace_dirs:
                 if not trace_dir.is_dir():
                     continue
-                trace_files = [
-                    path
-                    for path in _trace_files_for_dir(trace_dir)
-                    if not agentx_profile or safe_mtime(path) >= int(task_started_unix)
-                ]
+                trace_files = _trace_files_for_dir(trace_dir)
                 if trace_files:
                     selected_trace_dir = trace_dir
                     selected_trace_files = trace_files
                     break
                 existing_empty_dirs.append(trace_dir)
-
-            # SGLang can emit only capture sidecars without a top-level *.trace.json.gz; fall back to those so
-            # roofline analyzes the available trace instead of failing with no_trace_files.
             if selected_trace_dir is None:
                 for trace_dir in candidate_trace_dirs:
                     if not trace_dir.is_dir():
                         continue
-                    sidecars = [
-                        path
-                        for path in _capture_sidecar_traces_for_dir(trace_dir)
-                        if not agentx_profile or safe_mtime(path) >= int(task_started_unix)
-                    ]
+                    sidecars = _capture_sidecar_traces_for_dir(trace_dir)
                     if sidecars:
                         selected_trace_dir = trace_dir
                         selected_trace_files = sidecars
                         capture_only = True
                         break
-
             if selected_trace_dir is not None:
                 result["trace_dir"] = str(selected_trace_dir)
                 result["trace_files"] = [str(p) for p in selected_trace_files]
                 _record_trace_topology(result, selected_trace_files)
                 if capture_only:
                     result["profile_trace_selection_reason"] = "capture_only_fallback"
-                    if agentx_profile:
-                        main_trace = None
-                        result["trace_input_ready"] = False
-                        result["status"] = "failed"
-                        result["error_class"] = "profile_capture_only"
-                        result["error"] = (
-                            "AgentX profile produced only graph-capture sidecars; "
-                            "a single-rank workload trace is required"
-                        )
-                    else:
-                        # Legacy profiles pass the directory so TraceLens can choose among the available capture
-                        # sidecars.
-                        main_trace = selected_trace_dir
-                        log.info(
-                            "profile_executor: no *.trace.json.gz; falling back to "
-                            "%d SGLang capture sidecar(s) in %s (#575)",
-                            len(selected_trace_files),
-                            selected_trace_dir,
-                        )
+                    main_trace = selected_trace_dir
+                    log.info(
+                        "profile_executor: no *.trace.json.gz; falling back to %d SGLang capture sidecar(s) in %s (#575)",
+                        len(selected_trace_files),
+                        selected_trace_dir,
+                    )
                 else:
                     main_trace = _preferred_main_trace_path(
                         selected_trace_dir,
                         selected_trace_files,
-                        require_single_rank=agentx_profile,
+                        require_single_rank=False,
                         tensor_parallel_size=tensor_parallel_size,
                     )
                     if main_trace is not None:
-                        if agentx_profile:
-                            selected_rank = _trace_rank(main_trace)
-                            result["primary_rank"] = selected_rank
-                            result["profile_trace_selection_reason"] = (
-                                "primary_rank_trace" if selected_rank is not None else "single_trace_compatibility"
-                            )
-                        else:
-                            result["profile_trace_selection_reason"] = (
-                                "merged_trace_preferred"
-                                if main_trace.name.startswith("merged-")
-                                else "trace_dir_preferred"
-                            )
+                        result["profile_trace_selection_reason"] = (
+                            "merged_trace_preferred" if main_trace.name.startswith("merged-") else "trace_dir_preferred"
+                        )
                 if main_trace is not None:
                     result["main_trace_path"] = str(main_trace)
-                # Warn if the trace shape suggests PROFILE_EXTRA_BODY leaked / shape-discovery missing.
                 try:
                     framework = str(
                         getattr(ctx, "framework", "")
@@ -1445,113 +1285,76 @@ class ProfileExecutor(BenchmarkRunExecutor):
                     health = _validate_trace_structure(selected_trace_dir, framework)
                     if isinstance(health, dict):
                         result["trace_health"] = health
-                        # The probe reads the trace body, so it fails on its own terms (an unreadable capture) without
-                        # that meaning the profile failed.
                         certificate: dict[str, Any] = {}
                         probe_error = ""
                         try:
                             certificate = _certify_trace_dir(selected_trace_dir, framework)
-                        except Exception as e:  # noqa: BLE001 - probe is best-effort
+                        except (OSError, RuntimeError, ValueError, TypeError) as e:
                             probe_error = f"{type(e).__name__}: {e}"
-                            log.debug(
-                                "profile_executor: trace self-certification failed: %s",
-                                probe_error,
-                            )
-                        # Structured verdict for the caller's timeline event: the roofline recorder stores it per
-                        # profile attempt, so a retried roofline keeps each attempt's verdict beside the trace that
-                        # attempt produced.
+                            log.debug("profile_executor: trace self-certification failed: %s", probe_error)
                         result["trace_validate"] = _build_trace_validate(
                             health,
-                            trace_dir=selected_trace_dir,
-                            framework=framework,
-                            certificate=certificate,
-                            probe_error=probe_error,
+                            _TraceProbe(selected_trace_dir, framework, certificate=certificate, error=probe_error),
                             preflight=self._instrumentation_preflight,
                         )
-                        # The certificate's per-rank, per-candidate and per-chunk tables are unbounded in the
-                        # number of ranks and files, so they go to a file and the event keeps the path. Until now
-                        # they were computed and dropped: nothing wrote them anywhere.
                         result["trace_validate_path"] = _write_trace_certificate(
-                            selected_trace_dir,
-                            result["trace_validate"],
+                            selected_trace_dir, result["trace_validate"]
                         )
-                except Exception as e:  # noqa: BLE001 - validator is best-effort
-                    log.debug(
-                        "profile_executor: trace structure validator failed: %s",
-                        e,
-                    )
+                except (OSError, RuntimeError, ValueError, TypeError) as e:
+                    log.debug("profile_executor: trace structure validator failed: %s", e)
             else:
                 result["trace_dir"] = None
                 result["trace_files"] = []
                 result["status"] = "failed"
                 result["error_class"] = "no_trace_files"
-                probed = ", ".join(str(p) for p in candidate_trace_dirs)
+                probed = ", ".join((str(p) for p in candidate_trace_dirs))
                 result["error"] = f"no .trace.json.gz or capture sidecar under {workspace_str} (probed: {probed})"
                 if existing_empty_dirs:
                     log.warning(
-                        "profile_executor: trace dirs exist but no .trace.json.gz "
-                        "or capture sidecar (bs_*_rank*.json.gz) files in %s",
-                        ", ".join(str(p) for p in existing_empty_dirs),
+                        "profile_executor: trace dirs exist but no .trace.json.gz or capture sidecar (bs_*_rank*.json.gz) files in %s",
+                        ", ".join((str(p) for p in existing_empty_dirs)),
                     )
                 else:
                     log.warning(
                         "profile_executor: workspace=%s has no trace dir (checked: %s)",
                         workspace_str,
-                        ", ".join(str(p) for p in candidate_trace_dirs),
+                        ", ".join((str(p) for p in candidate_trace_dirs)),
                     )
-        capture_succeeded = str((capture_status or {}).get("status") or "") == "succeeded"
-        if agentx_profile:
-            result["trace_input_ready"] = bool(
-                measurement_status == "succeeded" and capture_succeeded and result.get("main_trace_path")
-            )
-        elif result.get("main_trace_path"):
+        if result.get("main_trace_path"):
             result["trace_input_ready"] = True
-        if capture_status is not None and str(capture_status.get("status") or "") != "succeeded":
-            if measurement_status == "succeeded":
-                result["status"] = "failed"
-                result["error_class"] = "profile_capture_failed"
-                result["error"] = (
-                    f"AgentX trace capture failed: {capture_status.get('reason') or 'unknown capture failure'}"
-                )
-        elif (
-            agentx_profile
-            and measurement_status == "succeeded"
-            and capture_succeeded
-            and result.get("trace_files")
-            and not result.get("main_trace_path")
-            and result.get("error_class") != "profile_capture_only"
-        ):
-            result["trace_input_ready"] = False
-            result["status"] = "failed"
-            result["error_class"] = "primary_rank_trace_missing"
-            result["error"] = (
-                "AgentX profiling produced trace files but no rank-0 raw trace "
-                "could be identified; refusing a merged multi-rank fallback"
-            )
-        if agentx_profile and trace_manifest_path is not None:
-            manifest = {
-                "schema_version": 1,
-                "capture_id": capture_id,
-                "measurement_status": result.get("measurement_status"),
-                "trace_capture_status": result.get("trace_capture_status"),
-                "trace_input_ready": bool(result.get("trace_input_ready")),
-                "primary_rank": result.get("primary_rank"),
-                "primary_trace_path": result.get("main_trace_path"),
-                "rank_trace_paths": result.get("rank_trace_paths") or {},
-                "merged_trace_paths": result.get("merged_trace_paths") or [],
-                "capture_status_path": str(capture_status_path) if capture_status_path else None,
+        return result
+
+    def _measurement_succeeded(self, measurement: dict[str, Any]) -> bool:
+        return measurement.get("round_succeeded", measurement.get("valid_measurement")) is True
+
+    async def _run_native_profile(self, ctx) -> dict[str, Any]:
+        """Collect Magpie-owned captures and certify each time window separately."""
+        import asyncio
+
+        result = await super().__call__(ctx)
+        if result.get("status") != "succeeded":
+            return result
+        capture = result.get("agentx_metrics", {}).get("profile_capture", {})
+        if capture.get("status") != "complete":
+            return {
+                **result,
+                "status": "failed",
+                "error_class": "profile_capture_failed",
+                "trace_capture": capture,
+                "trace_input_ready": False,
             }
-            try:
-                atomic_write_json(
-                    trace_manifest_path,
-                    manifest,
-                    trailing_newline=True,
-                    fsync=True,
-                    fsync_dir=True,
-                )
-                result["trace_manifest_path"] = str(trace_manifest_path)
-            except OSError as exc:
-                log.warning("profile_executor: failed to write AgentX trace manifest: %s", exc)
+        result["trace_capture"] = capture
+        result["trace_capture_status"] = capture["status"]
+        result["trace_input_ready"] = False
+        result["profile_captures"] = []
+        for window in capture.get("profiles", [capture]):
+            mapped = await asyncio.to_thread(_map_native_capture, window, result)
+            result["profile_captures"].append(mapped)
+        primary = next((window for window in result["profile_captures"] if window.get("trace_input_ready")), None)
+        if primary is None:
+            result.update(status="failed", error_class="primary_rank_trace_missing")
+        else:
+            result.update(primary)
         return result
 
 
@@ -1563,3 +1366,30 @@ __all__ = [
     "ProfileExecutor",
     "profile_executor",
 ]
+
+
+def _map_native_capture(capture: dict[str, Any], measurement: dict[str, Any]) -> dict[str, Any]:
+    """Select and check one capture, without combining ranks from different windows."""
+    files = [Path(name) for name in capture.get("trace_files", [])]
+    result: dict[str, Any] = {"capture_id": capture["capture_id"], "trace_input_ready": False}
+    if not files or not all(path.is_file() for path in files):
+        return result
+    trace_dir = files[0].parent
+    main = _preferred_main_trace_path(
+        trace_dir,
+        files,
+        require_single_rank=True,
+        tensor_parallel_size=measurement.get("tp"),
+    )
+    result.update(trace_dir=str(trace_dir), trace_files=[str(path) for path in files])
+    _record_trace_topology(result, files)
+    if main is None:
+        return result
+    result.update(main_trace_path=str(main), primary_rank=_trace_rank(main), trace_input_ready=True)
+    framework = measurement["framework"]
+    health = _validate_trace_structure(trace_dir, framework)
+    certificate = _certify_trace_dir(trace_dir, framework)
+    result["trace_health"] = health
+    result["trace_validate"] = _build_trace_validate(health, _TraceProbe(trace_dir, framework, certificate=certificate))
+    result["trace_validate_path"] = _write_trace_certificate(trace_dir, result["trace_validate"])
+    return result

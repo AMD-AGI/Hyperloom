@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
-from hyperloom.common.io import atomic_write_text
+from hyperloom.common.io import WriteOptions, atomic_write_text
 from hyperloom.inference_optimizer.session.session_paths import enablement_dir
 
 from .recipe.projections import root_id_for
@@ -301,7 +301,7 @@ def write_setup_script(session_dir: str | Path, enablement: "EnablementRound") -
     """Write ``enablement_setup.sh`` and its file copies; return its session-relative path."""
     root = Path(session_dir)
     out = enablement_dir(root) / SETUP_SCRIPT_NAME
-    atomic_write_text(out, render_setup_script(root, enablement), make_parents=True, mode=0o700)
+    atomic_write_text(out, render_setup_script(root, enablement), options=WriteOptions(make_parents=True, mode=0o700))
     return str(out.relative_to(root))
 
 

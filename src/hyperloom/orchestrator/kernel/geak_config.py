@@ -268,7 +268,7 @@ def _geak_has_accepted_kernel(result: Any) -> bool:
     return bool(_geak_accepted_kernel_specs(result))
 
 
-def _geak_overlay_is_loadable(overlay: str) -> bool:
+def geak_overlay_is_loadable(overlay: str) -> bool:
     """Report whether an overlay dir can actually install an authored kernel."""
     from hyperloom.common.overlay import overlay_is_loadable
 

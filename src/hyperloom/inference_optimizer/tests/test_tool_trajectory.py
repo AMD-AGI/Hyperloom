@@ -72,7 +72,7 @@ def test_reactor_tools_are_timed_from_use_to_result_under_their_request(tmp_path
 
 
 def test_input_summary_is_clipped_and_sized():
-    attributes = te.tool_attributes(name="Write", tool_use_id="t", tool_input={"content": "x" * 5000})
+    attributes = te.tool_attributes(te.ToolCall(name="Write", tool_use_id="t", tool_input={"content": "x" * 5000}))
     assert attributes["input_chars"] > 5000
     assert len(attributes["input_summary"]) <= 241
 

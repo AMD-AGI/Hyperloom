@@ -285,7 +285,6 @@ def test_incomplete_metadata_shapes_are_rejected(tmp_path, payload):
     (directory / "meta.json").write_text(json.dumps(payload))
 
     assert archive._inspect_complete_meta(directory, 1) == ("incomplete", None)
-    assert archive._complete_meta(directory, 1) is None
     # A directory the archive cannot vouch for never reaches the index.
     assert archive.load_index() == []
 

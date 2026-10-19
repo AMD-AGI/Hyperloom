@@ -39,11 +39,6 @@ from ..state.kernel_decision_settings import (
 
 log = logging.getLogger(__name__)
 
-#: A hot kernel whose source file trace analysis could not resolve. It retires
-#: like a rejection because nothing can dispatch it, but no backend judged it.
-UNRESOLVED_SOURCE_REASON = "unresolved_source"
-
-
 # "Honest E2E" hardening flags.
 _HONEST_E2E_UMBRELLA_ENV = "HL_HONEST_E2E"
 
@@ -668,15 +663,6 @@ def record_gemm_tuning(state, result: dict[str, Any]) -> None:
     state.gemm_tuning_attempts = attempts[-_DEFAULT_ATTEMPTS_HISTORY:]
 
 
-def _kernel_ids_in_optimization_stack(state) -> set[str]:
-    """kernel_ids already absorbed into optimization_stack by a kernel lane."""
-    return {
-        str(e.get("kernel_id"))
-        for e in (state.optimization_stack or [])
-        if isinstance(e, dict) and e.get("action") in INTEGRATING_STACK_ACTIONS and e.get("kernel_id")
-    }
-
-
 def _canonical_kernel_recipe_operator(kernel_id: str) -> str:
     """The ``kernel_name`` dimension out of a ``kernel:<producer>:<kernel_name>:...`` id, or ``\"\"`` when ``kernel_id`` is not that scheme.
 
@@ -712,60 +698,6 @@ def _forge_loop_entries_by_operator_in_optimization_stack(state) -> dict[str, di
 def _forge_loop_operators_in_optimization_stack(state) -> set[str]:
     """Normalized operator names an integrating kernel-recipe lane has already landed; see the sibling ``_entries`` function."""
     return set(_forge_loop_entries_by_operator_in_optimization_stack(state))
-
-
-def _kernel_ids_with_integrate_attempts(state) -> set[str]:
-    """kernel_ids that already received a *terminal* E2E integrate verdict."""
-    terminal: set[str] = set()
-    for entry in (state.kernel_integrate_attempts or {}).values():
-        if not isinstance(entry, dict):
-            continue
-        kid = str(entry.get("kernel_id") or "").strip()
-        if not kid:
-            continue
-        if entry.get("retryable") and not entry.get("rejected"):
-            continue
-        terminal.add(kid)
-    return terminal
-
-
-def integrate_attempt_count_for_kernel(state, kernel_id: str) -> int:
-    """Total *recorded* integrate attempts for a kernel_id."""
-    kid = str(kernel_id or "").strip()
-    if not kid:
-        return 0
-    total = 0
-    for entry in (state.kernel_integrate_attempts or {}).values():
-        if not isinstance(entry, dict):
-            continue
-        if str(entry.get("kernel_id") or "").strip() != kid:
-            continue
-        try:
-            total += int(entry.get("attempt_count") or 0)
-        except (TypeError, ValueError):
-            continue
-    return total
-
-
-def integrate_attempt_count_for_integration(
-    state,
-    integration_id: str,
-) -> int:
-    """Return recorded attempts for one immutable pending patch."""
-    ident = str(integration_id or "").strip()
-    if not ident:
-        return 0
-    total = 0
-    for entry in (state.kernel_integrate_attempts or {}).values():
-        if not isinstance(entry, dict):
-            continue
-        if str(entry.get("integration_id") or "") != ident:
-            continue
-        try:
-            total += int(entry.get("attempt_count") or 0)
-        except (TypeError, ValueError):
-            continue
-    return total
 
 
 def _kernel_trace_impact_pct(state, kernel_id: str) -> float:

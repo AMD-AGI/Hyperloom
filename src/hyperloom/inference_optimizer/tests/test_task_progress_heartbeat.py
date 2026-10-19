@@ -39,12 +39,7 @@ def _runner(tmp_path: Path, monkeypatch) -> SubAgentRunner:
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     sd = paths.make_session_dir()
     db = SqliteConnection(tmp_path / "coord.db")
-    return SubAgentRunner(
-        ResourceLockManager(SqliteLeaseBackend(db)),
-        TaskRegistry(db),
-        session_dir=sd,
-        policy=None,
-    )
+    return SubAgentRunner(ResourceLockManager(SqliteLeaseBackend(db)), TaskRegistry(db), session_dir=sd)
 
 
 def _progress_notes(task) -> list[dict]:
@@ -275,18 +270,6 @@ async def test_direct_cancel_during_cleanup_retains_capacity(tmp_path, monkeypat
         assert "cleanup cancelled" in caplog.text
     finally:
         finish.set()
-
-
-@pytest.mark.asyncio
-async def test_retired_recover_is_cancelled_without_running(tmp_path, monkeypatch):
-    sub = _runner(tmp_path, monkeypatch)
-    task = await sub.tasks.create(kind="recover", params={}, idempotency_key="legacy-recover")
-    result = await sub.run_task(task)
-    assert result.state == "cancelled"
-    row = await sub.tasks.get(task.task_id)
-    assert row.state == "cancelled"
-    assert row.history[-1]["from"] == "queued"
-    assert row.history[-1]["evidence"]["reason"] == "unsupported_action"
 
 
 @pytest.mark.asyncio

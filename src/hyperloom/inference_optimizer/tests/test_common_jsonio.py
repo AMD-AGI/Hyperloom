@@ -9,11 +9,11 @@ import re
 import pytest
 
 from hyperloom.common.jsonio import (
-    coerce_dict,
     extract_first_json_with_key,
     extract_last_json_with_key,
     read_json,
     read_jsonl,
+    read_json_strict,
 )
 
 _BARE = re.compile(r"(\{.*\})", re.DOTALL)
@@ -43,19 +43,19 @@ class TestReadJson:
 
     def test_strict_missing_raises(self, tmp_path):
         with pytest.raises(OSError):
-            read_json(tmp_path / "nope.json", strict=True)
+            read_json_strict(tmp_path / "nope.json")
 
     def test_strict_malformed_raises(self, tmp_path):
         p = tmp_path / "bad.json"
         p.write_text("{not json}")
         with pytest.raises(json.JSONDecodeError):
-            read_json(p, strict=True)
+            read_json_strict(p)
 
     def test_strict_require_dict_raises(self, tmp_path):
         p = tmp_path / "list.json"
         p.write_text("[1, 2]")
         with pytest.raises(ValueError):
-            read_json(p, require_dict=True, strict=True)
+            read_json_strict(p, require_dict=True)
 
     def test_reads_value(self, tmp_path):
         p = tmp_path / "ok.json"
@@ -65,7 +65,7 @@ class TestReadJson:
     def test_empty_value(self, tmp_path):
         p = tmp_path / "blank.json"
         p.write_text("  ")
-        assert read_json(p, strict=True, empty_value=None) is None
+        assert read_json_strict(p, empty_value=None) is None
 
     def test_tolerant_reports_error(self, tmp_path):
         p = tmp_path / "bad.json"
@@ -81,9 +81,9 @@ class TestReadJsonl:
         p.write_text('{"a": 1}\n\n{"b": 2}\n')
         assert read_jsonl(p) == [{"a": 1}, {"b": 2}]
 
-    def test_missing_default_and_error_callback(self, tmp_path):
+    def test_missing_file_is_empty_and_reported(self, tmp_path):
         errors: list[BaseException] = []
-        assert read_jsonl(tmp_path / "missing.jsonl", default=["fallback"], on_error=errors.append) == ["fallback"]
+        assert read_jsonl(tmp_path / "missing.jsonl", on_error=errors.append) == []
         assert isinstance(errors[0], OSError)
 
     def test_skip_malformed_and_non_dict_rows(self, tmp_path):
@@ -109,23 +109,6 @@ class TestReadJsonl:
         p.write_text("{not json}\n")
         with pytest.raises(json.JSONDecodeError):
             read_jsonl(p)
-
-
-class TestCoerceDict:
-    def test_dict_returned(self):
-        data = {"x": 1}
-        assert coerce_dict(data) is data
-
-    def test_path_to_dict(self, tmp_path):
-        p = tmp_path / "value.json"
-        p.write_text('{"x": 1}')
-        assert coerce_dict(p) == {"x": 1}
-
-    def test_invalid_or_non_dict_default(self, tmp_path):
-        p = tmp_path / "list.json"
-        p.write_text("[1, 2]")
-        assert coerce_dict(p) == {}
-        assert coerce_dict(None, default={"fallback": True}) == {"fallback": True}
 
 
 class TestExtractFirstJson:

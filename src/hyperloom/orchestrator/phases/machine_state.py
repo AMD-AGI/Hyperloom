@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import math
 import time
+from dataclasses import dataclass
 from typing import Any
 
 from hyperloom.common.coerce import to_unix
@@ -18,14 +19,12 @@ from hyperloom.orchestrator.lever import (
     LEVER_SOURCE_PATCH,
     LEVER_UPSTREAM_PR,
 )
-from hyperloom.inference_optimizer.breakdown.recorder.phase_event import is_phase_transition_row
 from hyperloom.inference_optimizer.breakdown.stop_reasons import is_valid_stop_reason
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
 )
 from ..kernel.patch_landing import IntegratedStack
 from ..state.kernel_decision_settings import resolve_kernel_opt_max_failures
-from .session_contract import bound_session_declares
 from ..state.shared_state import (
     ESCALATE_HINT_SKIP_TO_CLOSE,
     ESCALATE_HINT_SKIP_TO_KERNEL,
@@ -220,10 +219,6 @@ def _default_cycle_reloop_min_remaining_sec() -> float:
     return v if v > 0 else 10800.0
 
 
-# Minimum session wall-clock (seconds) that must remain to justify opening a new macro-cycle; below this we wind down
-# to CLOSE instead of starting a cycle we cannot meaningfully use.
-DEFAULT_CYCLE_RELOOP_MIN_REMAINING_SEC: float = _default_cycle_reloop_min_remaining_sec()
-
 # R7 global convergence: number of consecutive no-gain macro-cycles after which the run is considered converged (stop
 # looping → CLOSE).
 DEFAULT_GLOBAL_CONVERGENCE_NO_GAIN_CYCLES: int = 3
@@ -305,16 +300,11 @@ def _kernel_idle_max_ticks() -> int:
     return val if val >= 1 else 3
 
 
-KERNEL_IDLE_MAX_TICKS: int = _kernel_idle_max_ticks()
-
-
 def _kernel_idle_min_seconds() -> float:
     """Wall-clock seconds a KERNEL idle streak must last before winding down."""
     val = _env_float("INFERENCE_OPTIMIZER_KERNEL_IDLE_MIN_SECONDS", default=600.0)
     return val if val > 0.0 else 600.0
 
-
-KERNEL_IDLE_MIN_SECONDS: float = _kernel_idle_min_seconds()
 
 #: How often the intent router refreshes the inline-step liveness stamp.
 KERNEL_HEARTBEAT_SEC: float = 150.0
@@ -483,26 +473,6 @@ def phase_elapsed_seconds(state: Any, *, now_unix: float | None = None) -> float
     started = max(started, _resume_boundary_unix(state))
     now = float(now_unix if now_unix is not None else _now_unix(state))
     return max(0.0, now - started)
-
-
-def phase_elapsed_totals_from_history(history: Any) -> dict[str, float]:
-    """Rebuild per-phase completed-segment totals from a ``phase_history`` log."""
-    if not isinstance(history, list):
-        return {}
-    rows = [row for row in history if isinstance(row, dict)]
-    totals: dict[str, float] = {}
-    transition_rows = [row for row in rows if is_phase_transition_row(row)]
-    for idx in range(len(transition_rows) - 1):
-        phase = str(transition_rows[idx].get("to_phase") or "").strip().upper()
-        try:
-            entered = float(transition_rows[idx].get("ts_unix") or 0.0)
-            exited = float(transition_rows[idx + 1].get("ts_unix") or 0.0)
-        except (TypeError, ValueError):
-            continue
-        if not phase or entered <= 0.0 or exited <= entered:
-            continue
-        totals[phase] = totals.get(phase, 0.0) + (exited - entered)
-    return totals
 
 
 def phase_cumulative_seconds(
@@ -1157,10 +1127,18 @@ def _budget_predicate_inputs(
         "cap_sec": phase_cap_seconds(state),
         "entry_elapsed_sec": phase_elapsed_seconds(state, now_unix=now_unix),
         "cumulative_elapsed_sec": phase_cumulative_seconds(state, now_unix=now_unix),
+        "current_balance": remaining_sec,
     }
-    if bound_session_declares("phase_budget", "current_balance"):
-        budget["current_balance"] = remaining_sec
     return budget
+
+
+@dataclass(frozen=True)
+class PhaseFlags:
+    """Which optional phases a run has switched on."""
+
+    kernel_enabled: bool = True
+    optimize_enabled: bool = True
+    enablement_enabled: bool = False
 
 
 def _base_workflow_predicate_inputs(
@@ -1168,9 +1146,7 @@ def _base_workflow_predicate_inputs(
     *,
     current: str,
     now_unix: float,
-    kernel_enabled: bool,
-    optimize_enabled: bool,
-    enablement_enabled: bool,
+    flags: PhaseFlags,
     enablement_in_flight: bool,
 ) -> dict[str, Any]:
     hint = _pending_escalate_hint(state) or None
@@ -1187,11 +1163,8 @@ def _base_workflow_predicate_inputs(
         "cycle_reloop_min_remaining_sec": (
             _cycle_reloop_min_remaining_sec(state) if hint == ESCALATE_HINT_SKIP_TO_CLOSE else 0.0
         ),
+        "baseline_tput": ((_number(state.baseline_tput) or 0.0) if hint == ESCALATE_HINT_SKIP_TO_CLOSE else None),
     }
-    if bound_session_declares("workflow_global", "baseline_tput"):
-        global_inputs["baseline_tput"] = (
-            (_number(state.baseline_tput) or 0.0) if hint == ESCALATE_HINT_SKIP_TO_CLOSE else None
-        )
     return {
         "current_phase": current,
         "now_unix": now_unix,
@@ -1204,9 +1177,9 @@ def _base_workflow_predicate_inputs(
         "sweep_result": None,
         "macro_cycle": state.macro_cycle,
         "run_flags": {
-            "kernel_enabled": bool(kernel_enabled),
-            "framework_agent_enabled": bool(optimize_enabled),
-            "enablement_enabled": bool(enablement_enabled),
+            "kernel_enabled": bool(flags.kernel_enabled),
+            "framework_agent_enabled": bool(flags.optimize_enabled),
+            "enablement_enabled": bool(flags.enablement_enabled),
         },
         "enablement_in_flight": bool(enablement_in_flight),
         "phase_budget_pct": state.phase_budget_pct,
@@ -1358,10 +1331,8 @@ def _extend_budget_to_sweep_grant(budget: dict[str, Any], state: Any, *, now_uni
 def workflow_predicate_inputs(
     state: Any,
     *,
-    kernel_enabled: bool = True,
+    flags: PhaseFlags = PhaseFlags(),
     now_unix: float | None = None,
-    optimize_enabled: bool = True,
-    enablement_enabled: bool = False,
     enablement_in_flight: bool = False,
     kernel_work_in_flight: bool = False,
 ) -> dict[str, Any]:
@@ -1372,9 +1343,7 @@ def workflow_predicate_inputs(
         state,
         current=current,
         now_unix=frozen_now,
-        kernel_enabled=kernel_enabled,
-        optimize_enabled=optimize_enabled,
-        enablement_enabled=enablement_enabled,
+        flags=flags,
         enablement_in_flight=enablement_in_flight,
     )
     if current == PHASE_PRELUDE:
@@ -1403,22 +1372,13 @@ def workflow_predicate_inputs(
     return inputs
 
 
-def initial_workflow_predicate_inputs(
-    state: Any,
-    *,
-    current_phase: str,
-    kernel_enabled: bool,
-    optimize_enabled: bool,
-    enablement_enabled: bool,
-) -> dict[str, Any]:
+def initial_workflow_predicate_inputs(state: Any, *, current_phase: str, flags: PhaseFlags) -> dict[str, Any]:
     """Identity-transition facts for fresh start or explicit CLOSE resume."""
     return _base_workflow_predicate_inputs(
         state,
         current=current_phase,
         now_unix=float(_now_unix(state)),
-        kernel_enabled=kernel_enabled,
-        optimize_enabled=optimize_enabled,
-        enablement_enabled=enablement_enabled,
+        flags=flags,
         enablement_in_flight=False,
     )
 
@@ -1637,20 +1597,16 @@ def cycle_reloop_decision(state: Any, *, now_unix: float | None = None) -> tuple
 def compute_next_phase(
     state: Any,
     *,
-    kernel_enabled: bool = True,
+    flags: PhaseFlags = PhaseFlags(),
     now_unix: float | None = None,
-    optimize_enabled: bool = True,
-    enablement_enabled: bool = False,
     enablement_in_flight: bool = False,
     kernel_work_in_flight: bool = False,
 ) -> tuple[str, str, dict[str, Any]] | None:
     """Return the next transition with the primitive inputs it consumed."""
     inputs = workflow_predicate_inputs(
         state,
-        kernel_enabled=kernel_enabled,
+        flags=flags,
         now_unix=now_unix,
-        optimize_enabled=optimize_enabled,
-        enablement_enabled=enablement_enabled,
         enablement_in_flight=enablement_in_flight,
         kernel_work_in_flight=kernel_work_in_flight,
     )
@@ -1875,32 +1831,33 @@ def replay_next_phase(
 _PHASE_HISTORY_CAP = 100
 
 
-def make_history_row(
-    *,
-    from_phase: str,
-    to_phase: str,
-    reason: str,
-    evidence: dict[str, Any] | None,
-    ts: str,
-    ts_unix: float,
-    cycle: int = 0,
-) -> dict[str, Any]:
+@dataclass(frozen=True)
+class HistoryEntry:
+    """The fields of one phase_history row before they are normalized."""
+
+    from_phase: str
+    to_phase: str
+    reason: str
+    evidence: dict[str, Any] | None
+    ts: str
+    ts_unix: float
+    cycle: int = 0
+
+
+def make_history_row(entry: HistoryEntry) -> dict[str, Any]:
     """Construct a canonical phase_history row; ``reason`` unvalidated for resume tools."""
     return {
-        "from_phase": (from_phase or "").strip().upper(),
-        "to_phase": (to_phase or "").strip().upper(),
-        "reason": (reason or "").strip(),
-        "evidence": dict(evidence or {}),
-        "ts": ts,
-        "ts_unix": float(ts_unix or 0.0),
-        "cycle": int(cycle or 0),
+        "from_phase": (entry.from_phase or "").strip().upper(),
+        "to_phase": (entry.to_phase or "").strip().upper(),
+        "reason": (entry.reason or "").strip(),
+        "evidence": dict(entry.evidence or {}),
+        "ts": entry.ts,
+        "ts_unix": float(entry.ts_unix or 0.0),
+        "cycle": int(entry.cycle or 0),
     }
 
 
 # Lifecycle events — operator-facing phase/step boundary log.
-LIFECYCLE_STATUS_START = "START"
-LIFECYCLE_STATUS_END = "END"
-LIFECYCLE_STATUS_ERROR = "ERROR"
 # Phase-boundary marker: a point-in-time "entered <phase>" mark with no matching END (unlike START, which pairs with a
 # later END for the same step).
 LIFECYCLE_STATUS_ENTER = "ENTER"
@@ -1941,32 +1898,34 @@ def lifecycle_label(name: str) -> str:
     return key
 
 
-def make_lifecycle_event(
-    *,
-    step: str,
-    status: str,
-    phase: str,
-    label: str | None,
-    artifacts: dict[str, str] | None,
-    detail: str,
-    duration_s: float | None,
-    seq: int,
-    ts: str,
-) -> dict[str, Any]:
+@dataclass(frozen=True)
+class LifecycleMark:
+    """The fields of one lifecycle boundary before they are normalized into an event row."""
+
+    step: str
+    status: str
+    phase: str | None
+    label: str | None
+    artifacts: dict[str, str] | None
+    detail: str
+    duration_s: float | None
+
+
+def make_lifecycle_event(mark: LifecycleMark, *, seq: int, ts: str) -> dict[str, Any]:
     """Construct a canonical lifecycle event row."""
     event: dict[str, Any] = {
         "seq": int(seq),
         "ts": ts,
-        "phase": (phase or "").strip().upper(),
-        "step": (step or "").strip(),
-        "label": (label or lifecycle_label(step)),
-        "status": (status or "").strip().upper(),
-        "detail": (detail or "").strip(),
-        "artifacts": {str(k): str(v) for k, v in (artifacts or {}).items() if v not in (None, "")},
+        "phase": (mark.phase or "").strip().upper(),
+        "step": (mark.step or "").strip(),
+        "label": (mark.label or lifecycle_label(mark.step)),
+        "status": (mark.status or "").strip().upper(),
+        "detail": (mark.detail or "").strip(),
+        "artifacts": {str(k): str(v) for k, v in (mark.artifacts or {}).items() if v not in (None, "")},
     }
-    if duration_s is not None:
+    if mark.duration_s is not None:
         try:
-            event["duration_s"] = round(float(duration_s), 3)
+            event["duration_s"] = round(float(mark.duration_s), 3)
         except (TypeError, ValueError):
             # A malformed duration_s is omitted rather than failing creation.
             pass
@@ -1992,21 +1951,28 @@ def bank_phase_segment(state, *, until_unix: float) -> float:
     return segment
 
 
+@dataclass(frozen=True)
+class PhaseClock:
+    """The wall-clock stamp a transition is recorded at; the current time for whichever part is ``None``."""
+
+    ts: str | None = None
+    ts_unix: float | None = None
+
+
 def record_phase_transition(
     state,
     *,
     to_phase: str,
     reason: str,
     evidence: dict[str, Any] | None = None,
-    ts: str | None = None,
-    ts_unix: float | None = None,
+    at: PhaseClock = PhaseClock(),
 ) -> dict[str, Any]:
     """Append a phase_history row and atomically update ``phase`` fields; Coordinator-only writer. Returns the inserted row."""
     from datetime import datetime as _dt, timezone as _tz
     import time as _time
 
-    now_ts = ts or _dt.now(_tz.utc).isoformat(timespec="seconds")
-    now_unix = float(ts_unix if ts_unix is not None else _time.time())
+    now_ts = at.ts or _dt.now(_tz.utc).isoformat(timespec="seconds")
+    now_unix = float(at.ts_unix if at.ts_unix is not None else _time.time())
     from_phase = (state.phase or "").strip().upper()
     prev_cycle = state.macro_cycle
     # The loopback opens the next cycle right after this row is recorded; the entered phase already belongs to it.
@@ -2014,15 +1980,7 @@ def record_phase_transition(
     # Bank the finished segment for EVERY phase so the budget guards can charge
     # a phase for the whole run instead of the current entry.
     bank_phase_segment(state, until_unix=now_unix)
-    row = make_history_row(
-        from_phase=from_phase,
-        to_phase=to_phase,
-        reason=reason,
-        evidence=evidence,
-        ts=now_ts,
-        ts_unix=now_unix,
-        cycle=entry_cycle,
-    )
+    row = make_history_row(HistoryEntry(from_phase, to_phase, reason, evidence, now_ts, now_unix, entry_cycle))
     history = list(state.phase_history or [])
     history.append(row)
     if len(history) > _PHASE_HISTORY_CAP:
@@ -2052,6 +2010,7 @@ def record_phase_transition(
     try:
         from hyperloom.inference_optimizer.breakdown.recorder import phase_event, record_stage_reached
         from hyperloom.inference_optimizer.breakdown.recorder.outcome_stage import PHASE_STAGES
+        from hyperloom.inference_optimizer.breakdown.recorder.phase_records import PhaseCycle, PhaseEntry, PhaseExit
         from hyperloom.inference_optimizer.session.session_binding import bound_session
 
         # The phase itself, as a timeline event: close the span being left on
@@ -2061,23 +2020,25 @@ def record_phase_transition(
         # row at all to close the segment the session ended in.
         if from_phase and from_phase != str(row.get("to_phase") or ""):
             phase_event.record_exit(
-                phase=from_phase,
-                macro_cycle=prev_cycle,
-                to_phase=str(row.get("to_phase") or ""),
-                reason=str(row.get("reason") or ""),
-                evidence=dict(row.get("evidence") or {}),
-                exited_at=str(row.get("ts") or ""),
-                exited_unix=now_unix,
+                PhaseExit(
+                    at=PhaseCycle(from_phase, prev_cycle),
+                    to_phase=str(row.get("to_phase") or ""),
+                    reason=str(row.get("reason") or ""),
+                    evidence=dict(row.get("evidence") or {}),
+                    exited_at=str(row.get("ts") or ""),
+                    exited_unix=now_unix,
+                )
             )
         phase_event.record_entry(
-            phase=str(row.get("to_phase") or ""),
-            macro_cycle=entry_cycle,
-            sequence=len(history),
-            from_phase=from_phase,
-            reason=str(row.get("reason") or ""),
-            evidence=dict(row.get("evidence") or {}),
-            entered_at=str(row.get("ts") or ""),
-            entered_unix=now_unix,
+            PhaseEntry(
+                at=PhaseCycle(str(row.get("to_phase") or ""), entry_cycle),
+                sequence=len(history),
+                from_phase=from_phase,
+                reason=str(row.get("reason") or ""),
+                evidence=dict(row.get("evidence") or {}),
+                entered_at=str(row.get("ts") or ""),
+                entered_unix=now_unix,
+            )
         )
         stage = PHASE_STAGES.get(str(row.get("to_phase") or ""))
         if stage:
@@ -2103,13 +2064,15 @@ def append_phase_history_event(
     now_unix = float(ts_unix if ts_unix is not None else _time.time())
     phase = (state.phase or "").strip().upper()
     row = make_history_row(
-        from_phase=phase,
-        to_phase=phase,
-        reason=(reason or "").strip(),
-        evidence=evidence,
-        ts=now_ts,
-        ts_unix=now_unix,
-        cycle=state.macro_cycle,
+        HistoryEntry(
+            from_phase=phase,
+            to_phase=phase,
+            reason=(reason or "").strip(),
+            evidence=evidence,
+            ts=now_ts,
+            ts_unix=now_unix,
+            cycle=state.macro_cycle,
+        )
     )
     history = list(state.phase_history or [])
     history.append(row)
@@ -2118,14 +2081,16 @@ def append_phase_history_event(
     state.phase_history = history
     try:
         from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+        from hyperloom.inference_optimizer.breakdown.recorder.phase_records import PhaseCycle, PhaseMarker
 
         phase_event.record_marker(
-            phase=phase,
-            macro_cycle=state.macro_cycle,
-            sequence=len(history),
-            reason=str(row.get("reason") or ""),
-            evidence=dict(row.get("evidence") or {}),
-            ts=str(row.get("ts") or ""),
+            PhaseMarker(
+                at=PhaseCycle(phase, state.macro_cycle),
+                sequence=len(history),
+                reason=str(row.get("reason") or ""),
+                evidence=dict(row.get("evidence") or {}),
+                ts=str(row.get("ts") or ""),
+            )
         )
     except Exception:  # noqa: BLE001 -- telemetry must never block the marker
         pass
@@ -2150,13 +2115,15 @@ def record_lifecycle_event(
         events = state.lifecycle = []
     next_seq = (int(events[-1].get("seq", -1)) + 1) if events else 0
     event = make_lifecycle_event(
-        step=step,
-        status=status,
-        phase=(phase if phase is not None else (state.phase or "")),
-        label=label,
-        artifacts=artifacts,
-        detail=detail,
-        duration_s=duration_s,
+        LifecycleMark(
+            step=step,
+            status=status,
+            phase=(phase if phase is not None else (state.phase or "")),
+            label=label,
+            artifacts=artifacts,
+            detail=detail,
+            duration_s=duration_s,
+        ),
         seq=next_seq,
         ts=ts or _now_iso(),
     )
@@ -2173,10 +2140,7 @@ __all__ = [
     "DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK",
     "DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT",
     "DEFAULT_PLATEAU_EXPLORE_LOOKBACK",
-    "LIFECYCLE_STATUS_END",
     "LIFECYCLE_STATUS_ENTER",
-    "LIFECYCLE_STATUS_ERROR",
-    "LIFECYCLE_STATUS_START",
     "LIFECYCLE_STEP_LABELS",
     "ENABLEMENT_MAX_ATTEMPTS",
     "PHASE_ALLOWED_ACTIONS",
@@ -2190,10 +2154,13 @@ __all__ = [
     "PHASE_NAMES",
     "PHASE_PRELUDE",
     "PHASE_SWEEP",
+    "HistoryEntry",
+    "LifecycleMark",
+    "PhaseClock",
+    "PhaseFlags",
     "lifecycle_label",
     "make_lifecycle_event",
     "DEFAULT_MAX_MACRO_CYCLES",
-    "DEFAULT_CYCLE_RELOOP_MIN_REMAINING_SEC",
     "DEFAULT_GLOBAL_CONVERGENCE_NO_GAIN_CYCLES",
     "DEFAULT_LONGRUN_THRESHOLD_MINUTES",
     "is_long_run",
@@ -2224,7 +2191,6 @@ __all__ = [
     "phase_budget_remaining_seconds",
     "phase_cumulative_seconds",
     "phase_elapsed_seconds",
-    "phase_elapsed_totals_from_history",
     "phase_index",
     "phase_status_summary",
     "session_remaining_seconds",

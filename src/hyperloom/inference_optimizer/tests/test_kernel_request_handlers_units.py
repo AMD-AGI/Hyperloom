@@ -23,6 +23,7 @@ from hyperloom.common.codex_session import (
 from hyperloom.common.env import is_truthy
 from hyperloom.orchestrator.actions.executors import _kernel_agent_tool as tool
 from hyperloom.orchestrator.actions.executors import trace_analyze as ta
+from hyperloom.inference_optimizer.framework_paths import resolve_known_source_prefixes
 from hyperloom.orchestrator.kernel import request_handlers as krh
 from hyperloom.orchestrator.kernel import lane_budget
 from hyperloom.common.llm_config import (
@@ -103,14 +104,6 @@ _AITER_LINE = (
 
 
 class TestForgeGemmHelperCoverage:
-    def test_resolve_backend_requires_exact_kernel_order_forge(self, monkeypatch):
-        monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-        assert krh.resolve_gemm_tuning_backend({}) == "geak"
-        assert krh.resolve_gemm_tuning_backend({"gemm_tuning_backend": "forge"}) == "geak"
-        assert krh.resolve_gemm_tuning_backend({"gemm_tuning_backend": "unknown"}) == "geak"
-        monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
-        assert krh.resolve_gemm_tuning_backend({}) == "forge"
-
     def test_parse_forge_gemm_sentinel(self):
         payload = {"status": "ok", "micro_decision": "candidate"}
         text = "noise\nFORGE_GEMM_TUNE_RESULT_BEGIN\n" + json.dumps(payload) + "\nFORGE_GEMM_TUNE_RESULT_END\n"
@@ -2193,12 +2186,12 @@ class TestBackendOrder:
         monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
         monkeypatch.delenv("CURSOR_API_KEY", raising=False)
 
-        assert krh._raw_kernel_backend_order({}) == ["geak"]
+        assert krh._raw_kernel_backend_order() == ["geak"]
 
     def test_kernel_opt_backends_alias_with_mixed_values_stays_geak_only(self, monkeypatch):
         monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
 
-        assert krh._raw_kernel_backend_order({}) == ["geak"]
+        assert krh._raw_kernel_backend_order() == ["geak"]
 
 
 class TestCandidateEnvAllowed:
@@ -2351,13 +2344,13 @@ class TestReusableSourceRootsAtom:
 
     def test_includes_atom_editable_path(self):
         # The matcher lowercases its source-file input, so the stored prefix is lowercase ``/app/atom/atom/``.
-        assert any("/app/atom/atom/" in r.lower() for r in krh._reusable_source_roots())
+        assert any("/app/atom/atom/" in r.lower() for r in resolve_known_source_prefixes())
 
     def test_includes_atom_site_packages_python_3_10(self):
-        assert any("/opt/venv/lib/python3.10/site-packages/atom/" in r for r in krh._reusable_source_roots())
+        assert any("/opt/venv/lib/python3.10/site-packages/atom/" in r for r in resolve_known_source_prefixes())
 
     def test_includes_atom_site_packages_python_3_12(self):
-        assert any("/opt/venv/lib/python3.12/site-packages/atom/" in r for r in krh._reusable_source_roots())
+        assert any("/opt/venv/lib/python3.12/site-packages/atom/" in r for r in resolve_known_source_prefixes())
 
 
 class TestRunGemmTuningHandler:
@@ -3685,188 +3678,6 @@ class TestRunGemmTuningHandler:
         assert result["shape_capture"]["shape_count"] == 1
         assert result["status"] == "ok"
 
-    def test_handler_passes_non_fp8_geak_to_next_hyperloom_prereq(self, tmp_path, monkeypatch):
-        # An ambient KERNEL_OPT_BACKEND_ORDER=forge sends this down the forge branch instead.
-        monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-        monkeypatch.delenv("GEAK_CONFIG", raising=False)
-        state = SharedState(precision="bf16", framework="sglang", model_path="/models/qwen")
-        state.save(tmp_path)
-
-        result = asyncio.run(krh.run_gemm_tuning_handler({}, session_dir=tmp_path))
-
-        assert result["backend"] == "geak"
-        assert result["precision"] == "bf16"
-        assert result["error_class"] == "legacy_geak_config_missing"
-
-    def test_builds_task_file_input_not_task_argv(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-
-        state = SharedState(
-            precision="fp8",
-            framework="sglang",
-            model_path="/models/qwen-fp8",
-            gpu_type="mi355x",
-            tp=1,
-            conc=64,
-            isl=1024,
-            osl=1024,
-            baseline_tput=4479.0,
-        )
-        state.save(tmp_path)
-        captured: dict[str, object] = {}
-
-        async def fake_run(cmd: list[str], *, timeout_sec: int, **_kwargs):
-            captured["cmd"] = cmd
-            captured["timeout_sec"] = timeout_sec
-            input_path = cmd[cmd.index("--input-json") + 1]
-            data = json.loads(Path(input_path).read_text())
-            assert data["framework"] == "sglang"
-            assert data["precision"] == "fp8"
-            return (
-                0,
-                json.dumps(
-                    {
-                        "status": "ok",
-                        "decision": "KEEP",
-                        "best_speedup": 1.2,
-                        "tuned_file": "/tmp/a8w8_blockscale_tuned_gemm.csv",
-                    }
-                ),
-                "",
-            )
-
-        monkeypatch.setattr(krh, "_run_subprocess", fake_run)
-
-        result = asyncio.run(
-            krh._run_geak_gemm_tuning(
-                {
-                    "benchmark_script": "/workspace/run_sglang_test.sh",
-                    "dry_run": True,
-                    "task_id": "t1",
-                },
-                session_dir=tmp_path,
-            )
-        )
-
-        assert result["status"] == "ok"
-        cmd_text = " ".join(captured["cmd"])  # type: ignore[arg-type]
-        assert "run_sglang_test" not in cmd_text
-        assert "gemm_a8w8_blockscale_tune" not in cmd_text
-        assert "--input-json" in captured["cmd"]  # type: ignore[operator]
-        assert captured["cmd"][2] == krh.sys.executable  # type: ignore[index]
-
-    def test_generates_isolated_benchmark_script_when_missing(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-
-        state = SharedState(
-            precision="fp8",
-            framework="sglang",
-            model_path="/models/qwen-fp8",
-            gpu_type="mi355x",
-            tp=1,
-            conc=64,
-            isl=1024,
-            osl=1024,
-            baseline_tput=4479.0,
-        )
-        state.save(tmp_path)
-
-        async def fake_run(cmd: list[str], *, timeout_sec: int, **_kwargs):
-            input_path = cmd[cmd.index("--input-json") + 1]
-            data = json.loads(Path(input_path).read_text())
-            bench = Path(data["benchmark_script"])
-            text = bench.read_text()
-            assert bench.name == "geak_gemm_benchmark.sh"
-            assert 'PORT="${PORT:-18888}"' in text
-            assert "pgrep" not in text
-            assert data["benchmark_script"].endswith("geak_gemm_benchmark.sh")
-            return (
-                0,
-                json.dumps(
-                    {
-                        "status": "ok",
-                        "decision": "KEEP",
-                        "best_speedup": 1.1,
-                        "tuned_file": "/tmp/tuned.csv",
-                    }
-                ),
-                "",
-            )
-
-        monkeypatch.setattr(krh, "_run_subprocess", fake_run)
-
-        result = asyncio.run(
-            krh._run_geak_gemm_tuning(
-                {"dry_run": True, "task_id": "auto"},
-                session_dir=tmp_path,
-            )
-        )
-
-        assert result["status"] == "ok"
-
-    @pytest.mark.parametrize(
-        ("benchmark_mode", "grading"),
-        [("agentx", {"objective": "e2e_norm_intvty_p50"}), ("", {})],
-        ids=["agentx_intvty", "fixed_isl_osl"],
-    )
-    def test_tunes_on_output_whatever_the_session_is_graded_on(self, tmp_path, monkeypatch, benchmark_mode, grading):
-        monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-        SharedState(
-            precision="fp8",
-            framework="sglang",
-            model_path="/models/qwen-fp8",
-            gpu_type="mi355x",
-            tp=1,
-            conc=64,
-            isl=1024,
-            osl=1024,
-            baseline_tput=4479.0,
-            benchmark_mode=benchmark_mode,
-            grading=grading,
-        ).save(tmp_path)
-        captured: dict[str, object] = {}
-
-        async def fake_run(cmd: list[str], *, timeout_sec: int, **_kwargs):
-            captured["cmd"] = cmd
-            captured["input"] = json.loads(Path(cmd[cmd.index("--input-json") + 1]).read_text())
-            return 0, json.dumps({"status": "ok", "decision": "KEEP", "best_speedup": 1.1}), ""
-
-        monkeypatch.setattr(krh, "_run_subprocess", fake_run)
-
-        asyncio.run(krh._run_geak_gemm_tuning({"dry_run": True, "task_id": "t1"}, session_dir=tmp_path))
-
-        assert "E2E_METRIC=output" in captured["cmd"]  # type: ignore[operator]
-        assert captured["input"]["env"] == {"E2E_METRIC": "output"}  # type: ignore[index]
-        assert captured["input"]["baseline_tput"] == 4479.0  # type: ignore[index]
-
-    def test_geak_without_config_does_not_fall_back_to_forge(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-        monkeypatch.delenv("GEAK_CONFIG", raising=False)
-        state = SharedState(
-            precision="fp8",
-            framework="sglang",
-            model_path="/models/qwen-fp8",
-            gpu_type="mi355x",
-            tp=1,
-            conc=64,
-            isl=1024,
-            osl=1024,
-            baseline_tput=4479.0,
-        )
-        state.save(tmp_path)
-
-        async def fail_geak_subprocess(cmd, *, timeout_sec, **_kwargs):
-            raise AssertionError("legacy GEAK subprocess should not run without config")
-
-        monkeypatch.setattr(krh, "_run_subprocess", fail_geak_subprocess)
-
-        result = asyncio.run(krh._run_geak_gemm_tuning({"task_id": "legacy-geak"}, session_dir=tmp_path))
-
-        assert result["status"] == "skipped"
-        assert result["backend"] == "geak"
-        assert result["decision"] == "REVERT"
-        assert result["error_class"] == "legacy_geak_config_missing"
-
     def test_forge_uses_runtime_fp8_blockscale_for_aiter_backend(self, tmp_path, monkeypatch):
         monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
         model_dir = tmp_path / "qwen"
@@ -4576,18 +4387,20 @@ class TestBuildTraceAnalyzeCmd:
         state, session_dir = self._common(monkeypatch, tmp_path)
         cmd, steady = ta._build_trace_analyze_cmd(
             {"session_id": "sid", "trace_input": "/t/trace", "split_conc": "64", "split_osl": "1024"},
+            ta._AnalysisRun(
+                trace_input="/t/trace",
+                workspace_path="/ws",
+                tracelens_root=Path("/tl"),
+                is_bypass=False,
+                scriptable=False,
+                model_name="Qwen",
+                framework="sglang",
+                target_platform="MI300X",
+                analysis_mode="inference",
+            ),
             session_dir=session_dir,
             state=state,
-            workspace_path="/ws",
-            trace_input="/t/trace",
-            tracelens_root=Path("/tl"),
-            is_bypass=False,
-            scriptable=False,
             workload={"conc": 8, "osl": 256, "random_range_ratio": "0.5"},
-            model_name="Qwen",
-            framework="sglang",
-            target_platform="MI300X",
-            analysis_mode="inference",
         )
         assert cmd == [
             krh.sys.executable,
@@ -4620,6 +4433,28 @@ class TestBuildTraceAnalyzeCmd:
         ]
         assert steady == ""
 
+    def test_splitter_forwards_zero_workload_hints(self, monkeypatch, tmp_path):
+        """A zero conc/osl/ratio is a real workload value, not an unset one."""
+        state, session_dir = self._common(monkeypatch, tmp_path)
+        cmd, _steady = ta._build_trace_analyze_cmd(
+            {"trace_input": "/t/trace"},
+            ta._AnalysisRun(
+                trace_input="/t/trace",
+                workspace_path="/ws",
+                tracelens_root=Path("/tl"),
+                is_bypass=False,
+                scriptable=False,
+                model_name="",
+                framework="",
+                target_platform="",
+                analysis_mode="",
+            ),
+            session_dir=session_dir,
+            state=state,
+            workload={"conc": 0, "osl": 0, "random_range_ratio": 0.0},
+        )
+        assert cmd[cmd.index("--split-conc") :] == ["--split-conc", "0", "--split-osl", "0", "--split-r", "0.0"]
+
     def test_sglang_cmd_forwards_model_context(self, monkeypatch, tmp_path):
         """Non-scriptable analysis receives model config and precision context."""
         state, session_dir = self._common(monkeypatch, tmp_path)
@@ -4627,18 +4462,20 @@ class TestBuildTraceAnalyzeCmd:
         state.precision = "fp8"
         cmd, _steady = ta._build_trace_analyze_cmd(
             {"trace_input": "/t/trace"},
+            ta._AnalysisRun(
+                trace_input="/t/trace",
+                workspace_path="/ws",
+                tracelens_root=Path("/tl"),
+                is_bypass=False,
+                scriptable=False,
+                model_name="MiniMax",
+                framework="sglang",
+                target_platform="MI355X",
+                analysis_mode="default",
+            ),
             session_dir=session_dir,
             state=state,
-            workspace_path="/ws",
-            trace_input="/t/trace",
-            tracelens_root=Path("/tl"),
-            is_bypass=False,
-            scriptable=False,
             workload={"precision": "mxfp8"},
-            model_name="MiniMax",
-            framework="sglang",
-            target_platform="MI355X",
-            analysis_mode="default",
         )
         assert cmd[cmd.index("--model-path") + 1] == "/models/sglang-model"
         assert cmd[cmd.index("--precision") + 1] == "fp8"
@@ -4655,18 +4492,20 @@ class TestBuildTraceAnalyzeCmd:
                 "steady_state_mode": "auto",
                 "dry_run": True,
             },
+            ta._AnalysisRun(
+                trace_input="/t/trace",
+                workspace_path="/ws",
+                tracelens_root=None,
+                is_bypass=True,
+                scriptable=True,
+                model_name="",
+                framework="",
+                target_platform="",
+                analysis_mode="",
+            ),
             session_dir=session_dir,
             state=state,
-            workspace_path="/ws",
-            trace_input="/t/trace",
-            tracelens_root=None,
-            is_bypass=True,
-            scriptable=True,
             workload={},
-            model_name="",
-            framework="",
-            target_platform="",
-            analysis_mode="",
         )
         # bypass tool module; no --tracelens-root and no --skip-split.
         assert cmd[0] == krh.sys.executable
@@ -4688,18 +4527,20 @@ class TestBuildTraceAnalyzeCmd:
         state.tp = 8
         cmd, _steady = ta._build_trace_analyze_cmd(
             {"trace_input": "/t/trace-dir"},
+            ta._AnalysisRun(
+                trace_input="/t/trace-dir",
+                workspace_path="/ws",
+                tracelens_root=None,
+                is_bypass=True,
+                scriptable=False,
+                model_name="",
+                framework="sglang",
+                target_platform="",
+                analysis_mode="inference",
+            ),
             session_dir=session_dir,
             state=state,
-            workspace_path="/ws",
-            trace_input="/t/trace-dir",
-            tracelens_root=None,
-            is_bypass=True,
-            scriptable=False,
             workload={},
-            model_name="",
-            framework="sglang",
-            target_platform="",
-            analysis_mode="inference",
         )
         assert "--require-single-rank" in cmd
         assert cmd[cmd.index("--tensor-parallel-size") + 1] == "8"
@@ -4708,12 +4549,9 @@ class TestBuildTraceAnalyzeCmd:
         from hyperloom.inference_optimizer.trace.trajectory_trace import trajectory_scope
 
         state, session_dir = self._common(monkeypatch, tmp_path)
-        kwargs = dict(
-            session_dir=session_dir,
-            state=state,
+        run = dict(
             workspace_path="/ws",
             trace_input="/t/trace",
-            workload={},
             model_name="",
             framework="",
             target_platform="",
@@ -4728,10 +4566,18 @@ class TestBuildTraceAnalyzeCmd:
             parent_span_id="span-roof",
         ):
             cmd, _steady = ta._build_trace_analyze_cmd(
-                {"trace_input": "/t/trace"}, tracelens_root=Path("/tl"), is_bypass=False, **kwargs
+                {"trace_input": "/t/trace"},
+                ta._AnalysisRun(tracelens_root=Path("/tl"), is_bypass=False, **run),
+                session_dir=session_dir,
+                state=state,
+                workload={},
             )
             bypass_cmd, _steady = ta._build_trace_analyze_cmd(
-                {"trace_input": "/t/trace"}, tracelens_root=None, is_bypass=True, **kwargs
+                {"trace_input": "/t/trace"},
+                ta._AnalysisRun(tracelens_root=None, is_bypass=True, **run),
+                session_dir=session_dir,
+                state=state,
+                workload={},
             )
         assert cmd[cmd.index("--trajectory-session-dir") + 1] == str(session_dir)
         assert cmd[cmd.index("--trajectory-phase") + 1] == "roofline"
@@ -4745,18 +4591,20 @@ class TestBuildTraceAnalyzeCmd:
         monkeypatch.setenv("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "median")
         cmd, steady = ta._build_trace_analyze_cmd(
             {"trace_input": "/t/trace"},
+            ta._AnalysisRun(
+                trace_input="/t/trace",
+                workspace_path="/ws",
+                tracelens_root=Path("/tl"),
+                is_bypass=False,
+                scriptable=False,
+                model_name="",
+                framework="",
+                target_platform="",
+                analysis_mode="",
+            ),
             session_dir=session_dir,
             state=state,
-            workspace_path="/ws",
-            trace_input="/t/trace",
-            tracelens_root=Path("/tl"),
-            is_bypass=False,
-            scriptable=False,
             workload={},
-            model_name="",
-            framework="",
-            target_platform="",
-            analysis_mode="",
         )
         assert steady == "median"
         assert cmd[cmd.index("--steady-state-mode") + 1] == "median"

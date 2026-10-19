@@ -83,7 +83,7 @@ Approve example:
   "verdict": "approve",
   "source": "critic",
   "confidence": "high",
-  "reasoning": "Controlled A/B evidence shows a 4.2% tok/s/GPU gain with passing accuracy and active-path proof.",
+  "reasoning": "Controlled A/B evidence shows a 4.2% tok/s gain with passing accuracy and active-path proof.",
   "predicted_gain_pct": 4.2,
   "kb_evidence": [
     "kb:qwen3/attn-dispatch-best-config"

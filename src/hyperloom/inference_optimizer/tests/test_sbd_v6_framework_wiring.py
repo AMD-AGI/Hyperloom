@@ -19,10 +19,12 @@ import pytest
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
-from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.actions.executors.integrate_patch import RESULT_BENCHED
+from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
 from hyperloom.orchestrator.phases.machine import Transition
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.roles.mock_backend import MockBackend, MockTurn, ScriptedPlan
+from hyperloom.orchestrator.phases.framework import ProgressStamp
 
 
 def _tr(reason: str) -> Transition:
@@ -32,7 +34,6 @@ def _tr(reason: str) -> Transition:
         to_phase="SWEEP",
         reason=reason,
         evidence={},
-        loopback=False,
     )
 
 
@@ -46,7 +47,7 @@ def _coordinator(session_dir: Path) -> Coordinator:
             "critic": MockBackend(idle),
         },
         role_registry=default_role_registry(),
-        knowledge_plane=None,
+        advisory=AdvisoryServices(knowledge_plane=None),
     )
 
 
@@ -265,11 +266,13 @@ def test_terminal_row_settles_the_proposal(session_dir: Path):
     coord.phase_framework._open_framework_timeline()
 
     coord.phase_framework._stamp_framework_progress(
-        candidate_id="cand-1",
-        batch_id="b1",
-        status="apply_failed",
-        rationale="patch did not apply",
-        provenance="pump",
+        ProgressStamp(
+            candidate_id="cand-1",
+            batch_id="b1",
+            status="apply_failed",
+            rationale="patch did not apply",
+            provenance="pump",
+        )
     )
     coord.phase_framework.close_framework_timeline(_tr("optimize_no_more_leverage"))
 
@@ -397,6 +400,7 @@ def test_config_attempts_record_the_pair_and_the_verbatim_outcome(session_dir: P
     assert keep["measurement"]["after_tput"] == 112.0
     assert keep["adopted"] is True
     assert keep["attribution_eligible"] is True
+    assert all(row["benched"] is True for row in attempts.values())
     assert keep["config_delta"]["extra_server_args"] == "--foo 2"
     assert keep["config_delta"]["remove_args"] == ["--old-flag"]
     assert keep["config_delta"]["unset_envs"] == ["OLD_ENV"]
@@ -601,6 +605,7 @@ def test_source_attempt_records_its_pair_gate_and_lifecycle_step(session_dir: Pa
         task=task,
         result={
             "status": "kept",
+            RESULT_BENCHED: True,
             "base_tput": 100.0,
             "output_throughput": 108.0,
             "delta_pct": 8.0,
@@ -652,6 +657,7 @@ def test_source_attempt_records_its_pair_gate_and_lifecycle_step(session_dir: Pa
         "args_mode": "append",
     }
     assert attempt["adopted"] is True
+    assert attempt["benched"] is True
     assert attempt["attribution_eligible"] is True
     assert attempt["target_files"] == ["vllm/attention.py"]
     assert [gate["gate"] for gate in attempt["gates"]] == [
@@ -791,6 +797,18 @@ def test_an_attempt_that_never_measured_claims_no_stack(session_dir: Path):
         {"status": "failed", "error_class": "patch_apply_failed", "error": "does not apply"},
     )
     assert "measured_against" not in attempt
+
+
+@pytest.mark.parametrize(
+    ("result", "benched"),
+    [
+        pytest.param({"status": "reverted", "error_class": "bench_exception", RESULT_BENCHED: True}, True, id="gate"),
+        pytest.param({"status": "failed", "error_class": "framework_root_unresolved"}, False, id="earlier-stage"),
+    ],
+)
+def test_a_source_attempt_says_whether_it_reached_the_bench(session_dir: Path, result: dict, benched: bool):
+    """The executor's bench-and-gate stage marks its result whatever the verdict, and no earlier stage does."""
+    assert _authored_outcome(_coordinator(session_dir), result)["benched"] is benched
 
 
 def test_absent_accuracy_gate_writes_no_gate_row(session_dir: Path):

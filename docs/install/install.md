@@ -43,7 +43,7 @@ Before installing Hyperloom, ensure the following requirements are met.
 From the agent terminal in that workspace, install the published release wheel:
 
 ```bash
-pip install hyperloom-inference-optimizer==1.1.3 --target .
+pip install hyperloom-inference-optimizer==1.1.4 --target .
 ```
 
 It is normal for the current directory to contain many Python package directories
@@ -73,7 +73,7 @@ It asks for these values with a fixed option order:
    - `Use AMD gateway (https://llm-api.amd.com/anthropic)`
    - `Custom`
 2. Model:
-   - `Use default (claude-opus-5)`
+   - `Use default (claude-opus-5-5)`
    - `Custom`
 3. Secrets:
    - Setup writes placeholders in `.env`.
@@ -209,7 +209,7 @@ LLM defaults:
 
 | Mode | Required secret | Default base URL | Default model |
 |------|-----------------|------------------|---------------|
-| Anthropic | `ANTHROPIC_API_KEY` | `https://api.anthropic.com` | `CLAUDE_MODEL=claude-opus-5` |
+| Anthropic | `ANTHROPIC_API_KEY` | `https://api.anthropic.com` | `CLAUDE_MODEL=claude-opus-5-5` |
 
 Setup creates or updates `.env` in the current workspace and writes the resolved
 values there. Setup asks for the Anthropic side only; to run on Codex, add
@@ -347,7 +347,7 @@ paste API keys into chat.
 cat > .env <<'EOF'
 ANTHROPIC_API_KEY=<PLEASE_FILL_IN>
 ANTHROPIC_BASE_URL=https://api.anthropic.com
-CLAUDE_MODEL=claude-opus-5
+CLAUDE_MODEL=claude-opus-5-5
 # Writable artifact root for runtime files, dependency checkouts, logs,
 # optimizer runs, and generated env files. Set an absolute path you own.
 USER_DATA_PATH=<PLEASE_FILL_IN>

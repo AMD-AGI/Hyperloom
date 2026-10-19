@@ -24,6 +24,7 @@ from kernelforge.rewrite_by_flydsl import kb as flydsl_kb
 from kernelforge.knowledge.kb_store.recipe import KernelRecipeKB
 from kernelforge.rewrite_by_flydsl.identity import framework_version, resolve_identity
 from kernelforge.knowledge.kb_store.record_store import KBStoreError, RewriteRecordError
+from kernelforge.rewrite_by_flydsl.measurement import FlydslMeasurement
 from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
 
 from kernelforge.tests.test_rewrite_by_flydsl_kb import (
@@ -58,7 +59,6 @@ def _resolved_identity(
 ) -> KernelRecipeIdentity:
     identity, _canonical_id, _signature, _implementation = resolve_identity(
         spec,
-        framework="vllm",
         gpu=str(config.gpu_type or "").strip(),
         source_text=Path(spec.source_kernel).read_text(
             encoding="utf-8",
@@ -96,7 +96,6 @@ def test_a_run_without_a_configured_store_turns_every_call_into_a_no_op(
 
     assert kb.active is False
     assert kb.reason == "not_configured"
-    assert kb.read_best(tmp_path / "best") is None
     assert kb.read_top_n(tmp_path / "top") == []
     assert kb.prior_file("any", "kernel.py") == b""
     assert kb.write_candidate({"metric": {}}) == {
@@ -232,11 +231,11 @@ def test_producers_have_independent_candidates_top1_and_champions(
     assert {json.loads(bundle.recipe_path.read_text(encoding="utf-8"))["producer"] for bundle in forge_bundles} == {
         "forge-loop"
     }
-    assert flydsl.read_best(tmp_path / "flydsl-best").value == {
+    assert flydsl.read_top_n(tmp_path / "flydsl-best", limit=1)[0].value == {
         "owner": "flydsl",
         "rank": 1,
     }
-    assert forge_loop.read_best(tmp_path / "forge-best").value == {
+    assert forge_loop.read_top_n(tmp_path / "forge-best", limit=1)[0].value == {
         "owner": "forge-loop",
         "rank": 1,
     }
@@ -335,7 +334,7 @@ def test_the_agent_reads_back_the_best_port_recorded_for_its_identity(
     kb.write_candidate({"tag": "slow"}, speedup=1.2)
     kb.write_candidate({"tag": "fast"}, speedup=3.0)
 
-    assert kb.read_best(tmp_path / "best").value == {"tag": "fast"}
+    assert kb.read_top_n(tmp_path / "best", limit=1)[0].value == {"tag": "fast"}
     assert [prior.value["tag"] for prior in kb.read_top_n(tmp_path / "top")] == ["fast", "slow"]
 
 
@@ -416,9 +415,7 @@ def test_remote_top_n_ranks_beyond_twenty_recent_sessions(tmp_path, monkeypatch)
         kb.write_candidate({"tag": f"recent-{index}"}, speedup=1.0 + index / 100)
     store.champions.clear()
 
-    bundle = kb.read_best(tmp_path / "best")
-
-    assert bundle is not None
+    bundle = kb.read_top_n(tmp_path / "best", limit=1)[0]
     assert bundle.session_id == best["session_id"]
     assert bundle.value == {"tag": "old-best"}
     assert bundle.speedup == 10.0
@@ -432,15 +429,12 @@ def test_materialization_cleans_stale_candidate_files(tmp_path, monkeypatch):
         speedup=2.0,
     )
     destination = tmp_path / "bundles"
-    first = kb.read_best(destination)
-    assert first is not None
+    first = kb.read_top_n(destination, limit=1)[0]
     stale = first.files_dir / "stale.txt"
     stale.write_text("old", encoding="utf-8")
     (first.bundle_dir / "obsolete.json").write_text("{}", encoding="utf-8")
 
-    second = kb.read_best(destination)
-
-    assert second is not None
+    second = kb.read_top_n(destination, limit=1)[0]
     assert second.session_id == outcome["session_id"]
     assert not stale.exists()
     assert not (second.bundle_dir / "obsolete.json").exists()
@@ -458,7 +452,7 @@ def test_remote_materialization_rejects_traversal_before_download(tmp_path, monk
     files["../escape.py"] = b"escaped"
     destination = tmp_path / "unsafe-bundles"
 
-    assert kb.read_best(destination) is None
+    assert kb.read_top_n(destination, limit=1) == []
     assert store.downloads == []
     assert not (destination / "escape.py").exists()
     assert "unsafe artifact path" in kb.reason
@@ -477,7 +471,7 @@ def test_remote_read_rejects_a_mismatched_session_envelope(tmp_path, monkeypatch
 
     store.get_session = mismatched_get_session
 
-    assert kb.read_best(tmp_path / "wrong-envelope") is None
+    assert kb.read_top_n(tmp_path / "wrong-envelope", limit=1) == []
     assert store.downloads == []
     assert "canonical id mismatch" in kb.reason
 
@@ -486,7 +480,6 @@ def test_a_cold_identity_reads_as_empty_rather_than_failing(tmp_path, monkeypatc
     kb, _store, _spec_ = _kb(tmp_path, monkeypatch)
 
     assert kb.active is True
-    assert kb.read_best(tmp_path / "best") is None
     assert kb.read_top_n(tmp_path / "top") == []
 
 
@@ -501,7 +494,7 @@ def test_a_port_that_loses_to_its_baseline_is_recorded_but_never_promoted(
     assert outcome["written"] is True
     assert outcome["champion"] is False
     assert SOFTMAX_IDENTITY not in store.champions
-    assert kb.read_best(tmp_path / "best").value == {"tag": "correct-but-slower"}
+    assert kb.read_top_n(tmp_path / "best", limit=1)[0].value == {"tag": "correct-but-slower"}
 
 
 def test_the_champion_pointer_only_moves_for_a_port_that_beats_the_incumbent(
@@ -568,8 +561,7 @@ def test_records_survive_on_the_local_backend_too(tmp_path):
     outcome = kb.write_candidate({"tag": "on-disk"}, files=[spec.flydsl_kernel], speedup=2.0)
 
     assert outcome["written"] is True
-    bundle = kb.read_best(tmp_path / "best")
-    assert bundle is not None
+    bundle = kb.read_top_n(tmp_path / "best", limit=1)[0]
     assert bundle.value == {"tag": "on-disk"}
     assert bundle.bundle_dir == tmp_path / "best" / outcome["session_id"]
     assert bundle.recipe_path.name == "recipe.json"
@@ -618,7 +610,7 @@ def test_local_materialization_rejects_symlink_artifacts(tmp_path):
     artifact.unlink()
     artifact.symlink_to(outside)
 
-    assert kb.read_best(tmp_path / "unsafe-local-bundles") is None
+    assert kb.read_top_n(tmp_path / "unsafe-local-bundles", limit=1) == []
     assert "regular file" in kb.reason
     assert outside.read_text(encoding="utf-8") == "do not copy\n"
 
@@ -729,13 +721,8 @@ def test_a_refused_flydsl_solution_write_redacts_and_bounds_the_store_error(
     monkeypatch.setattr(store, "put_knowledge", refuse)
 
     outcome = flydsl_kb.write_flydsl_kb_solution(
-        spec,
-        str(driver),
-        _remote_config_with_token(tmp_path, token),
-        source_ms=2.0,
-        flydsl_best_ms=1.0,
-        speedup=2.0,
-        framework="vllm",
+        flydsl_kb.RewriteKbTarget(spec, str(driver), _remote_config_with_token(tmp_path, token)),
+        FlydslMeasurement(2.0, 1.0, 2.0),
     )
 
     assert outcome["written"] is False
@@ -768,18 +755,22 @@ def test_a_failed_run_experience_write_redacts_and_bounds_the_store_error(
 
     status = experience_sink.write_run_experience(
         config=_remote_config_with_token(tmp_path, token),
-        workspace=str(workspace),
-        kernel_path=str(kernel),
-        kernel_source=kernel.read_text(encoding="utf-8"),
-        kernel_backend="triton",
-        gpu_target="gfx950",
-        experiment_id="exp-1",
-        baseline_wall_ms=10.0,
-        best_wall_ms=5.0,
-        mean_case_speedup=2.0,
-        cumulative_diff="--- a/kernel.py\n+++ b/kernel.py\n",
-        digest="iter 1 kept",
-        framework="standalone",
+        kernel=experience_sink.LoopKernel(
+            kernel_path=str(kernel),
+            kernel_backend="triton",
+            kernel_source=kernel.read_text(encoding="utf-8"),
+            framework="standalone",
+            workspace=str(workspace),
+        ),
+        outcome=experience_sink.RunOutcome(
+            experiment_id="exp-1",
+            gpu_target="gfx950",
+            baseline_wall_ms=10.0,
+            best_wall_ms=5.0,
+            cumulative_diff="--- a/kernel.py\n+++ b/kernel.py\n",
+            digest="iter 1 kept",
+            mean_case_speedup=2.0,
+        ),
         summary_override={
             "category": "gemm",
             "strategy": "vectorize loads",

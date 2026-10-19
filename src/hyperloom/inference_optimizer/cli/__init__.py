@@ -11,7 +11,6 @@ from dataclasses import dataclass
 import json
 import logging
 import os
-import shlex
 import sys
 import time
 from collections.abc import Mapping
@@ -31,6 +30,8 @@ from .kb import (
     _bootstrap_knowledge_plane,
 )
 from .backends import (
+    CriticSetup,
+    ModelRouting,
     _build_backends,
     _build_proposal_scorer,
     critic_review_target,
@@ -56,6 +57,8 @@ from ..model_config_utils import (
     summarize_model_config,
 )
 from .bootstrap import (
+    LaunchInfo,
+    _emit_launch_info,
     constraint_budget_resume_conflict,
     resolve_launch_gpu_power,
     _begin_resume_leg,
@@ -100,8 +103,8 @@ from .recover import (
 __all__ = ["main"]
 from .. import framework_registry
 from ..session.manifest import load_manifest, write_manifest
-from ..protocol.action_surfaces import ACTION_CATALOGUE, ActionMetadata
-from hyperloom.orchestrator.loop.coordinator import Coordinator
+from ..protocol.action_surfaces import ACTION_CATALOGUE
+from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator, CoordinatorSettings, RunOptions
 from hyperloom.orchestrator.collaborator import OrchestrationPrompt as _OrchestrationPrompt
 from hyperloom.inference_optimizer.framework_paths import resolve_framework_tree, resolve_kernel_search_roots
 from hyperloom.orchestrator.state.objective import AnyObjective, Objective, build_objective
@@ -110,6 +113,9 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
     TRANSPORT_TOOLS,
     build_orchestration_prompt,
     default_enabled_actions,
+    PromptAssets,
+    PromptCycle,
+    SessionContext,
 )
 from hyperloom.inference_optimizer.breakdown.stop_reasons import SUPERVISOR_RESTART_REASON
 
@@ -332,49 +338,56 @@ def _objective_summary_for_prompt(objective: Objective) -> tuple[str, float | st
     return kind, value
 
 
+@dataclass(frozen=True)
+class OrchestrationPromptContext:
+    """What the Orchestration prompt says about the session itself; fixed for the run while cycles and phases move."""
+
+    no_kernel: bool
+    framework: str
+    objective: Objective
+    max_minutes: int
+    no_framework_agent: bool = False
+    transport: str = TRANSPORT_TOOLS
+    benchmark_mode: str = ""
+    agentx_corpus_shape: Mapping[str, Any] | None = None
+    agentx_grading: Mapping[str, Any] | None = None
+    agentx_backend: str = ""
+
+
 def _build_orchestration_prompt(
+    context: OrchestrationPromptContext,
     *,
-    no_kernel: bool,
-    framework: str,
-    objective: Objective,
-    max_minutes: int,
-    no_framework_agent: bool = False,
     macro_cycle: int = 0,
     cycle_directive: str = "",
     cycle_strategy: Mapping[str, Any] | None = None,
     phase: str = "",
-    transport: str = TRANSPORT_TOOLS,
-    action_registry: Mapping[str, ActionMetadata] | None = None,
-    benchmark_mode: str = "",
-    agentx_corpus_shape: Mapping[str, Any] | None = None,
-    agentx_grading: Mapping[str, Any] | None = None,
-    agentx_backend: str = "",
 ) -> str:
     """Compose the Orchestration system prompt from typed inputs (``--orch-prompt`` overrides)."""
-    registry = action_registry or ACTION_CATALOGUE
+    no_kernel, no_framework_agent, framework = context.no_kernel, context.no_framework_agent, context.framework
     enabled = default_enabled_actions(no_kernel=no_kernel, no_optimize=no_framework_agent)
-    kind, value = _objective_summary_for_prompt(objective)
+    kind, value = _objective_summary_for_prompt(context.objective)
     return build_orchestration_prompt(
-        action_registry=registry,
+        action_registry=ACTION_CATALOGUE,
         enabled_actions=enabled,
-        framework=framework,
-        kernel_enabled=not no_kernel,
-        framework_agent_phase_enabled=not no_framework_agent,
-        objective_kind=kind,
-        objective_value=value,
-        max_minutes=int(max_minutes),
-        macro_cycle=int(macro_cycle),
-        cycle_directive=cycle_directive,
-        cycle_strategy=cycle_strategy,
-        phase=phase,
-        transport=transport,
-        benchmark_mode=benchmark_mode,
-        agentx_corpus_shape=agentx_corpus_shape,
-        agentx_grading=agentx_grading,
-        agentx_backend=agentx_backend,
-        rules_fragment_path=_orchestration_rules_fragment_path(),
-        framework_source_roots=resolve_kernel_search_roots(),
-        session_framework_tree=resolve_framework_tree(framework),
+        session=SessionContext(
+            framework=framework,
+            kernel_enabled=not no_kernel,
+            framework_agent_phase_enabled=not no_framework_agent,
+            objective_kind=kind,
+            objective_value=value,
+            max_minutes=int(context.max_minutes),
+            framework_source_roots=resolve_kernel_search_roots(),
+            session_framework_tree=resolve_framework_tree(framework),
+            transport=context.transport,
+            benchmark_mode=context.benchmark_mode,
+            agentx_corpus_shape=context.agentx_corpus_shape,
+            agentx_grading=context.agentx_grading,
+            agentx_backend=context.agentx_backend,
+        ),
+        cycle=PromptCycle(
+            macro_cycle=int(macro_cycle), cycle_directive=cycle_directive, cycle_strategy=cycle_strategy, phase=phase
+        ),
+        assets=PromptAssets(rules_fragment_path=_orchestration_rules_fragment_path()),
     )
 
 
@@ -417,39 +430,6 @@ def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
         "--nodes>=2 guard active — see SKILL.md IR-8"
     )
     return auto_disabled
-
-
-def _emit_launch_info(
-    *,
-    pid: int,
-    session_dir: Path,
-    session_id: str,
-    run_log: str,
-    gpu_type: str,
-    framework: str,
-    model: str,
-    launch_info_file: str | None,
-) -> dict[str, Any]:
-    """Print the machine-readable HYPERLOOM_LAUNCH stdout line; optionally JSON-dump to ``launch_info_file``."""
-    launch_info: dict[str, Any] = {
-        "event": "launch",
-        "pid": pid,
-        "session_dir": str(session_dir),
-        "session_id": session_id,
-        "run_log": run_log,
-        "manifest": str(session_dir / "manifest.json"),
-        "gpu_type": gpu_type,
-        "framework": framework,
-        "model": model,
-    }
-    kv_body = " ".join(f"{k}={shlex.quote(str(v))}" for k, v in launch_info.items())
-    print(f"HYPERLOOM_LAUNCH {kv_body}")
-    if launch_info_file:
-        path = Path(launch_info_file)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(launch_info, indent=2))
-        print(f"Launch info file: {path}")
-    return launch_info
 
 
 # Exit code for "another optimizer already owns this session".
@@ -858,10 +838,9 @@ def _probe_critic_review_model(
         try:
             if protocol == "anthropic":
                 llm_config.anthropic_completion(
-                    model=model,
-                    messages=messages,
-                    max_tokens=16,
-                    timeout_s=_CRITIC_PROBE_TIMEOUT_SEC,
+                    request=llm_config.AnthropicCompletionRequest(
+                        model=model, messages=messages, max_tokens=16, timeout_s=_CRITIC_PROBE_TIMEOUT_SEC
+                    ),
                     component="critic",
                     operation="preflight",
                 )
@@ -1057,7 +1036,7 @@ def _apply_agentx_budget_profile(args: argparse.Namespace) -> None:
     # is a deliberate choice even when it equals the default, and gets no note.
     if getattr(args, "max_hours", None) is None:
         print(
-            f"NOTE: HYPERLOOM_AGENTX is on and --max-hours is at its default of {DEFAULT_MAX_HOURS}. "
+            f"NOTE: AgentX replay is configured and --max-hours is at its default of {DEFAULT_MAX_HOURS}. "
             "One AgentX round (corpus load + warmup + drain + measurement window) "
             "typically exceeds that on its own; pass an explicit --max-hours sized "
             "to the number of candidates you intend to measure.",
@@ -1065,35 +1044,8 @@ def _apply_agentx_budget_profile(args: argparse.Namespace) -> None:
         )
 
 
-# Largest input+output a single request reaches in the 256k-capped weka corpus, measured over all 30,141 requests of
-# semianalysis_cc_traces_weka_062126_256k (max input alone is 255,808).
-AGENTX_CAPPED_CORPUS_PEAK_TOKENS = 255_999
-
-
-def _warn_if_context_too_small_for_corpus(resolved: int, source: str) -> None:
-    """Say up front when the served window cannot hold the replay corpus."""
-    if not _agentx_enabled() or resolved >= AGENTX_CAPPED_CORPUS_PEAK_TOKENS:
-        return
-    print(
-        f"WARNING: HYPERLOOM_AGENTX is on but the served context window "
-        f"({resolved}, from {source}) is below the replay corpus peak "
-        f"({AGENTX_CAPPED_CORPUS_PEAK_TOKENS} input+output tokens). Requests that "
-        f"do not fit will be refused by the server; the run is expected to come "
-        f"back non-submittable, and a model this size is not comparable on the "
-        f"AgentX board.",
-        file=sys.stderr,
-    )
-
-
 def _resolve_run_max_model_len(args: argparse.Namespace) -> tuple[int, str]:
-    """Resolve run-wide MAX_MODEL_LEN with explicit operator values winning."""
-    resolved = _resolve_run_max_model_len_inner(args)
-    _warn_if_context_too_small_for_corpus(*resolved)
-    return resolved
-
-
-def _resolve_run_max_model_len_inner(args: argparse.Namespace) -> tuple[int, str]:
-    """Resolution proper; the corpus-fit warning is applied by the caller."""
+    """Resolve planning context; native AgentX serving context remains in its YAML."""
     if getattr(args, "max_model_len", None):
         return int(args.max_model_len), "--max-model-len"
     max_model_len_env = os.environ.get("MAX_MODEL_LEN", "").strip()
@@ -1115,10 +1067,8 @@ def _resolve_run_max_model_len_inner(args: argparse.Namespace) -> tuple[int, str
             return int(native), "agentx-native-context"
         # Model not on disk yet (uncached HF id).
         print(
-            "WARNING: HYPERLOOM_AGENTX is on but the model's native context could "
-            "not be read (weights not on disk yet), so MAX_MODEL_LEN falls back "
-            "to the synthetic ISL+OSL derivation and the server will be booted at "
-            "that width. Pre-fetch the weights, or pass --max-model-len.",
+            "NOTE: Model context is unavailable locally; using a planning estimate. "
+            "Magpie resolves the AgentX serving context from its workload configuration.",
             file=sys.stderr,
         )
     return (
@@ -1379,18 +1329,33 @@ def _partition_fanout_supported(framework: str | None) -> tuple[bool, str]:
     )
 
 
+@dataclass(frozen=True)
+class PartitionRequest:
+    """The compute-partition flags an operator passed: an asserted mode and the streams each partition runs."""
+
+    declared_mode: str | None = None
+    streams_per_partition: int | None = None
+
+
+@dataclass(frozen=True)
+class PartitionModel:
+    """The model a partition shape must fit: its path and precision, and the session state holding its identity."""
+
+    model_path: str | None = None
+    precision: str | None = None
+    shared_state: Any = None
+
+
 def _export_partition_shape(
+    request: PartitionRequest,
     *,
-    declared_mode: str | None,
-    streams_per_partition: int | None,
     framework: str | None = None,
     gpu_type: str | None = None,
     nodes: int = 1,
-    model_path: str | None = None,
-    precision: str | None = None,
-    shared_state: Any = None,
+    model: PartitionModel = PartitionModel(),
 ) -> dict[str, Any]:
     """Validate the session's compute-partition shape and publish it."""
+    declared_mode, streams_per_partition = request.declared_mode, request.streams_per_partition
     from hyperloom.common.gpu_partition import PartitionError, parse_mode
     from hyperloom.orchestrator.actions.executors._partition_shape import (
         DEFAULT_STREAMS_PER_PARTITION,
@@ -1461,10 +1426,10 @@ def _export_partition_shape(
         streams=streams,
         gpu_type=gpu_type,
         params={
-            "model_path": str(model_path or ""),
-            "precision": str(precision or ""),
+            "model_path": str(model.model_path or ""),
+            "precision": str(model.precision or ""),
         },
-        shared_state=shared_state,
+        shared_state=model.shared_state,
         # The footprint refusal is arithmetic about streams sharing a partition.
         fanout_expected=fanout or bool(mode) or streams_named,
     )
@@ -1757,17 +1722,18 @@ def _restore_platform_state(args: argparse.Namespace, state: SharedState, sessio
     _publish_gpu_power_settings(gpu_power)
     state.gpu_power_settings = gpu_power
     state.compute_partition = _export_partition_shape(
-        declared_mode=getattr(args, "compute_partition_mode", None),
-        streams_per_partition=getattr(args, "streams_per_partition", None),
+        PartitionRequest(getattr(args, "compute_partition_mode", None), getattr(args, "streams_per_partition", None)),
         framework=state.framework or getattr(args, "framework", None),
         gpu_type=os.environ.get("GPU_TYPE") or state.gpu_type,
         # A resume must re-pass --nodes, so the persisted count is the one that says whether this session was ever
         # multi-node.
         nodes=max(int(getattr(args, "nodes", 1) or 1), int(getattr(state, "nodes", 1) or 1)),
-        model_path=state.model_path or str(getattr(args, "model", "") or ""),
-        precision=state.precision or getattr(args, "precision", None),
         # Passed for the persisted model identity.
-        shared_state=state,
+        model=PartitionModel(
+            state.model_path or str(getattr(args, "model", "") or ""),
+            state.precision or getattr(args, "precision", None),
+            shared_state=state,
+        ),
     )
     if state.compute_partition.get("mode"):
         print(f"  re-exported partition shape: {state.compute_partition['mode']}")
@@ -1837,14 +1803,21 @@ def _restore_phase_toggles(args: argparse.Namespace, state, session_dir: Path) -
             )
 
 
+@dataclass(frozen=True)
+class _OperatorLaunchShape:
+    """The operator's server args and extra env a resume re-applies: this resume's flags, else the session's record."""
+
+    server_args: str
+    extra_env: dict
+
+
 def _reexport_session_environment(
     args: argparse.Namespace,
     state,
     *,
     session_dir: Path,
-    manifest: dict,
-    resume_server_args: str,
-    resume_extra_env: dict,
+    session_id: str,
+    launch_shape: _OperatorLaunchShape,
 ) -> None:
     """Put the session's recorded environment back, so a fresh shell resumes what was measured.
 
@@ -1885,17 +1858,17 @@ def _reexport_session_environment(
         print(f"  re-exported GPU_TYPE  : {state.gpu_type}")
         if runner_gpu_type != state.gpu_type:
             print(f"  Magpie runner GPU_TYPE: {runner_gpu_type}")
-    _emit_launch_info(
+    info = LaunchInfo(
         pid=os.getpid(),
         session_dir=session_dir,
-        session_id=str(manifest.get("session_id") or ""),
+        session_id=session_id,
         run_log=os.environ.get("INFERENCE_OPTIMIZER_RUN_LOG", ""),
         gpu_type=state.gpu_type or "",
         framework=state.framework or "",
         model=str(state.model_path or ""),
-        launch_info_file=getattr(args, "launch_info_file", None),
     )
-    _seed_env_from_resumed_state(state, resume_extra_env)
+    _emit_launch_info(info, launch_info_file=getattr(args, "launch_info_file", None))
+    _seed_env_from_resumed_state(state, launch_shape.extra_env)
     # The seeding above puts the recorded workload on the environment rung, so it outranks a shell export while an
     # explicit --isl/--conc/... on this resume still wins. The resolved values are then projected back into env so
     # resume sees the same workload contract (not YAML defaults).
@@ -1933,12 +1906,12 @@ def _reexport_session_environment(
         os.environ["FRAMEWORK_VERSION"] = state.framework_version
         print(f"  re-exported FRAMEWORK_VERSION: {state.framework_version}")
     # Operator launch shape: already exported above, ahead of the staleness guard that reads the pins.
-    state.operator_server_args = resume_server_args
-    state.operator_extra_env = resume_extra_env
-    if resume_server_args:
-        print(f"  re-exported server_args   : {resume_server_args}")
-    if resume_extra_env:
-        print(f"  re-exported extra_env     : {','.join(sorted(resume_extra_env))}")
+    state.operator_server_args = launch_shape.server_args
+    state.operator_extra_env = launch_shape.extra_env
+    if launch_shape.server_args:
+        print(f"  re-exported server_args   : {launch_shape.server_args}")
+    if launch_shape.extra_env:
+        print(f"  re-exported extra_env     : {','.join(sorted(launch_shape.extra_env))}")
     _apply_custom_specialist_resume(args, state)
     # Custom-workload paths: an explicit --framework-path / --benchmark-scripts-dir on this resume wins, else the
     # persisted value.
@@ -2057,9 +2030,8 @@ async def _resume_session(args: argparse.Namespace) -> _SessionStart:
         args,
         state,
         session_dir=session_dir,
-        manifest=manifest,
-        resume_server_args=_resume_server_args,
-        resume_extra_env=_resume_extra_env,
+        session_id=str(manifest.get("session_id") or ""),
+        launch_shape=_OperatorLaunchShape(server_args=_resume_server_args, extra_env=_resume_extra_env),
     )
     # After the re-export, not before: both read the GPU_TYPE and the framework it put back.
     _restore_platform_state(args, state, session_lock)
@@ -2221,21 +2193,7 @@ async def _seed_fresh_session(args: argparse.Namespace, *, nodes_resolved: int) 
     if _fw_version_for_env:
         os.environ["FRAMEWORK_VERSION"] = _fw_version_for_env
     if _agentx_enabled():
-        from hyperloom.inference_optimizer.agentx.mapping import (
-            CANONICAL_ISL,
-            CANONICAL_OSL,
-            CANONICAL_PREFIX_CACHE_HIT,
-        )
-
-        print(
-            f"Workload        : AgentX corpus replay "
-            f"(ISL avg={CANONICAL_ISL['avg']} p50={CANONICAL_ISL['p50']} p90={CANONICAL_ISL['p90']}, "
-            f"OSL avg={CANONICAL_OSL['avg']} p50={CANONICAL_OSL['p50']}, "
-            f"prefix_cache~{CANONICAL_PREFIX_CACHE_HIT:.0%}) "
-            f"MAX_MODEL_LEN={max_model_len} ({max_model_len_source}) "
-            f"PRECISION={args.precision} "
-            f"FRAMEWORK_VERSION={_fw_version_for_env or '<unset>'}"
-        )
+        print(f"Workload        : AgentX replay, CONC={args.conc}; corpus and model context resolved by Magpie")
     else:
         print(
             f"Workload        : ISL={args.isl} OSL={args.osl} "
@@ -2249,6 +2207,9 @@ async def _seed_fresh_session(args: argparse.Namespace, *, nodes_resolved: int) 
     # Single-optimizer guard: take the lock so the contract holds uniformly and the owner pid is published for the
     # session diagnostics.
     session_lock = _acquire_session_lock_or_exit(session_dir)
+    from .benchmark_config import bind_benchmark
+
+    bind_benchmark(session_dir, args)
     manifest = write_manifest(session_dir, args=args)
     _persist_install_event(args, session_dir)
     # One-shot Langfuse startup marker so a run killed before a breakdown still leaves a correlatable trace.
@@ -2263,7 +2224,7 @@ async def _seed_fresh_session(args: argparse.Namespace, *, nodes_resolved: int) 
     _print_session_skeleton(session_dir)
 
     # Machine-readable launch info: stable point for launcher scripts to harvest pid/session_dir/run_log.
-    _emit_launch_info(
+    info = LaunchInfo(
         pid=os.getpid(),
         session_dir=session_dir,
         session_id=str(manifest["session_id"]),
@@ -2271,20 +2232,18 @@ async def _seed_fresh_session(args: argparse.Namespace, *, nodes_resolved: int) 
         gpu_type=gpu_type or "",
         framework=args.framework or "",
         model=str(args.model) if args.model else "",
-        launch_info_file=getattr(args, "launch_info_file", None),
     )
+    _emit_launch_info(info, launch_info_file=getattr(args, "launch_info_file", None))
     # Placed here, not at the top of _run_optimize, because everything it weighs is resolved by now and none of it
     # was then: the framework (whether anything fans out), args.gpu_type (the CU fallback), and args.model, which
     # --quantize rewrites to the exported checkpoint -- sizing partitions against the source model would weigh the
     # wrong weights.
     compute_partition = _export_partition_shape(
-        declared_mode=getattr(args, "compute_partition_mode", None),
-        streams_per_partition=getattr(args, "streams_per_partition", None),
+        PartitionRequest(getattr(args, "compute_partition_mode", None), getattr(args, "streams_per_partition", None)),
         framework=framework,
         gpu_type=args.gpu_type,
         nodes=nodes_resolved,
-        model_path=str(args.model or os.environ.get("MODEL_PATH") or ""),
-        precision=getattr(args, "precision", None),
+        model=PartitionModel(str(args.model or os.environ.get("MODEL_PATH") or ""), getattr(args, "precision", None)),
     )
     gpu_power = resolve_launch_gpu_power(args, nodes=nodes_resolved)
     _publish_gpu_power_settings(gpu_power)
@@ -2553,7 +2512,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             log.warning("failed to preserve SBD V6 preflight failure", exc_info=True)
         raise
 
-    _resolve_models_for_run(
+    # Model resolution makes blocking LLM calls; the subscription-token client refuses to run inside this loop.
+    await asyncio.to_thread(
+        _resolve_models_for_run,
         args,
         resolved_urls,
         claude_follows_codex=claude_follows_codex,
@@ -2630,15 +2591,19 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     state = SharedState.load_or_init(session_dir)
 
     backends = _build_backends(
-        claude_model=args.claude_model,
-        codex_model=args.codex_model,
-        critic_choice=critic_choice,
+        ModelRouting(
+            claude_model=args.claude_model,
+            codex_model=args.codex_model,
+            codex_follows_claude=codex_follows_claude,
+            claude_follows_codex=claude_follows_codex,
+        ),
+        CriticSetup(
+            choice=critic_choice,
+            agent_root=critic_agent_root,
+            kb_mode=critic_kb_mode,
+            protocol=args.critic_protocol,
+        ),
         session_dir=session_dir,
-        critic_agent_root=critic_agent_root,
-        critic_kb_mode=critic_kb_mode,
-        codex_follows_claude=codex_follows_claude,
-        claude_follows_codex=claude_follows_codex,
-        critic_protocol=args.critic_protocol,
     )
     # Expose active session_dir to in-process executors via the canonical pin env var; reinforced here for resume
     # paths.
@@ -2654,12 +2619,16 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     coordinator = Coordinator(
         session_dir,
         backends=backends,
-        model_class=(getattr(args, "model_class", None) or os.environ.get("MODEL_CLASS") or ""),
-        phase_budget_pct=phase_budget_pct or None,
-        # KnowledgePlane facade (None when --degraded-pr).
-        knowledge_plane=knowledge_plane,
-        # Advisory multi-model specialist-proposal scorer, disabled by default (enable via --proposal-scoring).
-        proposal_scorer=_build_proposal_scorer(args, session_dir),
+        settings=CoordinatorSettings(
+            model_class=getattr(args, "model_class", None) or os.environ.get("MODEL_CLASS") or "",
+            phase_budget_pct=phase_budget_pct or None,
+        ),
+        advisory=AdvisoryServices(
+            # KnowledgePlane facade (None when --degraded-pr).
+            knowledge_plane=knowledge_plane,
+            # Advisory multi-model specialist-proposal scorer, disabled by default (enable via --proposal-scoring).
+            proposal_scorer=_build_proposal_scorer(args, session_dir),
+        ),
     )
     framework_for_prompt = os.environ.get("FRAMEWORK", "").strip().lower() or "sglang"
     max_minutes_for_prompt = int(round(float(args.max_hours) * 60))
@@ -2676,22 +2645,25 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # The role record always names Claude; the deployment's provider shape is what actually decides, so read the
     # transport off the built backend.
     _orch_transport = getattr(coordinator.backends.get("orchestration"), "transport", TRANSPORT_TOOLS)
+    prompt_context = OrchestrationPromptContext(
+        no_kernel=no_kernel,
+        no_framework_agent=no_framework_agent,
+        framework=framework_for_prompt,
+        objective=objective,
+        max_minutes=max_minutes_for_prompt,
+        transport=_orch_transport,
+        benchmark_mode=str(getattr(coordinator.shared_state, "benchmark_mode", "") or ""),
+        agentx_corpus_shape=coordinator.shared_state.agentx_corpus_shape,
+        agentx_grading=coordinator.shared_state.grading,
+        agentx_backend=coordinator.shared_state.agentx_backend,
+    )
     prompts: dict[str, str] = {
         "orchestration": args.orch_prompt
         or _build_orchestration_prompt(
-            no_kernel=no_kernel,
-            no_framework_agent=no_framework_agent,
-            framework=framework_for_prompt,
-            objective=objective,
-            max_minutes=max_minutes_for_prompt,
+            prompt_context,
             macro_cycle=_initial_macro_cycle,
             cycle_directive=_initial_directive,
             phase=_initial_phase,
-            transport=_orch_transport,
-            benchmark_mode=str(getattr(coordinator.shared_state, "benchmark_mode", "") or ""),
-            agentx_corpus_shape=coordinator.shared_state.agentx_corpus_shape,
-            agentx_grading=coordinator.shared_state.grading,
-            agentx_backend=coordinator.shared_state.agentx_backend,
         ),
         "critic": args.critic_prompt or _load_critic_prompt(),
     }
@@ -2700,19 +2672,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     coordinator.orch_prompt = _OrchestrationPrompt(
         overrides=prompts,
         is_user_supplied=bool(args.orch_prompt),
-        rebuild=_functools.partial(
-            _build_orchestration_prompt,
-            no_kernel=no_kernel,
-            no_framework_agent=no_framework_agent,
-            framework=framework_for_prompt,
-            objective=objective,
-            max_minutes=max_minutes_for_prompt,
-            transport=_orch_transport,
-            benchmark_mode=str(getattr(coordinator.shared_state, "benchmark_mode", "") or ""),
-            agentx_corpus_shape=coordinator.shared_state.agentx_corpus_shape,
-            agentx_grading=coordinator.shared_state.grading,
-            agentx_backend=coordinator.shared_state.agentx_backend,
-        ),
+        rebuild=_functools.partial(_build_orchestration_prompt, prompt_context),
     )
     # Build specialist executor only when research_lane capacity > 0 (0 degrades to LLM-direct grid).
     specialist_capacity = int(getattr(args, "research_lane_capacity", 1) or 0)
@@ -2780,11 +2740,13 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     try:
         stop_reason = await coordinator.run(
             objective=objective,
-            max_minutes=args.max_hours * 60.0,
-            tick_interval_sec=args.tick_interval_sec,
-            max_ticks=args.max_ticks,
-            install_signal_handlers=True,
-            closing_grace_sec=args.closing_grace_sec,
+            options=RunOptions(
+                max_minutes=args.max_hours * 60.0,
+                tick_interval_sec=args.tick_interval_sec,
+                max_ticks=args.max_ticks,
+                install_signal_handlers=True,
+                closing_grace_sec=args.closing_grace_sec,
+            ),
         )
     finally:
         state = coordinator.shared_state
@@ -2839,9 +2801,12 @@ def main(argv: list[str] | None = None) -> int:
             v = getattr(args, attr)
             if v and Path(v).exists():
                 setattr(args, attr, Path(v).read_text(encoding="utf-8"))
+        from .benchmark_config import configure_benchmark
+
         try:
+            configure_benchmark(args)
             _load_custom_specialist_args(args)
-        except ValueError as exc:
+        except (ValueError, OSError) as exc:
             parser.error(str(exc))
         return asyncio.run(_run_optimize(args))
     if args.command == "recover":

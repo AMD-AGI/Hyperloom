@@ -10,7 +10,9 @@ import pytest
 from hyperloom.agents.quantization.driver import runner as runner_module
 from hyperloom.agents.quantization.driver.runner import (
     DEFAULT_ALLOWED_TOOLS,
+    AttemptContext,
     AttemptResult,
+    ClaudeAgentSdk,
     build_attempt_prompt,
     resolve_skill_path,
     run_one_attempt,
@@ -51,14 +53,16 @@ def test_build_attempt_prompt_includes_skill_and_user_prompt(tmp_path):
     skill = tmp_path / "SKILL.md"
     skill.write_text("skill body", encoding="utf-8")
     text = build_attempt_prompt(
-        user_prompt="Quantize Qwen/Qwen3-0.5B in fp8",
+        AttemptContext(
+            user_prompt="Quantize Qwen/Qwen3-0.5B in fp8",
+            workspace=tmp_path / "ws",
+            quark_root=tmp_path / "qr",
+            attempt_number=1,
+            acceptable_eval_gap=0.05,
+            interactive=False,
+            previous_outcome=None,
+        ),
         skill_path=skill,
-        workspace=tmp_path / "ws",
-        quark_root=tmp_path / "qr",
-        attempt_number=1,
-        acceptable_eval_gap=0.05,
-        interactive=False,
-        previous_outcome=None,
         fix_hypothesis_path=None,
     )
     assert str(skill) in text
@@ -75,14 +79,16 @@ def test_build_attempt_prompt_retry_block_added_on_attempt_2(tmp_path):
     skill.write_text("x", encoding="utf-8")
     fix_hyp = tmp_path / "fix_hypothesis_attempt_2.md"
     text = build_attempt_prompt(
-        user_prompt="do",
+        AttemptContext(
+            user_prompt="do",
+            workspace=tmp_path,
+            quark_root=tmp_path,
+            attempt_number=2,
+            acceptable_eval_gap=None,
+            interactive=None,
+            previous_outcome="exec_oom",
+        ),
         skill_path=skill,
-        workspace=tmp_path,
-        quark_root=tmp_path,
-        attempt_number=2,
-        acceptable_eval_gap=None,
-        interactive=None,
-        previous_outcome="exec_oom",
         fix_hypothesis_path=fix_hyp,
     )
     assert "Retry context" in text
@@ -96,14 +102,16 @@ def test_build_attempt_prompt_interactive_on(tmp_path):
     skill = tmp_path / "SKILL.md"
     skill.write_text("x", encoding="utf-8")
     text = build_attempt_prompt(
-        user_prompt="x",
+        AttemptContext(
+            user_prompt="x",
+            workspace=tmp_path,
+            quark_root=tmp_path,
+            attempt_number=1,
+            acceptable_eval_gap=None,
+            interactive=True,
+            previous_outcome=None,
+        ),
         skill_path=skill,
-        workspace=tmp_path,
-        quark_root=tmp_path,
-        attempt_number=1,
-        acceptable_eval_gap=None,
-        interactive=True,
-        previous_outcome=None,
         fix_hypothesis_path=None,
     )
     assert "on (always relay checkpoints to operator)" in text
@@ -113,14 +121,16 @@ def test_build_attempt_prompt_default_threshold_message(tmp_path):
     skill = tmp_path / "SKILL.md"
     skill.write_text("x", encoding="utf-8")
     text = build_attempt_prompt(
-        user_prompt="x",
+        AttemptContext(
+            user_prompt="x",
+            workspace=tmp_path,
+            quark_root=tmp_path,
+            attempt_number=1,
+            acceptable_eval_gap=None,
+            interactive=False,
+            previous_outcome=None,
+        ),
         skill_path=skill,
-        workspace=tmp_path,
-        quark_root=tmp_path,
-        attempt_number=1,
-        acceptable_eval_gap=None,
-        interactive=False,
-        previous_outcome=None,
         fix_hypothesis_path=None,
     )
     assert "caller did not override" in text
@@ -138,12 +148,9 @@ async def test_run_one_attempt_invokes_sdk_with_prompt(tmp_path, fake_sdk, fake_
     qr.mkdir()
 
     result = await run_one_attempt(
-        user_prompt="my prompt",
-        workspace=tmp_path / "ws",
-        quark_root=qr,
+        AttemptContext(user_prompt="my prompt", workspace=tmp_path / "ws", quark_root=qr),
         skill_path=skill,
-        sdk_query_factory=fake_sdk,
-        sdk_options_cls=fake_options_cls,
+        sdk=ClaudeAgentSdk(query=fake_sdk, options_cls=fake_options_cls),
     )
 
     assert isinstance(result, AttemptResult)
@@ -162,12 +169,9 @@ async def test_run_one_attempt_sets_cwd_to_workspace(tmp_path, fake_sdk, fake_op
     ws = tmp_path / "ws"
 
     await run_one_attempt(
-        user_prompt="x",
-        workspace=ws,
-        quark_root=qr,
+        AttemptContext(user_prompt="x", workspace=ws, quark_root=qr),
         skill_path=skill,
-        sdk_query_factory=fake_sdk,
-        sdk_options_cls=fake_options_cls,
+        sdk=ClaudeAgentSdk(query=fake_sdk, options_cls=fake_options_cls),
     )
     options = fake_sdk.received_options[0]
     assert options.kwargs.get("cwd") == str(ws)
@@ -184,12 +188,9 @@ async def test_run_one_attempt_passes_quark_py310_env_to_sdk_options(tmp_path, f
     monkeypatch.delenv("PIP_IGNORE_REQUIRES_PYTHON", raising=False)
 
     await run_one_attempt(
-        user_prompt="x",
-        workspace=tmp_path / "ws",
-        quark_root=qr,
+        AttemptContext(user_prompt="x", workspace=tmp_path / "ws", quark_root=qr),
         skill_path=skill,
-        sdk_query_factory=fake_sdk,
-        sdk_options_cls=fake_options_cls,
+        sdk=ClaudeAgentSdk(query=fake_sdk, options_cls=fake_options_cls),
     )
 
     env = fake_sdk.received_options[0].kwargs["env"]
@@ -216,12 +217,9 @@ async def test_run_one_attempt_captures_sdk_exception(tmp_path, fake_sdk, fake_o
 
     fake_sdk.side_effect = RuntimeError("boom from SDK")
     result = await run_one_attempt(
-        user_prompt="x",
-        workspace=tmp_path / "ws",
-        quark_root=qr,
+        AttemptContext(user_prompt="x", workspace=tmp_path / "ws", quark_root=qr),
         skill_path=skill,
-        sdk_query_factory=fake_sdk,
-        sdk_options_cls=fake_options_cls,
+        sdk=ClaudeAgentSdk(query=fake_sdk, options_cls=fake_options_cls),
     )
     assert "RuntimeError" in result.sdk_error
     assert "boom from SDK" in result.sdk_error
@@ -238,14 +236,10 @@ async def test_run_one_attempt_aggregates_chunks(tmp_path, fake_sdk, fake_option
     fake_sdk.scripted_chunks = ["part one", "part two", "part three"]
 
     result = await run_one_attempt(
-        user_prompt="x",
-        workspace=tmp_path / "ws",
-        quark_root=qr,
+        AttemptContext(user_prompt="x", workspace=tmp_path / "ws", quark_root=qr),
         skill_path=skill,
-        sdk_query_factory=fake_sdk,
-        sdk_options_cls=fake_options_cls,
+        sdk=ClaudeAgentSdk(query=fake_sdk, options_cls=fake_options_cls),
     )
-    assert result.chunks == ["part one", "part two", "part three"]
     assert "part one\npart two\npart three" == result.raw_text
 
 
@@ -255,12 +249,9 @@ async def test_run_one_attempt_skill_missing_raises(tmp_path, fake_sdk, fake_opt
     qr.mkdir()
     with pytest.raises(FileNotFoundError):
         await run_one_attempt(
-            user_prompt="x",
-            workspace=tmp_path / "ws",
-            quark_root=qr,
+            AttemptContext(user_prompt="x", workspace=tmp_path / "ws", quark_root=qr),
             skill_path=tmp_path / "nope.md",
-            sdk_query_factory=fake_sdk,
-            sdk_options_cls=fake_options_cls,
+            sdk=ClaudeAgentSdk(query=fake_sdk, options_cls=fake_options_cls),
         )
 
 
@@ -276,14 +267,9 @@ async def test_run_one_attempt_retry_picks_up_hypothesis(tmp_path, fake_sdk, fak
     hyp.write_text("retry plan", encoding="utf-8")
 
     await run_one_attempt(
-        user_prompt="x",
-        workspace=ws,
-        quark_root=qr,
-        attempt_number=2,
-        previous_outcome="exec_oom",
+        AttemptContext(user_prompt="x", workspace=ws, quark_root=qr, attempt_number=2, previous_outcome="exec_oom"),
         skill_path=skill,
-        sdk_query_factory=fake_sdk,
-        sdk_options_cls=fake_options_cls,
+        sdk=ClaudeAgentSdk(query=fake_sdk, options_cls=fake_options_cls),
     )
     prompt = fake_sdk.received_prompts[0]
     assert "exec_oom" in prompt
@@ -307,12 +293,9 @@ async def test_run_one_attempt_falls_back_when_cwd_unsupported(tmp_path, fake_sd
             self.kwargs = kwargs
 
     result = await run_one_attempt(
-        user_prompt="x",
-        workspace=tmp_path / "ws",
-        quark_root=qr,
+        AttemptContext(user_prompt="x", workspace=tmp_path / "ws", quark_root=qr),
         skill_path=skill,
-        sdk_query_factory=fake_sdk,
-        sdk_options_cls=_StrictOptions,
+        sdk=ClaudeAgentSdk(query=fake_sdk, options_cls=_StrictOptions),
     )
     assert result.sdk_error == ""
     # cwd must have been stripped from the retry.
@@ -327,13 +310,10 @@ async def test_run_one_attempt_passes_model(tmp_path, fake_sdk, fake_options_cls
     qr.mkdir()
 
     await run_one_attempt(
-        user_prompt="x",
-        workspace=tmp_path / "ws",
-        quark_root=qr,
+        AttemptContext(user_prompt="x", workspace=tmp_path / "ws", quark_root=qr),
         skill_path=skill,
         model="custom-model-id",
-        sdk_query_factory=fake_sdk,
-        sdk_options_cls=fake_options_cls,
+        sdk=ClaudeAgentSdk(query=fake_sdk, options_cls=fake_options_cls),
     )
     assert fake_sdk.received_options[0].kwargs.get("model") == "custom-model-id"
 
@@ -348,13 +328,10 @@ async def test_run_one_attempt_log_callback_captures_chunks(tmp_path, fake_sdk, 
     fake_sdk.scripted_chunks = ["alpha", "beta"]
 
     await run_one_attempt(
-        user_prompt="x",
-        workspace=tmp_path / "ws",
-        quark_root=qr,
+        AttemptContext(user_prompt="x", workspace=tmp_path / "ws", quark_root=qr),
         skill_path=skill,
-        sdk_query_factory=fake_sdk,
-        sdk_options_cls=fake_options_cls,
         log=captured.append,
+        sdk=ClaudeAgentSdk(query=fake_sdk, options_cls=fake_options_cls),
     )
     assert any("alpha" in line for line in captured)
     assert any("beta" in line for line in captured)

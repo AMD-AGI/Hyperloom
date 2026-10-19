@@ -13,11 +13,8 @@ import yaml
 
 from hyperloom.common.failure_signature import classify_failure
 from hyperloom.orchestrator.actions.executors import integrate_patch as ip
-from hyperloom.orchestrator.actions.executors._grid_runner import (
-    GridVariant,
-    _build_variant_yaml,
-    apply_runtime_override,
-)
+from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant, _build_variant_yaml
+from hyperloom.inference_optimizer.runtime_environment import apply_runtime_override
 from hyperloom.orchestrator.enablement.runtime.stack_actions import (
     EnablementStackAction,
     FrameworkRuntime,

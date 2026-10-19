@@ -12,7 +12,13 @@ import time
 
 import pytest
 
-from hyperloom.orchestrator.bringup.reconcile import Reconciler, TIMEOUT_VERDICT
+from hyperloom.orchestrator.bringup.reconcile import (
+    TIMEOUT_VERDICT,
+    ReconcileLimits,
+    ReconcileLinks,
+    Reconciler,
+    ReconcileStores,
+)
 from hyperloom.orchestrator.bus.resource_lock import (
     BRINGUP_ROUND_LANE,
     ResourceLockManager,
@@ -24,6 +30,7 @@ from hyperloom.orchestrator.policy.projection import ResourceFacts
 from hyperloom.orchestrator.state.round_store import (
     OPEN,
     SETTLED,
+    RoundRequest,
     RoundStore,
 )
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
@@ -86,20 +93,23 @@ def db(tmp_path):
     conn.close()
 
 
-def _build(db, *, proposals=None, state=None, **kw) -> tuple[Reconciler, RoundStore, TaskRegistry, _State]:
+def _build(
+    db, *, proposals=None, state=None, result_pending=None, **limits
+) -> tuple[Reconciler, RoundStore, TaskRegistry, _State]:
     """A reconciler over ``db``, with the pieces a test needs to inspect."""
     rounds = RoundStore(db)
     tasks = TaskRegistry(db)
     shared = state or _State()
     rec = Reconciler(
-        rounds=rounds,
-        tasks=tasks,
-        locks=ResourceLockManager(SqliteLeaseBackend(db)),
-        shared_state=shared,
-        resources=ResourceFacts(),
-        proposals=(lambda: proposals) if proposals is not None else None,
-        session_dir=db.db_path.parent,
-        **kw,
+        ReconcileStores(rounds=rounds, tasks=tasks, locks=ResourceLockManager(SqliteLeaseBackend(db))),
+        shared,
+        links=ReconcileLinks(
+            resources=ResourceFacts(),
+            proposals=(lambda: proposals) if proposals is not None else None,
+            session_dir=db.db_path.parent,
+            result_pending=result_pending,
+        ),
+        limits=ReconcileLimits(**limits),
     )
     return rec, rounds, tasks, shared
 
@@ -109,10 +119,9 @@ async def _open_round(rounds: RoundStore, tasks: TaskRegistry, *, holder: str, l
     await tasks.create(kind="specialist", params={}, idempotency_key=f"k:{holder}", task_id=holder)
     result = await rounds.open(
         f"round-{holder}",
+        RoundRequest(now_unix=_NOW, request_id=f"open:{holder}"),
         holder_task_id=holder,
         lease_sec=lease,
-        now_unix=_NOW,
-        request_id=f"open:{holder}",
     )
     assert result.ok
 
@@ -141,7 +150,7 @@ async def test_a_round_whose_holder_cannot_be_confirmed_dead_still_releases(db):
 
     settled = await rounds.get("round-spec-1")
     assert settled.outcome == ""
-    assert settled.excludes_at(_NOW + 10.0) is True
+    assert settled.state == OPEN
     assert state.stop_reason == "", "an unobservable reap does not end the session"
 
 
@@ -155,7 +164,6 @@ async def test_age_never_requests_a_reap_of_a_running_holder(db):
 
     settled = await rounds.get("round-spec-1")
     assert settled.state == OPEN
-    assert settled.excludes_at(_NOW + 10.0) is True
     assert state.stop_reason == ""
 
 

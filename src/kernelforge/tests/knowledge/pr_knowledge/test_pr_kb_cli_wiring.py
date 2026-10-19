@@ -11,6 +11,7 @@ from click.testing import CliRunner
 from hyperloom.common.env import EnvValueError
 from kernelforge.cli import forge_loop
 from kernelforge.cli.relay import SearchActorBuildContext
+from kernelforge.knowledge.pr_knowledge.context import PrReferenceQuery
 from kernelforge.cli.pr_references import (
     _collect_pr_references,
     _git_remote_url,
@@ -75,26 +76,25 @@ def test_switch_is_independent_of_the_experience_kb_flag():
 
 def test_pr_context_is_wired_only_to_the_implementer():
     """Keep external PR text out of measured Analysis and planning evidence."""
-    actor_source = inspect.getsource(SearchActorBuildContext.build)
-    implementer = actor_source[
-        actor_source.index("actor_fn = make_agent_fn(") : actor_source.index("self._resolved_profile(")
+    source = inspect.getsource(forge_loop.callback)
+    implementer = source[
+        source.index("implementer_setup = ImplementerSetup(") : source.index("effective_implementer =")
     ]
+    analysis = source[source.index("analysis_service = make_analysis_agent_service(") : source.index("analysis_mode =")]
+    # Each Agent profile builds its own planning chain and supervisor; only its implementer receives the setup.
+    actor_source = inspect.getsource(SearchActorBuildContext.build)
     orchestration = actor_source[
         actor_source.index("orchestration = make_orchestration_service(") : actor_source.index(
             "supervisor = make_supervisor_fn("
         )
     ]
     supervisor = actor_source[actor_source.index("supervisor = make_supervisor_fn(") :]
-    cli_source = inspect.getsource(forge_loop.callback)
-    analysis = cli_source[
-        cli_source.index("analysis_service = make_analysis_agent_service(") : cli_source.index("analysis_mode =")
-    ]
 
-    assert "pre_task_context=self.pr_task_context" in implementer
-    assert "pr_kb_repo=self.pr_kb_repo" in implementer
+    assert "pre_task_context=pr_task_context" in implementer
+    assert "pr_kb_repo=pr_kb_repo" in implementer
     assert "pr_task_context" not in analysis
-    assert "pr_task_context" not in orchestration
-    assert "pr_task_context" not in supervisor
+    assert "setup" not in orchestration
+    assert "setup" not in supervisor
 
 
 def test_help_text_mentions_the_default_being_off():
@@ -185,13 +185,15 @@ def test_a_failed_lookup_degrades_instead_of_raising(monkeypatch, tmp_path):
 
     assert (
         _collect_pr_references(
-            workspace_dir=str(tmp_path),
-            kernel_backend="aiter",
-            git_remote="",
-            source_files=(),
-            operator_name="moe",
-            target_functions=(),
-            budget_sec=1.0,
+            str(tmp_path),
+            PrReferenceQuery(
+                kernel_backend="aiter",
+                git_remote="",
+                source_files=(),
+                operator_name="moe",
+                target_functions=(),
+            ),
+            1.0,
         )
         is None
     )
@@ -208,13 +210,15 @@ def test_a_service_failure_is_absorbed_like_a_local_one(monkeypatch, tmp_path):
 
     assert (
         _collect_pr_references(
-            workspace_dir=str(tmp_path),
-            kernel_backend="aiter",
-            git_remote="",
-            source_files=(),
-            operator_name="moe",
-            target_functions=(),
-            budget_sec=1.0,
+            str(tmp_path),
+            PrReferenceQuery(
+                kernel_backend="aiter",
+                git_remote="",
+                source_files=(),
+                operator_name="moe",
+                target_functions=(),
+            ),
+            1.0,
         )
         is None
     )
@@ -231,13 +235,15 @@ def test_an_unexpected_failure_is_not_swallowed(monkeypatch, tmp_path):
 
     with pytest.raises(KeyboardInterrupt):
         _collect_pr_references(
-            workspace_dir=str(tmp_path),
-            kernel_backend="aiter",
-            git_remote="",
-            source_files=(),
-            operator_name="moe",
-            target_functions=(),
-            budget_sec=1.0,
+            str(tmp_path),
+            PrReferenceQuery(
+                kernel_backend="aiter",
+                git_remote="",
+                source_files=(),
+                operator_name="moe",
+                target_functions=(),
+            ),
+            1.0,
         )
 
 

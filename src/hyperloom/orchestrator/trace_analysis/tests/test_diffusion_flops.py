@@ -103,17 +103,18 @@ def test_ceiling_scales_with_steps_and_precision(tmp_path):
         "patch_size": 2,
     }
     d = _write_denoiser(tmp_path / "m", cfg)
-    e10 = df.analytic_ceiling(d, gpu_type="mi355x", precision="bf16", num_steps=10, cfg_batch=1)
-    e20 = df.analytic_ceiling(d, gpu_type="mi355x", precision="bf16", num_steps=20, cfg_batch=1)
+    e10 = df.analytic_ceiling(d, gpu_type="mi355x", precision="bf16", num_steps=10)
+    e20 = df.analytic_ceiling(d, gpu_type="mi355x", precision="bf16", num_steps=20)
     # doubling steps doubles total flops + ideal_ms
     assert e20["total_flops"] == pytest.approx(2 * e10["total_flops"])
     assert e20["ideal_ms"] == pytest.approx(2 * e10["ideal_ms"])
     # fp8 peak is 2x -> ideal_ms halves
-    e_fp8 = df.analytic_ceiling(d, gpu_type="mi355x", precision="fp8", num_steps=10, cfg_batch=1)
+    e_fp8 = df.analytic_ceiling(d, gpu_type="mi355x", precision="fp8", num_steps=10)
     assert e_fp8["ideal_ms"] == pytest.approx(e10["ideal_ms"] / 2)
     # cfg batch 2 doubles vs 1
-    e_cfg2 = df.analytic_ceiling(d, gpu_type="mi355x", precision="bf16", num_steps=10, cfg_batch=2)
-    assert e_cfg2["total_flops"] == pytest.approx(2 * e10["total_flops"])
+    cfg1 = df.estimate_image_flops(d, num_steps=10, cfg_batch=1)
+    cfg2 = df.estimate_image_flops(d, num_steps=10, cfg_batch=2)
+    assert cfg2["total_flops"] == pytest.approx(2 * cfg1["total_flops"])
 
 
 def test_moe_uses_active_experts(tmp_path):
@@ -169,48 +170,6 @@ def test_sana_linear_attention_cheaper_than_full(tmp_path):
     # Linear attention must be far cheaper than full softmax at the same token count.
     seq, h, hd = 4096, 2240, 32
     assert df._linear_attention_flops(seq, h, hd) < df._full_attention_flops(seq, h) / 10
-
-
-# ---- real model configs (skipped when /primus/models is not mounted) -----
-_MODELS_ROOT = Path("/primus/models")
-_REAL = [
-    "stabilityai-stable-diffusion-xl-base-1.0",
-    "black-forest-labs-FLUX.1-dev",
-    "black-forest-labs-FLUX.1-schnell",
-    "Tongyi-MAI-Z-Image",
-    "Tongyi-MAI-Z-Image-Turbo",
-    "stabilityai-stable-diffusion-3.5-medium",
-    "stabilityai-stable-diffusion-3.5-large",
-    "stabilityai-stable-diffusion-3.5-large-turbo",
-    "stabilityai-stable-diffusion-3-medium-diffusers",
-    "Qwen-Qwen-Image",
-    "Qwen-Qwen-Image-2512",
-    "baidu-ERNIE-Image",
-    "baidu-ERNIE-Image-Turbo",
-    "HiDream-ai-HiDream-I1-Fast",
-    "ideogram-ai-ideogram-4-fp8",
-    "fal-AuraFlow",
-    "NucleusAI-Nucleus-Image",
-    "hunyuanvideo-community-HunyuanImage-2.1-Diffusers",
-    "Warlord-K-Sana-1024",
-    "tencent-SRPO",
-    "stabilityai-stable-diffusion-3-medium",
-]
-
-
-@pytest.mark.parametrize("slug", _REAL)
-def test_real_models_resolve_or_reference(slug):
-    d = _MODELS_ROOT / slug
-    if not d.is_dir():
-        pytest.skip(f"{d} not mounted")
-    g = df.resolve_geometry(d)
-    if g is None:
-        # SRPO / raw sd3-medium ship only single-file weights (no diffusers config).
-        assert slug in ("tencent-SRPO", "stabilityai-stable-diffusion-3-medium")
-        return
-    est = df.analytic_ceiling(d, gpu_type="mi355x", precision="bf16")
-    assert est["total_flops"] > 0
-    assert est["ideal_ms"] > 0
 
 
 # ---- safetensors-header inference fallback -------------------------------

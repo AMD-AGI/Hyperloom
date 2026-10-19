@@ -5,9 +5,8 @@
 
 from __future__ import annotations
 
-import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from kernelforge.loop.knowledge_integration import git_checkout_branch
@@ -15,20 +14,13 @@ from kernelforge.llm.git import ensure_commit_identity
 from kernelforge.loop.campaign_config import (
     CampaignConfig,
     CampaignConfigStore,
+    CampaignInputs,
     create_campaign_config,
     env_backend_override,
     normalize_kernel_backend_name,
     resolve_kernel_backend_override,
     validate_pending_campaign_head,
 )
-from kernelforge.loop.agent_relay import AgentRelayConfig
-
-
-def parse_list(raw: str) -> list[str]:
-    """Split a comma-or-newline-separated string into a stripped list."""
-    if not raw:
-        return []
-    return [p.strip() for p in re.split(r"[,\n]", raw) if p.strip()]
 
 
 @dataclass
@@ -42,27 +34,10 @@ class CampaignResolution:
 
 def resolve_campaign(
     workspace_dir: str,
+    inputs: CampaignInputs,
     *,
     resume: bool,
     prepare_task: bool,
-    kernel: str,
-    driver: str,
-    source_files: str = "",
-    program_md_file: str | None = None,
-    target_functions: str = "",
-    operator_name: str = "",
-    producer: str = "",
-    kernel_backend: str = "",
-    git_branch: str = "",
-    gpu_target: str = "",
-    gpu_type: str | None = None,
-    task_type: str = "",
-    framework: str = "",
-    snr_threshold: float,
-    nproc_per_node: int = 1,
-    bench_repeat: int = 1,
-    commit_new_paths: list[str] | None = None,
-    agent_relay: AgentRelayConfig | None = None,
 ) -> CampaignResolution:
     """Resolve or create the immutable campaign configuration."""
     workspace = Path(workspace_dir).resolve()
@@ -75,8 +50,15 @@ def resolve_campaign(
     if written_identity:
         print(f"  [git] workspace had no commit identity; set {written_identity}")
 
+    kernel, driver, program_md_file, git_branch = (
+        inputs.kernel,
+        inputs.driver,
+        inputs.program_md_file,
+        inputs.git_branch,
+    )
     campaign_inputs_supplied = any(
-        value not in (None, "") for value in (kernel, driver, source_files, program_md_file, operator_name)
+        value not in (None, "")
+        for value in (kernel, driver, inputs.source_files, program_md_file, inputs.operator_name)
     )
     pending_retry = not resume and campaign_store.exists() and not state_path.is_file()
 
@@ -96,7 +78,7 @@ def resolve_campaign(
             save_deferred=False,
         )
 
-    resolved_kernel_backend = (kernel_backend or "").strip()
+    resolved_kernel_backend = (inputs.kernel_backend or "").strip()
     if not resolved_kernel_backend:
         resolved_kernel_backend = env_backend_override()
     if resolved_kernel_backend:
@@ -124,28 +106,14 @@ def resolve_campaign(
         validate_pending_campaign_head(str(workspace), existing_campaign.base_commit)
 
     provisional_campaign = create_campaign_config(
-        # Measurement semantics travel with the campaign: a resumed session must not re-derive them from CLI defaults.
-        nproc_per_node=nproc_per_node,
-        bench_repeat=bench_repeat,
-        # What a KEEP may ship beyond the tracked diff is part of the campaign, not of one session's invocation.
-        commit_new_paths=list(commit_new_paths or []),
-        workspace_dir=str(workspace),
-        kernel=kernel,
-        driver=driver,
-        source_files=parse_list(source_files),
-        program_md_file=program_md_file,
+        str(workspace),
+        replace(
+            inputs,
+            kernel_backend=resolved_kernel_backend,
+            gpu_type=(existing_campaign.gpu_type if existing_campaign is not None else inputs.gpu_type),
+            producer=(existing_campaign.producer if existing_campaign is not None else inputs.producer),
+        ),
         base_commit=(existing_campaign.base_commit if existing_campaign is not None else None),
-        target_functions=(parse_list(target_functions) or None),
-        snr_threshold=snr_threshold,
-        gpu_target=gpu_target,
-        gpu_type=(existing_campaign.gpu_type if existing_campaign is not None else gpu_type),
-        git_branch=git_branch,
-        kernel_backend=resolved_kernel_backend,
-        task_type=task_type,
-        framework=framework,
-        operator_name=operator_name,
-        producer=(existing_campaign.producer if existing_campaign is not None else producer),
-        agent_relay=agent_relay,
     )
 
     if program_md_file:

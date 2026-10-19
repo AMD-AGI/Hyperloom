@@ -177,10 +177,6 @@ class CandidateArchive:
                 return "incomplete", None
         return "complete", meta
 
-    def _complete_meta(self, directory: Path, iteration: int) -> dict | None:
-        status, meta = self._inspect_complete_meta(directory, iteration)
-        return meta if status == "complete" else None
-
     def _quarantine_incomplete(self, directory: Path) -> bool:
         quarantine = self.root / (f".{directory.name}.incomplete-{os.getpid()}-{time.time_ns()}")
         try:

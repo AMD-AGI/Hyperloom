@@ -179,7 +179,7 @@ if [ -z "${GEAK_ROOT:-}" ]; then
   GEAK_ROOT="${_open_source_root}/GEAK@${_GEAK_SHA}"
 fi
 GEAK_E2E_RUNNER="${GEAK_E2E_RUNNER:-${GEAK_ROOT}/interface/run_e2e.py}"
-GEAK_CLAUDE_MODEL_VAL="${GEAK_CLAUDE_MODEL:-${CLAUDE_MODEL:-claude-opus-5}}"
+GEAK_CLAUDE_MODEL_VAL="${GEAK_CLAUDE_MODEL:-${CLAUDE_MODEL:-claude-opus-5-5}}"
 # Run mode for the GEAKv4 Claude Code workflow. ``full`` (default) selects the
 # 2 h / 5-round preset; ``quick`` selects the 1 h / 2-round smoke-test preset.
 # GEAK still honours later CLI ``--mode`` or LLM-parsed task-hint overrides.

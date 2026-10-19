@@ -37,7 +37,8 @@ def _patch(out: Path, name: str, *, speedup: float | None, env_flag: str, source
 def _publisher(out: Path):
     """The run's manifest writer, reduced to the two fields the salvage path reads."""
 
-    def publish(patches, *, artifacts=None, loop=None, **_rest):
+    def publish(outcome):
+        patches, artifacts, loop = outcome.patches, outcome.artifacts, outcome.loop
         manifest = {
             "verdict": "candidate",
             "patches": patches,

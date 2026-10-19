@@ -399,59 +399,7 @@ class Recipe:
         )
 
 
-# Attempt — append-only optimization-attempt record
-@dataclass
-class Attempt:
-    """One append-only evolutionary attempt against a recipe."""
-
-    id: int = 0
-    recipe_canonical_id: str = ""
-    session_id: str = ""
-    attempt_at: str = ""
-    diff: dict[str, Any] = field(default_factory=dict)
-    predicted_delta: dict[str, Any] = field(default_factory=dict)
-    measured_metrics: dict[str, Any] = field(default_factory=dict)
-    fitness: float | None = None
-    outcome: str = ""
-    rationale: str = ""
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialise the attempt to a plain dict."""
-        out: dict[str, Any] = {
-            "id": int(self.id),
-            "recipe_canonical_id": str(self.recipe_canonical_id),
-            "session_id": str(self.session_id),
-            "attempt_at": str(self.attempt_at),
-            "diff": dict(self.diff),
-            "predicted_delta": dict(self.predicted_delta),
-            "measured_metrics": dict(self.measured_metrics),
-            "outcome": str(self.outcome),
-            "rationale": str(self.rationale),
-        }
-        if self.fitness is not None:
-            out["fitness"] = float(self.fitness)
-        return out
-
-    @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> Attempt:
-        """Build an attempt from a dict."""
-        fitness = d.get("fitness")
-        return cls(
-            id=int(d.get("id") or 0),
-            recipe_canonical_id=str(d.get("recipe_canonical_id") or ""),
-            session_id=str(d.get("session_id") or ""),
-            attempt_at=str(d.get("attempt_at") or ""),
-            diff=dict(d.get("diff") or {}),
-            predicted_delta=dict(d.get("predicted_delta") or {}),
-            measured_metrics=dict(d.get("measured_metrics") or {}),
-            fitness=float(fitness) if fitness is not None else None,
-            outcome=str(d.get("outcome") or ""),
-            rationale=str(d.get("rationale") or ""),
-        )
-
-
 __all__ = [
-    "Attempt",
     "Gap",
     "KernelOptimization",
     "Lesson",

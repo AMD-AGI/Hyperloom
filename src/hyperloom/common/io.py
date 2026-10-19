@@ -10,6 +10,7 @@ import os
 import shutil
 import tempfile
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -33,40 +34,63 @@ def _best_effort_fsync_dir(directory: Path) -> None:
             os.close(fd)
 
 
-def atomic_write_bytes(
-    path: Path,
-    data: bytes,
-    *,
-    make_parents: bool = False,
-    fsync: bool = False,
-    fsync_dir: bool = False,
-    mode: int | None = None,
-    preserve_mode: bool = False,
-) -> None:
-    """Atomically write ``data`` to ``path`` (temp file in same dir + ``os.replace``).
+@dataclass(frozen=True)
+class WriteOptions:
+    """How an atomic replace treats parent directories, durability and permission bits.
 
     A new file is owner-only (``0o600``). ``mode`` is applied with group/other bits
-    stripped; ``preserve_mode`` instead keeps an existing ``path``'s permission bits
-    and is ignored when ``mode`` is given.
+    stripped; ``preserve_mode`` instead keeps an existing file's permission bits and
+    is ignored when ``mode`` is given.
     """
+
+    make_parents: bool = False
+    fsync: bool = False
+    fsync_dir: bool = False
+    mode: int | None = None
+    preserve_mode: bool = False
+
+
+@dataclass(frozen=True)
+class JsonFormat:
+    """How :func:`atomic_write_json` serializes a document."""
+
+    indent: int | None = 2
+    sort_keys: bool = True
+    ensure_ascii: bool = True
+    trailing_newline: bool = False
+
+
+@dataclass(frozen=True)
+class JsonLineFormat:
+    """How :func:`append_jsonl` serializes one row onto its line."""
+
+    ensure_ascii: bool = True
+    sort_keys: bool = False
+
+
+_JSON_WRITE = WriteOptions(make_parents=True)
+
+
+def atomic_write_bytes(path: Path, data: bytes, *, options: WriteOptions = WriteOptions()) -> None:
+    """Atomically write ``data`` to ``path`` (temp file in same dir + ``os.replace``)."""
     path = Path(path)
-    if make_parents:
+    if options.make_parents:
         path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_str = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
     tmp = Path(tmp_str)
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)
-            if fsync:
+            if options.fsync:
                 _best_effort_fsync(fh)
-        if mode is not None:
+        if options.mode is not None:
             # Strip group/other bits: written files may hold sensitive payloads, so never expose them beyond the owner
             # regardless of caller intent.
-            os.chmod(tmp, mode & 0o700)
-        elif preserve_mode and path.is_file():
+            os.chmod(tmp, options.mode & 0o700)
+        elif options.preserve_mode and path.is_file():
             shutil.copymode(path, tmp)
         os.replace(tmp, path)
-        if fsync_dir:
+        if options.fsync_dir:
             _best_effort_fsync_dir(path.parent)
     except Exception:
         with suppress(OSError):
@@ -74,54 +98,23 @@ def atomic_write_bytes(
         raise
 
 
-def atomic_write_text(
-    path: Path,
-    text: str,
-    *,
-    encoding: str = "utf-8",
-    make_parents: bool = False,
-    fsync: bool = False,
-    fsync_dir: bool = False,
-    mode: int | None = None,
-    preserve_mode: bool = False,
-) -> None:
-    """Atomically write ``text`` to ``path``; see :func:`atomic_write_bytes`."""
-    atomic_write_bytes(
-        path,
-        text.encode(encoding),
-        make_parents=make_parents,
-        fsync=fsync,
-        fsync_dir=fsync_dir,
-        mode=mode,
-        preserve_mode=preserve_mode,
-    )
+def atomic_write_text(path: Path, text: str, *, options: WriteOptions = WriteOptions()) -> None:
+    """Atomically write ``text`` to ``path`` as UTF-8; see :func:`atomic_write_bytes`."""
+    atomic_write_bytes(path, text.encode("utf-8"), options=options)
 
 
 def atomic_write_json(
     path: Path,
     data: Any,
     *,
-    indent: int | None = 2,
-    sort_keys: bool = True,
-    ensure_ascii: bool = True,
-    trailing_newline: bool = False,
-    make_parents: bool = True,
-    fsync: bool = False,
-    fsync_dir: bool = False,
-    mode: int | None = None,
+    fmt: JsonFormat = JsonFormat(),
+    options: WriteOptions = _JSON_WRITE,
 ) -> None:
-    """Atomically write ``data`` as JSON to ``path``."""
-    text = _json.dumps(data, indent=indent, sort_keys=sort_keys, ensure_ascii=ensure_ascii)
-    if trailing_newline:
+    """Atomically write ``data`` as JSON to ``path``; parent directories are created by default."""
+    text = _json.dumps(data, indent=fmt.indent, sort_keys=fmt.sort_keys, ensure_ascii=fmt.ensure_ascii)
+    if fmt.trailing_newline:
         text += "\n"
-    atomic_write_text(
-        path,
-        text,
-        make_parents=make_parents,
-        fsync=fsync,
-        fsync_dir=fsync_dir,
-        mode=mode,
-    )
+    atomic_write_text(path, text, options=options)
 
 
 def append_jsonl(
@@ -130,14 +123,13 @@ def append_jsonl(
     *,
     make_parents: bool = False,
     fsync: bool = False,
-    ensure_ascii: bool = True,
-    sort_keys: bool = False,
+    fmt: JsonLineFormat = JsonLineFormat(),
 ) -> None:
     """Append one JSON object as a line to a JSONL file."""
     path = Path(path)
     if make_parents:
         path.parent.mkdir(parents=True, exist_ok=True)
-    line = _json.dumps(row, ensure_ascii=ensure_ascii, sort_keys=sort_keys)
+    line = _json.dumps(row, ensure_ascii=fmt.ensure_ascii, sort_keys=fmt.sort_keys)
     with path.open("a", encoding="utf-8") as fh:
         fh.write(line + "\n")
         if fsync:
@@ -153,6 +145,9 @@ def safe_mtime(path: Path) -> float:
 
 
 __all__ = [
+    "JsonFormat",
+    "JsonLineFormat",
+    "WriteOptions",
     "atomic_write_bytes",
     "atomic_write_text",
     "atomic_write_json",

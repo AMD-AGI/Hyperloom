@@ -412,7 +412,7 @@ def test_kernel_over_the_device_register_budget() -> None:
 
 
 def test_a_hip_launch_resource_error_is_the_kernel_budget_not_a_missing_kernel() -> None:
-    """Rules are evaluated in list order, which FAILURE_KINDS does not govern.
+    """Rules are evaluated in list order.
 
     The HIP rule matches any ``hipError`` token, and this diagnostic carries one
     alongside the resource wording -- so ordering it after that rule would have

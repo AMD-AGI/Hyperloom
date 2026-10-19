@@ -55,7 +55,8 @@ Core comparability fields:
 - Launch script and environment variables.
 - TP, PP, DP, node count, and topology.
 - Concurrency, batch size, ISL, OSL, dataset, warmup, sample count, and duration.
-- Baseline and final `tok/s/GPU` absolute values.
+- Baseline and final throughput absolute values (`tok/s`: the whole server's
+  output throughput, summed over every GPU serving the model, not per GPU).
 - Timing of restart, rebuild, install, and cache clear steps.
 
 If one of these fields is missing but the packet still proves comparability by

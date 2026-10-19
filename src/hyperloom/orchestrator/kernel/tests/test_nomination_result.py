@@ -136,27 +136,23 @@ def test_explicit_empty_patches_array_is_a_clean_empty_outcome() -> None:
     assert outcome.patches == ()
     assert outcome.dropped == ()
     assert outcome.schema_error == ""
-    assert outcome.is_clean_empty is True
 
 
 @pytest.mark.parametrize("payload", [None, [], "text", 7])
 def test_non_mapping_envelope_is_not_a_clean_empty_outcome(payload: Any) -> None:
     outcome = nres.parse_outcome(payload)
     assert outcome.is_empty is True
-    assert outcome.is_clean_empty is False
     assert "not an object" in outcome.schema_error
 
 
 def test_missing_patches_key_is_not_a_clean_empty_outcome() -> None:
     outcome = nres.parse_outcome({"baseline_ms": 12.0})
-    assert outcome.is_clean_empty is False
     assert outcome.schema_error == "result envelope carries no patches array"
 
 
 @pytest.mark.parametrize("entries", [{}, "none", 0, 3.5])
 def test_non_list_patches_is_not_a_clean_empty_outcome(entries: Any) -> None:
     outcome = nres.parse_outcome({"patches": entries})
-    assert outcome.is_clean_empty is False
     assert "not an array" in outcome.schema_error
 
 
@@ -164,7 +160,6 @@ def test_offering_patches_of_which_none_survive_is_not_a_clean_empty_outcome() -
     outcome = nres.parse_outcome(_envelope([{"nonsense": 1}, "not-an-object"]))
     assert outcome.patches == ()
     assert len(outcome.dropped) == 2
-    assert outcome.is_clean_empty is False
     assert outcome.schema_error == "every one of the 2 offered patch entries was refused"
 
 

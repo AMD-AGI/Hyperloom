@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from dataclasses import dataclass, field
 from typing import Any
 
 #: Manifest schema version. Bump on any breaking change to row/field semantics.
@@ -147,15 +148,17 @@ def _dtype_tokens(dtypes: Any) -> tuple[str, str]:
     return (toks[0], toks[-1])
 
 
-def build_row(
-    launch: dict[str, Any],
-    *,
-    graph_variant: str,
-    node_ordinal: int,
-    phase: str,
-    bucket: str,
-    capture_only: bool,
-) -> dict[str, Any]:
+@dataclass(frozen=True)
+class GraphVariant:
+    """The variant labels every row built from one trace carries."""
+
+    name: str
+    phase: str
+    bucket: str
+    capture_only: bool
+
+
+def build_row(launch: dict[str, Any], variant: GraphVariant, *, node_ordinal: int) -> dict[str, Any]:
     """Build one manifest row from an enriched ``kernel_launches`` record."""
     name = launch.get("name", "") or ""
     op_name = launch.get("op_name", "") or ""
@@ -167,7 +170,7 @@ def build_row(
     is_target = is_gemm and _tuner_addressable(dtypes)
     dur = float(launch.get("dur", 0.0) or 0.0)
     row: dict[str, Any] = {
-        "graph_variant": graph_variant,
+        "graph_variant": variant.name,
         "node_ordinal": node_ordinal,
         "op": op,
         "backend": launch.get("kernel_backend", "") or "",
@@ -180,15 +183,15 @@ def build_row(
         "block_size": launch.get("block_size"),
         "scale_layout": launch.get("scale_layout"),
         "epilogue": launch.get("epilogue"),
-        "phase": phase,
-        "bucket": bucket,
+        "phase": variant.phase,
+        "bucket": variant.bucket,
         # measurement
         "replay_count": 1,
         "cum_gpu_us": round(dur, 3),
         "mean_gpu_us": round(dur, 3),
         "is_gemm": is_gemm,
         "is_target_gemm": is_target,
-        "capture_only": capture_only,
+        "capture_only": variant.capture_only,
         # provenance / source
         "kernel_symbol": name,
         "source": {
@@ -204,14 +207,7 @@ def build_row(
     return row
 
 
-def build_variant_rows(
-    *,
-    graph_variant: str,
-    analysis: dict[str, Any],
-    phase: str,
-    bucket: str,
-    capture_only: bool,
-) -> list[dict[str, Any]]:
+def build_variant_rows(variant: GraphVariant, analysis: dict[str, Any]) -> list[dict[str, Any]]:
     """Build variant-discriminating rows from one trace ``analyze_trace`` result."""
     launches = sorted(
         (analysis.get("kernel_launches") or []),
@@ -219,14 +215,7 @@ def build_variant_rows(
     )
     by_sig: dict[str, dict[str, Any]] = {}
     for ordinal, launch in enumerate(launches):
-        row = build_row(
-            launch,
-            graph_variant=graph_variant,
-            node_ordinal=ordinal,
-            phase=phase,
-            bucket=bucket,
-            capture_only=capture_only,
-        )
+        row = build_row(launch, variant, node_ordinal=ordinal)
         key = row["signature_key"]
         existing = by_sig.get(key)
         if existing is None:
@@ -247,11 +236,9 @@ def count_graph_replays(main_analysis: dict[str, Any]) -> int:
     return total
 
 
-def _phase_and_bucket(graph_variant: str, phase_hint: str) -> tuple[str, str]:
-    """Derive (phase, bucket) labels for a variant."""
-    bucket = graph_variant
-    phase = phase_hint or "mixed"
-    return phase, bucket
+def _graph_variant(name: str, phase_hint: str, *, capture_only: bool) -> GraphVariant:
+    """Derive the phase and bucket labels for a variant."""
+    return GraphVariant(name=name, phase=phase_hint or "mixed", bucket=name, capture_only=capture_only)
 
 
 def _totals(rows: list[dict[str, Any]]) -> dict[str, float]:
@@ -272,58 +259,57 @@ def _manifest_hash(rows: list[dict[str, Any]]) -> str:
     return hashlib.sha256(json.dumps(keys, sort_keys=True).encode("utf-8")).hexdigest()
 
 
+@dataclass(frozen=True)
+class CaptureShard:
+    """One graph-capture trace: its variant label, ``analyze_trace`` result, file hash and variant metadata."""
+
+    label: str
+    analysis: dict[str, Any]
+    trace_hash: str = ""
+    meta: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ManifestOrigin:
+    """The caller-supplied ``generated_from`` stamps: the main trace's file hash and the generation time."""
+
+    main_trace_hash: str
+    generated_at: str = ""
+
+
 def build_shape_manifest(
-    *,
     main_analysis: dict[str, Any],
-    capture_variants: list[tuple[str, dict[str, Any]]] | None,
+    captures: list[CaptureShard] | None,
+    origin: ManifestOrigin,
+    *,
     provenance: dict[str, Any] | None,
-    main_trace_hash: str,
-    capture_trace_hashes: dict[str, str] | None = None,
-    variant_meta: dict[str, dict[str, Any]] | None = None,
-    tracelens_revision: str | None = None,
-    analysis_route: str = "bypass",
-    generated_at: str = "",
     phase_hint: str = "mixed",
 ) -> dict[str, Any]:
     """Assemble the ``TraceShapeManifest`` (frozen schema v1)."""
     warnings: list[str] = []
     rows: list[dict[str, Any]] = []
     variant_steady_replay: dict[str, Any] = {}
+    capture_trace_hashes: dict[str, str] = {}
+    variant_meta: dict[str, dict[str, Any]] = {}
 
     total_graph_replays = count_graph_replays(main_analysis)
 
-    if capture_variants:
-        for variant_label, analysis in capture_variants:
-            phase, bucket = _phase_and_bucket(variant_label, phase_hint)
-            rows.extend(
-                build_variant_rows(
-                    graph_variant=variant_label,
-                    analysis=analysis,
-                    phase=phase,
-                    bucket=bucket,
-                    capture_only=True,
-                )
-            )
+    if captures:
+        for shard in captures:
+            rows.extend(build_variant_rows(_graph_variant(shard.label, phase_hint, capture_only=True), shard.analysis))
+            capture_trace_hashes[shard.label] = shard.trace_hash
+            variant_meta[shard.label] = shard.meta
         # Steady replay attribution: only unambiguous when a single variant exists.
-        if len(capture_variants) == 1:
-            variant_steady_replay[capture_variants[0][0]] = total_graph_replays or None
+        if len(captures) == 1:
+            variant_steady_replay[captures[0].label] = total_graph_replays or None
         else:
-            for variant_label, _ in capture_variants:
-                variant_steady_replay[variant_label] = None
+            for shard in captures:
+                variant_steady_replay[shard.label] = None
             warnings.append("multi_variant_replay_unresolved")
     else:
         # Eager fallback: the steady window already is one representative iteration, so per-node cum_gpu_us is real
         # steady time (capture_only False) and no replay multiplier is needed.
-        phase, bucket = _phase_and_bucket(EAGER_VARIANT, phase_hint)
-        rows.extend(
-            build_variant_rows(
-                graph_variant=EAGER_VARIANT,
-                analysis=main_analysis,
-                phase=phase,
-                bucket=bucket,
-                capture_only=False,
-            )
-        )
+        rows.extend(build_variant_rows(_graph_variant(EAGER_VARIANT, phase_hint, capture_only=False), main_analysis))
         variant_steady_replay[EAGER_VARIANT] = 1
 
     totals = _totals(rows)
@@ -331,20 +317,20 @@ def build_shape_manifest(
         **totals,
         "variant_steady_replay": variant_steady_replay,
         "total_graph_replays": total_graph_replays,
-        "variant_meta": variant_meta or {},
+        "variant_meta": variant_meta,
     }
 
     manifest: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "manifest_kind": MANIFEST_KIND,
         "generated_from": {
-            "tracelens_revision": tracelens_revision,
-            "main_trace_hash": main_trace_hash,
-            "capture_trace_hashes": capture_trace_hashes or {},
-            "analysis_route": analysis_route,
+            "tracelens_revision": None,
+            "main_trace_hash": origin.main_trace_hash,
+            "capture_trace_hashes": capture_trace_hashes,
+            "analysis_route": "bypass",
             "steady_window": main_analysis.get("steady_window"),
             "aggregation_scope": main_analysis.get("aggregation_scope", ""),
-            "generated_at": generated_at,
+            "generated_at": origin.generated_at,
         },
         "provenance": provenance or {},
         "workload": workload,

@@ -390,19 +390,23 @@ class TestTheAgentXValidityGate:
         assert out["accuracy"] == 1.0
 
 
-@pytest.mark.parametrize("errors,summary,expected", [(None, [], 1.0), (25, None, 0.0), (None, None, 0.0)])
-def test_mapped_profiling_result_reaches_agentx_gate(tmp_path, errors, summary, expected):
-    from hyperloom.inference_optimizer.agentx.mapping import map_aiperf
-
-    export = {"request_count": {"avg": 75}, "error_summary": summary}
-    if errors is not None:
-        export["error_request_count"] = {"avg": errors}
-    mapped = map_aiperf(export)
-    (tmp_path / "inferencex_result.json").write_text(json.dumps(mapped), encoding="utf-8")
+@pytest.mark.parametrize("rate,expected", [(0.0, 1.0), (0.25, 0.0)])
+def test_public_agentx_report_reaches_correctness_gate(tmp_path, rate, expected):
+    report = {
+        "scenario": "agentx",
+        "success": True,
+        "benchmark_valid": True,
+        "publishable": True,
+        "agentx_metrics": {
+            "execution_owner": "magpie",
+            "server_launch": {"owner": "magpie"},
+            "requests": {"error_rate": rate},
+        },
+    }
+    (tmp_path / "benchmark_report.json").write_text(json.dumps(report))
     result = ag.parse_eval_results(tmp_path, framework="vllm", benchmark_mode="agentx")
     assert result["accuracy"] == expected
-    assert result["task"] == "agentx_error_rate"
-    assert result["error_rate"] == mapped["request_error_rate"]
+    assert result["error_rate"] == rate * 100
 
 
 class TestParseAgentXErrorRate:
@@ -417,15 +421,9 @@ class TestParseAgentXErrorRate:
         (tmp_path / "inferencex_result.json").write_text(json.dumps({"request_error_rate": "n/a"}), encoding="utf-8")
         assert ag.parse_agentx_error_rate(tmp_path) is None
 
-    def test_a_mapped_result_missing_the_metric_reports_none(self, tmp_path):
-        """aiperf omits the metric when nothing completed. Coalescing that to
-        0.0 would report a perfect error rate for a run that measured nothing,
-        which is the fail-closed path this gate depends on."""
-        from hyperloom.inference_optimizer.agentx.mapping import map_aiperf
-
-        mapped = map_aiperf({"output_token_throughput": {"avg": 300.0}})
-        assert mapped["request_error_rate"] is None
-        (tmp_path / "inferencex_result.json").write_text(json.dumps(mapped), encoding="utf-8")
+    def test_an_invalid_public_report_cannot_be_salvaged(self, tmp_path):
+        (tmp_path / "benchmark_report.json").write_text(json.dumps({"scenario": "agentx", "benchmark_valid": False}))
+        (tmp_path / "inferencex_result.json").write_text(json.dumps({"request_error_rate": 0.0}))
         assert ag.parse_agentx_error_rate(tmp_path) is None
 
     def test_an_unreadable_result_reports_none_and_warns(self, tmp_path, caplog):

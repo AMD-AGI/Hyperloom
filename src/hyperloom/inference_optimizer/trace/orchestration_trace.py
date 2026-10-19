@@ -9,7 +9,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.io import atomic_write_json
+from hyperloom.common.io import JsonFormat, WriteOptions, atomic_write_json
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import (
     agent_mcp_setup_path,
@@ -42,9 +42,8 @@ def write_mcp_setup_once(*, session_dir: Path, setup: dict[str, Any]) -> None:
         atomic_write_json(
             path,
             {"ts": now_iso(), "schema_version": 1, **_safe_value(setup)},
-            ensure_ascii=False,
-            trailing_newline=True,
-            mode=0o600,
+            fmt=JsonFormat(ensure_ascii=False, trailing_newline=True),
+            options=WriteOptions(make_parents=True, mode=0o600),
         )
     except OSError as exc:
         log.warning("orchestration_trace: MCP setup write failed for %s: %r", session_dir.name, exc)

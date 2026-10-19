@@ -59,3 +59,15 @@ class IntegrateAttempt:
         if self.provision_result is None:
             return ""
         return self.provision_result.runtime.source_root
+
+    def benchmark_params(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Bind the measured launch to this attempt's acquired runtime and applied source."""
+        result = {
+            **params,
+            "source_patches": [
+                {"framework_root": str(self.framework_root), "patch_file": str(path)} for path in self.applied
+            ],
+        }
+        if self.provision_result is not None and self.provision_result.ok:
+            result["runtime_override"] = self.provision_result.runtime.to_runtime_override()
+        return result

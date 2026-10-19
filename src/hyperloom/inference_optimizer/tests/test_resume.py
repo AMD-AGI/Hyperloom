@@ -782,7 +782,7 @@ class TestASweepCancelledByRecoverIsRedispatchedOnResume:
             first.shared_state.phase = "SWEEP"
             first.shared_state.baseline_tput = 800.0
             await first.phase_sweep.on_enter_sweep(
-                Transition(from_phase="KERNEL_AGENT", to_phase="SWEEP", reason="test", evidence={}, loopback=False)
+                Transition(from_phase="KERNEL_AGENT", to_phase="SWEEP", reason="test", evidence={})
             )
             [sweep] = await first.tasks.queued()
             assert sweep.kind == "conc_sweep"

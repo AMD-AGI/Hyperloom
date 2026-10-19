@@ -550,29 +550,6 @@ def cleanup_owned_aiter_cache(isolation: AiterCacheIsolation) -> dict[str, Any]:
     return stats
 
 
-def cleanup_current_aiter_cache() -> dict[str, Any] | None:
-    """Delete the current Forge attempt's private AITER cache, if configured."""
-    cache_root_raw = os.environ.get("FORGE_AITER_CACHE_ROOT", "").strip()
-    owner_pid_raw = os.environ.get("FORGE_AITER_CACHE_OWNER_PID", "").strip()
-    try:
-        owner_pid = int(owner_pid_raw)
-    except ValueError:
-        return None
-    if owner_pid != os.getpid() or not cache_root_raw:
-        return None
-    cache_root = Path(cache_root_raw).resolve()
-    return cleanup_owned_aiter_cache(
-        AiterCacheIsolation(
-            cache_root=cache_root,
-            aiter_root_dir=cache_root / "cpp_itfs",
-            aiter_jit_dir=cache_root / "jit",
-            flydsl_cache_dir=cache_root / "flydsl_cache",
-            owner_file=cache_root / _OWNER_FILE,
-            owner_pid=owner_pid,
-        )
-    )
-
-
 def cleanup_current_owned_aiter_locks() -> dict[str, Any] | None:
     """Clean the current Forge cache after a child timeout, if configured."""
     owner_pid_raw = os.environ.get("FORGE_AITER_CACHE_OWNER_PID", "").strip()
@@ -605,7 +582,6 @@ __all__ = [
     "DEFAULT_AITER_CACHE_MAX_BYTES",
     "DEFAULT_AITER_CACHE_TARGET_BYTES",
     "child_cache_environment",
-    "cleanup_current_aiter_cache",
     "cleanup_current_owned_aiter_locks",
     "cleanup_owned_aiter_cache",
     "cleanup_owned_aiter_locks",

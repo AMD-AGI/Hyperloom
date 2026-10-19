@@ -1711,6 +1711,7 @@ async def test_materialize_filter_drops_rejected_variants(tmp_path: Path):
         variants=["v_a", "v_b", "v_c", "v_d"],
     )
 
+    @dataclass
     class _MoreState(_BareSharedState):
         baseline_config_path: str = ""
         baseline_tput: float = 1000.0
@@ -1749,6 +1750,7 @@ async def test_materialize_filter_skips_when_no_variant_survives(tmp_path: Path)
     coord.tasks = _StubTaskRegistry()
     pending = _seed_explore_proposal(coord, variants=["v_a", "v_b"])
 
+    @dataclass
     class _MoreState(_BareSharedState):
         baseline_config_path: str = ""
         baseline_tput: float = 1000.0
@@ -1850,6 +1852,12 @@ async def test_delegate_explore_with_grid_creates_task_directly(tmp_path: Path):
     create_calls: list[dict[str, Any]] = []
 
     class _TaskRegistry:
+        async def queued(self) -> list:
+            return []
+
+        async def running(self) -> list:
+            return []
+
         async def create_or_return_existing(self, **kwargs: Any):
             create_calls.append(dict(kwargs))
             from hyperloom.orchestrator.state.task_registry import Task
@@ -1898,6 +1906,12 @@ async def test_delegate_explore_seeds_the_stack_with_the_anchor(tmp_path: Path):
     created: list[dict[str, Any]] = []
 
     class _TaskRegistry:
+        async def queued(self) -> list:
+            return []
+
+        async def running(self) -> list:
+            return []
+
         async def create_or_return_existing(self, **kwargs: Any):
             created.append(dict(kwargs["params"]))
             from hyperloom.orchestrator.state.task_registry import Task

@@ -62,6 +62,8 @@ def _framework_event(outcome: str = "KEEP") -> dict[str, Any]:
                     "round_id": "r1",
                     "variant_name": "vllm_kv_fp8",
                     "outcome": outcome,
+                    "benched": True,
+                    "adopted": outcome == "KEEP",
                     "measurement": {"after_tput": 2447.5, "gain_pct": 10.99},
                 }
             ]
@@ -159,20 +161,6 @@ def _fixture_breakdown(**overrides: Any) -> dict[str, Any]:
                 },
             ]
         },
-        "robustness": {
-            "turns": [
-                {
-                    "turn_idx": 0,
-                    "outcome": "intents",
-                    "tick_index": 1,
-                    "intents": [
-                        {"type": "send_message", "topic": "heartbeat", "payload": {"body_md": "ok (robustness)"}}
-                    ],
-                    "parse_warnings": [],
-                },
-                {"turn_idx": 1, "outcome": "no_envelope", "tick_index": 4, "intents": [], "parse_warnings": ["empty"]},
-            ]
-        },
         "telemetry": {
             "gpu_monitor_aggregate": {
                 "samples": 52,
@@ -210,7 +198,6 @@ def test_all_renderers_register_in_stable_order() -> None:
         "attribution",
         "optimizations",
         "critic",
-        "robustness",
     ]
     assert [sid for sid, _ in REGISTRY] == expected
 
@@ -373,7 +360,7 @@ def test_llm_path_inserts_narratives_for_non_skipped_sections() -> None:
 def test_llm_broken_json_falls_back_to_deterministic_exec_summary() -> None:
     r = render_session_report(_fixture_breakdown(), llm_client=_BrokenLLM())
     assert "## Executive Summary" in r.markdown
-    assert "baseline 2205.00 tok/s/GPU → final" in r.markdown
+    assert "baseline 2205.00 tok/s → final" in r.markdown
 
 
 def test_llm_exception_does_not_crash_compose() -> None:
@@ -387,6 +374,52 @@ def test_kernel_lifecycle_funnel_propagates_to_global_facts() -> None:
     f = r.global_facts.kernel_pipeline_funnel
     assert f["detected"] == 50 and f["recommended"] == 10
     assert f["optimized"] == 0 and f["adopted"] == 0
+
+
+def test_variant_funnel_reaches_the_key_facts_and_the_summary() -> None:
+    """A breakdown exported before ``outcome.variants`` existed is counted off its timeline."""
+    md = render_session_report(_fixture_breakdown()).markdown
+
+    line = "1 bench run over 1 distinct change → kept 1 (100.0%) · reverted 0 · failed 0 → validated +10.99%"
+    assert f"- **Variants**: {line}\n" in md
+    assert f"- Variants: {line}.\n" in md
+
+
+def test_variant_funnel_reads_the_exported_block() -> None:
+    bd = _fixture_breakdown()
+    bd["outcome"]["variants"] = {
+        "bench_runs": 12,
+        "distinct": 7,
+        "kept": 2,
+        "reverted": 10,
+        "failed": 0,
+        "keep_rate_pct": 16.67,
+    }
+    bd["outcome"]["validation"]["adoption_count"] = 2
+
+    r = render_session_report(bd)
+
+    assert (
+        "- **Variants**: 12 bench runs over 7 distinct changes → kept 2 (16.7%) · reverted 10 · failed 0"
+        " → final stack 2 changes, validated +10.99%\n"
+    ) in r.markdown
+    assert json.loads(r.llm_user_prompt)["global_facts"]["variant_funnel"]["bench_runs"] == 12
+
+
+def test_a_session_that_benched_nothing_says_so() -> None:
+    bd = _fixture_breakdown()
+    bd["timeline"] = [_baseline_event(), _kernel_event()]
+
+    assert "- **Variants**: none benched\n" in render_session_report(bd).markdown
+
+
+def test_a_drifted_variants_block_still_renders() -> None:
+    bd = _fixture_breakdown()
+    bd["outcome"]["variants"] = {"bench_runs": "3", "kept": "x", "keep_rate_pct": "n/a"}
+
+    funnel = render_session_report(bd).global_facts.variant_funnel
+
+    assert (funnel["bench_runs"], funnel["kept"], funnel["keep_rate_pct"]) == (3, 0, None)
 
 
 @pytest.mark.parametrize(

@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 
 from hyperloom.inference_optimizer import roofline_snapshot as rs
+from hyperloom.inference_optimizer.roofline_ceiling import RooflineBreakdown
 
 
 _EXEC_MD = """\
@@ -151,21 +152,22 @@ def test_extract_top_kernel_unnamed_returns_none(tmp_path):
     assert rs.extract_top_kernel(md) is None
 
 
-# ---- _compute_within_and_gap ----
+# ---- within_roofline_pct / _clamp_within ----
 
 
-def test_compute_within_and_gap():
-    assert rs._compute_within_and_gap(peak=0, achieved=10) == (None, None)
-    within, gap = rs._compute_within_and_gap(peak=100, achieved=80)
-    assert within == 80.0
-    assert gap == 20.0
+def test_within_roofline_pct():
+    assert rs.within_roofline_pct(peak=0, achieved=10) is None
+    assert rs.within_roofline_pct(peak=100, achieved=80) == 80.0
 
 
-def test_compute_within_and_gap_clamps_overshoot():
+def test_clamp_within_splits_ratio_and_gap():
+    assert rs._clamp_within(None) == (None, None)
+    assert rs._clamp_within(80.0) == (80.0, 20.0)
+
+
+def test_clamp_within_caps_overshoot():
     """Beating the modelled ceiling caps ``within`` instead of reporting a negative gap."""
-    within, gap = rs._compute_within_and_gap(peak=100, achieved=120)
-    assert within == 100.0
-    assert gap == 0.0
+    assert rs._clamp_within(rs.within_roofline_pct(peak=100, achieved=120)) == (100.0, 0.0)
 
 
 def test_build_roofline_snapshot_reports_ceiling_overshoot():
@@ -173,8 +175,12 @@ def test_build_roofline_snapshot_reports_ceiling_overshoot():
         snapshot_id=1,
         ts="t0",
         analysis_md_path="",
-        theoretical_peak_tok_per_sec=100.0,
-        achieved_tok_per_sec=130.0,
+        reading=rs.RooflineReading(
+            ceiling=RooflineBreakdown(
+                mem_tok_per_sec=0.0, cmp_tok_per_sec=0.0, peak_tok_per_sec=100.0, bound_kind="unknown"
+            ),
+            achieved_tok_per_sec=130.0,
+        ),
     )
     assert snap["within_roofline_pct"] == 100.0
     assert snap["gap_to_roofline_pct"] == 0.0
@@ -213,8 +219,12 @@ def test_build_roofline_snapshot_no_analysis():
         snapshot_id=1,
         ts="t0",
         analysis_md_path="",
-        theoretical_peak_tok_per_sec=100.0,
-        achieved_tok_per_sec=80.0,
+        reading=rs.RooflineReading(
+            ceiling=RooflineBreakdown(
+                mem_tok_per_sec=0.0, cmp_tok_per_sec=0.0, peak_tok_per_sec=100.0, bound_kind="unknown"
+            ),
+            achieved_tok_per_sec=80.0,
+        ),
     )
     assert snap["within_roofline_pct"] == 80.0
     assert snap["theoretical_peak_tok_per_sec"] == 100.0
@@ -227,10 +237,13 @@ def test_build_roofline_snapshot_diffusion_unit():
         snapshot_id=1,
         ts="t0",
         analysis_md_path="",
-        theoretical_peak_tok_per_sec=31.5,
-        achieved_tok_per_sec=0.156,
-        bound_kind="memory",
-        throughput_unit="img/s",
+        reading=rs.RooflineReading(
+            ceiling=RooflineBreakdown(
+                mem_tok_per_sec=0.0, cmp_tok_per_sec=0.0, peak_tok_per_sec=31.5, bound_kind="memory"
+            ),
+            achieved_tok_per_sec=0.156,
+            throughput_unit="img/s",
+        ),
     )
     assert snap["throughput_unit"] == "img/s"
     assert snap["roofline_bound_kind"] == "memory"
@@ -238,7 +251,15 @@ def test_build_roofline_snapshot_diffusion_unit():
 
 def test_build_roofline_snapshot_empty_unit_defaults_tok_s():
     snap = rs.build_roofline_snapshot(
-        snapshot_id=1, ts="t0", analysis_md_path="", theoretical_peak_tok_per_sec=10.0, throughput_unit=""
+        snapshot_id=1,
+        ts="t0",
+        analysis_md_path="",
+        reading=rs.RooflineReading(
+            ceiling=RooflineBreakdown(
+                mem_tok_per_sec=0.0, cmp_tok_per_sec=0.0, peak_tok_per_sec=10.0, bound_kind="unknown"
+            ),
+            throughput_unit="",
+        ),
     )
     assert snap["throughput_unit"] == "tok/s"
 

@@ -12,6 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any
 
+from kernelforge.cli.lanes import LaneBinding
 from kernelforge.config import Config, resolve_agent_model
 from kernelforge.llm.gateway import (
     anthropic_environment_from_openai,
@@ -27,37 +28,23 @@ from kernelforge.loop.agent_relay import (
     select_start_profile,
 )
 from kernelforge.loop.search_actors import SearchActorBundle, SearchActorPool
+from kernelforge.orchestrator.agent import ImplementerSetup
 
 
 @dataclass
 class SearchActorBuildContext:
-    """Shared campaign inputs used to construct one strict search actor."""
+    """Shared campaign inputs used to construct one strict search actor per Agent profile."""
 
     config: Config
-    program_md: str
-    pr_task_context: str
-    pr_kb_repo: str
-    kernel_backend: str
-    driver: str
-    snr_threshold: float
-    max_blocks: int
-    session_timeout_sec: int
-    validation_timeout_sec: int
-    bench_timeout_sec: int
-    bench_repeat: int
-    permission_mode: str | None
-    task_type: str
-    source_files: list[str]
-    target_functions: list[str]
-    profiling_enabled: bool
-    commit_new_paths: list[str]
-    usage: Any
+    setup: ImplementerSetup
+    lane_binding: LaneBinding
     lanes: int
-    workspace_dir: str
+    program_md: str
     specialist_definitions: dict
     critic_enabled: bool
     relay_enabled: bool
     primary_provider: str
+    usage: Any = None
     supervisor_backend: str = ""
 
     def build(self, profile: AgentProfile) -> SearchActorBundle:
@@ -75,38 +62,16 @@ class SearchActorBuildContext:
             if self.relay_enabled
             else self.config
         )
-        actor_fn = make_agent_fn(
-            config=actor_config,
-            program_md=self.program_md,
-            pre_task_context=self.pr_task_context,
-            pr_kb_repo=self.pr_kb_repo,
-            kernel_backend_name=self.kernel_backend,
-            insession_gate=True,
-            driver_script=self.driver,
-            snr_threshold=self.snr_threshold,
-            max_blocks=self.max_blocks,
-            session_timeout_sec=self.session_timeout_sec,
-            validation_timeout_sec=self.validation_timeout_sec,
-            bench_timeout_sec=self.bench_timeout_sec,
-            bench_repeat=self.bench_repeat,
-            permission_mode=self.permission_mode,
-            task_type=self.task_type,
-            source_files=self.source_files,
-            target_functions=self.target_functions,
-            profiling_enabled=self.profiling_enabled,
-            agent_backend=profile.provider,
-            commit_new_paths=self.commit_new_paths,
-            usage=self.usage,
-        )
+        setup = replace(self.setup, session=replace(self.setup.session, agent_backend=profile.provider))
+        actor_fn = make_agent_fn(actor_config, setup, usage=self.usage)
         effective_profile = self._resolved_profile(profile, actor_fn)
         _require_lane_provider_capabilities(effective_profile.provider, self.lanes)
         lane_factory = _make_lane_agent_factory(
             make_agent=make_agent_fn,
             config=actor_config,
-            workspace_dir=self.workspace_dir,
-            driver=self.driver,
-            source_files=self.source_files,
-            session_kwargs=self._lane_session_kwargs(profile),
+            binding=self.lane_binding,
+            setup=setup,
+            usage=self.usage,
         )
         orchestration = make_orchestration_service(
             config=actor_config,
@@ -134,26 +99,6 @@ class SearchActorBuildContext:
             return profile
         # Without relay a provider fallback is allowed; the identity stays, the record names what actually runs.
         return AgentProfile(profile.profile_id, effective[0], effective[1], profile.reasoning_effort)
-
-    def _lane_session_kwargs(self, profile: AgentProfile) -> dict:
-        return {
-            "program_md": self.program_md,
-            "pre_task_context": self.pr_task_context,
-            "pr_kb_repo": self.pr_kb_repo,
-            "kernel_backend_name": self.kernel_backend,
-            "snr_threshold": self.snr_threshold,
-            "max_blocks": self.max_blocks,
-            "session_timeout_sec": self.session_timeout_sec,
-            "validation_timeout_sec": self.validation_timeout_sec,
-            "bench_timeout_sec": self.bench_timeout_sec,
-            "bench_repeat": self.bench_repeat,
-            "permission_mode": self.permission_mode,
-            "task_type": self.task_type,
-            "commit_new_paths": self.commit_new_paths,
-            "target_functions": self.target_functions,
-            "agent_backend": profile.provider,
-            "usage": self.usage,
-        }
 
 
 def resolve_default_relay_config(

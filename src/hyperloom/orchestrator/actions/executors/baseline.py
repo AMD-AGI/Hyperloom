@@ -9,7 +9,7 @@ InferenceX eval patching.
 """
 
 from __future__ import annotations
-
+from hyperloom.orchestrator.actions.executors._workload_envs import materialize_benchmark_config
 import asyncio
 import gzip
 import hashlib
@@ -46,6 +46,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
     make_baseline_recorder,
 )
 from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
+from hyperloom.inference_optimizer import inferencex_checkout
 from hyperloom.inference_optimizer.grid_server_args import with_capture_disabled
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...loop.sub_agent_runner import RunnerContext
@@ -59,12 +60,7 @@ from ..stop_attribution import (
     StoppedByTheRun,
 )
 from . import _server_lifecycle as _lifecycle
-from ._aiter_jit import (
-    AITER_JIT_PROBE_PATHS,
-    BASELINE_COLD_START_TIMEOUT_SEC,
-    COLD_START_KERNEL_THRESHOLD,
-    is_aiter_jit_registry_mismatch,
-)
+from ._aiter_jit import is_aiter_jit_registry_mismatch
 from ._launch_evidence import build_launch_evidence, persist_launch_evidence
 
 # The grid module is the namespace the helpers both benching arms share ended up in: how a sentinel returncode reads
@@ -92,12 +88,7 @@ from ._subprocess_kill import (
 from ._accuracy_gate import (
     materialized_run_eval_disabled,
 )
-from ._agentx_timeouts import (
-    AGENTX_CANON_WARMUP_GRACE_SEC as AGENTX_CANON_WARMUP_GRACE_SEC,
-    AGENTX_CANON_WARMUP_CONC as AGENTX_CANON_WARMUP_CONC,
-    agentx_warmup_grace_conc as agentx_warmup_grace_conc,
-    agentx_warmup_grace_sec as agentx_warmup_grace_sec,
-)
+
 from ._workload_envs import (
     VLLM_SOURCE_ROOT_ENVS,
     _client_tokenizer_mode,
@@ -105,7 +96,6 @@ from ._workload_envs import (
     FrameworkScriptMismatchError,
     agentx_active,
     default_baseline_config,
-    materialize_config_with_envs,
     prepare_agentx_runtime,
 )
 from ._inferencex_patcher import (
@@ -118,6 +108,7 @@ from ._inferencex_patcher import (
     failed_patch_anchors_in,
 )
 from ._git import _git_head_sha
+from ._agentx_prefix_cache import refuse_cacheless_agentx_baseline
 from ._magpie_patcher import ensure_client_tokenizer_hook, ensure_eval_concurrency_compat
 from ._patch_snapshot import (
     _create_patch_snapshot,
@@ -559,6 +550,13 @@ def _attach_baseline_launch_evidence(
     workspace = Path(str(result.get("workspace") or "")) if result.get("workspace") else None
     actual_log = _measurement_server_log_path(output_dir / "server.log", workspace, slot=output_dir)
     result["server_log_path"] = actual_log or ""
+    if result.get("benchmark_backend") == "magpie_agentx":
+        from hyperloom.inference_optimizer.agentx.report import native_launch_evidence
+
+        evidence = native_launch_evidence(result, config_path, actual_server_log=actual_log)
+        result["launch_evidence"] = evidence
+        result["launch_evidence_path"] = persist_launch_evidence(evidence, slot=output_dir)
+        return
     evidence = build_launch_evidence(
         config_path=config_path,
         actual_server_log=actual_log,
@@ -756,15 +754,6 @@ def nonzero_output_signature(err_class: str, proc_stdout: str | None, proc_stder
     return f"{err_class}|{hashlib.sha256(text.encode('utf-8')).hexdigest()}"
 
 
-# Cold-start settings and probes live in ``_aiter_jit`` and are re-exported above for callers/tests that import them
-# from this module.
-
-
-# Underscore-prefixed aliases re-exported for callers/tests; canonical names live in `_workload_envs`.
-_default_baseline_config = default_baseline_config
-_materialize_config_with_envs = materialize_config_with_envs
-
-
 def _set_materialized_run_eval(config_path: Path, *, enabled: bool) -> None:
     """Set the effective eval mode after lifecycle eligibility is known."""
     cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
@@ -784,6 +773,24 @@ def _resolve_result_dir(output_dir: Path, override_result_dir: str | None) -> Pa
     if result_dir.is_absolute():
         return result_dir
     return (output_dir / result_dir).resolve()
+
+
+def _benchmark_process_env(
+    config_path: Path, output_dir: Path, result_dir: Path, inferencex_path: str
+) -> dict[str, str]:
+    """Build the client environment without overriding Magpie's native checkout selection."""
+    from .magpie_agentx import native_config
+
+    env = scrub_benchmark_process_env(os.environ.copy())
+    env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
+    if inferencex_path and not native_config(config_path):
+        env["MAGPIE_INFERENCEX_PATH"] = inferencex_path
+    env["RESULT_DIR"] = str(result_dir)
+    # InferenceX removes EVAL_RESULT_DIR after processing lm-eval output.
+    env["EVAL_RESULT_DIR"] = str(result_dir / "eval_output")
+    env["SERVER_LOG"] = str(output_dir / "server.log")
+    env["GPU_METRICS_CSV"] = str(output_dir / "gpu_metrics.csv")
+    return env
 
 
 def _should_establish_quality_ref(task_kind: str | None, params: dict[str, Any] | None = None) -> bool:
@@ -1720,6 +1727,9 @@ class BenchmarkRunExecutor:
             )
             return False
 
+    def _measurement_succeeded(self, measurement: dict[str, Any]) -> bool:
+        return measurement.get("valid_measurement") is True
+
     def _resolve_timeout(self, params: dict[str, Any]) -> float:
         """Benchmark rounds share one cap; other executor purposes keep their budgets."""
         if self.benchmark_watchdog:
@@ -2395,7 +2405,7 @@ class BenchmarkRunExecutor:
             base_extra_envs["RUN_EVAL"] = "false"
         await _prepare_aiter_serving_so(base_extra_envs)
         try:
-            config_path = materialize_config_with_envs(
+            config_path = materialize_benchmark_config(
                 config_path,
                 output_dir,
                 extra_server_args=effective_extra_server_args,
@@ -2423,22 +2433,9 @@ class BenchmarkRunExecutor:
         # Stash for the result so Coordinator can reuse it downstream.
         materialized_config_path = config_path
         effective_inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
-        # Apply runtime_override from params into the materialized YAML so the revalidation baseline boots under the
-        # same framework runtime as the KEEP'd candidate (PATH/PYTHONPATH/framework_bin etc.).
-        _rt_from_params = params.get("runtime_override")
-        if isinstance(_rt_from_params, dict) and _rt_from_params:
-            try:
-                import yaml as _yaml
+        from .magpie_agentx import activate_runtime
 
-                from ._grid_runner import apply_runtime_override
-
-                _cfg_data = _yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-                _cfg_bench = _cfg_data.setdefault("benchmark", {})
-                _cfg_envs = _cfg_bench.setdefault("envs", {})
-                apply_runtime_override(_cfg_envs, _rt_from_params)
-                config_path.write_text(_yaml.safe_dump(_cfg_data), encoding="utf-8")
-            except Exception:
-                log.debug("baseline_executor: runtime_override application failed", exc_info=True)
+        activate_runtime(config_path, params.get("runtime_override") or {})
         # Report the invocation now, with the config final and the server not
         # yet booted. This frame is the only one that knows the args as a fact:
         # the one-shot eager fallback and the MoE-runner drop have both had
@@ -2454,18 +2451,7 @@ class BenchmarkRunExecutor:
                 model_path=resolved_model,
                 args_mode=str(params.get("args_mode") or "append"),
             )
-        # AgentX: deploy the aiperf client into InferenceX benchmarks/ and
-        # capability-preflight aiperf before Magpie runs the materialized config.
-        # Baseline/profile shell out here (not via _run_magpie), so without this the
-        # materialize-time swap to aiperf_client.sh would point at a script that was
-        # never deployed. No-op when HYPERLOOM_AGENTX is off.
-        #
-        # Off-loop: this call can shell out to the installer (the runtime aiperf
-        # repair, bounded at REPAIR_TIMEOUT_SEC) and that installer waits on a
-        # cross-process ``flock`` with no timeout of its own. Run inline it would
-        # freeze the whole orchestrator for as long as that takes -- heartbeats,
-        # cancellation, the wall-clock budget and every bus write stop with it.
-        # ``_grid_runner`` already runs its copy of this through ``to_thread``.
+        # MLPerf prepares its delegated client off-loop; native AgentX is entirely managed by Magpie.
         _agx_err = await asyncio.to_thread(
             prepare_agentx_runtime,
             env=os.environ,
@@ -3275,10 +3261,6 @@ class BenchmarkRunExecutor:
     ) -> dict[str, Any] | None:
         """Ask the installed framework's parser about this round's argv.
 
-        The argv is read out of the rendered YAML and probed in that file's own
-        benchmark envs, which are what the launch reads. A repaired argv is
-        written back through the same seal.
-
         Args:
             config_path: The materialised YAML this round launches.
             framework: Framework the config serves.
@@ -3292,6 +3274,10 @@ class BenchmarkRunExecutor:
             ``None`` when the round may proceed -- including every unavailable
             verdict, which must never cost a round.
         """
+        from .magpie_agentx import native_config
+
+        if native_config(config_path):
+            return None
         from ...bringup import (
             ARGV_INVALID,
             argv_invalid_observation,
@@ -3385,23 +3371,16 @@ class BenchmarkRunExecutor:
         server_already_ready: bool = False,
     ) -> dict[str, Any]:
         """Run one Magpie benchmark subprocess and parse its result."""
+        from .magpie_agentx import bind_source_evidence
+
+        await asyncio.to_thread(bind_source_evidence, config_path, params.get("patches") or [])
         cmd = build_benchmark_command(
             python_exe=self.magpie_python,
             config_path=config_path,
             output_dir=output_dir,
         )
-        env = scrub_benchmark_process_env(os.environ.copy())
-        # Put the venv first in PATH so the benchmark script's `python3` resolves to one with torch+rocm (defense in
-        # depth vs Magpie YAML).
-        env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
-        # Pin Magpie's InferenceX resolution to the same per-task checkout rendered into benchmark.inferencex_path and
-        # patched by the ``_after_materialize_config`` hook.
-        if inferencex_path:
-            env["MAGPIE_INFERENCEX_PATH"] = inferencex_path
-        # Always-on ``$RESULT_DIR`` default for scripts that respect it; scripts that ignore it are caught by the
-        # salvage pass.
         result_dir = _resolve_result_dir(output_dir, override_result_dir)
-        env["RESULT_DIR"] = str(result_dir)
+        env = _benchmark_process_env(config_path, output_dir, result_dir, inferencex_path)
         # Config/eval-contract facts echoed onto every failure result so an eval-rooted failure can be fingerprinted
         # and re-run by enablement.
         capture_meta = {
@@ -3409,13 +3388,6 @@ class BenchmarkRunExecutor:
             "result_dir": str(result_dir),
             "run_eval_disabled": bool(run_eval_disabled),
         }
-        # InferenceX ``run_lm_eval`` cleans ``$EVAL_RESULT_DIR`` after processing lm-eval output.
-        env["EVAL_RESULT_DIR"] = str(result_dir / "eval_output")
-        # Pin SERVER_LOG / GPU_METRICS_CSV per-task so wrappers write into the task workspace;
-        # ``harvest_leaked_artifacts`` is the defense-in-depth net.
-        env["SERVER_LOG"] = str(output_dir / "server.log")
-        env["GPU_METRICS_CSV"] = str(output_dir / "gpu_metrics.csv")
-
         # The materialized YAML is authoritative for the framework: params and $FRAMEWORK are both optional on a
         # baseline task.
         framework = (
@@ -3452,9 +3424,9 @@ class BenchmarkRunExecutor:
                 # Merge the reference base UNDER the per-task args (last-wins) so a multi-node per-round restart
                 # carries the same reference flags the single-node materialized YAML does.
                 from ._grid_runner import merge_server_args
-                from ._workload_envs import resolve_reference_base
+                from ._workload_envs import resolve_reference_launch
 
-                _mn_ref_args, _mn_ref_envs = resolve_reference_base()
+                _mn_ref_args, _mn_ref_envs, _ = resolve_reference_launch()
                 # Base on effective_extra_server_args (carries the one-shot cuda-graph eager-fallback flag when armed)
                 # so the MN per-round restart keeps that fallback too.
                 _mn_task_args = effective_extra_server_args
@@ -3820,6 +3792,7 @@ class BenchmarkRunExecutor:
 
         measurement = extract_benchmark_measurement(
             report,
+            config_path=config_path,
             workspace=workspace,
             subprocess_started_unix=subprocess_started_unix,
         )
@@ -3827,7 +3800,7 @@ class BenchmarkRunExecutor:
         for leak_src, _ in harvested:
             warnings.append(f"harvested_leaked_artifact:{leak_src}")
 
-        if not measurement.get("valid_measurement"):
+        if not self._measurement_succeeded(measurement):
             if registry_mismatch:
                 error_class = "aiter_jit_registry_mismatch"
                 error = server_init_dead_error if server_init_dead else ((proc_stderr or proc_stdout or "")[-2000:])
@@ -3986,7 +3959,7 @@ class BaselineExecutor(BenchmarkRunExecutor):
 
     def _resolve_default_config(self) -> Path:
         """Resolve the benchmark YAML the round runs when the task names none."""
-        return _default_baseline_config()
+        return default_baseline_config()
 
     @staticmethod
     def _client_script_from_config(config_path: Path) -> str | None:
@@ -4038,16 +4011,17 @@ class BaselineExecutor(BenchmarkRunExecutor):
         output_dir: Path,
     ) -> dict[str, Any] | None:
         """Hook after YAML materialization, before launch."""
+        from .magpie_agentx import native_config
+
+        if native_config(config_path):
+            return None
         ix_root = self._inferencex_root_from_config(config_path)
         if ix_root:
+            if invalid := inferencex_checkout.unusable_reason(ix_root):
+                return {"status": "failed", "error_class": "inferencex_checkout_invalid", "error": invalid}
             ensure_benchmark_lib_eval_dest_patched(Path(ix_root))
             ensure_benchmark_lib_eval_start_patched(Path(ix_root))
-        # Runs for EVERY workload, not just eval ones: this hook fixes the throughput
-        # client, which runs whether or not lm-eval does. Independent of the fail-soft
-        # eval-concurrency result: a missing tokenizer hook is
-        # fatal only for a model whose tokenizer has to be named, and for that model it is
-        # fatal outright -- the client dies in HF AutoConfig before its first request, writes
-        # no throughput result, and the round is graded a boot failure with the server serving.
+        # Required custom tokenizers must reach the throughput client as well as eval.
         tok_mode = _client_tokenizer_mode(self._model_from_config(config_path))
         if tok_mode:
             try:
@@ -4208,6 +4182,9 @@ class BaselineExecutor(BenchmarkRunExecutor):
         )
         try:
             result = await self._run_retrying(ctx, recorder=recorder)
+            shared_state = (getattr(ctx, "extra", None) or {}).get("shared_state")
+            if _should_establish_quality_ref(getattr(ctx.task, "kind", ""), params) and agentx_active(shared_state):
+                refuse_cacheless_agentx_baseline(result)
         except BaseException as exc:
             if recorder is not None:
                 recorder.finish_crashed(exc)
@@ -4278,14 +4255,7 @@ baseline_executor = BaselineExecutor()
 
 
 __all__ = [
-    "AITER_JIT_PROBE_PATHS",
-    "BASELINE_COLD_START_TIMEOUT_SEC",
-    "AGENTX_CANON_WARMUP_GRACE_SEC",
-    "AGENTX_CANON_WARMUP_CONC",
-    "agentx_warmup_grace_conc",
-    "agentx_warmup_grace_sec",
     "BaselineExecutor",
     "BenchmarkRunExecutor",
-    "COLD_START_KERNEL_THRESHOLD",
     "baseline_executor",
 ]

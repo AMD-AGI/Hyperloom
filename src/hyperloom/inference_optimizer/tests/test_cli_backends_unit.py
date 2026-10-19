@@ -58,7 +58,21 @@ def _build(**over):
         session_dir=Path("/tmp/s"),
     )
     kwargs.update(over)
-    return clib._build_backends(**kwargs)
+    models = clib.ModelRouting(
+        claude_model=kwargs.pop("claude_model"),
+        codex_model=kwargs.pop("codex_model"),
+        codex_follows_claude=kwargs.pop("codex_follows_claude", False),
+        claude_follows_codex=kwargs.pop("claude_follows_codex", False),
+    )
+    critic = clib.CriticSetup(
+        choice=kwargs.pop("critic_choice"),
+        agent_root=kwargs.pop("critic_agent_root", None),
+        kb_mode=kwargs.pop("critic_kb_mode", "inmemory"),
+        protocol=kwargs.pop("critic_protocol", "auto"),
+    )
+    session_dir = kwargs.pop("session_dir")
+    assert not kwargs, kwargs
+    return clib._build_backends(models, critic, session_dir=session_dir)
 
 
 @pytest.fixture(autouse=True)

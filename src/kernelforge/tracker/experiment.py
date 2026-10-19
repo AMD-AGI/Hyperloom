@@ -19,7 +19,9 @@ from kernelforge.tracker.schema import (
     EXPERIMENT_COMPLETED,
     EXPERIMENT_INTERRUPTED,
     EXPERIMENT_RUNNING,
+    CampaignSegment,
     Experiment,
+    ExperimentSubject,
     Iteration,
 )
 from kernelforge.durable_io import atomic_write_text
@@ -54,12 +56,6 @@ class ExperimentTracker:
             with contextlib.suppress(Exception):  # broad-suppress: caller-supplied observer
                 cb(exp)
         return exp
-
-    def mark_interrupted(self, experiment_id: str) -> Experiment:
-        """Mark an unfinished segment interrupted without rewriting terminal state."""
-        with self._experiment_lock(experiment_id):
-            exp = self._load(experiment_id)
-            return self._mark_interrupted_locked(exp)
 
     def _mark_interrupted_locked(self, exp: Experiment) -> Experiment:
         """Transition a locked experiment to interrupted if it is still running."""
@@ -124,30 +120,24 @@ class ExperimentTracker:
 
     def create(
         self,
-        task_id: str = "",
-        backend: str = "",
-        kernel_backend: str = "",
-        description: str = "",
-        target_wall_ms: float | None = None,
-        baseline_wall_ms: float | None = None,
-        campaign_id: str = "",
-        segment_index: int = 0,
-        parent_experiment_id: str = "",
+        subject: ExperimentSubject = ExperimentSubject(),
+        *,
+        segment: CampaignSegment = CampaignSegment(),
         experiment_id: str | None = None,
     ) -> Experiment:
         """Create a new experiment and persist it."""
         started_at = datetime.now().isoformat()
         exp = Experiment(
             experiment_id=experiment_id or str(uuid.uuid4())[:8],
-            task_id=task_id,
-            backend=backend,
-            kernel_backend=kernel_backend,
-            description=description,
-            target_wall_ms=target_wall_ms,
-            baseline_wall_ms=baseline_wall_ms,
-            campaign_id=campaign_id,
-            segment_index=segment_index,
-            parent_experiment_id=parent_experiment_id,
+            task_id=subject.task_id,
+            backend=subject.backend,
+            kernel_backend=subject.kernel_backend,
+            description=subject.description,
+            target_wall_ms=subject.target_wall_ms,
+            baseline_wall_ms=subject.baseline_wall_ms,
+            campaign_id=segment.campaign_id,
+            segment_index=segment.segment_index,
+            parent_experiment_id=segment.parent_experiment_id,
             status=EXPERIMENT_RUNNING,
             started_at=started_at,
         )
@@ -156,20 +146,13 @@ class ExperimentTracker:
 
     def create_segment(
         self,
-        *,
-        campaign_id: str,
-        segment_index: int,
-        parent_experiment_id: str = "",
-        task_id: str = "",
-        backend: str = "",
-        kernel_backend: str = "",
-        description: str = "",
-        target_wall_ms: float | None = None,
-        baseline_wall_ms: float | None = None,
+        segment: CampaignSegment,
+        subject: ExperimentSubject = ExperimentSubject(),
     ) -> Experiment:
         """Create a linked campaign segment and close an abandoned parent."""
-        campaign_id = (campaign_id or "").strip()
-        parent_experiment_id = (parent_experiment_id or "").strip()
+        campaign_id = (segment.campaign_id or "").strip()
+        segment_index = segment.segment_index
+        parent_experiment_id = (segment.parent_experiment_id or "").strip()
         if not campaign_id:
             raise ValueError("campaign_id is required")
         if segment_index < 1:
@@ -201,15 +184,8 @@ class ExperimentTracker:
                 raise ValueError("segment index must be 1 when no parent is provided")
 
             return self.create(
-                task_id=task_id,
-                backend=backend,
-                kernel_backend=kernel_backend,
-                description=description,
-                target_wall_ms=target_wall_ms,
-                baseline_wall_ms=baseline_wall_ms,
-                campaign_id=campaign_id,
-                segment_index=segment_index,
-                parent_experiment_id=parent_experiment_id,
+                subject,
+                segment=CampaignSegment(campaign_id, segment_index, parent_experiment_id),
             )
 
     def list_experiments(self) -> list[Experiment]:
