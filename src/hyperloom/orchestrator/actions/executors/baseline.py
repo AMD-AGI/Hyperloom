@@ -3830,91 +3830,101 @@ class BaselineExecutor(BenchmarkRunExecutor):
             ensure_benchmark_lib_eval_dest_patched(Path(ix_root))
             ensure_benchmark_lib_eval_start_patched(Path(ix_root))
         # Required custom tokenizers must reach the throughput client as well as eval.
+        tokenizer_failure = self._client_tokenizer_hook_failure(config_path, ix_root)
+        if tokenizer_failure is not None:
+            return tokenizer_failure
+        if materialized_run_eval_disabled(config_path):
+            return None
+        return self._eval_patch_failure(ix_root)
+
+    def _client_tokenizer_hook_failure(self, config_path: Path, ix_root: str) -> dict[str, Any] | None:
+        """Install the client-side tokenizer hook this model needs, reporting a tree it cannot be installed in."""
         tok_mode = _client_tokenizer_mode(self._model_from_config(config_path))
-        if tok_mode:
-            try:
-                hook_ok = ensure_client_tokenizer_hook(
-                    inferencex_dir=ix_root or None,
-                    script_name=self._client_script_from_config(config_path),
-                )
-            except OSError as exc:
-                log.error("baseline_executor: client tokenizer hook raised for %s: %s", ix_root, exc)
-                hook_ok = False
-            if not hook_ok:
-                msg = (
-                    f"the benchmark client cannot be told to load the {tok_mode!r} tokenizer: "
-                    f"the hook could not be installed in InferenceX's benchmark scripts "
-                    f"(inferencex={ix_root or '<unset>'}). This model's client resolves the "
-                    "checkpoint through HF AutoConfig, which cannot map its model_type, so it "
-                    "would die before issuing a request and the round would be graded a boot "
-                    "failure with the server up."
-                )
+        if not tok_mode:
+            return None
+        try:
+            hook_ok = ensure_client_tokenizer_hook(
+                inferencex_dir=ix_root or None,
+                script_name=self._client_script_from_config(config_path),
+            )
+        except OSError as exc:
+            log.error("baseline_executor: client tokenizer hook raised for %s: %s", ix_root, exc)
+            hook_ok = False
+        if hook_ok:
+            return None
+        msg = (
+            f"the benchmark client cannot be told to load the {tok_mode!r} tokenizer: "
+            f"the hook could not be installed in InferenceX's benchmark scripts "
+            f"(inferencex={ix_root or '<unset>'}). This model's client resolves the "
+            "checkpoint through HF AutoConfig, which cannot map its model_type, so it "
+            "would die before issuing a request and the round would be graded a boot "
+            "failure with the server up."
+        )
+        log.error("baseline_executor: %s", msg)
+        return {
+            "status": "failed",
+            "error_class": "client_tokenizer_unpatchable",
+            "error": msg,
+        }
+
+    def _eval_patch_failure(self, ix_root: str) -> dict[str, Any] | None:
+        """Patch the InferenceX tree this run's lm-eval needs, reporting a tree that will abort the eval."""
+        # Target present but unpatchable is a hard stop; target absent is an unrecognized layout, which warns
+        # rather than failing every eval run.
+        probe_root = Path(ix_root) if ix_root else None
+        # Best-effort, unlike the probe below: without it a refused connection ends the round on
+        # UnboundLocalError instead of on the connection, which is worse reporting of a round that
+        # was already going to fail -- not a reason to refuse to start one.
+        ensure_eval_unbound_outputs_patched(probe_root)
+        if not ensure_eval_probe_patched(probe_root):
+            msg = (
+                "the generation-pathology probe is not installed "
+                "(utils/evals/patches/lm_eval_sitecustomize.py, inferencex="
+                f"{ix_root or '<unset>'}, INFERENCEX_PATH="
+                f"{os.environ.get('INFERENCEX_PATH', '') or '<unset>'}). "
+                "A model that never emits EOS will run the accuracy eval to "
+                "the full max_tokens budget on every sample and consume the "
+                "entire baseline timeout."
+            )
+            if eval_probe_targets_exist(probe_root):
                 log.error("baseline_executor: %s", msg)
                 return {
                     "status": "failed",
-                    "error_class": "client_tokenizer_unpatchable",
+                    "error_class": "eval_probe_unpatchable",
                     "error": msg,
                 }
-        if not materialized_run_eval_disabled(config_path):
-            # Target present but unpatchable is a hard stop; target absent is an unrecognized layout, which warns
-            # rather than failing every eval run.
-            probe_root = Path(ix_root) if ix_root else None
-            # Best-effort, unlike the probe below: without it a refused connection ends the round on
-            # UnboundLocalError instead of on the connection, which is worse reporting of a round that
-            # was already going to fail -- not a reason to refuse to start one.
-            ensure_eval_unbound_outputs_patched(probe_root)
-            if not ensure_eval_probe_patched(probe_root):
-                msg = (
-                    "the generation-pathology probe is not installed "
-                    "(utils/evals/patches/lm_eval_sitecustomize.py, inferencex="
-                    f"{ix_root or '<unset>'}, INFERENCEX_PATH="
-                    f"{os.environ.get('INFERENCEX_PATH', '') or '<unset>'}). "
-                    "A model that never emits EOS will run the accuracy eval to "
-                    "the full max_tokens budget on every sample and consume the "
-                    "entire baseline timeout."
-                )
-                if eval_probe_targets_exist(probe_root):
-                    log.error("baseline_executor: %s", msg)
-                    return {
-                        "status": "failed",
-                        "error_class": "eval_probe_unpatchable",
-                        "error": msg,
-                    }
-                log.warning("baseline_executor: %s", msg)
-            # Fail LOUDLY (never warn-and-continue) when the fatal eval flag cannot be removed AND this run is meant
-            # to execute lm-eval: the benchmark is guaranteed to abort in run_lm_eval, and the accuracy gate then
-            # stops the whole session.
-            try:
-                compat_ok = ensure_eval_concurrency_compat(inferencex_dir=ix_root or None)
-            except OSError as exc:
-                log.error("baseline_executor: eval-concurrency compat patch failed for %s: %s", ix_root, exc)
-                compat_ok = False
-            if not compat_ok:
-                msg = (
-                    "accuracy eval cannot run: the redundant "
-                    "'--concurrent-requests' flag could not be removed from the "
-                    "Magpie benchmark scripts (MAGPIE_PATH="
-                    f"{os.environ.get('MAGPIE_PATH', '') or '<unset>'}) and/or "
-                    "InferenceX's run_lm_eval arg parser could not be made to "
-                    f"tolerate it (inferencex={ix_root or '<unset>'}). "
-                    "InferenceX resolves eval concurrency from "
-                    "EVAL_CONCURRENT_REQUESTS (fallback CONC); the flag is "
-                    "rejected as 'Unknown parameter: --concurrent-requests' and "
-                    "aborts the benchmark before any results*.json is written. "
-                    "Fix the run_eval line (or re-run install.sh against the "
-                    "Magpie tree that is actually imported at run time) — do "
-                    "NOT work around this with RUN_EVAL=false."
-                )
-                log.error("baseline_executor: %s", msg)
-                return {
-                    "status": "failed",
-                    "error_class": "eval_concurrency_flag_unpatchable",
-                    "error": msg,
-                }
-            anchor_result = self._eval_patch_anchors_result(ix_root)
-            if anchor_result is not None:
-                return anchor_result
-        return None
+            log.warning("baseline_executor: %s", msg)
+        # Fail LOUDLY (never warn-and-continue) when the fatal eval flag cannot be removed AND this run is meant
+        # to execute lm-eval: the benchmark is guaranteed to abort in run_lm_eval, and the accuracy gate then
+        # stops the whole session.
+        try:
+            compat_ok = ensure_eval_concurrency_compat(inferencex_dir=ix_root or None)
+        except OSError as exc:
+            log.error("baseline_executor: eval-concurrency compat patch failed for %s: %s", ix_root, exc)
+            compat_ok = False
+        if not compat_ok:
+            msg = (
+                "accuracy eval cannot run: the redundant "
+                "'--concurrent-requests' flag could not be removed from the "
+                "Magpie benchmark scripts (MAGPIE_PATH="
+                f"{os.environ.get('MAGPIE_PATH', '') or '<unset>'}) and/or "
+                "InferenceX's run_lm_eval arg parser could not be made to "
+                f"tolerate it (inferencex={ix_root or '<unset>'}). "
+                "InferenceX resolves eval concurrency from "
+                "EVAL_CONCURRENT_REQUESTS (fallback CONC); the flag is "
+                "rejected as 'Unknown parameter: --concurrent-requests' and "
+                "aborts the benchmark before any results*.json is written. "
+                "Fix the run_eval line (or re-run install.sh against the "
+                "Magpie tree that is actually imported at run time) — do "
+                "NOT work around this with RUN_EVAL=false."
+            )
+            log.error("baseline_executor: %s", msg)
+            return {
+                "status": "failed",
+                "error_class": "eval_concurrency_flag_unpatchable",
+                "error": msg,
+            }
+        return self._eval_patch_anchors_result(ix_root)
 
     # Scoped to the line-replacement patches this hook applies.
     _EVAL_HOOK_ANCHORS = ("eval_dest", "eval_start")
