@@ -139,8 +139,8 @@ def test_parse_device_list_agrees_with_effective_tokens() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# detect_gpu_count: env masks first, then amd-smi (PR #1827 rocm-smi -> amd-smi
-# migration; this path had never been exercised directly before).
+# detect_gpu_count: env masks first, then amd-smi. This path had never been
+# exercised directly before.
 # --------------------------------------------------------------------------- #
 
 

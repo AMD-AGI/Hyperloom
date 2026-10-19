@@ -37,16 +37,18 @@ GPU_BUSY_UTILIZATION_PCT = 50.0
 #: MiB per unit amd-smi may label a memory size with. Its "MB" is mebibytes -- an MI355X with 288 GiB reports 294912
 #: of them -- so the binary divisor is the right one, and "GB" is read the same way for consistency with it. Same
 #: convention as ``gpu_partition._VRAM_UNIT_GIB``.
+_KIB = 1024.0
+
 _MIB_PER_UNIT: dict[str, float] = {
-    "B": 1.0 / 1024**2,
-    "KB": 1.0 / 1024,
-    "KIB": 1.0 / 1024,
+    "B": 1.0 / _KIB**2,
+    "KB": 1.0 / _KIB,
+    "KIB": 1.0 / _KIB,
     "MB": 1.0,
     "MIB": 1.0,
-    "GB": 1024.0,
-    "GIB": 1024.0,
-    "TB": 1024.0**2,
-    "TIB": 1024.0**2,
+    "GB": _KIB,
+    "GIB": _KIB,
+    "TB": _KIB**2,
+    "TIB": _KIB**2,
 }
 
 #: Keys ``metric --usage`` has carried the graphics-busy percentage under. The APU average is last because it is a
