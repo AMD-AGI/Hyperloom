@@ -44,6 +44,7 @@ Two rules run through everything below:
 
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import math
@@ -856,7 +857,7 @@ class KvMetricsPoller:
         try:
             with _OPENER.open(self.url, timeout=self.timeout_sec) as response:
                 body = response.read().decode("utf-8", "ignore")
-        except (urllib.error.URLError, OSError, ValueError) as exc:
+        except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError) as exc:
             self._failures += 1
             # Both a count and a clock. On the count alone, three misses inside six seconds park the poller for the rest
             # of the round -- and an engine that has logged "ready" can still be a few seconds from accepting a request,
@@ -967,7 +968,7 @@ class AiperfProgressPoller:
         try:
             with _OPENER.open(f"{url.rstrip('/')}/api/progress", timeout=self.timeout_sec) as response:
                 payload = json.loads(response.read().decode("utf-8", "ignore"))
-        except (urllib.error.URLError, OSError, ValueError) as exc:
+        except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError) as exc:
             self._failures += 1
             # Only give up on an endpoint that never worked. One that answered before and is failing now is an aiperf
             # that has exited, and the timeline already collected is still the authority for this round.
@@ -1051,7 +1052,7 @@ class KvMetricsRecorder:
     """Collects phase-tagged KV samples for one benchmark round.
 
     Owns everything stateful about collection so the watchdog loop it hangs off keeps a single call per pass and one
-    ``finally``. Like the poller, nothing here raises: a recorder that fails must cost the round nothing.
+    ``finally``. Like the poller, a failed scrape costs the round one sample: the pollers treat connection and truncated-response errors as a miss.
 
     The phase machine is driven by markers the loop already detects, plus aiperf's own phase lines under AgentX. It is
     never inferred from elapsed time, because the boundaries move by tens of minutes between rounds -- an AgentX warmup

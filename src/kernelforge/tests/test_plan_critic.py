@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
 
-from kernelforge.agent_backends import AgentRunResult
+from kernelforge.agent_backends import AgentProviderError, AgentRunResult
 from kernelforge.orchestrator.contracts import (
     CaseEvidence,
     DispatchPlan,
     LaneDrop,
     OrchestrationContext,
+    OrchestrationInfrastructureError,
     PlanCriticOutcome,
     SpecialistRound,
     SynthesizedPlan,
@@ -804,12 +806,19 @@ async def test_a_review_that_failed_narrows_nothing(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_a_backend_error_fails_the_review_closed(tmp_path):
+@pytest.mark.parametrize(
+    ("error", "message"),
+    [
+        (AgentProviderError("provider crashed"), "^AgentProviderError: provider crashed$"),
+        (asyncio.TimeoutError(), r"^plan critic backend exceeded \d+(\.\d+)?s timeout$"),
+    ],
+)
+async def test_a_backend_outage_fails_the_review_closed(tmp_path, error, message):
     """A critic that could not run must not wave the plan through."""
-    backend = _Backend(RuntimeError("provider crashed"))
+    backend = _Backend(error)
     critic = PlanCriticAgent(backend=backend, timeout_sec=2)
 
-    with pytest.raises(RuntimeError, match="^provider crashed$"):
+    with pytest.raises(OrchestrationInfrastructureError, match=message):
         await critic.review(
             context=_context(tmp_path),
             drafts=[SynthesizedPlan(text="# Draft")],
@@ -817,6 +826,18 @@ async def test_a_backend_error_fails_the_review_closed(tmp_path):
         )
 
     assert len(backend.specs) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_unexpected_backend_error_propagates_unchanged(tmp_path):
+    critic = PlanCriticAgent(backend=_Backend(KeyError("session")), timeout_sec=2)
+
+    with pytest.raises(KeyError, match="session"):
+        await critic.review(
+            context=_context(tmp_path),
+            drafts=[SynthesizedPlan(text="# Draft")],
+            specialists=SpecialistRound(DispatchPlan(analysis_commit="abc123", assignments=()), (), {}),
+        )
 
 
 def test_a_one_plan_review_keeps_the_budget_it_always_had():

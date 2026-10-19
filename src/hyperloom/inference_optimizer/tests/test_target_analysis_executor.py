@@ -384,10 +384,14 @@ async def test_agentx_no_gpu_persists_mode_and_clears_previous_target(native_ben
 @pytest.mark.asyncio
 @pytest.mark.parametrize("gpu", ["b300", ""])
 @pytest.mark.parametrize("error", [ValueError("schema mismatch"), OSError("read-only filesystem")])
-async def test_analyzer_exception_propagates_without_replacing_summary(
+async def test_analyzer_exception_propagates_and_clears_target_without_replacing_summary(
     native_benchmark, session_dir, monkeypatch, gpu, error
 ):
+    from hyperloom.inference_optimizer.session import session_paths
+
     monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(native_benchmark))
+    stale = session_paths.competitor_target_json(session_dir)
+    stale.write_text('{"old":true}', encoding="utf-8")
     baseline = session_dir / "target_analysis/target_baseline.json"
     baseline.parent.mkdir()
     baseline.write_text('{"status":"ok","best":{"tput_per_gpu":9999}}', encoding="utf-8")
@@ -399,6 +403,7 @@ async def test_analyzer_exception_propagates_without_replacing_summary(
     monkeypatch.setattr(ta, "analyze", fail)
     with pytest.raises(type(error), match=str(error)):
         await TargetAnalysisExecutor(compare_against_gpu=gpu)(_ctx(session_dir, {"model_path": "GLM-5.2"}))
+    assert not stale.exists()
     assert baseline.read_bytes() == previous
 
 

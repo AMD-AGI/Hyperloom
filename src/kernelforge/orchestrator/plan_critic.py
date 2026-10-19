@@ -13,6 +13,7 @@ from typing import Any
 
 from kernelforge.agent_backends import (
     AgentBackend,
+    AgentProviderError,
     AgentRunSpec,
     AgentToolPolicy,
     watchdog_timeout_sec,
@@ -25,6 +26,7 @@ from kernelforge.orchestrator.agent_response import (
 from kernelforge.orchestrator.contracts import (
     LaneDrop,
     OrchestrationContext,
+    OrchestrationInfrastructureError,
     PlanCriticOutcome,
     SpecialistRound,
     SynthesizedPlan,
@@ -408,32 +410,37 @@ class PlanCriticAgent:
         specialists: SpecialistRound,
         usage=None,
     ) -> PlanCriticOutcome:
-        """Review one round; backend failures propagate, unusable critic output accepts fail-open."""
+        """Review one round; backend outages raise ``OrchestrationInfrastructureError``, unusable output accepts fail-open."""
         system_prompt, user_prompt = build_plan_critic_prompts(context=context, drafts=drafts, specialists=specialists)
         budget_sec = self._budget_for(len(drafts))
         started_at = time.monotonic()
-        result = await asyncio.wait_for(
-            self.backend.run(
-                AgentRunSpec(
-                    system_prompt=system_prompt,
-                    user_prompt=user_prompt,
-                    role="plan critic",
-                    cwd=context.workspace,
-                    writable=False,
-                    timeout_sec=budget_sec,
-                    tool_policy=AgentToolPolicy(
-                        read=True,
-                        search=True,
-                        write=False,
-                        shell=False,
-                        max_turns=self.max_turns,
+        try:
+            result = await asyncio.wait_for(
+                self.backend.run(
+                    AgentRunSpec(
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                        role="plan critic",
+                        cwd=context.workspace,
+                        writable=False,
+                        timeout_sec=budget_sec,
+                        tool_policy=AgentToolPolicy(
+                            read=True,
+                            search=True,
+                            write=False,
+                            shell=False,
+                            max_turns=self.max_turns,
+                        ),
+                        protected_globs=["*"],
                     ),
-                    protected_globs=["*"],
+                    usage=usage,
                 ),
-                usage=usage,
-            ),
-            timeout=watchdog_timeout_sec(budget_sec),
-        )
+                timeout=watchdog_timeout_sec(budget_sec),
+            )
+        except asyncio.TimeoutError as error:
+            raise OrchestrationInfrastructureError(f"plan critic backend exceeded {budget_sec}s timeout") from error
+        except AgentProviderError as error:
+            raise OrchestrationInfrastructureError(f"{type(error).__name__}: {error}") from error
 
         try:
             review = validated_agent_text(result, role="plan critic")

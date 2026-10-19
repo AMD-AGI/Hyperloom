@@ -32,6 +32,7 @@ from kernelforge.orchestrator.contracts import (
     EvidenceRef,
     LaneGround,
     OrchestrationContext,
+    OrchestrationInfrastructureError,
     OrchestrationRunResult,
     PlanCriticOutcome,
     SynthesizedPlan,
@@ -281,10 +282,6 @@ Do not dispatch specialists again, edit files, run shell commands, alter
 measurement inputs, or present inference as profiler fact. Return only the
 final ordinary Markdown plan.
 """
-
-
-class OrchestrationInfrastructureError(RuntimeError):
-    """Report an orchestration backend outage that produced no model answer."""
 
 
 class OrchestrationOutputError(ValueError):

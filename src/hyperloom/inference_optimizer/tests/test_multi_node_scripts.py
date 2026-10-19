@@ -1048,11 +1048,11 @@ def test_install_geak_propagates_install_failure(monkeypatch):
     monkeypatch.setattr(mn_cli, "_load_state", lambda: {"backend": "infera"})
     monkeypatch.setattr(mn_cli, "cmd_install_geak", install_fails)
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="^install-geak failed$"):
         mn_cli.install_geak_on_pods_best_effort()
 
 
-def test_kill_inference_for_kernel_agent_propagates_kill_failure(monkeypatch):
+def test_kill_inference_for_kernel_agent_warns_on_a_command_failure(monkeypatch, capsys):
     from hyperloom.inference_optimizer.multi_node import cli as mn_cli
 
     def kill_fails(_ns):
@@ -1060,7 +1060,20 @@ def test_kill_inference_for_kernel_agent_propagates_kill_failure(monkeypatch):
 
     monkeypatch.setattr(mn_cli, "cmd_kill_inference", kill_fails)
 
-    with pytest.raises(RuntimeError):
+    assert mn_cli.kill_inference_for_kernel_agent_best_effort() is None
+    err = capsys.readouterr().err
+    assert re.fullmatch(r"\[[^\]]+\] WARN kill-inference skipped: RuntimeError: kill-inference failed\n", err)
+
+
+def test_kill_inference_for_kernel_agent_propagates_an_unexpected_error(monkeypatch):
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    def kill_has_a_bug(_ns):
+        raise KeyError("pid_file")
+
+    monkeypatch.setattr(mn_cli, "cmd_kill_inference", kill_has_a_bug)
+
+    with pytest.raises(KeyError, match="pid_file"):
         mn_cli.kill_inference_for_kernel_agent_best_effort()
 
 

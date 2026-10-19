@@ -101,18 +101,22 @@ class TargetAnalysisExecutor:
         isl = int(params.get("isl") or env_int("ISL", 0))
         osl = int(params.get("osl") or env_int("OSL", 0))
 
-        summary = analyze(
-            session_dir=session_dir,
-            request=TargetAnalysisRequest(
-                model_path=model_path,
-                compare_against_gpu=compare_against_gpu,
-                framework=framework,
-                precision=precision,
-                isl=isl,
-                osl=osl,
-                benchmark_mode=benchmark_mode,
-            ),
-        )
+        try:
+            summary = analyze(
+                session_dir=session_dir,
+                request=TargetAnalysisRequest(
+                    model_path=model_path,
+                    compare_against_gpu=compare_against_gpu,
+                    framework=framework,
+                    precision=precision,
+                    isl=isl,
+                    osl=osl,
+                    benchmark_mode=benchmark_mode,
+                ),
+            )
+        except Exception:
+            clear_competitor_target(session_dir)
+            raise
         return self._format_result(ctx, summary, session_dir)
 
     def _format_result(

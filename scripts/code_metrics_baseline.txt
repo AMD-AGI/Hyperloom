@@ -1003,7 +1003,7 @@ module-lines src/kernelforge/loop/knowledge_integration.py 1457
 module-lines src/kernelforge/loop/runner.py 6051
 module-lines src/kernelforge/loop/task_preparer.py 1299
 module-lines src/kernelforge/orchestrator/analysis.py 2080
-module-lines src/kernelforge/orchestrator/orchestration.py 1831
+module-lines src/kernelforge/orchestrator/orchestration.py 1828
 nested-blocks src/hyperloom/inference_optimizer/framework_paths.py::_discover_installed_framework_roots 6
 nested-blocks src/hyperloom/inference_optimizer/trace/tool_events.py::stream_json_tool_events 6
 nested-blocks src/hyperloom/orchestrator/actions/executors/_kv_metrics.py::_read_aiperf_aggregate_json 6

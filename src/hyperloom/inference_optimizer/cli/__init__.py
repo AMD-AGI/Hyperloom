@@ -1114,7 +1114,7 @@ def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
 
 
 def _detect_checkpoint_precision(model_path: str | None) -> str:
-    """Detect weight precision from model config.json; returns '' on failure."""
+    """Detect weight precision from model config.json; returns '' when it names none."""
     if not model_path:
         return ""
     from hyperloom.inference_optimizer.model_config_utils import summarize_model_config

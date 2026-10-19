@@ -712,3 +712,7 @@ class OrchestrationRunResult:
             raise ValueError("orchestration optimization_plan_executable must be a boolean")
         if not isinstance(self.plan_revised, bool):
             raise ValueError("orchestration plan_revised must be a boolean")
+
+
+class OrchestrationInfrastructureError(RuntimeError):
+    """Report an orchestration backend outage that produced no model answer."""
