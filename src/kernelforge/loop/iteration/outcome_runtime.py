@@ -243,6 +243,7 @@ class OutcomeMixin:
                         incumbent_case_times=self._scored_incumbent_case_times(),
                     ),
                 )
+                self._record_wiki_outcome(result, decision_label)
             self.state_store.save(self.run_state)
 
             if require_durable:
@@ -302,6 +303,8 @@ class OutcomeMixin:
             best_after_mean_case_speedup=(result.mean_case_speedup if result.kept else self.best_mean_case_speedup),
             is_new_best=result.kept,
             diversification_cycle_completed=(self.run_state.diversification_cycle_completed),
+            # The planning phase of a --wiki-guided campaign and the GUIDED batch the iteration implemented.
+            **(self.wiki_rounds.result_fields() if self.wiki_rounds is not None else {}),
         )
 
     def _record_iteration_handoff(

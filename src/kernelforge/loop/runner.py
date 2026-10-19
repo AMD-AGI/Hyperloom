@@ -23,6 +23,7 @@ from .iteration.outcome_runtime import OutcomeMixin
 from .iteration.round_admission import RoundAdmissionMixin
 from .iteration.scoring_runtime import ScoringMixin
 from .iteration.supervisor_review import SupervisorReviewMixin
+from .iteration.wiki_guidance_hooks import WikiGuidanceMixin
 from .iteration.workspace_git import WorkspaceGitMixin
 from collections.abc import Awaitable, Callable
 from kernelforge.config import Config
@@ -31,6 +32,7 @@ from kernelforge.loop.handoffs import HandoffStore
 from kernelforge.loop.relay_runtime import RelayRuntimeMixin
 from kernelforge.loop.run_state import LoopStateStore
 from kernelforge.loop.search_policy import SearchPolicyDecision, SearchPolicyEngine
+from kernelforge.loop.wiki_guided_rounds import WikiGuidedRounds
 from kernelforge.tracker import Experiment, ExperimentTracker
 from typing import Any
 
@@ -55,6 +57,7 @@ class IterationLoop(
     RoundAdmissionMixin,
     ScoringMixin,
     SupervisorReviewMixin,
+    WikiGuidanceMixin,
     WorkspaceGitMixin,
 ):
     """Autonomous kernel optimization loop."""
@@ -129,6 +132,8 @@ class IterationLoop(
         self.search_policy_engine = SearchPolicyEngine()
         self._search_policy_decision: SearchPolicyDecision | None = None
         self._reported_window_gain_faults: set[str] = set()
+        # Knowledge-base-guided planning; None leaves every planning path as it was.
+        self.wiki_rounds: WikiGuidedRounds | None = self._open_wiki_rounds(resume) if self.ic.wiki_guided else None
         self.handoff_store: HandoffStore | None = None
         # A committed KEEP recovered during synchronous resume preflight waits here until the async run can restore
         # its post-KEEP profile/archive.

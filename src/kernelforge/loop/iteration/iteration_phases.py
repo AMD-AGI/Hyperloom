@@ -104,6 +104,8 @@ class IterationPhasesMixin:
 
         # Durable per-iteration marker (facts only; detail lives in files).
         self.run_state.iteration = iteration
+        if self.wiki_rounds is not None:
+            self.wiki_rounds.start_iteration()
         self.state_store.append_event(
             make_event(
                 "iteration_started",
@@ -303,6 +305,7 @@ class IterationPhasesMixin:
         """
         iteration, session_sink = frame.iteration, frame.session_sink
         optimization_plan_path, optimization_plan_executable = plan.path, plan.executable
+        self._note_batch_report(iteration, session_sink)
         # Either kind of "this candidate exists but must not be measured": protected state was tainted, or the
         # workspace is still busy.
         unmeasured_result: IterationResult | None = None
@@ -515,11 +518,17 @@ class IterationPhasesMixin:
             )
         )
         try:
-            result = await orchestration_service.run(
-                context,
-                usage=self._usage,
-                lanes=lanes,
-            )
+            if self.wiki_rounds is not None:
+                planned = await self.wiki_rounds.plan_round(
+                    iteration, orchestration_service, context, usage=self._usage, lanes=lanes
+                )
+                context, result = planned.context, planned.result
+            else:
+                result = await orchestration_service.run(
+                    context,
+                    usage=self._usage,
+                    lanes=lanes,
+                )
         except OrchestrationInfrastructureError as error:
             detail = f"{type(error).__name__}: {error}"
             print(f"  [orchestration] failed ({detail})")

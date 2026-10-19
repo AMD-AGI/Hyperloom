@@ -12,8 +12,15 @@ import pytest
 
 from kernelforge.agent_backends.base import AgentCapabilities, AgentRunResult
 from kernelforge.config import Config
-from kernelforge.knowledge.wiki_tool import LOG_NAME, SERVER_KEY, KnowledgeWikiTool, require_mcp_backend
+from kernelforge.knowledge.wiki_tool import (
+    LOG_NAME,
+    SERVER_KEY,
+    KnowledgeWikiTool,
+    require_mcp_backend,
+    withdraw_knowledge_wiki,
+)
 from kernelforge.knowledge.wiki_tool import mcp_server as server
+from kernelforge.knowledge.wiki_tool import tool as wiki_tool_module
 from kernelforge.orchestrator import agent as agent_module
 from kernelforge.orchestrator import orchestration as orchestration_module
 from kernelforge.orchestrator.contracts import (
@@ -413,6 +420,23 @@ def test_orchestration_turns_get_the_tools_except_tool_less_formatting_turns(tmp
     assert tool_less.mcp_servers == {} and tool_less.tool_policy.extra_tools == ()
 
 
+def test_a_withdrawn_knowledge_base_is_offered_to_no_later_session(tmp_path, wiki, log, monkeypatch):
+    monkeypatch.setattr(wiki_tool_module, "_WITHDRAWN", set())
+    agent = OrchestrationAgent(
+        backend=_RecordingBackend(),
+        timeout_sec=60,
+        max_turns=5,
+        knowledge_wiki=KnowledgeWikiTool(root=wiki, log_path=log),
+    )
+    turn = orchestration_module._Turn(system_prompt="s", user_prompt="u", role="orchestration dispatch")
+
+    # Withdrawn through another instance over the same checkout, as the loop does.
+    withdraw_knowledge_wiki(KnowledgeWikiTool(root=wiki, log_path=log))
+    spec = agent._run_spec(_context(tmp_path), turn, timeout_sec=60)
+
+    assert spec.mcp_servers == {} and spec.tool_policy.extra_tools == ()
+
+
 async def test_the_plan_critic_review_gets_the_tools(tmp_path, wiki, log):
     tool = KnowledgeWikiTool(root=wiki, log_path=log)
     backend = _RecordingBackend("VERDICT: ACCEPT\n\nThe plan is evidence-grounded.")
@@ -572,6 +596,8 @@ def test_the_planning_factory_hands_every_role_the_same_knowledge_base(wiki, log
     expected = KnowledgeWikiTool(root=wiki, log_path=log)
     assert service._agent.knowledge_wiki == expected
     assert service._plan_critic.knowledge_wiki == expected
-    assert [agent.knowledge_wiki for agent in service._specialist_pool._agents.values()] == [expected] * len(
-        service._definitions
-    )
+    agents = service._specialist_pool._agents
+    assert [agent.knowledge_wiki for agent in agents.values()] == [expected] * len(agents)
+    # The pool also holds the playbook group analyst for GUIDED rounds, which the dispatch planner is never offered.
+    assert set(agents) == set(service._definitions) | {orchestration_module.PLAYBOOK_GROUP_ROLE}
+    assert orchestration_module.PLAYBOOK_GROUP_ROLE not in service._definitions

@@ -131,6 +131,10 @@ class IterationConfig:
     # Mean per-case speedup over the baseline (the KEEP objective) at which the campaign stops, however much budget
     # remains. Zero disables the gate, which is the default.
     target_mean_case_speedup: float = 0.0
+    # Plan each round as one knowledge base batch (``loop.wiki_guidance``) until the knowledge base and the evidence
+    # support nothing more or a batch brings too little; then plan freely. Needs the knowledge base
+    # (``Config.knowledge_wiki_root``) and is off by default.
+    wiki_guided: bool = False
 
     def __post_init__(self) -> None:
         # Validated here rather than at the CLI boundary alone, so a pattern can never reach the commit/delete sites

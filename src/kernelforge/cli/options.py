@@ -119,6 +119,20 @@ def _validate_roofline_target(target: float, ceiling_enabled: bool) -> float:
     return value
 
 
+def _validate_wiki_guided(enabled: bool, knowledge_wiki_root: str) -> bool:
+    """Check guided planning has a knowledge base to build its batch from.
+
+    Without a knowledge base there is nothing to build a batch from, so the flag would plan exactly as without it
+    while the operator believes otherwise; it is refused rather than run.
+    """
+    if enabled and not str(knowledge_wiki_root or "").strip():
+        raise click.BadParameter(
+            "--wiki-guided needs a knowledge base to build its batch from; set FORGE_KNOWLEDGE_WIKI_ROOT",
+            param_hint="--wiki-guided",
+        )
+    return bool(enabled)
+
+
 _SPEEDUP_TARGET_OPTION = "--target-mean-case-speedup"
 
 

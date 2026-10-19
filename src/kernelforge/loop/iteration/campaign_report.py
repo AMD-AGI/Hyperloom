@@ -261,6 +261,7 @@ class CampaignReportMixin:
                 f"Mode residence remaining after this iteration: {policy.residence_iterations_remaining}"
             )
             history = "\n".join(policy_lines) + "\n\n" + history
+        history = self._with_guidance_note(history)
         # The latest free-form Supervisor Ruling is durable across KEEP and resume.
         if self._supervisor_ruling:
             history = (

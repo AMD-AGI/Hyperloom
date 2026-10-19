@@ -713,6 +713,9 @@ class SpecialistPool:
         self._agents = dict(agents)
         self._max_parallel = max_parallel
 
+    def has_role(self, role_id: str) -> bool:
+        return role_id in self._agents
+
     async def run(
         self,
         assignments: Sequence[SpecialistAssignment],

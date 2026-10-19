@@ -348,6 +348,8 @@ class ResumeRecoveryMixin:
                     checkpoint_metadata=pending,
                 )
             )
+            if self.wiki_rounds is not None:
+                self.wiki_rounds.recover_keep(result.iteration)
         self.state_store.save(self.run_state)
         persisted = self.state_store.load()
         if persisted.to_dict() != self.run_state.to_dict():
