@@ -24,7 +24,7 @@ from ..kernel.geak_config import (
     _normalize_geak_overlay_dir,
     geak_overlay_is_loadable,
 )
-from ._geak_revalidation import _GeakRebench, _ReplayRuling
+from ._geak_revalidation import FALLBACK, VALIDATED, _GeakRebench, _ReplayRuling
 
 if TYPE_CHECKING:
     from ..state.task_registry import Task
@@ -298,7 +298,7 @@ class GeakHarnessReplay(CoordinatorCollaborator):
         """
         measured, got_hash = rebench.measured, rebench.got_hash
         promoted = False
-        decision = "fallback"
+        decision = FALLBACK
         log.warning(
             "geak 2b revalidation inconclusive (measured=%r got_hash=%r expected=%r) -> GEAK-harness 2a fallback",
             measured,
@@ -340,5 +340,5 @@ class GeakHarnessReplay(CoordinatorCollaborator):
             result["status"] = refusal if refusal in {INCOMPARABLE_REVALIDATION, "no_promote"} else "failed"
         else:
             promoted = True
-            decision = "validated"
+            decision = VALIDATED
         return _ReplayRuling(decision=decision, promoted=promoted)

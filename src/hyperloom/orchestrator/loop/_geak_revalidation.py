@@ -94,6 +94,12 @@ class _MaterialVerdict(NamedTuple):
     rejection: str | None = None
 
 
+#: The 2b rebench ruled the stack validated: its config identity held and the optimization engaged.
+VALIDATED = "validated"
+#: The 2b rebench could not rule, so the round replays through GEAK's own harness (2a).
+FALLBACK = "fallback"
+
+
 class _RebenchEngagement(NamedTuple):
     """What a settled 2b rebench reported about the config and overlay it was dispatched with.
 
@@ -343,14 +349,14 @@ class GeakRevalidation(CoordinatorCollaborator):
         got_digest, decision = overlay.digest, overlay.decision
         if native_rejection:
             decision = "no_promote"
-        if decision == "validated":
+        if decision == VALIDATED:
             verdict = self._material_verdict(rebench)
             decision = verdict.decision
             if verdict.rejection is not None:
                 native_rejection = verdict.rejection
 
         pending_status = self._geak_candidate_slot_status()
-        if decision == "validated":
+        if decision == VALIDATED:
             # Only an overlay that was dispatched AND still matches its
             # manifest proves a kernel was in the measurement.
             promoted = self._promote_validated_rebench(
@@ -364,7 +370,7 @@ class GeakRevalidation(CoordinatorCollaborator):
             await self._refuse_rebench(
                 result, task=task, rebench=rebench, decision=decision, native_rejection=native_rejection
             )
-        elif decision == "fallback":
+        elif decision == FALLBACK:
             replay = await self._replay_via_geak_harness(result, task=task, rebench=rebench)
             decision, promoted = replay.decision, replay.promoted
         expected_hash = str((task.params or {}).get("expected_cfg_hash") or "")
@@ -454,7 +460,7 @@ class GeakRevalidation(CoordinatorCollaborator):
             expected_digest = str((task.params or {}).get("expected_overlay_digest") or "")
             got_digest = _geak_overlay_digest(expected_overlay)
             overlay_loaded = geak_overlay_is_loadable(expected_overlay) and (got_digest == expected_digest)
-            if not overlay_loaded and decision == "validated":
+            if not overlay_loaded and decision == VALIDATED:
                 log.warning(
                     "geak 2b: overlay %r did not survive the run "
                     "(loadable=%r digest expected=%r got=%r) -> 2a fallback",
@@ -463,7 +469,7 @@ class GeakRevalidation(CoordinatorCollaborator):
                     expected_digest,
                     got_digest,
                 )
-                decision = "fallback"
+                decision = FALLBACK
         return _OverlayReading(expected=expected_overlay, loaded=overlay_loaded, digest=got_digest, decision=decision)
 
     def _geak_rebench_decision(
@@ -492,7 +498,7 @@ class GeakRevalidation(CoordinatorCollaborator):
             current_best=current_grade.reference,
         )
         if not _grades_can_rule(result, measured, baseline_grade, current_grade):
-            decision = "fallback"
+            decision = FALLBACK
         elif (not expected_hash or got_hash == expected_hash) and any(
             grade.graded_on_intvty and grade.verdict != "KEEP" for grade in (baseline_grade, current_grade)
         ):
@@ -672,7 +678,7 @@ class GeakRevalidation(CoordinatorCollaborator):
             else:
                 if not has_material:
                     return _MaterialVerdict(decision="no_material")
-        return _MaterialVerdict(decision="validated")
+        return _MaterialVerdict(decision=VALIDATED)
 
     def _record_geak_rebench_timeline(
         self,
