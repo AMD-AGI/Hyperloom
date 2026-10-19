@@ -177,7 +177,7 @@ this reference is partial — `breakdown/exporter.py` is authoritative.
   reshaped, and the `optimization_stack`, `attribution`, `geak_invocations`,
   `forge_invocations`, and `gemm_tuning` projections are gone. Consumers
   MUST match on the `vN` major prefix, never on exact-string equality, and
-  archived V2/V3/V4/V5 documents need a migration before a V6 reader sees them.
+  archived V2/V3/V4/V5/V6 documents need a migration before a V7 reader sees them.
 - `optimizations` carries its own `schema_version` (currently `5`),
   independent of the envelope's.
 - Adding optional fields is **never** a breaking change.

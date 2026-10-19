@@ -10,11 +10,8 @@ from typing import Any, Literal, TypedDict
 from ..session.sbd_v6 import SCHEMA_VERSION_V6
 
 
-#: Current breakdown schema version. V6 stamps the document once the timeline
-#: is recorded by the actions themselves rather than projected out of their
-#: artefacts afterwards, which is what makes an event's start time its real one.
-#: ``enablement`` gained its ledger-sourced round fields inside this version:
-#: they add a section to the block rather than reshape the document.
+#: Current breakdown schema version (v7.0). ``enablement`` carries its
+#: ledger-sourced round fields inside this version without reshaping the document.
 SCHEMA_VERSION = SCHEMA_VERSION_V6
 
 
