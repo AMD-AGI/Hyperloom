@@ -35,6 +35,7 @@ from hyperloom_multibranch.contracts.toolbox import (
     NodeHealth,
     QueueState,
     RequestRejected,
+    TestProgress,
     TestRecordSink,
     TestWithdrawn,
     UnknownTestRequest,
@@ -52,7 +53,7 @@ from hyperloom_multibranch.toolbox.acceptance import Acceptance, MeasurementPlan
 from hyperloom_multibranch.toolbox.attachments import store_attachment
 from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES, AttemptRunner, Executor, TestJob
 from hyperloom_multibranch.toolbox.quarantine import Quarantine
-from hyperloom_multibranch.toolbox.queue import QueuedTest, QueuePolicy, WorkQueue, sandbox_priority
+from hyperloom_multibranch.toolbox.queue import QueuedTest, QueuePolicy, State, WorkQueue, sandbox_priority
 from hyperloom_multibranch.toolbox.submission_log import LogEntry, SubmissionLog
 from hyperloom_multibranch.toolbox.tools import JobStatus, ToolJobs, ToolRequest
 
@@ -214,6 +215,16 @@ class RealToolbox:
     async def queue_state(self) -> QueueState:
         return self._queue.state()
 
+    async def progress(self, request_id: str) -> TestProgress | None:
+        item = self._queue.get(request_id)
+        if item is None:
+            return None
+        if item.state is State.QUEUED:
+            return TestProgress("queued", queued_ahead=self._queue.queued_ahead(request_id))
+        running = None if item.started_at is None else max(0.0, self._clock() - item.started_at)
+        ago, line = await self._last_output(request_id) or (None, None)
+        return TestProgress("running", running_seconds=running, last_output_seconds_ago=ago, last_line=line)
+
     async def measurement_capacity(self) -> MeasurementCapacity:
         """The cards this toolbox can measure on; a toolbox with no card pool of its own reports it as unknown."""
 
@@ -372,6 +383,12 @@ class RealToolbox:
     async def _housekeeping(self) -> None:
         """What a backend reports on its own once a test has settled and on every tick; nothing here by default."""
 
+    async def _last_output(self, request_id: str) -> tuple[float, str] | None:
+        """``(seconds since, last line)`` of the newest log a running test wrote, where a backend can read its live
+        files; ``None`` here by default."""
+
+        return None
+
     async def renew_claims(self) -> None:
         if self._claims is None:
             return
@@ -436,6 +453,7 @@ class RealToolbox:
         if self._closed:
             return
         while (item := self._queue.take()) is not None:
+            item.started_at = self._clock()
             self._tasks[item.request_id] = asyncio.create_task(self._run(item))
 
     async def _run(self, item: QueuedTest) -> None:

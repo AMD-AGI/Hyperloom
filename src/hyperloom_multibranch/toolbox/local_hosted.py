@@ -11,14 +11,19 @@ that sandbox. At most ``8 / TP`` tests run at once on one node.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import os
+import re
 import sys
+import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 from hyperloom.measure.archive import DirResultArchive, ResultArchive
-from hyperloom.measure.hosted import HostedConfig, HostedMeasurementBackend
+from hyperloom.measure.hosted import FILES_ROOT, HostedConfig, HostedMeasurementBackend
+from hyperloom.measure.hosted_log import STATE_FINISHED
 from hyperloom.measure.hosted_spec import SpecContext
 from hyperloom.measure.local import SUPPORTED_KINDS
 from hyperloom.measure.local_templates import local_runner_template
@@ -32,7 +37,14 @@ from hyperloom_multibranch.toolbox.submission_log import SubmissionLog
 from hyperloom_multibranch.toolbox.tools import AsyncTool, ToolJobs, tracelens_tool
 from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup, RealToolbox, ToolboxStores, ToolboxTuning
 
-__all__ = ["LocalHostedToolbox", "LocalOptions", "LocalSession", "MAX_CARDS_PER_NODE", "build_local_toolbox"]
+__all__ = [
+    "LocalHostedToolbox",
+    "LocalOptions",
+    "LocalSession",
+    "MAX_CARDS_PER_NODE",
+    "build_local_toolbox",
+    "last_output",
+]
 
 #: One node serves at most eight cards, so at most ``8 / TP`` tests run at once (handover 5, item 7).
 MAX_CARDS_PER_NODE = 8
@@ -40,14 +52,26 @@ _SANDBOXES, _ARCHIVE, _SUBMISSIONS = "sandboxes", "archive", "toolbox/submission
 _TOOL_RESULTS = "tool-results"
 _POLL_INTERVAL_SEC = 2.0
 LEAKED_CARDS_REASON = "sandbox processes not provably gone"
+#: The logs of a running test that show whether it still makes progress; the one written last is reported.
+_LIVE_LOGS = frozenset({"server.log", "benchmark_stderr.log", "benchmark_stdout.log"})
+#: A running test's files below its sandbox's directory: a local sandbox's root is its ``fs`` directory.
+_LIVE_FILES = Path("fs") / FILES_ROOT.lstrip("/")
+_TAIL_BYTES = 64 * 1024
+_LINE_CHARS = 300
+_ESCAPES = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]+")
 logger = logging.getLogger(__name__)
 
 
 class LocalHostedToolbox(RealToolbox):
-    """A :class:`RealToolbox` that also owns its hosted backend and local sandbox provider; ``close`` releases them."""
+    """A :class:`RealToolbox` that also owns its hosted backend and local sandbox provider; ``close`` releases them.
+
+    ``sandboxes`` is the provider's directory, where a running test's live files are read for :meth:`progress`.
+    """
 
     backend: HostedMeasurementBackend
     provider: LocalSandboxProvider
+    sandboxes: Path
     _reported_cards: frozenset[int] = frozenset()
 
     async def measurement_capacity(self) -> MeasurementCapacity:
@@ -107,6 +131,48 @@ class LocalHostedToolbox(RealToolbox):
         await asyncio.to_thread(self.backend.close)
         await asyncio.to_thread(self.provider.close)
         await self._housekeeping()  # a sandbox that could not be reaped at shutdown has leaked its cards too
+
+    async def _last_output(self, request_id: str) -> tuple[float, str] | None:
+        """The newest live log in the sandbox the backend's journal names for the test's unfinished attempt."""
+
+        return await asyncio.to_thread(self._live_log, request_id)
+
+    def _live_log(self, request_id: str) -> tuple[float, str] | None:
+        record = self.backend.journal.latest(request_id)
+        if record is None or record.state == STATE_FINISHED or not record.sandbox_id:
+            return None
+        return last_output(self.sandboxes / record.sandbox_id / _LIVE_FILES, time.time())
+
+
+def last_output(directory: Path, now: float) -> tuple[float, str] | None:
+    """``(seconds since it was written, its last non-empty line)`` of the live log below ``directory`` written last.
+
+    ``None`` when there is none or it cannot be read. The line has terminal escapes and control characters removed and
+    keeps its last ``_LINE_CHARS`` characters, where a progress line has its newest figures.
+    """
+    found = []
+    for root, _, names in os.walk(directory):  # a directory that goes away during the walk is skipped, not raised
+        for path in (Path(root) / name for name in _LIVE_LOGS.intersection(names)):
+            with contextlib.suppress(OSError):
+                found.append((path.stat().st_mtime, path))
+    if not found:
+        return None
+    written, newest = max(found)
+    try:
+        with newest.open("rb") as handle:
+            handle.seek(max(0, handle.seek(0, os.SEEK_END) - _TAIL_BYTES))
+            tail = handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    return max(0.0, now - written), _last_line(tail)
+
+
+def _last_line(text: str) -> str:
+    for line in reversed(_ESCAPES.sub("", text).splitlines()):
+        cleaned = _CONTROL_CHARS.sub(" ", line).strip()
+        if cleaned:
+            return cleaned[-_LINE_CHARS:]
+    return ""
 
 
 def max_parallel_tests(cards: int, tp: int) -> int:
@@ -248,5 +314,6 @@ def build_local_toolbox(
         tuning=ToolboxTuning(policy=_capped(options.policy, parallel), max_infra_retries=options.max_infra_retries),
     )
     toolbox.backend, toolbox.provider, toolbox.trace_root = backend, provider, directory
+    toolbox.sandboxes = directory / _SANDBOXES
     toolbox.blobs = spec.blobs
     return toolbox

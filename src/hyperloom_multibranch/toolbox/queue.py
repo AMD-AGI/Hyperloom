@@ -125,7 +125,10 @@ class State(str, Enum):
 
 @dataclass
 class QueuedTest:
-    """One accepted test; ``seq`` is the queue's arrival order and breaks ties inside a priority."""
+    """One accepted test; ``seq`` is the queue's arrival order and breaks ties inside a priority.
+
+    ``started_at`` is when the toolbox took it from the queue to run, ``None`` while it waits.
+    """
 
     request: TestRequest
     priority: int
@@ -133,6 +136,7 @@ class QueuedTest:
     environment: object = None
     queued_at: float = 0.0
     state: State = State.QUEUED
+    started_at: float | None = None
 
     @property
     def request_id(self) -> str:
@@ -211,6 +215,16 @@ class WorkQueue:
         best = min(ready, key=lambda item: (item.priority, item.seq))
         best.state = State.RUNNING
         return best
+
+    def queued_ahead(self, request_id: str) -> int:
+        """How many waiting tests ``take`` prefers to ``request_id`` by priority and arrival, whatever their K."""
+
+        item = self._items[request_id]
+        return sum(
+            1
+            for other in self._items.values()
+            if other.state is State.QUEUED and (other.priority, other.seq) < (item.priority, item.seq)
+        )
 
     def remove(self, request_id: str) -> QueuedTest | None:
         return self._items.pop(request_id, None)

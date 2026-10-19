@@ -27,16 +27,19 @@ from hyperloom_multibranch.contracts.toolbox import (
     CancelOutcome,
     QueueState,
     RequestRejected,
+    TestProgress,
 )
 from hyperloom_multibranch.notebook import LocalNotebook
-from hyperloom_multibranch.notebook.tests.factories import FakeClock
-from hyperloom_multibranch.notebook.tests.sessions import scripted_session
+from hyperloom_multibranch.notebook.tests.factories import TTL, FakeClock, delta, intent, request, result
+from hyperloom_multibranch.notebook.tests.sessions import Writers, scripted_session
 from hyperloom_multibranch.toolbox.mcp_tools import (
     SPECIALIST_TOKEN_ENV,
+    WAIT_TEST_MAX_SECONDS,
     McpSpecialistTokens,
     jsonable,
     SpecialistToolOptions,
     register_specialist_tools,
+    wait_budget,
 )
 
 HOST_TOKEN = "host-token-0123456789abcdef"
@@ -48,6 +51,7 @@ class FakeToolbox:
         self.submitted: list[TestRequest] = []
         self.cancelled: list[str] = []
         self.refuse: Exception | None = None
+        self.progress_of: dict[str, TestProgress] = {}
 
     async def submit_test(self, request: TestRequest) -> str:
         if self.refuse is not None:
@@ -61,6 +65,9 @@ class FakeToolbox:
 
     async def queue_state(self) -> QueueState:
         return QueueState(queued_by_priority={0: 1, 1: 2, 2: 0, 3: 0, 4: 0}, running_by_branch={"s1": 1})
+
+    async def progress(self, request_id: str) -> TestProgress | None:
+        return self.progress_of.get(request_id)
 
 
 class Rig:
@@ -165,7 +172,7 @@ def test_a_specialist_sees_exactly_the_specialist_tools(rig: Rig) -> None:
     _, reply = rig.post(rig.token("s1"), message)
     names = sorted(tool["name"] for tool in reply["result"]["tools"])
     assert names == sorted(
-        ["submit_test", "test_result", "cancel_test", "queue_state", "poll_inbox", "start_analysis"]
+        ["submit_test", "test_result", "wait_test", "cancel_test", "queue_state", "poll_inbox", "start_analysis"]
         + [f"notebook_{name}" for name in ("lookup", "claim", "release", "search", "record", "branch_log")]
         + ["notebook_append_branch_log", "notebook_learn", "notebook_learnings", "notebook_brief", "notebook_replay"]
     )
@@ -230,6 +237,86 @@ def test_test_result_of_another_branch_is_forbidden(rig: Rig) -> None:
 
 def test_test_result_of_an_unknown_request_is_an_error_result(rig: Rig) -> None:
     assert "UnknownRequest" in rig.failed(rig.token("s1"), "test_result", request_id="nope")
+
+
+PAGED_KV = intent("s1", "c1", "attention", "paged kv")
+
+
+@pytest.fixture
+async def waiting(seeded: tuple[Path, FakeClock]) -> Writers:
+    """The scripted session plus ``r9``, a test of ``s1`` that is accepted and not over."""
+    w = Writers(*seeded)
+    change = delta("--block-size 16")
+    claim = await w.as_role(Role.SPECIALIST_RUNTIME, "s1").acquire(PAGED_KV, change.fingerprint(), ttl_seconds=TTL)
+    toolbox = w.as_role(Role.TOOLBOX)
+    await toolbox.write_request(request("r9", PAGED_KV, change))
+    await toolbox.attach_request(claim.key, "r9", ttl_seconds=TTL)
+    return w
+
+
+@pytest.fixture
+def wait_rig(seeded: tuple[Path, FakeClock], waiting: Writers) -> Iterator[Rig]:
+    yield from _running(seeded, SpecialistToolOptions(claim_ttl_seconds=60.0, wait_poll_seconds=0.05))
+
+
+def _wait(rig: Rig, branch: str = "s1", **arguments: Any) -> dict[str, Any]:
+    return json.loads(rig.ok(rig.token(branch), "wait_test", **arguments))
+
+
+def test_wait_test_answers_a_measured_test_at_once_as_test_result_does(rig: Rig) -> None:
+    started = time.monotonic()
+    body = _wait(rig, request_id="r1")
+    assert time.monotonic() - started < 5
+    assert body["state"] == "measured" and body == json.loads(rig.ok(rig.token("s1"), "test_result", request_id="r1"))
+
+
+async def test_wait_test_returns_as_soon_as_the_result_lands(wait_rig: Rig, waiting: Writers) -> None:
+    call = asyncio.create_task(asyncio.to_thread(_wait, wait_rig, request_id="r9", wait_seconds=60))
+    await asyncio.sleep(0.3)
+    await waiting.as_role(Role.TOOLBOX).write_result(result("r9"))
+    body = await asyncio.wait_for(call, 10)
+    assert body["state"] == "measured" and body["result"]["request_id"] == "r9"
+
+
+def test_wait_test_reports_how_many_tests_are_queued_ahead_of_a_waiting_one(wait_rig: Rig) -> None:
+    wait_rig.toolbox.progress_of["r9"] = TestProgress("queued", queued_ahead=2)
+    started = time.monotonic()
+    body = _wait(wait_rig, request_id="r9", wait_seconds=1)
+    assert time.monotonic() - started >= 1
+    assert body == {"request_id": "r9", "state": "queued", "waited_seconds": 1, "progress": {"queued_ahead": 2}}
+
+
+def test_wait_test_reports_how_long_a_running_test_ran_and_what_it_wrote_last(wait_rig: Rig) -> None:
+    progress = TestProgress("running", running_seconds=125.4, last_output_seconds_ago=3.2, last_line="decode batch 8")
+    wait_rig.toolbox.progress_of["r9"] = progress
+    body = _wait(wait_rig, request_id="r9", wait_seconds=1)
+    assert (body["state"], body["waited_seconds"]) == ("running", 1)
+    assert body["progress"] == {"running_seconds": 125, "last_output_seconds_ago": 3, "last_line": "decode batch 8"}
+
+
+def test_wait_test_of_a_test_the_toolbox_no_longer_holds_is_in_flight_with_no_progress(wait_rig: Rig) -> None:
+    assert _wait(wait_rig, request_id="r9", wait_seconds=1) == {
+        "request_id": "r9",
+        "state": "in_flight",
+        "waited_seconds": 1,
+    }
+
+
+def test_wait_test_of_another_branch_is_forbidden_as_test_result_is(wait_rig: Rig) -> None:
+    for branch, request_id in (("s2", "r9"), ("s1", "r2")):
+        _, reply = wait_rig.call(wait_rig.token(branch), "wait_test", request_id=request_id)
+        assert reply["error"] == {"code": -32001, "message": "a specialist reads the tests of its own branch only"}
+
+
+@pytest.mark.parametrize(
+    ("requested", "expected"), [(None, 240), (-5, 1), (0, 1), (1, 1), (90, 90), (240, 240), (10_000, 240)]
+)
+def test_wait_seconds_is_held_to_one_to_240(requested: int | None, expected: int) -> None:
+    assert WAIT_TEST_MAX_SECONDS == 240 and wait_budget(requested) == expected
+
+
+def test_a_wait_of_zero_seconds_waits_one(wait_rig: Rig) -> None:
+    assert _wait(wait_rig, request_id="r9", wait_seconds=0)["waited_seconds"] == 1
 
 
 def test_cancel_test_only_for_the_own_branch(rig: Rig) -> None:

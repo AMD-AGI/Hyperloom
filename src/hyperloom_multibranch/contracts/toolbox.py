@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The toolbox as the other multi-branch modules call it: submit a test, cancel it, read the queue.
+"""The toolbox as the other multi-branch modules call it: submit a test, cancel it, read the queue and its progress.
 
 A module hands the toolbox a :class:`~hyperloom.contracts.measurement.TestRequest` and gets the ``request_id`` back
 once the toolbox accepted it. Acceptance is the toolbox's checks of design section 4.17 (the request validates, the
@@ -127,6 +127,25 @@ _PRIORITIES = range(PRIORITY_HIGHEST, PRIORITY_LOWEST + 1)
 
 
 @dataclass(frozen=True)
+class TestProgress:
+    """How far a test that has not finished has got, as the toolbox knows it; a field it cannot tell is ``None``.
+
+    A ``queued`` test has ``queued_ahead``, the waiting tests the queue prefers to it by priority and arrival (a test of
+    a branch at its K is counted, though it may not start first). A ``running`` test has ``running_seconds`` since it
+    left the queue and, when its live output can be read, ``last_output_seconds_ago`` (since its newest server or
+    benchmark log was written) and ``last_line`` (that log's last non-empty line, cleaned and shortened).
+    """
+
+    __test__ = False
+
+    state: Literal["queued", "running"]
+    queued_ahead: int | None = None
+    running_seconds: float | None = None
+    last_output_seconds_ago: float | None = None
+    last_line: str | None = None
+
+
+@dataclass(frozen=True)
 class MeasurementCapacity:
     """How many cards the toolbox can still measure on: what the scheduler checks ``usable_cards < workload.tp`` against.
 
@@ -164,7 +183,7 @@ class SpecialistGrant:
     token_env: str
     token: str = field(repr=False)
     #: Hands over a ``beat()`` the service calls every minute or so while a call of this token is in progress.
-    heartbeat_sink: Callable[[Callable[[], None]], None] = field(default=lambda beat: None, repr=False, compare=False)
+    heartbeat_sink: Callable[[Callable[[], None]], None] = field(default=lambda _beat: None, repr=False, compare=False)
 
 
 class SpecialistTokens(Protocol):
@@ -200,6 +219,9 @@ class Toolbox(Protocol):
 
     async def queue_state(self) -> QueueState: ...
 
+    async def progress(self, request_id: str) -> TestProgress | None:
+        """How far a queued or running test has got; ``None`` when the toolbox is not queueing or running it."""
+
     async def measurement_capacity(self) -> MeasurementCapacity:
         """The cards this toolbox can still measure on; read-only, see :class:`MeasurementCapacity`."""
 
@@ -224,6 +246,7 @@ __all__ = [
     "RequestRejected",
     "SpecialistGrant",
     "SpecialistTokens",
+    "TestProgress",
     "TestRecordSink",
     "TestWithdrawn",
     "Toolbox",

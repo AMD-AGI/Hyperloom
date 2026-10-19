@@ -7,12 +7,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from hyperloom.contracts.measurement import FailureClass, TestResult, Validity
+from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT, MeasurementJournal, Record
 from hyperloom.measure.runner.tools import ToolError, ensure_inferencex
 from hyperloom.measure.tests.hosted_fixtures import spec_context
 from hyperloom.measure.tests.test_hosted_real_runner import _git_repo, _point
@@ -24,6 +28,7 @@ from hyperloom_multibranch.toolbox.local_hosted import (
     LocalOptions,
     LocalSession,
     build_local_toolbox,
+    last_output,
     max_parallel_tests,
 )
 from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
@@ -40,6 +45,39 @@ def test_at_most_eight_over_tp_tests_run_at_once(cards: int, tp: int, expected: 
 def test_a_test_that_needs_more_cards_than_the_pool_is_refused() -> None:
     with pytest.raises(ValueError, match="cannot run a test of TP=4"):
         max_parallel_tests(2, 4)
+
+
+def _write(path: Path, text: str, written: float) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    os.utime(path, (written, written))
+
+
+def test_the_live_output_is_the_last_line_of_the_live_log_written_last(tmp_path: Path) -> None:
+    variant = tmp_path / "variant_00_test"
+    _write(variant / "warmup_round" / "benchmark_sglang_1" / "server.log", "boot\nready\n", 1000.0)
+    _write(variant / "benchmark_sglang_1" / "benchmark_stderr.log", "\x1b[32mINFO\x1b[0m\t42/100\r\x07\n\n", 1100.0)
+    _write(variant / "notes.log", "written last, but no live log\n", 1200.0)
+    assert last_output(tmp_path, 1130.0) == (30.0, "INFO 42/100")
+    _write(variant / "benchmark_sglang_1" / "benchmark_stdout.log", "x" * 1000 + "END\n", 1300.0)
+    seconds, line = last_output(tmp_path, 1300.0) or (None, "")
+    assert seconds == 0.0 and len(line) == 300 and line.endswith("END")
+    assert last_output(tmp_path / "missing", 1300.0) is None
+
+
+def test_the_live_output_is_read_from_the_sandbox_of_the_unfinished_attempt(tmp_path: Path) -> None:
+    toolbox = LocalHostedToolbox.__new__(LocalHostedToolbox)
+    journal = MeasurementJournal(tmp_path / "hosted")
+    toolbox.backend, toolbox.sandboxes = SimpleNamespace(journal=journal), tmp_path / "sandboxes"  # type: ignore[assignment]
+    _write(
+        tmp_path / "sandboxes" / "lsb-1" / "fs" / "out" / "files" / "v" / "server.log", "decode batch\n", time.time()
+    )
+    assert toolbox._live_log("r1") is None
+    journal.append(Record("r1", 1, STATE_SENT, "lsb-1", "tests/r1/attempt-1", "r1", {}))
+    output = toolbox._live_log("r1")
+    assert output is not None and output[1] == "decode batch" and 0.0 <= output[0] < 60.0
+    journal.append(Record("r1", 1, STATE_FINISHED, "lsb-1", "tests/r1/attempt-1", "r1", {}))
+    assert toolbox._live_log("r1") is None
 
 
 def _require_tool_checkout(repo: Path, commit: str, home: Path, monkeypatch: pytest.MonkeyPatch) -> None:

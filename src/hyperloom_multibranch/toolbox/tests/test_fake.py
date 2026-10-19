@@ -26,6 +26,7 @@ from hyperloom_multibranch.contracts.toolbox import (
     Backpressure,
     CancelOutcome,
     RequestRejected,
+    TestProgress,
     Toolbox,
     UnknownTestRequest,
 )
@@ -162,6 +163,18 @@ async def test_default_priority_follows_the_purpose_and_queue_state_shows_it() -
     assert dict(state.queued_by_branch) == {"b1": 3}
     assert state.running == 1
     await box.drain()
+
+
+async def test_progress_counts_the_tests_queued_ahead_and_times_the_running_one() -> None:
+    box = _toolbox(max_parallel_tests=1, default_k=9)
+    running = await box.submit_test(_request(priority=2))  # starts at once, held by the gate
+    later = await box.submit_test(_request(priority=4))
+    sooner = await box.submit_test(_request(priority=1))
+    assert await box.progress(running) == TestProgress("running", running_seconds=0.0)
+    assert await box.progress(sooner) == TestProgress("queued", queued_ahead=0)
+    assert await box.progress(later) == TestProgress("queued", queued_ahead=1)
+    await box.drain()
+    assert [await box.progress(request_id) for request_id in (running, later, sooner)] == [None, None, None]
 
 
 def _attach():

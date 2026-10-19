@@ -9,6 +9,8 @@ from the arguments, so a specialist submits, cancels, claims, logs and reads its
 only; the notebook's search and record reads are shared across branches, as the notebook contract has them:
 
 * ``submit_test``, ``test_result``, ``cancel_test`` and ``queue_state`` go through the toolbox interface;
+* ``wait_test`` blocks on one test of the branch until its record says it is over or the wait runs out, and then
+  reports how far it has got (the toolbox's ``progress``);
 * ``start_analysis`` starts ``tracelens`` or ``roofline`` on the branch's head commit (an
   :class:`~.analysis.AnalysisStarter`, the real toolbox);
 * ``poll_inbox`` reads the branch's inbox;
@@ -24,6 +26,7 @@ import dataclasses
 import enum
 import functools
 import threading
+import time
 from collections.abc import Awaitable, Callable, Mapping
 from typing import TYPE_CHECKING, Any, cast
 
@@ -42,6 +45,7 @@ from hyperloom_multibranch.contracts.toolbox import (
     SpecialistGrant,
     Backpressure,
     RequestRejected,
+    TestProgress,
     Toolbox,
     ToolboxError,
 )
@@ -63,6 +67,22 @@ _NO_ARGUMENTS: dict[str, Any] = {"type": _OBJECT, "properties": {}, "additionalP
 _REQUEST_ID: dict[str, Any] = {
     "type": _OBJECT,
     "properties": {"request_id": {"type": _STRING, "minLength": 1}},
+    "required": ["request_id"],
+    "additionalProperties": False,
+}
+#: The longest one ``wait_test`` call blocks; a specialist waits longer by calling it again.
+WAIT_TEST_MAX_SECONDS = 240
+#: How often ``wait_test`` reads the test's record while it waits.
+WAIT_POLL_SECONDS = 5.0
+_WAIT_TEST: dict[str, Any] = {
+    "type": _OBJECT,
+    "properties": {
+        "request_id": {"type": _STRING, "minLength": 1},
+        "wait_seconds": {
+            "type": _INTEGER,
+            "description": f"Seconds to wait at most, held to 1..{WAIT_TEST_MAX_SECONDS}; the most when omitted.",
+        },
+    },
     "required": ["request_id"],
     "additionalProperties": False,
 }
@@ -226,21 +246,75 @@ def _start_analysis(
     return handle
 
 
+def _result_document(request_id: str, record: Any) -> dict[str, Any]:
+    """What ``test_result`` answers for the notebook's ``record`` of ``request_id``."""
+    if record.withdrawn_at is not None:
+        state = "withdrawn"
+    else:
+        state = "in_flight" if record.result is None else "measured"
+    return {
+        "request_id": request_id,
+        "state": state,
+        "withdrawal_reason": record.withdrawal_reason,
+        "result": jsonable(record.result),
+        "judgement": jsonable(record.judgement),
+        "conclusion": jsonable(record.conclusion),
+    }
+
+
 def _test_result(notebooks: NotebookFor) -> Callable[[dict[str, Any], CallContext], Any]:
     async def handle(arguments: dict[str, Any], ctx: CallContext) -> dict[str, Any]:
-        record = await _own_record(notebooks, ctx, arguments["request_id"])
-        if record.withdrawn_at is not None:
-            state = "withdrawn"
-        else:
-            state = "in_flight" if record.result is None else "measured"
-        return {
-            "request_id": arguments["request_id"],
-            "state": state,
-            "withdrawal_reason": record.withdrawal_reason,
-            "result": jsonable(record.result),
-            "judgement": jsonable(record.judgement),
-            "conclusion": jsonable(record.conclusion),
+        request_id = arguments["request_id"]
+        return _result_document(request_id, await _own_record(notebooks, ctx, request_id))
+
+    return handle
+
+
+def _is_over(record: Any) -> bool:
+    return record.withdrawn_at is not None or record.result is not None
+
+
+def wait_budget(requested: int | None) -> int:
+    """The seconds a ``wait_test`` call waits at most: ``requested`` held to 1..:data:`WAIT_TEST_MAX_SECONDS`."""
+    if requested is None:
+        return WAIT_TEST_MAX_SECONDS
+    return min(max(int(requested), 1), WAIT_TEST_MAX_SECONDS)
+
+
+def _waiting_document(request_id: str, waited: float, progress: TestProgress | None) -> dict[str, Any]:
+    """What ``wait_test`` answers for a test that is not over: its state and the toolbox's progress, in seconds.
+
+    A test the toolbox neither queues nor runs (its outcome is logged but not yet in the notebook) is ``in_flight``
+    with no progress.
+    """
+    document: dict[str, Any] = {
+        "request_id": request_id,
+        "state": "in_flight" if progress is None else progress.state,
+        "waited_seconds": round(waited),
+    }
+    if progress is not None:
+        document["progress"] = {
+            name: round(value) if isinstance(value, float) else value
+            for name, value in jsonable(progress).items()
+            if name != "state" and value is not None
         }
+    return document
+
+
+def _wait_test(
+    toolbox: Toolbox, notebooks: NotebookFor, home: asyncio.AbstractEventLoop | None, poll_seconds: float
+) -> Callable[[dict[str, Any], CallContext], Any]:
+    async def handle(arguments: dict[str, Any], ctx: CallContext) -> dict[str, Any]:
+        request_id = arguments["request_id"]
+        budget, started = wait_budget(arguments.get("wait_seconds")), time.monotonic()
+        record = await _own_record(notebooks, ctx, request_id)
+        while not _is_over(record) and (left := budget - (time.monotonic() - started)) > 0:
+            await asyncio.sleep(min(poll_seconds, left))
+            record = await _own_record(notebooks, ctx, request_id)
+        if _is_over(record):
+            return _result_document(request_id, record)
+        progress = await _on(home, toolbox.progress(request_id))
+        return _waiting_document(request_id, time.monotonic() - started, progress)
 
     return handle
 
@@ -308,6 +382,7 @@ class SpecialistToolOptions:
     ``briefing_for`` gives the provider of the brief of a branch (the notebook's ``SessionBriefs.for_branch``), called
     with the caller's branch from the token at every ``notebook_brief``; without it the notebook's own brief is returned.
     ``analysis`` starts ``start_analysis`` jobs (the real toolbox is one); without it that tool refuses by name.
+    ``wait_poll_seconds`` is how often ``wait_test`` reads the record of the test it waits for.
     """
 
     claim_ttl_seconds: float = 600.0
@@ -315,6 +390,7 @@ class SpecialistToolOptions:
     learnings: LearningFinder | None = None
     briefing_for: BriefingFor | None = None
     analysis: AnalysisStarter | None = None
+    wait_poll_seconds: float = WAIT_POLL_SECONDS
 
 
 def register_specialist_tools(
@@ -342,6 +418,16 @@ def register_specialist_tools(
         description="The state and result of one test this branch submitted.",
         schema=_REQUEST_ID,
         handler=_test_result(notebooks),
+        **own,
+    )
+    server.register(
+        "wait_test",
+        description=(
+            "How to wait for a test of this branch: returns as soon as its result lands, else after wait_seconds "
+            "with the test's progress; call it again to keep waiting."
+        ),
+        schema=_WAIT_TEST,
+        handler=_wait_test(toolbox, notebooks, toolbox_loop, options.wait_poll_seconds),
         **own,
     )
     server.register(
@@ -393,6 +479,9 @@ __all__ = [
     "NotebookFor",
     "McpSpecialistTokens",
     "SpecialistToolOptions",
+    "WAIT_POLL_SECONDS",
+    "WAIT_TEST_MAX_SECONDS",
     "jsonable",
     "register_specialist_tools",
+    "wait_budget",
 ]
