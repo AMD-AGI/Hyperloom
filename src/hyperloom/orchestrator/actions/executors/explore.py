@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import functools
 import logging
 import os
@@ -16,7 +15,7 @@ from typing import Any
 
 import yaml
 
-from hyperloom.common.coerce import to_str_list
+from hyperloom.common.coerce import to_float, to_str_list
 from hyperloom.common.env import is_truthy
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.launch_log_evidence import settings_the_engine_rewrote
@@ -69,10 +68,8 @@ from ._grid_base import (
     TS_KILLED_OVERTIME,
     TS_SKIPPED_DEDUP,
 )
-from . import _explore_reuse as reuse
-from ._explore_projection import projection_enabled, route_variants
-from ._explore_screen import screen_variants
 from .benchmark_result import double_run_requested
+from ._explore_prefilter import RoundContext, Stack, Verdict, launch_of, prefilter_variants, record_decision_round
 from ._grid_runner import (
     DEFAULT_KEEP_THRESHOLD_PCT,
     _MN_BACKENDS_PRIORITY,
@@ -137,34 +134,6 @@ _CARRIED_VARIANT_ATTRS: tuple[str, ...] = (
     "source_evidence",
     "experience_citations",
 )
-
-
-def _record_measured_anchor(
-    config_path: Path,
-    stack_args: str,
-    variant: GridVariant,
-    subdir: Path,
-    result: Any,
-    *,
-    runtime: dict[str, str],
-    source: dict[str, Any],
-    anchor_gpu: str,
-    **materialize_kw: Any,
-) -> None:
-    """Index a decision round as an InferaSim anchor when an anchor store is configured."""
-    from . import inferasim_bridge as bridge
-
-    if not os.environ.get(bridge.ENV_ANCHOR_STORE) or not getattr(result, "tpot_mean_ms", None):
-        return
-    try:
-        cfg = _build_variant_yaml(config_path, stack_args, variant, output_subdir=subdir, **materialize_kw)
-        with Path(cfg).open(encoding="utf-8") as fh:
-            bench = (yaml.safe_load(fh) or {}).get("benchmark") or {}
-        spec = bridge.spec_from_benchmark(bench, ambient=False)
-        spec.runtime = dict(runtime)
-        bridge.record_measured_anchor(spec, tpot_mean_ms=result.tpot_mean_ms, gpu=anchor_gpu, source=source)
-    except Exception as exc:  # noqa: BLE001 - an anchor is a by-product; never fail the round over it
-        log.warning("explore: could not record %s as an InferaSim anchor (%s)", variant.name, exc)
 
 
 def _decision_fields(gv: Any) -> dict[str, Any]:
@@ -886,19 +855,9 @@ class ExploreExecutor:
         )
 
         # per-variant overtime kill — anchored on baseline wall-clock.
-        baseline_runtime_sec_raw = params.get("baseline_runtime_sec")
-        try:
-            baseline_runtime_sec = float(baseline_runtime_sec_raw) if baseline_runtime_sec_raw is not None else 0.0
-        except (TypeError, ValueError):
-            baseline_runtime_sec = 0.0
+        baseline_runtime_sec = to_float(params.get("baseline_runtime_sec"), 0.0)
         # WARM measure-round anchor (client-only).
-        baseline_warm_runtime_sec_raw = params.get("baseline_warm_runtime_sec")
-        try:
-            baseline_warm_runtime_sec = (
-                float(baseline_warm_runtime_sec_raw) if baseline_warm_runtime_sec_raw is not None else 0.0
-            )
-        except (TypeError, ValueError):
-            baseline_warm_runtime_sec = 0.0
+        baseline_warm_runtime_sec = to_float(params.get("baseline_warm_runtime_sec"), 0.0)
         # Resolve framework from materialized YAML (for the ledger + the atom seed-grid fallback below).
         try:
             with config_path.open(encoding="utf-8") as _f:
@@ -910,7 +869,6 @@ class ExploreExecutor:
         except (OSError, yaml.YAMLError) as exc:
             log.warning("explore: could not resolve framework from %s: %s", config_path, exc)
             framework = ""
-            _cfg = {}
             _yaml_envs = {}
             _base_inherited_args = ""
         _effective_inherited_args = "" if base_args_mode == "replace" else _base_inherited_args
@@ -1097,135 +1055,6 @@ class ExploreExecutor:
                 priority_tags=_MN_PARAMS_PRIORITY + _MN_BACKENDS_PRIORITY,
             )
 
-        # Drop the variants a cheap reduced-scale probe puts decisively behind
-        # the stack. Off by default; a no-op when the probe cannot run, or when
-        # it cannot be held in the deployment's kernel regime.
-        runnable, screened_out = screen_variants(runnable, config_path, session_dir=self.session_dir)
-        skipped_dup.extend(screened_out)
-
-        # Drop the variants InferaSim projects decisively behind the stack. Off
-        # by default; it only removes variants, and a KEEP still rests on the
-        # survivor's own measured decision round.
-        def _materialize_for_projection(variant: GridVariant, subdir: Path) -> Path:
-            return _build_variant_yaml(
-                config_path,
-                base_extra_args,
-                variant,
-                output_subdir=subdir,
-                model_path=resolved_model,
-                gpu_type=resolved_gpu,
-                benchmark_script=override_script,
-                base_args_mode=base_args_mode,
-                base_extra_envs=dict(base_extra_envs),
-                base_remove_args=list(base_remove_args),
-                base_unset_envs=list(base_unset_envs),
-            )
-
-        from hyperloom.inference_optimizer import framework_registry
-
-        def _launch_of(
-            gv: GridVariant, s_envs: dict[str, str], s_remove: list[str], s_unset: list[str], s_mode: str
-        ) -> tuple[list[str], list[str], dict[str, str]]:
-            """The removals, unsets and envs ``gv`` launches with on this stack."""
-            if s_mode == "replace":
-                remove = to_str_list(getattr(gv, "remove_args", []))
-            else:
-                remove = list(dict.fromkeys(s_remove + to_str_list(getattr(gv, "remove_args", []))))
-            unset = list(dict.fromkeys(s_unset + to_str_list(getattr(gv, "unset_envs", []))))
-            envs = dict(s_envs)
-            for key in gv.unset_envs:
-                envs.pop(key, None)
-            envs.update(gv.extra_envs)
-            return remove, unset, envs
-
-        session_runtime = reuse.runtime_identity(getattr(ss, "stack_fingerprint_meta", None), framework)
-        session_gpu = resolved_gpu or str(getattr(ss, "gpu_type", "") or "")
-        accuracy_required = framework_registry.is_scriptable(framework) or baseline_accuracy > 0
-        base_bench = dict(_cfg.get("benchmark") or {}) if isinstance(_cfg, dict) else {}
-        base_identity = reuse.benchmark_identity(
-            base_bench, volatile_roots=[str(output_root), str(self.session_dir or "")]
-        )
-        # An interactivity verdict rests on two axes a paired throughput gain
-        # does not carry.
-        reuse_on = reuse.reuse_enabled() and not bool(resolved_grading(ss)[0])
-        decision_protocol = (
-            "warm"
-            if (resolve_lifecycle_params(config_path).get("eligible") and getattr(ss, "baseline_double_run", True))
-            else "cold"
-        )
-
-        def _exact_identity(
-            gv: GridVariant, s_args: str, s_envs: dict[str, str], s_remove: list[str], s_unset: list[str], s_mode: str
-        ) -> dict[str, Any] | None:
-            remove, unset, envs = _launch_of(gv, s_envs, s_remove, s_unset, s_mode)
-            pythonpath = [str(getattr(gv, "overlay_pythonpath", "") or "")]
-            for source in (envs, s_envs, base_bench.get("envs") or {}):
-                pythonpath += str(source.get("PYTHONPATH") or "").split(":")
-
-            def _no_pp(e: dict[str, str]) -> dict[str, str]:
-                return {k: str(v) for k, v in sorted(e.items()) if k != "PYTHONPATH"}
-
-            return reuse.measurement_identity(
-                model=resolved_model or "",
-                framework=framework,
-                gpu=session_gpu,
-                workload_signature=ws_sig,
-                runtime=session_runtime,
-                benchmark=base_identity,
-                inherited_args=_effective_inherited_args,
-                stack={
-                    "extra_server_args": s_args,
-                    "extra_envs": _no_pp(s_envs),
-                    "remove_args": list(s_remove),
-                    "unset_envs": list(s_unset),
-                    "args_mode": s_mode,
-                },
-                variant={
-                    "fingerprint": getattr(gv, "canonical_fp", ""),
-                    "extra_server_args": gv.extra_server_args,
-                    "args_mode": str(getattr(gv, "args_mode", "append") or "append"),
-                    "remove_args": remove,
-                    "unset_envs": unset,
-                    "extra_envs": _no_pp(envs),
-                    "accepted_kernels": sorted(getattr(gv, "accepted_kernels", []) or []),
-                },
-                pythonpath_entries=pythonpath,
-                decision_protocol=decision_protocol,
-                runtime_override=getattr(gv, "runtime_override", None),
-            )
-
-        def _lookup_exact(gv: GridVariant, *stack_state: Any) -> tuple[dict[str, Any] | None, str, Any]:
-            identity = _exact_identity(gv, *stack_state) if reuse_on else None
-            key = reuse.measurement_key(identity) if identity else ""
-            hit = (
-                reuse.lookup(key, accuracy_required=accuracy_required, keep_threshold_pct=keep_threshold_pct)
-                if key
-                else None
-            )
-            return identity, key, hit
-
-        opening_stack = (
-            base_extra_args,
-            dict(base_extra_envs),
-            list(base_remove_args),
-            list(base_unset_envs),
-            base_args_mode,
-        )
-        answered_before = {gv.name for gv in runnable if _lookup_exact(gv, *opening_stack)[2] is not None}
-
-        projection_summary: dict[str, Any] | None = None
-        if runnable and projection_enabled():
-            runnable, projected_out, projection_summary = await asyncio.to_thread(
-                route_variants,
-                runnable,
-                materialize=_materialize_for_projection,
-                output_root=output_root / "_projection",
-                grade_on_intvty=bool(resolved_grading(ss)[0]),
-                runtime=session_runtime,
-                exempt=answered_before,
-            )
-            skipped_dup.extend(projected_out)
-
         # Seeded by the Coordinator from the durable cursor: this executor holds no
         # history of its own, so it cannot count the rounds before this one.
         round_id_seed = int(params.get("explore_search_cursor") or 0) + 1
@@ -1295,6 +1124,21 @@ class ExploreExecutor:
         # Warm-decision mode.
         _double_run = double_run_requested(params)
         use_warm_decision = lifecycle_eligible and _double_run
+        round_ctx = RoundContext(
+            config_path=config_path,
+            output_root=output_root,
+            state=ss,
+            build={"model_path": resolved_model, "gpu_type": resolved_gpu, "benchmark_script": override_script},
+            inherited_args=_effective_inherited_args,
+            keep_threshold_pct=keep_threshold_pct,
+            decision_protocol="warm" if use_warm_decision else "cold",
+            session_dir=self.session_dir,
+        )
+        # A revalidation or a config replay re-measures a config on purpose, so no pre-filter may drop it.
+        protected = frozenset(gv.name for gv in runnable if is_stack_revalidation(params) or _is_noop_filter_exempt(gv))
+        prefiltered = await prefilter_variants(runnable, round_ctx, Stack.from_measured(_measured_against()), protected)
+        runnable = prefiltered.runnable
+        skipped_dup.extend(prefiltered.dropped)
         # Admission uses the measured warm duration when this round reuses a server.
         decision_anchor_sec = (
             baseline_warm_runtime_sec if (use_warm_decision and baseline_warm_runtime_sec > 0) else baseline_runtime_sec
@@ -1336,33 +1180,9 @@ class ExploreExecutor:
 
         try:
             for idx, gv in enumerate(runnable):
-                # Looked up against the stack as it stands now: a KEEP earlier
-                # in the round changes what this variant launches on.
-                reuse_identity, reuse_key, reused = (
-                    _lookup_exact(
-                        gv,
-                        stack_extra_args,
-                        dict(stack_extra_envs),
-                        list(stack_remove_args),
-                        list(stack_unset_envs),
-                        stack_base_args_mode,
-                    )
-                    if running_base_tput > 0
-                    else (None, "", None)
-                )
-                if reused is not None:
-                    log.info(
-                        "explore: variant %s answered by a past measurement (%+.2f%% against its anchor, %s)",
-                        gv.name,
-                        reused.gain_pct,
-                        reused.record.get("ts"),
-                    )
                 # A warm-decision variant pays for both rounds, so admitting it on the decision round alone would let
-                # it in and then strand it mid-variant with a discarded warmup and no measurement. A reused one
-                # runs nothing.
-                if reused is not None:
-                    fit_required_sec = 0.0
-                elif decision_expected_sec is not None:
+                # it in and then strand it mid-variant with a discarded warmup and no measurement.
+                if decision_expected_sec is not None:
                     fit_required_sec = float(decision_expected_sec) + (
                         float(warmup_expected_sec or 0.0) if use_warm_decision else 0.0
                     )
@@ -1370,11 +1190,7 @@ class ExploreExecutor:
                     from ._subprocess_kill import resolve_benchmark_timeouts
 
                     fit_required_sec = resolve_benchmark_timeouts()[1]
-                run_stop = (
-                    variant_budget_stop(session_deadline_sec, extra.get("phase_deadline"), fit_required_sec)
-                    if reused is None
-                    else None
-                )
+                run_stop = variant_budget_stop(session_deadline_sec, extra.get("phase_deadline"), fit_required_sec)
                 if run_stop is not None:
                     run_stop_detail = run_stop.never_started
                     session_budget_untested = len(runnable) - idx
@@ -1410,16 +1226,15 @@ class ExploreExecutor:
                 provenance = getattr(gv, "provenance", "llm_direct")
                 scope = str(getattr(gv, "scope", "") or "")
                 control_fields = _variant_control_fields(gv)
-                run_remove_args, run_unset_envs, run_extra_envs = _launch_of(
-                    gv, stack_extra_envs, stack_remove_args, stack_unset_envs, stack_base_args_mode
-                )
+                variant_stack = Stack.from_measured(_measured_against())
+                launch = launch_of(gv, variant_stack)
                 run_gv = GridVariant(
                     name=gv.name,
                     extra_server_args=gv.extra_server_args,
-                    extra_envs=run_extra_envs,
+                    extra_envs=launch.extra_envs,
                     note=gv.note,
-                    remove_args=run_remove_args,
-                    unset_envs=run_unset_envs,
+                    remove_args=launch.remove_args,
+                    unset_envs=launch.unset_envs,
                     args_mode=str(getattr(gv, "args_mode", "append") or "append"),
                 )
                 _carry_variant_metadata(gv, run_gv)
@@ -1443,7 +1258,7 @@ class ExploreExecutor:
                 variant_lease = round_serving_lease
                 try:
                     # Warm-decision warmup round.
-                    if use_warm_decision and reused is None:
+                    if use_warm_decision:
                         warmup_slot = slot / "warmup_round"
                         warmup_slot.mkdir(parents=True, exist_ok=True)
                         warmup_results = await run_grid(
@@ -1542,37 +1357,27 @@ class ExploreExecutor:
                             )
                             continue
                     # Decision round: warm (re-attaches to the warmup's hot server, client-only) when
-                    # ``use_warm_decision``, otherwise a fresh cold boot. A reused measurement stands in for it.
-                    if reused is not None:
-                        results = [
-                            reused.as_result(
-                                name=gv.name,
-                                extra_server_args=gv.extra_server_args,
-                                extra_envs=run_extra_envs,
-                                anchor_tput=running_base_tput,
-                            )
-                        ]
-                    else:
-                        results = await run_grid(
-                            base_yaml_path=config_path,
-                            base_extra_args=stack_extra_args,
-                            grid=[decision_gv],
-                            output_root=slot,
-                            model_path=resolved_model,
-                            gpu_type=resolved_gpu,
-                            benchmark_script=override_script,
-                            result_dir=override_result_dir,
-                            server_lifecycle=variant_lifecycle,
-                            base_args_mode=stack_base_args_mode,
-                            base_extra_envs=dict(stack_extra_envs),
-                            base_remove_args=list(stack_remove_args),
-                            base_unset_envs=list(stack_unset_envs),
-                            server_already_ready=use_warm_decision,
-                            ready_server_log=w.server_log_path if use_warm_decision else None,
-                            serving_lease=variant_lease,
-                            session_deadline_sec=session_deadline_sec,
-                            variant_expected_sec=decision_expected_sec,
-                        )
+                    # ``use_warm_decision``, otherwise a fresh cold boot.
+                    results = await run_grid(
+                        base_yaml_path=config_path,
+                        base_extra_args=stack_extra_args,
+                        grid=[decision_gv],
+                        output_root=slot,
+                        model_path=resolved_model,
+                        gpu_type=resolved_gpu,
+                        benchmark_script=override_script,
+                        result_dir=override_result_dir,
+                        server_lifecycle=variant_lifecycle,
+                        base_args_mode=stack_base_args_mode,
+                        base_extra_envs=dict(stack_extra_envs),
+                        base_remove_args=list(stack_remove_args),
+                        base_unset_envs=list(stack_unset_envs),
+                        server_already_ready=use_warm_decision,
+                        ready_server_log=w.server_log_path if use_warm_decision else None,
+                        serving_lease=variant_lease,
+                        session_deadline_sec=session_deadline_sec,
+                        variant_expected_sec=decision_expected_sec,
+                    )
                     if not results:
                         # run_grid returns one result per grid entry.
                         log.warning(
@@ -1695,14 +1500,10 @@ class ExploreExecutor:
                         # fixed 1.0.
                         if scriptable or baseline_accuracy > 0:
                             accuracy_gated = True
-                            eval_out = (
-                                {"accuracy": reused.accuracy}
-                                if reused is not None
-                                else parse_eval_results(
-                                    slot,
-                                    framework=framework,
-                                    benchmark_mode=str(getattr(ss, "benchmark_mode", "") or ""),
-                                )
+                            eval_out = parse_eval_results(
+                                slot,
+                                framework=framework,
+                                benchmark_mode=str(getattr(ss, "benchmark_mode", "") or ""),
                             )
                             accuracy_value = eval_out.get("accuracy")
                             if isinstance(accuracy_value, (int, float)):
@@ -1782,45 +1583,11 @@ class ExploreExecutor:
                             if outcome == "KEEP"
                             else ""
                         ),
-                        # A reused verdict replays an earlier round's paired gain
-                        # against this anchor; nothing ran this round.
-                        "decided_by": "reused_measurement" if reused is not None else "measured",
-                        "reused_measurement": reused.provenance() if reused is not None else None,
                     }
                     if gv.name:
                         name_index[gv.name] = fp
-                    if reused is None and r.status == "succeeded":
-                        if reuse_key and not graded.degrade_reason:
-                            reuse.record(
-                                reuse_key,
-                                reuse_identity or {},
-                                r,
-                                anchor_tput=running_base_tput,
-                                accuracy=accuracy_value if isinstance(accuracy_value, (int, float)) else None,
-                                outcome=outcome,
-                                variant_name=gv.name,
-                                round_id=round_id,
-                                session_dir=str(self.session_dir or ""),
-                                workspace=r.workspace,
-                            )
-                        await asyncio.to_thread(
-                            _record_measured_anchor,
-                            config_path,
-                            stack_extra_args,
-                            run_gv,
-                            slot / "_anchor_spec",
-                            r,
-                            model_path=resolved_model,
-                            gpu_type=resolved_gpu,
-                            benchmark_script=override_script,
-                            base_args_mode=stack_base_args_mode,
-                            base_extra_envs=dict(stack_extra_envs),
-                            base_remove_args=list(stack_remove_args),
-                            base_unset_envs=list(stack_unset_envs),
-                            anchor_gpu=session_gpu,
-                            runtime=session_runtime,
-                            source={"round_id": round_id, "variant": gv.name, "workspace": r.workspace},
-                        )
+                    verdict = Verdict(outcome, reason, running_base_tput, round_id, variant_stack)
+                    await record_decision_round(round_ctx, gv, r, verdict)
 
                     # ---- KEEP path ----
                     if outcome == "KEEP":
@@ -1852,15 +1619,15 @@ class ExploreExecutor:
                             remove_args=to_str_list(getattr(gv, "remove_args", [])),
                             args_mode=getattr(gv, "args_mode", "append"),
                         )
-                        next_envs = dict(run_extra_envs)
+                        next_envs = dict(launch.extra_envs)
                         effective_control_fields = dict(control_fields)
                         if _keep_remove_args:
                             effective_control_fields["remove_args"] = list(_keep_remove_args)
                         if _keep_unset_envs:
                             effective_control_fields["unset_envs"] = list(_keep_unset_envs)
                         persist_effective_args = bool(
-                            run_remove_args
-                            or run_unset_envs
+                            launch.remove_args
+                            or launch.unset_envs
                             or str(getattr(gv, "args_mode", "append") or "append").strip().lower() == "replace"
                             or stack_base_args_mode == "replace"
                         )
@@ -1902,8 +1669,6 @@ class ExploreExecutor:
                             "round_id": round_id,
                             "accepted_at_round": round_id,
                             "ts": _now_iso(),
-                            "decided_by": "reused_measurement" if reused is not None else "measured",
-                            "reused_measurement": reused.provenance() if reused is not None else None,
                         }
                         # The variant KEEPs on the round that graded it.
                         stack_extra_args = next_effective_args if persist_effective_args else next_stack_args
@@ -2182,13 +1947,7 @@ class ExploreExecutor:
             # gain_pct for the audit trail (best gain of the batch).
             "gain_pct": best_gain_pct,
             "explore_grid_exhausted": not runnable,
-            # What the projection router did this round; None when it was off.
-            "projection": projection_summary,
-            "reused_measurements": sorted(
-                str(te.get("name") or "")
-                for te in tested_update.values()
-                if te.get("decided_by") == "reused_measurement"
-            ),
+            "projection": prefiltered.projection,
         }
 
 

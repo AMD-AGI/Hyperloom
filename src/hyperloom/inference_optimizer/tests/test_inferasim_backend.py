@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.orchestrator.actions.executors import benchmark_backend as bb
+from hyperloom.orchestrator.actions.executors import inferasim_anchors as ia
 from hyperloom.orchestrator.actions.executors import inferasim_bridge as ib
 
 
@@ -180,9 +181,9 @@ def test_anchor_is_real_weights_detection(tmp_path):
     real, dummy = tmp_path / "r.json", tmp_path / "d.json"
     _write_anchor(real, model="m", real_weights=True, decode_ms=9.0)
     _write_anchor(dummy, model="m", real_weights=False, decode_ms=5.0)
-    assert ib._anchor_is_real_weights(str(real)) is True
-    assert ib._anchor_is_real_weights(str(dummy)) is False
-    assert ib._anchor_is_real_weights(str(tmp_path / "missing.json")) is False
+    assert ia._anchor_is_real_weights(str(real)) is True
+    assert ia._anchor_is_real_weights(str(dummy)) is False
+    assert ia._anchor_is_real_weights(str(tmp_path / "missing.json")) is False
 
 
 def test_recipe_from_spec_extracts_attention_backend():
@@ -200,7 +201,7 @@ def test_select_anchor_prefers_explicit_env(tmp_path, monkeypatch):
     a = tmp_path / "explicit.json"
     _write_anchor(a, model="m", real_weights=True, decode_ms=9.0)
     monkeypatch.setenv(ib.ENV_ANCHOR, str(a))
-    choice = ib.select_anchor(ib.ServingSpec(framework="vllm", model_path="m"))
+    choice = ia.select_anchor(ib.ServingSpec(framework="vllm", model_path="m"))
     assert choice is not None
     assert choice.path == str(a)
     assert choice.regime_distance == 0
@@ -209,7 +210,7 @@ def test_select_anchor_prefers_explicit_env(tmp_path, monkeypatch):
 def test_select_anchor_none_without_store(monkeypatch):
     monkeypatch.delenv(ib.ENV_ANCHOR, raising=False)
     monkeypatch.delenv(ib.ENV_ANCHOR_STORE, raising=False)
-    assert ib.select_anchor(ib.ServingSpec(framework="vllm", model_path="m")) is None
+    assert ia.select_anchor(ib.ServingSpec(framework="vllm", model_path="m")) is None
 
 
 def _write_curve(path: Path, points: list[tuple[int, float]]) -> None:
@@ -240,11 +241,11 @@ def _write_curve(path: Path, points: list[tuple[int, float]]) -> None:
 def test_anchor_curve_sanity_gate(tmp_path, points, sane):
     p = tmp_path / "curve.json"
     _write_curve(p, points)
-    assert ib.anchor_curve_is_sane(str(p)) is sane
+    assert ia.anchor_curve_is_sane(str(p)) is sane
 
 
 def test_anchor_curve_sanity_gate_missing_file(tmp_path):
-    assert ib.anchor_curve_is_sane(str(tmp_path / "nope.json")) is False
+    assert ia.anchor_curve_is_sane(str(tmp_path / "nope.json")) is False
 
 
 @pytest.mark.parametrize("payload", ["[]", '[{"batch": 1}]', '"text"', "12"])
@@ -256,7 +257,7 @@ def test_anchor_curve_sanity_gate_rejects_non_object_json(tmp_path, payload):
     """
     art = tmp_path / "not_an_artifact.json"
     art.write_text(payload)
-    assert ib.anchor_curve_is_sane(str(art)) is False
+    assert ia.anchor_curve_is_sane(str(art)) is False
 
 
 @pytest.mark.parametrize(
@@ -357,12 +358,12 @@ def test_select_anchor_rejects_insane_anchor(tmp_path, monkeypatch):
     _write_curve(bad, [(16, 16.3), (64, 1.4)])
     monkeypatch.setenv(ib.ENV_ANCHOR, str(bad))
     monkeypatch.delenv(ib.ENV_ANCHOR_STORE, raising=False)
-    assert ib.select_anchor(ib.ServingSpec(framework="vllm", model_path="m")) is None
+    assert ia.select_anchor(ib.ServingSpec(framework="vllm", model_path="m")) is None
 
     good = tmp_path / "good.json"
     _write_curve(good, [(16, 12.0), (64, 20.0)])
     monkeypatch.setenv(ib.ENV_ANCHOR, str(good))
-    choice = ib.select_anchor(ib.ServingSpec(framework="vllm", model_path="m"))
+    choice = ia.select_anchor(ib.ServingSpec(framework="vllm", model_path="m"))
     assert choice is not None and choice.path == str(good)
 
 
@@ -395,7 +396,7 @@ def _anchored_argv(tmp_path, monkeypatch, mode: str | None) -> list[str]:
         monkeypatch.delenv(ib.ENV_MODE, raising=False)
     else:
         monkeypatch.setenv(ib.ENV_MODE, mode)
-    choice = ib.AnchorChoice(path=str(anchor), regime_distance=0, model="m")
+    choice = ia.AnchorChoice(path=str(anchor), regime_distance=0, model="m")
     return ib._build_argv(ib.ServingSpec(framework="vllm", model_path="m"), "w.yaml", choice)
 
 
@@ -437,7 +438,7 @@ def test_ambient_env_is_ignored_when_asked(monkeypatch):
 
 def _infera_root(tmp_path: Path) -> Path:
     root = tmp_path / "infera"
-    script = root / ib._HARVEST_SCRIPT_REL
+    script = root / ia._HARVEST_SCRIPT_REL
     script.parent.mkdir(parents=True)
     script.write_text("# stub\n")
     return root
@@ -457,7 +458,7 @@ def test_harvest_command_measures_the_candidates_regime(tmp_path, monkeypatch):
         ep=8,
         extra_server_args="--attention-backend aiter --tp-size 8 --max-running-requests 128",
     )
-    cmd = ib.harvest_command(spec, "/store/a.json")
+    cmd = ia.harvest_command(spec, "/store/a.json")
     assert cmd is not None
     arg = lambda flag: cmd[cmd.index(flag) + 1]  # noqa: E731
     assert arg("--serving-backend") == "sglang"  # a build launches as its family
@@ -484,7 +485,7 @@ def test_harvest_command_declines_when_it_cannot_run(tmp_path, monkeypatch, spec
         monkeypatch.setenv(ib.ENV_ROOT, str(_infera_root(tmp_path)))
     else:
         monkeypatch.delenv(ib.ENV_ROOT, raising=False)
-    assert ib.harvest_command(_spec(**spec_kw), "/store/a.json") is None
+    assert ia.harvest_command(_spec(**spec_kw), "/store/a.json") is None
 
 
 def test_benchmark_mode_fails_closed_without_an_anchor(monkeypatch):
@@ -493,31 +494,31 @@ def test_benchmark_mode_fails_closed_without_an_anchor(monkeypatch):
     monkeypatch.delenv(ib.ENV_ANCHOR, raising=False)
     monkeypatch.delenv(ib.ENV_ANCHOR_STORE, raising=False)
     with pytest.raises(ib.InferasimBridgeError, match="no in-regime anchor"):
-        ib.resolve_anchor(_spec())
+        ia.resolve_anchor(_spec())
 
 
 def test_harvest_disabled_fails_closed(tmp_path, monkeypatch):
     monkeypatch.setenv(ib.ENV_ANCHOR_STORE, str(tmp_path / "store"))
     monkeypatch.setenv(ib.ENV_HARVEST, "0")
     monkeypatch.delenv(ib.ENV_ANCHOR, raising=False)
-    monkeypatch.setattr(ib, "select_anchor", lambda spec: None)
+    monkeypatch.setattr(ia, "select_anchor", lambda spec: None)
     with pytest.raises(ib.InferasimBridgeError):
-        ib.resolve_anchor(_spec())
+        ia.resolve_anchor(_spec())
 
 
 def test_an_in_regime_anchor_is_used_without_harvesting(monkeypatch):
-    choice = ib.AnchorChoice(path="/a.json", regime_distance=0)
-    monkeypatch.setattr(ib, "select_anchor", lambda spec: choice)
-    monkeypatch.setattr(ib, "harvest_anchor", lambda spec: pytest.fail("harvested despite a hit"))
-    assert ib.resolve_anchor(_spec()) is choice
+    choice = ia.AnchorChoice(path="/a.json", regime_distance=0)
+    monkeypatch.setattr(ia, "select_anchor", lambda spec: choice)
+    monkeypatch.setattr(ia, "harvest_anchor", lambda spec: pytest.fail("harvested despite a hit"))
+    assert ia.resolve_anchor(_spec()) is choice
 
 
 def test_an_out_of_regime_anchor_triggers_a_harvest(monkeypatch):
-    near = ib.AnchorChoice(path="/near.json", regime_distance=1)
-    fresh = ib.AnchorChoice(path="/fresh.json", regime_distance=0)
-    monkeypatch.setattr(ib, "select_anchor", lambda spec: near)
-    monkeypatch.setattr(ib, "harvest_anchor", lambda spec: fresh)
-    assert ib.resolve_anchor(_spec()) is fresh
+    near = ia.AnchorChoice(path="/near.json", regime_distance=1)
+    fresh = ia.AnchorChoice(path="/fresh.json", regime_distance=0)
+    monkeypatch.setattr(ia, "select_anchor", lambda spec: near)
+    monkeypatch.setattr(ia, "harvest_anchor", lambda spec: fresh)
+    assert ia.resolve_anchor(_spec()) is fresh
 
 
 def test_harvest_runs_once_indexes_and_selects(tmp_path, monkeypatch):
@@ -564,11 +565,11 @@ def test_harvest_runs_once_indexes_and_selects(tmp_path, monkeypatch):
         )
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
-    monkeypatch.setattr(ib.subprocess, "run", fake_run)
-    selections = iter([None, ib.AnchorChoice(path="/harvested.json", regime_distance=0)])
-    monkeypatch.setattr(ib, "select_anchor", lambda spec: next(selections))
+    monkeypatch.setattr(ia.subprocess, "run", fake_run)
+    selections = iter([None, ia.AnchorChoice(path="/harvested.json", regime_distance=0)])
+    monkeypatch.setattr(ia, "select_anchor", lambda spec: next(selections))
 
-    choice = ib.harvest_anchor(_spec())
+    choice = ia.harvest_anchor(_spec())
     assert choice is not None and choice.path == "/harvested.json"
     assert len(runs) == 1
     assert len(indexed) == 1 and indexed[0].startswith(str(store / "harvested"))
@@ -578,18 +579,18 @@ def test_a_failed_harvest_returns_nothing(tmp_path, monkeypatch):
     monkeypatch.setenv(ib.ENV_ROOT, str(_infera_root(tmp_path)))
     monkeypatch.setenv(ib.ENV_ANCHOR_STORE, str(tmp_path / "store"))
     monkeypatch.delenv(ib.ENV_HARVEST, raising=False)
-    monkeypatch.setattr(ib, "select_anchor", lambda spec: None)
+    monkeypatch.setattr(ia, "select_anchor", lambda spec: None)
     monkeypatch.setattr(
-        ib.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, "", "engine failed to start")
+        ia.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, "", "engine failed to start")
     )
-    assert ib.harvest_anchor(_spec()) is None
+    assert ia.harvest_anchor(_spec()) is None
 
 
 def test_a_corrupt_harvest_is_not_indexed(tmp_path, monkeypatch):
     monkeypatch.setenv(ib.ENV_ROOT, str(_infera_root(tmp_path)))
     monkeypatch.setenv(ib.ENV_ANCHOR_STORE, str(tmp_path / "store"))
     monkeypatch.delenv(ib.ENV_HARVEST, raising=False)
-    monkeypatch.setattr(ib, "select_anchor", lambda spec: None)
+    monkeypatch.setattr(ia, "select_anchor", lambda spec: None)
 
     def fake_run(cmd, **kw):
         save = cmd[cmd.index("--save") + 1]
@@ -598,9 +599,9 @@ def test_a_corrupt_harvest_is_not_indexed(tmp_path, monkeypatch):
         )
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
-    monkeypatch.setattr(ib.subprocess, "run", fake_run)
+    monkeypatch.setattr(ia.subprocess, "run", fake_run)
     monkeypatch.setattr(ib, "_ensure_infera_importable", lambda: pytest.fail("indexed a corrupt anchor"))
-    assert ib.harvest_anchor(_spec()) is None
+    assert ia.harvest_anchor(_spec()) is None
 
 
 # ── closed-loop replay ───────────────────────────────────────────────────────
@@ -648,11 +649,11 @@ def test_replayed_metrics_come_from_the_replay():
         itl={"mean": 11.0},
         e2e={"mean": 13000.0},
     )
-    m = ib._metrics_from_results(_spec(osl=1000, isl=1000), perf, None, des={"point": point})
+    m = ib._metrics_from_results(_spec(osl=1000, isl=1000), {"performance": perf, "des": {"point": point}})
     assert m.output_throughput == pytest.approx(1200.0)
     assert (m.ttft_ms, m.tpot_ms, m.itl_ms, m.e2el_ms) == (450.0, 12.5, 11.0, 13000.0)
     assert m.extras["estimator"] == "des"
-    closed = ib._metrics_from_results(_spec(), perf, None)
+    closed = ib._metrics_from_results(_spec(), {"performance": perf})
     assert closed.output_throughput == pytest.approx(9999.0)
     assert closed.extras["estimator"] == "analytical"
 
@@ -662,21 +663,21 @@ def test_replayed_metrics_come_from_the_replay():
 
 def test_auto_calibrates_only_on_an_in_regime_anchor(monkeypatch):
     monkeypatch.delenv(ib.ENV_MODE, raising=False)
-    monkeypatch.setattr(ib, "select_anchor", lambda spec: None)
-    assert ib.resolve_mode(_spec()) == ib.MODE_SIMULATE
-    monkeypatch.setattr(ib, "select_anchor", lambda spec: ib.AnchorChoice(path="/a", regime_distance=1))
-    assert ib.resolve_mode(_spec()) == ib.MODE_SIMULATE
-    monkeypatch.setattr(ib, "select_anchor", lambda spec: ib.AnchorChoice(path="/a", regime_distance=0))
-    assert ib.resolve_mode(_spec()) == ib.MODE_BENCHMARK
+    monkeypatch.setattr(ia, "select_anchor", lambda spec: None)
+    assert ia.resolve_mode(_spec()) == ib.MODE_SIMULATE
+    monkeypatch.setattr(ia, "select_anchor", lambda spec: ia.AnchorChoice(path="/a", regime_distance=1))
+    assert ia.resolve_mode(_spec()) == ib.MODE_SIMULATE
+    monkeypatch.setattr(ia, "select_anchor", lambda spec: ia.AnchorChoice(path="/a", regime_distance=0))
+    assert ia.resolve_mode(_spec()) == ib.MODE_BENCHMARK
     monkeypatch.setenv(ib.ENV_MODE, "simulate")
-    assert ib.resolve_mode(_spec()) == ib.MODE_SIMULATE
+    assert ia.resolve_mode(_spec()) == ib.MODE_SIMULATE
 
 
 def test_a_miss_without_harvest_fails_closed_and_boots_nothing(monkeypatch):
-    monkeypatch.setattr(ib, "select_anchor", lambda spec: ib.AnchorChoice(path="/a", regime_distance=1))
-    monkeypatch.setattr(ib, "harvest_anchor", lambda spec: pytest.fail("auto mode harvested"))
+    monkeypatch.setattr(ia, "select_anchor", lambda spec: ia.AnchorChoice(path="/a", regime_distance=1))
+    monkeypatch.setattr(ia, "harvest_anchor", lambda spec: pytest.fail("auto mode harvested"))
     with pytest.raises(ib.InferasimBridgeError, match="could be found$"):
-        ib.resolve_anchor(_spec(), harvest=False)
+        ia.resolve_anchor(_spec(), harvest=False)
 
 
 # ── decision rounds as anchors ───────────────────────────────────────────────
@@ -687,16 +688,20 @@ def anchor_store(tmp_path, monkeypatch):
     store = tmp_path / "anchors"
     monkeypatch.setenv(ib.ENV_ANCHOR_STORE, str(store))
     indexed: list[str] = []
-    monkeypatch.setattr(ib, "_index_artifact", lambda root, path: indexed.append(path))
+    monkeypatch.setattr(ia, "_index_artifact", lambda root, path: indexed.append(path))
     return store, indexed
 
 
 def test_a_decision_round_is_recorded_as_a_served_single_point_anchor(anchor_store):
     store, indexed = anchor_store
     spec = _spec(
-        framework="sglang", conc=64, extra_server_args="--attention-backend aiter", runtime={"image_digest": "x"}
+        framework="sglang",
+        conc=64,
+        extra_server_args="--attention-backend aiter",
+        runtime={"image_digest": "x"},
+        gpu="MI355X",
     )
-    path = ib.record_measured_anchor(spec, tpot_mean_ms=14.0, gpu="MI355X", source={"round_id": "explore-001"})
+    path = ia.record_measured_anchor(spec, tpot_mean_ms=14.0, source={"round_id": "explore-001"})
     assert path and indexed == [path]
     doc = json.loads(Path(path).read_text())
     assert doc["backend"] == "sglang"
@@ -705,37 +710,37 @@ def test_a_decision_round_is_recorded_as_a_served_single_point_anchor(anchor_sto
     assert (meta["tp"], meta["attention_backend"], meta["gpu_arch"]) == (8, "aiter", "mi355x")
     assert meta["runtime"] == {"image_digest": "x"}
     assert meta["sources"] == [{"batch": 64, "round_id": "explore-001"}]
-    assert ib.anchor_curve_is_sane(path) and ib._anchor_is_served(path) and ib._anchor_is_real_weights(path)
+    assert ia.anchor_curve_is_sane(path) and ia._anchor_is_served(path) and ia._anchor_is_real_weights(path)
 
 
 def test_concurrencies_of_one_launch_build_a_ladder(anchor_store):
-    first = ib.record_measured_anchor(_spec(conc=64), tpot_mean_ms=14.0)
-    ib.record_measured_anchor(_spec(conc=16), tpot_mean_ms=9.0)
-    again = ib.record_measured_anchor(_spec(conc=64), tpot_mean_ms=15.0)
-    other = ib.record_measured_anchor(_spec(conc=16, extra_server_args="--max-num-seqs 16"), tpot_mean_ms=8.0)
+    first = ia.record_measured_anchor(_spec(conc=64), tpot_mean_ms=14.0)
+    ia.record_measured_anchor(_spec(conc=16), tpot_mean_ms=9.0)
+    again = ia.record_measured_anchor(_spec(conc=64), tpot_mean_ms=15.0)
+    other = ia.record_measured_anchor(_spec(conc=16, extra_server_args="--max-num-seqs 16"), tpot_mean_ms=8.0)
     assert first == again != other
     sweep = json.loads(Path(first).read_text())["sweep"]
     assert sweep == [{"batch": 16, "decode_ms": 9.0}, {"batch": 64, "decode_ms": 15.0}]
 
 
 def test_an_impossible_ladder_is_not_recorded(anchor_store):
-    ib.record_measured_anchor(_spec(conc=16), tpot_mean_ms=20.0)
-    assert ib.record_measured_anchor(_spec(conc=64), tpot_mean_ms=5.0) is None
+    ia.record_measured_anchor(_spec(conc=16), tpot_mean_ms=20.0)
+    assert ia.record_measured_anchor(_spec(conc=64), tpot_mean_ms=5.0) is None
 
 
 def test_nothing_is_recorded_without_a_store_or_a_tpot(monkeypatch, anchor_store):
-    assert ib.record_measured_anchor(_spec(), tpot_mean_ms=None) is None
+    assert ia.record_measured_anchor(_spec(), tpot_mean_ms=None) is None
     monkeypatch.delenv(ib.ENV_ANCHOR_STORE)
-    assert ib.record_measured_anchor(_spec(), tpot_mean_ms=10.0) is None
+    assert ia.record_measured_anchor(_spec(), tpot_mean_ms=10.0) is None
 
 
 def test_a_measured_anchor_from_another_image_conflicts(tmp_path):
     path = tmp_path / "a.json"
     path.write_text(json.dumps({"meta": {"runtime": {"image_digest": "old", "framework_version": "0.5"}}}))
-    assert ib._runtime_conflicts(str(path), {"image_digest": "new"})
-    assert not ib._runtime_conflicts(str(path), {"image_digest": "old"})
-    assert not ib._runtime_conflicts(str(path), {"rocm": "7"})
-    assert not ib._runtime_conflicts(str(path), {})
+    assert ia._runtime_conflicts(str(path), {"image_digest": "new"})
+    assert not ia._runtime_conflicts(str(path), {"image_digest": "old"})
+    assert not ia._runtime_conflicts(str(path), {"rocm": "7"})
+    assert not ia._runtime_conflicts(str(path), {})
 
 
 def test_gpu_arch_is_canonical(monkeypatch):
@@ -743,3 +748,54 @@ def test_gpu_arch_is_canonical(monkeypatch):
     assert ib.gpu_arch() == "mi355x"
     assert ib.gpu_arch("AMD Instinct MI300X") == "mi300x"
     assert ib.recipe_from_spec(_spec())["gpu_arch"] == "mi355x"
+
+
+def test_the_projection_is_priced_for_the_session_gpu(monkeypatch):
+    monkeypatch.delenv(ib.ENV_GPU_ARCH, raising=False)
+    monkeypatch.delenv(ib.ENV_HBM_GB, raising=False)
+    spec = _spec(gpu="MI300X")
+    assert ib.recipe_from_spec(spec)["gpu_arch"] == "mi300x"
+    argv = ib._build_argv(spec, "w.yaml", mode=ib.MODE_SIMULATE, estimator_name=ib.ESTIMATOR_ANALYTICAL)
+    assert argv[argv.index("--gpu-arch") + 1] == "mi300x"
+    assert argv[argv.index("--hbm-capacity-gb") + 1] == "192.0"
+
+
+def test_the_arch_override_only_names_an_unknown_session_gpu(monkeypatch):
+    monkeypatch.setenv(ib.ENV_GPU_ARCH, "mi325x")
+    assert ib.recipe_from_spec(_spec())["gpu_arch"] == "mi325x"
+    assert ib.recipe_from_spec(_spec(gpu="mi300x"))["gpu_arch"] == "mi300x"
+
+
+@pytest.mark.parametrize(
+    ("model", "preset"),
+    [
+        ("deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", None),
+        ("deepseek-ai/DeepSeek-R1", "deepseek_v3_671b-fp8"),
+        ("deepseek-ai/DeepSeek-V2-Lite-Chat", "deepseek_v2_lite"),
+        ("MiniMaxAI/MiniMax-M2.5", "minimax_m2.5"),
+    ],
+)
+def test_resolve_preset_takes_the_most_specific_match_and_the_student_of_a_distill(monkeypatch, model, preset):
+    monkeypatch.delenv(ib.ENV_MODEL, raising=False)
+    assert ib.resolve_preset(model) == preset
+
+
+def test_launches_that_differ_in_an_env_lever_keep_separate_anchors(anchor_store):
+    def spec(aiter: str):
+        bench = {
+            "framework": "sglang",
+            "model": "/models/gpt-oss-120b",
+            "envs": {"TP": "8", "CONC": "64", "SGLANG_USE_AITER": aiter, "RESULT_DIR": "/out"},
+        }
+        return ib.spec_from_benchmark(bench, ambient=False)
+
+    on, off = spec("1"), spec("0")
+    assert on.launch and on.launch != off.launch
+    assert ia.record_measured_anchor(on, tpot_mean_ms=14.0) != ia.record_measured_anchor(off, tpot_mean_ms=20.0)
+    on_path = ia.record_measured_anchor(on, tpot_mean_ms=14.0)
+    assert ia._runtime_conflicts(on_path, ia._runtime_of(off))
+    assert not ia._runtime_conflicts(on_path, ia._runtime_of(on))
+
+
+def test_an_unpinned_launch_records_no_anchor(anchor_store):
+    assert ia.record_measured_anchor(_spec(launch=ia.LAUNCH_UNPINNED), tpot_mean_ms=14.0) is None

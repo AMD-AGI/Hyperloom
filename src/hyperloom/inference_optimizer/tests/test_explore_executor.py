@@ -684,6 +684,7 @@ async def test_explore_executor_keeps_and_reverts_per_variant(sub_agent_runner, 
 @pytest.mark.asyncio
 async def test_explore_projection_drops_a_variant_before_it_is_benchmarked(sub_agent_runner, tmp_path, monkeypatch):
     """A projected loser never boots; the survivor's KEEP comes from its own measurement."""
+    from hyperloom.orchestrator.actions.executors import inferasim_anchors as ia
     from hyperloom.orchestrator.actions.executors import inferasim_bridge as ib
 
     sub, tr, _ = sub_agent_runner
@@ -691,8 +692,10 @@ async def test_explore_projection_drops_a_variant_before_it_is_benchmarked(sub_a
     _write_baseline_yaml(base)
     monkeypatch.setenv("HYPERLOOM_EXPLORE_PROJECTION", "1")
     monkeypatch.delenv(ib.ENV_MODE, raising=False)
+    priced_for: set[str] = set()
 
     def _project(spec, mode=None):
+        priced_for.add(spec.gpu)
         # The stack runs at CONC=8; CONC=2 projects 75% behind it.
         tput = {8: 1000.0, 2: 250.0}[spec.conc]
         return ib.ProjMetrics(
@@ -708,7 +711,7 @@ async def test_explore_projection_drops_a_variant_before_it_is_benchmarked(sub_a
             max_concurrency=0,
         )
 
-    monkeypatch.setattr(ib, "project", _project)
+    monkeypatch.setattr(ia, "project", _project)
 
     benchmarked: list[str] = []
 
@@ -724,7 +727,13 @@ async def test_explore_projection_drops_a_variant_before_it_is_benchmarked(sub_a
     ]
     task = await tr.create(
         kind="explore",
-        params={"config_path": str(base), "output_dir": str(tmp_path / "out"), "base_tput": 800.0, "grid": grid},
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / "out"),
+            "base_tput": 800.0,
+            "grid": grid,
+            "gpu_type": "mi300x",
+        },
         idempotency_key="ex-projection",
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
@@ -745,6 +754,7 @@ async def test_explore_projection_drops_a_variant_before_it_is_benchmarked(sub_a
     rows = {r["variant_name"]: r["outcome"] for r in out["per_variant_outcomes"]}
     assert rows == {"v_keep": "KEEP", "v_c2": "SKIPPED_DEDUP"}
     assert out["projection"]["dropped"] == 1
+    assert priced_for == {"mi300x"}
 
 
 async def _explore_round(sub, tr, tmp_path, name: str, *, base_tput: float, grid: list, fake_run) -> dict:
@@ -762,47 +772,69 @@ async def _explore_round(sub, tr, tmp_path, name: str, *, base_tput: float, grid
     return res.result
 
 
+def _benchmarking_fake(benchmarked: list[str], tput_of):
+    def _fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        slug = slot.parent.name + "/" + slot.name
+        benchmarked.append(slug)
+        _fake_workspace(slot, tput=tput_of(slug))
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    return _fake_run
+
+
 @pytest.mark.asyncio
-async def test_an_exact_past_measurement_answers_a_variant_without_running_it(sub_agent_runner, tmp_path, monkeypatch):
-    """Another session on the same image re-proposes the round: both verdicts replay, nothing boots."""
+async def test_a_launch_that_reverted_before_is_skipped_and_a_keep_is_measured_again(
+    sub_agent_runner, tmp_path, monkeypatch
+):
+    """Another session on the same image re-proposes the round: the REVERT is skipped, the KEEP re-measured."""
     sub, tr, _ = sub_agent_runner
     monkeypatch.setenv("HYPERLOOM_MEASUREMENT_STORE", str(tmp_path / "measurements"))
     monkeypatch.delenv("HYPERLOOM_INFERASIM_ANCHOR_STORE", raising=False)
     state = SharedState()
     state.stack_fingerprint_meta = {"image_digest": "sha256:aaa", "sglang": "0.5.1"}
     sub.shared_state = state
-
     benchmarked: list[str] = []
-
-    def _fake_run(cmd, *args, **kwargs):
-        slot = Path(cmd[cmd.index("--output-dir") + 1])
-        slug = slot.parent.name + "/" + slot.name
-        benchmarked.append(slug)
-        _fake_workspace(slot, tput=840.0 if "v_keep" in slug else 840.4)
-        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
-
+    fake = _benchmarking_fake(benchmarked, lambda slug: 840.0 if "v_keep" in slug else 800.4)
+    # v_revert runs first, on the stack the next round opens on; after v_keep's KEEP the stack differs.
     grid = [
-        {"name": "v_keep", "extra_args": "--keep-flag", "extra_envs": {}, "provenance": "llm_direct"},
         {"name": "v_revert", "extra_args": "--revert-flag", "extra_envs": {}, "provenance": "llm_direct"},
+        {"name": "v_keep", "extra_args": "--keep-flag", "extra_envs": {}, "provenance": "llm_direct"},
     ]
-    first = await _explore_round(sub, tr, tmp_path, "a", base_tput=800.0, grid=grid, fake_run=_fake_run)
+
+    first = await _explore_round(sub, tr, tmp_path, "a", base_tput=800.0, grid=grid, fake_run=fake)
     assert {w["name"] for w in first["winners"]} == {"v_keep"}
-    assert first["reused_measurements"] == []
+    assert not first["skipped_dup"]
+
+    benchmarked.clear()
+    second = await _explore_round(sub, tr, tmp_path, "b", base_tput=800.0, grid=grid, fake_run=fake)
+    assert benchmarked and all("v_revert" not in slug for slug in benchmarked)
+    assert any("v_keep" in slug for slug in benchmarked)
+    assert [(s["name"], s["reason"]) for s in second["skipped_dup"]] == [("v_revert", "measured_revert_before")]
+    assert second["winners"][0]["name"] == "v_keep"
+    assert second["winners"][0]["tput"] == pytest.approx(840.0)
+    tested = {row["name"] for row in second["explore_search_update"]["tested"].values()}
+    assert tested == {"v_keep"}
+
+
+@pytest.mark.asyncio
+async def test_a_revalidation_is_never_skipped(sub_agent_runner, tmp_path, monkeypatch):
+    sub, tr, _ = sub_agent_runner
+    monkeypatch.setenv("HYPERLOOM_MEASUREMENT_STORE", str(tmp_path / "measurements"))
+    state = SharedState()
+    state.stack_fingerprint_meta = {"image_digest": "sha256:aaa"}
+    sub.shared_state = state
+    benchmarked: list[str] = []
+    fake = _benchmarking_fake(benchmarked, lambda slug: 800.4)
+    proposed = [{"name": "v_stack", "extra_args": "--stack-flag", "extra_envs": {}, "provenance": "llm_direct"}]
+    await _explore_round(sub, tr, tmp_path, "a", base_tput=800.0, grid=proposed, fake_run=fake)
     assert benchmarked
 
     benchmarked.clear()
-    second = await _explore_round(sub, tr, tmp_path, "b", base_tput=1000.0, grid=grid, fake_run=_fake_run)
-    assert benchmarked == []
-    assert second["reused_measurements"] == ["v_keep", "v_revert"]
-    winner = second["winners"][0]
-    assert winner["name"] == "v_keep"
-    # The paired +5% against this session's anchor, not the 840 measured against 800.
-    assert winner["tput"] == pytest.approx(1050.0)
-    assert winner["decided_by"] == "reused_measurement"
-    assert winner["reused_measurement"]["base_tput"] == pytest.approx(800.0)
-    tested = {row["name"]: row for row in second["explore_search_update"]["tested"].values()}
-    assert tested["v_revert"]["outcome"] == "REVERT"
-    assert tested["v_revert"]["decided_by"] == "reused_measurement"
+    revalidate = [dict(proposed[0], provenance="resume_stack_revalidate")]
+    second = await _explore_round(sub, tr, tmp_path, "b", base_tput=800.0, grid=revalidate, fake_run=fake)
+    assert any("v_stack" in slug for slug in benchmarked)
+    assert not second["skipped_dup"]
 
 
 @pytest.mark.asyncio
@@ -812,33 +844,26 @@ async def test_a_different_image_measures_again(sub_agent_runner, tmp_path, monk
     state = SharedState()
     state.stack_fingerprint_meta = {"image_digest": "sha256:aaa"}
     sub.shared_state = state
-
     benchmarked: list[str] = []
-
-    def _fake_run(cmd, *args, **kwargs):
-        slot = Path(cmd[cmd.index("--output-dir") + 1])
-        benchmarked.append(slot.name)
-        _fake_workspace(slot, tput=840.0)
-        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
-
-    grid = [{"name": "v_keep", "extra_args": "--keep-flag", "extra_envs": {}, "provenance": "llm_direct"}]
-    await _explore_round(sub, tr, tmp_path, "a", base_tput=800.0, grid=grid, fake_run=_fake_run)
+    fake = _benchmarking_fake(benchmarked, lambda slug: 800.4)
+    grid = [{"name": "v_revert", "extra_args": "--revert-flag", "extra_envs": {}, "provenance": "llm_direct"}]
+    await _explore_round(sub, tr, tmp_path, "a", base_tput=800.0, grid=grid, fake_run=fake)
     benchmarked.clear()
     state.stack_fingerprint_meta = {"image_digest": "sha256:bbb"}
-    second = await _explore_round(sub, tr, tmp_path, "b", base_tput=800.0, grid=grid, fake_run=_fake_run)
+    second = await _explore_round(sub, tr, tmp_path, "b", base_tput=800.0, grid=grid, fake_run=fake)
     assert benchmarked
-    assert second["reused_measurements"] == []
-    assert second["winners"][0]["decided_by"] == "measured"
+    assert not second["skipped_dup"]
 
 
 @pytest.mark.asyncio
 async def test_a_decision_round_becomes_an_inferasim_anchor(sub_agent_runner, tmp_path, monkeypatch):
+    from hyperloom.orchestrator.actions.executors import inferasim_anchors as ia
     from hyperloom.orchestrator.actions.executors import inferasim_bridge as ib
 
     sub, tr, _ = sub_agent_runner
     store = tmp_path / "anchors"
     monkeypatch.setenv(ib.ENV_ANCHOR_STORE, str(store))
-    monkeypatch.setattr(ib, "_index_artifact", lambda root, path: None)
+    monkeypatch.setattr(ia, "_index_artifact", lambda root, path: None)
 
     def _fake_run(cmd, *args, **kwargs):
         slot = Path(cmd[cmd.index("--output-dir") + 1])
@@ -855,8 +880,9 @@ async def test_a_decision_round_becomes_an_inferasim_anchor(sub_agent_runner, tm
     doc = json.loads(artifacts[0].read_text())
     assert doc["sweep"] == [{"batch": 8, "decode_ms": pytest.approx(11.5)}]
     assert "--keep-flag" in doc["meta"]["server_args"]
-    assert doc["meta"]["derived_from"] == ib.MEASURED_DERIVED_FROM
-    assert ib.anchor_curve_is_sane(str(artifacts[0]))
+    assert doc["meta"]["derived_from"] == ia.MEASURED_DERIVED_FROM
+    assert doc["meta"]["runtime"]["launch"]
+    assert ia.anchor_curve_is_sane(str(artifacts[0]))
 
 
 @pytest.mark.asyncio

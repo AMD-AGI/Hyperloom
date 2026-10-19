@@ -257,7 +257,7 @@ hyperloom = [
     "assets/configs/*.yaml",
     "assets/agentx/*.sh",
     "assets/agentx/*.py",
-    # InferaSim serving-projection benchmark backend workload template.
+    # Workload template for the InferaSim projection EXPLORE pre-filters with.
     "assets/inferasim/*.yaml",
     # Host-side evidence probe, injected into the benchmark process via a
     # PYTHONPATH prefix (see _framework_rewrite_evidence). Shipped so wheel

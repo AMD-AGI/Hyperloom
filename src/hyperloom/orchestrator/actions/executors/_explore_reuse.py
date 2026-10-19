@@ -1,14 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Answer an EXPLORE variant from an exact past measurement instead of rerunning it.
+"""Skip an EXPLORE variant whose exact launch was already measured and reverted.
 
-A decision round measures one launch on one stack, and the gain it reports is
-paired: the variant against the anchor it was graded on. When a later round
-proposes the same launch on the same stack -- in this session or another --
-that measurement already answers it. The store keeps one record per
-measurement, keyed by everything that decides what the server ran and how it
-was measured:
+A decision round measures one launch on one stack. When the performance gate
+reverts it, a later round proposing the same launch on the same stack -- in
+this session or another -- would boot the same server to reach the same
+verdict. The store keeps one record per reverted launch, keyed by everything
+that decides what the server ran and how it was graded:
 
 * the variant and the stack under it, as launched (args, envs, removals,
   modes, the inherited recipe args);
@@ -16,19 +15,18 @@ was measured:
 * model, engine, GPU, and the image digest / engine / ROCm / AITER versions
   the session recorded at boot;
 * the content of every kernel overlay on the server's ``PYTHONPATH``;
-* the decision protocol (warm or cold decision round).
+* the decision protocol (warm or cold decision round), the grading axes and
+  the KEEP threshold.
 
-Anything that cannot be pinned refuses reuse rather than guessing: no image or
-engine version on record, a runtime override, or an overlay too large to hash.
-
-A hit is replayed as the paired gain, not the raw throughput: the reused
-throughput is the current anchor scaled by the recorded gain, so it goes
-through the same KEEP/REVERT gates a fresh measurement would against the
-anchor that is current now. Only throughput-graded sessions reuse; an
-interactivity verdict depends on two axes the gain does not carry.
+A hit only ever removes the variant from the round. Nothing is replayed, so a
+stored number never reaches KEEP/REVERT, the anchor, the journal or the KB,
+and a KEEP or a stack revalidation always rests on a measurement taken now.
+Rounds that kept, failed, or reverted on accuracy are not stored. Anything
+that cannot be pinned is not stored or matched: no image or engine version on
+record, a runtime override, or an overlay too large to hash.
 
 Off unless ``HYPERLOOM_MEASUREMENT_STORE`` names a directory. Records older
-than ``HYPERLOOM_MEASUREMENT_MAX_AGE_DAYS`` (14) are not reused.
+than ``HYPERLOOM_MEASUREMENT_MAX_AGE_DAYS`` (14) are not used.
 """
 
 from __future__ import annotations
@@ -39,37 +37,25 @@ import logging
 import os
 import re
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-
-from ._grid_base import VariantResult
 
 log = logging.getLogger(__name__)
 
 ENV_STORE = "HYPERLOOM_MEASUREMENT_STORE"
 ENV_MAX_AGE_DAYS = "HYPERLOOM_MEASUREMENT_MAX_AGE_DAYS"
 DEFAULT_MAX_AGE_DAYS = 14.0
-SCHEMA = 1
+SCHEMA = 2
+OUTCOME_REVERT = "REVERT"
+# A launch digest when an overlay is too large to hash; it matches nothing recorded.
+LAUNCH_UNPINNED = "unpinned"
 
 _OVERLAY_MAX_FILES = 5000
 _OVERLAY_MAX_BYTES = 256 * 1024 * 1024
 # Envs that name where things are rather than what runs.
 _LOCATION_ENV = re.compile(r"(DIR|PATH|LOG|FILE|PORT|HOST|URL|TOKEN|SECRET|PASSWORD)")
 _RUNTIME_KEYS = (("image_digest", "image_digest"), ("rocm", "rocm"), ("aiter", "aiter"))
-
-_SCALED_FIELDS = ("output_throughput", "input_throughput", "total_token_throughput", "request_throughput")
-_CARRIED_FIELDS = (
-    "ttft_mean_ms",
-    "tpot_mean_ms",
-    "tpot_p90_ms",
-    "e2el_mean_ms",
-    "intvty_p90",
-    "intvty_p50",
-    "duration_seconds",
-    "request_error_rate",
-    "completed_requests",
-)
+_PYTHONPATH = "PYTHONPATH"
 
 
 def store_root() -> Path | None:
@@ -149,15 +135,31 @@ def overlay_identity(pythonpath_entries: list[str]) -> list[str] | None:
     return out
 
 
+def _is_location(key: Any, value: Any, roots: list[str]) -> bool:
+    text = str(value)
+    return bool(_LOCATION_ENV.search(str(key).upper())) or any(r in text for r in roots if r)
+
+
+def launch_digest(envs: dict[str, Any], priced: frozenset[str]) -> str:
+    """Digest of a launch's envs and kernel overlays, leaving out ``priced`` envs and locations."""
+    overlays = overlay_identity(str(envs.get(_PYTHONPATH) or "").split(":"))
+    if overlays is None:
+        return LAUNCH_UNPINNED
+    kept = {
+        str(k): str(v)
+        for k, v in sorted(envs.items())
+        if str(k).upper() not in priced and not _is_location(k, v, []) and not str(v).startswith("/")
+    }
+    return hashlib.sha256(json.dumps([kept, overlays], sort_keys=True).encode()).hexdigest()[:16]
+
+
 def benchmark_identity(bench: dict[str, Any], *, volatile_roots: list[str]) -> dict[str, Any]:
     """The base benchmark block minus where it writes."""
-    roots = [r for r in volatile_roots if r]
-    envs = {}
-    for key, value in sorted((bench.get("envs") or {}).items()):
-        text = str(value)
-        if _LOCATION_ENV.search(str(key).upper()) or any(r in text for r in roots):
-            continue
-        envs[str(key)] = text
+    envs = {
+        str(key): str(value)
+        for key, value in sorted((bench.get("envs") or {}).items())
+        if not _is_location(key, value, volatile_roots)
+    }
     return {
         "framework": str(bench.get("framework") or "").lower(),
         "model": str(bench.get("model") or ""),
@@ -167,42 +169,21 @@ def benchmark_identity(bench: dict[str, Any], *, volatile_roots: list[str]) -> d
 
 
 def measurement_identity(
-    *,
-    model: str,
-    framework: str,
-    gpu: str,
-    workload_signature: str,
-    runtime: dict[str, str],
-    benchmark: dict[str, Any],
-    inherited_args: str,
-    stack: dict[str, Any],
-    variant: dict[str, Any],
-    pythonpath_entries: list[str],
-    decision_protocol: str,
-    runtime_override: Any = None,
+    session: dict[str, Any], stack: dict[str, Any], variant: dict[str, Any], pythonpath_entries: list[str]
 ) -> dict[str, Any] | None:
-    """Everything a measurement depends on, or None when it cannot be pinned."""
-    if runtime_override:
-        return None
+    """Everything a measurement depends on, or None when it cannot be pinned.
+
+    ``session`` carries what every launch in the round shares: model, engine,
+    GPU, workload signature, runtime versions, base benchmark block, inherited
+    args, decision protocol and grading.
+    """
+    runtime = session.get("runtime") or {}
     if not (runtime.get("image_digest") or runtime.get("framework_version")):
         return None
     overlays = overlay_identity(pythonpath_entries)
     if overlays is None:
         return None
-    return {
-        "schema": SCHEMA,
-        "model": model,
-        "framework": (framework or "").lower(),
-        "gpu": (gpu or "").lower(),
-        "workload_signature": workload_signature,
-        "runtime": dict(sorted(runtime.items())),
-        "benchmark": benchmark,
-        "inherited_args": inherited_args,
-        "stack": stack,
-        "variant": variant,
-        "overlays": overlays,
-        "decision_protocol": decision_protocol,
-    }
+    return {"schema": SCHEMA, **session, "stack": stack, "variant": variant, "overlays": overlays}
 
 
 def measurement_key(identity: dict[str, Any]) -> str:
@@ -213,105 +194,37 @@ def _record_path(root: Path, key: str) -> Path:
     return root / key[:2] / f"{key}.json"
 
 
-@dataclass
-class ReusedMeasurement:
-    """A stored decision round that answers this variant."""
-
-    key: str
-    record: dict[str, Any]
-
-    @property
-    def gain_pct(self) -> float:
-        return float(self.record["gain_pct"])
-
-    @property
-    def accuracy(self) -> float | None:
-        value = self.record.get("accuracy")
-        return float(value) if isinstance(value, (int, float)) else None
-
-    def provenance(self) -> dict[str, Any]:
-        return {
-            "key": self.key,
-            "measured_at": self.record.get("ts"),
-            "session_dir": self.record.get("session_dir"),
-            "round_id": self.record.get("round_id"),
-            "variant_name": self.record.get("variant_name"),
-            "workspace": self.record.get("workspace"),
-            "gain_pct": self.gain_pct,
-            "base_tput": self.record.get("base_tput"),
-            "tput": self.record.get("output_throughput"),
-        }
-
-    def as_result(self, *, name: str, extra_server_args: str, extra_envs: dict[str, str], anchor_tput: float) -> Any:
-        """The stored round replayed against ``anchor_tput``: throughputs by the paired gain."""
-        recorded_base = float(self.record.get("base_tput") or 0.0)
-        factor = anchor_tput / recorded_base if recorded_base > 0 else 0.0
-        fields: dict[str, Any] = {}
-        for f in _SCALED_FIELDS:
-            value = self.record.get(f)
-            fields[f] = float(value) * factor if isinstance(value, (int, float)) else None
-        for f in _CARRIED_FIELDS:
-            fields[f] = self.record.get(f)
-        return VariantResult(
-            name=name,
-            extra_server_args=extra_server_args,
-            extra_envs=dict(extra_envs),
-            status="succeeded",
-            workspace=self.record.get("workspace"),
-            note="reused_measurement",
-            **fields,
-        )
-
-
-def lookup(
-    key: str, *, accuracy_required: bool, keep_threshold_pct: float, now: float | None = None
-) -> ReusedMeasurement | None:
-    """The stored measurement for ``key`` when it is fresh and complete enough.
-
-    A session that gates on accuracy needs the recorded score, except for a
-    gain below ``keep_threshold_pct``: that reverts before accuracy is read.
-    """
+def lookup_revert(key: str, *, now: float | None = None) -> dict[str, Any] | None:
+    """The fresh stored REVERT for ``key``, or None."""
     root = store_root()
-    if root is None:
+    if root is None or not key:
         return None
     try:
         record = json.loads(_record_path(root, key).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    if not isinstance(record, dict) or record.get("schema") != SCHEMA:
+    if not isinstance(record, dict) or record.get("schema") != SCHEMA or record.get("outcome") != OUTCOME_REVERT:
         return None
     age = (now if now is not None else time.time()) - float(record.get("ts_epoch") or 0.0)
     if age < 0 or age > _max_age_sec():
         return None
-    if not isinstance(record.get("gain_pct"), (int, float)) or not float(record.get("base_tput") or 0.0) > 0:
-        return None
-    if (
-        accuracy_required
-        and not isinstance(record.get("accuracy"), (int, float))
-        and float(record["gain_pct"]) >= keep_threshold_pct
-    ):
-        return None
-    return ReusedMeasurement(key=key, record=record)
+    return record
 
 
-def record(key: str, identity: dict[str, Any], result: Any, *, anchor_tput: float, **context: Any) -> None:
-    """Store a fresh decision round under ``key``; a re-measurement replaces it."""
+def record_revert(key: str, identity: dict[str, Any], fields: dict[str, Any]) -> None:
+    """Store a reverted decision round under ``key``; a re-measurement replaces it."""
     root = store_root()
-    tput = float(getattr(result, "output_throughput", 0.0) or 0.0)
-    if root is None or anchor_tput <= 0 or tput <= 0:
+    if root is None or not key:
         return
-    doc: dict[str, Any] = {
+    doc = {
+        **fields,
         "schema": SCHEMA,
         "key": key,
         "identity": identity,
+        "outcome": OUTCOME_REVERT,
         "ts_epoch": time.time(),
         "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "base_tput": anchor_tput,
-        "gain_pct": (tput / anchor_tput - 1.0) * 100.0,
     }
-    for f in (*_SCALED_FIELDS, *_CARRIED_FIELDS):
-        doc[f] = getattr(result, f, None)
-    doc.update(context)
     path = _record_path(root, key)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)

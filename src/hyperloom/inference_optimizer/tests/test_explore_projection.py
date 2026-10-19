@@ -18,6 +18,7 @@ import pytest
 import yaml
 
 from hyperloom.orchestrator.actions.executors import _explore_projection as ep
+from hyperloom.orchestrator.actions.executors import inferasim_anchors as ia
 from hyperloom.orchestrator.actions.executors import inferasim_bridge as ib
 from hyperloom.orchestrator.actions.executors._grid_base import GridVariant
 
@@ -73,7 +74,9 @@ def _enabled(monkeypatch):
 
 
 def _route(tmp_path, variants, project, **kw):
-    return ep.route_variants(variants, materialize=_materialize, output_root=tmp_path, project=project, **kw)
+    request = ep.ProjectionRequest(materialize=_materialize, output_root=tmp_path, **kw)
+    routed = ep.route_variants(variants, request, project=project)
+    return routed.survivors, routed.dropped, routed.summary
 
 
 def test_off_by_default(tmp_path, monkeypatch):
@@ -240,11 +243,17 @@ def test_the_default_shortlist_is_five(tmp_path):
     assert {d["reason"] for d in dropped} == {ep.REASON_OUTRANKED}
 
 
-def test_a_variant_a_past_measurement_answers_is_not_projected(tmp_path):
+def test_every_side_is_priced_for_the_session_gpu(tmp_path):
+    priced_for: set[str] = set()
+
+    def project(spec, mode=None):
+        priced_for.add(spec.gpu)
+        return _metrics(1000.0 if spec.conc == 64 else 200.0)
+
     variants = [GridVariant(name="c8", extra_envs={"CONC": "8"})]
-    kept, dropped, summary = _route(tmp_path, variants, _by_conc({64: 1000.0, 8: 1.0}), exempt={"c8"})
-    assert kept == variants and dropped == []
-    assert summary["variants"][0]["reason"] == "measured_before"
+    _, dropped, summary = _route(tmp_path, variants, project, gpu="mi300x")
+    assert priced_for == {"mi300x"}
+    assert summary["gpu"] == "mi300x" and dropped
 
 
 def test_two_estimators_are_never_compared(tmp_path):
@@ -262,7 +271,7 @@ def test_two_estimators_are_never_compared(tmp_path):
 
 def test_the_round_is_projected_in_the_mode_resolved_on_the_stack(tmp_path, monkeypatch):
     """Auto mode calibrates the whole round when the stack has an anchor, and says so."""
-    monkeypatch.setattr(ib, "resolve_mode", lambda spec: ib.MODE_BENCHMARK)
+    monkeypatch.setattr(ia, "resolve_mode", lambda spec: ib.MODE_BENCHMARK)
     seen: list[tuple[str, dict]] = []
 
     def project(spec, mode=None):

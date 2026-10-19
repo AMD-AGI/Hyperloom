@@ -55,7 +55,7 @@ import re
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import yaml
 
@@ -325,11 +325,24 @@ def screen_variants(
         return list(variants), []
 
     margin = margin_pct if margin_pct is not None else _margin_pct()
-    cut_at = baseline * (1.0 + margin / 100.0)
+    survivors, dropped = _cut_slower(variants, lambda v: _probe(v, bench, timeout_sec, backend)[0], baseline, margin)
+    log.info(
+        "explore screen: %d/%d variants forwarded to benchmark; cut %s",
+        len(survivors),
+        len(variants),
+        ", ".join(d["name"] for d in dropped) or "nothing",
+    )
+    return survivors, dropped
 
+
+def _cut_slower(
+    variants: list[GridVariant], probe: Callable[[GridVariant], float | None], baseline: float, margin: float
+) -> tuple[list[GridVariant], list[dict[str, str]]]:
+    """Cut the variants whose probe reads more than ``margin`` percent behind ``baseline``; keep unread ones."""
+    cut_at = baseline * (1.0 + margin / 100.0)
     survivors, dropped = [], []
     for variant in variants:
-        reading, _ = _probe(variant, bench, timeout_sec, backend)
+        reading = probe(variant)
         if reading is not None and reading > cut_at:
             dropped.append(
                 {
@@ -341,13 +354,6 @@ def screen_variants(
             )
         else:
             survivors.append(variant)
-
-    log.info(
-        "explore screen: %d/%d variants forwarded to benchmark; cut %s",
-        len(survivors),
-        len(variants),
-        ", ".join(d["name"] for d in dropped) or "nothing",
-    )
     return survivors, dropped
 
 
