@@ -15,11 +15,11 @@ from hyperloom.common.benchmark_config import is_magpie_agentx
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env_safety import BLOCKED_EXTERNAL_ENV_NAMES
 from hyperloom.inference_optimizer.grid_server_args import (
-    _SGLANG_MOE_RUNNER_BACKEND_RE,
-    _shell_safe_dedupe,
     compose_server_args,
     moe_runner_requires_aiter,
     server_args_env_name,
+    _shell_safe_dedupe as _shell_safe_dedupe,
+    _SGLANG_MOE_RUNNER_BACKEND_RE as _SGLANG_MOE_RUNNER_BACKEND_RE,
 )
 from hyperloom.inference_optimizer.runtime_environment import apply_runtime_override
 

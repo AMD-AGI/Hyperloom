@@ -79,13 +79,13 @@ from hyperloom.inference_optimizer.grid_server_args import (
     server_args_env_name as server_args_env_name,
     merge_server_args as merge_server_args,
     compose_server_args as compose_server_args,
-    _shell_safe_dedupe as _shell_safe_dedupe,
-    _SGLANG_MOE_RUNNER_BACKEND_RE as _SGLANG_MOE_RUNNER_BACKEND_RE,
     moe_runner_requires_aiter as moe_runner_requires_aiter,
 )
 from ._grid_variant_yaml import (
     _build_variant_yaml as _build_variant_yaml,
     variant_conc as variant_conc,
+    _shell_safe_dedupe as _shell_safe_dedupe,
+    _SGLANG_MOE_RUNNER_BACKEND_RE as _SGLANG_MOE_RUNNER_BACKEND_RE,
 )
 from ._grid_variant_filter import (
     resolve_skip_spec as resolve_skip_spec,
@@ -100,6 +100,9 @@ from ._grid_variant_filter import (
 
 
 log = logging.getLogger(__name__)
+
+#: Sub-directory of a variant's slot that its discarded warmup round runs in.
+_WARMUP_ROUND_DIR = "warmup_round"
 
 
 def _validate_magpie_python_override(value: str) -> str:
@@ -1096,7 +1099,7 @@ async def _run_warmup_round(run: _GridRun, at: _VariantSlot, rounds: _VariantRou
     Returns the throughput it reached, which the measured row carries as a warning.
     """
     launch = run.launch
-    warmup_slot = at.path / "warmup_round"
+    warmup_slot = at.path / _WARMUP_ROUND_DIR
     warmup_server_log = warmup_slot / "server.log"
     cfg_path = await _variant_yaml_or_abort(
         run,
@@ -1157,7 +1160,7 @@ async def _warmup_throughput(
     pass_: _MeasuredRound,
 ) -> float | None:
     """The throughput the warmup pass measured, or end the variant when it measured none."""
-    warmup_slot = at.path / "warmup_round"
+    warmup_slot = at.path / _WARMUP_ROUND_DIR
     run_ws = select_run_workspace(warmup_slot, known_before=pass_.workspaces_before)
     workspace = run_ws if run_ws is not None else warmup_slot
     harvested = harvest_leaked_artifacts(workspace, subprocess_started_unix=pass_.started_unix)
@@ -1672,12 +1675,8 @@ async def _measure_variant(run: _GridRun, at: _VariantSlot) -> VariantResult:
     await _restart_multi_node_server(run, at, rounds)
     # The restart above is a launch of its own and is under no cap, so the budget admitted at the top of the
     # loop may no longer be there.
-    if _warn_budget_cannot_admit(
-        run,
-        at.idx,
-        rounds_left=1 + run.budget.mn_warmup_rounds,
-        spent_on="this variant's server restart",
-    ):
+    spent_on = "this variant's server restart"
+    if _warn_budget_cannot_admit(run, at.idx, rounds_left=1 + run.budget.mn_warmup_rounds, spent_on=spent_on):
         if rounds.auto_warmup:
             _teardown_variant_server(at.path, rounds.lifecycle)
         _abandon_rest_of_grid(run, at)
@@ -1843,7 +1842,7 @@ def _measurement_server_log_path(
         direct = _existing_log_path(workspace / "server.log")
     if direct:
         return direct
-    warmup_dir = owning_slot / "warmup_round"
+    warmup_dir = owning_slot / _WARMUP_ROUND_DIR
     try:
         candidates = [path for path in warmup_dir.glob("*/server.log") if path.is_file()]
     except OSError:
