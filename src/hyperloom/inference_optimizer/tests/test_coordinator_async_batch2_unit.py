@@ -2255,7 +2255,7 @@ async def test_advance_phase_escalation_transition(coord: Coordinator, monkeypat
     monkeypatch.setattr(
         ps,
         "compute_next_phase",
-        lambda *a, **k: ("FRAMEWORK_AGENT", "robustness_escalated", {"evidence": "llm_escalation"}),
+        lambda *a, **k: ("FRAMEWORK_AGENT", "optimize_no_more_leverage", {"evidence": "llm_escalation"}),
     )
 
     async def _entered(*, from_phase, to_phase, reason="", evidence=None):
@@ -2722,7 +2722,7 @@ async def test_on_enter_close_runs_full_sequence(coord: Coordinator, monkeypatch
 
     coord.shared_state.set_stop_reason("target_reached")
     await coord.phase_close.on_enter_close(
-        Transition(from_phase="SWEEP", to_phase="CLOSE", reason="SWEEP", evidence={}, loopback=False)
+        Transition(from_phase="SWEEP", to_phase="CLOSE", reason="SWEEP", evidence={})
     )
     assert coord.shared_state.close_sequence_done is True
     assert coord.shared_state.stop_reason
@@ -3099,6 +3099,21 @@ async def test_optimization_rounds_inherit_nothing(coord: Coordinator) -> None:
         done_payload={"patches_written": ["kernel.py"], "proposal_set": [{"name": "opt", "extra_args": ""}]},
     )
     assert "extra_server_args" not in _autosubmitted_integrate_params(coord)
+
+
+@pytest.mark.asyncio
+async def test_autosubmit_patch_survives_a_non_dict_first_proposal(coord: Coordinator) -> None:
+    """A malformed proposal entry costs the review its patch name, not the review itself."""
+    from hyperloom.orchestrator.state.task_registry import Task
+
+    sid = "spec-bare-proposal"
+    _make_real_patch(coord, sid)
+    task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv-bare")
+    await coord.phase_framework.maybe_autosubmit_specialist_patches(
+        task=task,
+        done_payload={"patches_written": ["kernel.py"], "proposal_set": ["fuse-moe"]},
+    )
+    assert _autosubmitted_integrate_params(coord)["patch_name"] == ""
 
 
 @pytest.mark.asyncio

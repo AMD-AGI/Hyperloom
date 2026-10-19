@@ -421,7 +421,7 @@ def test_wal_ownership_is_seen_without_changing_database_or_history(tmp_path):
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="CLI imports require POSIX fcntl")
-@pytest.mark.parametrize("residual", ["foreign", "legacy", "cancelled", "matching"])
+@pytest.mark.parametrize("residual", ["foreign", "legacy", "cancelled", "matching", "older_schema"])
 def test_cli_checks_ownership_before_state_changes_or_execution(tmp_path, monkeypatch, capsys, residual):
     import hyperloom.inference_optimizer.cli as cli
     from hyperloom.orchestrator.bus import resource_lock
@@ -437,6 +437,9 @@ def test_cli_checks_ownership_before_state_changes_or_execution(tmp_path, monkey
     elif residual == "legacy":
         _task(path)
         _execute(path, "INSERT INTO leases VALUES ('benchmark_lane', 'holder-1', 'task-1', 123)")
+    elif residual == "older_schema":
+        _execute(path, "CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
+        _execute(path, "INSERT INTO schema_version VALUES (6, '2026-10-01 00:00:00')")
     else:
         _task(path)
         scope = "local" if residual == "matching" else "foreign"
@@ -478,7 +481,15 @@ def test_cli_checks_ownership_before_state_changes_or_execution(tmp_path, monkey
         assert exc.value.code == 2
         lock.release.assert_called_once()
         install.assert_not_called()
-        assert "task-1" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        if residual == "older_schema":
+            assert (
+                "ERROR: --resume-from coordinator.db is at schema version 6, older than this build's 7: sessions "
+                "created before this release cannot be resumed. Finish the session under the build that started "
+                "it, or start a new session."
+            ) in err.splitlines()
+        else:
+            assert "task-1" in err
     coordinator.assert_not_called()
     resume_leg.assert_not_called()
     assert path.read_bytes() == before_db

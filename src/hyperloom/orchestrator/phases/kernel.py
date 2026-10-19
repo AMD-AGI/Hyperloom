@@ -26,7 +26,7 @@ from . import geak_rebench as _geak_rebench
 from . import machine_state as _phase_state
 from .kernel_round_budget import controller_round_stop, integrate_within_phase, measurement_round_sec
 from hyperloom.common.env import env_bool, env_float, env_int
-from hyperloom.common.io import atomic_write_json
+from hyperloom.common.io import WriteOptions, atomic_write_json
 from hyperloom.common.launch_log_evidence import recipe_server_launch
 from hyperloom.common.perf_metric import axis_of, graded_axes_of
 from hyperloom.orchestrator.lever import (
@@ -490,10 +490,9 @@ class KernelPhase(CoordinatorCollaborator):
         stack = state.optimization_stack if isinstance(state.optimization_stack, list) else []
         self._kernel_stack_at_entry = [dict(item) for item in stack if isinstance(item, dict)]
         cached = state.last_trace_analyze or {}
-        current_best = state.current_best if isinstance(state.current_best, dict) else {}
         recorder.begin(
             stack_depth_in=state.cumulative_gain_validated_stack_len or None,
-            tput_before=current_best.get("tput"),
+            tput_before=state.current_best.get("tput"),
             session_baseline_tput=state.baseline_tput or None,
             snapshot=cached,
             snapshot_staleness="absent" if not cached else "fresh",
@@ -738,7 +737,6 @@ class KernelPhase(CoordinatorCollaborator):
             return
         self._kernel_timeline_recorder = None
         state = self.shared_state
-        current_best = state.current_best if isinstance(state.current_best, dict) else {}
         stack_before = getattr(self, "_kernel_stack_at_entry", None) or []
         stack_after = [dict(item) for item in (state.optimization_stack or []) if isinstance(item, dict)]
         if len(stack_after) >= len(stack_before):
@@ -749,7 +747,7 @@ class KernelPhase(CoordinatorCollaborator):
             stack_removed = [item for item in stack_before if item not in stack_after]
         recorder.finish(
             exit_reason=exit_reason,
-            tput_after=current_best.get("tput"),
+            tput_after=state.current_best.get("tput"),
             cumulative_gain_validated_out=state.cumulative_gain_validated or None,
             stack_depth_out=state.cumulative_gain_validated_stack_len or None,
             stack_added=stack_added,
@@ -803,9 +801,8 @@ class KernelPhase(CoordinatorCollaborator):
     def _gemm_tuning_required_before_kernel_opt(self) -> bool:
         """Decide whether GEMM tuning must run before kernel_opt.
 
-        When using the kernelforge gemm-tune backend: eligible on any supported
-        framework (sglang / vllm / vllm-aiter), with no precision or MoE
-        pre-filter. When using GEAK: only FP8 + SGLang (legacy behavior).
+        Eligible on any supported framework (sglang / vllm / vllm-aiter), with no
+        precision or MoE pre-filter.
 
         Returns:
             bool: ``True`` when GEMM tuning should run before source-level
@@ -814,24 +811,15 @@ class KernelPhase(CoordinatorCollaborator):
         if self._skip_gemm_tuning():
             return False
         ss = self.shared_state
-        precision = str(ss.precision or "").strip().lower()
         framework = str(ss.framework or "").strip().lower()
 
-        from ..kernel.request_handlers import resolve_gemm_tuning_backend
-
-        backend = resolve_gemm_tuning_backend({})
-
-        if backend == "forge":
-            # kernelforge gemm-tune handles any precision (bf16/fp16/fp8/fp4/mxfp4),
-            # dense or MoE, on sglang/vllm. Real e2e KEEPs span all of these —
-            # including bf16 *dense* (+11.1%) — so we must NOT pre-filter on
-            # precision/MoE here, or a category that can optimize gets silently
-            # blocked. Gate only on a supported framework and let forge itself
-            # return no_improvement when a shape can't be beaten.
-            eligible = framework in ("sglang", "vllm", "vllm-aiter")
-        else:
-            # GEAK: legacy FP8 + SGLang only.
-            eligible = precision == "fp8" and framework == "sglang"
+        # kernelforge gemm-tune handles any precision (bf16/fp16/fp8/fp4/mxfp4),
+        # dense or MoE, on sglang/vllm. Real e2e KEEPs span all of these —
+        # including bf16 *dense* (+11.1%) — so we must NOT pre-filter on
+        # precision/MoE here, or a category that can optimize gets silently
+        # blocked. Gate only on a supported framework and let forge itself
+        # return no_improvement when a shape can't be beaten.
+        eligible = framework in ("sglang", "vllm", "vllm-aiter")
 
         if not eligible:
             return False
@@ -1256,7 +1244,7 @@ class KernelPhase(CoordinatorCollaborator):
             )
             state.save(self.session_dir)
 
-        cb = state.current_best or {}
+        cb = state.current_best
         try:
             env_spec = self._coord.writeback.build_env_spec()
         except (OSError, TypeError, ValueError) as exc:
@@ -1276,9 +1264,7 @@ class KernelPhase(CoordinatorCollaborator):
         measurement = (
             state_measurement
             if isinstance(state_measurement, Mapping) and state_measurement
-            else (
-                cb.get("measurement") if isinstance(cb, Mapping) and isinstance(cb.get("measurement"), Mapping) else {}
-            )
+            else (cb.get("measurement") if isinstance(cb.get("measurement"), Mapping) else {})
         )
         if agentx and not str(spec_config.get("server_launch_flags") or "").strip():
             evidence = measurement.get("launch_evidence")
@@ -2132,7 +2118,7 @@ class KernelPhase(CoordinatorCollaborator):
             return False
         if measured <= 0:
             return False
-        cb_now = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
+        cb_now = self.shared_state.current_best
         cb_tput = cb_now.get("tput")
         try:
             accepted_flags, parsed_envs = self._parse_geak_accepted_config(result)
@@ -2306,12 +2292,6 @@ class KernelPhase(CoordinatorCollaborator):
             log.debug("geak journey read failed", exc_info=True)
             return {}
         return data if isinstance(data, dict) else {}
-
-    @classmethod
-    def _geak_journey_kernels(cls, result: dict[str, Any]) -> list[dict[str, Any]]:
-        """Return the journey's kernel records, or ``[]`` when unreadable."""
-        journey = cls._load_geak_journey(result)
-        return [kernel for kernel in journey.get("kernels") or [] if isinstance(kernel, dict)]
 
     def record_geak_adopted_kernels(
         self,
@@ -3242,7 +3222,7 @@ class KernelPhase(CoordinatorCollaborator):
         try:
             if not path.parent.is_dir():
                 return
-            atomic_write_json(path, entry, make_parents=False)
+            atomic_write_json(path, entry, options=WriteOptions())
         except (OSError, TypeError, ValueError):
             log.warning("gemm result.json writeback failed for %s", path, exc_info=True)
 

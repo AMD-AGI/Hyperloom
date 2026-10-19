@@ -45,14 +45,21 @@ class SandboxResult:
         }
 
 
+@dataclass(frozen=True)
+class SandboxLimits:
+    """The wall-clock bound, the device and the extra environment a generated script runs under."""
+
+    timeout_s: int = DEFAULT_TIMEOUT_S
+    gpu_id: str = "0"
+    env_overrides: dict[str, str] | None = None
+
+
 def run_generated_tuner(
     script: Path,
     work_dir: Path,
     *,
     expect: list[Path] | None = None,
-    timeout_s: int = DEFAULT_TIMEOUT_S,
-    gpu_id: str = "0",
-    env_overrides: dict[str, str] | None = None,
+    limits: SandboxLimits = SandboxLimits(),
 ) -> SandboxResult:
     """Execute ``script`` and report what survived."""
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -67,14 +74,14 @@ def run_generated_tuner(
     env = dict(os.environ)
     env.update(
         {
-            "HIP_VISIBLE_DEVICES": gpu_id,
-            "CUDA_VISIBLE_DEVICES": gpu_id,
+            "HIP_VISIBLE_DEVICES": limits.gpu_id,
+            "CUDA_VISIBLE_DEVICES": limits.gpu_id,
             # A generated script has no business reaching the network, and saying so costs nothing even though it is
             # not enforcement.
             "no_proxy": "*",
         }
     )
-    env.update(env_overrides or {})
+    env.update(limits.env_overrides or {})
     # Preserve caller overrides while bounding compiler memory for the one-shot sandbox run.
     cap_build_parallelism(env)
 
@@ -90,13 +97,13 @@ def run_generated_tuner(
                 env=env,
                 stdout=sink,
                 stderr=subprocess.STDOUT,
-                timeout=timeout_s,
+                timeout=limits.timeout_s,
                 check=False,
             )
         rc = proc.returncode
     except subprocess.TimeoutExpired:
         timed_out = True
-        log.warning("tier3: generated tuner exceeded %ds; keeping what it wrote", timeout_s)
+        log.warning("tier3: generated tuner exceeded %ds; keeping what it wrote", limits.timeout_s)
     except OSError as exc:
         return SandboxResult(
             False, None, time.perf_counter() - started, stderr_tail=f"could not start the script: {exc}"

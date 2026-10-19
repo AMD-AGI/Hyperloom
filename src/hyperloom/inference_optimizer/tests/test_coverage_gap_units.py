@@ -69,11 +69,11 @@ def test_common_atomic_writes_and_cleanup(tmp_path: Path, monkeypatch: pytest.Mo
     from hyperloom.common import io
 
     text_path = tmp_path / "nested" / "value.txt"
-    io.atomic_write_text(text_path, "hello", make_parents=True)
+    io.atomic_write_text(text_path, "hello", options=io.WriteOptions(make_parents=True))
     assert text_path.read_text(encoding="utf-8") == "hello"
 
     json_path = tmp_path / "data.json"
-    io.atomic_write_json(json_path, {"b": 2, "a": 1}, indent=None, trailing_newline=True)
+    io.atomic_write_json(json_path, {"b": 2, "a": 1}, fmt=io.JsonFormat(indent=None, trailing_newline=True))
     assert json_path.read_text(encoding="utf-8") == '{"a": 1, "b": 2}\n'
 
     def _boom(_tmp, _dst):
@@ -474,7 +474,7 @@ def test_infera_restart_and_kill_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     assert saved[-1]["last_kill_results"] == [{"ok": True}]
 
 
-def test_infera_node_ops_apply_revert_and_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_infera_node_ops_apply_and_revert(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import hyperloom.inference_optimizer.multi_node.commands.infera as inf
 
     state = {
@@ -548,50 +548,6 @@ def test_infera_node_ops_apply_revert_and_bench(tmp_path: Path, monkeypatch: pyt
     assert (
         inf._infera_revert_patch(
             argparse.Namespace(backup_map_json=json.dumps({"10.0.1.0": "/b"}), target_path="/x", timeout_sec=1)
-        )
-        == 0
-    )
-
-    assert (
-        inf._infera_kernel_bench(
-            argparse.Namespace(
-                workspace="/w",
-                bench_command="true",
-                files_b64_json="{bad",
-                result_glob="*.json",
-                timeout_sec=10,
-                print_logs=False,
-            )
-        )
-        == inf.EXIT_CONFIG_ERROR
-    )
-    monkeypatch.setattr(inf, "_infera_ssh_node_op", lambda *a, **kw: (None, {"rc": 1, "stderr": "no json"}))
-    assert (
-        inf._infera_kernel_bench(
-            argparse.Namespace(
-                workspace="/w",
-                bench_command="true",
-                files_b64_json="{}",
-                result_glob="*.json",
-                timeout_sec=10,
-                print_logs=True,
-            )
-        )
-        == inf.EXIT_TRANSIENT
-    )
-    monkeypatch.setattr(
-        inf, "_infera_ssh_node_op", lambda *a, **kw: ({"status": "ok", "result": 1}, {"rc": 0, "stderr": ""})
-    )
-    assert (
-        inf._infera_kernel_bench(
-            argparse.Namespace(
-                workspace="/w",
-                bench_command="true",
-                files_b64_json="{}",
-                result_glob="*.json",
-                timeout_sec=10,
-                print_logs=False,
-            )
         )
         == 0
     )

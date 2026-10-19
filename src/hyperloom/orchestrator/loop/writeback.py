@@ -1198,7 +1198,6 @@ class WritebackCollaborator(CoordinatorCollaborator):
         result_payload = dict(result or {})
         if task.kind == "conc_sweep" and not result_payload.get("status"):
             result_payload["status"] = "failed"
-        any_changed = False
         if task.kind == "explore" and bool((task.params or {}).get("geak_fallback")):
             geak_result = {
                 **(self.shared_state.geak_result or {}),
@@ -1214,7 +1213,6 @@ class WritebackCollaborator(CoordinatorCollaborator):
             )
             # The settled verdict and its diagnostics live on ``geak_result``; ``geak_pending`` only holds live work.
             self.shared_state.geak_pending = {}
-            any_changed = True
         # Per-action audit (failed attempt) for the in-scope kinds.
         if task.kind in _AUDIT_ACTIONS:
             audit_extras: dict[str, Any] = {}
@@ -1229,14 +1227,12 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 result=result_payload,
                 extras=audit_extras,
             )
-            any_changed = True
         # Global rolling failure log (every kind, including kernel_agent-owned).
         self.shared_state.record_action_failure(
             action=task.kind,
             task_id=task.task_id,
             result=result_payload,
         )
-        any_changed = True
         if task.kind == "conc_sweep":
             # No audit attempt here: ``record_action_attempt`` returns early for
             # any kind outside ``_AUDIT_ACTIONS``, which conc_sweep is not in.
@@ -1275,7 +1271,6 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     err_class=err_class,
                     stopped_by_the_run=stopped_by_the_run,
                 )
-                any_changed = True
             from ..actions.executors._accuracy_gate import eval_enablement_allowed
             from ..actions.executors._multi_node_env import is_multi_node
 
@@ -1370,13 +1365,11 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 "error_class": err_class,
                 "baseline_eval_failed": eval_failed,
             }
-            any_changed = True
         # Mirror the promote-path roofline failure handling: bump streak, clear gate, warn.
         if task.kind == "roofline":
             self.shared_state.roofline_failure_streak += 1
             if self.shared_state.auto_roofline_pending_task_id == task.task_id:
                 self.shared_state.auto_roofline_pending_task_id = ""
-            any_changed = True
             log.warning(
                 "Auto-roofline %s failed (reason=%s phase=%s "
                 "error_class=%s); continuing in degraded mode "
@@ -1390,9 +1383,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         elif task.kind == "profile" and self.shared_state.auto_roofline_pending_task_id == task.task_id:
             # With enable_roofline off the initial analysis is a profile; leaving its id set would hold PRELUDE.
             self.shared_state.auto_roofline_pending_task_id = ""
-            any_changed = True
-        if any_changed:
-            self.shared_state.save(self.session_dir)
+        self.shared_state.save(self.session_dir)
         if baseline_event_payload is not None:
             await self.bus.append_and_seq(
                 Message.new(
@@ -1451,7 +1442,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             and bv.get("baseline_enablement") is True
             and bv.get("attribution_eligible") is False
         )
-        cand_source = _graded_source(bv if isinstance(bv, dict) else {}, best_tput)
+        cand_source = _graded_source(bv, best_tput)
         if not prebaseline_enablement:
             graded = resolve_graded_comparison(self.shared_state, cand_source)
             if not graded.comparable:
@@ -1492,29 +1483,18 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     graded.candidate,
                 )
                 return False
-        previous = self.shared_state.current_best or {}
-        base_args = ""
-        if isinstance(previous, dict):
-            base_args = strip_benchmark_harness_flags(previous.get("extra_server_args"))
+        previous = self.shared_state.current_best
+        base_args = strip_benchmark_harness_flags(previous.get("extra_server_args"))
         # An authored-kernel overlay stays active until another KEEP replaces it.
-        _overlay = str((bv.get("final_overlay") if isinstance(bv, dict) else "") or "").strip()
-        if not _overlay and isinstance(previous, dict):
+        _overlay = str(bv.get("final_overlay") or "").strip()
+        if not _overlay:
             _overlay = str(previous.get("final_overlay") or "").strip()
-        candidate_args = ""
-        if isinstance(bv, dict):
-            candidate_args = strip_benchmark_harness_flags(
-                bv.get("candidate_extra_server_args") or bv.get("extra_server_args")
-            )
-        full_args = ""
-        if isinstance(bv, dict):
-            full_args = strip_benchmark_harness_flags(bv.get("extra_server_args"))
+        candidate_args = strip_benchmark_harness_flags(
+            bv.get("candidate_extra_server_args") or bv.get("extra_server_args")
+        )
+        full_args = strip_benchmark_harness_flags(bv.get("extra_server_args"))
         controls_effective = bool(
-            isinstance(bv, dict)
-            and (
-                bv.get("remove_args")
-                or bv.get("unset_envs")
-                or str(bv.get("args_mode") or "").strip().lower() == "replace"
-            )
+            bv.get("remove_args") or bv.get("unset_envs") or str(bv.get("args_mode") or "").strip().lower() == "replace"
         )
         # Build cumulative launch args without double-stacking; helper dedupes repeated --flag pairs (last wins).
         if controls_effective:
@@ -1529,7 +1509,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 full_args,
             )
 
-        variant_name = bv.get("name") if isinstance(bv, dict) else None
+        variant_name = bv.get("name")
         if candidate_args or variant_name:
             existing = {
                 (str(e.get("action")), str(e.get("variant_name")))
@@ -1549,9 +1529,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             )
             if not already_stacked:
                 source_phase = str(
-                    (bv.get("source_phase") if isinstance(bv, dict) else "")
-                    or (self.shared_state.phase if task_kind != "integrate_patch" else "")
-                    or ""
+                    bv.get("source_phase") or (self.shared_state.phase if task_kind != "integrate_patch" else "") or ""
                 ).strip()
                 # The phase fallback above inherits whatever is live at
                 # writeback time, which is not what authored the winner.
@@ -1567,17 +1545,15 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     "action": task_kind,
                     "variant_name": variant_name,
                     "candidate_extra_server_args": candidate_args,
-                    "candidate_extra_envs": (
-                        dict(bv.get("candidate_extra_envs") or {}) if isinstance(bv, dict) else {}
-                    ),
+                    "candidate_extra_envs": dict(bv.get("candidate_extra_envs") or {}),
                     "extra_server_args": full_args,
-                    "extra_envs": (dict(bv.get("extra_envs") or {}) if isinstance(bv, dict) else {}),
+                    "extra_envs": dict(bv.get("extra_envs") or {}),
                     # Carry the promoting lane's accuracy verdict onto the stack
                     # so CLOSE reads one place instead of reconstructing which
                     # lane promoted the champion. ``None`` means "not gated".
-                    "accuracy": (bv.get("accuracy") if isinstance(bv, dict) else None),
+                    "accuracy": bv.get("accuracy"),
                     "tput": float(best_tput),
-                    "workspace": (bv.get("workspace") if isinstance(bv, dict) else None),
+                    "workspace": bv.get("workspace"),
                     "ts": datetime.now(timezone.utc).isoformat(),
                 }
                 if source_phase:
@@ -1588,23 +1564,20 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     stack_entry["gap_canonical_id"] = gap_canonical_id
                 # Stamp the variant's stable join key (and source) so breakdown
                 # attribution maps this explore gain to its specialist provenance.
-                fp_val = ""
-                prov_val = ""
-                if isinstance(bv, dict):
-                    fp_val = str(bv.get("fingerprint") or "").strip()
-                    if not fp_val:
-                        from hyperloom.inference_optimizer.canonical_fingerprint import (
-                            canonical_fingerprint,
-                        )
+                fp_val = str(bv.get("fingerprint") or "").strip()
+                if not fp_val:
+                    from hyperloom.inference_optimizer.canonical_fingerprint import (
+                        canonical_fingerprint,
+                    )
 
-                        fp_val = canonical_fingerprint(
-                            candidate_args or full_args,
-                            dict(bv.get("extra_envs") or {}),
-                            remove_args=bv.get("remove_args"),
-                            unset_envs=bv.get("unset_envs"),
-                            args_mode=str(bv.get("args_mode") or "append"),
-                        )
-                    prov_val = str(bv.get("provenance") or "").strip()
+                    fp_val = canonical_fingerprint(
+                        candidate_args or full_args,
+                        dict(bv.get("extra_envs") or {}),
+                        remove_args=bv.get("remove_args"),
+                        unset_envs=bv.get("unset_envs"),
+                        args_mode=str(bv.get("args_mode") or "append"),
+                    )
+                prov_val = str(bv.get("provenance") or "").strip()
                 if fp_val:
                     stack_entry["fingerprint"] = fp_val
                 if prov_val:
@@ -1612,32 +1585,30 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 # Carry the authored-kernel names onto the stack entry so
                 # attribution can separate a config gain from a gain measured
                 # with a kernel loaded. Absent on every flags-only variant.
-                if isinstance(bv, dict):
-                    _stack_kernels = [str(k).strip() for k in (bv.get("accepted_kernels") or []) if str(k).strip()]
-                    if _stack_kernels:
-                        stack_entry["accepted_kernels"] = _stack_kernels
-                if isinstance(bv, dict):
-                    recipe_delta = bv.get("recipe_delta")
-                    if isinstance(recipe_delta, Mapping):
-                        stack_entry["recipe_delta"] = {
-                            "extra_server_args": str(recipe_delta.get("extra_server_args") or "").strip(),
-                            "extra_envs": dict(recipe_delta.get("extra_envs") or {}),
-                            "remove_args": to_str_list(recipe_delta.get("remove_args")),
-                            "unset_envs": to_str_list(recipe_delta.get("unset_envs")),
-                            "args_mode": str(recipe_delta.get("args_mode") or "append").strip().lower(),
-                        }
-                    for _ctrl_key in ("remove_args", "unset_envs", "args_mode"):
-                        if bv.get(_ctrl_key):
-                            stack_entry[_ctrl_key] = bv.get(_ctrl_key)
-                    if bv.get("task_id"):
-                        stack_entry["task_id"] = str(bv.get("task_id"))
-                    if bv.get("effective_extra_server_args"):
-                        stack_entry["effective_extra_server_args"] = dedupe_extra_server_args(
-                            strip_benchmark_harness_flags(bv.get("effective_extra_server_args"))
-                        )
+                _stack_kernels = [str(k).strip() for k in (bv.get("accepted_kernels") or []) if str(k).strip()]
+                if _stack_kernels:
+                    stack_entry["accepted_kernels"] = _stack_kernels
+                recipe_delta = bv.get("recipe_delta")
+                if isinstance(recipe_delta, Mapping):
+                    stack_entry["recipe_delta"] = {
+                        "extra_server_args": str(recipe_delta.get("extra_server_args") or "").strip(),
+                        "extra_envs": dict(recipe_delta.get("extra_envs") or {}),
+                        "remove_args": to_str_list(recipe_delta.get("remove_args")),
+                        "unset_envs": to_str_list(recipe_delta.get("unset_envs")),
+                        "args_mode": str(recipe_delta.get("args_mode") or "append").strip().lower(),
+                    }
+                for _ctrl_key in ("remove_args", "unset_envs", "args_mode"):
+                    if bv.get(_ctrl_key):
+                        stack_entry[_ctrl_key] = bv.get(_ctrl_key)
+                if bv.get("task_id"):
+                    stack_entry["task_id"] = str(bv.get("task_id"))
+                if bv.get("effective_extra_server_args"):
+                    stack_entry["effective_extra_server_args"] = dedupe_extra_server_args(
+                        strip_benchmark_harness_flags(bv.get("effective_extra_server_args"))
+                    )
                 # Stable filter label for "what kind of optimization" (backend /
                 # param / env), so the stack can be sliced like the timeline.
-                _stack_envs = dict(bv.get("extra_envs") or {}) if isinstance(bv, dict) else {}
+                _stack_envs = dict(bv.get("extra_envs") or {})
                 stack_entry["operation_kind"] = operation_kind_for(
                     task_kind,
                     classify_change_kind(
@@ -1645,37 +1616,36 @@ class WritebackCollaborator(CoordinatorCollaborator):
                         {"extra_server_args": candidate_args, "extra_envs": _stack_envs},
                     ),
                 )
-                _stack_scope = str(bv.get("scope") or "").strip() if isinstance(bv, dict) else ""
+                _stack_scope = str(bv.get("scope") or "").strip()
                 if _stack_scope:
                     stack_entry["scope"] = _stack_scope
-                if isinstance(bv, dict):
-                    for _src_key in (
-                        "source_snapshot",
-                        "source_manifest",
-                        "source_import_root",
-                        "framework_root",
-                        "base_sha",
-                    ):
-                        val = bv.get(_src_key)
-                        if val:
-                            stack_entry[_src_key] = str(val)
-                    # Copied unconditionally: False is the meaningful value that
-                    # marks a snapshot unusable, so truthiness must not drop it.
-                    if "source_snapshot_complete" in bv:
-                        stack_entry["source_snapshot_complete"] = bool(bv["source_snapshot_complete"])
-                    target_files = [str(path) for path in (bv.get("target_files") or []) if str(path).strip()]
-                    if target_files:
-                        stack_entry["target_files"] = target_files
-                    for _attr_key in ("baseline_enablement", "attribution_eligible"):
-                        if _attr_key in bv:
-                            stack_entry[_attr_key] = bool(bv.get(_attr_key))
-                    if "recipe_publishable" in bv:
-                        stack_entry["recipe_publishable"] = bool(bv.get("recipe_publishable"))
-                    if "framework_agent_authoring" in bv:
-                        stack_entry["framework_agent_authoring"] = bool(bv.get("framework_agent_authoring"))
-                    for _origin_key in ("domain", "gap_layer", "keep_reason", "resolves_finding"):
-                        if bv.get(_origin_key):
-                            stack_entry[_origin_key] = str(bv.get(_origin_key))
+                for _src_key in (
+                    "source_snapshot",
+                    "source_manifest",
+                    "source_import_root",
+                    "framework_root",
+                    "base_sha",
+                ):
+                    val = bv.get(_src_key)
+                    if val:
+                        stack_entry[_src_key] = str(val)
+                # Copied unconditionally: False is the meaningful value that
+                # marks a snapshot unusable, so truthiness must not drop it.
+                if "source_snapshot_complete" in bv:
+                    stack_entry["source_snapshot_complete"] = bool(bv["source_snapshot_complete"])
+                target_files = [str(path) for path in (bv.get("target_files") or []) if str(path).strip()]
+                if target_files:
+                    stack_entry["target_files"] = target_files
+                for _attr_key in ("baseline_enablement", "attribution_eligible"):
+                    if _attr_key in bv:
+                        stack_entry[_attr_key] = bool(bv.get(_attr_key))
+                if "recipe_publishable" in bv:
+                    stack_entry["recipe_publishable"] = bool(bv.get("recipe_publishable"))
+                if "framework_agent_authoring" in bv:
+                    stack_entry["framework_agent_authoring"] = bool(bv.get("framework_agent_authoring"))
+                for _origin_key in ("domain", "gap_layer", "keep_reason", "resolves_finding"):
+                    if bv.get(_origin_key):
+                        stack_entry[_origin_key] = str(bv.get(_origin_key))
                 if _overlay:
                     stack_entry["final_overlay"] = _overlay
                 for _extra_key, _extra_val in (entry_extra or {}).items():
@@ -1708,10 +1678,10 @@ class WritebackCollaborator(CoordinatorCollaborator):
 
         # Merge envs: start from previous stack top envs so source-layer KEEPs
         # (extra_envs_applied={}) do not clear prior explore/env layers.
-        _prev_envs = dict((previous.get("extra_envs") or {}) if isinstance(previous, dict) else {})
-        _new_envs = dict(bv.get("extra_envs") or {}) if isinstance(bv, dict) else {}
+        _prev_envs = dict(previous.get("extra_envs") or {})
+        _new_envs = dict(bv.get("extra_envs") or {})
         _merged_envs = dict(_prev_envs)
-        for _key in to_str_list(bv.get("unset_envs") if isinstance(bv, dict) else None):
+        for _key in to_str_list(bv.get("unset_envs")):
             _merged_envs.pop(_key, None)
         _merged_envs.update(_new_envs)
         current_best = {
@@ -1722,25 +1692,24 @@ class WritebackCollaborator(CoordinatorCollaborator):
             "extra_envs": _merged_envs,
             "final_overlay": _overlay,
             "optimization_stack": list(self.shared_state.optimization_stack),
-            "ttft_mean_ms": bv.get("ttft_mean_ms") if isinstance(bv, dict) else None,
-            **constraint_fields(bv if isinstance(bv, dict) else {}),
-            "tpot_mean_ms": bv.get("tpot_mean_ms") if isinstance(bv, dict) else None,
-            "workspace": bv.get("workspace") if isinstance(bv, dict) else None,
+            "ttft_mean_ms": bv.get("ttft_mean_ms"),
+            **constraint_fields(bv),
+            "tpot_mean_ms": bv.get("tpot_mean_ms"),
+            "workspace": bv.get("workspace"),
         }
         # The axes of the measurement this KEEP was graded on. Without them the
         # next round's anchor has no snapshot, and the session degrades to
         # output grading permanently after the first KEEP.
         current_best.update(graded_axes_of(cand_source))
-        if isinstance(bv, dict):
-            for _ctrl_key in ("remove_args", "unset_envs", "args_mode"):
-                if bv.get(_ctrl_key):
-                    current_best[_ctrl_key] = bv.get(_ctrl_key)
-            if bv.get("effective_extra_server_args"):
-                current_best["effective_extra_server_args"] = dedupe_extra_server_args(
-                    strip_benchmark_harness_flags(bv.get("effective_extra_server_args"))
-                )
-            if (bv.get("remove_args") or bv.get("unset_envs")) and not current_best.get("args_mode"):
-                current_best["args_mode"] = "replace"
+        for _ctrl_key in ("remove_args", "unset_envs", "args_mode"):
+            if bv.get(_ctrl_key):
+                current_best[_ctrl_key] = bv.get(_ctrl_key)
+        if bv.get("effective_extra_server_args"):
+            current_best["effective_extra_server_args"] = dedupe_extra_server_args(
+                strip_benchmark_harness_flags(bv.get("effective_extra_server_args"))
+            )
+        if (bv.get("remove_args") or bv.get("unset_envs")) and not current_best.get("args_mode"):
+            current_best["args_mode"] = "replace"
         self.shared_state.current_best = current_best
         self.shared_state.working_recipe_generation = int(self.shared_state.working_recipe_generation or 0) + 1
         self._stamp_current_best_measurement(bv)
@@ -2575,7 +2544,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     rebench_measurement["output_throughput"] = measured
                 measured = output_tput_of(rebench_measurement)
                 got_hash = str(rebench_variant.get("fingerprint") or "")
-                cb_now = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
+                cb_now = self.shared_state.current_best
                 cb_tput = cb_now.get("tput")
                 baseline_grade = resolve_graded_comparison(
                     self.shared_state, rebench_measurement, against_baseline=True
@@ -2877,8 +2846,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 return
             if measured_ok and self.shared_state.baseline_tput > 0 and not stale_measurement:
                 self.validate(measured, result, source=STACK_REVALIDATE_SOURCE)
-                cb_rec = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
-                recorded = cb_rec.get("tput")
+                recorded = self.shared_state.current_best.get("tput")
                 floor = _DEFAULT_RESUME_DRIFT_FLOOR_PCT
                 if (
                     isinstance(recorded, (int, float))
@@ -3442,8 +3410,6 @@ class WritebackCollaborator(CoordinatorCollaborator):
     def _stamp_current_best_measurement(self, evidence: Mapping[str, Any] | None = None) -> None:
         """Attach the exact promoted config identity to ``current_best``."""
         cb = self.shared_state.current_best
-        if not isinstance(cb, dict):
-            return
         evidence = evidence if isinstance(evidence, Mapping) else {}
         launch_evidence = evidence.get("launch_evidence") or {}
         launch_evidence = dict(launch_evidence) if isinstance(launch_evidence, Mapping) else {}
@@ -3495,7 +3461,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         Returns:
             Server args, envs, removal/replacement controls, and ``final_overlay``.
         """
-        cb = self.shared_state.current_best if isinstance(self.shared_state.current_best, Mapping) else {}
+        cb = self.shared_state.current_best
         args = str(cb.get("extra_server_args") or "").strip()
         envs: dict[str, str] = {}
         raw_envs = cb.get("extra_envs")
@@ -3544,7 +3510,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         """
         from ..source_snapshot import source_layer_overlay_dir, source_layer_reproducible
 
-        cb = self.shared_state.current_best if isinstance(self.shared_state.current_best, Mapping) else {}
+        cb = self.shared_state.current_best
         materialized = self.current_best_launch_config()
         # current_best's embedded stack was promoted with its tput. Reading the
         # mutable global stack here could attach an unrelated source patch after
@@ -4426,8 +4392,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 "reason": "geak_overlay_unloadable" if overlay_requested else "geak_material_requires_harness",
                 "fallback": "geak_harness",
             }
-        cb_now = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
-        base_params = stack_base_params({**cb_now, **self.current_best_launch_config()})
+        base_params = stack_base_params({**self.shared_state.current_best, **self.current_best_launch_config()})
         base_params = {
             key: value
             for key, value in base_params.items()
@@ -4506,7 +4471,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         args = launch["extra_server_args"]
         envs = launch["extra_envs"]
         overlay = launch["final_overlay"]
-        cb_now = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
+        cb_now = self.shared_state.current_best
         cb_remove = cb_now.get("remove_args")
         cb_unset = cb_now.get("unset_envs")
         cb_replace = str(cb_now.get("args_mode") or "").strip().lower() == "replace"
@@ -4794,7 +4759,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         from hyperloom.orchestrator.phases.machine import Transition
 
         await self._coord.phase_kernel.on_enter_kernel(
-            Transition(from_phase="resume", to_phase="KERNEL_AGENT", reason="resume", evidence={}, loopback=False)
+            Transition(from_phase="resume", to_phase="KERNEL_AGENT", reason="resume", evidence={})
         )
 
     @property

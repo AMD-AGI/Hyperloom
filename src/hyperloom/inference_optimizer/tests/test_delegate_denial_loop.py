@@ -138,6 +138,7 @@ async def test_delegate_fallback_key_uses_tick_and_content_fingerprint(session_d
 async def test_policy_denial_records_target_proposal_message_id(session_dir):
     from hyperloom.inference_optimizer.breakdown.exporter import build
     from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+    from hyperloom.inference_optimizer.breakdown.recorder.phase_records import PhaseCycle, PhaseEntry, PhaseExit
     from hyperloom.inference_optimizer.session.session_binding import session_scope
     from hyperloom.orchestrator.phases.machine_state import workflow_predicate_inputs
     from hyperloom.orchestrator.policy.gate import PolicyDenied
@@ -147,7 +148,7 @@ async def test_policy_denial_records_target_proposal_message_id(session_dir):
     coordinator.shared_state.macro_cycle = 0
     try:
         with session_scope(session_dir):
-            phase_event.record_entry(phase="PRELUDE", macro_cycle=0, sequence=1)
+            phase_event.record_entry(PhaseEntry(at=PhaseCycle("PRELUDE", 0), sequence=1))
             intent = Intent(
                 type=IntentType.DELEGATE,
                 payload={"action_name": "baseline", "target_proposal_msg_id": "proposal-42"},
@@ -158,11 +159,12 @@ async def test_policy_denial_records_target_proposal_message_id(session_dir):
                 PolicyDenied("denied", rule="phase_action_not_allowed", hint="wait"),
             )
             phase_event.record_exit(
-                phase="PRELUDE",
-                macro_cycle=0,
-                to_phase="CLOSE",
-                reason="prelude_baseline_failed",
-                evidence={"predicate_inputs": workflow_predicate_inputs(coordinator.shared_state)},
+                PhaseExit(
+                    at=PhaseCycle("PRELUDE", 0),
+                    to_phase="CLOSE",
+                    reason="prelude_baseline_failed",
+                    evidence={"predicate_inputs": workflow_predicate_inputs(coordinator.shared_state)},
+                )
             )
         breakdown = build(session_dir)
     finally:

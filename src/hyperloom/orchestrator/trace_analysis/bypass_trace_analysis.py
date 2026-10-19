@@ -30,7 +30,7 @@ from . import _bypass_report as _report
 from . import _bypass_trace_reader as _reader
 from . import _trace_shape_manifest as _tsm
 
-from hyperloom.common.io import atomic_write_json
+from hyperloom.common.io import JsonFormat, atomic_write_json
 from hyperloom.common.provenance import build_provenance as _shared_build_provenance
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer import framework_registry
@@ -347,7 +347,7 @@ def _maybe_build_shape_manifest(
             phase_hint=phase_hint,
         )
         out_path = bypass_dir / "trace_shape_manifest.json"
-        atomic_write_json(out_path, manifest, ensure_ascii=False, sort_keys=False, trailing_newline=False)
+        atomic_write_json(out_path, manifest, fmt=JsonFormat(sort_keys=False, ensure_ascii=False))
         print(
             f"[trace_shape_manifest] variants={len(capture_variants) or 'eager'} "
             f"rows={len(manifest.get('rows', []))} path={out_path}",
@@ -739,7 +739,7 @@ def main(argv: list[str] | None = None) -> int:
             summary_csv_path=str(kernel_summary_csv_path),
         ),
     )
-    atomic_write_json(candidates_path, candidates, ensure_ascii=False, sort_keys=False, trailing_newline=False)
+    atomic_write_json(candidates_path, candidates, fmt=JsonFormat(sort_keys=False, ensure_ascii=False))
     # CSV exports: full per-kernel metrics + category summary.
     write_text(kernel_metrics_csv_path, _report.build_metrics_csv(candidates))
     write_text(kernel_summary_csv_path, _report.build_category_summary_csv(candidates))
@@ -772,9 +772,7 @@ def main(argv: list[str] | None = None) -> int:
             "event_total": analyze.get("event_total", 0),
             "created_at": now_iso(timespec="seconds"),
         },
-        ensure_ascii=False,
-        sort_keys=False,
-        trailing_newline=False,
+        fmt=JsonFormat(sort_keys=False, ensure_ascii=False),
     )
 
     kernel_roofline = _report.build_kernel_roofline(
@@ -782,9 +780,7 @@ def main(argv: list[str] | None = None) -> int:
         analysis_md_path=str(analysis_md_path),
         kernel_candidates_path=str(candidates_path),
     )
-    atomic_write_json(
-        kernel_roofline_path, kernel_roofline, ensure_ascii=False, sort_keys=False, trailing_newline=False
-    )
+    atomic_write_json(kernel_roofline_path, kernel_roofline, fmt=JsonFormat(sort_keys=False, ensure_ascii=False))
 
     # Optional rocprof-compute enrichment (opt-in; enriches the sidecar in place).
     rocprof_enrich: dict[str, Any] = (
@@ -793,7 +789,7 @@ def main(argv: list[str] | None = None) -> int:
         else _maybe_enrich_rocprof(kernel_roofline_path, candidates_path, run_dir)
     )
     summary["rocprof_enrich"] = rocprof_enrich
-    atomic_write_json(summary_path, summary, ensure_ascii=False, sort_keys=False, trailing_newline=False)
+    atomic_write_json(summary_path, summary, fmt=JsonFormat(sort_keys=False, ensure_ascii=False))
 
     # Kernel-fusion opportunities: launch adjacency -> fusable clusters.
     fusion = _report.build_fusion(analyze)
@@ -821,7 +817,7 @@ def main(argv: list[str] | None = None) -> int:
                 kernels_aggregated=len(_all_kernels),
             )
             _diff_path = run_dir / "diffusion_roofline.json"
-            atomic_write_json(_diff_path, _diff_report, ensure_ascii=False, sort_keys=False, trailing_newline=False)
+            atomic_write_json(_diff_path, _diff_report, fmt=JsonFormat(sort_keys=False, ensure_ascii=False))
             diffusion_roofline_path = str(_diff_path)
         except Exception:  # noqa: BLE001 - best-effort sidecar, never blocks the run
             diffusion_roofline_path = None

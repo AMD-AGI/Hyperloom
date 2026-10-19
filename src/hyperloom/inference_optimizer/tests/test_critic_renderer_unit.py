@@ -1,26 +1,20 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for the critic and robustness breakdown renderers.
+"""Unit tests for the critic breakdown renderer.
 
-Both agents watch the session from outside the optimization loop, and both have
-a quiet mode that must not read as absence: a critic pass that ruled on nothing
-still says the critic was asked, and a robustness turn that produced no
-envelope still says the agent was reached.
+The critic watches the session from outside the optimization loop, and its quiet
+mode must not read as absence: a critic pass that ruled on nothing still says
+the critic was asked.
 """
 
 from __future__ import annotations
 
 from hyperloom.inference_optimizer.breakdown.reporters._renderers import critic as cr
-from hyperloom.inference_optimizer.breakdown.reporters._renderers import robustness as rb
 
 
 def _critic(*iterations: dict) -> dict:
     return {"critic": {"iterations": list(iterations)}}
-
-
-def _robustness(*turns: dict) -> dict:
-    return {"robustness": {"turns": list(turns)}}
 
 
 # ---- critic ----
@@ -72,44 +66,3 @@ def test_knowledge_base_use_is_reported_only_when_it_was_wired_up():
 def test_a_malformed_verdict_count_does_not_lose_the_section():
     out = cr.render(_critic({"iter": 1, "verdict_counts": {"approve": "many"}}))
     assert out.skipped is False
-
-
-# ---- robustness ----
-
-
-def test_a_session_without_a_robustness_agent_is_skipped():
-    assert rb.render({}).skipped is True
-    assert rb.render(_robustness()).skipped is True
-
-
-def test_a_turn_that_produced_no_envelope_is_distinguished_from_a_quiet_one():
-    out = rb.render(
-        _robustness(
-            {"turn_idx": 0, "outcome": "intents", "intents": []},
-            {"turn_idx": 1, "outcome": "no_envelope", "intents": []},
-        )
-    )
-    assert "1 turn(s) produced no usable envelope" in " ".join(out.key_facts)
-
-
-def test_intents_are_counted_by_severity():
-    out = rb.render(
-        _robustness(
-            {"turn_idx": 0, "intents": [{"type": "raise", "severity": "warn"}, {"type": "raise", "severity": "warn"}]},
-            {"turn_idx": 1, "intents": [{"type": "raise", "severity": "error"}]},
-        )
-    )
-    assert "1 error, 2 warn" in " ".join(out.key_facts)
-
-
-def test_what_the_agent_said_reaches_the_table():
-    out = rb.render(
-        _robustness({"turn_idx": 0, "intents": [{"type": "send_message", "payload": {"body_md": "disk is filling"}}]})
-    )
-    assert "disk is filling" in out.markdown_block
-
-
-def test_parse_warnings_are_surfaced():
-    out = rb.render(_robustness({"turn_idx": 0, "intents": [], "parse_warnings": ["truncated json"]}))
-    assert "1 turn(s) carried parse warnings" in " ".join(out.key_facts)
-    assert "truncated json" in out.markdown_block

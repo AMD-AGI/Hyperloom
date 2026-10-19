@@ -8,6 +8,8 @@ from __future__ import annotations
 import dataclasses
 import json
 
+import pytest
+
 from hyperloom.orchestrator.state.shared_state import (
     LATEST_STATE_SCHEMA_VERSION,
     SharedState,
@@ -134,6 +136,12 @@ def test_legacy_dict_with_unknown_scoreboard_keys_loads_and_stamps():
     assert isinstance(loaded.explore_search, dict)
     for key in ("tested", "accepted", "rejected", "winners_history"):
         assert key in loaded.explore_search
+
+
+@pytest.mark.parametrize("raw", [None, [], "880.0", 880.0])
+def test_a_non_object_current_best_loads_as_empty(raw):
+    """Readers rely on ``current_best`` being a dict, so any other stored shape loads as ``{}``."""
+    assert SharedState.from_dict({"session_id": "legacy", "current_best": raw}).current_best == {}
 
 
 # 3. Inv-10.3 — migration idempotence

@@ -26,7 +26,7 @@ from typing import Any, Callable, NamedTuple
 # same thing on the same signal, so it waits exactly as long.
 from hyperloom.common.env import env_flag
 from hyperloom.common.proctree import TERM_GRACE_SEC as TERM_GRACE_SECONDS
-from hyperloom.common.proctree import collect_tree, group_alive, kill_tree, signal_group
+from hyperloom.common.proctree import collect_tree, kill_tree, signal_group
 
 from .bypass_analysis import parse_server_log_throughput
 
@@ -57,19 +57,6 @@ def new_session_kwargs() -> dict:
     if os.name == "posix":
         return {"start_new_session": True}
     return {}
-
-
-def _process_group_alive(pgid: int) -> bool:
-    """Return True iff at least one process is still in ``pgid``.
-
-    Args:
-        pgid: The POSIX process-group id to probe.
-
-    Returns:
-        True if the group still has at least one member (or liveness is
-        indeterminate), False once the group is empty or on non-POSIX.
-    """
-    return group_alive(pgid)
 
 
 def _signal_group(pgid: int, sig: int) -> None:
@@ -413,46 +400,9 @@ class _StreamCapture:
             pass
 
 
-# Bytes read from the tail of ``server.log`` per scan.
-_SERVER_LOG_TAIL_BYTES: int = 65536
-
 # Glob (relative to the watched path's directory) for nested per-run server logs Magpie writes when its wrapper
 # ignores ``$SERVER_LOG`` and emits to a ``benchmark_<framework>_<timestamp>/server.log`` subdir instead.
 _NESTED_SERVER_LOG_GLOB: str = "benchmark_*/server.log"
-
-
-def _server_log_tail_has_marker(path: str) -> str | None:
-    """Return the death marker present in the tail of the single file ``path``, else None."""
-    try:
-        with open(path, "rb") as fh:
-            try:
-                fh.seek(-_SERVER_LOG_TAIL_BYTES, os.SEEK_END)
-            except OSError:
-                fh.seek(0)
-            tail = fh.read().decode("utf-8", "ignore")
-    except (OSError, ValueError):
-        return None
-    for marker in _SERVER_DEAD_MARKERS:
-        if marker in tail:
-            return marker
-    return None
-
-
-def _server_log_shows_death(path: str) -> str | None:
-    """Return the terminal engine/worker-init marker present in a server log, else None."""
-    marker = _server_log_tail_has_marker(path)
-    if marker is not None:
-        return marker
-    try:
-        base_dir = os.path.dirname(path) or "."
-        for nested in glob.glob(os.path.join(base_dir, _NESTED_SERVER_LOG_GLOB)):
-            if nested != path:
-                nested_marker = _server_log_tail_has_marker(nested)
-                if nested_marker is not None:
-                    return nested_marker
-    except OSError:
-        return None
-    return None
 
 
 def server_log_death_excerpt(path: str, *, max_chars: int = 1200) -> str | None:

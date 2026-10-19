@@ -459,13 +459,6 @@ def scan_sources_with_coverage(
     return {name: tuple(values) for name, values in combined.items()}, complete
 
 
-def scan_sources_for_constants(
-    sources: Sequence[str | None], names: Iterable[str]
-) -> dict[str, tuple[str, ...]] | None:
-    """``scan_sources_with_coverage`` without the coverage flag."""
-    return scan_sources_with_coverage(sources, names)[0]
-
-
 def _as_sources(
     kernel_source: str | Sequence[str | None] | None,
 ) -> list[str | None]:

@@ -70,8 +70,7 @@ def roofline_recipe(state: Any, reason: str) -> str:
 
     PRELUDE profiles the baseline's own arguments, which are current_best's only until the first KEEP.
     """
-    current_best = state.current_best if isinstance(state.current_best, dict) else {}
-    if reason == "prelude_initial" and current_best.get("action") != "baseline":
+    if reason == "prelude_initial" and state.current_best.get("action") != "baseline":
         return "baseline-arm"
     return f"recipe-{int(state.working_recipe_generation or 0)}"
 
