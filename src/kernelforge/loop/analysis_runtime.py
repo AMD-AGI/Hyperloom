@@ -32,18 +32,12 @@ class AnalysisRuntimeMixin(AnalysisEvidenceMixin):
         supervisor_due: bool = False,
         iteration: int | None = None,
     ) -> AnalysisRefreshDecision:
-        state = self.run_state.analysis
         planning_iteration = self.run_state.iteration if iteration is None else int(iteration)
         return decide_analysis_refresh(
+            self.run_state.analysis,
             canonical_commit=context.analysis_commit,
-            evidence_commit=state.evidence_commit,
-            evidence_mean_case_speedup=(state.evidence_mean_case_speedup),
-            evidence_status=state.evidence_status,
             current_mean_case_speedup=self.best_mean_case_speedup,
             supervisor_due=supervisor_due,
-            last_attempt_commit=state.last_attempt_commit,
-            last_attempt_status=state.last_attempt_status,
-            last_attempt_iteration=state.last_attempt_iteration,
             current_iteration=planning_iteration,
         )
 

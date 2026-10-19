@@ -127,10 +127,9 @@ def source_assembler(tmp_path, monkeypatch):
     source.write_bytes(b"first assembly")
     outputs = []
 
-    def assemble(source_path, output_path, **kwargs):
-        assert kwargs["gpu_target"] == "gfx950"
-        assert kwargs["toolchain_dir"] == Path("toolchain")
-        assert kwargs["timeout_sec"] == 60
+    def assemble(source_path, output_path, *, gpu_target, toolchain_dir):
+        assert gpu_target == "gfx950"
+        assert toolchain_dir == Path("toolchain")
         output_path.write_bytes(b"\x7fELF-" + source_path.read_bytes())
         outputs.append(output_path)
         return output_path

@@ -145,7 +145,7 @@ def _prepare_with_spec_reading_driver(
         return ref_dir
 
     async def fake_agent(**kwargs):
-        prompt = kwargs["prompt"]
+        prompt = kwargs["turn"].prompt
         captured["prompt"] = prompt
         spec_rel = _runtime_spec_path(prompt)
         captured["spec_rel"] = spec_rel
@@ -185,15 +185,17 @@ def _prepare_with_spec_reading_driver(
                 model="test-model",
                 experiments_dir=tmp_path / "experiments",
             ),
-            workspace_dir=str(workspace),
-            kernel=str(kernel),
-            driver=str(driver),
-            program_md="# Task",
-            target_functions=["hipb_mm"],
-            source_files=[str(kernel)],
-            invocation_spec_file=str(source_spec),
-            read_only_files=[str(source_spec)],
-            **prepare_kwargs,
+            task=task_preparer.PreparationTask(
+                workspace_dir=str(workspace),
+                kernel=str(kernel),
+                driver=str(driver),
+                program_md="# Task",
+                target_functions=["hipb_mm"],
+                source_files=[str(kernel)],
+                invocation_spec_file=str(source_spec),
+                read_only_files=[str(source_spec)],
+                **prepare_kwargs,
+            ),
         )
     )
     captured["result"] = result
@@ -305,8 +307,8 @@ def test_a_declared_suite_still_gates_preflight_when_the_spec_cannot_be_staged(t
         driver.write_text("# prepared driver\n", encoding="utf-8")
         return "prepared"
 
-    async def recording_preflight(*_args, **kwargs):
-        captured["expected_case_ids"] = kwargs.get("expected_case_ids")
+    async def recording_preflight(_driver, contract, *_args, **kwargs):
+        captured["expected_case_ids"] = contract.expected_case_ids
         return task_preflight.PreflightResult(
             ok=False,
             correctness_ok=False,
@@ -331,14 +333,16 @@ def test_a_declared_suite_still_gates_preflight_when_the_spec_cannot_be_staged(t
                     model="test-model",
                     experiments_dir=tmp_path / "experiments",
                 ),
-                workspace_dir=str(workspace),
-                kernel=str(kernel),
-                driver=str(driver),
-                program_md="# Task",
-                target_functions=["hipb_mm"],
-                source_files=[str(kernel)],
-                invocation_spec_file=str(source_spec),
-                expected_case_ids=["case_001", "case_002"],
+                task=task_preparer.PreparationTask(
+                    workspace_dir=str(workspace),
+                    kernel=str(kernel),
+                    driver=str(driver),
+                    program_md="# Task",
+                    target_functions=["hipb_mm"],
+                    source_files=[str(kernel)],
+                    invocation_spec_file=str(source_spec),
+                    expected_case_ids=["case_001", "case_002"],
+                ),
             )
         )
 
@@ -367,7 +371,7 @@ def test_a_failed_rematerialization_stops_advertising_the_absent_bundle(tmp_path
         return ref_dir
 
     async def fake_agent(**kwargs):
-        prompts.append(kwargs["prompt"])
+        prompts.append(kwargs["turn"].prompt)
         driver.write_text(f"# attempt {len(prompts)}\n", encoding="utf-8")
         return "prepared"
 
@@ -392,12 +396,14 @@ def test_a_failed_rematerialization_stops_advertising_the_absent_bundle(tmp_path
                     model="test-model",
                     experiments_dir=tmp_path / "experiments",
                 ),
-                workspace_dir=str(workspace),
-                kernel=str(kernel),
-                driver=str(driver),
-                program_md="# Task",
-                target_functions=["hipb_mm"],
-                source_files=[str(kernel)],
+                task=task_preparer.PreparationTask(
+                    workspace_dir=str(workspace),
+                    kernel=str(kernel),
+                    driver=str(driver),
+                    program_md="# Task",
+                    target_functions=["hipb_mm"],
+                    source_files=[str(kernel)],
+                ),
             )
         )
 
@@ -521,12 +527,14 @@ def test_a_source_the_rollback_cannot_put_back_fails_the_preparation(tmp_path, m
     result = asyncio.run(
         task_preparer.prepare_task(
             config=SimpleNamespace(model="test-model", experiments_dir=tmp_path / "experiments"),
-            workspace_dir=str(workspace),
-            kernel=str(kernel),
-            driver=str(driver),
-            program_md="# Task",
-            target_functions=["hipb_mm"],
-            source_files=[str(kernel), str(helper)],
+            task=task_preparer.PreparationTask(
+                workspace_dir=str(workspace),
+                kernel=str(kernel),
+                driver=str(driver),
+                program_md="# Task",
+                target_functions=["hipb_mm"],
+                source_files=[str(kernel), str(helper)],
+            ),
         )
     )
 
@@ -587,12 +595,14 @@ def test_a_source_that_comes_back_on_a_retry_is_not_still_reported_as_lost(tmp_p
     result = asyncio.run(
         task_preparer.prepare_task(
             config=SimpleNamespace(model="test-model", experiments_dir=tmp_path / "experiments"),
-            workspace_dir=str(workspace),
-            kernel=str(kernel),
-            driver=str(driver),
-            program_md="# Task",
-            target_functions=["hipb_mm"],
-            source_files=[str(kernel)],
+            task=task_preparer.PreparationTask(
+                workspace_dir=str(workspace),
+                kernel=str(kernel),
+                driver=str(driver),
+                program_md="# Task",
+                target_functions=["hipb_mm"],
+                source_files=[str(kernel)],
+            ),
         )
     )
 
@@ -635,12 +645,14 @@ def test_preparation_gives_back_the_source_the_caller_had_not_the_one_head_holds
     result = asyncio.run(
         task_preparer.prepare_task(
             config=SimpleNamespace(model="test-model", experiments_dir=tmp_path / "experiments"),
-            workspace_dir=str(workspace),
-            kernel=str(kernel),
-            driver=str(driver),
-            program_md="# Task",
-            target_functions=["hipb_mm"],
-            source_files=[str(kernel)],
+            task=task_preparer.PreparationTask(
+                workspace_dir=str(workspace),
+                kernel=str(kernel),
+                driver=str(driver),
+                program_md="# Task",
+                target_functions=["hipb_mm"],
+                source_files=[str(kernel)],
+            ),
         )
     )
 
@@ -668,8 +680,8 @@ def test_external_bundle_reuses_its_own_spec_beside_the_driver(tmp_path, monkeyp
         return ref_dir
 
     async def fake_agent(**kwargs):
-        staged = Path(kwargs["workspace"])
-        spec_rel = _runtime_spec_path(kwargs["prompt"])
+        staged = Path(kwargs["turn"].workspace)
+        spec_rel = _runtime_spec_path(kwargs["turn"].prompt)
         assert spec_rel == source_spec.name
         assert (staged / spec_rel).is_file()
         (staged / "driver.py").write_text(
@@ -702,14 +714,16 @@ def test_external_bundle_reuses_its_own_spec_beside_the_driver(tmp_path, monkeyp
                 model="test-model",
                 experiments_dir=tmp_path / "experiments",
             ),
-            workspace_dir=str(workspace),
-            kernel=str(kernel),
-            driver=str(driver),
-            program_md="# Task",
-            target_functions=["hipb_mm"],
-            source_files=[str(kernel)],
-            invocation_spec_file=str(source_spec),
-            read_only_files=[str(source_spec)],
+            task=task_preparer.PreparationTask(
+                workspace_dir=str(workspace),
+                kernel=str(kernel),
+                driver=str(driver),
+                program_md="# Task",
+                target_functions=["hipb_mm"],
+                source_files=[str(kernel)],
+                invocation_spec_file=str(source_spec),
+                read_only_files=[str(source_spec)],
+            ),
         )
     )
 

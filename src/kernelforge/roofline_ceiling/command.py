@@ -16,7 +16,7 @@ from typing import Any, Sequence
 import click
 import yaml
 
-from kernelforge.agent_backends.base import with_writable_sandbox
+from kernelforge.agent_backends.base import AgentRuntimeSettings, with_writable_sandbox
 from kernelforge.agent_backends.registry import (
     create_registered_backend,
     get_agent_provider,
@@ -127,10 +127,12 @@ def resolve_analyst_backend(agent: AnalystAgent):
     runtime = resolve_agent_runtime(
         name,
         model=selected,
-        timeout_sec=agent.timeout_sec,
-        reasoning_effort=resolve_agent_reasoning_effort(),
-        sandbox_mode=agent.sandbox_mode,
-        fallback_provider="",
+        settings=AgentRuntimeSettings(
+            timeout_sec=agent.timeout_sec,
+            reasoning_effort=resolve_agent_reasoning_effort(),
+            sandbox_mode=agent.sandbox_mode,
+            fallback_provider="",
+        ),
     )
     return create_registered_backend(with_writable_sandbox(runtime))
 

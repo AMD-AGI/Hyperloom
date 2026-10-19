@@ -24,12 +24,14 @@ def _run_preflight(monkeypatch, tmp_path, *, correctness, bench):
     async def _fake_correctness(**kwargs):
         return correctness
 
-    async def _fake_bench(**kwargs):
+    async def _fake_bench(_run, **kwargs):
         return bench
 
     monkeypatch.setattr(task_preflight, "test_correctness", _fake_correctness)
     monkeypatch.setattr(task_preflight, "bench_wallclock", _fake_bench)
-    return asyncio.run(task_preflight._preflight_async(driver.as_posix(), 30.0, 1, 2))
+    return asyncio.run(
+        task_preflight._preflight_async(driver.as_posix(), task_preflight.DriverContract(snr_threshold=30.0), 1, 2)
+    )
 
 
 def test_crash_tail_reaches_result_and_audit(monkeypatch, tmp_path):
@@ -101,10 +103,9 @@ def test_retry_prompt_shows_the_traceback():
         diagnostics={"correctness": _TRACEBACK},
     )
     prompt = task_preparer_prompts._build_prompt(
-        evidence="## Task metadata",
-        driver_rel=".forge_driver_x.py",
-        reference_note="",
-        prior_failure="Deterministic preflight after your edit:\n" + failed.detail_report(),
+        task_preparer_prompts.PromptBrief(evidence="## Task metadata", driver_rel=".forge_driver_x.py"),
+        "",
+        task_preparer_prompts.RetryNote(failure="Deterministic preflight after your edit:\n" + failed.detail_report()),
     )
 
     assert "TypeError" in prompt

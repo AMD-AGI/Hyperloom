@@ -20,10 +20,10 @@ if not torch.version.hip or not torch.cuda.is_available():
 triton = pytest.importorskip("triton")
 tl = pytest.importorskip("triton.language")
 
-from kernelforge.assembly.prepare import AssemblyPreparationError, prepare_assembly
+from kernelforge.assembly.prepare import AssemblyPreparationError, AssemblyTask, prepare_assembly
 from kernelforge.config import Config
 from kernelforge.loop.validation import run_validation_pipeline
-from kernelforge.mcp_server.tools.bench import bench_wallclock
+from kernelforge.mcp_server.tools.bench import BenchRun, bench_wallclock
 
 
 @pytest.mark.parametrize(
@@ -76,12 +76,9 @@ def test_compiler_capture_wrong_instruction_and_replay(tmp_path, frontend, wirin
 
     async def run_preparation():
         return await prepare_assembly(
-            config=Config(workspace=str(workspace), gpu_target=target),
-            kernel=str(workspace / "kernel.py"),
-            driver=driver,
-            sources=[],
+            Config(workspace=str(workspace), gpu_target=target),
+            AssemblyTask(kernel=str(workspace / "kernel.py"), driver=driver, sources=[], threshold=50.0),
             base_commit=base,
-            threshold=50.0,
             deadline=time.time() + 1800,
         )
 
@@ -127,11 +124,13 @@ def test_compiler_capture_wrong_instruction_and_replay(tmp_path, frontend, wirin
     assert report.all_passed, report.failed_output
     result = asyncio.run(
         bench_wallclock(
-            str(replay / "driver.py"),
-            driver_args=["--bench-case", "random"],
-            warmup_iters=2,
-            bench_iters=10,
-            repeat=2,
+            BenchRun(
+                str(replay / "driver.py"),
+                driver_args=["--bench-case", "random"],
+                warmup_iters=2,
+                bench_iters=10,
+                repeat=2,
+            )
         )
     )
     assert result["success"], result

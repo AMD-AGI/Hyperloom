@@ -29,7 +29,7 @@ async def test_preflight_requires_complete_profiling_contract(
     async def fake_correctness(**_kwargs):
         return {"passed": True, "snr_db": 60.0, "message": "ok"}
 
-    async def fake_bench(**_kwargs):
+    async def fake_bench(_run, **_kwargs):
         return {
             "success": True,
             "median_ms": 1.0,
@@ -50,12 +50,7 @@ async def test_preflight_requires_complete_profiling_contract(
     monkeypatch.setattr(task_preflight, "_check_profile_contract", fake_profile)
 
     result = await task_preflight._preflight_async(
-        str(driver),
-        30.0,
-        3,
-        10,
-        require_graph=True,
-        require_profile=True,
+        str(driver), task_preflight.DriverContract(snr_threshold=30.0, require_graph=True, require_profile=True), 3, 10
     )
 
     assert result.ok is True
@@ -69,7 +64,7 @@ def _passing_stages(monkeypatch, case_times: dict[str, float]):
     async def fake_correctness(**_kwargs):
         return {"passed": True, "snr_db": 60.0, "message": "ok"}
 
-    async def fake_bench(**_kwargs):
+    async def fake_bench(_run, **_kwargs):
         return {
             "success": True,
             "median_ms": 1.0,
@@ -93,10 +88,9 @@ async def test_preflight_rejects_driver_that_skips_declared_cases(
 
     result = await task_preflight._preflight_async(
         str(driver),
-        30.0,
+        task_preflight.DriverContract(snr_threshold=30.0, expected_case_ids=["case_001", "case_002"]),
         3,
         10,
-        expected_case_ids=["case_001", "case_002"],
     )
 
     assert result.ok is False
@@ -117,10 +111,9 @@ async def test_preflight_rejects_driver_that_benchmarks_undeclared_cases(
 
     result = await task_preflight._preflight_async(
         str(driver),
-        30.0,
+        task_preflight.DriverContract(snr_threshold=30.0, expected_case_ids=["case_001", "case_002"]),
         3,
         10,
-        expected_case_ids=["case_001", "case_002"],
     )
 
     assert result.ok is False
@@ -137,10 +130,9 @@ async def test_preflight_accepts_the_complete_declared_suite(tmp_path, monkeypat
 
     result = await task_preflight._preflight_async(
         str(driver),
-        30.0,
+        task_preflight.DriverContract(snr_threshold=30.0, expected_case_ids=["case_001", "case_002"]),
         3,
         10,
-        expected_case_ids=["case_001", "case_002"],
     )
 
     assert result.ok is True
@@ -231,14 +223,15 @@ def test_prepare_agent_does_not_receive_shell_access(tmp_path, monkeypatch):
             config=SimpleNamespace(
                 agent_runtime=lambda: configured,
             ),
-            workspace=tmp_path,
-            system_prompt="system",
-            prompt="prompt",
-            timeout_sec=10,
-            additional_dirs=[str(tmp_path / "read-only")],
-            allow_shell=False,
-            target_files=[str(tmp_path / "driver.py")],
-            protected_files=[str(tmp_path / "kernel.py")],
+            turn=task_preparer._AuthoringTurn(
+                workspace=tmp_path,
+                prompt="prompt",
+                timeout_sec=10,
+                target_files=[str(tmp_path / "driver.py")],
+                protected_files=[str(tmp_path / "kernel.py")],
+                additional_dirs=[str(tmp_path / "read-only")],
+                allow_shell=False,
+            ),
             usage=usage,
         )
     )
@@ -290,12 +283,13 @@ def test_prepare_agent_owns_the_driver_it_is_asked_to_author(
                     model="gpt-test",
                 ),
             ),
-            workspace=tmp_path,
-            system_prompt="system",
-            prompt="prompt",
-            timeout_sec=10,
-            target_files=[str(driver)],
-            protected_files=[str(tmp_path / "graph_harness.py")],
+            turn=task_preparer._AuthoringTurn(
+                workspace=tmp_path,
+                prompt="prompt",
+                timeout_sec=10,
+                target_files=[str(driver)],
+                protected_files=[str(tmp_path / "graph_harness.py")],
+            ),
         )
     )
 
@@ -340,21 +334,17 @@ def test_prepare_agent_initializes_required_git_workspace(
     first = asyncio.run(
         task_preparer._run_prepare_agent(
             config=config,
-            workspace=tmp_path,
-            system_prompt="system",
-            prompt="prompt",
-            timeout_sec=10,
-            target_files=[str(tmp_path / "driver.py")],
+            turn=task_preparer._AuthoringTurn(
+                workspace=tmp_path, prompt="prompt", timeout_sec=10, target_files=[str(tmp_path / "driver.py")]
+            ),
         )
     )
     second = asyncio.run(
         task_preparer._run_prepare_agent(
             config=config,
-            workspace=tmp_path,
-            system_prompt="system",
-            prompt="prompt",
-            timeout_sec=10,
-            target_files=[str(tmp_path / "driver.py")],
+            turn=task_preparer._AuthoringTurn(
+                workspace=tmp_path, prompt="prompt", timeout_sec=10, target_files=[str(tmp_path / "driver.py")]
+            ),
         )
     )
 
@@ -568,14 +558,14 @@ def test_prepare_agent_gets_the_spec_inline_and_it_is_restored(tmp_path, monkeyp
         return ref_dir
 
     async def fake_agent(**kwargs):
-        captured["prompt"] = kwargs["prompt"]
+        captured["prompt"] = kwargs["turn"].prompt
         assert json.loads(materialized.read_text(encoding="utf-8")) == payload
         materialized.write_text('{"tampered": true}\n', encoding="utf-8")
         driver.write_text("# prepared driver\n", encoding="utf-8")
         return "prepared"
 
-    async def fake_preflight(*_args, **kwargs):
-        captured["expected_case_ids"] = kwargs.get("expected_case_ids")
+    async def fake_preflight(_driver, contract, *_args, **kwargs):
+        captured["expected_case_ids"] = contract.expected_case_ids
         assert json.loads(materialized.read_text(encoding="utf-8")) == payload
         return task_preflight.PreflightResult(
             ok=True,
@@ -607,20 +597,22 @@ def test_prepare_agent_gets_the_spec_inline_and_it_is_restored(tmp_path, monkeyp
     result = asyncio.run(
         task_preparer.prepare_task(
             config=SimpleNamespace(model="test-model"),
-            workspace_dir=str(workspace),
-            kernel=str(kernel),
-            driver=str(driver),
-            program_md="# Task",
-            target_functions=[],
-            source_files=[str(kernel)],
+            task=task_preparer.PreparationTask(
+                workspace_dir=str(workspace),
+                kernel=str(kernel),
+                driver=str(driver),
+                program_md="# Task",
+                target_functions=[],
+                source_files=[str(kernel)],
+                invocation_spec_file=str(source_spec),
+                expected_case_ids=["case_001"],
+            ),
             preflight=task_preflight.PreflightResult(
                 ok=False,
                 correctness_ok=False,
                 bench_ok=False,
                 reasons=["driver missing"],
             ),
-            invocation_spec_file=str(source_spec),
-            expected_case_ids=["case_001"],
         )
     )
 
@@ -662,7 +654,7 @@ def test_failed_external_preparation_rolls_back_driver_helpers_and_source(
     source_spec.write_text('{"schema_version": 1}\n', encoding="utf-8")
 
     async def fake_agent(**kwargs):
-        staged = Path(kwargs["workspace"])
+        staged = Path(kwargs["turn"].workspace)
         assert staged != output_dir
         (staged / "workspace" / "kernel.py").write_text(
             "ILLEGAL_KERNEL_EDIT\n",
@@ -692,14 +684,16 @@ def test_failed_external_preparation_rolls_back_driver_helpers_and_source(
                 model="test-model",
                 experiments_dir=tmp_path / "experiments",
             ),
-            workspace_dir=str(workspace),
-            kernel=str(kernel),
-            driver=str(driver),
-            program_md="# Task",
-            target_functions=[],
-            source_files=[str(kernel)],
-            invocation_spec_file=str(source_spec),
-            read_only_files=[str(program), str(source_spec)],
+            task=task_preparer.PreparationTask(
+                workspace_dir=str(workspace),
+                kernel=str(kernel),
+                driver=str(driver),
+                program_md="# Task",
+                target_functions=[],
+                source_files=[str(kernel)],
+                invocation_spec_file=str(source_spec),
+                read_only_files=[str(program), str(source_spec)],
+            ),
         )
     )
 
@@ -728,10 +722,10 @@ def test_external_driver_uses_add_dir_without_kernel_repo_commit(tmp_path, monke
     captured: dict = {}
 
     async def fake_agent(**kwargs):
-        staged = Path(kwargs["workspace"])
+        staged = Path(kwargs["turn"].workspace)
         captured["workspace"] = staged
-        captured["additional_dirs"] = kwargs.get("additional_dirs")
-        assert kwargs["allow_shell"] is False
+        captured["additional_dirs"] = kwargs["turn"].additional_dirs
+        assert kwargs["turn"].allow_shell is False
         assert staged != output_dir
         assert (staged / "workspace").is_symlink()
         assert not (staged / "artifacts").exists()
@@ -771,12 +765,14 @@ def test_external_driver_uses_add_dir_without_kernel_repo_commit(tmp_path, monke
                 model="test-model",
                 experiments_dir=output_dir / "artifacts" / "forge_experiments",
             ),
-            workspace_dir=str(workspace),
-            kernel=str(kernel),
-            driver=str(driver),
-            program_md="# Task",
-            target_functions=[],
-            source_files=[str(kernel)],
+            task=task_preparer.PreparationTask(
+                workspace_dir=str(workspace),
+                kernel=str(kernel),
+                driver=str(driver),
+                program_md="# Task",
+                target_functions=[],
+                source_files=[str(kernel)],
+            ),
         )
     )
 
@@ -815,7 +811,7 @@ def test_external_staging_is_discarded_when_preflight_is_cancelled(
     driver.write_text("BROKEN_DRIVER\n", encoding="utf-8")
 
     async def fake_agent(**kwargs):
-        staged = Path(kwargs["workspace"])
+        staged = Path(kwargs["turn"].workspace)
         (staged / "driver.py").write_text("PREPARED_DRIVER\n", encoding="utf-8")
         (staged / "new_helper.py").write_text("NEW_HELPER\n", encoding="utf-8")
         return "prepared"
@@ -837,12 +833,14 @@ def test_external_staging_is_discarded_when_preflight_is_cancelled(
                     model="test-model",
                     experiments_dir=tmp_path / "experiments",
                 ),
-                workspace_dir=str(workspace),
-                kernel=str(kernel),
-                driver=str(driver),
-                program_md="# Task",
-                target_functions=[],
-                source_files=[str(kernel)],
+                task=task_preparer.PreparationTask(
+                    workspace_dir=str(workspace),
+                    kernel=str(kernel),
+                    driver=str(driver),
+                    program_md="# Task",
+                    target_functions=[],
+                    source_files=[str(kernel)],
+                ),
             )
         )
 
@@ -860,7 +858,7 @@ def test_timeout_salvages_driver_when_preflight_passes(tmp_path, monkeypatch):
     driver.write_text("BROKEN_DRIVER\n", encoding="utf-8")
 
     async def timing_out_agent(**kwargs):
-        staged_driver = Path(kwargs["workspace"]) / "driver.py"
+        staged_driver = Path(kwargs["turn"].workspace) / "driver.py"
         staged_driver.write_text(
             "VALID_DRIVER_WRITTEN_BEFORE_TIMEOUT\n",
             encoding="utf-8",
@@ -888,12 +886,14 @@ def test_timeout_salvages_driver_when_preflight_passes(tmp_path, monkeypatch):
                 model="test-model",
                 experiments_dir=tmp_path / "experiments",
             ),
-            workspace_dir=str(workspace),
-            kernel=str(kernel),
-            driver=str(driver),
-            program_md="# Task",
-            target_functions=[],
-            source_files=[str(kernel)],
+            task=task_preparer.PreparationTask(
+                workspace_dir=str(workspace),
+                kernel=str(kernel),
+                driver=str(driver),
+                program_md="# Task",
+                target_functions=[],
+                source_files=[str(kernel)],
+            ),
         )
     )
 

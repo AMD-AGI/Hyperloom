@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from kernelforge.tracker import (
+    ExperimentSubject,
     ExperimentTracker,
     UsageAccumulator,
     combine_usage_totals,
@@ -206,7 +207,7 @@ def test_combine_usage_totals_reports_unavailable_when_nothing_was_priced():
 def test_set_llm_usage_persists_to_experiment():
     with tempfile.TemporaryDirectory() as tmpdir:
         tracker = ExperimentTracker(tmpdir)
-        exp = tracker.create(task_id="t", backend="forge")
+        exp = tracker.create(ExperimentSubject(task_id="t", backend="forge"))
         acc = UsageAccumulator()
         acc.add_from_message(
             FakeResultMessage(
@@ -226,7 +227,7 @@ def test_set_llm_usage_persists_to_experiment():
 def test_set_llm_usage_noop_on_empty():
     with tempfile.TemporaryDirectory() as tmpdir:
         tracker = ExperimentTracker(tmpdir)
-        exp = tracker.create(task_id="t", backend="forge")
+        exp = tracker.create(ExperimentSubject(task_id="t", backend="forge"))
         tracker.set_llm_usage(exp.experiment_id, {})  # no-op
         assert tracker.get(exp.experiment_id).llm_usage == {}
 

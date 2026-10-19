@@ -18,7 +18,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from kernelforge.llm.git import git
+from kernelforge.llm.git import git, git_bytes
 from kernelforge.agent_backends import (
     AgentHook,
     AgentHooks,
@@ -681,14 +681,7 @@ def _publish_patch(
             target = Path(relative)
             if target.is_absolute() or ".." in target.parts:
                 raise RuntimeError(f"apply-back changed file escapes repository: {relative}")
-            content = git(
-                "-C",
-                str(workspace),
-                "show",
-                f"{applyback_commit}:{target.as_posix()}",
-                check=False,
-                text=False,
-            )
+            content = git_bytes("-C", str(workspace), "show", f"{applyback_commit}:{target.as_posix()}", check=False)
             # Deleted files belong in the patch but have no final snapshot.
             if content.returncode != 0:
                 continue

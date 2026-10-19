@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
 from kernelforge.config import Config
@@ -14,8 +16,10 @@ from kernelforge.knowledge.kb_store.recipe import KernelRecipeKB
 from kernelforge.knowledge.kb_store.identity.run import (
     EXPERIENCE_ARTIFACT,
     PATCH_ARTIFACT,
+    LoopKernel,
     resolve_loop_identity,
 )
+from kernelforge.knowledge.kb_store.writer import RunOutcome
 
 DIFF = """diff --git a/kernel.py b/kernel.py
 --- a/kernel.py
@@ -56,9 +60,11 @@ def config(tmp_path, workspace):
     )
 
 
+_LOOP_KERNEL_FIELDS = {field.name for field in dataclasses.fields(LoopKernel)}
+
+
 def _write(config, workspace, **overrides):
     kwargs = {
-        "config": config,
         "workspace": str(workspace),
         "kernel_path": str(workspace / "kernel.py"),
         "kernel_source": KERNEL_SOURCE,
@@ -72,19 +78,30 @@ def _write(config, workspace, **overrides):
         "digest": "iter 1 kept",
         "snr_db": 42.0,
         "framework": "standalone",
-        "summary_override": SUMMARY,
     }
     kwargs.update(overrides)
-    return sink.write_run_experience(**kwargs)
+    return write_flat_experience(config, kwargs)
+
+
+def write_flat_experience(config, fields: dict) -> dict:
+    """Write one run experience from the flat keyword fields the KB tests spell."""
+    fields = dict(fields)
+    summary_override = fields.pop("summary_override", SUMMARY)
+    kernel = LoopKernel(**{name: fields.pop(name) for name in _LOOP_KERNEL_FIELDS if name in fields})
+    return sink.write_run_experience(
+        config=config, kernel=kernel, outcome=RunOutcome(**fields), summary_override=summary_override
+    )
 
 
 def _records(config, workspace) -> KernelRecipeKB:
     identity, _op, _fw = resolve_loop_identity(
-        kernel_path=str(workspace / "kernel.py"),
-        kernel_source=KERNEL_SOURCE,
-        kernel_backend="triton",
+        LoopKernel(
+            kernel_path=str(workspace / "kernel.py"),
+            kernel_backend="triton",
+            kernel_source=KERNEL_SOURCE,
+            framework="standalone",
+        ),
         gpu_type="mi300x",
-        framework="standalone",
     )
     return KernelRecipeKB.open_identity(identity, config)
 
@@ -232,8 +249,8 @@ def test_write_persists_supplied_pristine_implementation_contract(config, worksp
     status = _write(
         config,
         workspace,
-        implementation_signature_override=pristine_signature,
-        implementation_identity_override=pristine_identity,
+        implementation_signature=pristine_signature,
+        implementation_identity=pristine_identity,
     )
 
     assert status["written"] is True
@@ -327,11 +344,13 @@ def test_a_different_gpu_is_a_different_address(config, workspace):
     _write(config, workspace)
 
     identity, _op, _fw = resolve_loop_identity(
-        kernel_path=str(workspace / "kernel.py"),
-        kernel_source=KERNEL_SOURCE,
-        kernel_backend="triton",
+        LoopKernel(
+            kernel_path=str(workspace / "kernel.py"),
+            kernel_backend="triton",
+            kernel_source=KERNEL_SOURCE,
+            framework="standalone",
+        ),
         gpu_type="mi355x",
-        framework="standalone",
     )
     other = KernelRecipeKB.open_identity(identity, config)
 
@@ -352,12 +371,14 @@ def test_either_spelling_of_one_operator_reaches_the_same_record(config, workspa
 
     for spelling in ("KdaPackedDecodeKernel", "kda_packed_decode_kernel", "kda_packed_decode"):
         identity, _op, _fw = resolve_loop_identity(
-            kernel_path=str(workspace / "kernel.py"),
-            kernel_source=KERNEL_SOURCE,
-            kernel_backend="triton",
+            LoopKernel(
+                kernel_path=str(workspace / "kernel.py"),
+                kernel_backend="triton",
+                kernel_source=KERNEL_SOURCE,
+                framework="standalone",
+                operator_name=spelling,
+            ),
             gpu_type="mi300x",
-            framework="standalone",
-            operator_name=spelling,
         )
         records = KernelRecipeKB.open_identity(identity, config)
         assert identity.kernel_name == "kda_packed_decode"
@@ -372,11 +393,13 @@ def test_a_different_producer_is_a_different_address(config, workspace):
     _write(config, workspace)
 
     identity, _op, _fw = resolve_loop_identity(
-        kernel_path=str(workspace / "kernel.py"),
-        kernel_source=KERNEL_SOURCE,
-        kernel_backend="triton",
+        LoopKernel(
+            kernel_path=str(workspace / "kernel.py"),
+            kernel_backend="triton",
+            kernel_source=KERNEL_SOURCE,
+            framework="standalone",
+        ),
         gpu_type="mi300x",
-        framework="standalone",
         producer="fusion",
     )
     other = KernelRecipeKB.open_identity(identity, config)
@@ -391,10 +414,12 @@ def test_a_different_producer_is_a_different_address(config, workspace):
 def test_an_unset_producer_still_files_under_the_loops_own(config, workspace):
     """Every existing caller passes nothing, and must keep its address."""
     identity, _op, _fw = resolve_loop_identity(
-        kernel_path=str(workspace / "kernel.py"),
-        kernel_source=KERNEL_SOURCE,
-        kernel_backend="triton",
+        LoopKernel(
+            kernel_path=str(workspace / "kernel.py"),
+            kernel_backend="triton",
+            kernel_source=KERNEL_SOURCE,
+            framework="standalone",
+        ),
         gpu_type="mi300x",
-        framework="standalone",
     )
     assert identity.producer == "forge-loop"

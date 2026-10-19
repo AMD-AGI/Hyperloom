@@ -18,6 +18,7 @@ from kernelforge.knowledge.pr_knowledge.search import (
     PRLifecycle,
     PRReference,
     PRState,
+    SearchLimits,
     component_relevance,
     components_of_interest,
     discover,
@@ -614,7 +615,7 @@ def test_candidate_cap_bounds_the_enrichment_request_count(service, client):
     service.by_query = {"moe": list(range(1, 31))}
     service.details = {n: _detail(n) for n in range(1, 31)}
 
-    discover(client, _context(keywords=("moe",)), candidate_cap=4)
+    discover(client, _context(keywords=("moe",)), limits=SearchLimits(candidate_cap=4))
 
     assert service.query_count("/prs/") == 4
 
@@ -624,7 +625,7 @@ def test_cap_prefers_path_hits_over_search_hits(service, client):
     service.by_query = {"moe": [900, 901, 902]}
     service.details = {n: _detail(n) for n in (1, 900, 901, 902)}
 
-    discover(client, _context(file_paths=("a/f.py",), keywords=("moe",)), candidate_cap=1)
+    discover(client, _context(file_paths=("a/f.py",), keywords=("moe",)), limits=SearchLimits(candidate_cap=1))
 
     assert service.query_count("/prs/1") == 1
 
@@ -838,7 +839,7 @@ def test_top_k_truncates_the_ranked_list(service, client):
     service.by_query = {"moe": [1, 2, 3, 4, 5, 6]}
     service.details = {n: _detail(n, worth=n / 10) for n in range(1, 7)}
 
-    outcome = discover(client, _context(keywords=("moe",)), top_k=2)
+    outcome = discover(client, _context(keywords=("moe",)), limits=SearchLimits(top_k=2))
 
     assert len(outcome.references) == 2
     assert [ref.number for ref in outcome.references] == [6, 5]

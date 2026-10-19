@@ -12,7 +12,7 @@ from typing import Optional
 import click
 
 from kernelforge.config import resolve_agent_model, resolve_agent_reasoning_effort
-from kernelforge.agent_backends.base import AgentProviderUnavailableError
+from kernelforge.agent_backends.base import AgentProviderUnavailableError, AgentRuntimeSettings
 from kernelforge.agent_backends.registry import (
     create_registered_backend,
     get_agent_provider,
@@ -110,11 +110,13 @@ def _create_agent_backend(
     runtime = resolve_agent_runtime(
         provider,
         model=model,
-        timeout_sec=_agent_timeout_sec(),
-        # Same switches forge-loop reads. Omitting this pinned every fusion
-        # session to the default depth no matter what the box asked for.
-        reasoning_effort=resolve_agent_reasoning_effort(),
-        sandbox_mode=sandbox_mode,
-        fallback_provider="",
+        settings=AgentRuntimeSettings(
+            timeout_sec=_agent_timeout_sec(),
+            # Same switches forge-loop reads. Omitting this pinned every fusion
+            # session to the default depth no matter what the box asked for.
+            reasoning_effort=resolve_agent_reasoning_effort(),
+            sandbox_mode=sandbox_mode,
+            fallback_provider="",
+        ),
     )
     return create_registered_backend(runtime)

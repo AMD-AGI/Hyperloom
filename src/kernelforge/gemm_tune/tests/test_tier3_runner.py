@@ -511,12 +511,13 @@ class TestTheProviderCallMatchesTheProviderAPI:
         import inspect
 
         registry = pytest.importorskip("kernelforge.agent_backends.registry")
+        from kernelforge.agent_backends.base import AgentRuntimeSettings
 
         # What generate.call_agent passes.
         inspect.signature(registry.resolve_agent_runtime).bind(
             "claude",
             model="",
-            timeout_sec=1800,
+            settings=AgentRuntimeSettings(timeout_sec=1800, reasoning_effort=""),
         )
 
     def test_provider_selection_yields_something_with_a_name(self):

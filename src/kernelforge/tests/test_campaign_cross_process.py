@@ -109,7 +109,7 @@ def test_two_sessions_preserve_lineage_history_and_global_ids(tmp_path, monkeypa
         tracker,
         session_count=2,
     )
-    first_results = asyncio.run(first.run(agent_fn=editing_agent))
+    first_results = asyncio.run(first.run(runner_module.LoopAgents(agent_fn=editing_agent)))
     second = _make_loop(
         workspace,
         kernel,
@@ -118,7 +118,7 @@ def test_two_sessions_preserve_lineage_history_and_global_ids(tmp_path, monkeypa
         session_count=2,
         resume=True,
     )
-    second_results = asyncio.run(second.run(agent_fn=editing_agent))
+    second_results = asyncio.run(second.run(runner_module.LoopAgents(agent_fn=editing_agent)))
 
     assert [item.iteration for item in first_results] == [1, 2]
     assert [item.iteration for item in second_results] == [3, 4]
@@ -192,7 +192,7 @@ def test_runner_exposes_state_persistence_degradation(tmp_path, monkeypatch):
         return "No source change."
 
     monkeypatch.setattr(LoopStateStore, "save", fail_save)
-    asyncio.run(loop.run(agent_fn=no_change_agent))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=no_change_agent)))
 
     assert loop.persistence_degraded is True
     assert any("simulated state write failure" in item for item in loop.persistence_errors)
@@ -251,8 +251,8 @@ def test_published_keep_survives_interruption_resume_and_later_failure(
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(
             first.run(
-                agent_fn=editing_agent,
-                on_iteration=interrupt_after_keep,
+                runner_module.LoopAgents(agent_fn=editing_agent),
+                callbacks=runner_module.LoopCallbacks(on_iteration=interrupt_after_keep),
             )
         )
 
@@ -269,7 +269,7 @@ def test_published_keep_survives_interruption_resume_and_later_failure(
         session_count=1,
         resume=True,
     )
-    asyncio.run(resumed.run(agent_fn=editing_agent))
+    asyncio.run(resumed.run(runner_module.LoopAgents(agent_fn=editing_agent)))
 
     final_manifest = json.loads((root / "best" / "manifest.json").read_text())
     final_report = (root / "optimization_report.md").read_text()
@@ -318,7 +318,7 @@ def test_resume_recovers_keep_committed_before_state_checkpoint(tmp_path, monkey
         interrupt_before_checkpoint,
     )
     with pytest.raises(asyncio.CancelledError):
-        asyncio.run(first.run(agent_fn=editing_agent))
+        asyncio.run(first.run(runner_module.LoopAgents(agent_fn=editing_agent)))
 
     root = workspace / "forge_experiments"
     committed_head = subprocess.run(
@@ -347,7 +347,7 @@ def test_resume_recovers_keep_committed_before_state_checkpoint(tmp_path, monkey
         session_count=0,
         resume=True,
     )
-    asyncio.run(resumed.run(agent_fn=forbidden_agent))
+    asyncio.run(resumed.run(runner_module.LoopAgents(agent_fn=forbidden_agent)))
 
     state = LoopStateStore(str(workspace)).load()
     events = LoopStateStore(str(workspace)).read_events()
@@ -394,7 +394,7 @@ def test_resume_clears_reconciled_pending_keep(
         interrupt_before_checkpoint,
     )
     with pytest.raises(asyncio.CancelledError):
-        asyncio.run(first.run(agent_fn=editing_agent))
+        asyncio.run(first.run(runner_module.LoopAgents(agent_fn=editing_agent)))
 
     root = workspace / "forge_experiments"
     assert (root / "pending_keep.json").is_file()
@@ -407,7 +407,7 @@ def test_resume_clears_reconciled_pending_keep(
         session_count=0,
         resume=True,
     )
-    asyncio.run(resumed.run(agent_fn=None))
+    asyncio.run(resumed.run(runner_module.LoopAgents(agent_fn=None)))
 
     assert not (root / "pending_keep.json").exists()
     archived = CandidateArchive(str(workspace), str(kernel)).load_meta(1)
@@ -421,12 +421,12 @@ def test_resume_repairs_publication_after_state_advanced_once(tmp_path, monkeypa
     original_publish = runner_module.BestResultPublisher.publish
     publish_calls = 0
 
-    def interrupt_publication(self, **kwargs):
+    def interrupt_publication(self, *args, **kwargs):
         nonlocal publish_calls
         publish_calls += 1
         if publish_calls == 1:
             raise OSError("simulated publication interruption")
-        return original_publish(self, **kwargs)
+        return original_publish(self, *args, **kwargs)
 
     monkeypatch.setattr(
         runner_module.BestResultPublisher,
@@ -447,7 +447,7 @@ def test_resume_repairs_publication_after_state_advanced_once(tmp_path, monkeypa
         tracker,
         session_count=1,
     )
-    asyncio.run(first.run(agent_fn=editing_agent))
+    asyncio.run(first.run(runner_module.LoopAgents(agent_fn=editing_agent)))
 
     root = workspace / "forge_experiments"
     interrupted_state = LoopStateStore(str(workspace)).load()
@@ -464,7 +464,7 @@ def test_resume_repairs_publication_after_state_advanced_once(tmp_path, monkeypa
         session_count=0,
         resume=True,
     )
-    asyncio.run(resumed.run(agent_fn=None))
+    asyncio.run(resumed.run(runner_module.LoopAgents(agent_fn=None)))
 
     recovered = LoopStateStore(str(workspace)).load()
     events = LoopStateStore(str(workspace)).read_events()
@@ -501,7 +501,7 @@ def test_resume_discards_pending_keep_when_commit_never_happened(tmp_path, monke
 
     monkeypatch.setattr(first, "_git_commit", interrupt_commit)
     with pytest.raises(KeyboardInterrupt):
-        asyncio.run(first.run(agent_fn=editing_agent))
+        asyncio.run(first.run(runner_module.LoopAgents(agent_fn=editing_agent)))
 
     root = workspace / "forge_experiments"
     assert (root / "pending_keep.json").is_file()
@@ -521,7 +521,7 @@ def test_resume_discards_pending_keep_when_commit_never_happened(tmp_path, monke
         session_count=0,
         resume=True,
     )
-    asyncio.run(resumed.run(agent_fn=None))
+    asyncio.run(resumed.run(runner_module.LoopAgents(agent_fn=None)))
 
     state = LoopStateStore(str(workspace)).load()
     assert resumed._git("rev-parse", "HEAD").splitlines()[0] == base_head
@@ -557,7 +557,7 @@ def test_resume_rejects_pending_keep_with_unexpected_child_commit(
 
     monkeypatch.setattr(first, "_git_commit", interrupt_commit)
     with pytest.raises(KeyboardInterrupt):
-        asyncio.run(first.run(agent_fn=editing_agent))
+        asyncio.run(first.run(runner_module.LoopAgents(agent_fn=editing_agent)))
 
     root = workspace / "forge_experiments"
     state_before = (root / "run_state.json").read_bytes()
@@ -580,7 +580,7 @@ def test_resume_rejects_pending_keep_with_unexpected_child_commit(
         resume=True,
     )
     with pytest.raises(ValueError, match="committed patch mismatch"):
-        asyncio.run(resumed.run(agent_fn=None))
+        asyncio.run(resumed.run(runner_module.LoopAgents(agent_fn=None)))
 
     assert (root / "run_state.json").read_bytes() == state_before
     assert (root / "pending_keep.json").read_bytes() == pending_before
@@ -604,7 +604,7 @@ def test_resume_repairs_best_views_from_run_state_before_agent(tmp_path, monkeyp
         tracker,
         session_count=1,
     )
-    asyncio.run(first.run(agent_fn=editing_agent))
+    asyncio.run(first.run(runner_module.LoopAgents(agent_fn=editing_agent)))
 
     root = workspace / "forge_experiments"
     (root / "best" / "manifest.json").unlink()
@@ -625,7 +625,7 @@ def test_resume_repairs_best_views_from_run_state_before_agent(tmp_path, monkeyp
         session_count=0,
         resume=True,
     )
-    asyncio.run(resumed.run(agent_fn=forbidden_agent))
+    asyncio.run(resumed.run(runner_module.LoopAgents(agent_fn=forbidden_agent)))
 
     state = LoopStateStore(str(workspace)).load()
     manifest = json.loads((root / "best" / "manifest.json").read_text())
@@ -647,7 +647,7 @@ import asyncio
 import sys
 from pathlib import Path
 
-from kernelforge.loop.runner import IterationConfig, IterationLoop
+from kernelforge.loop.runner import IterationConfig, IterationLoop, LoopAgents
 from kernelforge.tracker import ExperimentTracker
 
 
@@ -704,7 +704,7 @@ async def main():
         await asyncio.Event().wait()
 
     loop.run_one_iteration = blocked_validation
-    await loop.run(agent_fn=agent, usage=usage)
+    await loop.run(LoopAgents(agent_fn=agent), usage=usage)
 
 
 asyncio.run(main())

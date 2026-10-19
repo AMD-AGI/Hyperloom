@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.llm.git import DEFAULT_TIMEOUT_SEC, GitError, git, git_async
+from kernelforge.llm.git import DEFAULT_TIMEOUT_SEC, GitError, git, git_bytes, git_async
 
 
 def _repo(tmp_path: Path) -> Path:
@@ -53,7 +53,7 @@ def test_bytes_mode_keeps_paths_that_are_not_utf8(tmp_path):
     (root / os.fsdecode(b"weird\xff.py")).write_text("x = 1\n")
     git("add", "-A", cwd=root)
 
-    listed = git("ls-files", "-z", cwd=root, text=False).stdout
+    listed = git_bytes("ls-files", "-z", cwd=root).stdout
 
     assert b"weird\xff.py" in listed
 
@@ -116,7 +116,7 @@ def test_a_failure_in_bytes_mode_still_reads_as_words(tmp_path):
     root = _repo(tmp_path)
 
     with pytest.raises(GitError) as raised:
-        git("rev-parse", "--verify", "refs/heads/absent", cwd=root, text=False)
+        git_bytes("rev-parse", "--verify", "refs/heads/absent", cwd=root)
 
     assert "Needed a single revision" in str(raised.value)
 

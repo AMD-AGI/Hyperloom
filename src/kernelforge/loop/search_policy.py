@@ -46,25 +46,40 @@ class SearchPolicyDecision:
             raise ValueError("search policy reason_codes must not be empty")
 
 
+@dataclass(frozen=True)
+class SearchState:
+    """Where the search stands: the best's source, the stall streak, the current mode, its residence and cycle."""
+
+    best_source: str
+    no_improvement_iters: int
+    current_mode: str = SEARCH_MODE_EXPLOIT
+    residence_iterations_remaining: int = 0
+    diversification_cycle_completed: bool = False
+
+
+@dataclass(frozen=True)
+class RecentProgress:
+    """What the recent iterations showed: the empty-diff streak and the gain ratio over the exploit window."""
+
+    consecutive_no_changes: int = 0
+    window_gain_ratio: float | None = None
+
+
 class SearchPolicyEngine:
     """Choose EXPLOIT or DIVERSIFY from durable, measured state."""
 
     def decide(
         self,
+        state: SearchState,
         *,
-        best_source: str,
-        no_improvement_iters: int,
         stall_threshold: int,
-        current_mode: str = SEARCH_MODE_EXPLOIT,
-        residence_iterations_remaining: int = 0,
-        diversification_cycle_completed: bool = False,
-        consecutive_no_changes: int = 0,
-        window_gain_ratio: float | None = None,
+        recent: RecentProgress = RecentProgress(),
     ) -> SearchPolicyDecision:
         """Return a deterministic mode with stable reason codes."""
         threshold = max(1, int(stall_threshold))
-        residence = max(0, int(residence_iterations_remaining))
-        empty_diffs = max(0, int(consecutive_no_changes))
+        residence = max(0, int(state.residence_iterations_remaining))
+        empty_diffs = max(0, int(recent.consecutive_no_changes))
+        window_gain_ratio = recent.window_gain_ratio
         window_gain = None if window_gain_ratio is None else float(window_gain_ratio)
         if window_gain is not None and not math.isfinite(window_gain):
             raise ValueError(f"window_gain_ratio must be finite: {window_gain_ratio!r}")
@@ -75,19 +90,19 @@ class SearchPolicyEngine:
         if empty_diffs >= NO_CHANGES_ESCALATION_THRESHOLD:
             mode = SEARCH_MODE_DIVERSIFY
             reason = "REPEATED_NO_CHANGES"
-        elif current_mode == SEARCH_MODE_EXPLOIT and residence > 0:
+        elif state.current_mode == SEARCH_MODE_EXPLOIT and residence > 0:
             mode = SEARCH_MODE_EXPLOIT
             reason = "MODE_RESIDENCE"
-        elif diversification_cycle_completed:
+        elif state.diversification_cycle_completed:
             mode = SEARCH_MODE_EXPLOIT
             reason = "DIVERSIFY_PLAN_CREATED"
-        elif no_improvement_iters >= threshold:
+        elif state.no_improvement_iters >= threshold:
             mode = SEARCH_MODE_DIVERSIFY
             reason = "NO_IMPROVEMENT_STALL"
         elif window_gain is not None and window_gain < MARGINAL_GAIN_FLOOR:
             mode = SEARCH_MODE_DIVERSIFY
             reason = "DIMINISHING_RETURNS"
-        elif (best_source or "").strip().lower() == "warm_start":
+        elif (state.best_source or "").strip().lower() == "warm_start":
             mode = SEARCH_MODE_EXPLOIT
             reason = "KB_WARM_START_EXPLOIT"
         else:

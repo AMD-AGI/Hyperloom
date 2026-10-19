@@ -7,6 +7,7 @@ import asyncio
 import pytest
 
 from kernelforge.mcp_server.tools.bench import (
+    BenchRun,
     CaseCoverageError,
     bench_wallclock,
     calculate_mean_case_speedup,
@@ -67,7 +68,7 @@ def test_bench_rejects_duplicate_case_timings(tmp_path):
         "print('case_ms: repeated 1.0')\nprint('case_ms: repeated 2.0')\nprint('mean_ms: 1.5')\n",
     )
 
-    result = asyncio.run(bench_wallclock(driver_script=driver))
+    result = asyncio.run(bench_wallclock(BenchRun(driver)))
 
     assert result["success"] is False
     assert result["message"] == "DUPLICATE CASE TIMINGS: repeated"
@@ -131,7 +132,7 @@ def test_correctness_timeout(tmp_path):
 
 def test_bench_per_iter_median(tmp_path):
     drv = _write_driver(tmp_path, "b.py", "for t in (1.0, 2.0, 3.0):\n    print(f'wall_ms: {t}')\n")
-    result = asyncio.run(bench_wallclock(drv))
+    result = asyncio.run(bench_wallclock(BenchRun(drv)))
     assert result["success"] is True
     assert result["median_ms"] == 2.0
     assert result["min_ms"] == 1.0
@@ -142,7 +143,7 @@ def test_bench_per_iter_median(tmp_path):
 def test_bench_case_times_and_callback(tmp_path):
     drv = _write_driver(tmp_path, "b.py", "print('wall_ms: 2.0')\nprint('case_ms: caseA 5.5')\n")
     captured = {}
-    result = asyncio.run(bench_wallclock(drv, on_result=captured.update))
+    result = asyncio.run(bench_wallclock(BenchRun(drv), on_result=captured.update))
     assert result["case_times"] == {"caseA": 5.5}
     assert captured["median_ms"] == 2.0
 
@@ -155,7 +156,7 @@ def test_bench_parses_case_bandwidth(tmp_path):
         "print('mean_ms: 1.0')\nprint('case_bw: caseA bytes=9007199254740993 algbw=12.5GB/s busbw=10.25GB/s')\n",
     )
 
-    result = asyncio.run(bench_wallclock(drv))
+    result = asyncio.run(bench_wallclock(BenchRun(drv)))
 
     assert result["case_bandwidth"] == {
         "caseA": {
@@ -168,7 +169,7 @@ def test_bench_parses_case_bandwidth(tmp_path):
 
 def test_bench_aggregate_mean(tmp_path):
     drv = _write_driver(tmp_path, "b.py", "print('mean_ms: 4.25')\n")
-    result = asyncio.run(bench_wallclock(drv))
+    result = asyncio.run(bench_wallclock(BenchRun(drv)))
     assert result["success"] is True
     assert result["stat"] == "mean"
     assert result["median_ms"] == 4.25
@@ -176,32 +177,32 @@ def test_bench_aggregate_mean(tmp_path):
 
 def test_bench_aggregate_median(tmp_path):
     drv = _write_driver(tmp_path, "b.py", "print('median_ms: 3.0')\n")
-    result = asyncio.run(bench_wallclock(drv))
+    result = asyncio.run(bench_wallclock(BenchRun(drv)))
     assert result["stat"] == "median"
 
 
 def test_bench_no_timing(tmp_path):
     drv = _write_driver(tmp_path, "b.py", "print('no timings here')\n")
-    result = asyncio.run(bench_wallclock(drv))
+    result = asyncio.run(bench_wallclock(BenchRun(drv)))
     assert result["success"] is False
     assert "NO TIMING DATA" in result["message"]
 
 
 def test_bench_crash(tmp_path):
     drv = _write_driver(tmp_path, "b.py", "import sys; sys.exit(1)\n")
-    result = asyncio.run(bench_wallclock(drv))
+    result = asyncio.run(bench_wallclock(BenchRun(drv)))
     assert result["success"] is False
     assert "CRASHED" in result["message"]
 
 
 def test_bench_timeout(tmp_path):
     drv = _write_driver(tmp_path, "b.py", "import time; time.sleep(5)\n")
-    result = _run_and_flush(bench_wallclock(drv, timeout_sec=1))
+    result = _run_and_flush(bench_wallclock(BenchRun(drv), timeout_sec=1))
     assert result["success"] is False
     assert "TIMEOUT" in result["message"]
 
 
 def test_bench_bad_case_ms_skipped(tmp_path):
     drv = _write_driver(tmp_path, "b.py", "print('wall_ms: 1.0')\nprint('case_ms: caseB notanumber')\n")
-    result = asyncio.run(bench_wallclock(drv))
+    result = asyncio.run(bench_wallclock(BenchRun(drv)))
     assert result["case_times"] == {}

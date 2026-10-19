@@ -22,7 +22,8 @@ from pathlib import Path
 
 from kernelforge.loop.aiter_cache import cleanup_current_owned_aiter_locks
 from kernelforge.loop.profile_contract import PROFILE_RUN_FLAG
-from kernelforge.mcp_server.tools.bench import bench_wallclock
+from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.mcp_server.tools.bench import BenchRun, bench_wallclock
 from kernelforge.mcp_server.tools.test import test_correctness
 
 
@@ -581,17 +582,31 @@ async def _check_profile_contract(
     return True, "verified"
 
 
+@dataclass(frozen=True)
+class DriverContract:
+    """What a driver must satisfy: the correctness threshold, graph timing, a profile run, its ranks and cases."""
+
+    snr_threshold: float = DEFAULT_SNR_THRESHOLD_DB
+    require_graph: bool = False
+    require_profile: bool = False
+    require_ranks: int = 1
+    expected_case_ids: list[str] | None = None
+
+
 async def _preflight_async(
     driver: str,
-    snr_threshold: float,
+    contract: DriverContract,
     warmup: int,
     iters: int,
-    require_graph: bool = False,
-    require_profile: bool = False,
-    require_ranks: int = 1,
+    *,
     deadline_unix: float = 0.0,
-    expected_case_ids: list[str] | None = None,
 ) -> PreflightResult:
+    snr_threshold, expected_case_ids = contract.snr_threshold, contract.expected_case_ids
+    require_graph, require_profile, require_ranks = (
+        contract.require_graph,
+        contract.require_profile,
+        contract.require_ranks,
+    )
     reasons: list[str] = []
     details: dict = {}
     diagnostics: dict = {}
@@ -651,10 +666,7 @@ async def _preflight_async(
     stage_started = time.monotonic()
     try:
         bres = await bench_wallclock(
-            driver_script=driver,
-            driver_args=[],
-            warmup_iters=warmup,
-            bench_iters=iters,
+            BenchRun(driver, driver_args=[], warmup_iters=warmup, bench_iters=iters),
             timeout_sec=int(_deadline_timeout(deadline_unix, PREFLIGHT_BENCH_TIMEOUT_S)),
         )
         reported_cases = bres.get("case_times") or {}

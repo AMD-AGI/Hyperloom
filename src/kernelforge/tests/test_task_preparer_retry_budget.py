@@ -31,14 +31,16 @@ def _prepare(workspace, driver, tmp_path, *, deadline_sec):
     return asyncio.run(
         task_preparer.prepare_task(
             config=SimpleNamespace(model="test-model", experiments_dir=str(tmp_path / "experiments")),
-            workspace_dir=str(workspace),
-            kernel=str(workspace / "kernel.py"),
-            driver=str(driver),
-            program_md="# Task",
-            target_functions=[],
-            source_files=[str(workspace / "kernel.py")],
+            task=task_preparer.PreparationTask(
+                workspace_dir=str(workspace),
+                kernel=str(workspace / "kernel.py"),
+                driver=str(driver),
+                program_md="# Task",
+                target_functions=[],
+                source_files=[str(workspace / "kernel.py")],
+            ),
+            budget=task_preparer.PreparationBudget(wall_sec=deadline_sec),
             preflight=task_preflight.PreflightResult(ok=False, correctness_ok=False, bench_ok=False, reasons=["nope"]),
-            deadline_sec=deadline_sec,
         )
     )
 

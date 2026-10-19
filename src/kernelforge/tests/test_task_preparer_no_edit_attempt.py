@@ -38,12 +38,14 @@ def _run(workspace, driver, audit_dir):
     return asyncio.run(
         task_preparer.prepare_task(
             config=SimpleNamespace(model="test-model", experiments_dir=str(audit_dir)),
-            workspace_dir=str(workspace),
-            kernel=str(workspace / "kernel.py"),
-            driver=str(driver),
-            program_md="# Task",
-            target_functions=[],
-            source_files=[str(workspace / "kernel.py")],
+            task=task_preparer.PreparationTask(
+                workspace_dir=str(workspace),
+                kernel=str(workspace / "kernel.py"),
+                driver=str(driver),
+                program_md="# Task",
+                target_functions=[],
+                source_files=[str(workspace / "kernel.py")],
+            ),
             preflight=_failing_preflight(),
         )
     )
@@ -55,7 +57,7 @@ def test_timeout_without_an_edit_says_so_in_prompt_and_result(tmp_path, monkeypa
     prompts: list[str] = []
 
     async def agent_that_writes_nothing(**kwargs):
-        prompts.append(kwargs["prompt"])
+        prompts.append(kwargs["turn"].prompt)
         raise asyncio.TimeoutError
 
     async def failing_preflight(*_a, **_k):
@@ -84,7 +86,7 @@ def test_edited_attempt_keeps_the_original_wording(tmp_path, monkeypatch):
     prompts: list[str] = []
 
     async def agent_that_edits_then_times_out(**kwargs):
-        prompts.append(kwargs["prompt"])
+        prompts.append(kwargs["turn"].prompt)
         driver.write_text(f"EDIT {len(prompts)}\n", encoding="utf-8")
         raise asyncio.TimeoutError
 
@@ -157,9 +159,7 @@ def test_template_verify_uses_snr_not_allclose():
     assert "allclose" not in tmpl.split("_run_bench")[1].split("def ")[0]
 
     prompt_text = task_preparer_prompts._build_prompt(
-        evidence="## Task metadata",
-        driver_rel=".forge_driver_x.py",
-        reference_note="",
+        task_preparer_prompts.PromptBrief(evidence="## Task metadata", driver_rel=".forge_driver_x.py"), ""
     )
     assert "SNR-based" in prompt_text or "_snr_db" in prompt_text
     assert "NOT `torch.allclose`" in prompt_text
@@ -167,9 +167,7 @@ def test_template_verify_uses_snr_not_allclose():
 
 def test_user_prompt_does_not_tell_the_agent_to_read_everything_first():
     prompt = task_preparer_prompts._build_prompt(
-        evidence="## Task metadata",
-        driver_rel=".forge_driver_x.py",
-        reference_note="",
+        task_preparer_prompts.PromptBrief(evidence="## Task metadata", driver_rel=".forge_driver_x.py"), ""
     )
 
     assert "Study the reference files first" not in prompt
@@ -196,12 +194,16 @@ def test_compile_only_driver_is_detected_and_flagged_in_evidence(tmp_path):
     )
 
     evidence = task_preparer._build_evidence(
+        task_preparer.PreparationTask(
+            workspace_dir=str(workspace),
+            kernel="kernel.cu",
+            driver="driver.py",
+            program_md="",
+            target_functions=[],
+            source_files=[],
+        ),
         workspace=workspace,
-        kernel="kernel.cu",
         driver="driver.py",
-        program_md="",
-        target_functions=[],
-        source_files=[],
         preflight=task_preflight.PreflightResult(
             ok=False,
             correctness_ok=False,
@@ -252,12 +254,16 @@ def test_regular_driver_keeps_non_conforming_heading(tmp_path):
     driver.write_text("# broken measurement driver\nimport torch\n", encoding="utf-8")
 
     evidence = task_preparer._build_evidence(
+        task_preparer.PreparationTask(
+            workspace_dir=str(workspace),
+            kernel="kernel.py",
+            driver="driver.py",
+            program_md="",
+            target_functions=[],
+            source_files=[],
+        ),
         workspace=workspace,
-        kernel="kernel.py",
         driver="driver.py",
-        program_md="",
-        target_functions=[],
-        source_files=[],
         preflight=None,
     )
 
@@ -364,7 +370,7 @@ def test_jit_timeout_retry_tells_agent_not_to_rewrite(tmp_path, monkeypatch):
     prompts: list[str] = []
 
     async def agent_that_edits(**kwargs):
-        prompts.append(kwargs["prompt"])
+        prompts.append(kwargs["turn"].prompt)
         driver.write_text(f"EDITED {len(prompts)}\n", encoding="utf-8")
         raise asyncio.TimeoutError
 
@@ -405,7 +411,7 @@ def test_external_driver_prepare_publishes_on_success(tmp_path, monkeypatch):
     _patch_git(monkeypatch)
 
     async def agent_that_writes_a_passing_driver(**kwargs):
-        workspace_dir = kwargs.get("workspace", "")
+        workspace_dir = kwargs["turn"].workspace
         staged_driver = Path(str(workspace_dir)) / "driver.py"
         staged_driver.write_text("PREPARED_DRIVER\n", encoding="utf-8")
         return "done"
@@ -423,12 +429,14 @@ def test_external_driver_prepare_publishes_on_success(tmp_path, monkeypatch):
     result = asyncio.run(
         task_preparer.prepare_task(
             config=SimpleNamespace(model="test-model", experiments_dir=str(tmp_path / "experiments")),
-            workspace_dir=str(workspace),
-            kernel=str(workspace / "kernel.py"),
-            driver=str(driver),
-            program_md="# Task",
-            target_functions=[],
-            source_files=[str(workspace / "kernel.py")],
+            task=task_preparer.PreparationTask(
+                workspace_dir=str(workspace),
+                kernel=str(workspace / "kernel.py"),
+                driver=str(driver),
+                program_md="# Task",
+                target_functions=[],
+                source_files=[str(workspace / "kernel.py")],
+            ),
             preflight=_failing_preflight(),
         )
     )
@@ -451,7 +459,7 @@ def test_external_driver_prepare_rolls_back_on_failure(tmp_path, monkeypatch):
     _patch_git(monkeypatch)
 
     async def agent_that_edits_then_times_out(**kwargs):
-        workspace_dir = kwargs.get("workspace", "")
+        workspace_dir = kwargs["turn"].workspace
         staged_driver = Path(str(workspace_dir)) / "driver.py"
         staged_driver.write_text("BROKEN_DRIVER\n", encoding="utf-8")
         raise asyncio.TimeoutError
@@ -465,12 +473,14 @@ def test_external_driver_prepare_rolls_back_on_failure(tmp_path, monkeypatch):
     result = asyncio.run(
         task_preparer.prepare_task(
             config=SimpleNamespace(model="test-model", experiments_dir=str(tmp_path / "experiments")),
-            workspace_dir=str(workspace),
-            kernel=str(workspace / "kernel.py"),
-            driver=str(driver),
-            program_md="# Task",
-            target_functions=[],
-            source_files=[str(workspace / "kernel.py")],
+            task=task_preparer.PreparationTask(
+                workspace_dir=str(workspace),
+                kernel=str(workspace / "kernel.py"),
+                driver=str(driver),
+                program_md="# Task",
+                target_functions=[],
+                source_files=[str(workspace / "kernel.py")],
+            ),
             preflight=_failing_preflight(),
         )
     )

@@ -18,6 +18,7 @@ from pathlib import Path
 from kernelforge.llm.git import git
 from kernelforge.kernel_backends.constants import KERNEL_BACKENDS
 from kernelforge.knowledge.kb_store.identity.source_resolution import (
+    KernelSources,
     infer_source_owner_framework,
     resolve_operation,
 )
@@ -419,35 +420,52 @@ def validate_pending_campaign_head(workspace_dir: str, base_commit: str) -> None
     )
 
 
+def parse_list(raw: str) -> list[str]:
+    """Split a comma-or-newline-separated string into a stripped list."""
+    if not raw:
+        return []
+    return [p.strip() for p in re.split(r"[,\n]", raw) if p.strip()]
+
+
+@dataclass(frozen=True)
+class CampaignInputs:
+    """What the operator asked a fresh campaign to be; lists are comma-or-newline separated as given."""
+
+    kernel: str | None
+    driver: str | None
+    snr_threshold: float = DEFAULT_SNR_THRESHOLD_DB
+    source_files: str = ""
+    program_md_file: str | None = None
+    target_functions: str = ""
+    operator_name: str = ""
+    producer: str = ""
+    kernel_backend: str = ""
+    git_branch: str = ""
+    gpu_target: str = ""
+    gpu_type: str | None = None
+    task_type: str = ""
+    framework: str = ""
+    # Measurement semantics and what a KEEP may ship beyond the tracked diff belong to the campaign, not one session.
+    nproc_per_node: int = 1
+    bench_repeat: int = 1
+    commit_new_paths: tuple[str, ...] = ()
+
+
 def create_campaign_config(
-    *,
     workspace_dir: str,
-    kernel: str,
-    driver: str,
-    source_files: list[str],
-    program_md_file: str | None,
+    inputs: CampaignInputs,
+    *,
     base_commit: str | None = None,
-    target_functions: list[str] | None = None,
-    snr_threshold: float = DEFAULT_SNR_THRESHOLD_DB,
-    gpu_target: str | None = None,
-    gpu_type: str | None = None,
-    git_branch: str | None = None,
-    kernel_backend: str | None = None,
-    task_type: str | None = None,
-    framework: str | None = None,
-    operator_name: str | None = None,
-    producer: str | None = None,
-    nproc_per_node: int = 1,
-    bench_repeat: int = 1,
-    commit_new_paths: list[str] | None = None,
 ) -> CampaignConfig:
     """Resolve and normalize all immutable inputs for a fresh campaign."""
+    kernel, driver, program_md_file = inputs.kernel, inputs.driver, inputs.program_md_file
+    target_functions = parse_list(inputs.target_functions) or None
     workspace = Path(workspace_dir).resolve()
     kernel_path = _relative_file(workspace, kernel, "kernel")
     driver_path = _driver_reference(workspace, driver)
 
     normalized_sources: list[str] = []
-    for raw_path in [kernel, *source_files]:
+    for raw_path in [kernel, *parse_list(inputs.source_files)]:
         relative = _relative_file(workspace, raw_path, "source file")
         if relative not in normalized_sources:
             normalized_sources.append(relative)
@@ -475,8 +493,8 @@ def create_campaign_config(
         raw_source_paths,
         base_commit=resolved_base_commit,
     )
-    resolved_branch = (git_branch or "").strip() or branch
-    kernel_backend_override = (kernel_backend or "").strip()
+    resolved_branch = (inputs.git_branch or "").strip() or branch
+    kernel_backend_override = (inputs.kernel_backend or "").strip()
     resolved_kernel_backend = (
         resolve_kernel_backend_override(kernel_backend_override)
         if kernel_backend_override
@@ -493,12 +511,14 @@ def create_campaign_config(
     )
     kernel_absolute = str((workspace / kernel_path).resolve())
     resolved_framework = infer_source_owner_framework(
-        kernel_path=kernel_absolute,
-        kernel_source=pristine_sources.get(kernel_absolute, ""),
+        KernelSources(
+            kernel_absolute,
+            pristine_sources.get(kernel_absolute, ""),
+            raw_source_paths,
+            source_contents=pristine_sources,
+        ),
         target_functions=resolved_targets,
-        source_files=raw_source_paths,
-        framework_override=(framework or "").strip(),
-        source_contents=pristine_sources,
+        framework_override=(inputs.framework or "").strip(),
     )
     pristine_signature, pristine_identity = implementation_signature(
         workspace=str(workspace),
@@ -509,7 +529,7 @@ def create_campaign_config(
     )
     # Settled once, from the pristine sources, because it is part of the address the campaign's experience is filed
     # under.
-    resolved_operator = (operator_name or "").strip() or resolve_operation(
+    resolved_operator = (inputs.operator_name or "").strip() or resolve_operation(
         pristine_sources.get(kernel_absolute, ""),
         kernel_absolute,
         target_functions=resolved_targets,
@@ -524,8 +544,8 @@ def create_campaign_config(
         program_text = source_program.read_text(errors="replace")
         program_md_sha256 = hashlib.sha256(program_text.encode()).hexdigest()
 
-    resolved_task_type = (task_type or "").strip() or ("repository" if len(normalized_sources) > 1 else "")
-    resolved_snr_threshold = float(snr_threshold)
+    resolved_task_type = (inputs.task_type or "").strip() or ("repository" if len(normalized_sources) > 1 else "")
+    resolved_snr_threshold = float(inputs.snr_threshold)
     if not math.isfinite(resolved_snr_threshold) or resolved_snr_threshold <= 0:
         raise ValueError("SNR threshold must be a positive finite float")
     canonical_driver = workspace / driver_path
@@ -537,8 +557,8 @@ def create_campaign_config(
         program_md_path=program_md_path,
         program_md_sha256=program_md_sha256,
         snr_threshold=resolved_snr_threshold,
-        gpu_target=(gpu_target or "").strip() or detect_gpu_target(),
-        gpu_type=str("mi355x" if gpu_type is None else gpu_type).strip().lower(),
+        gpu_target=(inputs.gpu_target or "").strip() or detect_gpu_target(),
+        gpu_type=str("mi355x" if inputs.gpu_type is None else inputs.gpu_type).strip().lower(),
         kernel_backend=resolved_kernel_backend,
         task_type=resolved_task_type,
         target_functions=resolved_targets,
@@ -546,10 +566,10 @@ def create_campaign_config(
         base_commit=resolved_base_commit,
         framework=resolved_framework,
         operator_name=resolved_operator,
-        producer=str(producer or "").strip().lower(),
+        producer=str(inputs.producer or "").strip().lower(),
         implementation_signature=pristine_signature,
         implementation_identity=pristine_identity,
-        nproc_per_node=max(1, int(nproc_per_node or 1)),
-        bench_repeat=max(1, int(bench_repeat or 1)),
-        commit_new_paths=normalize_commit_new_paths(commit_new_paths or []),
+        nproc_per_node=max(1, int(inputs.nproc_per_node or 1)),
+        bench_repeat=max(1, int(inputs.bench_repeat or 1)),
+        commit_new_paths=normalize_commit_new_paths(list(inputs.commit_new_paths)),
     )

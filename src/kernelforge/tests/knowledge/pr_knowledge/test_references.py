@@ -41,6 +41,7 @@ from kernelforge.knowledge.pr_knowledge.references import (
 )
 from kernelforge.knowledge.pr_knowledge.search import PRLifecycle, PRReference, PRState
 from kernelforge.knowledge.pr_knowledge.context import (
+    PrReferenceQuery,
     PR_REPOS_EXPECTED,
     REASON_CONTRACT_ERROR,
     REASON_SKIPPED_DEADLINE,
@@ -474,7 +475,9 @@ def _pr_payload(number: int, worth: float = 0.6) -> dict:
 
 
 def test_unreachable_service_with_no_cache_yields_an_empty_fragment(tmp_path):
-    result = collect_references(workspace_dir=str(tmp_path), client=_StubClient(healthy=False), kernel_backend="aiter")
+    result = collect_references(
+        workspace_dir=str(tmp_path), query=PrReferenceQuery(kernel_backend="aiter"), client=_StubClient(healthy=False)
+    )
 
     assert result.reason == "service_unreachable"
     assert result.prompt_context == ""
@@ -483,13 +486,14 @@ def test_unreachable_service_with_no_cache_yields_an_empty_fragment(tmp_path):
 def test_unreachable_service_still_shows_the_cached_references(tmp_path):
     """A transient outage must not retract references mid-campaign."""
     warm = _StubClient(by_query={"moe": [1]}, prs={1: _pr_payload(1)})
-    collect_references(workspace_dir=str(tmp_path), client=warm, kernel_backend="aiter", operator_name="moe")
+    collect_references(
+        workspace_dir=str(tmp_path), query=PrReferenceQuery(kernel_backend="aiter", operator_name="moe"), client=warm
+    )
 
     result = collect_references(
         workspace_dir=str(tmp_path),
+        query=PrReferenceQuery(kernel_backend="aiter", operator_name="moe"),
         client=_StubClient(healthy=False),
-        kernel_backend="aiter",
-        operator_name="moe",
     )
 
     assert result.injected
@@ -502,14 +506,15 @@ def test_unreachable_service_still_shows_the_cached_references(tmp_path):
 
 def test_unresolvable_repo_still_shows_the_cached_references(tmp_path):
     warm = _StubClient(by_query={"moe": [1]}, prs={1: _pr_payload(1)})
-    collect_references(workspace_dir=str(tmp_path), client=warm, kernel_backend="aiter", operator_name="moe")
+    collect_references(
+        workspace_dir=str(tmp_path), query=PrReferenceQuery(kernel_backend="aiter", operator_name="moe"), client=warm
+    )
 
     # A later invocation cannot resolve a repo at all.
     result = collect_references(
         workspace_dir=str(tmp_path),
+        query=PrReferenceQuery(kernel_backend="ck", operator_name="moe"),
         client=_StubClient(),
-        kernel_backend="ck",
-        operator_name="moe",
     )
 
     assert result.injected
@@ -518,7 +523,9 @@ def test_unresolvable_repo_still_shows_the_cached_references(tmp_path):
 
 def test_transport_failure_still_shows_the_cached_references(tmp_path):
     warm = _StubClient(by_query={"moe": [1]}, prs={1: _pr_payload(1)})
-    collect_references(workspace_dir=str(tmp_path), client=warm, kernel_backend="aiter", operator_name="moe")
+    collect_references(
+        workspace_dir=str(tmp_path), query=PrReferenceQuery(kernel_backend="aiter", operator_name="moe"), client=warm
+    )
 
     class _Unavailable(_StubClient):
         def list_repos(self, *, timeout_sec=None):
@@ -526,9 +533,8 @@ def test_transport_failure_still_shows_the_cached_references(tmp_path):
 
     result = collect_references(
         workspace_dir=str(tmp_path),
+        query=PrReferenceQuery(kernel_backend="aiter", operator_name="moe"),
         client=_Unavailable(),
-        kernel_backend="aiter",
-        operator_name="moe",
     )
 
     assert result.injected
@@ -544,16 +550,17 @@ def test_unexpected_client_failure_is_not_silenced(tmp_path):
     with pytest.raises(RuntimeError, match="bug"):
         collect_references(
             workspace_dir=str(tmp_path),
+            query=PrReferenceQuery(kernel_backend="aiter", operator_name="moe"),
             client=_Broken(),
-            kernel_backend="aiter",
-            operator_name="moe",
         )
 
 
 def test_unresolvable_repo_makes_no_query(tmp_path):
     client = _StubClient()
 
-    result = collect_references(workspace_dir=str(tmp_path), client=client, kernel_backend="ck", operator_name="gemm")
+    result = collect_references(
+        workspace_dir=str(tmp_path), query=PrReferenceQuery(kernel_backend="ck", operator_name="gemm"), client=client
+    )
 
     assert result.reason == "repo_unresolved"
     assert client.searched == []
@@ -562,7 +569,9 @@ def test_unresolvable_repo_makes_no_query(tmp_path):
 def test_successful_lookup_renders_persists_and_indexes(tmp_path):
     client = _StubClient(by_query={"moe": [1]}, prs={1: _pr_payload(1)})
 
-    result = collect_references(workspace_dir=str(tmp_path), client=client, kernel_backend="aiter", operator_name="moe")
+    result = collect_references(
+        workspace_dir=str(tmp_path), query=PrReferenceQuery(kernel_backend="aiter", operator_name="moe"), client=client
+    )
 
     assert result.injected
     assert UNTRUSTED_PREFIX in result.prompt_context
@@ -577,7 +586,9 @@ def test_a_closed_unmerged_pr_reaches_the_prompt_and_index_as_closed(tmp_path):
     payload["summary"].update(state="closed", is_merged=False)
     client = _StubClient(by_query={"moe": [1]}, prs={1: payload})
 
-    result = collect_references(workspace_dir=str(tmp_path), client=client, kernel_backend="aiter", operator_name="moe")
+    result = collect_references(
+        workspace_dir=str(tmp_path), query=PrReferenceQuery(kernel_backend="aiter", operator_name="moe"), client=client
+    )
 
     assert "- ROCm/aiter#1 (closed, worth 0.60" in result.prompt_context
     assert "| ROCm/aiter#1 | 0.60 | closed |" in (refs_dir(str(tmp_path)) / "index.md").read_text()
@@ -589,9 +600,8 @@ def test_deferred_persistence_leaves_the_workspace_untouched(tmp_path):
 
     result = collect_references(
         workspace_dir=str(tmp_path),
+        query=PrReferenceQuery(kernel_backend="aiter", operator_name="moe"),
         client=client,
-        kernel_backend="aiter",
-        operator_name="moe",
         persist=False,
     )
 
@@ -605,9 +615,8 @@ def test_a_deferred_snapshot_is_persisted_on_commit(tmp_path):
     client = _StubClient(by_query={"moe": [1]}, prs={1: _pr_payload(1)})
     result = collect_references(
         workspace_dir=str(tmp_path),
+        query=PrReferenceQuery(kernel_backend="aiter", operator_name="moe"),
         client=client,
-        kernel_backend="aiter",
-        operator_name="moe",
         persist=False,
     )
 
@@ -635,10 +644,7 @@ def test_snapshot_keeps_all_surfaced_references_beyond_top_k(tmp_path):
     )
 
     result = collect_references(
-        workspace_dir=str(tmp_path),
-        client=client,
-        kernel_backend="aiter",
-        operator_name="moe",
+        workspace_dir=str(tmp_path), query=PrReferenceQuery(kernel_backend="aiter", operator_name="moe"), client=client
     )
 
     assert len(result.references) == 5
@@ -649,11 +655,15 @@ def test_a_query_proven_empty_is_not_reissued(tmp_path):
     """The negative cache is what keeps refreshes from re-paying for misses."""
     client = _StubClient(by_query={})
 
-    first = collect_references(workspace_dir=str(tmp_path), client=client, kernel_backend="aiter", operator_name="moe")
+    first = collect_references(
+        workspace_dir=str(tmp_path), query=PrReferenceQuery(kernel_backend="aiter", operator_name="moe"), client=client
+    )
     issued_first = list(client.searched)
     client.searched.clear()
 
-    second = collect_references(workspace_dir=str(tmp_path), client=client, kernel_backend="aiter", operator_name="moe")
+    second = collect_references(
+        workspace_dir=str(tmp_path), query=PrReferenceQuery(kernel_backend="aiter", operator_name="moe"), client=client
+    )
 
     assert issued_first
     assert client.searched == []
@@ -664,19 +674,27 @@ def test_a_query_proven_empty_is_not_reissued(tmp_path):
 def test_a_query_that_hit_is_reissued_on_the_next_call(tmp_path):
     client = _StubClient(by_query={"moe": [1]}, prs={1: _pr_payload(1)})
 
-    collect_references(workspace_dir=str(tmp_path), client=client, kernel_backend="aiter", operator_name="moe")
+    collect_references(
+        workspace_dir=str(tmp_path), query=PrReferenceQuery(kernel_backend="aiter", operator_name="moe"), client=client
+    )
     client.searched.clear()
-    collect_references(workspace_dir=str(tmp_path), client=client, kernel_backend="aiter", operator_name="moe")
+    collect_references(
+        workspace_dir=str(tmp_path), query=PrReferenceQuery(kernel_backend="aiter", operator_name="moe"), client=client
+    )
 
     assert client.searched
 
 
 def test_snapshot_is_monotonic_across_two_lookups(tmp_path):
     client = _StubClient(by_query={"moe": [1]}, prs={1: _pr_payload(1, worth=0.6)})
-    collect_references(workspace_dir=str(tmp_path), client=client, kernel_backend="aiter", operator_name="moe")
+    collect_references(
+        workspace_dir=str(tmp_path), query=PrReferenceQuery(kernel_backend="aiter", operator_name="moe"), client=client
+    )
 
     client._prs = {1: _pr_payload(1, worth=0.1)}
-    collect_references(workspace_dir=str(tmp_path), client=client, kernel_backend="aiter", operator_name="moe")
+    collect_references(
+        workspace_dir=str(tmp_path), query=PrReferenceQuery(kernel_backend="aiter", operator_name="moe"), client=client
+    )
 
     entries = load_snapshot(str(tmp_path)).entries
     assert len(entries) == 1
@@ -686,16 +704,15 @@ def test_snapshot_is_monotonic_across_two_lookups(tmp_path):
 def test_resume_reinjects_from_the_snapshot_when_a_refresh_finds_nothing(tmp_path):
     """Dropping already-shown references mid-campaign would contradict the lesson."""
     client = _StubClient(by_query={"moe": [1]}, prs={1: _pr_payload(1)})
-    first = collect_references(workspace_dir=str(tmp_path), client=client, kernel_backend="aiter", operator_name="moe")
+    first = collect_references(
+        workspace_dir=str(tmp_path), query=PrReferenceQuery(kernel_backend="aiter", operator_name="moe"), client=client
+    )
     assert first.injected
 
     # A later call finds nothing new: different keywords, no hits.
     quiet = _StubClient(by_query={})
     second = collect_references(
-        workspace_dir=str(tmp_path),
-        client=quiet,
-        kernel_backend="aiter",
-        operator_name="moe",
+        workspace_dir=str(tmp_path), query=PrReferenceQuery(kernel_backend="aiter", operator_name="moe"), client=quiet
     )
 
     assert second.injected, "the references already shown must keep being shown"
@@ -706,7 +723,9 @@ def test_resume_reinjects_from_the_snapshot_when_a_refresh_finds_nothing(tmp_pat
 
 def test_service_outage_still_reinjects_what_was_already_shown(tmp_path):
     client = _StubClient(by_query={"moe": [1]}, prs={1: _pr_payload(1)})
-    collect_references(workspace_dir=str(tmp_path), client=client, kernel_backend="aiter", operator_name="moe")
+    collect_references(
+        workspace_dir=str(tmp_path), query=PrReferenceQuery(kernel_backend="aiter", operator_name="moe"), client=client
+    )
 
     class _Broken(_StubClient):
         def get_many(self, requests, *, budget_sec=None):
@@ -719,9 +738,8 @@ def test_service_outage_still_reinjects_what_was_already_shown(tmp_path):
 
     second = collect_references(
         workspace_dir=str(tmp_path),
+        query=PrReferenceQuery(kernel_backend="aiter", operator_name="moe"),
         client=_Broken(),
-        kernel_backend="aiter",
-        operator_name="moe",
     )
 
     assert second.injected
@@ -734,19 +752,15 @@ def test_all_queries_cached_empty_still_renders_prior_references(tmp_path):
     (tmp_path / "a.py").write_text("x")
     collect_references(
         workspace_dir=str(tmp_path),
+        query=PrReferenceQuery(kernel_backend="aiter", source_files=["a.py"], operator_name="moe"),
         client=client,
-        kernel_backend="aiter",
-        source_files=["a.py"],
-        operator_name="moe",
     )
 
     # Second call: the keyword query is now a cached miss, path query still hits.
     second = collect_references(
         workspace_dir=str(tmp_path),
+        query=PrReferenceQuery(kernel_backend="aiter", source_files=["a.py"], operator_name="moe"),
         client=client,
-        kernel_backend="aiter",
-        source_files=["a.py"],
-        operator_name="moe",
     )
 
     assert second.injected
@@ -793,7 +807,9 @@ def test_snapshot_entry_round_trips_every_rendered_field(tmp_path):
 def test_a_cached_entry_without_state_keeps_only_an_unambiguous_merge(tmp_path, recorded, state, label):
     """Older entries hold only ``is_merged``, and a cached head is never refetched to correct them."""
     client = _StubClient(by_query={"moe": [1]}, prs={1: _pr_payload(1)})
-    collect_references(workspace_dir=str(tmp_path), client=client, kernel_backend="aiter", operator_name="moe")
+    collect_references(
+        workspace_dir=str(tmp_path), query=PrReferenceQuery(kernel_backend="aiter", operator_name="moe"), client=client
+    )
     snapshot = load_snapshot(str(tmp_path))
     for entry in snapshot.entries.values():
         for name in ("state", "draft", "merged_at", "base_ref"):
@@ -801,7 +817,9 @@ def test_a_cached_entry_without_state_keeps_only_an_unambiguous_merge(tmp_path, 
         entry.update(recorded)
     save_snapshot(str(tmp_path), snapshot)
 
-    result = collect_references(workspace_dir=str(tmp_path), client=client, kernel_backend="aiter", operator_name="moe")
+    result = collect_references(
+        workspace_dir=str(tmp_path), query=PrReferenceQuery(kernel_backend="aiter", operator_name="moe"), client=client
+    )
 
     assert result.references[0].lifecycle == PRLifecycle(state=state)
     assert f"- ROCm/aiter#1 ({label}, worth 0.60" in result.prompt_context
@@ -936,10 +954,10 @@ def test_untracked_fork_recovers_and_still_injects(tmp_path):
 
     result = collect_references(
         workspace_dir=str(tmp_path),
+        query=PrReferenceQuery(
+            git_remote="https://github.com/carlushuang/aiter-k3.git", source_files=["csrc/k.cu"], operator_name="mha"
+        ),
         client=client,
-        git_remote="https://github.com/carlushuang/aiter-k3.git",
-        source_files=["csrc/k.cu"],
-        operator_name="mha",
     )
 
     assert result.repo == "ROCm/aiter"
@@ -951,9 +969,11 @@ def _fork_workspace(tmp_path):
     (tmp_path / "csrc" / "k.cu").write_text("// kernel")
     return {
         "workspace_dir": str(tmp_path),
-        "git_remote": "https://github.com/carlushuang/aiter-k3.git",
-        "source_files": ["csrc/k.cu"],
-        "operator_name": "mha",
+        "query": PrReferenceQuery(
+            git_remote="https://github.com/carlushuang/aiter-k3.git",
+            source_files=["csrc/k.cu"],
+            operator_name="mha",
+        ),
     }
 
 
@@ -963,9 +983,8 @@ def test_probe_contract_error_outranks_later_discovery_outage(tmp_path):
     payload["distill"]["components"] = ["mha"]
     collect_references(
         workspace_dir=options["workspace_dir"],
+        query=PrReferenceQuery(kernel_backend="aiter", operator_name="mha"),
         client=_StubClient(by_query={"mha": [1]}, prs={1: payload}),
-        kernel_backend="aiter",
-        operator_name="mha",
     )
 
     result = collect_references(
@@ -1062,9 +1081,8 @@ def test_the_whole_lookup_fits_inside_one_end_to_end_budget(monkeypatch, tmp_pat
 
     collect_references(
         workspace_dir=str(tmp_path),
+        query=PrReferenceQuery(kernel_backend="aiter", operator_name="moe"),
         client=PRMonitorClient("https://host/pr-monitor"),
-        kernel_backend="aiter",
-        operator_name="moe",
         budget_sec=1.0,
     )
 
@@ -1085,9 +1103,8 @@ def test_a_budget_spent_on_preflight_is_not_reported_as_an_outage(tmp_path):
 
     result = collect_references(
         workspace_dir=str(tmp_path),
+        query=PrReferenceQuery(kernel_backend="aiter", operator_name="moe"),
         client=client,
-        kernel_backend="aiter",
-        operator_name="moe",
         budget_sec=0.05,
     )
 
@@ -1120,9 +1137,8 @@ def test_the_deadline_starts_before_local_snapshot_loading(monkeypatch, tmp_path
 
     result = collect_references(
         workspace_dir=str(tmp_path),
+        query=PrReferenceQuery(kernel_backend="aiter", operator_name="moe"),
         client=client,
-        kernel_backend="aiter",
-        operator_name="moe",
         budget_sec=0.03,
     )
 
@@ -1177,9 +1193,8 @@ def test_repo_drift_warns_but_does_not_block(tmp_path, caplog):
     with caplog.at_level("WARNING"):
         result = collect_references(
             workspace_dir=str(tmp_path),
+            query=PrReferenceQuery(kernel_backend="aiter", operator_name="moe"),
             client=client,
-            kernel_backend="aiter",
-            operator_name="moe",
         )
 
     assert result.injected
@@ -1193,9 +1208,8 @@ def test_only_existing_source_files_become_path_queries(tmp_path):
 
     collect_references(
         workspace_dir=str(tmp_path),
+        query=PrReferenceQuery(kernel_backend="flydsl", source_files=["kernels/real.py", "kernels/ghost.py"]),
         client=client,
-        kernel_backend="flydsl",
-        source_files=["kernels/real.py", "kernels/ghost.py"],
     )
 
     assert client.path_queries == ["kernels/real.py"]

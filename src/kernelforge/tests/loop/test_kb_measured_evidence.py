@@ -25,6 +25,8 @@ from kernelforge.knowledge.kb_store.record_store import (
 
 from kernelforge.tests.test_rewrite_by_flydsl_kb import InMemoryKBStore, _remote_config
 from kernelforge.conftest import kb_store_run_config as _remote_config_with_token
+from kernelforge.knowledge.kb_store.identity.run import LoopKernel
+from kernelforge.loop.knowledge_integration import WarmStartHarness
 
 PRODUCER_KERNEL_PATH = Path("packages/src/aiter_meta/ops/triton/deterministic_kernel.py")
 CONSUMER_KERNEL_PATH = Path("src/aiter/ops/triton/deterministic_kernel.py")
@@ -154,17 +156,18 @@ def _publish_candidate(
     assert patch
     status = sink.write_run_experience(
         config=_run_config(),
-        workspace=str(workspace),
-        kernel_path=str(kernel),
-        kernel_source=optimized_source,
-        kernel_backend="triton",
-        gpu_target="gfx950",
-        experiment_id=f"producer-{name}",
-        baseline_wall_ms=10.0,
-        best_wall_ms=10.0 / claimed_speedup,
-        mean_case_speedup=claimed_speedup,
-        cumulative_diff=patch,
-        digest="deterministic producer result",
+        kernel=sink.LoopKernel(
+            kernel_path=str(kernel), kernel_backend="triton", kernel_source=optimized_source, workspace=str(workspace)
+        ),
+        outcome=sink.RunOutcome(
+            experiment_id=f"producer-{name}",
+            gpu_target="gfx950",
+            baseline_wall_ms=10.0,
+            best_wall_ms=10.0 / claimed_speedup,
+            cumulative_diff=patch,
+            digest="deterministic producer result",
+            mean_case_speedup=claimed_speedup,
+        ),
         summary_override=SUMMARY,
     )
     assert status["written"] is True
@@ -237,10 +240,8 @@ class _StubClock:
 def _warm_start(workspace: Path, kernel: Path) -> dict:
     return integration.kb_warmstart(
         config=_run_config(),
-        kernel=str(kernel),
-        driver="unused-driver.py",
-        workspace_dir=str(workspace),
-        kernel_backend="triton",
+        kernel=LoopKernel(kernel_path=str(kernel), kernel_backend="triton", workspace=str(workspace)),
+        harness=WarmStartHarness(driver="unused-driver.py"),
     )
 
 

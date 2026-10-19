@@ -13,6 +13,8 @@ from kernelforge.loop import knowledge_integration as integration
 from kernelforge.knowledge.kb_store import writer as sink
 from kernelforge.knowledge.kb_store.config import KnowledgeConfig
 from kernelforge.loop import recovery
+from kernelforge.knowledge.kb_store.identity.run import LoopKernel
+from kernelforge.loop.knowledge_integration import WarmStartHarness
 
 
 PRODUCER_KERNEL_PATH = Path("packages/src/aiter_meta/ops/triton/deterministic_kernel.py")
@@ -140,18 +142,22 @@ def _publish_producer_solution(
 
     status = sink.write_run_experience(
         config=_run_config(gpu_type),
-        workspace=str(workspace),
-        kernel_path=str(kernel),
-        kernel_source=optimized_source,
-        kernel_backend="triton",
-        gpu_target="gfx950",
-        experiment_id=experiment_id,
-        baseline_wall_ms=10.0,
-        best_wall_ms=5.0,
-        mean_case_speedup=2.0,
-        cumulative_diff=patch,
-        digest="deterministic end-to-end producer result",
-        source_files=source_files,
+        kernel=sink.LoopKernel(
+            kernel_path=str(kernel),
+            kernel_backend="triton",
+            kernel_source=optimized_source,
+            source_files=source_files,
+            workspace=str(workspace),
+        ),
+        outcome=sink.RunOutcome(
+            experiment_id=experiment_id,
+            gpu_target="gfx950",
+            baseline_wall_ms=10.0,
+            best_wall_ms=5.0,
+            cumulative_diff=patch,
+            digest="deterministic end-to-end producer result",
+            mean_case_speedup=2.0,
+        ),
         summary_override=SUMMARY,
     )
     return status, patch
@@ -193,11 +199,13 @@ def _warm_start(
 ) -> dict:
     return integration.kb_warmstart(
         config=_run_config(gpu_type),
-        kernel=str(consumer_kernel),
-        driver="unused-driver.py",
-        workspace_dir=str(consumer_workspace),
-        kernel_backend="triton",
-        source_files=source_files,
+        kernel=LoopKernel(
+            kernel_path=str(consumer_kernel),
+            kernel_backend="triton",
+            source_files=source_files,
+            workspace=str(consumer_workspace),
+        ),
+        harness=WarmStartHarness(driver="unused-driver.py"),
     )
 
 
@@ -300,13 +308,13 @@ def test_happy_path_applies_and_publishes_iteration_zero_recovery(
 
     caller_result = tmp_path / "caller-result.json"
     result = recovery.publish_warm_start_recovery(
-        workspace_dir=str(consumer),
+        str(consumer),
         base_commit=consumer_base,
         warm=warm,
-        caller_experiment_id="consumer-run",
-        experience_id="producer-happy",
+        caller=recovery.CallerRecovery(
+            caller_experiment_id="consumer-run", experience_id="producer-happy", result_json=str(caller_result)
+        ),
         tracker=Tracker(),
-        result_json=str(caller_result),
     )
 
     best_result = json.loads((consumer / "forge_experiments" / "best_result.json").read_text())

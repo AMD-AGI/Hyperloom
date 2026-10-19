@@ -10,8 +10,8 @@ from click.testing import CliRunner
 
 from hyperloom.common.env import EnvValueError
 from kernelforge.cli import forge_loop
+from kernelforge.knowledge.pr_knowledge.context import PrReferenceQuery
 from kernelforge.cli.pr_references import (
-    PrReferenceQuery,
     _collect_pr_references,
     _git_remote_url,
     _pr_kb_enabled,
@@ -76,7 +76,9 @@ def test_switch_is_independent_of_the_experience_kb_flag():
 def test_pr_context_is_wired_only_to_the_implementer():
     """Keep external PR text out of measured Analysis and planning evidence."""
     source = inspect.getsource(forge_loop.callback)
-    implementer = source[source.index("agent_fn = make_agent_fn(") : source.index("effective_implementer =")]
+    implementer = source[
+        source.index("implementer_setup = ImplementerSetup(") : source.index("effective_implementer =")
+    ]
     analysis = source[source.index("analysis_service = make_analysis_agent_service(") : source.index("analysis_mode =")]
     orchestration = source[
         source.index("orchestration_service = make_orchestration_service(") : source.index(
