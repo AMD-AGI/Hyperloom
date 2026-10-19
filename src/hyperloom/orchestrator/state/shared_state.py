@@ -8,7 +8,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import shlex
 import time
 import traceback
 from collections.abc import Callable, Iterator, Mapping
@@ -25,11 +24,11 @@ from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.io import atomic_write_json
 from hyperloom.common.timeutil import now_iso
 from hyperloom.common.jsonio import read_json_strict
-from hyperloom.common.profile_args import sanitize_profile_server_args
 
 if TYPE_CHECKING:  # import cycle: perf_metric is imported lazily at call time
     from hyperloom.common.perf_metric import GradedComparison
 
+from . import _profile_workload
 from . import kernel_decision_settings as _kernel_decision_settings
 from ._shared_state.attempt_audit import _AUDIT_ACTIONS, _KEY_METRIC_MAP
 from ._shared_state.enablement_round import EnablementRound
@@ -95,6 +94,15 @@ def resolve_grading_anchor_tput(state: Any) -> float:
     return float(baseline) if isinstance(baseline, (int, float)) and baseline > 0 else 0.0
 
 
+def _output_grading_reference(state: Any, *, against_baseline: bool, anchor_tput: float | None) -> float:
+    """Resolve the output throughput a candidate is graded against: the caller's anchor, the baseline, or the session anchor."""
+    if anchor_tput is not None:
+        return float(anchor_tput)
+    if against_baseline:
+        return float(getattr(state, "baseline_tput", 0.0) or 0.0)
+    return resolve_grading_anchor_tput(state)
+
+
 def resolve_graded_comparison(
     state: Any,
     measurement: Any,
@@ -112,87 +120,28 @@ def resolve_graded_comparison(
     # ``anchor_perf``/``anchor_tput`` default to the session anchor; explore passes its own because variants stack
     # within a round. Objective and band come from ``resolved_grading``, so both are what the session was seeded
     # with rather than whatever the calling process's environment holds.
-    from hyperloom.common.gain_math import gain_pct
-    from hyperloom.common.perf_metric import (
-        AGENTX_KEEP_P50_THRESHOLD_PCT,
-        GRADED_INTVTY,
-        GRADED_INTVTY_P50,
-        GRADED_OUTPUT,
-        GradedComparison,
-        VERDICT_KEEP,
-        VERDICT_REVERT,
-        axis_of,
-        holds_within_band,
-        constraint_veto_reason,
-        incomparability_reason,
-        output_tput_of,
-        perf_snapshot_from_mapping,
-        resolve_grading_anchor_perf,
-        total_tput_of,
-    )
+    from ._graded_comparison import grade_interactivity, grade_output_throughput
     from hyperloom.inference_optimizer.grading import resolved_grading
 
     on_intvty, noise_pct = resolved_grading(state)
-    # The session's constraints (latency, power) veto a candidate the gain gates would KEEP, on whichever axis graded
-    # it. A candidate that already lost carries no veto, so the ledger names the gate that actually refused it.
     degrade_reason = ""
     if on_intvty:
-        if anchor_perf is not None:
-            ref_perf, reason = anchor_perf, ""
-        elif against_baseline:
-            ref_perf = perf_snapshot_from_mapping(getattr(state, "baseline_perf", None))
-            reason = "" if ref_perf else "baseline_axes_missing"
-        else:
-            ref_perf, reason = resolve_grading_anchor_perf(state)
-        cand_perf = perf_snapshot_from_mapping(measurement)
-        if ref_perf and cand_perf:
-            gain = gain_pct(axis_of(cand_perf, GRADED_INTVTY_P50), axis_of(ref_perf, GRADED_INTVTY_P50))
-            # The output guard reads the raw aggregate: the chip count divides both sides of the ratio, so the band
-            # holds identically per GPU.
-            gates = (
-                ("p50_gain_below_threshold", gain is not None and gain >= AGENTX_KEEP_P50_THRESHOLD_PCT),
-                ("p90_regressed", holds_within_band(cand_perf, ref_perf, GRADED_INTVTY, noise_pct=noise_pct)),
-                ("output_regressed", holds_within_band(cand_perf, ref_perf, GRADED_OUTPUT, noise_pct=noise_pct)),
-            )
-            refused = [gate for gate, held in gates if not held]
-            incomparable = incomparability_reason(cand_perf, ref_perf)
-            if incomparable:
-                refused.append(incomparable)
-            sla_veto = "" if refused else constraint_veto_reason(measurement, state)
-            return GradedComparison(
-                objective=GRADED_INTVTY_P50,
-                candidate=axis_of(cand_perf, GRADED_INTVTY_P50),
-                reference=axis_of(ref_perf, GRADED_INTVTY_P50),
-                verdict=VERDICT_REVERT if refused or sla_veto else VERDICT_KEEP,
-                tput_candidate=total_tput_of(cand_perf),
-                tput_reference=total_tput_of(ref_perf),
-                veto_reason=sla_veto,
-                refused_by=",".join(refused),
-            )
-        degrade_reason = reason or "candidate_axes_missing"
-
-    if anchor_tput is not None:
-        reference = float(anchor_tput)
-    elif against_baseline:
-        reference = float(getattr(state, "baseline_tput", 0.0) or 0.0)
-    else:
-        reference = resolve_grading_anchor_tput(state)
-    candidate = output_tput_of(measurement)
-    gain = gain_pct(candidate, reference) if reference > 0 else None
-    if degrade_reason:
-        # The output-axis figures are diagnostic only. A degraded AgentX pair
-        # must not read as a throughput KEEP at the resolver chokepoint.
-        verdict = VERDICT_REVERT
-    else:
-        verdict = VERDICT_KEEP if gain is not None and gain >= keep_threshold_pct else VERDICT_REVERT
-    sla_veto = constraint_veto_reason(measurement, state) if verdict == VERDICT_KEEP else ""
-    return GradedComparison(
-        objective=GRADED_OUTPUT,
-        candidate=candidate,
-        reference=reference,
-        verdict=VERDICT_REVERT if sla_veto else verdict,
+        outcome = grade_interactivity(
+            state,
+            measurement,
+            against_baseline=against_baseline,
+            anchor_perf=anchor_perf,
+            noise_pct=noise_pct,
+        )
+        if outcome.comparison is not None:
+            return outcome.comparison
+        degrade_reason = outcome.degrade_reason
+    return grade_output_throughput(
+        state,
+        measurement,
+        reference=_output_grading_reference(state, against_baseline=against_baseline, anchor_tput=anchor_tput),
+        keep_threshold_pct=keep_threshold_pct,
         degrade_reason=degrade_reason,
-        veto_reason=sla_veto,
     )
 
 
@@ -839,14 +788,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     #: ClassVar so it never serialises into state.json.
     PROFILE_WORKLOAD_IDENTITY_KEYS: ClassVar[tuple[str, ...]] = (
         "benchmark_mode",
-        "framework",
-        "precision",
-        "model_path",
-        "tp",
-        "conc",
-        "isl",
-        "osl",
-        "max_model_len",
+        *_profile_workload.PROFILE_OVERRIDABLE_KEYS,
     )
 
     @classmethod
@@ -862,80 +804,20 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     ) -> dict[str, Any]:
         """Return the normalized workload and runtime identity for a profile trace."""
         params = overrides if isinstance(overrides, dict) else {}
-        context: dict[str, Any] = {}
         # benchmark_mode distinguishes AgentX from synthetic traces with the
         # same CONC/TP so a synthetic trace is never reused for an AgentX session.
-        context["benchmark_mode"] = str(getattr(self, "benchmark_mode", "") or "").strip().lower()
-        for name in ("framework", "precision", "model_path"):
-            value = params.get(name)
-            if value in (None, ""):
-                value = getattr(self, name, "")
-            normalized = str(value or "").strip()
-            if name in ("framework", "precision"):
-                normalized = normalized.lower()
-            elif normalized:
-                path = Path(normalized).expanduser()
-                if path.exists():
-                    try:
-                        normalized = str(path.resolve())
-                    except OSError:
-                        log.debug(
-                            "profile workload path resolution failed for %s; keeping the unresolved path",
-                            path,
-                            exc_info=True,
-                        )
-            context[name] = normalized
-        for name in ("tp", "conc", "isl", "osl", "max_model_len"):
-            value = params.get(name)
-            if value in (None, ""):
-                value = getattr(self, name, 0)
-            try:
-                context[name] = int(value or 0)
-            except (TypeError, ValueError):
-                context[name] = 0
-        raw_server_args = (
-            params.get("extra_server_args") if "extra_server_args" in params else params.get("base_extra_args")
-        )
-        server_args = str(raw_server_args or "").strip()
-        server_args = sanitize_profile_server_args(server_args)
-        try:
-            context["server_args"] = shlex.join(shlex.split(server_args)) if server_args else ""
-        except ValueError:
-            context["server_args"] = " ".join(server_args.split())
-
-        raw_envs = params.get("extra_envs") if "extra_envs" in params else params.get("base_extra_envs")
-        if isinstance(raw_envs, dict):
-            context["extra_envs"] = {
-                str(key): str(value) for key, value in sorted(raw_envs.items(), key=lambda item: str(item[0]))
-            }
-        else:
-            context["extra_envs"] = {}
-
-        def _normalized_list(base_name: str, direct_name: str) -> list[str]:
-            raw = params.get(direct_name) if direct_name in params else params.get(base_name)
-            values = [raw] if isinstance(raw, str) else list(raw or [])
-            return sorted({str(value).strip() for value in values if str(value).strip()})
-
-        context["remove_args"] = _normalized_list("base_remove_args", "remove_args")
-        context["unset_envs"] = _normalized_list("base_unset_envs", "unset_envs")
-        args_mode = params.get("args_mode") if "args_mode" in params else params.get("base_args_mode")
-        context["args_mode"] = str(args_mode or "append").strip().lower()
-
-        raw_envs = self.current_best.get("extra_envs") or {}
-        extra_envs = (
-            {
-                str(key): str(value)
-                for key, value in sorted(raw_envs.items(), key=lambda item: str(item[0]))
-                if str(key).strip()
-            }
-            if isinstance(raw_envs, dict)
-            else {}
-        )
-        serving_config = {
-            "extra_server_args": str(self.current_best.get("extra_server_args") or "").strip(),
-            "extra_envs": extra_envs,
+        context: dict[str, Any] = {
+            "benchmark_mode": str(getattr(self, "benchmark_mode", "") or "").strip().lower(),
+            **_profile_workload.identity_fields(params, self),
+            **_profile_workload.shape_fields(params, self),
+            "server_args": _profile_workload.normalized_server_args(params),
+            "extra_envs": _profile_workload.profile_env_map(params),
+            "remove_args": _profile_workload.normalized_control_list(params, "remove_args", "base_remove_args"),
+            "unset_envs": _profile_workload.normalized_control_list(params, "unset_envs", "base_unset_envs"),
+            "args_mode": _profile_workload.normalized_args_mode(params),
         }
-        if any((serving_config["extra_server_args"], extra_envs)):
+        serving_config = _profile_workload.serving_config_of(self.current_best)
+        if serving_config:
             context["serving_config"] = serving_config
         return context
 
@@ -978,75 +860,12 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         """Return the profile identity for the active current-best runtime."""
         current_best = self.current_best
         incoming = overrides if isinstance(overrides, dict) else {}
-        params: dict[str, Any] = {}
-        runtime_keys = {
-            "extra_server_args",
-            "extra_envs",
-            "remove_args",
-            "unset_envs",
-            "args_mode",
-            "base_extra_args",
-            "base_extra_envs",
-            "base_remove_args",
-            "base_unset_envs",
-            "base_args_mode",
-        }
-        has_runtime_override = any(key in current_best for key in runtime_keys) or any(
-            key in incoming for key in runtime_keys
-        )
-        recorded = self.last_profile_workload if isinstance(self.last_profile_workload, dict) else {}
-        # A bare baseline/profile ``current_best`` carries no runtime fields, so the only record of what the server
-        # actually ran with is the last profile.
-        recorded_action = str(self.last_profile_workload_action or "").strip()
-        if (
-            not has_runtime_override
-            and current_best.get("action") in {"baseline", "profile"}
-            and recorded
-            # Legacy sessions predate the recorded action; keep reusing them rather than forcing a reprofile on every
-            # run.
-            and recorded_action in {"", "baseline", "profile"}
-        ):
-            params.update(
-                {
-                    "base_extra_args": recorded.get("server_args", ""),
-                    "base_extra_envs": dict(recorded.get("extra_envs") or {}),
-                    "base_remove_args": list(recorded.get("remove_args") or []),
-                    "base_unset_envs": list(recorded.get("unset_envs") or []),
-                    "base_args_mode": recorded.get("args_mode", "append"),
-                }
-            )
-        for source, target in (
-            ("extra_server_args", "base_extra_args"),
-            ("remove_args", "base_remove_args"),
-            ("unset_envs", "base_unset_envs"),
-            ("args_mode", "base_args_mode"),
-        ):
-            if source in current_best:
-                params[target] = current_best[source]
-            if source in incoming:
-                params[target] = incoming[source]
-            if target in incoming:
-                params[target] = incoming[target]
-
-        raw_current_envs = current_best.get("extra_envs")
-        merged_envs = dict(raw_current_envs) if isinstance(raw_current_envs, dict) else {}
-        if isinstance(incoming.get("base_extra_envs"), dict):
-            merged_envs.update(incoming["base_extra_envs"])
-        if isinstance(incoming.get("extra_envs"), dict):
-            merged_envs.update(incoming["extra_envs"])
+        params = _profile_workload.reusable_recorded_runtime(self, current_best, incoming)
+        params.update(_profile_workload.runtime_overrides(current_best, incoming))
+        merged_envs = _profile_workload.merged_runtime_envs(current_best, incoming)
         if merged_envs:
             params["base_extra_envs"] = merged_envs
-
-        for name in (
-            "framework",
-            "precision",
-            "model_path",
-            "tp",
-            "conc",
-            "isl",
-            "osl",
-            "max_model_len",
-        ):
+        for name in _profile_workload.PROFILE_OVERRIDABLE_KEYS:
             if name in incoming:
                 params[name] = incoming[name]
         return self.profile_workload_context(params)
