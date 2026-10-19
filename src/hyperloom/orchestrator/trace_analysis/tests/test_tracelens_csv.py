@@ -1081,6 +1081,9 @@ def test_124_tracelens_analysis_fails_fast_on_cpu_only_trace(tmp_path):
     assert all("TraceLens.TraceUtils.split_trace.main" not in str(p) for cmd in captured for p in cmd), (
         f"splitter must not run on CPU-only trace; captured={captured}"
     )
+    assert all("TraceLens_generate_perf_report_" not in str(c[0]) for c in captured if c), (
+        f"perf-report CLI must not be invoked for CPU-only trace; captured={captured}"
+    )
 
 
 @pytest.mark.parametrize(
@@ -2019,6 +2022,9 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(
     assert "--CONC" in splitter_cmd and "8" in splitter_cmd, splitter_cmd
     assert "--OSL" in splitter_cmd and "1024" in splitter_cmd, splitter_cmd
 
+    assert all("TraceLens_generate_perf_report_" not in str(c[0]) for c in captured if c), (
+        f"perf-report CSV fallback must not run; analysis.md is the single source of truth. cmds={captured}"
+    )
     out = capsys.readouterr().out
     result = _json.loads(out)
     assert result["status"] == "failed"

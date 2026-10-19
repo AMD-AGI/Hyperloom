@@ -52,7 +52,7 @@ _log = logging.getLogger(__name__)
 
 DEFAULT_ALLOWED_TOOLS = ["Read", "Write", "Edit", "Bash", "Task"]
 
-# The run config the orchestrator skill reads in place of its Step 0 questions.
+# The run config the TraceLens skill reads.
 RUN_CONFIG_NAME = "run.yaml"
 
 # The Codex SDK has no literal Read/Write/Bash/Task tools, and this thread runs

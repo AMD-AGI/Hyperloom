@@ -4459,7 +4459,7 @@ def main() -> int:
         "--tracelens-internal-root",
         default=os.environ.get("TRACELENS_INTERNAL_ROOT", DEFAULT_TRACELENS_INTERNAL_ROOT),
         help="Optional TraceLens-internal checkout (TRACELENS_INTERNAL_ROOT). "
-        "Enables the internal extension and the arch-spec population. "
+        "Rehydration module; plumbed to run_tracelens_skill. "
         "Leave empty for the open-source-only report.",
     )
     parser.add_argument(
