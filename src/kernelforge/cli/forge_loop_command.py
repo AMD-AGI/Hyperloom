@@ -42,6 +42,7 @@ from kernelforge.cli.publication import (
     _remote_publication_view,
     _warm_start_publication_covers,
 )
+from kernelforge.cli.relay import agent_relay_summary, relay_switch_possible
 from kernelforge.cli.session_budget import _forge_session_timeout_sec, _is_long_horizon
 from kernelforge.config import Config
 from kernelforge.knowledge.kb_store.config import KnowledgeConfig
@@ -336,6 +337,7 @@ class _RunReporter:
             "kb_experience": kb_experience,
             "agent_backend": self.effective_implementer,
             "agent_model": self.effective_implementer_model,
+            "agent_relay": agent_relay_summary(loop_runner.run_state),
             "llm_usage": getattr(loop_runner, "llm_usage", {}) or {},
         }
         if self.assembly_preparation is not None:
@@ -2061,6 +2063,11 @@ def forge_loop(
     for profile_id, status in search_actors.availability.profiles.items():
         state = "available" if status.available else f"unavailable ({status.reason})"
         print(f"  Agent profile: {profile_id} / {status.model}: {state}")
+    if campaign.agent_relay is not None and not relay_switch_possible(search_actors.availability):
+        print(
+            "  WARNING: model relay disabled for this session: no Agent profile other than the primary passed its "
+            "startup check (reasons above); a search blockage falls back to the Supervisor"
+        )
 
     from kernelforge.orchestrator.analysis import make_analysis_agent_service
 

@@ -29,6 +29,7 @@ from kernelforge.loop.campaign_config import (
 from kernelforge.loop.experience import ExperienceLedger
 from kernelforge.loop.agent_relay import (
     AgentAvailabilitySnapshot,
+    AgentRelayState,
     ProfileAvailability,
     ProviderAvailability,
 )
@@ -166,6 +167,8 @@ def _install_cli_fakes(monkeypatch, tmp_path):
                     iteration=8 if resume else 4,
                     commit_hash="best-commit",
                 ),
+                agent_relay=AgentRelayState(),
+                agent_availability_snapshot=AgentAvailabilitySnapshot(),
             )
             captured["loops"].append(self)
 

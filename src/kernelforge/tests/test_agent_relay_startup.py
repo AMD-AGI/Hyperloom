@@ -183,3 +183,54 @@ def test_primary_profile_probe_failure_refuses_startup(monkeypatch, tmp_path):
             ),
             workspace=str(tmp_path),
         )
+
+
+def test_switching_the_implementer_provider_drops_the_other_providers_cli_and_options(monkeypatch, tmp_path):
+    from kernelforge.orchestrator import agent as agent_module
+
+    captured = {}
+
+    def create(runtime, **_kwargs):
+        captured["runtime"] = runtime
+        return SimpleNamespace(name=runtime.provider, runtime=runtime)
+
+    monkeypatch.setattr(agent_module, "create_registered_backend", create)
+    config = Config(
+        workspace=str(tmp_path),
+        agent_backend="codex",
+        agent_cli="/opt/bin/codex",
+        agent_options={"codex_only": True},
+    )
+
+    agent_module._resolve_implementer_backend(config, "claude", None)
+
+    assert captured["runtime"].provider == "claude"
+    assert captured["runtime"].executable == ""
+    assert captured["runtime"].options == {}
+
+
+def test_relay_summary_reports_whether_a_switch_is_possible():
+    from kernelforge.cli.relay import agent_relay_summary, relay_switch_possible
+    from kernelforge.loop.agent_relay import AgentAvailabilitySnapshot, ProfileAvailability
+    from kernelforge.loop.run_state import RunState
+
+    state = RunState()
+    state.agent_relay.active_profile_id = "claude"
+    state.agent_availability_snapshot = AgentAvailabilitySnapshot(
+        profiles={
+            "claude": ProfileAvailability(provider="claude", model="claude-opus-5", available=True),
+            "codex": ProfileAvailability(provider="codex", model="gpt-6-astra", available=False, reason="no key"),
+        }
+    )
+
+    summary = agent_relay_summary(state)
+
+    assert relay_switch_possible(state.agent_availability_snapshot) is False
+    assert summary["switch_possible"] is False
+    assert summary["active_profile_id"] == "claude"
+    assert summary["profiles"]["codex"] == {
+        "provider": "codex",
+        "model": "gpt-6-astra",
+        "available": False,
+        "reason": "no key",
+    }

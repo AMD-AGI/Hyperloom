@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 import logging
 import os
@@ -136,13 +137,51 @@ class ClaudeTimeoutError(ClaudeBackendError):
     """The session outran its wall-clock budget before it could be resumed."""
 
 
+#: ``--version`` verdicts keyed by (path, mtime, size), so a session does not relaunch the CLI to re-ask.
+_claude_cli_verdicts: dict[tuple[str, int, int], bool] = {}
+_ignored_agent_clis: set[str] = set()
+
+
+def _is_claude_cli(path: str) -> bool:
+    """Whether the executable at ``path`` reports itself as the Claude Code CLI."""
+    try:
+        status = os.stat(path)
+    except OSError:
+        return False
+    key = (path, status.st_mtime_ns, status.st_size)
+    if key not in _claude_cli_verdicts:
+        try:
+            completed = subprocess.run([path, "--version"], capture_output=True, timeout=10, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            _claude_cli_verdicts[key] = False
+        else:
+            text = b"\n".join([completed.stdout, completed.stderr]).decode(errors="replace")
+            _claude_cli_verdicts[key] = completed.returncode == 0 and "claude" in text.lower()
+    return _claude_cli_verdicts[key]
+
+
+def _bundled_claude_cli() -> str:
+    """The CLI claude-agent-sdk ships inside its package, which it would run itself if no path were given."""
+    spec = importlib.util.find_spec("claude_agent_sdk")
+    if spec is None or not spec.origin:
+        return ""
+    name = "claude.exe" if sys.platform == "win32" else "claude"
+    bundled = Path(spec.origin).parent / "_bundled" / name
+    return str(bundled) if bundled.is_file() and os.access(bundled, os.X_OK) else ""
+
+
 def resolve_claude_cli(explicit: str = "") -> str:
     """Locate the Claude CLI for SDK subprocess execution."""
     if explicit.strip():
         return explicit.strip()
     candidate = os.environ.get("FORGE_AGENT_CLI", "").strip()
     if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-        return candidate
+        # The variable names one provider's executable while both run in one process.
+        if _is_claude_cli(candidate):
+            return candidate
+        if candidate not in _ignored_agent_clis:
+            _ignored_agent_clis.add(candidate)
+            log.warning("ignoring FORGE_AGENT_CLI=%s for the Claude backend: it is not the Claude CLI", candidate)
     found = shutil.which("claude")
     if found:
         return found
@@ -157,7 +196,7 @@ def resolve_claude_cli(explicit: str = "") -> str:
     for candidate in candidates:
         if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
             return candidate
-    return "claude"
+    return _bundled_claude_cli() or "claude"
 
 
 def _hook_matcher(hook: AgentHook, hook_type: Any) -> Any:

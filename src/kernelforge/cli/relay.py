@@ -354,6 +354,31 @@ def build_search_actor_pool(
     )
 
 
+def relay_switch_possible(availability: AgentAvailabilitySnapshot) -> bool:
+    """Whether at least two profiles passed the startup check, so a blockage has somewhere to switch to."""
+    return sum(1 for status in availability.profiles.values() if status.available) >= 2
+
+
+def agent_relay_summary(run_state) -> dict:
+    """What the campaign result reports about relay: per-profile availability and the active profile."""
+    snapshot = run_state.agent_availability_snapshot
+    relay = run_state.agent_relay
+    return {
+        "switch_possible": relay_switch_possible(snapshot),
+        "active_profile_id": relay.active_profile_id,
+        "blockage_epoch": relay.blockage_epoch,
+        "profiles": {
+            profile_id: {
+                "provider": status.provider,
+                "model": status.model,
+                "available": status.available,
+                "reason": status.reason,
+            }
+            for profile_id, status in snapshot.profiles.items()
+        },
+    }
+
+
 def _provider_is_available(registration) -> tuple[bool, str]:
     try:
         if not registration.availability():
@@ -365,8 +390,10 @@ def _provider_is_available(registration) -> tuple[bool, str]:
 
 __all__ = [
     "SearchActorBuildContext",
+    "agent_relay_summary",
     "build_search_actor_pool",
     "config_for_profile",
     "probe_agent_profiles",
+    "relay_switch_possible",
     "resolve_default_relay_config",
 ]
