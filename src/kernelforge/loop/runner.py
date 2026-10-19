@@ -236,6 +236,12 @@ CONFIG_COVERAGE_DISPERSION_MULTIPLE = 1.0
 _CEILING_UNLOADED = object()
 
 
+def _lane_rationale(lane) -> str:
+    """The rationale of the iteration that measures a queued lane, with the lane Implementer's own when it gave one."""
+    head = f"lane {lane.lane_id} of a fan-out round"
+    return f"{head}: {lane.rationale}" if lane.rationale else head
+
+
 def _measurement_case_times(
     bench_detail: dict | None,
 ) -> dict[str, tuple[float, ...]]:
@@ -5680,9 +5686,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         elif queued_lane is not None:
             unmeasured_result = None
             commit_hash = ""
-            rationale = f"lane {queued_lane.lane_id} of a fan-out round" + (
-                f": {queued_lane.rationale}" if queued_lane.rationale else ""
-            )
+            rationale = _lane_rationale(queued_lane)
             attempt_source = self._read_kernel_source()
             attempt_diff = self._working_tree_diff()
             reusable_benchmark = None

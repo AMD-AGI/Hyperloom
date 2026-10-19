@@ -443,6 +443,14 @@ def build_specialist_prompts(
     return system_prompt, user_prompt
 
 
+@dataclass(frozen=True)
+class SpecialistTools:
+    """What a specialist may use beyond its backend's own tools: the GPU probe and the knowledge base."""
+
+    probe: SpecialistProbeConfig | None = None
+    knowledge_wiki: KnowledgeWikiTool | None = None
+
+
 class SpecialistAgent:
     """Run one registered specialist role through an injected backend."""
 
@@ -453,20 +461,19 @@ class SpecialistAgent:
         backend: AgentBackend,
         timeout_sec: int,
         max_turns: int,
-        probe: SpecialistProbeConfig | None = None,
-        knowledge_wiki: KnowledgeWikiTool | None = None,
+        tools: SpecialistTools = SpecialistTools(),
     ) -> None:
         if timeout_sec <= 0:
             raise ValueError("timeout_sec must be greater than zero")
         if max_turns <= 0:
             raise ValueError("max_turns must be greater than zero")
-        require_mcp_backend(knowledge_wiki, backend, f"specialist {definition.role_id}")
+        require_mcp_backend(tools.knowledge_wiki, backend, f"specialist {definition.role_id}")
         self.definition = definition
         self.backend = backend
         self.timeout_sec = timeout_sec
         self.max_turns = max_turns
-        self.probe = probe
-        self.knowledge_wiki = knowledge_wiki
+        self.probe = tools.probe
+        self.knowledge_wiki = tools.knowledge_wiki
 
     async def run(
         self,

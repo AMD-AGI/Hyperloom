@@ -149,6 +149,15 @@ def _make_ceiling_estimator(
     return estimate
 
 
+def _announce_knowledge_base(config) -> None:
+    """Say which knowledge base every forge role reads, when one is configured."""
+    from kernelforge.knowledge.wiki_tool import KnowledgeWikiTool
+
+    knowledge_wiki = KnowledgeWikiTool.from_config(config)
+    if knowledge_wiki is not None:
+        print(f"  Knowledge base: {knowledge_wiki.root} (calls logged to {knowledge_wiki.log_path})")
+
+
 def _load_external_baseline(path: str) -> tuple[float, dict[str, float]]:
     """Read the ``--baseline-json`` scoring anchor, rejecting one that cannot anchor a speedup.
 
@@ -1932,11 +1941,7 @@ def forge_loop(request: ForgeLoopRequest):
     )
     analysis_mode = "profiled" if profiling_enabled else "static-only"
     print("  Analysis Agent: " + analysis_mode)
-    from kernelforge.knowledge.wiki_tool import KnowledgeWikiTool
-
-    knowledge_wiki = KnowledgeWikiTool.from_config(config)
-    if knowledge_wiki is not None:
-        print(f"  Knowledge base: {knowledge_wiki.root} (calls logged to {knowledge_wiki.log_path})")
+    _announce_knowledge_base(config)
     print(f"  Orchestration: enabled with parallel specialists ({', '.join(sorted(specialist_definitions))})")
     print(
         "  Plan Critic: "
