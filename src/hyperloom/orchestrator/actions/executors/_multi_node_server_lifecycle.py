@@ -859,7 +859,7 @@ def _collect_worker_server_logs(state: dict, reason: str) -> None:
                     if cp.stderr:
                         body += "\n--- ssh stderr ---\n" + cp.stderr
                     source = "ssh:" + str(remote)
-                except (OSError, subprocess.TimeoutExpired, ValueError, TypeError):
+                except (OSError, subprocess.TimeoutExpired, ValueError):
                     continue
             else:
                 continue

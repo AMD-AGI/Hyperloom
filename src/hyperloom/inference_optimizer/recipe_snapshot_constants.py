@@ -253,7 +253,7 @@ def detect_framework_version(framework_name: str) -> str:
         import importlib
 
         mod = importlib.import_module(module_name)
-    except ImportError as exc:
+    except (ImportError, OSError) as exc:
         log.debug(
             "detect_framework_version: import %r failed (%s); falling back to %r",
             module_name,

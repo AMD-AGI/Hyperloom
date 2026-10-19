@@ -812,7 +812,7 @@ class ServingLease:
                 )
 
     def _abandon_ref(self, ref: Any) -> None:
-        """Drop a round this lease will never collect. Never raises."""
+        """Drop a round this lease will never collect; Ray and OS errors are swallowed."""
         import ray
 
         try:
@@ -823,7 +823,7 @@ class ServingLease:
             log.warning("ServingLease: could not cancel the abandoned round: %r", exc)
 
     def _ask_actor_to_cancel(self, reason: str) -> bool:
-        """Tell the actor to stop the round it is running. Never raises."""
+        """Tell the actor to stop the round it is running; Ray and OS errors are swallowed."""
         import ray
 
         actor = self._actor
@@ -879,7 +879,7 @@ class ServingLease:
             )
 
     def _kill_actor(self) -> None:
-        """Kill the actor handle without waiting for it. Idempotent, never raises."""
+        """Kill the actor handle without waiting for it. Idempotent; Ray and OS errors are swallowed."""
         if self._actor is None:
             return
         import ray

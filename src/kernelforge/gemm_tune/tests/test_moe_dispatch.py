@@ -335,6 +335,24 @@ class TestTheAttemptPutsTheProcessBack:
         adapter.close()
         assert not workdir.exists()
 
+    def test_an_aiter_that_cannot_load_its_library_leaves_nothing_to_drop(self, monkeypatch):
+        core = ModuleType("aiter.jit.core")
+
+        def unloadable(name):
+            raise OSError("libamdhip64.so.6: cannot open shared object file")
+
+        core.__getattr__ = unloadable
+        for name, module in (
+            ("aiter", ModuleType("aiter")),
+            ("aiter.jit", ModuleType("aiter.jit")),
+            ("aiter.jit.core", core),
+        ):
+            monkeypatch.setitem(sys.modules, name, module)
+        adapter = dp._FusedMoeAdapter()
+        workdir = adapter._workdir
+        adapter.close()
+        assert not workdir.exists()
+
     def test_a_broken_aiter_cache_drop_is_not_swallowed(self, monkeypatch):
         cache = SimpleNamespace(cache_clear=lambda: None)
         core = ModuleType("aiter.jit.core")

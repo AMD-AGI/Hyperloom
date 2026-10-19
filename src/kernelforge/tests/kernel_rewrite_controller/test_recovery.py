@@ -126,6 +126,7 @@ def test_recovery_publishes_a_validated_result_sidecar(tmp_path: Path) -> None:
         subprocess.CalledProcessError(128, ["git", "diff"], stderr="fatal: bad object"),
         subprocess.TimeoutExpired(["git", "diff"], 300.0),
         OSError("disk full"),
+        UnicodeDecodeError("utf-8", b"\xfc", 0, 1, "invalid start byte"),
     ],
     ids=lambda failure: type(failure).__name__,
 )

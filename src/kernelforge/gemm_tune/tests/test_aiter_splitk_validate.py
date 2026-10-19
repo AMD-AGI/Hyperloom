@@ -41,6 +41,14 @@ def test_none_when_control_cannot_import_aiter(monkeypatch):
     assert max_supported_splitk((64, 5120, 5120)) is None
 
 
+def test_none_when_control_cannot_load_a_library(monkeypatch):
+    def unloadable(m, n, k, sk, device="cuda"):
+        raise OSError("libamdhip64.so.6: cannot open shared object file")
+
+    _probe(monkeypatch, unloadable)
+    assert max_supported_splitk((64, 5120, 5120)) is None
+
+
 def test_control_propagates_unexpected_errors(monkeypatch):
     def buggy(m, n, k, sk, device="cuda"):
         raise TypeError("probe signature drifted")

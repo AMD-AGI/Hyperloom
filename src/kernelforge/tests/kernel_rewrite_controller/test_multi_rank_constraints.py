@@ -13,6 +13,7 @@ budget with them.
 from __future__ import annotations
 
 import json
+import importlib.abc
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -258,6 +259,22 @@ def test_a_driver_failure_reports_an_unknown_count(monkeypatch) -> None:
         raise RuntimeError("no HIP driver")
 
     _fake_torch(monkeypatch, no_driver)
+
+    assert dispatcher._visible_gpu_count() == dispatcher.GPU_COUNT_UNKNOWN
+
+
+def test_a_torch_that_cannot_load_its_library_reports_an_unknown_count(monkeypatch) -> None:
+    monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+
+    class _LoaderFailure(importlib.abc.MetaPathFinder):
+        def find_spec(self, fullname, path=None, target=None):
+            if fullname == "torch":
+                raise OSError("libamdhip64.so.6: cannot open shared object file")
+            return
+
+    monkeypatch.delitem(sys.modules, "torch", raising=False)
+    monkeypatch.setattr(sys, "meta_path", [_LoaderFailure(), *sys.meta_path])
 
     assert dispatcher._visible_gpu_count() == dispatcher.GPU_COUNT_UNKNOWN
 

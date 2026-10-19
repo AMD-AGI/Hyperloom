@@ -458,7 +458,11 @@ def _run_with_new_best_handler(tmp_path, monkeypatch, failure: BaseException) ->
 
 @pytest.mark.parametrize(
     "failure",
-    [OSError("git is not installed"), subprocess.TimeoutExpired(["git", "show"], 300.0)],
+    [
+        OSError("git is not installed"),
+        subprocess.TimeoutExpired(["git", "show"], 300.0),
+        UnicodeDecodeError("utf-8", b"\xfc", 0, 1, "invalid start byte"),
+    ],
     ids=lambda failure: type(failure).__name__,
 )
 def test_optimize_survives_a_failing_new_best_handler(tmp_path, monkeypatch, failure):

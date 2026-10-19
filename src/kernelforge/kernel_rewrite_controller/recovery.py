@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from kernelforge.kernel_rewrite_controller.contracts import KernelRewriteTask, TaskStateError
+from kernelforge.kernel_rewrite_controller.contracts import KernelRewriteTask
 from kernelforge.kernel_rewrite_controller.paths import ControllerLayout
 from kernelforge.kernel_rewrite_controller.publisher import (
     PUBLICATION_FILENAME,
@@ -246,7 +246,7 @@ def recover_task_result(
             patch_dir=patch_dir,
             best_commit=best_commit,
         )
-    except (WorktreeError, PublicationError, TaskStateError, subprocess.SubprocessError, OSError) as error:
+    except (WorktreeError, PublicationError, subprocess.SubprocessError, OSError, ValueError) as error:
         log.warning(
             "could not publish result for %s: %s",
             task.operator_id,

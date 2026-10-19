@@ -221,7 +221,7 @@ def test_log_sweep_skips_a_pod_whose_ssh_cannot_run(collect, error) -> None:
     assert collect(_SSH_STATE, _ssh_answering("10.0.0.1", error)) == ["prefill_p1.log"]
 
 
-@pytest.mark.parametrize("port", ["not-a-port", ["2233"]])
+@pytest.mark.parametrize("port", ["not-a-port"])
 def test_log_sweep_skips_a_pod_with_an_unusable_ssh_port(collect, port) -> None:
     state = {
         **_SSH_STATE,

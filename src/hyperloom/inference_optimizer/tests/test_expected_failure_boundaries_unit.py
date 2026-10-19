@@ -44,24 +44,25 @@ def shape_gate():
 
 
 class _ExplodingFinder(importlib.abc.MetaPathFinder):
-    """Makes importing one top-level module raise a RuntimeError instead of an ImportError."""
+    """Makes importing one top-level module raise ``error`` instead of an ImportError."""
 
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, error: type[Exception]) -> None:
         self._name = name
+        self._error = error
 
     def find_spec(self, fullname, path=None, target=None):
         if fullname == self._name:
-            raise RuntimeError(f"{fullname} is broken")
+            raise self._error(f"{fullname} is broken")
         return
 
 
 @pytest.fixture
 def break_import(monkeypatch):
-    """Return a function that makes ``import <name>`` raise RuntimeError."""
+    """Return a function that makes ``import <name>`` raise ``error`` (RuntimeError by default)."""
 
-    def _break(name: str) -> None:
+    def _break(name: str, error: type[Exception] = RuntimeError) -> None:
         monkeypatch.delitem(sys.modules, name, raising=False)
-        monkeypatch.setattr(sys, "meta_path", [_ExplodingFinder(name), *sys.meta_path])
+        monkeypatch.setattr(sys, "meta_path", [_ExplodingFinder(name, error), *sys.meta_path])
 
     return _break
 
@@ -203,6 +204,45 @@ def test_apply_records_an_unexpected_import_error_as_unexpected(pod_patcher, tmp
     assert result["error"] == "unexpected: RuntimeError: sglang is broken"
 
 
+def test_apply_reports_an_sglang_whose_library_cannot_load(pod_patcher, tmp_path, break_import):
+    break_import("sglang", OSError)
+
+    result = _apply(pod_patcher, tmp_path)
+
+    assert result["status"] == "failed"
+    assert result["error"] == "sglang not importable: sglang is broken"
+
+
+def test_installed_version_falls_back_when_sglang_cannot_load_its_library(pod_patcher, monkeypatch, missing_import):
+    broken = types.ModuleType("sglang.version")
+
+    def unloadable(name):
+        raise OSError("libamdhip64.so.6: cannot open shared object file")
+
+    broken.__getattr__ = unloadable
+    monkeypatch.setitem(sys.modules, "sglang.version", broken)
+
+    assert pod_patcher._installed_sglang_version(types.SimpleNamespace(__version__="0.5.9")) == "0.5.9"
+
+
+def test_anchor_path_falls_back_when_the_profiler_module_cannot_load_its_library(pod_patcher, tmp_path, monkeypatch):
+    for name in ("sglang", "sglang.srt", "sglang.srt.managers"):
+        parent = types.ModuleType(name)
+        parent.__path__ = []
+        monkeypatch.setitem(sys.modules, name, parent)
+    leaf = "sglang.srt.managers.scheduler_profiler_mixin"
+
+    class _Unloadable(types.ModuleType):
+        @property
+        def __file__(self):
+            raise OSError("libamdhip64.so.6: cannot open shared object file")
+
+    monkeypatch.setitem(sys.modules, leaf, _Unloadable(leaf))
+    module = types.SimpleNamespace(__file__=None, __path__=[str(tmp_path)])
+
+    assert pod_patcher._sglang_anchor_path(module) == tmp_path
+
+
 # ---- pod-side sglang_shape_gate ----
 
 
@@ -213,6 +253,14 @@ def test_shape_mode_uses_the_pinned_version_without_sglang(shape_gate, monkeypat
     monkeypatch.setenv("HYPERLOOM_SGLANG_VERSION_PIN", pin)
 
     assert shape_gate.sglang_shape_mode() == mode
+
+
+def test_shape_mode_uses_the_pinned_version_when_sglang_cannot_load_its_library(shape_gate, monkeypatch, break_import):
+    break_import("sglang", OSError)
+    monkeypatch.delenv("HYPERLOOM_SGLANG_SHAPE_MODE", raising=False)
+    monkeypatch.setenv("HYPERLOOM_SGLANG_VERSION_PIN", "0.5.18")
+
+    assert shape_gate.sglang_shape_mode() == "sitecustomize"
 
 
 def test_shape_mode_lets_an_unexpected_import_error_propagate(shape_gate, monkeypatch, break_import):
@@ -230,10 +278,19 @@ def test_framework_version_lets_an_unexpected_import_error_propagate(monkeypatch
     monkeypatch.delenv("HYPERLOOM_RESOLVED_FRAMEWORK", raising=False)
     monkeypatch.delenv("HYPERLOOM_RESOLVED_FRAMEWORK_PYTHON", raising=False)
     monkeypatch.delitem(sys.modules, "vllm", raising=False)
-    monkeypatch.setattr(sys, "meta_path", [_ExplodingFinder("vllm"), *sys.meta_path])
+    monkeypatch.setattr(sys, "meta_path", [_ExplodingFinder("vllm", RuntimeError), *sys.meta_path])
 
     with pytest.raises(RuntimeError, match="vllm is broken"):
         detect_framework_version("vllm")
+
+
+def test_framework_version_defaults_when_the_framework_cannot_load_its_library(monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_RESOLVED_FRAMEWORK", raising=False)
+    monkeypatch.delenv("HYPERLOOM_RESOLVED_FRAMEWORK_PYTHON", raising=False)
+    monkeypatch.delitem(sys.modules, "vllm", raising=False)
+    monkeypatch.setattr(sys, "meta_path", [_ExplodingFinder("vllm", OSError), *sys.meta_path])
+
+    assert detect_framework_version("vllm") == DEFAULT_FRAMEWORK_VERSION_SLUG
 
 
 def test_framework_version_defaults_when_the_framework_is_not_installed(monkeypatch):

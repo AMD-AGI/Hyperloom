@@ -471,7 +471,7 @@ def run_optimize(
                 return published_commit
             try:
                 on_new_best(payload)
-            except (OSError, subprocess.SubprocessError) as error:
+            except (OSError, ValueError, subprocess.SubprocessError) as error:
                 log.warning(
                     "optimize: new-best callback failed (%s: %s)",
                     type(error).__name__,
