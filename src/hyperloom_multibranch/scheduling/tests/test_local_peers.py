@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.contracts.measurement import AttachmentRef
 from hyperloom.contracts.recipe import Recipe, RecipeDelta
 from hyperloom.common.env import forge_explicitly_enabled
 from hyperloom.common.perf_metric import agentx_enabled
@@ -32,6 +33,8 @@ from hyperloom_multibranch.notebook import STALL_TESTS, LocalNotebook
 from hyperloom_multibranch.notebook.tests.factories import intent, judgement, request, result
 from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST, SpecialistGrant
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
+from hyperloom_multibranch.rulegate.critic import NoCritic
+from hyperloom_multibranch.rulegate.fix_case import FIX_CASE_ID, FixCase, read_case
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.regression import RegressionSet
 from hyperloom_multibranch.rulegate.rules import AgentXRule, InferenceXRule
@@ -76,8 +79,13 @@ HOST = MeasurementHost((0, 1, 2, 3), IMAGE, ToolCommits("a" * 40, "b" * 40))
 IMAGE_VARS = ("HYPERLOOM_ACTIVE_IMAGE_REF", "HYPERLOOM_ACTIVE_IMAGE_DIGEST")
 
 
-def _call_tool(grant: SpecialistGrant, name: str) -> dict[str, object]:
-    message = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": {}}}
+def _call_tool(grant: SpecialistGrant, name: str, arguments: dict[str, str] | None = None) -> dict[str, object]:
+    message = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": name, "arguments": arguments or {}},
+    }
     request = urllib.request.Request(
         grant.url,
         data=json.dumps(message).encode(),
@@ -258,7 +266,8 @@ async def built(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterato
     clock = Clock()
     layout = create_session(tmp_path, WORKLOAD.model_basename, clock)
     desk = ForkDesk(Roster(RosterCaps(1, 1, 1), layout.roster, clock), DecisionLog(layout.decisions, clock), clock)
-    setup = PeerSetup(layout, WORKLOAD, desk, ProcessRegistry(layout.pids, clock), LocalBlobStore(layout.blobs))
+    blobs = LocalBlobStore(layout.blobs)
+    setup = PeerSetup(layout, WORKLOAD, desk, ProcessRegistry(layout.pids, clock), blobs, NoCritic())
     wired: list[SessionWiring] = []
 
     def sessions(wiring: SessionWiring) -> ModelSessions:
@@ -320,9 +329,24 @@ async def test_the_real_peers_live_inside_the_session_directory(built: _Built) -
         "notebook_brief",
         "request_repair",
         "decline_repair",
+        "fix_case",
     }
     assert served <= tools
     assert all(entry.name.startswith(SESSION_PREFIX) for entry in layout.root.iterdir())
+
+
+async def test_a_fix_case_a_specialist_declares_is_stored_in_the_session_blob_store(built: _Built) -> None:
+    grant = built.wiring.tokens.issue("b01", frozenset({SCOPE_SPECIALIST}))
+    case = FixCase("#!/bin/bash\nexit 0\n", "fp8 scales overflow at 8k context; clamp them before the cast")
+
+    reply = await asyncio.to_thread(
+        _call_tool, grant, "fix_case", {"repro_sh": case.repro_sh, "diagnosis": case.diagnosis}
+    )
+
+    assert reply["result"]["isError"] is False
+    ref = AttachmentRef.from_document(json.loads(reply["result"]["content"][0]["text"]))
+    assert (ref.id, ref.kind) == (FIX_CASE_ID, "dir")
+    assert read_case(built.setup.blobs.get(ref.sha256)) == case
 
 
 async def test_the_specialist_notebook_handle_briefs_a_branch_after_stall_tests_judged_tests_without_a_commit(

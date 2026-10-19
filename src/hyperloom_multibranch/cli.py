@@ -42,6 +42,7 @@ from hyperloom.inference_optimizer.session.paths import workspace_root
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient, RemoteRecipeConfigurationError
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
+from hyperloom_multibranch.rulegate.critic import LlmCritic, anthropic_critic
 from hyperloom_multibranch.scheduling.budget import MB_DEFAULT_MAX_HOURS, MB_MIN_PRELUDE_HOURS
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.layout import create_session
@@ -229,11 +230,12 @@ async def _run_session(settings: RunSettings, peer_factory: PeerFactory, recipe_
     model = default_model()
     judge = anthropic_completion(model, component=PROG, operation="judge")
     resolver = anthropic_completion(model, component=PROG, operation="patch_resolve")
+    services = SessionServices(judge, resolver, recipe_kb, LlmCritic(anthropic_critic(model, component=PROG)))
     layout = create_session(workspace_root(), settings.workload.model_basename, clock)
     print(layout.root, flush=True)
     logging.getLogger().addHandler(_file_handler(layout.scheduler_log))
     host = SessionHost(layout, ProcessRegistry(layout.pids, clock), clock)
-    session = Session(settings, peer_factory, host, SessionServices(judge, resolver, recipe_kb))
+    session = Session(settings, peer_factory, host, services)
     return (await session.run()).exit_code
 
 

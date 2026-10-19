@@ -35,6 +35,7 @@ from hyperloom_multibranch.contracts.notebook.records import ManifestFingerprint
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.codec import encode
 from hyperloom_multibranch.notebook.rsi.session import FRONTIER_LOG, session_frontier
+from hyperloom_multibranch.rulegate.critic import FixReviewer
 from hyperloom_multibranch.scheduling.branches import BranchControl
 from hyperloom_multibranch.scheduling.budget import HardStop, SessionBudget, budget_seconds, explore_gpu_seconds
 from hyperloom_multibranch.scheduling.clock import Clock
@@ -130,13 +131,14 @@ class SessionHost:
 
 @dataclass(frozen=True)
 class SessionServices:
-    """What the session calls out to besides its peers: the completions the judge and the patch resolver ask, and the
+    """What the session calls out to besides its peers: the completions the judge and the patch resolver ask, the
     Recipe KB PRELUDE reads the warm-start leads from and CLOSE writes the final recipe back to (``None`` when none is
-    configured)."""
+    configured), and the critic the rule gate asks whether a proven correctness fix matters under the workload."""
 
     judge_completion: Completion
     resolver_completion: Completion
     recipe_kb: RemoteRecipeClient | None
+    critic: FixReviewer
 
 
 class Session:
@@ -156,7 +158,7 @@ class Session:
         self._decisions = DecisionLog(layout.decisions, clock)
         desk = ForkDesk(self._roster, self._decisions, clock)
         blobs = LocalBlobStore(layout.blobs)
-        peers = peer_factory(PeerSetup(layout, settings.workload, desk, processes, blobs))
+        peers = peer_factory(PeerSetup(layout, settings.workload, desk, processes, blobs, services.critic))
         context = SchedulerContext(
             layout, self._roster, self._notebook, self._decisions, processes, clock, desk, peers.reserved
         )

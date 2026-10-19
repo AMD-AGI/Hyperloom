@@ -65,6 +65,7 @@ from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.notebook.rsi.briefing import SessionBriefs
 from hyperloom_multibranch.notebook.tests.factories import delta, intent, request
+from hyperloom_multibranch.rulegate.critic import NoCritic
 from hyperloom_multibranch.rulegate.fix_case import FIX_CASE_ID
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.regression import FixProof, ReproRun
@@ -358,7 +359,10 @@ class Stage:
         self.time.hold_threads()
         host = SessionHost(self.layout, self.processes, self.time.clock)
         session = Session(
-            self.settings, self.factory, host, SessionServices(self.judge, ScriptedCompletion(), self.recipe_kb)
+            self.settings,
+            self.factory,
+            host,
+            SessionServices(self.judge, ScriptedCompletion(), self.recipe_kb, NoCritic()),
         )
         return await session.run()
 

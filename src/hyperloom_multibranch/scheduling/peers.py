@@ -5,8 +5,9 @@
 
 A :data:`PeerFactory` builds the specialist lifecycle, the toolbox, the experiment repository, the rule gate's
 session service, the session's MCP service and its briefs on a :class:`PeerSetup`: the session directory, the workload the session optimizes, the scheduler's
-answer to the rule gate's branch requests, the session's process registry and its blob store. The specialist runtime
-builds its own rule gates on the branch requests; the session gate judges the tests the scheduler submits itself.
+answer to the rule gate's branch requests, the session's process registry, its blob store and the critic that
+reviews a declared correctness fix. The specialist runtime builds its own rule gates on the branch requests; the
+session gate judges the tests the scheduler submits itself.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from hyperloom_multibranch.contracts.gate import RegressionCheck, SessionGate
 from hyperloom_multibranch.contracts.lifecycle import SpecialistLifecycle
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.notebook.rsi.briefing import SessionBriefs
+from hyperloom_multibranch.rulegate.critic import FixReviewer
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.settings import Workload
@@ -62,8 +64,9 @@ class PeerSetup:
     on. ``processes`` is the session's process registry: the session stop kills what is registered there even when a
     peer's own stop hangs, and reports what outlives that kill; the specialist runtime registers every process the AI
     work socket starts for it with ``processes.adopt``. The toolbox's sandboxes are its own: the session stop releases
-    them by closing the toolbox. ``blobs``
-    holds the patch and kernel files the recipes name; the toolbox's environment compiler reads them from it.
+    them by closing the toolbox. ``blobs`` holds the patch and kernel files the recipes name; the toolbox's
+    environment compiler reads them from it. ``critic`` decides whether the defect a proven correctness fix removes is
+    reachable under the workload.
     """
 
     layout: SessionLayout
@@ -71,6 +74,7 @@ class PeerSetup:
     desk: ForkAdmissionService
     processes: ProcessRegistry
     blobs: BlobStore
+    critic: FixReviewer
 
 
 PeerFactory = Callable[[PeerSetup], Peers]

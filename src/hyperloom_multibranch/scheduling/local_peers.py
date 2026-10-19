@@ -13,7 +13,9 @@ on; its learnings tool recalls this session's learnings only, as MB1 runs on no 
 session service and the specialist runtime judge on one rule, :func:`workload_rule`; the runtime settles through a
 rule gate that asks the scheduler's fork desk for branches, and the MCP service's ``request_repair`` and
 ``decline_repair`` conclude a blocked candidate through the same gate, which the scheduler has land each fork it
-admits and record each fork and repair it voids. The runtime's specialist sessions come from
+admits and record each fork and repair it voids. A specialist declares a correctness fix with the MCP service's
+``fix_case``; the runtime proves it with the repro runner the regression set uses and has the setup's critic review
+it. The runtime's specialist sessions come from
 a :data:`SpecialistSessions`: :func:`model_backed_sessions` runs each branch's specialist as an agent CLI in a
 worktree of its own, briefed by the session's :class:`SessionBriefs`, whose warm-start leads the session binds once
 PRELUDE has read them. :func:`load_peers` reads the measurement host, checks the image holds the framework package
@@ -54,6 +56,8 @@ from hyperloom_multibranch.scheduling.mb_fakes import (
 )
 from hyperloom_multibranch.scheduling.peers import PeerFactory, Peers, PeerSetup, PeersUnavailable
 from hyperloom_multibranch.scheduling.settings import Workload
+from hyperloom_multibranch.specialist.fix_check import FixChecking
+from hyperloom_multibranch.specialist.fix_tools import register_fix_tools
 from hyperloom_multibranch.specialist.judging import Judging
 from hyperloom_multibranch.specialist.runtime import RuntimePacing, SpecialistRuntime
 
@@ -209,13 +213,14 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     gate = RuleGate(gate_notebook, repo, setup.desk, toolbox)
     blocked = BlockedCandidates(gate_notebook, gate)
     register_blocked_tools(mcp, blocked=blocked, home=tool_options.toolbox_loop)
-    judging = Judging(gate, toolbox, rule)
+    register_fix_tools(mcp, attachments=toolbox)
+    runner = ReproRunner(toolbox, gate_notebook, toolbox)
+    judging = Judging(gate, toolbox, rule, FixChecking(runner, setup.critic, setup.blobs, _specialist_role(workload)))
     runtime = SpecialistRuntime(
         runtime_notebook, judging, built.factory, pacing=RuntimePacing(claim_ttl_seconds=CLAIM_TTL_SECONDS)
     )
     mcp.start()
     gate_service = GateService(gate_notebook, toolbox, rule, toolbox)
-    runner = ReproRunner(toolbox, gate_notebook, toolbox)
     regression = RegressionSet(gate_notebook, runner, repo)
     return Peers(runtime, toolbox, repo, gate_service, mcp, briefs, image.digest, gate, regression)
 
