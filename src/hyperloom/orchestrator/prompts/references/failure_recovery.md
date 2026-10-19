@@ -52,11 +52,11 @@ measurement, NOT a failure — do not retry it.
 ## Decision rules
 
 * **RULE F1 — same fingerprint, twice failed → change at least one
-  of the eight fingerprint fields.** (PRELUDE only.) Because you run as a
+  of the seven fingerprint fields.** (PRELUDE only.) Because you run as a
   persistent conversation you remember the attempts you already made this
   session — do not re-propose a baseline whose params fingerprint
   matches a recent failure; it will fail the same way. Changing a
-  field OUTSIDE the eight does not count and does not get you a new
+  field OUTSIDE the seven does not count and does not get you a new
   attempt: the proposal is dropped as a duplicate and you have burned
   a tick. Bump at least one of: `params.benchmark_script`
   (a sanitized `*.sh` file name that MUST match THIS run's framework —
