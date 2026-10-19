@@ -590,13 +590,13 @@ def _tally_hot_kernels(top15: list[dict[str, Any]], inputs: _SummaryInputs, tall
         if match is None:
             continue
         pending = inputs.last_kernel_opt if kernel_id == inputs.keep_pending_kernel_id else None
-        context = _RowContext(inputs.results_dir, inputs.session_dir, pending)
-        tally.record(_render_attempted_row(top_entry, match.attempt, match.category, context))
+        where = ResultsLocation(inputs.results_dir, inputs.session_dir)
+        tally.record(_render_attempted_row(top_entry, match.attempt, match.category, where, pending))
 
 
 def _tally_ledger_only_kernels(inputs: _SummaryInputs, tally: _KernelTally) -> None:
     """Record every attempted kernel the roofline top15 does not name."""
-    context = _RowContext(inputs.results_dir, inputs.session_dir, None)
+    where = ResultsLocation(inputs.results_dir, inputs.session_dir)
     for kernel_id, attempt in inputs.attempts_map.items():
         if kernel_id in inputs.hot_kernel_ids:
             continue
@@ -606,7 +606,7 @@ def _tally_ledger_only_kernels(inputs: _SummaryInputs, tally: _KernelTally) -> N
             rejected_ids=inputs.rejected_ids,
             kernel_id=kernel_id,
         )
-        tally.record(_render_attempted_row({"kernel_id": kernel_id}, attempt, category, context))
+        tally.record(_render_attempted_row({"kernel_id": kernel_id}, attempt, category, where, None))
 
 
 def _tally_gemm_tuning_keeps(state: Any, inputs: _SummaryInputs, tally: _KernelTally) -> None:
@@ -615,12 +615,12 @@ def _tally_gemm_tuning_keeps(state: Any, inputs: _SummaryInputs, tally: _KernelT
     One campaign retunes many GEMM shapes at once rather than one named kernel, so there is no
     roofline top15 row to match it against and it would otherwise read as "never attempted".
     """
-    context = _RowContext(inputs.results_dir, inputs.session_dir, None)
+    where = ResultsLocation(inputs.results_dir, inputs.session_dir)
     for gemm_entry in _gemm_tuning_entries_in_optimization_stack(state):
         gemm_kid = str(gemm_entry.get("variant_name") or "gemm_tuning")
         top_entry = {"kernel_id": gemm_kid, "name": gemm_kid, "kernel_category": "gemm_tuning"}
         attempt = _synthetic_gemm_tuning_attempt(gemm_entry)
-        tally.record(_render_attempted_row(top_entry, attempt, CATEGORY_INTEGRATED, context))
+        tally.record(_render_attempted_row(top_entry, attempt, CATEGORY_INTEGRATED, where, None))
 
 
 def _lane_totals_by_lane(
@@ -701,12 +701,11 @@ def build_kernel_optimization_summary(state: Any, session_dir: Path | str) -> di
     }
 
 
-class _RowContext(NamedTuple):
-    """Session-wide lookups a summary row needs beside the kernel's own ledger data."""
+class ResultsLocation(NamedTuple):
+    """Where a session's per-kernel result files live and what their paths are relative to."""
 
     results_dir: Path | None
     session_dir: Path
-    last_kernel_opt: dict[str, Any] | None
 
 
 #: ``results/<kid>.json`` verification fields that override the ledger's own, for kernels
@@ -765,12 +764,12 @@ def _artifact_error(verification: dict[str, Any], ladder: list[dict[str, Any]]) 
     return "no usable backend attempt" if ladder else "ladder unavailable; compile_passed=false"
 
 
-def _kernel_agent_result_path(context: _RowContext, kernel_id: str) -> str:
+def _kernel_agent_result_path(where: ResultsLocation, kernel_id: str) -> str:
     """Session-relative path of the kernel-agent result file (``""`` when it was never written)."""
-    if context.results_dir is None:
+    if where.results_dir is None:
         return ""
-    fpath = context.results_dir / f"{kernel_id}.json"
-    return _relative_to_session(fpath, context.session_dir) if fpath.is_file() else ""
+    fpath = where.results_dir / f"{kernel_id}.json"
+    return _relative_to_session(fpath, where.session_dir) if fpath.is_file() else ""
 
 
 def _roofline_profile_fields(top_entry: dict[str, Any], attempt: dict[str, Any]) -> dict[str, Any]:
@@ -806,13 +805,14 @@ def _render_attempted_row(
     top_entry: dict[str, Any],
     attempt: dict[str, Any],
     category: str,
-    context: _RowContext,
+    where: ResultsLocation,
+    last_kernel_opt: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """Build a summary row for a kernel that was attempted."""
     kid = str(top_entry.get("kernel_id") or attempt.get("kernel_id") or "")
-    ladder, ladder_unavailable = _load_backend_ladder(context.results_dir, kid)
-    kernel_result, _ = _load_kernel_result(context.results_dir, kid)
-    verification = _verification_block(attempt, kernel_result, context.last_kernel_opt)
+    ladder, ladder_unavailable = _load_backend_ladder(where.results_dir, kid)
+    kernel_result, _ = _load_kernel_result(where.results_dir, kid)
+    verification = _verification_block(attempt, kernel_result, last_kernel_opt)
     artifact_error = _artifact_error(verification, ladder)
 
     return {
@@ -831,7 +831,7 @@ def _render_attempted_row(
         "verification": verification,
         "backend_ladder": ladder,
         "backend_ladder_unavailable_reason": ladder_unavailable,
-        "kernel_agent_result_path": _kernel_agent_result_path(context, kid),
+        "kernel_agent_result_path": _kernel_agent_result_path(where, kid),
     }
 
 

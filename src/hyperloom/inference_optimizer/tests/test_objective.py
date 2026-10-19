@@ -15,7 +15,7 @@ from hyperloom.orchestrator.roles import (
     ScriptedPlan,
 )
 from hyperloom.orchestrator.actions.executors import report_executor
-from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.coordinator import Coordinator, RunOptions
 from hyperloom.orchestrator.state.shared_state import effective_closing_grace_sec
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.state.objective import (
@@ -244,7 +244,7 @@ def test_build_objective_treats_empty_target_as_unset():
 async def test_run_stops_on_max_ticks(session_dir):
     c = Coordinator(session_dir, backends=_backends_silent())
     try:
-        reason = await c.run(max_ticks=3)
+        reason = await c.run(options=RunOptions(max_ticks=3))
         assert reason == "max_ticks"
         assert c.shared_state.stop_reason == "max_ticks"
     finally:
@@ -259,10 +259,7 @@ async def test_run_routes_a_met_objective_through_sweep(session_dir):
         c.shared_state.baseline_tput = 1000.0
         c.shared_state.cumulative_gain_validated = 50.0
         c.shared_state.save(session_dir)
-        reason = await c.run(
-            objective=TargetGainObjective(target_gain_pct=10.0),
-            max_ticks=10,
-        )
+        reason = await c.run(objective=TargetGainObjective(target_gain_pct=10.0), options=RunOptions(max_ticks=10))
         assert c.shared_state.target_reached_at
         assert [row.get("to_phase") for row in c.shared_state.phase_history].count("SWEEP") == 1
         # The ladder never ran in this harness, so SWEEP names its own failure rather than borrowing the target's
@@ -281,10 +278,7 @@ async def test_run_does_not_stop_on_a_gain_no_rebench_confirmed(session_dir):
         c.shared_state.current_best = {"action": "explore", "tput": 1500.0}
         c.shared_state.cumulative_gain_validated = 2.0
         c.shared_state.save(session_dir)
-        reason = await c.run(
-            objective=TargetGainObjective(target_gain_pct=10.0),
-            max_ticks=3,
-        )
+        reason = await c.run(objective=TargetGainObjective(target_gain_pct=10.0), options=RunOptions(max_ticks=3))
         assert reason == "max_ticks"
     finally:
         await c.stop()
@@ -302,7 +296,7 @@ async def test_run_stops_on_time_exhausted(session_dir):
     """A short wall-clock budget stops the run wherever it expires."""
     c = Coordinator(session_dir, backends=_backends_silent())
     try:
-        reason = await c.run(max_minutes=0.001, max_ticks=1000)
+        reason = await c.run(options=RunOptions(max_minutes=0.001, max_ticks=1000))
         # The 60 ms budget can expire before or after PRELUDE depending on the runner's speed; both reasons prove that
         # the session bound stopped it.
         assert reason in {"time_exhausted", "time_exhausted_during_prelude"}
@@ -341,10 +335,7 @@ async def test_run_closing_phase_writes_report_on_time_exhausted(session_dir):
     c.shared_state.save(session_dir)
     try:
         reason = await c.run(
-            max_minutes=0.0001,
-            max_ticks=50,
-            closing_grace_sec=30.0,
-            tick_interval_sec=0.0,
+            options=RunOptions(max_minutes=0.0001, tick_interval_sec=0.0, max_ticks=50, closing_grace_sec=30.0)
         )
         assert reason == "time_exhausted"
         assert (session_dir / "reports" / "final.md").exists()
@@ -388,12 +379,7 @@ async def test_run_closing_phase_skips_reactor(session_dir):
 
     c.phase_close.enter_closing_phase = _enter_and_record  # type: ignore[method-assign]
     try:
-        await c.run(
-            max_minutes=0.0001,
-            max_ticks=30,
-            closing_grace_sec=5.0,
-            tick_interval_sec=0.0,
-        )
+        await c.run(options=RunOptions(max_minutes=0.0001, tick_interval_sec=0.0, max_ticks=30, closing_grace_sec=5.0))
         assert calls_at_closing, "expected closing phase to be entered"
         # A spent bound cancels phase-enter and skips reactors on the tick that trips CLOSE.
         assert spy.calls == calls_at_closing[0]
@@ -406,7 +392,7 @@ async def test_run_stops_on_signal_via_stop_event(session_dir):
     c = Coordinator(session_dir, backends=_backends_silent())
     try:
         c._stop.set()
-        reason = await c.run(max_ticks=10)
+        reason = await c.run(options=RunOptions(max_ticks=10))
         assert reason == "signal"
     finally:
         await c.stop()
@@ -419,7 +405,7 @@ async def test_run_stops_on_emergency_crash_count(session_dir):
         # Record crashes so the trailing-window rate sees them.
         for _ in range(30):
             c.shared_state.increment_crash_count()
-        reason = await c.run(max_ticks=10)
+        reason = await c.run(options=RunOptions(max_ticks=10))
         assert reason == "emergency"
     finally:
         await c.stop()
@@ -430,7 +416,7 @@ async def test_run_does_not_emergency_below_default_threshold(session_dir):
     c = Coordinator(session_dir, backends=_backends_silent())
     try:
         c.shared_state.crash_count = 5
-        reason = await c.run(max_ticks=2)
+        reason = await c.run(options=RunOptions(max_ticks=2))
         assert reason == "max_ticks"
     finally:
         await c.stop()
@@ -448,7 +434,7 @@ async def test_run_records_tick_exception_and_continues(session_dir, monkeypatch
 
     monkeypatch.setattr(c.dispatcher, "pump_dispatcher_once", flaky_dispatcher_once)
     try:
-        reason = await c.run(max_ticks=2)
+        reason = await c.run(options=RunOptions(max_ticks=2))
         assert reason == "max_ticks"
         assert calls["n"] == 2
         assert c.shared_state.crash_count == 1
@@ -471,7 +457,7 @@ async def test_run_repeated_tick_exceptions_stop_as_emergency(
 
     monkeypatch.setattr(c.dispatcher, "pump_dispatcher_once", broken_dispatcher_once)
     try:
-        reason = await c.run(max_ticks=10, crash_emergency_threshold=2)
+        reason = await c.run(options=RunOptions(max_ticks=10, crash_emergency_threshold=2))
         assert reason == "emergency"
         assert c.shared_state.crash_count == 2
         assert c.shared_state.stop_reason == "emergency"
@@ -496,7 +482,7 @@ async def test_run_finally_labels_residual_escape_as_coordinator_exception(
     monkeypatch.setattr(c.dispatcher, "pump_dispatcher_once", broken_dispatcher_once)
     try:
         with pytest.raises(ValueError, match="stop callback failed"):
-            await c.run(stop_when=broken_stop_when, max_ticks=10)
+            await c.run(options=RunOptions(max_ticks=10, stop_when=broken_stop_when))
         persisted = SharedState.load_or_init(session_dir)
         assert persisted.stop_reason == "coordinator_exception"
         assert persisted.last_tick_exception["type"] == "RuntimeError"
@@ -511,7 +497,7 @@ async def test_run_emergency_threshold_can_be_lowered_per_call(session_dir):
     try:
         for _ in range(4):
             c.shared_state.increment_crash_count()
-        reason = await c.run(max_ticks=10, crash_emergency_threshold=3)
+        reason = await c.run(options=RunOptions(max_ticks=10, crash_emergency_threshold=3))
         assert reason == "emergency"
     finally:
         await c.stop()
@@ -527,7 +513,7 @@ async def test_run_stops_on_custom_stop_when(session_dir):
             ticks["n"] += 1
             return ticks["n"] >= 2
 
-        reason = await c.run(stop_when=custom_stop, max_ticks=20)
+        reason = await c.run(options=RunOptions(max_ticks=20, stop_when=custom_stop))
         assert reason == "custom"
         assert ticks["n"] == 2
     finally:
@@ -538,7 +524,7 @@ async def test_run_stops_on_custom_stop_when(session_dir):
 async def test_run_persists_stop_reason_to_state_json(session_dir):
     c = Coordinator(session_dir, backends=_backends_silent())
     try:
-        await c.run(max_ticks=2)
+        await c.run(options=RunOptions(max_ticks=2))
     finally:
         await c.stop()
     on_disk = json.loads((session_dir / "state.json").read_text())
@@ -549,7 +535,7 @@ async def test_run_persists_stop_reason_to_state_json(session_dir):
 async def test_run_persists_max_minutes_to_state(session_dir):
     c = Coordinator(session_dir, backends=_backends_silent())
     try:
-        await c.run(max_ticks=1, max_minutes=42.0)
+        await c.run(options=RunOptions(max_minutes=42.0, max_ticks=1))
     finally:
         await c.stop()
     assert c.shared_state.max_minutes == 42
@@ -564,7 +550,7 @@ async def test_run_async_stop_when_callback(session_dir):
         async def acb(_c):
             return True
 
-        reason = await c.run(stop_when=acb, max_ticks=10)
+        reason = await c.run(options=RunOptions(max_ticks=10, stop_when=acb))
         assert reason == "custom"
     finally:
         await c.stop()

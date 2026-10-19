@@ -79,35 +79,34 @@ def _axes_for_metric(metric: str, tp_eff: float) -> _Axes:
 
 
 @dataclass(frozen=True)
-class _Chart:
-    """What a sweep chart is titled with, and which optional series it draws."""
+class ConcCurveOptions:
+    """Labels and workload shape a sweep curve is drawn for.
 
-    model_label: str
-    gpu_label: str
-    tp: int
-    isl: int
-    osl: int
-    draw_ceiling: bool
+    Attributes:
+        model_label: Model name in the chart title.
+        gpu_label: GPU name in the chart title.
+        tp: Tensor-parallel size the per-chip axes divide by.
+        isl: Input sequence length the roofline ceiling is computed for.
+        osl: Output sequence length the roofline ceiling is computed for.
+        draw_ceiling: Whether to draw the roofline ceiling.
+    """
+
+    model_label: str = ""
+    gpu_label: str = ""
+    tp: int = 1
+    isl: int = 0
+    osl: int = 0
+    draw_ceiling: bool = False
 
 
 def render_conc_sweep_curve(
     payload: dict[str, Any] | str | Path,
     out_path: str | Path,
-    *,
-    model_label: str = "",
-    gpu_label: str = "",
-    tp: int = 1,
-    isl: int = 0,
-    osl: int = 0,
-    draw_ceiling: bool = False,
+    options: ConcCurveOptions = ConcCurveOptions(),
 ) -> Path | None:
     """Render a throughput-vs-interactivity PNG from a ``conc_sweep_summary.json``."""
     try:
-        return _render(
-            payload,
-            Path(out_path),
-            _Chart(model_label, gpu_label, tp, isl, osl, draw_ceiling),
-        )
+        return _render(payload, Path(out_path), options)
     except Exception:
         log.debug("conc_sweep_plot: render failed", exc_info=True)
         return None
@@ -286,17 +285,17 @@ def _draw_arms(ax: Any, series: _SweepSeries) -> None:
     )
 
 
-def _chart_title(chart: _Chart, agentic: bool) -> str:
+def _chart_title(options: ConcCurveOptions, agentic: bool) -> str:
     """The chart's title, naming the request shape only when the sweep fixed one."""
-    parts = [chart.model_label or "Model"]
-    if chart.gpu_label:
-        parts.append(chart.gpu_label)
+    parts = [options.model_label or "Model"]
+    if options.gpu_label:
+        parts.append(options.gpu_label)
     # An agentic replay takes its request shapes from the trace corpus, so the session's ISL/OSL are inert
     # placeholders and naming them would misreport what was measured.
     if agentic:
         parts.append("Agentic")
-    elif chart.isl or chart.osl:
-        parts.append(f"ISL={chart.isl} OSL={chart.osl}")
+    elif options.isl or options.osl:
+        parts.append(f"ISL={options.isl} OSL={options.osl}")
     return "Concurrency Sweep — Throughput vs Interactivity\n" + " | ".join(parts)
 
 
@@ -315,14 +314,14 @@ def _apply_dark_theme(fig: Any, ax: Any, axes: _Axes, title: str) -> None:
     fig.tight_layout()
 
 
-def _render(payload: dict[str, Any] | str | Path, out_path: Path, chart: _Chart) -> Path | None:
+def _render(payload: dict[str, Any] | str | Path, out_path: Path, options: ConcCurveOptions) -> Path | None:
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     data = _load_payload(payload)
-    tp_eff = float(max(chart.tp, 1))
+    tp_eff = float(max(options.tp, 1))
     series = _sweep_series(data, tp_eff)
     if series is None:
         log.debug("conc_sweep_plot: no valid data points in either arm — skipping plot")
@@ -331,10 +330,10 @@ def _render(payload: dict[str, Any] | str | Path, out_path: Path, chart: _Chart)
     fig, ax = plt.subplots(figsize=(10, 6))
     fig.patch.set_facecolor(_BG)
     ax.set_facecolor(_BG)
-    if chart.draw_ceiling and series.shows_roofline():
+    if options.draw_ceiling and series.shows_roofline():
         _draw_roofline_ceiling(ax, data, tp_eff)
     _draw_arms(ax, series)
-    _apply_dark_theme(fig, ax, series.axes, _chart_title(chart, series.agentic))
+    _apply_dark_theme(fig, ax, series.axes, _chart_title(options, series.agentic))
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(str(out_path), dpi=150, format="png", facecolor=_BG)
@@ -343,4 +342,4 @@ def _render(payload: dict[str, Any] | str | Path, out_path: Path, chart: _Chart)
     return out_path
 
 
-__all__ = ["render_conc_sweep_curve"]
+__all__ = ["ConcCurveOptions", "render_conc_sweep_curve"]

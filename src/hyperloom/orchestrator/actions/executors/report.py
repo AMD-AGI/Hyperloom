@@ -1072,7 +1072,7 @@ def _render_conc_sweep_curve_for_report(
 ) -> Path | None:
     """Render the concurrency-sweep curve PNG into the reports directory."""
     from hyperloom.inference_optimizer.session.session_paths import reports_dir as _reports_dir
-    from hyperloom.orchestrator.kernel.conc_sweep_plot import render_conc_sweep_curve
+    from hyperloom.orchestrator.kernel.conc_sweep_plot import ConcCurveOptions, render_conc_sweep_curve
 
     json_path = _reports_dir(session_dir) / "conc_sweep_summary.json"
     try:
@@ -1090,14 +1090,7 @@ def _render_conc_sweep_curve_for_report(
     osl = int(payload.get("osl") or 0)
 
     return render_conc_sweep_curve(
-        payload,
-        png_path,
-        model_label=model_label,
-        gpu_label=gpu_label,
-        tp=tp,
-        isl=isl,
-        osl=osl,
-        draw_ceiling=False,
+        payload, png_path, ConcCurveOptions(model_label=model_label, gpu_label=gpu_label, tp=tp, isl=isl, osl=osl)
     )
 
 
