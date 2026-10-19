@@ -1157,11 +1157,7 @@ class KvMetricsRecorder:
         workload = self._poll_progress()
         start_mono = time.monotonic()
         start_unix = time.time()
-        try:
-            sample = self._poller.sample()
-        except Exception:
-            log.debug("kv_metrics: sample failed", exc_info=True)
-            return None
+        sample = self._poller.sample()
         end_mono = time.monotonic()
         if sample is None:
             return None
@@ -1192,11 +1188,7 @@ class KvMetricsRecorder:
         """
         if self._progress is None:
             return None
-        try:
-            phases = self._progress.poll()
-        except Exception:
-            log.debug("kv_metrics: progress poll failed", exc_info=True)
-            return None
+        phases = self._progress.poll()
         if not phases:
             return None
         active: dict[str, Any] | None = None
@@ -1331,51 +1323,47 @@ class KvMetricsRecorder:
         """
         if self._workspace is None:
             return None
-        try:
-            export = None
-            records = []
-            for candidate in _server_metrics_exports(self._workspace):
-                records = read_aiperf_server_metrics(candidate)
-                if records:
-                    export = candidate
-                    break
-            if export is None:
-                return None
-            # Kept by time, not by phase label. aiperf covers one contiguous window -- it starts after the server is up
-            # and exits before the accuracy eval -- so a live row outside that span is a reading nothing else took,
-            # while one inside it is redundant by definition. Judging on the label instead would keep a row whose
-            # timestamp lands mid-window and let it close a counter window it has no business closing.
-            covered_from = records[0][0].ts
-            covered_to = records[-1][0].ts
-            kept = [
-                r
-                for r in self._rows
-                if isinstance(r.get("ts"), (int, float)) and not (covered_from <= r["ts"] <= covered_to)
-            ]
-            # Rebuilt from scratch so no superseded live reading survives into the counter windows below.
-            self._rows = []
-            self._first_counters = {}
-            self._last_counters = {}
-            previous_phase = self._phase
-            for sample, timing, phase in records:
-                # An unstamped record is one aiperf took before any phase began -- its baseline capture, of an idle
-                # pool. That is boot. Defaulting it to "measured" put readings of a pool under no load into the one
-                # phase allowed into a comparison: observed on a live round, where three such rows produced a measured
-                # prefix-cache delta of 34,395 describing nothing that happened.
-                self._phase = phase or "boot"
-                self._absorb(sample, timing=timing)
-            self._phase = previous_phase
-            if kept:
-                # Time order, because the counter windows below are bracketed by walking the rows in sequence.
-                self._rows = sorted([*self._rows, *kept], key=lambda r: r.get("ts") or 0.0)
-            # Adjacent phases share the reading at their boundary here too. aiperf takes its own scrape at each
-            # transition, but tags it with the phase that is ending, so without this the next phase's window would open
-            # at its first periodic sample and the increment in between would be credited to neither.
-            self._rebuild_counter_windows()
-            return str(export)
-        except Exception:
-            log.debug("kv_metrics: aiperf server metrics unavailable", exc_info=True)
+        export = None
+        records = []
+        for candidate in _server_metrics_exports(self._workspace):
+            records = read_aiperf_server_metrics(candidate)
+            if records:
+                export = candidate
+                break
+        if export is None:
             return None
+        # Kept by time, not by phase label. aiperf covers one contiguous window -- it starts after the server is up
+        # and exits before the accuracy eval -- so a live row outside that span is a reading nothing else took,
+        # while one inside it is redundant by definition. Judging on the label instead would keep a row whose
+        # timestamp lands mid-window and let it close a counter window it has no business closing.
+        covered_from = records[0][0].ts
+        covered_to = records[-1][0].ts
+        kept = [
+            r
+            for r in self._rows
+            if isinstance(r.get("ts"), (int, float)) and not (covered_from <= r["ts"] <= covered_to)
+        ]
+        # Rebuilt from scratch so no superseded live reading survives into the counter windows below.
+        self._rows = []
+        self._first_counters = {}
+        self._last_counters = {}
+        previous_phase = self._phase
+        for sample, timing, phase in records:
+            # An unstamped record is one aiperf took before any phase began -- its baseline capture, of an idle
+            # pool. That is boot. Defaulting it to "measured" put readings of a pool under no load into the one
+            # phase allowed into a comparison: observed on a live round, where three such rows produced a measured
+            # prefix-cache delta of 34,395 describing nothing that happened.
+            self._phase = phase or "boot"
+            self._absorb(sample, timing=timing)
+        self._phase = previous_phase
+        if kept:
+            # Time order, because the counter windows below are bracketed by walking the rows in sequence.
+            self._rows = sorted([*self._rows, *kept], key=lambda r: r.get("ts") or 0.0)
+        # Adjacent phases share the reading at their boundary here too. aiperf takes its own scrape at each
+        # transition, but tags it with the phase that is ending, so without this the next phase's window would open
+        # at its first periodic sample and the increment in between would be credited to neither.
+        self._rebuild_counter_windows()
+        return str(export)
 
     def _authoritative_bounds(self) -> dict[str, tuple[float, float | None]] | None:
         """Phase windows in Unix seconds, from aiperf's own stamps, or ``None`` when unusable.
@@ -1486,33 +1474,29 @@ class KvMetricsRecorder:
         """
         if self._workspace is None:
             return None
-        try:
-            from ._agentx_timeline import (
-                TIMELINE_ARTIFACT_NAME,
-                build_events,
-                correlate_rows,
-                find_profile_export,
-                parse_profile_export,
-                write_timeline,
-            )
+        from ._agentx_timeline import (
+            TIMELINE_ARTIFACT_NAME,
+            build_events,
+            correlate_rows,
+            find_profile_export,
+            parse_profile_export,
+            write_timeline,
+        )
 
-            export = find_profile_export(self._workspace)
-            if export is None:
-                return None
-            records = parse_profile_export(export)
-            if not records:
-                return None
-            events, summary = build_events(records, self._authoritative_bounds())
-            # Correlation runs over every record, so the counts on a row stay exact even when the event stream above
-            # had to be sampled.
-            summary["rows_correlated"] = correlate_rows(self._rows, records)
-            path = Path(self._workspace) / TIMELINE_ARTIFACT_NAME
-            summary["path"] = path.name if write_timeline(path, events) else None
-            summary["source"] = str(export)
-            return summary
-        except Exception:
-            log.debug("kv_metrics: workload timeline unavailable", exc_info=True)
+        export = find_profile_export(self._workspace)
+        if export is None:
             return None
+        records = parse_profile_export(export)
+        if not records:
+            return None
+        events, summary = build_events(records, self._authoritative_bounds())
+        # Correlation runs over every record, so the counts on a row stay exact even when the event stream above
+        # had to be sampled.
+        summary["rows_correlated"] = correlate_rows(self._rows, records)
+        path = Path(self._workspace) / TIMELINE_ARTIFACT_NAME
+        summary["path"] = path.name if write_timeline(path, events) else None
+        summary["source"] = str(export)
+        return summary
 
     def rows(self) -> list[dict[str, Any]]:
         """Collected rows, stride-downsampled to the row cap."""

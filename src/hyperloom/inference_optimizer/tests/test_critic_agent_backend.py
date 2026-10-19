@@ -2200,3 +2200,32 @@ async def test_anthropic_protocol_traces_cache_counters_separately(
     assert row["cache_read_input_tokens"] == 4000
     assert row["cache_creation_input_tokens"] == 300
     assert row["output_tokens"] == 500
+
+
+@pytest.mark.asyncio
+async def test_a_failing_iteration_record_propagates_from_the_turn(
+    fake_critic_root: Path,
+    fake_session_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hyperloom.inference_optimizer.breakdown.recorder import critic_out
+
+    def _boom(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("critic record bug")
+
+    monkeypatch.setattr(critic_out, "record_critic_iteration", _boom)
+    judge_bundle = {
+        "kind": "coordinator_inbox",
+        "session_id": fake_session_dir.name,
+        "proposals": [],
+        "review_constraints": {},
+    }
+    backend, _ = _make_backend(
+        fake_critic_root,
+        fake_session_dir,
+        codex_replies=[],
+        judge_bundle=judge_bundle,
+    )
+
+    with pytest.raises(RuntimeError, match="critic record bug"):
+        await backend.run(prompt="=== inbox ===\n", system_prompt="You are critic.")

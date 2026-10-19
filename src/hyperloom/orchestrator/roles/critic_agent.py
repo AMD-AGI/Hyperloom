@@ -699,10 +699,7 @@ class CriticAgentBackend:
             kb_priors=kb_priors_trace,
         )
         # Record this critic iteration before the workdir can be pruned.
-        try:
-            critic_out.record_critic_iteration(self.session_dir, iteration)
-        except Exception:  # noqa: BLE001
-            pass
+        critic_out.record_critic_iteration(self.session_dir, iteration)
 
         # Attach what each ruling was grounded in to the ruling itself, on the
         # proposal it judged. Done here because these are the turn's own facts:
