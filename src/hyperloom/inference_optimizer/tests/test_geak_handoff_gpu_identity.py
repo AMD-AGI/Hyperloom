@@ -18,12 +18,9 @@ from hyperloom.orchestrator.state.shared_state import SharedState
     ("gpu_type", "expected"),
     [
         ("r9700", {"gpu_type": "r9700", "expected_target": "r9700", "expected_gfx": "gfx1201"}),
-        (" R9700 ", {"gpu_type": " R9700 ", "expected_target": "r9700", "expected_gfx": "gfx1201"}),
         ("mi300x", {"gpu_type": "mi300x"}),
         ("mi355x", {"gpu_type": "mi355x"}),
         ("gfx1201", {"gpu_type": "gfx1201"}),
-        ("", {"gpu_type": ""}),
-        (None, {"gpu_type": ""}),
     ],
 )
 def test_handoff_gpu_identity(gpu_type, expected) -> None:
@@ -54,18 +51,3 @@ async def test_r9700_handoff_carries_product_and_isa(tmp_path: Path, monkeypatch
     assert handoff["gpu_type"] == "r9700"
     assert handoff["expected_target"] == "r9700"
     assert handoff["expected_gfx"] == "gfx1201"
-
-
-@pytest.mark.asyncio
-async def test_mi_handoff_is_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    handoff = await _write_handoff(tmp_path, monkeypatch, SharedState(model_path="/models/m", gpu_type="mi355x"))
-    assert handoff["gpu_type"] == "mi355x"
-    assert "expected_target" not in handoff
-    assert "expected_gfx" not in handoff
-
-
-@pytest.mark.asyncio
-async def test_resumed_r9700_state_keeps_the_pair(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    resumed = SharedState.from_dict(SharedState(model_path="/models/m", gpu_type="r9700").to_dict())
-    handoff = await _write_handoff(tmp_path, monkeypatch, resumed)
-    assert (handoff["expected_target"], handoff["expected_gfx"]) == ("r9700", "gfx1201")

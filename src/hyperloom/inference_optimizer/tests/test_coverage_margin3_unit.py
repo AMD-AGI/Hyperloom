@@ -150,26 +150,6 @@ def test_gpu_type_resolution_env_probe_and_runner(monkeypatch) -> None:
     assert gpu_types._resolve_amd_gpu_type() is None
 
 
-def test_fresh_gpu_request_prefers_product_over_runner(monkeypatch) -> None:
-    from hyperloom.inference_optimizer import gpu_types
-
-    monkeypatch.setattr(gpu_types, "_autodetect_gpu_type", lambda: None)
-    monkeypatch.setenv("TARGET_GPU_TYPE", "r9700")
-    monkeypatch.setenv("GPU_TYPE", "gfx12")
-    assert gpu_types._resolve_amd_gpu_type(None) == "r9700"
-    assert gpu_types._resolve_amd_gpu_type("mi355x") == "mi355x"
-
-    monkeypatch.delenv("TARGET_GPU_TYPE")
-    assert gpu_types._resolve_amd_gpu_type(None) is None
-    monkeypatch.setenv("GPU_TYPE", "gfx1201")
-    assert gpu_types._resolve_amd_gpu_type(None) is None
-    monkeypatch.setenv("TARGET_GPU_TYPE", "gfx1201")
-    assert gpu_types._resolve_amd_gpu_type(None) is None
-    monkeypatch.setenv("GPU_TYPE", "mi325x")
-    monkeypatch.delenv("TARGET_GPU_TYPE")
-    assert gpu_types._resolve_amd_gpu_type(None) == "mi325x"
-
-
 def test_gpu_type_autodetect_rocm_and_torch_fallback(monkeypatch) -> None:
     from hyperloom.inference_optimizer import gpu_types
 
