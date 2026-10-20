@@ -1738,8 +1738,8 @@ def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
         The rendered roofline-evidence section lines.
     """
     rows = ["## 4a. ROOFLINE EVIDENCE", ""]
-    ev = inp.roofline_evidence or {}
-    if not isinstance(ev, dict) or not ev:
+    ev = inp.roofline_evidence
+    if not ev:
         rows.append(
             "(none — no fresh roofline snapshot has been recorded yet. "
             "The Coordinator auto-enqueues `roofline` at the end of "
@@ -1753,8 +1753,8 @@ def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
         rows.append(f"**TraceLens snapshot #{snap_id}**")
         rows.append("")
 
-    summary = ev.get("executive_summary") or {}
-    if isinstance(summary, dict) and summary:
+    summary = ev.get("executive_summary")
+    if summary:
         rows.append("**Executive Summary:**")
         for label, key in (
             ("Compute %", "compute_pct"),
@@ -1772,53 +1772,13 @@ def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
                 rows.append(f"- {label}: {val}")
         rows.append("")
 
-    roofline = ev.get("kernel_roofline_top15") or []
-    if isinstance(roofline, list) and roofline:
-        rows.append(
-            "**Kernel roofline "
-            "(kernel_id | name | gpu_pct | bound | AI | eff_pct | "
-            "compute_pct | bandwidth_pct | action):**"
-        )
-        rows.append("")
-        rows.append("| kernel_id | name | gpu_pct | bound | AI | eff_pct | compute_pct | bandwidth_pct | action |")
-        rows.append("|---|---|---:|---|---:|---:|---:|---:|---|")
-        for k in roofline:
-            if not isinstance(k, dict):
-                continue
-            kid = str(k.get("kernel_id") or "")
-            name = str(k.get("name") or "")
-            gpu_pct = k.get("gpu_pct")
-            gpu_pct_str = f"{float(gpu_pct):.2f}%" if isinstance(gpu_pct, (int, float)) else "—"
-            bound = str(k.get("bound_type") or k.get("bottleneck") or "")
-            ai = k.get("arithmetic_intensity")
-            if ai is None:
-                ai = k.get("flops_per_byte")
-            ai_str = f"{float(ai):.3g}" if isinstance(ai, (int, float)) else "—"
-            eff = k.get("efficiency_percent")
-            eff_str = f"{float(eff):.2f}%" if isinstance(eff, (int, float)) else "—"
-            comp = k.get("compute_utilization_pct")
-            comp_str = f"{float(comp):.2f}%" if isinstance(comp, (int, float)) else "—"
-            bw = k.get("bandwidth_utilization_pct")
-            bw_str = f"{float(bw):.2f}%" if isinstance(bw, (int, float)) else "—"
-            actions = k.get("recommended_actions") or []
-            action = str(k.get("suggestion") or "")
-            if not action and isinstance(actions, list) and actions:
-                action = str(actions[0])
-            rows.append(
-                f"| `{kid}` | {name} | {gpu_pct_str} | {bound} | {ai_str} | "
-                f"{eff_str} | {comp_str} | {bw_str} | {action} |"
-            )
-        rows.append("")
-
-    hot = ev.get("hot_kernels_top15") or []
-    if isinstance(hot, list) and hot:
+    hot = ev.get("hot_kernels_top15")
+    if hot:
         rows.append("**Top hot kernels (kernel_id | name | gpu_pct | bottleneck | source_file):**")
         rows.append("")
         rows.append("| kernel_id | name | gpu_pct | bottleneck | source_file |")
         rows.append("|---|---|---:|---|---|")
         for k in hot:
-            if not isinstance(k, dict):
-                continue
             kid = str(k.get("kernel_id") or "")
             name = str(k.get("name") or "")
             gpu_pct = k.get("gpu_pct")
@@ -1833,7 +1793,7 @@ def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
         rows.extend(directive)
         rows.append("")
 
-    analysis_path = str(ev.get("analysis_md_path") or "")
+    analysis_path = ev.get("analysis_md_path")
     if analysis_path:
         rows.append(f"**Full analysis.md path:** `{analysis_path}`")
         rows.append("")
