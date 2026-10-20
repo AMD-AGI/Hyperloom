@@ -2190,6 +2190,75 @@ def test_port_loop_restores_protected_inputs_without_validation(
     assert driver.read_text() == "print('original driver')\n"
 
 
+def _install_agent_with_restore(monkeypatch, restore, histories):
+    import kernelforge.orchestrator.agent as agent_mod
+
+    def make_agent(*_args, **_kwargs):
+        async def agent(kernel_path, history, session_sink=None):
+            histories.append(history)
+            session_sink["integrity_violation"] = True
+            session_sink["integrity_reason"] = "oracle changed"
+            session_sink["integrity_restore"] = restore
+            return "unsafe"
+
+        return agent
+
+    monkeypatch.setattr(agent_mod, "make_agent_fn", make_agent)
+
+
+def _run_port(tmp_path, spec, attempts):
+    (tmp_path / "driver.py").write_text("print('drive')\n")
+    return _run(
+        port_loop.run_port_loop(
+            spec,
+            str(tmp_path / "driver.py"),
+            Config.from_env(workspace=str(tmp_path)),
+            port_loop.PortRequest(max_attempts=attempts),
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [RuntimeError("inventory incomplete"), OSError("read-only file system")],
+    ids=lambda failure: type(failure).__name__,
+)
+def test_port_loop_rejects_an_attempt_whose_protected_restore_failed(tmp_path, monkeypatch, failure):
+    spec = _spec(tmp_path)
+    histories: list[str] = []
+
+    def restore():
+        raise failure
+
+    _install_agent_with_restore(monkeypatch, restore, histories)
+
+    result = _run_port(tmp_path, spec, attempts=2)
+
+    assert result.ok is False
+    assert histories[1] == (
+        "Your PORT attempt changed protected driver/source-oracle state and was REJECTED before validation. "
+        f"The protected files were restored. Modify only {spec.flydsl_kernel_name}.\n"
+        f"oracle changed; protected snapshot restore failed: {type(failure).__name__}: {failure}"
+    )
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [TypeError("restore signature drifted"), AttributeError("snapshot has no content")],
+    ids=lambda failure: type(failure).__name__,
+)
+def test_port_loop_surfaces_an_unexpected_protected_restore_error(tmp_path, monkeypatch, failure):
+    spec = _spec(tmp_path)
+
+    def restore():
+        raise failure
+
+    _install_agent_with_restore(monkeypatch, restore, [])
+
+    with pytest.raises(type(failure), match=str(failure)):
+        _run_port(tmp_path, spec, attempts=1)
+
+
 def test_port_loop_does_not_create_an_agent_after_the_search_cutoff(
     tmp_path,
     monkeypatch,
