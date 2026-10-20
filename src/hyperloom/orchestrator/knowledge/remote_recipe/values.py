@@ -642,7 +642,7 @@ def match_rewrite_attempt(
 
 def build_kernel_rewrite_value(state: Any, files: _Files) -> dict[str, Any]:
     """Build rewrite rows exclusively from E2E-integrated stack entries."""
-    attempts = getattr(state, "kernel_opt_task_attempts", {}) or getattr(state, "kernel_opt_attempts", {}) or {}
+    attempts = getattr(state, "kernel_opt_task_attempts", {}) or {}
     rows: list[dict[str, Any]] = []
     if not isinstance(attempts, Mapping):
         attempts = {}
@@ -698,19 +698,9 @@ def build_kernel_rewrite_value(state: Any, files: _Files) -> dict[str, Any]:
         e2e_gain = _number(entry.get("gain_pct"))
         optimized_throughput = _number(entry.get("tput"))
         experience = files.write(
-            "\n".join(
-                (
-                    f"# Kernel rewrite: {kernel_name}",
-                    "",
-                    "- Phase: KERNEL_AGENT",
-                    "- Decision: KEEP",
-                    f"- Measured speedup: {speedup:g}x",
-                    f"- E2E gain: {e2e_gain:g}%",
-                    f"- Optimized throughput: {optimized_throughput:g}",
-                    f"- Patch: {patch or 'unavailable'}",
-                    "",
-                )
-            ),
+            f"# Kernel rewrite: {kernel_name}\n\n- Phase: KERNEL_AGENT\n- Decision: KEEP\n"
+            f"- Measured speedup: {speedup:g}x\n- E2E gain: {e2e_gain:g}%\n"
+            f"- Optimized throughput: {optimized_throughput:g}\n- Patch: {patch}\n",
             rel=f"kernel/rewrite/experience/{slug}.md",
             kind="experience",
         )
