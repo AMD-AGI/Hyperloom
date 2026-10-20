@@ -760,7 +760,7 @@ class Coordinator:
         self.recipe_journal.ensure_recipe_finalized(source="t4_fallback")
         try:
             self.shared_state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.exception("recipe KB T4 SharedState.save failed")
 
     async def tick(self, n: int = 1) -> None:

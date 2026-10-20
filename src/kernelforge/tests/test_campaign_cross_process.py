@@ -11,7 +11,7 @@ import time
 
 import pytest
 
-from kernelforge.conftest import SRC_ROOT
+from kernelforge.tests.conftest import SRC_ROOT
 
 import kernelforge.loop.runner as runner_module
 from kernelforge.loop.archive import CandidateArchive

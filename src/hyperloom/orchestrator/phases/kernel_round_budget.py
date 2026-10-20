@@ -24,6 +24,28 @@ def measurement_round_sec(state: Any) -> float:
     return resolve_benchmark_timeouts()[1]
 
 
+# Kept past the rebench's own round, as a share of one baseline round. GEAK stopping late and the wait for its GPUs
+# come out of it before explore checks that the round fits; a candidate slower than the baseline comes out of it after.
+_REBENCH_SPARE_OF_A_ROUND = 0.25
+
+
+def rebench_round_sec(state: Any) -> float:
+    """What re-measuring a GEAK result costs: the round explore will admit it as, and a quarter of a round to spare.
+
+    The rebench is an explore round measured the way the baseline was. After a baseline that ran a warm pass, explore
+    admits it only when its warmup and its decision pass both fit, so holding back one pass leaves the warmup to GEAK
+    and the rebench refused for want of the time it was supposed to have. A baseline that could not afford its warm
+    pass never leaves PRELUDE, so one without a warm figure is single-pass, as AgentX's is, and so is its rebench.
+    """
+    first_pass_sec = _phase_state.measured_seconds(state, "baseline_runtime_sec")
+    if first_pass_sec is None:
+        from ..actions.executors._subprocess_kill import resolve_benchmark_timeouts
+
+        return resolve_benchmark_timeouts()[1]
+    warm_pass_sec = _phase_state.measured_seconds(state, "baseline_warm_runtime_sec") or 0.0
+    return first_pass_sec + warm_pass_sec + _REBENCH_SPARE_OF_A_ROUND * first_pass_sec
+
+
 def round_stop(state: Any) -> StoppedByTheRun | None:
     """How to record a measured round the KERNEL budget can no longer fit, or ``None`` while one still fits."""
     remaining = _phase_state.phase_budget_remaining_seconds(state)

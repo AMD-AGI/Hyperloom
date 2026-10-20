@@ -435,8 +435,7 @@ def test_optimize_never_hands_over_another_run_s_result(tmp_path, monkeypatch):
     assert seen == []
 
 
-def test_optimize_survives_a_failing_new_best_handler(tmp_path, monkeypatch):
-    """Publishing is best-effort; it must not cost the optimization run."""
+def _run_with_new_best_handler(tmp_path, monkeypatch, failure: BaseException) -> dict:
     rj = tmp_path / "res.json"
     rj.write_text(json.dumps({"experiment_id": "EXP-RAISE", "best_ms": 4.0, "best_commit": "c1"}))
     monkeypatch.setattr(
@@ -447,14 +446,28 @@ def test_optimize_survives_a_failing_new_best_handler(tmp_path, monkeypatch):
     monkeypatch.setattr(optimize, "_restore_best_kernel", lambda *a, **k: None)
 
     def explode(_payload):
-        raise RuntimeError("store unreachable")
+        raise failure
 
-    out = optimize.run_optimize(
+    return optimize.run_optimize(
         _spec(tmp_path),
         "driver.py",
         Config.from_env(workspace=str(tmp_path)),
         optimize.OptimizeRequest(str(tmp_path), result_json=str(rj), on_new_best=explode),
     )
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        OSError("git is not installed"),
+        subprocess.TimeoutExpired(["git", "show"], 300.0),
+        UnicodeDecodeError("utf-8", b"\xfc", 0, 1, "invalid start byte"),
+    ],
+    ids=lambda failure: type(failure).__name__,
+)
+def test_optimize_survives_a_failing_new_best_handler(tmp_path, monkeypatch, failure):
+    """Publishing is best-effort; it must not cost the optimization run."""
+    out = _run_with_new_best_handler(tmp_path, monkeypatch, failure)
 
     assert out["best_ms"] == 4.0
 
@@ -567,18 +580,30 @@ def test_optimize_no_trusted_result_returns_empty(tmp_path, monkeypatch):
     assert out == {}
 
 
-def test_optimize_returns_empty_on_launch_failure(tmp_path, monkeypatch):
-    s = _spec(tmp_path)
-
+def _run_with_launch_failure(tmp_path, monkeypatch, failure: BaseException) -> dict:
     def _boom(cmd, **kw):
-        raise FileNotFoundError("kernelforge not found")
+        raise failure
 
     monkeypatch.setattr(optimize.subprocess, "Popen", _boom)
     cfg = Config.from_env(workspace=str(tmp_path))
-    out = optimize.run_optimize(
-        s, "driver.py", cfg, optimize.OptimizeRequest(str(tmp_path), result_json=str(tmp_path / "r.json"))
+    return optimize.run_optimize(
+        _spec(tmp_path), "driver.py", cfg, optimize.OptimizeRequest(str(tmp_path), result_json=str(tmp_path / "r.json"))
     )
-    assert out == {}
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [FileNotFoundError("kernelforge not found"), ValueError("embedded null byte")],
+    ids=lambda failure: type(failure).__name__,
+)
+def test_optimize_returns_empty_on_launch_failure(tmp_path, monkeypatch, failure):
+    assert _run_with_launch_failure(tmp_path, monkeypatch, failure) == {}
+
+
+@pytest.mark.parametrize("run", [_run_with_new_best_handler, _run_with_launch_failure], ids=lambda run: run.__name__)
+def test_optimize_propagates_an_unexpected_error(tmp_path, monkeypatch, run):
+    with pytest.raises(TypeError, match="^seam drifted$"):
+        run(tmp_path, monkeypatch, TypeError("seam drifted"))
 
 
 def test_optimize_cutoff_terminates_loop_and_restores_port_kernel(

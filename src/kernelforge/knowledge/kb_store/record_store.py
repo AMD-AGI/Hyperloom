@@ -23,7 +23,7 @@ except ImportError:  # pragma: no cover - exercised only on non-POSIX hosts
     fcntl = None  # type: ignore[assignment]
 
 from kernelforge.knowledge.kb_store.remote_client import KBStoreClient, KBStoreError
-from kernelforge.durable_io import atomic_write_bytes, fsync_directory, fsync_tree_directories
+from kernelforge.tools.durable_io import atomic_write_bytes, fsync_directory, fsync_tree_directories
 
 CHAMPION_METRIC = "speedup"
 MEASURED_SPEEDUP_KEY = "measured_speedup"

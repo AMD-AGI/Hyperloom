@@ -107,7 +107,7 @@ def render_conc_sweep_curve(
     """Render a throughput-vs-interactivity PNG from a ``conc_sweep_summary.json``."""
     try:
         return _render(payload, Path(out_path), options)
-    except Exception:
+    except (ImportError, OSError):
         log.debug("conc_sweep_plot: render failed", exc_info=True)
         return None
 
