@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 import logging as _logging
+import sqlite3
 from dataclasses import dataclass
 from typing import Any
 
@@ -351,7 +352,7 @@ class MachinePhase(CoordinatorCollaborator):
                     },
                 )
             )
-        except Exception:
+        except sqlite3.Error:
             log.exception("Coordinator: phase_transition event bus write failed")
         # Phase-entry side effects are additive; hook failures are logged only. They run on the transition itself,
         # which is what callers advancing into CLOSE rely on to see the sequencer's settlement once it returns.

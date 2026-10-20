@@ -2007,12 +2007,12 @@ def record_phase_transition(
             "macro_cycle": int(state.macro_cycle or 0),
         },
     )
-    try:
-        from hyperloom.inference_optimizer.breakdown.recorder import phase_event, record_stage_reached
-        from hyperloom.inference_optimizer.breakdown.recorder.outcome_stage import PHASE_STAGES
-        from hyperloom.inference_optimizer.breakdown.recorder.phase_records import PhaseCycle, PhaseEntry, PhaseExit
-        from hyperloom.inference_optimizer.session.session_binding import bound_session
+    from hyperloom.inference_optimizer.breakdown.recorder import phase_event, record_stage_reached
+    from hyperloom.inference_optimizer.breakdown.recorder.outcome_stage import PHASE_STAGES
+    from hyperloom.inference_optimizer.breakdown.recorder.phase_records import PhaseCycle, PhaseEntry, PhaseExit
+    from hyperloom.inference_optimizer.session.session_binding import SessionNotBoundError, bound_session
 
+    try:
         # The phase itself, as a timeline event: close the span being left on
         # the exit that ended it, and open the one being entered. Recorded here
         # because here is where the two facts exist -- export could only pair
@@ -2043,7 +2043,7 @@ def record_phase_transition(
         stage = PHASE_STAGES.get(str(row.get("to_phase") or ""))
         if stage:
             record_stage_reached(bound_session(), stage)
-    except Exception:  # noqa: BLE001 -- telemetry must never block phase changes
+    except (OSError, ValueError, SessionNotBoundError):
         pass
     return row
 
