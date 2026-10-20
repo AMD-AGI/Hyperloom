@@ -16,7 +16,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.assembler import stack_eve
 from hyperloom.inference_optimizer.breakdown.reporters._renderers.final import render as render_final
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.kernel.geak_config import (
-    _geak_result_has_material,
+    _geak_result_has_artifact,
     _geak_revalidation_decision,
     _normalize_geak_overlay_dir,
 )
@@ -780,30 +780,6 @@ async def test_structured_native_rejection_prevents_fresh_fallback(tmp_path, rea
     assert coord.shared_state.geak_result["revalidation_error"] == reason
 
 
-def test_complete_return_with_inherited_removals_is_not_measured(tmp_path):
-    coord = _coord(tmp_path, baseline=100.0, best_tput=110.0)
-    state = coord.shared_state
-    state.current_best.update(
-        {
-            "extra_server_args": "--mem-fraction-static 0.95",
-            "args_mode": "replace",
-            "remove_args": ["--disable-radix-cache"],
-        }
-    )
-    state.geak_result = {
-        "status": "ok",
-        "accepted_config": {
-            "flags": "--mem-fraction-static 0.95",
-            "env_map": {},
-            "args_mode": "replace",
-        },
-    }
-    assert coord.writeback.geak_rebench_params(reason="geak_e2e_win") == {
-        "skipped": True,
-        "reason": "geak_no_material",
-    }
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "outcome,reason,fingerprint",
@@ -1068,76 +1044,21 @@ async def test_2b_config_delta_candidate_still_promotes(tmp_path: Path) -> None:
     assert not ss.geak_pending
 
 
-# ── material-guard helper unit boundaries ────────────────────────────────────
+# ── artifact helper unit boundaries ──────────────────────────────────────────
 
 
 @pytest.mark.parametrize(
-    ("result", "prev_flags", "prev_envs", "expected"),
+    ("result", "expected"),
     [
-        # Empty / non-dict -> cannot judge -> True (caller disambiguates).
-        ({}, "", {}, True),
-        (None, "", {}, True),
-        # No product, config identical to prev best -> non-material.
-        (
-            {"accepted_config": {"flags": "--a 1", "env": "X=1"}, "accepted_kernels": []},
-            "--a 1",
-            {"X": "1"},
-            False,
-        ),
-        # Env order differs but semantics identical -> non-material.
-        (
-            {"accepted_config": {"flags": "", "env": "A=1 B=2"}},
-            "",
-            {"B": "2", "A": "1"},
-            False,
-        ),
-        # accepted_kernels is a list of blank entries -> non-material.
-        (
-            {"accepted_config": {"flags": "--a 1", "env": ""}, "accepted_kernels": ["", "  "]},
-            "--a 1",
-            {},
-            False,
-        ),
-        # accepted_kernels has a real entry -> material.
-        (
-            {"accepted_config": {"flags": "--a 1", "env": ""}, "accepted_kernels": ["fused_rope"]},
-            "--a 1",
-            {},
-            True,
-        ),
-        # final_overlay is whitespace only -> non-material (config identical).
-        (
-            {"accepted_config": {"flags": "--a 1", "env": ""}, "final_overlay": "   "},
-            "--a 1",
-            {},
-            False,
-        ),
-        # accepted_config adds a new env vs prev best -> material.
-        (
-            {"accepted_config": {"flags": "--a 1", "env": "X=1 NEW=1"}},
-            "--a 1",
-            {"X": "1"},
-            True,
-        ),
-        # accepted_config MISSING while prev best is non-empty -> non-material (a bare mismatch must not promote and
-        # wipe the existing config).
-        (
-            {"status": "ok", "accepted_kernels": []},
-            "--max-num-batched-tokens 24576",
-            {"VLLM_ROCM_USE_AITER": "1"},
-            False,
-        ),
-        # accepted_config present but all-empty while prev best is non-empty -> non-material (same wipe hazard).
-        (
-            {"status": "ok", "accepted_config": {"flags": "", "env": ""}},
-            "--max-num-batched-tokens 24576",
-            {"VLLM_ROCM_USE_AITER": "1"},
-            False,
-        ),
+        ({"accepted_kernels": ["", "  "]}, False),
+        ({"accepted_kernels": ["fused_rope"]}, True),
+        ({"accepted_heads": ["attention"]}, True),
+        ({"final_overlay": "   "}, False),
+        ({"final_patch": "/geak/final.patch"}, True),
     ],
 )
-def test_geak_result_has_material_boundaries(result, prev_flags, prev_envs, expected) -> None:
-    assert _geak_result_has_material(result, prev_best_flags=prev_flags, prev_best_envs=prev_envs) is expected
+def test_geak_result_has_artifact_boundaries(result, expected) -> None:
+    assert _geak_result_has_artifact(result) is expected
 
 
 # ── B5: a stack entry may only name kernels the overlay was proven to carry ──

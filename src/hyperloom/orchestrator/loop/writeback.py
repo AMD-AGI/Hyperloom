@@ -73,7 +73,7 @@ from ..kernel.geak_config import (
     _geak_has_accepted_kernel,
     _geak_overlay_digest,
     geak_overlay_is_loadable,
-    _geak_result_has_material,
+    _geak_result_has_artifact,
     _geak_revalidation_decision,
     geak_spec_name,
     _geak_sweep_measured_tput,
@@ -4274,23 +4274,16 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 ps_cfg, inherited_remove_args=self.current_best_launch_config()["remove_args"]
             )
             ps_flags, ps_envs = _accepted_config_as_variant(ps_cfg)
-            ps_has_material = ps_admissible and _geak_result_has_material(ps)
         except ValueError as exc:
             self._coord.phase_kernel.reject_geak_promotion(
                 ps, measured_tput=0.0, current_best_tput=0.0, reason=str(exc)
             )
             self.shared_state.save(self.session_dir)
             return {"skipped": True, "reason": "geak_invalid_config"}
+        ps_has_artifact = _geak_result_has_artifact(ps)
         if not (
             ps_admissible
-            and (
-                ps_cfg.get("flags")
-                or ps_cfg.get("env")
-                or "env_map" in ps_cfg
-                or ps_controls
-                or ps_overlay
-                or ps_has_material
-            )
+            and (ps_cfg.get("flags") or ps_cfg.get("env") or "env_map" in ps_cfg or ps_controls or ps_has_artifact)
         ):
             return {"skipped": True, "reason": "geak_no_material"}
 
@@ -4319,7 +4312,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         if not ps_overlay and self._geak_launch_restates_current_best(ps_flags, ps_envs, ps_controls):
             if overlay_requested:
                 return {"skipped": True, "reason": "geak_overlay_unloadable", "fallback": "geak_harness"}
-            if _geak_result_has_material({**ps, "accepted_config": None}):
+            if ps_has_artifact:
                 return {"skipped": True, "reason": "geak_material_requires_harness", "fallback": "geak_harness"}
             return {"skipped": True, "reason": "geak_no_material"}
         base_params = stack_base_params({**self.shared_state.current_best, **self.current_best_launch_config()})
@@ -4378,15 +4371,19 @@ class WritebackCollaborator(CoordinatorCollaborator):
         """Whether GEAK's accepted launch, applied over ``current_best``, launches what ``current_best`` runs.
 
         Both launches are composed over ``current_best``'s complete observed engine flags, so a GEAK config that
-        spells the incumbent launch out in full compares equal to the shorter delta ``current_best`` stores.
+        spells the incumbent launch out in full compares equal to the shorter delta ``current_best`` stores. Removal
+        lists count as identity: a removal whose effect the composed flags cannot show still changes the launch.
         """
         from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
         from hyperloom.inference_optimizer.grid_server_args import compose_server_args
 
         launch = self.current_best_launch_config()
-        complete_flags = str(self.build_env_spec()["config"]["server_launch_flags"] or "")
+        complete_flags = self.build_env_spec()["config"]["server_launch_flags"]
         replacing = controls.get("args_mode") == "replace"
-        added_removals = to_str_list(controls.get("remove_args"))
+        added_removals = controls.get("remove_args", [])
+        candidate_removals = (
+            added_removals if replacing else list(dict.fromkeys(launch["remove_args"] + added_removals))
+        )
         current_args = compose_server_args(
             inherited_args=complete_flags,
             base_extra_args=launch["extra_server_args"],
@@ -4397,14 +4394,16 @@ class WritebackCollaborator(CoordinatorCollaborator):
             inherited_args=complete_flags,
             base_extra_args="" if replacing else launch["extra_server_args"],
             variant_extra_args=flags,
-            remove_args=added_removals if replacing else launch["remove_args"] + added_removals,
+            remove_args=candidate_removals,
             args_mode="replace" if replacing else launch["args_mode"],
         )
-        unset = sorted(set(launch["unset_envs"]) | set(to_str_list(controls.get("unset_envs"))))
+        unset = sorted(set(launch["unset_envs"]) | set(controls.get("unset_envs", [])))
         candidate_envs = {name: value for name, value in launch["extra_envs"].items() if name not in unset}
         candidate_envs.update(envs)
-        return canonical_fingerprint(candidate_args, candidate_envs, unset_envs=unset) == canonical_fingerprint(
-            current_args, launch["extra_envs"], unset_envs=launch["unset_envs"]
+        return canonical_fingerprint(
+            candidate_args, candidate_envs, remove_args=candidate_removals, unset_envs=unset
+        ) == canonical_fingerprint(
+            current_args, launch["extra_envs"], remove_args=launch["remove_args"], unset_envs=launch["unset_envs"]
         )
 
     async def enqueue_internal_stack_rebench(

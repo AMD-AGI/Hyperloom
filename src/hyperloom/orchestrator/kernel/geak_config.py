@@ -123,55 +123,21 @@ def _geak_revalidation_decision(
     return "validated"
 
 
-def _geak_result_has_material(
-    result: Any,
-    *,
-    prev_best_flags: str = "",
-    prev_best_envs: Any = None,
-    prev_best_controls: Any = None,
-) -> bool:
-    """Decide whether a GEAK result carries a material optimization product."""
-    from hyperloom.inference_optimizer.canonical_fingerprint import (
-        canonical_fingerprint,
-    )
+def _geak_result_has_artifact(result: dict[str, Any]) -> bool:
+    """Whether a GEAK result carries an authored kernel, head, overlay or patch."""
 
     def _has_nonempty(entries: Any) -> bool:
-        # A list whose items are all empty/blank (e.g. ``[""]``) is not material.
+        # A list whose items are all empty/blank (e.g. ``[""]``) carries nothing.
         if not isinstance(entries, (list, tuple, set)):
             return bool(entries)
         return any(str(e).strip() for e in entries)
 
-    if not isinstance(result, dict) or not result:
-        return True
-    if _has_nonempty(result.get("accepted_kernels")):
-        return True
-    if _has_nonempty(result.get("accepted_heads")):
-        return True
-    if str(result.get("final_overlay") or "").strip():
-        return True
-    if str(result.get("final_patch") or "").strip():
-        return True
-    accepted_flags, parsed_envs = _accepted_config_as_variant(result.get("accepted_config"))
-    prior_controls = _accepted_config_controls(prev_best_controls)
-    controls = _accepted_config_controls(
-        result.get("accepted_config"), inherited_remove_args=prior_controls.get("remove_args")
+    return (
+        _has_nonempty(result.get("accepted_kernels"))
+        or _has_nonempty(result.get("accepted_heads"))
+        or bool(str(result.get("final_overlay") or "").strip())
+        or bool(str(result.get("final_patch") or "").strip())
     )
-    # A missing / all-empty accepted_config carries no config optimization; a
-    # bare fingerprint mismatch against a non-empty current_best is NOT material
-    # (promoting it would wipe the existing config to empty).
-    if not accepted_flags and not parsed_envs and not controls:
-        return False
-    # Both sides go through the same guard: a resume can hand current_best the raw accepted_config, and an untrusted
-    # key on one side only reads as a diff.
-    prev_envs, _dropped = filter_untrusted_env_mapping(
-        dict(prev_best_envs or {}),
-        allow_predicate=is_allowed_variant_env_key,
-    )
-    got_fp = canonical_fingerprint(accepted_flags, parsed_envs, **controls)
-    prev_fp = canonical_fingerprint(
-        str(prev_best_flags or ""), prev_envs, **(_accepted_config_controls(prev_best_controls) if controls else {})
-    )
-    return got_fp != prev_fp
 
 
 def _normalize_geak_overlay_dir(overlay: str) -> str:

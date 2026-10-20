@@ -499,57 +499,88 @@ async def test_recovered_empty_map_closes_without_fallback(coordinator, tmp_path
     assert not await c.tasks.queued()
 
 
-def test_material_check_ignores_untrusted_env_names() -> None:
-    """An untrusted key on one side only must not read as a config difference."""
-    from hyperloom.orchestrator.kernel.geak_config import _geak_result_has_material
-
-    echoed = {
-        "status": "ok",
-        "accepted_config": {
-            "flags": "--fp8-gemm-backend aiter",
-            "env": "PATH=/opt/venv/bin SGLANG_USE_AITER=1",
-        },
-    }
-    assert not _geak_result_has_material(
-        echoed,
-        prev_best_flags="--fp8-gemm-backend aiter",
-        prev_best_envs={"SGLANG_USE_AITER": "1"},
-    )
-    # A real config delta still registers.
-    assert _geak_result_has_material(
-        echoed,
-        prev_best_flags="--fp8-gemm-backend triton",
-        prev_best_envs={"SGLANG_USE_AITER": "1"},
-    )
-
-
 @pytest.mark.parametrize(
-    ("accepted", "previous", "expected"),
+    ("current", "accepted", "settles"),
     [
-        ({"flags": "", "args_mode": "replace"}, {"flags": "--disable-radix-cache"}, True),
-        ({"flags": "", "args_mode": "replace"}, {"flags": "", "args_mode": "replace"}, False),
         (
-            {"flags": "--mem-fraction-static 0.9", "args_mode": "replace"},
-            {"flags": "--mem-fraction-static 0.9", "args_mode": "replace"},
+            {"extra_server_args": "--fp8-gemm-backend aiter", "extra_envs": {"SGLANG_USE_AITER": "1"}},
+            {"flags": "--fp8-gemm-backend aiter", "env": "PATH=/opt/venv/bin SGLANG_USE_AITER=1"},
+            True,
+        ),
+        (
+            {"extra_server_args": "--fp8-gemm-backend aiter", "extra_envs": {"SGLANG_USE_AITER": "1", "PATH": "/x"}},
+            {"flags": "--fp8-gemm-backend aiter", "env": "PATH=/x SGLANG_USE_AITER=1"},
+            True,
+        ),
+        (
+            {"extra_server_args": "--fp8-gemm-backend triton", "extra_envs": {"SGLANG_USE_AITER": "1"}},
+            {"flags": "--fp8-gemm-backend aiter", "env": "PATH=/opt/venv/bin SGLANG_USE_AITER=1"},
             False,
         ),
-        ({"flags": "--mem-fraction-static 0.9"}, {"flags": "--mem-fraction-static 0.9", "args_mode": "replace"}, False),
-        ({"flags": "", "env_map": {}}, {"flags": "--disable-radix-cache", "args_mode": "replace"}, False),
-        ({"unset_envs": ["SGLANG_AITER_MLA_PERSIST"]}, {"env_map": {"SGLANG_AITER_MLA_PERSIST": "1"}}, True),
+        ({"extra_server_args": "--disable-radix-cache"}, {"flags": "", "args_mode": "replace"}, False),
+        (
+            {"extra_server_args": "--mem-fraction-static 0.9", "args_mode": "replace"},
+            {"flags": "--mem-fraction-static 0.9", "args_mode": "replace"},
+            True,
+        ),
+        (
+            {"extra_server_args": "--mem-fraction-static 0.9", "args_mode": "replace"},
+            {"flags": "--mem-fraction-static 0.9"},
+            True,
+        ),
+        (
+            {"extra_server_args": "", "extra_envs": {"SGLANG_AITER_MLA_PERSIST": "1"}},
+            {"unset_envs": ["SGLANG_AITER_MLA_PERSIST"]},
+            False,
+        ),
+        ({"extra_server_args": "--a 1"}, {"flags": "--a 1", "remove_args": ["--disable-radix-cache"]}, False),
+    ],
+    ids=[
+        "untrusted-env-in-geak-only",
+        "untrusted-env-on-both-sides",
+        "real-flag-delta",
+        "empty-replacement-of-flags",
+        "complete-flags-restated",
+        "delta-over-complete-flags",
+        "unset-of-a-current-env",
+        "removal-the-flags-cannot-show",
     ],
 )
-def test_material_check_distinguishes_explicit_controls_from_empty_legacy(accepted, previous, expected):
-    from hyperloom.orchestrator.kernel.geak_config import _geak_result_has_material
+def test_geak_launch_restates_current_best(coordinator, current, accepted, settles) -> None:
+    """Only a change to the launch current_best runs is worth a rebench; spelling and guarded keys are not."""
+    st = coordinator.shared_state
+    st.baseline_tput = 100.0
+    st.current_best = {"action": "explore", "tput": 110.0, **current}
+    st.geak_result = {"status": "ok", "accepted_config": accepted}
 
-    assert (
-        _geak_result_has_material(
-            {"status": "ok", "accepted_config": accepted},
-            prev_best_flags=previous.get("flags", ""),
-            prev_best_envs=previous.get("env_map", {}),
-            prev_best_controls=previous,
-        )
-        is expected
-    )
+    params = coordinator.writeback.geak_rebench_params(reason="geak_e2e_win")
+
+    if settles:
+        assert params == {"skipped": True, "reason": "geak_no_material"}
+    else:
+        assert params["grid"][0]["provenance"] == "geak_revalidate"
+
+
+@pytest.mark.parametrize("removals", [None, [], ["--disable-radix-cache"]])
+def test_complete_config_inherits_omitted_removals(coordinator, removals) -> None:
+    """A complete config that omits removals keeps current_best's; an explicit empty list clears them."""
+    st = coordinator.shared_state
+    st.baseline_tput = 100.0
+    st.current_best = {
+        "action": "explore",
+        "tput": 110.0,
+        "extra_server_args": "--mem-fraction-static 0.95",
+        "args_mode": "replace",
+        "remove_args": ["--disable-radix-cache"],
+    }
+    config = {"flags": "--mem-fraction-static 0.95", "env_map": {}, "args_mode": "replace"}
+    if removals is not None:
+        config["remove_args"] = removals
+    st.geak_result = {"status": "ok", "accepted_config": config}
+
+    params = coordinator.writeback.geak_rebench_params(reason="geak_e2e_win")
+
+    assert (params == {"skipped": True, "reason": "geak_no_material"}) is (removals != [])
 
 
 @pytest.mark.asyncio
