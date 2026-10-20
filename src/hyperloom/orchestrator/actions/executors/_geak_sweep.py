@@ -13,7 +13,7 @@ import shlex
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping, NamedTuple
+from typing import Any, Callable, Iterator, Mapping, NamedTuple
 
 import yaml
 
@@ -423,28 +423,26 @@ def _build_replay_plan(
     )
 
 
-def _plan_sweep_points(grid: _SweepGrid, output_root: Path) -> list[_SweepPoint]:
-    """Lay out every point of the grid, named as the sweep collector's scanner expects.
+def _plan_sweep_points(grid: _SweepGrid, output_root: Path) -> Iterator[_SweepPoint]:
+    """Lay out the points of the grid one at a time, named as the sweep collector's scanner expects.
 
     The name must stay ``variant_<idx>_conc<c>_isl<i>_osl<o>`` or the collector never discovers the point.
+    Laid out lazily, so a shape spec that cannot be parsed stops the sweep where the grid reaches it rather
+    than before the points ahead of it have run.
     """
     shapes = [(conc, spec) for conc in grid.conc_values for spec in grid.isl_osl_configs]
-    points = []
     for index, (conc, spec) in enumerate(shapes):
         isl, osl = _parse_isl_osl(spec)
         variant_name = f"variant_{index}_conc{conc}_isl{isl}_osl{osl}"
-        points.append(
-            _SweepPoint(
-                conc=conc,
-                isl=isl,
-                osl=osl,
-                variant_name=variant_name,
-                out_dir=output_root / variant_name,
-                repeats=grid.repeats,
-                timeout_sec=grid.timeout_sec,
-            )
+        yield _SweepPoint(
+            conc=conc,
+            isl=isl,
+            osl=osl,
+            variant_name=variant_name,
+            out_dir=output_root / variant_name,
+            repeats=grid.repeats,
+            timeout_sec=grid.timeout_sec,
         )
-    return points
 
 
 def _sweep_point_env(plan: _ReplayPlan, point: _SweepPoint) -> dict[str, str]:

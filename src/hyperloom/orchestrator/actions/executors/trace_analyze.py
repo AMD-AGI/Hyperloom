@@ -710,13 +710,15 @@ def _resolve_tracelens_checkout() -> Path:
     return tracelens_root
 
 
-def _resolve_analysis(payload: dict, state: Any, session_dir: Path) -> _ResolvedAnalysis:
-    """Resolve the trace, workspace, route and workload one analysis request describes."""
+def _requested_trace_input(payload: dict) -> Any:
+    """The trace this request names, under either of the two keys callers spell it with."""
+    return payload.get("trace_input") or payload.get("trace_dir")
+
+
+def _resolve_analysis(payload: dict, trace_input: Any, state: Any, session_dir: Path) -> _ResolvedAnalysis:
+    """Resolve the framework, workspace, route and workload one analysis request describes."""
     from hyperloom.inference_optimizer.framework_registry import is_scriptable
 
-    trace_input = payload.get("trace_input") or payload.get("trace_dir")
-    if not trace_input:
-        raise _AnalysisUnavailable({"status": "failed", "error": "missing 'trace_input' in payload"})
     choice = _resolve_analysis_framework(payload, state)
     analysis_mode = (payload.get("analysis_mode") or "").strip()
     if not analysis_mode and choice.framework.lower() in {"vllm", "sglang"}:
@@ -750,6 +752,7 @@ async def _run_analysis_tool(cmd: list[str], timeout_sec: int) -> HandlerResult:
     """Run the trace-analysis tool within its budget and shape whatever it exited with."""
     try:
         rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout_sec)
+        return _shape_tool_result(rc, stdout, stderr)
     except subprocess.TimeoutExpired as exc:
         cmd_repr = " ".join(str(c) for c in (getattr(exc, "cmd", None) or cmd))
         return {
@@ -757,7 +760,6 @@ async def _run_analysis_tool(cmd: list[str], timeout_sec: int) -> HandlerResult:
             "error_class": "subprocess_timeout",
             "error": f"TimeoutExpired after {timeout_sec}s: {cmd_repr[:1500]}",
         }
-    return _shape_tool_result(rc, stdout, stderr)
 
 
 def _surface_artifact_paths(result: dict[str, Any]) -> str:
@@ -878,12 +880,15 @@ async def trace_analyze_handler(
     Returns the tool's result dict with ``status``, surfaced artifact paths, and
     ``trace_health_warnings``; on failure, ``returncode`` / ``error`` and empty ``hot_kernels``.
     """
+    trace_input = _requested_trace_input(payload)
+    if not trace_input:
+        return {"status": "failed", "error": "missing 'trace_input' in payload"}
     # Backfill workload context from SharedState when Orchestration omits it.
     from ...state.shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir)
     try:
-        resolved = _resolve_analysis(payload, state, session_dir)
+        resolved = _resolve_analysis(payload, trace_input, state, session_dir)
     except _AnalysisUnavailable as exc:
         return exc.failure
     cmd, steady_state_mode = _build_trace_analyze_cmd(

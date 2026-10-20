@@ -473,10 +473,12 @@ def _format_before_after_roofline(cmp: dict[str, Any], baseline: dict[str, Any],
     return [
         _ROOFLINE_HEADING,
         "",
-        "Before/after comparison of TraceLens Executive Summaries. "
-        "The baseline snapshot was captured at PRELUDE; the latest "
-        "snapshot was captured after a +10% gain watermark refresh "
-        "(see `KernelPhase.maybe_enqueue_watermark_roofline`).",
+        (
+            "Before/after comparison of TraceLens Executive Summaries. "
+            "The baseline snapshot was captured at PRELUDE; the latest "
+            "snapshot was captured after a +10% gain watermark refresh "
+            "(see `KernelPhase.maybe_enqueue_watermark_roofline`)."
+        ),
         "",
         f"{_ROOFLINE_PEAK_NOTE} {anchor_note}_",
         "",
@@ -493,8 +495,10 @@ def _format_roofline_comparison_section(cmp: dict[str, Any]) -> list[str]:
         return [
             _ROOFLINE_HEADING,
             "",
-            "_No roofline snapshot was captured during this session — "
-            "the `roofline` composite action never completed successfully._",
+            (
+                "_No roofline snapshot was captured during this session — "
+                "the `roofline` composite action never completed successfully._"
+            ),
             "",
         ]
     latest = cmp.get("latest") or {}
@@ -522,10 +526,12 @@ def _format_unrequested_external_baseline(ext: dict[str, Any]) -> list[str]:
     return [
         "## External baseline (not requested)",
         "",
-        "- No `--compare-against-gpu` was specified; only a marker JSON "
-        "was written. Re-run with `--compare-against-gpu <gpu>` (e.g. "
-        "`b300` / `mi355x` / `h200`) to fetch the matching InferenceX "
-        "reference data point.",
+        (
+            "- No `--compare-against-gpu` was specified; only a marker JSON "
+            "was written. Re-run with `--compare-against-gpu <gpu>` (e.g. "
+            "`b300` / `mi355x` / `h200`) to fetch the matching InferenceX "
+            "reference data point."
+        ),
         f"- Fetched at: {ext.get('fetched_at') or '(unknown)'}",
         f"- Status: `{_external_status(ext)}` "
         f"reason=`{str(ext.get('reason') or '').strip()}` (rows matched: {ext.get('row_count', 0)})",
