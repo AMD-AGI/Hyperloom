@@ -182,6 +182,18 @@ def _subdir_is_release_branch(name: str) -> bool:
     return name.endswith(f"_{_RELEASE_BRANCH_SUFFIX}")
 
 
+def _nearest_not_newer(available: dict[tuple[int, ...], Path], running: tuple[int, ...]) -> Path | None:
+    """The newest entry not newer than ``running``, preferring its own minor series."""
+    if len(running) >= 2:
+        same_minor = [vt for vt in available if vt[:2] == running[:2] and vt <= running]
+        if same_minor:
+            return available[max(same_minor)]
+    not_higher = [vt for vt in available if vt <= running]
+    if not_higher:
+        return available[max(not_higher)]
+    return None
+
+
 def _resolve_versioned_patches_dir(
     patches_root: Path,
     version: str,
@@ -217,16 +229,7 @@ def _resolve_versioned_patches_dir(
         if vt in available and _subdir_is_release_branch(d.name) is not want_branch:
             continue
         available[vt] = d
-    if not available:
-        return None
-    if len(running) >= 2:
-        same_minor = [vt for vt in available if vt[:2] == running[:2] and vt <= running]
-        if same_minor:
-            return available[max(same_minor)]
-    not_higher = [vt for vt in available if vt <= running]
-    if not_higher:
-        return available[max(not_higher)]
-    return None
+    return _nearest_not_newer(available, running)
 
 
 # Public API
@@ -468,16 +471,7 @@ def _resolve_vllm_patch_file(patches_dir: Path, version: str) -> Path | None:
             if vt and vt in available:
                 return available[vt]
     running = _version_tuple(version)
-    if running is None:
-        return None
-    if len(running) >= 2:
-        same_minor = [vt for vt in available if vt[:2] == running[:2] and vt <= running]
-        if same_minor:
-            return available[max(same_minor)]
-    not_higher = [vt for vt in available if vt <= running]
-    if not_higher:
-        return available[max(not_higher)]
-    return None
+    return _nearest_not_newer(available, running) if running else None
 
 
 def _probe_isolated_vllm() -> tuple[str, Path] | None:

@@ -37,7 +37,7 @@ def test_config_framework_reads_materialized_yaml(tmp_path):
 def _count_scans(monkeypatch) -> dict[str, int]:
     calls = {"scan": 0}
 
-    def _scan(server_log_path, offsets, residuals=None, identities=None):
+    def _scan(self, server_log_path):
         calls["scan"] += 1
         return sk._LogScan(
             saw_ready=False,
@@ -47,7 +47,7 @@ def _count_scans(monkeypatch) -> dict[str, int]:
             child_spoke=False,
         )
 
-    monkeypatch.setattr(sk, "_scan_logs_increment", _scan)
+    monkeypatch.setattr(sk._LogCursor, "advance", _scan)
     return calls
 
 
