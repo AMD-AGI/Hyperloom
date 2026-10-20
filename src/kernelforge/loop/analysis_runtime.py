@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import replace
 
 from kernelforge.loop.analysis_evidence import AnalysisEvidenceMixin
 from kernelforge.loop.analysis_refresh_policy import (
@@ -256,22 +255,5 @@ class AnalysisRuntimeMixin(AnalysisEvidenceMixin):
         else:
             context = stale_context
             context = analysis_service.apply_checkpoint(context)
-        cumulative_diff = self._analysis_cumulative_diff(
-            evidence_commit=analysis_state.evidence_commit,
-            canonical_commit=context.analysis_commit,
-        )
-        context = replace(
-            context,
-            canonical_commit=context.analysis_commit,
-            evidence_commit=analysis_state.evidence_commit,
-            evidence_stale=bool(
-                analysis_state.evidence_commit and analysis_state.evidence_commit != context.analysis_commit
-            ),
-            evidence_status=analysis_state.evidence_status,
-            evidence_mean_case_speedup=(analysis_state.evidence_mean_case_speedup),
-            current_mean_case_speedup=self.best_mean_case_speedup,
-            cumulative_diff_path=cumulative_diff.path,
-            cumulative_diff_error=cumulative_diff.error,
-        )
-        self._active_analysis_context = context
-        return context
+        self._active_analysis_context = self._with_evidence_standing(context)
+        return self._active_analysis_context

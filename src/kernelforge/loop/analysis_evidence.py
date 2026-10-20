@@ -14,7 +14,7 @@ from pathlib import Path
 
 from kernelforge.llm.git import git
 from kernelforge.kernel_backends.constants import resolve_language_dirs
-from kernelforge.orchestrator.contracts import EvidenceRef
+from kernelforge.orchestrator.contracts import CaseEvidence, EvidenceRef, OrchestrationContext
 from kernelforge.orchestrator.supervisor import latest_supervisor_ruling_path
 from kernelforge.tools.durable_io import atomic_write_text
 
@@ -120,115 +120,34 @@ class AnalysisEvidenceMixin:
 
     def _build_orchestration_context(self):
         """Build one immutable planning context from current loop evidence."""
-        from kernelforge.orchestrator.contracts import (
-            CaseEvidence,
-            EvidenceRef,
-            OrchestrationContext,
-        )
-
         workspace = Path(self.ic.workspace_dir).resolve()
         canonical_commit = self._canonical_commit()
-        analysis_state = self.run_state.analysis
-        evidence_commit = analysis_state.evidence_commit
         cumulative_diff = self._analysis_cumulative_diff(
-            evidence_commit=evidence_commit,
+            evidence_commit=self.run_state.analysis.evidence_commit,
             canonical_commit=canonical_commit,
         )
-        cumulative_diff_path = cumulative_diff.path
         source_map_path = Path(self.ic.kernel_file).resolve()
 
         scored_case_ids = [
             case_id for case_id in sorted(self._baseline_case_times) if case_id not in self._unscored_cases
         ]
-        if not scored_case_ids:
-            scored_case_ids = sorted(self._baseline_case_times)
         cases = tuple(
             CaseEvidence(
                 case_id=case_id,
                 latency_ms=(self._best_case_times.get(case_id) or self._baseline_case_times.get(case_id)),
             )
-            for case_id in scored_case_ids
+            for case_id in scored_case_ids or sorted(self._baseline_case_times)
         )
-
-        evidence_refs = []
-        if source_map_path.is_file():
-            evidence_refs.append(
-                EvidenceRef(
-                    kind="source_map",
-                    path=str(source_map_path),
-                    summary="Current source map or anchor source.",
-                )
-            )
-        artifact_candidates = (
-            workspace / "forge_experiments" / "candidates" / "index.jsonl",
-            workspace / "forge_experiments" / "run_state.json",
+        evidence_refs = self._orchestration_evidence_refs(
+            workspace, source_map_path, cumulative_diff.path, canonical_commit
         )
-        for path in artifact_candidates:
-            if path.is_file():
-                evidence_refs.append(
-                    EvidenceRef(
-                        kind=("candidate_archive" if path.name == "index.jsonl" else "run_state"),
-                        path=str(path.resolve()),
-                        summary=f"Current {path.stem.replace('_', ' ')} evidence.",
-                    )
-                )
-        if cumulative_diff_path:
-            evidence_refs.append(
-                EvidenceRef(
-                    kind="analysis_cumulative_diff",
-                    path=cumulative_diff_path,
-                    summary=(
-                        "Cumulative canonical source diff from the Analysis "
-                        f"evidence commit {evidence_commit} to "
-                        f"{canonical_commit}."
-                    ),
-                )
-            )
-        if getattr(self, "lessons", None) is not None:
-            lesson_iterations = self.lessons.existing_iterations()
-            if lesson_iterations:
-                latest_lesson = self.lessons.path(lesson_iterations[-1])
-                evidence_refs.extend(
-                    (
-                        EvidenceRef(
-                            kind="lesson_directory",
-                            path=str(self.lessons.root.resolve()),
-                            summary=(
-                                "Free-form Implementer session records for all "
-                                "completed iterations; historical evidence only."
-                            ),
-                        ),
-                        EvidenceRef(
-                            kind="latest_lesson",
-                            path=str(latest_lesson.resolve()),
-                            summary=(
-                                f"Latest free-form Implementer session record from iteration {lesson_iterations[-1]}."
-                            ),
-                        ),
-                    )
-                )
-        if self._supervisor_ruling:
-            supervisor_path = latest_supervisor_ruling_path(self.ic.workspace_dir)
-            if supervisor_path.is_file():
-                evidence_refs.append(
-                    EvidenceRef(
-                        kind="supervisor_guidance",
-                        path=str(supervisor_path.resolve()),
-                        summary=(
-                            "Latest free-form Supervisor Ruling. It overrides "
-                            "subjective conclusions in historical lesson records "
-                            "but not objective measurements."
-                        ),
-                    )
-                )
         knowledge_index = ""
         local_knowledge_root = getattr(self.config, "local_knowledge_dir", None)
         if local_knowledge_root:
             try:
                 from kernelforge.knowledge import build_forge_knowledge
 
-                stored = (self.ic.kernel_backend or "").strip()
-                backend = stored or self.ic.backend or ""
+                backend = self.ic.kernel_backend.strip() or self.ic.backend
                 root = Path(local_knowledge_root)
                 language = resolve_language_dirs(backend, root)
                 include_aiter = backend == "aiter" or any(
@@ -246,36 +165,105 @@ class AnalysisEvidenceMixin:
             except OSError:
                 log.debug("failed to build orchestration knowledge index", exc_info=True)
 
-        return OrchestrationContext(
-            analysis_commit=canonical_commit,
-            workspace=str(workspace),
-            gpu_target=self.config.gpu_target,
-            objective=(
-                "Preserve correctness and complete benchmark case coverage while "
-                "maximizing equal-weight mean incumbent-to-candidate case speedup."
-            ),
-            program_context=(self.ic.program_md or f"Optimize the kernel at {self.ic.kernel_file}."),
-            source_map_path=str(source_map_path),
-            # The declared source set, verbatim and in campaign order, so the planner is told what it may edit instead
-            # of inferring it from the one path in program_context.
-            editable_sources=tuple(self._target_source_files()),
-            cases=cases,
-            knowledge_index=knowledge_index,
-            supervisor_guidance=self._supervisor_ruling,
-            last_critic_verdict=self._last_critic_verdict,
-            last_critic_review=self._last_critic_review,
-            search_mode=self.run_state.search_mode,
-            search_reason_codes=tuple(self.run_state.search_reason_codes),
-            search_objective=self.run_state.search_objective,
-            search_mode_residence_remaining=(self.run_state.search_mode_residence_remaining),
-            evidence_refs=tuple(evidence_refs),
-            canonical_commit=canonical_commit,
-            evidence_commit=evidence_commit,
-            evidence_stale=bool(evidence_commit and evidence_commit != canonical_commit),
-            evidence_status=analysis_state.evidence_status,
-            evidence_mean_case_speedup=(analysis_state.evidence_mean_case_speedup),
+        return self._with_evidence_standing(
+            OrchestrationContext(
+                analysis_commit=canonical_commit,
+                workspace=str(workspace),
+                gpu_target=self.config.gpu_target,
+                objective=(
+                    "Preserve correctness and complete benchmark case coverage while "
+                    "maximizing equal-weight mean incumbent-to-candidate case speedup."
+                ),
+                program_context=(self.ic.program_md or f"Optimize the kernel at {self.ic.kernel_file}."),
+                source_map_path=str(source_map_path),
+                # The declared source set, verbatim and in campaign order, so the planner is told what it may edit
+                # instead of inferring it from the one path in program_context.
+                editable_sources=tuple(self._target_source_files()),
+                cases=cases,
+                knowledge_index=knowledge_index,
+                supervisor_guidance=self._supervisor_ruling,
+                last_critic_verdict=self._last_critic_verdict,
+                last_critic_review=self._last_critic_review,
+                search_mode=self.run_state.search_mode,
+                search_reason_codes=tuple(self.run_state.search_reason_codes),
+                search_objective=self.run_state.search_objective,
+                search_mode_residence_remaining=(self.run_state.search_mode_residence_remaining),
+                evidence_refs=evidence_refs,
+            )
+        )
+
+    def _orchestration_evidence_refs(
+        self, workspace: Path, source_map_path: Path, cumulative_diff_path: str, canonical_commit: str
+    ) -> tuple[EvidenceRef, ...]:
+        """The artifacts a planning context cites as evidence, each one only while it exists."""
+        experiments = workspace / "forge_experiments"
+        refs = [
+            EvidenceRef(kind=kind, path=str(path.resolve()), summary=summary)
+            for kind, path, summary in (
+                ("source_map", source_map_path, "Current source map or anchor source."),
+                ("candidate_archive", experiments / "candidates" / "index.jsonl", "Current index evidence."),
+                ("run_state", experiments / "run_state.json", "Current run state evidence."),
+            )
+            if path.is_file()
+        ]
+        if cumulative_diff_path:
+            refs.append(
+                EvidenceRef(
+                    kind="analysis_cumulative_diff",
+                    path=cumulative_diff_path,
+                    summary=(
+                        "Cumulative canonical source diff from the Analysis evidence commit "
+                        f"{self.run_state.analysis.evidence_commit} to {canonical_commit}."
+                    ),
+                )
+            )
+        lesson_iterations = self.lessons.existing_iterations() if getattr(self, "lessons", None) is not None else []
+        if lesson_iterations:
+            refs.append(
+                EvidenceRef(
+                    kind="lesson_directory",
+                    path=str(self.lessons.root.resolve()),
+                    summary=(
+                        "Free-form Implementer session records for all completed iterations; historical evidence only."
+                    ),
+                )
+            )
+            refs.append(
+                EvidenceRef(
+                    kind="latest_lesson",
+                    path=str(self.lessons.path(lesson_iterations[-1]).resolve()),
+                    summary=f"Latest free-form Implementer session record from iteration {lesson_iterations[-1]}.",
+                )
+            )
+        if self._supervisor_ruling:
+            supervisor_path = latest_supervisor_ruling_path(self.ic.workspace_dir)
+            if supervisor_path.is_file():
+                refs.append(
+                    EvidenceRef(
+                        kind="supervisor_guidance",
+                        path=str(supervisor_path.resolve()),
+                        summary=(
+                            "Latest free-form Supervisor Ruling. It overrides subjective conclusions in historical "
+                            "lesson records but not objective measurements."
+                        ),
+                    )
+                )
+        return tuple(refs)
+
+    def _with_evidence_standing(self, context):
+        """``context`` with where its Analysis evidence stands against its commit: freshness, scores and diff."""
+        state = self.run_state.analysis
+        commit = context.analysis_commit
+        cumulative_diff = self._analysis_cumulative_diff(evidence_commit=state.evidence_commit, canonical_commit=commit)
+        return replace(
+            context,
+            canonical_commit=commit,
+            evidence_commit=state.evidence_commit,
+            evidence_stale=bool(state.evidence_commit and state.evidence_commit != commit),
+            evidence_status=state.evidence_status,
+            evidence_mean_case_speedup=state.evidence_mean_case_speedup,
             current_mean_case_speedup=self.best_mean_case_speedup,
-            cumulative_diff_path=cumulative_diff_path,
+            cumulative_diff_path=cumulative_diff.path,
             cumulative_diff_error=cumulative_diff.error,
         )
 
