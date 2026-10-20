@@ -51,17 +51,19 @@ def _donor(
     return row
 
 
-_TARGET = _DonorTarget(
-    arch_slug="qwen2forcausallm",
+_TARGET_IDENTITY = _SearchIdentity(
+    hardware="mi300x",
+    framework="sglang",
     model_type="qwen2",
-    conc=64,
-    isl=128,
-    osl=128,
+    arch_slug="qwen2forcausallm",
+    framework_version="1.2.5",
+    precision="bf16",
 )
+_TARGET = _DonorTarget(conc=64, isl=128, osl=128)
 
 
 def test_trustworthy_donor_accepted() -> None:
-    assert _donor_is_trustworthy(_donor(), _TARGET) is True
+    assert _donor_is_trustworthy(_donor(), identity=_TARGET_IDENTITY, target=_TARGET) is True
 
 
 def test_donor_identity_falls_back_to_canonical_id() -> None:
@@ -69,7 +71,7 @@ def test_donor_identity_falls_back_to_canonical_id() -> None:
     donor.pop("architectures")
     donor.pop("model_type")
 
-    assert _donor_is_trustworthy(donor, _TARGET) is True
+    assert _donor_is_trustworthy(donor, identity=_TARGET_IDENTITY, target=_TARGET) is True
 
 
 def test_explicit_zero_donor_confidence_is_preserved() -> None:

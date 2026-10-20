@@ -46,7 +46,15 @@ def test_agentx_donor_ignores_fixed_length_placeholders() -> None:
         "isl": 2048,
         "osl": 512,
     }
-    assert _donor_is_trustworthy(donor, _DonorTarget(arch_slug="arch", model_type="mt", conc=64))
+    identity = _SearchIdentity(
+        hardware="mi300x",
+        framework="sglang",
+        model_type="mt",
+        arch_slug="arch",
+        framework_version="1.2.5",
+        precision="bf16",
+    )
+    assert _donor_is_trustworthy(donor, identity=identity, target=_DonorTarget(conc=64))
 
 
 # Fake SharedState — only the fields the anchor reads
@@ -543,7 +551,7 @@ def _cascade(kb, cid="CID:target"):
             precision="fp8",
         ),
         warm_prefer=None,
-        target=_DonorTarget(arch_slug="qwen3forcausallm", model_type="qwen"),
+        target=_DonorTarget(),
     )
 
 

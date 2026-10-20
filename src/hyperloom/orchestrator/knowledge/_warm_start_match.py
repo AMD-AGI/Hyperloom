@@ -61,17 +61,11 @@ class _TierQuery(NamedTuple):
 
 
 class _DonorTarget(NamedTuple):
-    """The workload a borrowed replay config has to be safe for."""
+    """The request shape a borrowed replay config has to be safe for; the identity it must match travels separately."""
 
-    arch_slug: str
-    model_type: str
     conc: Any = None
     isl: Any = None
     osl: Any = None
-
-    def for_identity(self, identity: "_SearchIdentity") -> "_DonorTarget":
-        """The same request shape, re-pinned to the architecture and model type *identity* names."""
-        return self._replace(arch_slug=identity.arch_slug, model_type=identity.model_type)
 
 
 class _ConfigDonor(NamedTuple):
@@ -238,6 +232,7 @@ def _max_session_gain(row: Mapping[str, Any]) -> float:
         try:
             best = max(best, float(row.get("validated_gain_pct") or row.get("gain_pct") or 0.0))
         except (TypeError, ValueError):
+            # A non-numeric gain field is absent data, not a zero measurement: leave what the sessions reported.
             pass
     return best
 
@@ -280,6 +275,7 @@ def _recipe_is_actionable(row: Mapping[str, Any]) -> bool:
         if float(row.get("best_throughput") or 0.0) > 0.0:
             return True
     except (TypeError, ValueError):
+        # A non-numeric best_throughput decides nothing either way; the textual evidence below still can.
         pass
     return any(row.get(key) for key in ("what_worked", "what_failed", "pitfalls", "lessons"))
 
@@ -308,8 +304,8 @@ def _shape_matches(donor: Mapping[str, Any], target_value: Any, donor_key: str) 
     return donor_shape > 0 and target_shape == donor_shape
 
 
-def _donor_dimensions_match(donor: Mapping[str, Any], target: _DonorTarget) -> bool:
-    """True when the donor names a concrete architecture and model type, both matching the target's."""
+def _donor_dimensions_match(donor: Mapping[str, Any], identity: _SearchIdentity) -> bool:
+    """True when the donor names a concrete architecture and model type, both matching the identity's."""
     from hyperloom.inference_optimizer.recipe_snapshot_constants import _architectures_slug
 
     donor_arch_value = donor.get("architectures")
@@ -320,13 +316,13 @@ def _donor_dimensions_match(donor: Mapping[str, Any], target: _DonorTarget) -> b
     unknown = {"", "unknown", "unknown_arch", "unknown_model_type"}
     if donor_arch in unknown or donor_mt in unknown:
         return False
-    if target.arch_slug and donor_arch and donor_arch != target.arch_slug:
+    if identity.arch_slug and donor_arch and donor_arch != identity.arch_slug:
         return False
-    target_mt = _text(target.model_type).lower()
+    target_mt = _text(identity.model_type).lower()
     return not (target_mt and donor_mt and donor_mt != target_mt)
 
 
-def _donor_is_trustworthy(donor: Mapping[str, Any], target: _DonorTarget) -> bool:
+def _donor_is_trustworthy(donor: Mapping[str, Any], *, identity: _SearchIdentity, target: _DonorTarget) -> bool:
     """Gate a BORROWED (cross-model) warm-replay config donor."""
     if not isinstance(donor, Mapping):
         return False
@@ -337,7 +333,7 @@ def _donor_is_trustworthy(donor: Mapping[str, Any], target: _DonorTarget) -> boo
     # Require evidence of a real positive gain.
     if _max_session_gain(donor) <= 0:
         return False
-    if not _donor_dimensions_match(donor, target):
+    if not _donor_dimensions_match(donor, identity):
         return False
     return all(
         (
@@ -470,7 +466,8 @@ def _trustworthy_candidates(
     return [
         row
         for row in rows
-        if _candidate_matches_tier(row, identity=identity, query=query) and _donor_is_trustworthy(row, target)
+        if _candidate_matches_tier(row, identity=identity, query=query)
+        and _donor_is_trustworthy(row, identity=identity, target=target)
     ]
 
 

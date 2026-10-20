@@ -2853,7 +2853,7 @@ def test_remote_adapter_pages_history_then_materializes_l2_donor(
             precision="fp8",
         ),
         warm_prefer=None,
-        target=_DonorTarget(arch_slug="qwenarch", model_type="qwen"),
+        target=_DonorTarget(),
     )
 
     assert row["canonical_id"] == donor

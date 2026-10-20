@@ -268,7 +268,6 @@ def _cascade_warm_start_search(
     if exact is not None and _recipe_is_actionable(exact):
         return _WarmMatch(dict(exact), "exact", 1.0)
     stored = _identity_from_cid(cid, identity)
-    stored_target = target.for_identity(stored)
     seen = {cid}
     for query in _warm_search_tiers(stored):
         rows = _search_warm_candidates(
@@ -277,7 +276,7 @@ def _cascade_warm_start_search(
             hardware_in=query.hardware_in,
         )
         offered = [row for row in _take_unseen(rows, seen) if _remote_candidate_matches(kb, row, labels=query.labels)]
-        usable = _trustworthy_candidates(offered, identity=stored, query=query, target=stored_target)
+        usable = _trustworthy_candidates(offered, identity=stored, query=query, target=target)
         if rows and not usable:
             log.info(
                 "warm-start tier %s rejected all %d candidates",
@@ -292,12 +291,16 @@ def _cascade_warm_start_search(
     return _WarmMatch({}, "miss", 0.0)
 
 
+def _advisory_source(recipe: Mapping[str, Any] | None) -> Mapping[str, Any]:
+    """The row a match's advisory content is read off: its exact-identity history when it carries one, else itself."""
+    row = _mapping(recipe)
+    history = row.get("exact_history")
+    return history if isinstance(history, Mapping) else row
+
+
 def _warm_start_priors(recipe: Mapping[str, Any] | None) -> dict[str, list[Any]]:
     """The advisory lists a matched identity carries, read off its exact-identity history when it has one."""
-    source = _mapping(recipe)
-    history = source.get("exact_history")
-    if isinstance(history, Mapping):
-        source = history
+    source = _advisory_source(recipe)
     return {
         "proven_prior": list(source.get("what_worked") or []),
         "do_not_repeat": list(source.get("what_failed") or []),
@@ -699,8 +702,6 @@ def _warm_replay_target(shared_state: Any, identity: _T0Identity) -> _DonorTarge
     """The workload a borrowed replay config has to be safe for; an agentx identity pins no sequence lengths."""
     agentx = identity.canonical_id.startswith("agentx:")
     return _DonorTarget(
-        arch_slug=identity.search.arch_slug,
-        model_type=identity.search.model_type,
         conc=getattr(shared_state, "conc", None),
         isl=None if agentx else getattr(shared_state, "isl", None),
         osl=None if agentx else getattr(shared_state, "osl", None),
@@ -738,15 +739,16 @@ def _warm_replay_donor(
     recipe = match.recipe
     if not recipe or recipe.get("record_kind") == RECORD_KIND_HYPERLOOM_RECIPE:
         return _ConfigDonor(None, "", 0.0)
-    if _has_replayable_config(recipe) and (match.tier == "exact" or _donor_is_trustworthy(recipe, target)):
+    if _has_replayable_config(recipe) and (
+        match.tier == "exact" or _donor_is_trustworthy(recipe, identity=identity.search, target=target)
+    ):
         return _ConfigDonor(recipe, "self", match.confidence)
     return _find_config_donor(kb, cid=identity.canonical_id, identity=identity.search, target=target)
 
 
 def _warm_start_experience(recipe: Mapping[str, Any]) -> _WarmStartExperience:
     """The lessons and pitfalls the matched identity carries, read off its exact-identity history when it has one."""
-    history = recipe.get("exact_history")
-    source = history if isinstance(history, Mapping) else recipe
+    source = _advisory_source(recipe)
     return _WarmStartExperience(
         lessons=_experience_rows(source.get("lessons"), "statement", "lessons"),
         pitfalls=_experience_rows(source.get("pitfalls"), "description", "pitfalls"),

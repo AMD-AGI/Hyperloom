@@ -43,13 +43,7 @@ _TARGET_IDENTITY = _SearchIdentity(
     framework_version=TARGET["framework_version"],
     precision=TARGET["precision"],
 )
-_TARGET_SHAPE = _DonorTarget(
-    arch_slug=TARGET["architectures"],
-    model_type=TARGET["model_type"],
-    conc=64,
-    isl=128,
-    osl=128,
-)
+_TARGET_SHAPE = _DonorTarget(conc=64, isl=128, osl=128)
 
 
 def _candidate(
@@ -198,9 +192,9 @@ def test_local_framework_name_filter_matches_canonical_rows() -> None:
 
 def test_borrowed_donor_requires_matching_workload_shape() -> None:
     donor = _candidate("shape-donor")
-    assert _donor_is_trustworthy(donor, _TARGET_SHAPE)
+    assert _donor_is_trustworthy(donor, identity=_TARGET_IDENTITY, target=_TARGET_SHAPE)
     donor.pop("conc")
-    assert not _donor_is_trustworthy(donor, _TARGET_SHAPE)
+    assert not _donor_is_trustworthy(donor, identity=_TARGET_IDENTITY, target=_TARGET_SHAPE)
 
 
 def test_exact_and_each_fallback_confidence_order() -> None:
