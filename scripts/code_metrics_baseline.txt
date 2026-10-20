@@ -21,9 +21,7 @@ cognitive-complexity src/hyperloom/inference_optimizer/breakdown/reporters/_rend
 cognitive-complexity src/hyperloom/inference_optimizer/cli/__init__.py::_run_optimize 43
 cognitive-complexity src/hyperloom/inference_optimizer/cli/model_gate.py::_detect_unsupported_model 32
 cognitive-complexity src/hyperloom/inference_optimizer/framework_paths.py::_discover_installed_framework_roots 43
-cognitive-complexity src/hyperloom/inference_optimizer/grid_server_args.py::_reserialize_json_blobs 45
 cognitive-complexity src/hyperloom/inference_optimizer/grid_server_args.py::dedupe_extra_server_args 34
-cognitive-complexity src/hyperloom/inference_optimizer/grid_server_args.py::remove_server_args 37
 cognitive-complexity src/hyperloom/inference_optimizer/multi_node/commands/infera.py::_infera_restart_server 42
 cognitive-complexity src/hyperloom/inference_optimizer/multi_node/scripts/kill_multinode.py::_gpu_used_mb_for_pgids 32
 cognitive-complexity src/hyperloom/inference_optimizer/multi_node/scripts/launch_infera_node.py::_kill_prior 40
