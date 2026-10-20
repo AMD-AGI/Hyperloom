@@ -118,9 +118,7 @@ def check_flydsl_port(spec: RewriteSpec) -> str:
 def _dynamic_import_violation(tree: ast.AST, kernel_name: str, forbidden: frozenset[str]) -> str:
     """Reject a dynamic import, which evades the static import scan. Returns \"\" if there is none."""
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        fn = node.func
+        fn = node.func if isinstance(node, ast.Call) else None
         is_dunder_import = isinstance(fn, ast.Name) and fn.id == "__import__"
         is_import_module = isinstance(fn, ast.Attribute) and fn.attr == "import_module"
         if not (is_dunder_import or is_import_module):
