@@ -18,6 +18,9 @@ rate for the model the specialists run on or the one the judge, the patch resolv
 would record tokens only. ``--reuse-prelude DIR`` roots the session on the child session the PRELUDE of the
 earlier session in ``DIR`` rooted on instead of starting a child, and still measures the baseline; it is a usage error
 unless that session committed its root on the same workload and on the image ``HYPERLOOM_ACTIVE_IMAGE_DIGEST`` names.
+``--frontier-policy`` says which frontier policy the session scores its branches with once PRELUDE established the
+baseline: ``auto`` (the default) takes the variation the calibration over similar archived sessions chooses, within
+its guardrails, and ``default`` keeps the defaults; the manifest fingerprint records the label under ``frontier``.
 Each ``--specialist-prompt`` file holds a direction the user wrote for one specialist: its branch opens at PRELUDE's
 root ahead of the opening batch, counted within ``--max-branches``, its specialist sees the text in every launch
 prompt, and the judge neither stops it nor lowers its K for its first judged tests; an empty or unreadable file, or
@@ -74,7 +77,13 @@ from hyperloom_multibranch.scheduling.peers import PeerFactory, PeersUnavailable
 from hyperloom_multibranch.scheduling.prelude import reused_prelude
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry, adopting_orphans
 from hyperloom_multibranch.scheduling.roster import RosterCaps
-from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, RunSettings, Workload
+from hyperloom_multibranch.scheduling.settings import (
+    FrontierPolicyMode,
+    InferenceXShape,
+    KernelOptimizer,
+    RunSettings,
+    Workload,
+)
 
 PROG = "hyperloom-multibranch"
 EXIT_FAILED = 1
@@ -162,6 +171,15 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="DIR",
         help="An earlier session of this workload and image whose PRELUDE child to root on instead of starting one.",
     )
+    run.add_argument(
+        "--frontier-policy",
+        choices=[mode.value for mode in FrontierPolicyMode],
+        default=FrontierPolicyMode.AUTO.value,
+        help=(
+            "The frontier policy the session scores with after PRELUDE: auto takes the calibration's choice for similar"
+            " archived sessions, default keeps the defaults."
+        ),
+    )
     run.add_argument("-v", "--verbose", action="store_true", help="Log at debug level.")
     return parser
 
@@ -237,6 +255,7 @@ def settings_from(args: argparse.Namespace) -> RunSettings:
         caps,
         args.judge_interval_sec,
         user_directions=_user_directions(args.specialist_prompts or [], caps.max_branches),
+        frontier_policy=FrontierPolicyMode(args.frontier_policy),
     )
 
 

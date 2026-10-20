@@ -24,6 +24,8 @@ from hyperloom_multibranch.contracts.notebook.records import (
 )
 from hyperloom_multibranch.contracts.notebook.vocab import FrontierBasis
 from hyperloom_multibranch.notebook import STALL_TESTS
+from hyperloom_multibranch.notebook.rsi.calibration import PolicyChoice
+from hyperloom_multibranch.notebook.rsi.frontier import FrontierPolicy
 from hyperloom_multibranch.notebook.tests.factories import intent, request, result
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.events import MB_BIG_GAIN_BARS, MB_BOTTLENECK_SHIFT_PP, EventKind, SessionEvent
@@ -90,6 +92,11 @@ ROSTER = (
 
 
 OPENING_ROSTER = (_entry(INTEGRATION_BRANCH, kind=BranchKind.INTEGRATION),)
+CHOSEN = PolicyChoice(
+    FrontierPolicy(METRIC, window_seconds=1800.0),
+    "window x2",
+    "window x2: rank correlation 0.61 against 0.42 for the defaults, over 24 compared rounds in 3 similar sessions",
+)
 WIDENING = WideningSignals(min_useful_seconds=1350.0, cold_start_seconds=90.0, toolbox_headroom=3)
 
 
@@ -152,11 +159,17 @@ def _view(
         scheduler_llm_usd=0.27183,
         specialists=specialists or {},
         held=held or {},
+        frontier_policy=CHOSEN,
     )
 
 
 def _text(reply: str) -> CompletionReply:
     return CompletionReply(reply, TokenCounts(), 0.0)
+
+
+def test_the_prompt_names_the_frontier_policy_and_the_evidence_it_was_chosen_on() -> None:
+    assert _state(_view())["frontier_policy"] == {"label": CHOSEN.label, "evidence": CHOSEN.evidence}
+    assert "frontier_policy names the scoring's variation" in " ".join(JUDGE_SYSTEM_PROMPT.split())
 
 
 def test_the_prompt_shows_and_explains_the_gpu_hours_and_llm_dollars_used() -> None:

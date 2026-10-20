@@ -42,6 +42,7 @@ from dataclasses import dataclass
 from hyperloom_multibranch.contracts.lifecycle import SpecialistLifecycle, SpecialistStatus
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.records import BranchProgress, priced_usd
+from hyperloom_multibranch.notebook.rsi.calibration import PolicyChoice
 from hyperloom_multibranch.notebook.rsi.frontier import FrontierScoring
 from hyperloom_multibranch.notebook.rsi.session import judge_history
 from hyperloom_multibranch.scheduling.budget import MB_SECONDS_PER_HOUR
@@ -103,8 +104,8 @@ class Steering:
     """How the judge steers EXPLORE: the judge, how often it is asked, the frontier-scored progress it reads, against
     the archived sessions that progress holds, the dashboard rebuilt once the opening batch is open and after every
     later judge call, the signals of whether a branch opened now would still pay off, which running branches made
-    much the same change, the events that have the judge asked at once, and the specialist lifecycle, which reports
-    each running branch's specialist."""
+    much the same change, the events that have the judge asked at once, the specialist lifecycle, which reports
+    each running branch's specialist, and the frontier policy ``progress`` scores with and why it was chosen."""
 
     judge: Judge
     interval_seconds: float
@@ -114,6 +115,7 @@ class Steering:
     similarity: BranchSimilarity
     events: SessionEvents
     specialists: SpecialistLifecycle
+    frontier_policy: PolicyChoice
 
 
 def spent_gpu_seconds(progress: Iterable[BranchProgress]) -> float:
@@ -155,6 +157,7 @@ class Explorer:
         self._similarity = steering.similarity
         self._events = steering.events
         self._specialists = steering.specialists
+        self._frontier_policy = steering.frontier_policy
 
     async def run(self, window: ExploreWindow) -> SessionStopReason:
         """Explore until the deadline or the judge's soft stop; the integrator is stopped before this returns.
@@ -306,6 +309,7 @@ class Explorer:
             scheduler_llm_usd=priced_usd(record.usage for record in snapshot.llm_usage if not record.usage.branch),
             specialists=specialists,
             held=await self._held(),
+            frontier_policy=self._frontier_policy,
         )
         try:
             decision = await self._clock.wait_for(self._judge.decide(view), window.explore_end - now)

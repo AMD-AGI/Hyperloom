@@ -5,7 +5,8 @@
 
 PRELUDE gets the whole remaining budget, and spends none of it on a child when it reuses an earlier session's PRELUDE;
 whatever it leaves is split into the EXPLORE, FINAL and CLOSE windows, FINAL's no shorter than the
-longest baseline test. The
+longest baseline test. Once the baseline is established, the session chooses the frontier policy EXPLORE and CLOSE
+score with: the calibration's choice for sessions like it, or the defaults under ``--frontier-policy default``. The
 FINAL candidates are fixed while every branch still stands, then exploration ends and FINAL validates them. A
 failed PRELUDE, an EXPLORE that ran out of cards to measure on, a stop signal, the session deadline before FINAL
 starts or an unhandled error skip straight to CLOSE, which always runs and kills every process the session started.
@@ -41,7 +42,14 @@ from hyperloom_multibranch.contracts.notebook.records import ManifestFingerprint
 from hyperloom_multibranch.contracts.notebook.vocab import UsageSource
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.codec import encode
-from hyperloom_multibranch.notebook.rsi.session import FRONTIER_LOG, session_frontier
+from hyperloom_multibranch.notebook.rsi.calibration import DEFAULT_POLICY, PolicyChoice
+from hyperloom_multibranch.notebook.rsi.frontier import FrontierPolicy, FrontierScoring
+from hyperloom_multibranch.notebook.rsi.session import (
+    FRONTIER_LOG,
+    archived_history,
+    session_frontier,
+    session_frontier_policy,
+)
 from hyperloom_multibranch.rulegate.critic import FixReviewer
 from hyperloom_multibranch.scheduling.branches import BranchControl
 from hyperloom_multibranch.scheduling.budget import HardStop, SessionBudget, budget_seconds, explore_gpu_seconds
@@ -71,7 +79,7 @@ from hyperloom_multibranch.scheduling.prelude import (
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.requests import SessionChecks, SessionTests
 from hyperloom_multibranch.scheduling.roster import QUOTA_POLICY_VERSION, Roster
-from hyperloom_multibranch.scheduling.settings import RunSettings
+from hyperloom_multibranch.scheduling.settings import FrontierPolicyMode, RunSettings
 from hyperloom_multibranch.scheduling.stops import (
     TOOLBOX_CLOSE_SECONDS,
     SessionStopper,
@@ -92,6 +100,9 @@ POLICY_VERSIONS = {
     "judge_prompt": JUDGE_PROMPT_VERSION,
     "scheduling": policy_version(SCHEDULING_POLICY),
 }
+#: The ``policy_versions`` key the frontier policy's label is recorded under once PRELUDE chose it.
+FRONTIER_POLICY_KEY = "frontier"
+FORCED_DEFAULT_EVIDENCE = f"{DEFAULT_POLICY}: --frontier-policy default"
 #: Stop reasons a session ends with when it ran its course, a budget spent as set included; any other one, or an
 #: error, is a failed session.
 COMPLETED_REASONS = frozenset(
@@ -183,14 +194,18 @@ class Session:
         self._base_image_digest = peers.base_image_digest
         tests = SessionTests(peers.toolbox, clock)
         checks = SessionChecks(tests, peers.gate, peers.regression)
-        budget = budget_seconds(settings.max_hours)
-        metric = settings.workload.metric
+        self._metric = settings.workload.metric
+        self._budget_seconds = budget_seconds(settings.max_hours)
+        # The defaults until PRELUDE's choice replaces it; EXPLORE and CLOSE build their scoring from it.
+        self._frontier_policy = FrontierPolicy.for_budget(self._metric, self._budget_seconds)
+        self._history = archived_history()
+        self._context = context
+        self._repo = peers.repo
+        self._blobs = blobs
+        self._recipe_kb = services.recipe_kb
+        self._lifecycle = peers.lifecycle
         self._branches = BranchControl(context, peers.lifecycle, peers.toolbox, peers.repo, peers.briefs)
         self._stopper = SessionStopper(context, self._branches, peers.toolbox, peers.mcp)
-        progress = session_frontier(
-            self._notebook, metric, budget_seconds=budget, log_path=layout.reports / FRONTIER_LOG
-        )
-        dashboard = SessionDashboard(self._notebook, progress, peers.toolbox, metric, layout.dashboard)
         resolver = LlmPatchResolver(
             recorded(services.resolver_completion, self._notebook, UsageSource.RESOLVER), peers.repo
         )
@@ -198,27 +213,14 @@ class Session:
         self._prelude = Prelude(
             context, PreludeServices(peers.repo, peers.gate, tests, peers.toolbox), warm_start=warm_start
         )
-        integrator = Integrator(MergeRecords(merger, DecisionLog(layout.merges, clock)), peers.repo, checks, resolver)
-        judge = Judge(recorded(services.judge_completion, self._notebook, UsageSource.JUDGE), layout.judge, clock)
-        widening = Widening(peers.toolbox, self._roster, progress.policy)
-        similarity = BranchSimilarity(peers.repo, self._roster)
-        profiler = IntegrationProfiler(peers.toolbox, tests, self._notebook, clock)
-        events = SessionEvents(self._notebook, self._decisions, profiler, peers.toolbox, settings.workload.tp)
-        steering = Steering(
-            judge,
-            settings.judge_interval_seconds,
-            progress,
-            dashboard,
-            widening,
-            similarity,
-            events,
-            peers.lifecycle,
+        self._integrator = Integrator(
+            MergeRecords(merger, DecisionLog(layout.merges, clock)), peers.repo, checks, resolver
         )
-        self._explorer = Explorer(context, self._branches, integrator, steering)
+        self._judge = Judge(recorded(services.judge_completion, self._notebook, UsageSource.JUDGE), layout.judge, clock)
+        self._similarity = BranchSimilarity(peers.repo, self._roster)
+        profiler = IntegrationProfiler(peers.toolbox, tests, self._notebook, clock)
+        self._events = SessionEvents(self._notebook, self._decisions, profiler, peers.toolbox, settings.workload.tp)
         self._selector = FinalSelector(checks, settings.workload)
-        sources = ExportSources(self._notebook, peers.repo, blobs, dashboard)
-        closing = SessionExports(layout, sources, metric, budget, kb_client=services.recipe_kb)
-        self._closer = Closer(layout, self._stopper, closing, clock)
         self._signals = StopSignals()
         self._in_final = False
 
@@ -301,13 +303,14 @@ class Session:
             longest_root_test = await self._prelude.measure_baseline(prelude.root_commit)
         except PreludeFailed as exc:
             return SessionOutcome(SessionStopReason.PRELUDE_FAILED, None, None, str(exc))
+        frontier = await self._choose_frontier()
         sockets = await asyncio.to_thread(socket_versions)
         await self._notebook.write_manifest_fingerprint(
             ManifestFingerprint(
                 activity=self._layout.session_id,
                 sockets=sockets,
                 prompt_versions=prompt_versions(),
-                policy_versions=POLICY_VERSIONS,
+                policy_versions={**POLICY_VERSIONS, FRONTIER_POLICY_KEY: frontier.label},
             )
         )
         deadlines = budget.phases_after_prelude(self._clock.now(), longest_root_test)
@@ -323,7 +326,7 @@ class Session:
             prelude.child_gpu_seconds_upper_bound,
             self._settings.user_directions,
         )
-        reason = await self._explorer.run(window)
+        reason = await self._explorer(frontier).run(window)
         if reason is SessionStopReason.NO_MEASUREMENT_CARDS:
             await self._stopper.end_exploration(reason)
             return SessionOutcome(reason, None, None, NO_CARDS_LEFT)
@@ -334,6 +337,56 @@ class Session:
         final = await self._selector.select(candidates)
         self._decisions.record(Decision(DecisionKind.FINAL, final.reason, detail={"chosen": encode(final.chosen)}))
         return SessionOutcome(reason, final, None, "")
+
+    async def _choose_frontier(self) -> PolicyChoice:
+        """The frontier policy the session scores with from here on, recorded as a scheduler decision: the
+        calibration's choice for the profile PRELUDE recorded, or the defaults under ``--frontier-policy default``."""
+
+        defaults = self._frontier_policy
+        if self._settings.frontier_policy is FrontierPolicyMode.DEFAULT:
+            choice = PolicyChoice(defaults, DEFAULT_POLICY, FORCED_DEFAULT_EVIDENCE)
+        else:
+            snapshot = await self._notebook.snapshot()
+            choice = await asyncio.to_thread(session_frontier_policy, snapshot, self._history, defaults)
+        self._frontier_policy = choice.policy
+        self._decisions.record(
+            Decision(
+                DecisionKind.PRELUDE, "frontier policy", detail={"label": choice.label, "evidence": choice.evidence}
+            )
+        )
+        return choice
+
+    def _scoring(self) -> FrontierScoring:
+        return session_frontier(
+            self._notebook,
+            self._metric,
+            log_path=self._layout.reports / FRONTIER_LOG,
+            history=self._history,
+            policy=self._frontier_policy,
+        )
+
+    def _dashboard(self, scoring: FrontierScoring) -> SessionDashboard:
+        return SessionDashboard(self._notebook, scoring, self._toolbox, self._metric, self._layout.dashboard)
+
+    def _explorer(self, frontier: PolicyChoice) -> Explorer:
+        scoring = self._scoring()
+        steering = Steering(
+            self._judge,
+            self._settings.judge_interval_seconds,
+            scoring,
+            self._dashboard(scoring),
+            Widening(self._toolbox, self._roster, scoring.policy),
+            self._similarity,
+            self._events,
+            self._lifecycle,
+            frontier,
+        )
+        return Explorer(self._context, self._branches, self._integrator, steering)
+
+    def _closer(self) -> Closer:
+        sources = ExportSources(self._notebook, self._repo, self._blobs, self._dashboard(self._scoring()))
+        closing = SessionExports(self._layout, sources, self._metric, self._budget_seconds, kb_client=self._recipe_kb)
+        return Closer(self._layout, self._stopper, closing, self._clock)
 
     async def _root_session(self, budget: SessionBudget, hard_stop: HardStop) -> PreludeResult:
         """PRELUDE's first step: the root commit and the warm-start leads every specialist is briefed on, and the
@@ -367,7 +420,8 @@ class Session:
         if ending.stop_reason is SessionStopReason.ABORTED:
             hard_stop.bring_forward()
         close_by = hard_stop.at
-        closing = asyncio.ensure_future(self._closer.close(ending.stop_reason, ending.final, ending.error, close_by))
+        closer = self._closer()
+        closing = asyncio.ensure_future(closer.close(ending.stop_reason, ending.final, ending.error, close_by))
         cut = asyncio.ensure_future(self._cut(hard_stop, close_by))
         try:
             await asyncio.wait({closing, cut}, return_when=asyncio.FIRST_COMPLETED)
@@ -377,7 +431,7 @@ class Session:
             closing.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await closing
-            return await self._cut_short(ending)
+            return await self._cut_short(ending, closer)
         report = closing.result()
         if not report.stop.clean:
             logger.error(
@@ -400,7 +454,7 @@ class Session:
         with contextlib.suppress(asyncio.TimeoutError):
             await self._clock.wait_for(self._signals.wait_second(), until - self._clock.now())
 
-    async def _cut_short(self, ending: SessionOutcome) -> SessionOutcome:
+    async def _cut_short(self, ending: SessionOutcome, closer: Closer) -> SessionOutcome:
         """CLOSE abandoned after a stop signal: release the toolbox and every registered process, and report what is
         still alive."""
 
@@ -408,7 +462,7 @@ class Session:
         error = "; ".join(filter(None, (ending.error, CUT_SHORT)))
         stop = StopReport(await self._processes.leftovers(), None, (CUT_SHORT, *released))
         report = CloseReport(ending.stop_reason, ending.final, None, stop, error)
-        self._closer.write_report(report)
+        closer.write_report(report)
         logger.error("%s; the toolbox was released and every registered process killed", CUT_SHORT)
         return replace(ending, close=report, error=error)
 
@@ -449,6 +503,8 @@ def code_version() -> CodeVersion:
 
 __all__ = [
     "COMPLETED_REASONS",
+    "FORCED_DEFAULT_EVIDENCE",
+    "FRONTIER_POLICY_KEY",
     "NO_CARDS_LEFT",
     "CodeVersion",
     "Session",

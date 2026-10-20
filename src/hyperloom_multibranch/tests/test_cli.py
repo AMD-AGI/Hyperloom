@@ -32,7 +32,13 @@ from hyperloom_multibranch.scheduling import local_peers
 from hyperloom_multibranch.scheduling.local_peers import AGENTX_ENV
 from hyperloom_multibranch.scheduling.peers import PeerFactory
 from hyperloom_multibranch.scheduling.roster import RosterCaps
-from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, RunSettings, Workload
+from hyperloom_multibranch.scheduling.settings import (
+    FrontierPolicyMode,
+    InferenceXShape,
+    KernelOptimizer,
+    RunSettings,
+    Workload,
+)
 
 #: What the session's launcher sets to name the image the session runs on.
 IMAGE_VARS = ("HYPERLOOM_ACTIVE_IMAGE_REF", "HYPERLOOM_ACTIVE_IMAGE_DIGEST")
@@ -94,6 +100,11 @@ def test_run_defaults() -> None:
         caps=RosterCaps(max_branches=4, max_k_per_branch=2, max_parallel_tests=4),
         judge_interval_seconds=600.0,
     )
+    assert _settings().frontier_policy is FrontierPolicyMode.AUTO
+
+
+def test_frontier_policy_can_keep_the_defaults() -> None:
+    assert _settings("--frontier-policy", "default").frontier_policy is FrontierPolicyMode.DEFAULT
 
 
 def test_run_options_override_the_defaults() -> None:
@@ -148,6 +159,7 @@ def test_parallel_tests_default_fills_the_machine() -> None:
         ["run", *WORKLOAD_ARGS, "--gpu-type", "mi325x"],
         ["run", *WORKLOAD_ARGS, "--gpu-type", "mi308x"],
         ["run", *WORKLOAD_ARGS, "--kernel-optimizer", "triton"],
+        ["run", *WORKLOAD_ARGS, "--frontier-policy", "bandit"],
         ["run", *_without(WORKLOAD_ARGS, "--workload")],
         ["run", *WORKLOAD_ARGS, "--workload", "sharegpt"],
         ["run", *_without(WORKLOAD_ARGS, "--isl")],

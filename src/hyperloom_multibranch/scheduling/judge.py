@@ -33,6 +33,7 @@ from hyperloom_multibranch.contracts.lifecycle import SpecialistStatus
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.records import BranchProgress, PendingCandidate, TestRecord
 from hyperloom_multibranch.notebook import STALL_TESTS
+from hyperloom_multibranch.notebook.rsi.calibration import PolicyChoice
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.events import MB_BIG_GAIN_BARS, MB_BOTTLENECK_SHIFT_PP, SessionEvent
 from hyperloom_multibranch.scheduling.forks import PendingBranch
@@ -75,7 +76,8 @@ Spend the budget where the expected gain is highest: a branch whose frontier exp
 observing a slow-paying direction is a candidate to stop or to lower K; keep K where the gain is high.
 A branch's basis says what its expected gain rests on: its own trend, a prior from similar past sessions, the floor
 of a direction still being observed, the floor of a branch too new to have a trend, or the roofline headroom that
-capped it; trust a measured trend over a floor.
+capped it; trust a measured trend over a floor. frontier_policy names the scoring's variation and the evidence it was
+chosen on: default, or the one that ranked the branches of similar past sessions better.
 A branch's judged_since_commit counts its tests judged since its last commit (since it opened, before any). When it
 reaches {STALL_TESTS}, its specialist is asked to read its brief again and reconsider its direction: a branch whose
 count runs well past that is stalling, a candidate to stop or to lower K unless its frontier still expects a gain.
@@ -180,6 +182,7 @@ class JudgeView:
     maps a running specialist branch to what the specialist runtime knows of its specialist; a branch whose
     specialist's state is not known is not in it. ``held`` maps each branch the judge may neither stop nor lower the
     K of to why, as :func:`held_branches` finds them when the view is built; it is what the prompt shows.
+    ``frontier_policy`` is the policy the frontier scores rest on, with its label and evidence.
     """
 
     now: float
@@ -208,6 +211,7 @@ class JudgeView:
     scheduler_llm_usd: float
     specialists: Mapping[str, SpecialistStatus]
     held: Mapping[str, HoldReason]
+    frontier_policy: PolicyChoice
 
 
 def held_branches(
@@ -367,6 +371,7 @@ def render_prompt(view: JudgeView) -> str:
     progress = {row.branch: row for row in view.progress}
     state = {
         "metric": view.metric,
+        "frontier_policy": {"label": view.frontier_policy.label, "evidence": view.frontier_policy.evidence},
         "opening": view.opening,
         "caps": asdict(view.caps),
         "free_branch_slots": view.free_slots,

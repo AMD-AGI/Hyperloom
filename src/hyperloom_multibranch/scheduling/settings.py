@@ -31,6 +31,14 @@ class KernelOptimizer(str, Enum):
     GEAK = "geak"
 
 
+class FrontierPolicyMode(str, Enum):
+    """How a session picks the frontier policy it scores with once PRELUDE recorded its profile: the variation the
+    calibration over similar archived sessions chooses (``auto``), or always the defaults."""
+
+    AUTO = "auto"
+    DEFAULT = "default"
+
+
 @dataclass(frozen=True)
 class InferenceXShape:
     """The synthetic requests an InferenceX workload sends: input and output sequence lengths."""
@@ -97,7 +105,7 @@ class RunSettings:
     the session's tests may use and ``max_llm_usd`` the dollars the session's recorded LLM calls, the specialists'
     and the judge's and patch resolver's, may cost; 0 means no limit for any of them. ``reuse_prelude`` is the earlier
     PRELUDE the run roots on, ``None`` when it runs a child of its own. ``user_directions`` are the directions the user
-    wrote, each opening one branch at the root ahead of the opening batch, within the branch cap."""
+    wrote, each opening one branch at the root ahead of the opening batch, within the branch cap. ``frontier_policy`` says how the frontier policy is chosen."""
 
     workload: Workload
     max_hours: float
@@ -107,10 +115,12 @@ class RunSettings:
     judge_interval_seconds: float
     reuse_prelude: ReusedPrelude | None = None
     user_directions: tuple[str, ...] = ()
+    frontier_policy: FrontierPolicyMode = FrontierPolicyMode.AUTO
 
 
 __all__ = [
     "SWEEP_FACTORS",
+    "FrontierPolicyMode",
     "InferenceXShape",
     "KernelOptimizer",
     "ReusedPrelude",

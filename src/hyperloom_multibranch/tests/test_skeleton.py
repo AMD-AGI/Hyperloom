@@ -69,6 +69,9 @@ from hyperloom_multibranch.contracts.toolbox import CancelOutcome, MeasurementCa
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.notebook.rsi.briefing import SessionBriefs
+from hyperloom_multibranch.notebook.rsi.calibration import DEFAULT_POLICY, PolicyChoice
+from hyperloom_multibranch.notebook.rsi.frontier import FrontierPolicy
+from hyperloom_multibranch.notebook.rsi.session import FRONTIER_LOG
 from hyperloom_multibranch.notebook.tests.factories import delta, intent, request
 from hyperloom_multibranch.rulegate.critic import (
     CriticReply,
@@ -94,8 +97,11 @@ from hyperloom_multibranch.scheduling.explore import EXPLORE_TICK_SECONDS, FORK_
 from hyperloom_multibranch.scheduling.final import INTEGRATION_LABEL, PRIMARY_POINT_ONLY
 from hyperloom_multibranch.scheduling.judge import JUDGE_PROMPT_VERSION, HoldReason
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
+from hyperloom_multibranch.scheduling import lifecycle
 from hyperloom_multibranch.scheduling.lifecycle import (
     CUT_SHORT,
+    FORCED_DEFAULT_EVIDENCE,
+    FRONTIER_POLICY_KEY,
     NO_CARDS_LEFT,
     Session,
     SessionHost,
@@ -107,7 +113,13 @@ from hyperloom_multibranch.scheduling.llm import CompletionFailed, CompletionRep
 from hyperloom_multibranch.scheduling.peers import Peers, PeerSetup
 from hyperloom_multibranch.scheduling.policy import SCHEDULING_POLICY, policy_version
 from hyperloom_multibranch.scheduling.roster import BranchOrigin, BranchStatus, RosterCaps, StopCause
-from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, RunSettings, Workload
+from hyperloom_multibranch.scheduling.settings import (
+    FrontierPolicyMode,
+    InferenceXShape,
+    KernelOptimizer,
+    RunSettings,
+    Workload,
+)
 from hyperloom_multibranch.scheduling.stops import (
     STOP_OVERRAN,
     TOOLBOX_CLOSE_OVERRAN,
@@ -188,6 +200,10 @@ FIX_REASONS = tuple(FIXES)
 FIX_CASE = AttachmentRef(FIX_CASE_ID, "dir", "a" * 64)
 #: An agent CLI as the AI work socket starts one: leading a session of its own.
 AGENT_ARGV = ("sleep", "600")
+#: The frontier policy an injected calibration chooses: a trend window longer than any start-up, no new-branch floor.
+CHOSEN_WINDOW_SECONDS = 4321.0
+CHOSEN_LABEL = "no new-branch floor"
+CHOSEN_EVIDENCE = "no new-branch floor: rank correlation 0.6 against 0.4 for the defaults"
 #: How long each FINAL test of a slow toolbox runs: longer than the whole budget.
 FINAL_TEST_SECONDS = 2 * SETTINGS.max_hours * 3600
 
@@ -435,6 +451,7 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
     [fingerprint] = await observer.manifest_fingerprints()
     assert fingerprint.policy_versions["judge_prompt"] == JUDGE_PROMPT_VERSION
     assert fingerprint.policy_versions["scheduling"] == policy_version(SCHEDULING_POLICY)
+    assert fingerprint.policy_versions[FRONTIER_POLICY_KEY] == DEFAULT_POLICY
     [policy] = [row for row in _decisions(stage) if row["kind"] == "prelude" and row["reason"] == "scheduling policy"]
     assert policy["detail"] == {"values": dict(SCHEDULING_POLICY)}
     assert dict(fingerprint.sockets) == socket_versions()
@@ -586,6 +603,82 @@ async def test_the_specialists_are_briefed_on_the_warm_start_leads_prelude_read_
     assert stage.recipe_kb.searched
     replay = await stage.briefs.for_branch(INTEGRATION_BRANCH).warm_replay(lead.canonical_id)
     assert replay is not None and replay.parent_commit == await stage.repo.head(INTEGRATION_BRANCH)
+
+
+def _choosing(monkeypatch: pytest.MonkeyPatch, choice: Callable[[FrontierPolicy], PolicyChoice]) -> list[object]:
+    """Have the session's frontier policy be ``choice`` of the defaults; the returned list gets each call's
+    snapshot and defaults."""
+
+    calls: list[object] = []
+
+    def choose(snapshot: NotebookSnapshot, history: Sequence[object], defaults: FrontierPolicy) -> PolicyChoice:
+        calls.append((snapshot, defaults))
+        return choice(defaults)
+
+    monkeypatch.setattr(lifecycle, "session_frontier_policy", choose)
+    return calls
+
+
+def _frontier_lines(stage: Stage) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in (stage.layout.reports / FRONTIER_LOG).read_text().splitlines()]
+
+
+async def _frontier_fingerprint(stage: Stage) -> str:
+    [fingerprint] = await stage.handle(Role.OBSERVER).manifest_fingerprints()
+    return fingerprint.policy_versions[FRONTIER_POLICY_KEY]
+
+
+async def test_a_session_scores_its_frontier_with_the_policy_the_calibration_chooses_after_prelude(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def chosen(defaults: FrontierPolicy) -> PolicyChoice:
+        policy = replace(defaults, window_seconds=CHOSEN_WINDOW_SECONDS, new_branch_floor_pct=0.0)
+        return PolicyChoice(policy, CHOSEN_LABEL, CHOSEN_EVIDENCE)
+
+    calls = _choosing(monkeypatch, chosen)
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    _script(stage)
+
+    outcome = await stage.run()
+
+    assert outcome.exit_code == 0
+    [(snapshot, defaults)] = calls
+    assert isinstance(snapshot, NotebookSnapshot) and snapshot.profile is not None
+    assert defaults == FrontierPolicy.for_budget(GRADED_OUTPUT, SETTINGS.max_hours * MB_SECONDS_PER_HOUR)
+    assert await _frontier_fingerprint(stage) == CHOSEN_LABEL
+    [decided] = [row for row in _decisions(stage) if row["reason"] == "frontier policy"]
+    assert decided["detail"] == {"label": CHOSEN_LABEL, "evidence": CHOSEN_EVIDENCE}
+    states = [_judge_state(prompt) for prompt in _judge_prompts(stage)]
+    assert states and all(
+        state["frontier_policy"] == {"label": CHOSEN_LABEL, "evidence": CHOSEN_EVIDENCE} for state in states
+    )
+    assert all(state["min_useful_seconds"] == round(CHOSEN_WINDOW_SECONDS) for state in states)
+    lines = _frontier_lines(stage)
+    assert lines and all(
+        (line["new_branch_floor_pct"], line["window_seconds"]) == (0.0, CHOSEN_WINDOW_SECONDS) for line in lines
+    )
+
+
+async def test_frontier_policy_default_keeps_the_defaults_without_asking_the_calibration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _choosing(monkeypatch, lambda defaults: PolicyChoice(defaults, CHOSEN_LABEL, CHOSEN_EVIDENCE))
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.settings = replace(SETTINGS, frontier_policy=FrontierPolicyMode.DEFAULT)
+    _script(stage)
+
+    outcome = await stage.run()
+
+    assert outcome.exit_code == 0 and calls == []
+    assert await _frontier_fingerprint(stage) == DEFAULT_POLICY
+    [decided] = [row for row in _decisions(stage) if row["reason"] == "frontier policy"]
+    assert decided["detail"] == {"label": DEFAULT_POLICY, "evidence": FORCED_DEFAULT_EVIDENCE}
+    assert _judge_state(_judge_prompts(stage)[0])["frontier_policy"] == {
+        "label": DEFAULT_POLICY,
+        "evidence": FORCED_DEFAULT_EVIDENCE,
+    }
+    defaults = FrontierPolicy.for_budget(GRADED_OUTPUT, SETTINGS.max_hours * MB_SECONDS_PER_HOUR)
+    assert all(line["new_branch_floor_pct"] == defaults.new_branch_floor_pct for line in _frontier_lines(stage))
 
 
 async def test_a_failed_prelude_skips_to_close(tmp_path: Path) -> None:
