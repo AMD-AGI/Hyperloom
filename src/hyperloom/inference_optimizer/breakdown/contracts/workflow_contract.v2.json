@@ -1,6 +1,6 @@
 {
   "workflow_contract_version": "hyperloom.workflow_evaluation.v2",
-  "sbd_schema_version": "hyperloom.session_breakdown.v7.0",
+  "sbd_schema_version": "hyperloom.session_breakdown.v6.1",
   "canonicalization": "UTF-8 JSON with sorted keys, compact separators, and ensure_ascii=false; SHA-256 hex digest",
   "vocabularies": {
     "phases": [
