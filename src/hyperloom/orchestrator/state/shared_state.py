@@ -2010,7 +2010,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
                     disk["path"],
                 )
         steady_state_trace = result.get("steady_state_trace") or artifacts.get("tracelens_steady_state_trace") or ""
-        summary, kernel_roofline, reusable_ids = self._build_hot_kernel_summaries(result, kernel_roofline_path)
+        summary, kernel_roofline, reusable_ids = self._build_hot_kernel_summaries(result)
 
         # Project skipped (non-routable) candidates so the LLM sees unoptimizable operators.
         skipped = result.get("skipped_kernels") or []
@@ -2111,23 +2111,12 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     def _build_hot_kernel_summaries(
         self,
         result: dict[str, Any],
-        kernel_roofline_path: str,
     ) -> "tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]":
-        """Build ``(summary, kernel_roofline, reusable_ids)`` from the top-N hot kernels, merging the optional per-kernel rocprof roofline sidecar."""
+        """Build ``(summary, kernel_roofline, reusable_ids)`` from the top-N hot kernels."""
         hot = result.get("hot_kernels") or []
         summary: list[dict[str, Any]] = []
         kernel_roofline: list[dict[str, Any]] = []
         reusable_ids: list[str] = []
-        rocprof_by_kernel_id: dict[str, Any] = {}
-        if kernel_roofline_path:
-            try:
-                roofline_payload = json.loads(Path(kernel_roofline_path).read_text(encoding="utf-8"))
-                for row in roofline_payload.get("kernels") or []:
-                    if not isinstance(row, dict) or not row.get("kernel_id"):
-                        continue
-                    rocprof_by_kernel_id[str(row["kernel_id"])] = row.get("rocprof_roofline")
-            except (OSError, ValueError, AttributeError):
-                rocprof_by_kernel_id = {}
         for entry in hot[:_TRACE_HOT_KERNEL_TOP_N] if isinstance(hot, list) else []:
             if not isinstance(entry, dict):
                 continue
@@ -2139,9 +2128,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             efficiency_percent = entry.get("efficiency_percent")
             if efficiency_percent is None:
                 efficiency_percent = entry.get("efficiency_pct")
-            rocprof_roofline = entry.get("rocprof_roofline")
-            if rocprof_roofline is None and kid is not None:
-                rocprof_roofline = rocprof_by_kernel_id.get(str(kid))
             summary_entry = {
                 "kernel_id": kid,
                 "name": entry.get("name"),
@@ -2159,7 +2145,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
                 "bandwidth_utilization_pct": entry.get("bandwidth_utilization_pct"),
                 "suggestion": entry.get("suggestion") or "",
                 "roofline_name": entry.get("roofline_name"),
-                "rocprof_roofline": rocprof_roofline,
                 "source_file": entry.get("source_file"),
                 "reusable_native_kernel": reusable,
                 "kernel_contract": entry.get("kernel_contract"),
@@ -2188,7 +2173,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
                     "bandwidth_utilization_pct",
                     "suggestion",
                     "roofline_name",
-                    "rocprof_roofline",
                 )
             ):
                 kernel_roofline.append(dict(summary_entry))
