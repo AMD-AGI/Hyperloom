@@ -54,8 +54,17 @@ class _Attribution:
         return [str(item).strip() for item in items if str(item).strip()]
 
     def dedup_keys(self) -> tuple[str, str]:
-        """The upstream PR url and head sha the ledger dedups on."""
-        return self.text("fa_pr_url"), self.text("fa_pr_sha")
+        """The upstream PR url and head sha the ledger dedups on, as this proposal claims them.
+
+        Unlike the descriptive fields, the identity is never taken from the
+        payload: a payload-level ``fa_pr_*`` belongs to whichever proposal put
+        it there, so standing it in for one this proposal omits would file the
+        lesson under another patch's PR.
+        """
+        return (
+            str(self.proposal.get("fa_pr_url") or "").strip(),
+            str(self.proposal.get("fa_pr_sha") or "").strip(),
+        )
 
     def accuracy_delta_pct(self, measured: float | None) -> float:
         """The measured accuracy delta, or the one the proposal declared when nothing was measured."""

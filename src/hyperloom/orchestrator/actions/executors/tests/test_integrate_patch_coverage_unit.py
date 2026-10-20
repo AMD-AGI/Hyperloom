@@ -684,6 +684,34 @@ async def test_kb_writeback_skips_when_no_pr_keys(tmp_path):
     await ex._maybe_write_framework_kb_record(ip.KbLesson("integrated", 1.0), done_payload=payload, extra={})
 
 
+@pytest.mark.asyncio
+async def test_kb_writeback_ignores_payload_level_pr_identity(tmp_path, monkeypatch):
+    """A payload-level ``fa_pr_*`` is another proposal's identity, not this one's.
+
+    The proposal that carried the patch declares no PR, so the attempt has no
+    dedup key and must leave no lesson -- filing it under the payload's key
+    would merge this patch's outcome into an unrelated PR's history.
+    """
+    writes: list[Any] = []
+
+    async def _fake_write(fields):
+        writes.append(fields)
+        return "/tmp/lessons.jsonl"
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.knowledge.kb_writeback.write_framework_record",
+        _fake_write,
+    )
+    ex = IntegratePatchExecutor(session_dir=tmp_path)
+    payload = {
+        "fa_pr_url": "https://example/pr/other",
+        "fa_pr_sha": "cafebabe",
+        "proposal_set": [{"provenance": "specialist:serving:framework"}],
+    }
+    await ex._maybe_write_framework_kb_record(ip.KbLesson("integrated", 1.0), done_payload=payload, extra={})
+    assert writes == []
+
+
 def test_find_framework_proposal():
     assert IntegratePatchExecutor._find_framework_proposal(None) is None
     assert IntegratePatchExecutor._find_framework_proposal({"proposal_set": "x"}) is None
