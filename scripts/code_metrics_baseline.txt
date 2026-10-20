@@ -191,7 +191,6 @@ cognitive-complexity src/kernelforge/gemm_tune/tune_robustness.py::run_isolated 
 cognitive-complexity src/kernelforge/gemm_tune/tuners/_aiter_dense_common.py::_augment_with_config_m_values 33
 cognitive-complexity src/kernelforge/kernel_rewrite_controller/opportunity_agent.py::OpportunityAnalysisAgent.run 34
 cognitive-complexity src/kernelforge/loop/analysis_evidence.py::AnalysisEvidenceMixin._apply_last_analysis_evidence 46
-cognitive-complexity src/kernelforge/loop/analysis_runtime.py::AnalysisRuntimeMixin._resolve_analysis_context 41
 cognitive-complexity src/kernelforge/loop/archive.py::CandidateArchive._reconcile_storage 32
 cognitive-complexity src/kernelforge/loop/external_artifacts.py::ExternalArtifactTransaction._copy_tree 33
 cognitive-complexity src/kernelforge/loop/insession_gate.py::_python_command_payloads 42
@@ -202,7 +201,6 @@ cognitive-complexity src/kernelforge/loop/runner.py::IterationLoop._inspect_pend
 cognitive-complexity src/kernelforge/loop/runner.py::IterationLoop._record_iteration_outcome 40
 cognitive-complexity src/kernelforge/loop/runner.py::IterationLoop._run_locked 39
 cognitive-complexity src/kernelforge/loop/runner.py::IterationLoop.run_one_iteration 39
-cognitive-complexity src/kernelforge/loop/task_preflight.py::_preflight_async 41
 cognitive-complexity src/kernelforge/loop/task_preparer.py::prepare_task 37
 cognitive-complexity src/kernelforge/orchestrator/agent.py::make_agent_fn 72
 cognitive-complexity src/kernelforge/orchestrator/analysis.py::AnalysisAgentService._write_artifact_catalog 32
@@ -774,10 +772,8 @@ function-lines src/kernelforge/kernel_rewrite_controller/scheduler.py::dispatch_
 function-lines src/kernelforge/kernel_rewrite_controller/task.py::parse_task_payload 113
 function-lines src/kernelforge/knowledge/kb_store/reader.py::_read_top_solutions_impl 113
 function-lines src/kernelforge/loop/analysis_evidence.py::AnalysisEvidenceMixin._apply_last_analysis_evidence 160
-function-lines src/kernelforge/loop/analysis_evidence.py::AnalysisEvidenceMixin._build_orchestration_context 160
 function-lines src/kernelforge/loop/analysis_evidence.py::AnalysisEvidenceMixin._render_analysis_evidence_for_implementer 84
 function-lines src/kernelforge/loop/analysis_refresh_policy.py::decide_analysis_refresh 85
-function-lines src/kernelforge/loop/analysis_runtime.py::AnalysisRuntimeMixin._resolve_analysis_context 205
 function-lines src/kernelforge/loop/archive.py::CandidateArchive.render_digest 84
 function-lines src/kernelforge/loop/campaign_config.py::create_campaign_config 119
 function-lines src/kernelforge/loop/campaign_setup.py::resolve_campaign 105
@@ -786,7 +782,6 @@ function-lines src/kernelforge/loop/insession_gate.py::InSessionGate._on_stop 18
 function-lines src/kernelforge/loop/knowledge_integration.py::_try_apply_candidate 126
 function-lines src/kernelforge/loop/knowledge_integration.py::kb_warmstart 234
 function-lines src/kernelforge/loop/lessons.py::build_summary_prompt 111
-function-lines src/kernelforge/loop/recovery.py::publish_warm_start_recovery 150
 function-lines src/kernelforge/loop/reporting.py::BestResultPublisher.publish 161
 function-lines src/kernelforge/loop/runner.py::IterationLoop.__init__ 100
 function-lines src/kernelforge/loop/runner.py::IterationLoop._adopt_validated_warm_start 82
@@ -797,7 +792,6 @@ function-lines src/kernelforge/loop/runner.py::IterationLoop._resolve_keep_sigma
 function-lines src/kernelforge/loop/runner.py::IterationLoop._run_locked 256
 function-lines src/kernelforge/loop/runner.py::IterationLoop.run_one_iteration 206
 function-lines src/kernelforge/loop/task_preflight.py::_count_graph_replays 85
-function-lines src/kernelforge/loop/task_preflight.py::_preflight_async 195
 function-lines src/kernelforge/loop/task_preparer.py::prepare_task 340
 function-lines src/kernelforge/orchestrator/agent.py::make_agent_fn 312
 function-lines src/kernelforge/orchestrator/agent.py::make_agent_fn.agent_fn 194
