@@ -541,6 +541,16 @@ class TestScriptableLatencyRooflineSidecar:
         assert e2e_ms == pytest.approx(1350.0, abs=1.0)
         assert ideal_ms == pytest.approx(611.192, abs=0.01)
 
+    def test_analytic_ceiling_takes_priority_over_summed_kernels(self, tmp_path):
+        state = self._make_state(tmp_path)
+        sidecar = self._write_sidecar(tmp_path)
+        sidecar.write_text(
+            json.dumps({"analytic_ceiling": {"ideal_ms": 400.0}, "totals": {"sigma_ideal_roofline_us": 611192.0}}),
+            encoding="utf-8",
+        )
+        _e2e, ideal_ms = state._scriptable_latency_roofline("xdit", 0.740741, "")
+        assert ideal_ms == 400.0
+
     def test_missing_sidecar_yields_zero_ideal(self, tmp_path):
         state = self._make_state(tmp_path)
         e2e_ms, ideal_ms = state._scriptable_latency_roofline("xdit", 0.740741, "")
