@@ -675,6 +675,117 @@ async def test_close_sequencer_records_its_own_verdict_and_artifacts(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("pending", "expected", "warning_marker"),
+    [
+        (
+            {
+                "status": "awaiting_rebench",
+                "self_reported_gain_pct": 12.5,
+                "self_reported_tput": 1125.0,
+                "self_reported_basis": "geak_harness",
+            },
+            {
+                "revalidation_pending": True,
+                "status": "awaiting_rebench",
+                "revalidation_error": None,
+                "revalidation_error_class": None,
+                "self_reported_gain_pct": 12.5,
+                "self_reported_tput": 1125.0,
+                "self_reported_basis": "geak_harness",
+            },
+            "AWAITING",
+        ),
+        (
+            {
+                "status": "rebench_cancelled",
+                "revalidation_error": "close_sequence",
+                "self_reported_gain_pct": 12.5,
+                "self_reported_tput": 1125.0,
+                "self_reported_basis": "geak_harness",
+            },
+            {
+                "revalidation_pending": False,
+                "status": "rebench_cancelled",
+                "revalidation_error": "close_sequence",
+                "revalidation_error_class": None,
+                "self_reported_gain_pct": 12.5,
+                "self_reported_tput": 1125.0,
+                "self_reported_basis": "geak_harness",
+            },
+            "DROPPED",
+        ),
+        (
+            {
+                "status": "rebench_declined",
+                "revalidation_error": "no_slot_free",
+                "self_reported_gain_pct": 12.5,
+                "self_reported_tput": 1125.0,
+                "self_reported_basis": "geak_harness",
+            },
+            {
+                "revalidation_pending": False,
+                "status": "rebench_declined",
+                "revalidation_error": "no_slot_free",
+                "revalidation_error_class": None,
+                "self_reported_gain_pct": 12.5,
+                "self_reported_tput": 1125.0,
+                "self_reported_basis": "geak_harness",
+            },
+            "DROPPED",
+        ),
+        (
+            {
+                "status": "overlay_unloadable",
+                "revalidation_error": "geak_overlay_unloadable",
+                "self_reported_gain_pct": 12.5,
+                "self_reported_tput": 1125.0,
+                "self_reported_basis": "geak_harness",
+            },
+            {
+                "revalidation_pending": False,
+                "status": "overlay_unloadable",
+                "revalidation_error": "geak_overlay_unloadable",
+                "revalidation_error_class": None,
+                "self_reported_gain_pct": 12.5,
+                "self_reported_tput": 1125.0,
+                "self_reported_basis": "geak_harness",
+            },
+            "DROPPED",
+        ),
+    ],
+)
+async def test_close_sequencer_records_the_unsettled_geak_candidate_the_final_report_flags(
+    coord, tmp_path, monkeypatch, pending, expected, warning_marker
+):
+    from hyperloom.inference_optimizer.breakdown.reporters._renderers.final import render
+
+    monkeypatch.setenv("HYPERLOOM_SESSION_PACKAGE_DEST", str(tmp_path / "session-packages"))
+    coord.shared_state.phase_history = [_close_phase_history_row()]
+    coord.shared_state.stop_reason = "sweep_done"
+    coord.shared_state.geak_pending = dict(pending)
+
+    await coord.phase_close.on_enter_close(Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}))
+
+    close = collect_v6_close([], recorded=assemble_parts(tmp_path, warnings=[])["close"])
+    assert close["geak_candidate"] == expected
+    section = render({"outcome": {"final": {}, "baseline": {}, "validation": {}}, "close": close, "timeline": []})
+    assert any(warning_marker in fact for fact in section.key_facts)
+
+
+@pytest.mark.asyncio
+async def test_close_sequencer_records_no_geak_candidate_when_none_is_pending(coord, tmp_path, monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_SESSION_PACKAGE_DEST", str(tmp_path / "session-packages"))
+    coord.shared_state.phase_history = [_close_phase_history_row()]
+    coord.shared_state.stop_reason = "sweep_done"
+    coord.shared_state.geak_pending = {}
+
+    await coord.phase_close.on_enter_close(Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}))
+
+    assert "geak_candidate" not in collect_v6_close([], recorded=assemble_parts(tmp_path, warnings=[])["close"])
+
+
+@pytest.mark.asyncio
 async def test_close_sequencer_records_the_recipe_publication_under_close(
     coord,
     tmp_path,

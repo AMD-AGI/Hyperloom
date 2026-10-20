@@ -645,7 +645,9 @@ def assemble_enablement_ext(
             "count": len(attempts),
             # Rounds with a verdict; ``count`` includes one still in flight.
             "settled": sum(1 for row in attempts if row.get("status")),
-            "landed": sum(1 for row in attempts if str(row.get("status") or "") == ROUND_KEPT),
+            # A KEEP awaiting revalidation has not landed yet.
+            "landed": sum(1 for row in attempts if row.get("landed")),
+            "validation_pending": sum(1 for row in attempts if row.get("validation_pending")),
             "advanced": sum(1 for row in attempts if row.get("advanced")),
             "rows": attempts,
         },

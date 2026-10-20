@@ -13,6 +13,7 @@ from typing import Any
 from hyperloom.common.env import env_bool
 from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_prompt
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import GEAK_DROPPED_STATUSES
 from .attempt_audit import _AUDIT_ACTIONS
 from .phase_state import GAP_SEVERITY_RANK
 
@@ -175,7 +176,7 @@ class _RenderMixin:
         )
         if geak_pending_status == "awaiting_rebench":
             geak_pending_tag = " ⚠ geak candidate awaiting main-flow rebench — NOT in headline until validated"
-        elif geak_pending_status in {"rebench_cancelled", "rebench_unavailable"}:
+        elif geak_pending_status in GEAK_DROPPED_STATUSES:
             geak_pending_tag = f" ⚠ geak candidate dropped unvalidated ({geak_pending_status})"
         elif geak_revalidation_status in {"failed", "fallback_failed"} and not geak_in_stack:
             # A fallback rebench that also failed is the same unjudged drop; only ``no_material`` / ``no_promote`` are

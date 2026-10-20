@@ -264,6 +264,32 @@ def record_final_recipe(session_dir: Path | str | None, recipe: FinalRecipe) -> 
     _write(session_dir, {"final_recipe": recipe.block()})
 
 
+def record_geak_candidate(session_dir: Path | str | None, pending: Mapping[str, Any] | None) -> None:
+    """Record the GEAK candidate still unsettled when the session winds down.
+
+    A settled candidate clears its slot, so a non-empty ``pending`` is one
+    awaiting a rebench or dropped without one; an empty slot writes nothing.
+    """
+    slot = dict(pending or {})
+    if not slot:
+        return
+    status = str(slot.get("status") or "")
+    _write(
+        session_dir,
+        {
+            "geak_candidate": {
+                "revalidation_pending": status == "awaiting_rebench",
+                "status": status,
+                "revalidation_error": slot.get("revalidation_error") or None,
+                "revalidation_error_class": slot.get("revalidation_error_class") or None,
+                "self_reported_gain_pct": to_float(slot.get("self_reported_gain_pct")),
+                "self_reported_tput": to_float(slot.get("self_reported_tput")),
+                "self_reported_basis": slot.get("self_reported_basis"),
+            }
+        },
+    )
+
+
 @dataclass(frozen=True)
 class RooflineProgress:
     """The session's trajectory and the roofline ceiling it is measured against.
@@ -615,6 +641,7 @@ __all__ = [
     "record_close_safety_net",
     "record_close_settled",
     "record_close_step",
+    "record_geak_candidate",
     "record_roofline_progress",
     "record_write_back_opened",
     "record_write_back_settled",

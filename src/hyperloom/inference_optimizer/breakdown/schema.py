@@ -2048,15 +2048,14 @@ class V6KernelTraceAnalyzeRun(V6KernelAnalysisDetail, V6RowScope, total=False):
 class V6KernelRewriteE2E(TypedDict, total=False):
     """End-to-end integration sub-result of one kernel rewrite.
 
-    Derived at assembly from the event's ``integrate`` rows, never accepted
-    from a caller: the gate that produces it runs outside the phase that
-    produced the rewrite, so the lane has no verdict of its own to state. The
-    rows carry the full account, including the attempts this collapses; this
-    is the standing verdict, on the row it rules on.
+    Derived at assembly from the event's ``integrate`` rows (and a GEAK
+    candidate's rebench), never accepted from a caller. ``e2e_gain_pct`` is
+    Hyperloom-measured; GEAK's own figure is ``self_reported_e2e_gain_pct``.
     """
 
     integrated: bool
     e2e_gain_pct: float | None
+    self_reported_e2e_gain_pct: float | None
     validated: bool | None
     decision: str | None
     patch_path: str | None

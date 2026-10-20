@@ -279,6 +279,15 @@ class ClosePhase(CoordinatorCollaborator):
         except Exception:
             log.debug("CLOSE: roofline progress record failed", exc_info=True)
 
+    def _record_close_progress(self) -> None:
+        """Snapshot the roofline, baseline and unsettled GEAK candidate state into the close section."""
+        self._record_close_roofline_progress()
+        self._record_close_baseline_progress()
+        try:
+            _close_out.record_geak_candidate(self.session_dir, self.shared_state.geak_pending)
+        except Exception:
+            log.debug("CLOSE: geak candidate record failed", exc_info=True)
+
     def _close_stack_ledger(self) -> None:
         """Settle the stack ledger's timeline event.
 
@@ -493,8 +502,7 @@ class ClosePhase(CoordinatorCollaborator):
         # Recorded here rather than derived by the exporter: this is the first
         # moment each of these is final, and the snapshot history the exporter
         # would re-walk is capped and may have evicted what it needs.
-        self._record_close_roofline_progress()
-        self._record_close_baseline_progress()
+        self._record_close_progress()
         self._close_stack_ledger()
         # A revert leaves its adoption row standing, so what the stack ended as
         # is stated here or nowhere.

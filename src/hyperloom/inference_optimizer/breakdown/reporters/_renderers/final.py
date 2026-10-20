@@ -27,12 +27,9 @@ from ..base import (
     task_config_of,
     validation_of,
 )
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import GEAK_DROPPED_STATUSES
 from ._agentx_metrics import graded_axes_facts, render_graded_axes
 from ._invocation import render_invocation_block
-
-# ``geak_candidate.status`` values meaning the candidate was measured but its
-# revalidation never landed, so the win was abandoned rather than judged.
-_GEAK_DROPPED_STATUSES: frozenset[str] = frozenset({"rebench_cancelled", "rebench_unavailable"})
 
 # ``geak.rebench.final_status`` values with the same meaning, but settled: the
 # rebench ran and could not produce a verdict. ``no_material`` / ``no_promote``
@@ -162,7 +159,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     facts.extend(graded_axes_facts(validation.get("perf"), label="Final"))
     self_gain = candidate.get("self_reported_gain_pct")
     self_gain_str = fmt_pct(self_gain, plus=True) if isinstance(self_gain, (int, float)) else "unknown"
-    if candidate_status in _GEAK_DROPPED_STATUSES:
+    if candidate_status in GEAK_DROPPED_STATUSES:
         drop_reason = str(candidate.get("revalidation_error") or "").strip() or "reason not recorded"
         facts.append(
             f"GEAK candidate (self-reported {self_gain_str}) was DROPPED without "

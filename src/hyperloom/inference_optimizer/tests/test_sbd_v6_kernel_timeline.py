@@ -1769,3 +1769,93 @@ def test_a_verdict_with_no_failure_behind_it_carries_no_error(tmp_path):
     # Absent rather than blank: nothing failed, so there is no class to name.
     assert rebench["final_error_class"] is None
     assert rebench["final_error"] is None
+
+
+def test_a_geak_attempt_reports_the_rebench_gain_and_keeps_the_claim_apart(tmp_path):
+    recorder = _geak_recorder()
+    recorder.record_geak_attempts(
+        {
+            "kernels": [
+                {
+                    "kernel_id": "k001",
+                    "dispatch": {"dispatched": True},
+                    "e2e": {"decision": "KEEP", "integrated": True, "validated": True, "e2e_gain_pct": 40.799},
+                }
+            ]
+        }
+    )
+    recorder.record_geak_claim({}, specs=[{"short_name": "k001", "kernel_id": "k001", "e2e_delta_pct": 40.799}])
+    _geak_rebench(recorder, "geak-rb-1", REBENCH_VALIDATED, base_tput=1000.0, measured_tput=1107.132)
+    recorder.finish(tput_after=1107.132)
+
+    row = _kernel_events(tmp_path)[0]["ext"]["attempts"][0]
+    assert row["settled_by"] == "rebench"
+    assert row["gain_pct"] == 10.7132
+    assert row["e2e"] == {
+        "integrated": True,
+        "e2e_gain_pct": 10.7132,
+        "validated": True,
+        "decision": "KEEP",
+        "self_reported_e2e_gain_pct": 40.799,
+        "rejection_reason": None,
+        "revalidation_measured_tput": None,
+        "revalidation_current_best_tput": None,
+        "revalidation_provenance": None,
+        "patch_path": None,
+        "target_file": None,
+    }
+
+
+def test_a_geak_attempt_with_no_measurement_has_no_e2e_gain(tmp_path):
+    recorder = _geak_recorder()
+    recorder.record_geak_attempts(
+        {"kernels": [{"kernel_id": "k001", "e2e": {"decision": "KEEP", "integrated": True, "e2e_gain_pct": 40.799}}]}
+    )
+    recorder.finish(tput_after=900.0)
+
+    e2e = _kernel_events(tmp_path)[0]["ext"]["attempts"][0]["e2e"]
+    assert e2e["e2e_gain_pct"] is None
+    assert e2e["self_reported_e2e_gain_pct"] == 40.799
+
+
+def test_a_revoked_geak_keep_keeps_the_claim_it_made(tmp_path):
+    recorder = _geak_recorder()
+    recorder.record_geak_attempts(
+        {"kernels": [{"kernel_id": "k001", "e2e": {"decision": "KEEP", "integrated": True, "e2e_gain_pct": 40.799}}]}
+    )
+    reject_geak_attempts(
+        event=recorder.event_id,
+        measured_tput=850.0,
+        current_best_tput=900.0,
+        provenance="orchestrator_rebench",
+        rejection_reason="no_promote",
+    )
+    recorder.finish(tput_after=900.0)
+
+    e2e = _kernel_events(tmp_path)[0]["ext"]["attempts"][0]["e2e"]
+    assert e2e["e2e_gain_pct"] is None
+    assert e2e["self_reported_e2e_gain_pct"] == 40.799
+
+
+@pytest.mark.parametrize(
+    ("last_gain", "expected"),
+    [(2.0, 2.0), (None, None)],
+)
+def test_the_standing_e2e_gain_is_the_one_the_standing_decision_measured(last_gain, expected):
+    from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import _integrate_e2e
+
+    e2e = _integrate_e2e(
+        [
+            {"decision": "KEEP", "gain_pct": 6.0, "settled_at": "2026-09-02T00:01:00", "attempt_count": 1},
+            {"decision": "REVERT", "gain_pct": last_gain, "settled_at": "2026-09-02T00:09:00", "attempt_count": 2},
+        ]
+    )
+
+    assert e2e == {
+        "integrated": False,
+        "e2e_gain_pct": expected,
+        "validated": None,
+        "decision": "REVERT",
+        "patch_path": None,
+        "target_file": None,
+    }

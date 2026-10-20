@@ -236,6 +236,35 @@ def test_the_round_that_landed_the_fix_is_identifiable(_bound_session):
     assert [row["attempt"] for row in landed] == [3]
 
 
+def test_a_keep_awaiting_revalidation_is_counted_apart_from_a_landed_fix(_bound_session):
+    _boot_trigger()
+    enablement_event.record_dispatch(
+        enablement_event.AuthoringDispatch(task_id="spec-1", attempt=1, failure_kind="accuracy_gap")
+    )
+    enablement_event.record_round(
+        enablement_event.AuthoringRound(
+            task_id="spec-1",
+            attempt=1,
+            result=_kept(),
+            stall_streak=0,
+            succeeded=False,
+            validation_pending=True,
+        )
+    )
+
+    attempts = _ext(_bound_session)["attempts"]
+    assert {key: value for key, value in attempts.items() if key != "rows"} == {
+        "count": 1,
+        "settled": 1,
+        "landed": 0,
+        "validation_pending": 1,
+        "advanced": 0,
+    }
+    assert attempts["rows"][0]["status"] == enablement_event.ROUND_KEPT
+    assert attempts["rows"][0]["landed"] is False
+    assert attempts["rows"][0]["validation_pending"] is True
+
+
 def test_the_gap_a_round_revealed_is_not_the_gap_it_faced(_bound_session):
     _boot_trigger(evidence="gap 1: ImportError fused_moe")
     enablement_event.record_dispatch(
