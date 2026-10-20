@@ -3,7 +3,8 @@
 
 """What the model behind a branch's specialist is told: its role once, and at every launch where its branch stands.
 
-The role says how a long-running specialist works through the session's tools, how its candidates are judged, how it
+The role says how a long-running specialist works through the session's tools, what has found gains on ROCm before,
+how its candidates are judged, how it
 declares a correctness fix with its repro case, and which gains the toolbox refuses as fake (main's ``FAKE_GAINS``
 catalog, so a new row reaches the role). The
 launch prompt opens with the repair a repair branch was opened for, the branch's direction (one the user wrote, or
@@ -137,6 +138,29 @@ deeper in it rather than switching to settings. Once it is done, with nothing pr
 can be done within the hour), take another of the session's directions, preferring one no running branch covers: \
 {{directions}}.
 
+What has found gains on ROCm before, in any direction:
+- server.log first: a backend that fell back (hipBLASLt, an eager or plain torch path, CUDA graphs off) or JIT \
+compiles on the first requests (a cold cache a startup prewarm removes) cost more than any setting gains.
+- Kernel boundaries add up: inside a CUDA graph each launch costs some 2 to 4 us, on every layer and every step. \
+Folding a small kernel (a split-K reduce, a sort, a quantize, an elementwise op) into the kernel that consumes its \
+output often gains where tuning the kernel itself does not.
+- Before porting a change, check that the image lacks it and read how the CUDA path does it: a path disabled on HIP \
+may only need enabling.
+- Before retuning, check the tuned table against the shapes the profile shows: it may already be optimal for them.
+- A fusion that reorders a floating-point sum changes outputs and must pass the accuracy gate; one that keeps the \
+order leaves them unchanged.
+Examples:
+- The profile showed each layer's split-K GEMM followed by its own reduce kernel at decode. Folding the reduce into \
+the all-reduce that consumed the partial sums, in the same summation order, removed a launch per layer: about 0.2 ms \
+per decode step, every output unchanged.
+- ROCm ran the prefill outside CUDA graphs where CUDA captures it. Enabling the breakable prefill graph on HIP, with \
+the two operators that blocked capture made capturable, gained 8.7% P50.
+- Requests failed with NaN under load at some batch sizes. The cause was a default GEMM configuration whose \
+pipelined K loop mishandled the tail block for one shape; a block size that divides K removed the NaN, declared as a \
+correctness fix with its case, and halved that kernel's time.
+- A one-launch replacement for a two-kernel top-k was exact but 2 to 3 times slower under CUDA graphs: the branch \
+dropped it on that result and took the next operator the profile ranked.
+
 How a candidate is judged: it is compared with its parent's recorded value at the session's graded operating point. A \
 gain must clear the session's bar, set from the spread of the baseline measurements, and hold when it is measured \
 again on another node; every commit must also pass the accuracy gate. A gain lands on your branch only while your \
@@ -173,7 +197,9 @@ the reviewer is recorded only, and a notice says why. A gain that carries a case
 Rules:
 - Write only in your worktree and your workspace; the source base and other branches' worktrees are not yours.
 - Do not start servers or benchmarks yourself: the toolbox measures every test in a fresh sandbox.
-- Keep a candidate to one intent, so its result says what that intent is worth.
+- A candidate is one intent, so its result says what that intent is worth. Small changes, each too small to clear \
+the bar alone, may go together as one intent: name every change in its mechanism and give as target_share_pct the \
+summed share of the operators they speed up.
 - {BASH_KILL_SAFETY_PREAMBLE}
 """
 

@@ -123,6 +123,23 @@ def test_the_role_works_its_direction_first_and_then_moves_to_one_no_branch_cove
     assert "server.log fixes; GEMM tuning; Fusion; Server arguments and environment variables; ROCm code gaps" in prompt
 
 
+def test_the_role_carries_what_found_gains_on_rocm_with_examples():
+    prompt = role_prompt(WORKLOAD)
+
+    assert "What has found gains on ROCm before" in prompt
+    assert "into the kernel that consumes its output" in prompt
+    assert "it may already be optimal for them" in prompt
+    assert prompt.index("What has found gains") < prompt.index("Examples:") < prompt.index("How a candidate is judged")
+
+
+def test_the_role_lets_small_changes_too_small_alone_go_together_as_one_intent():
+    prompt = role_prompt(WORKLOAD)
+
+    assert "Keep a candidate to one intent" not in prompt
+    assert "may go together as one intent" in prompt
+    assert "the summed share of the operators they speed up" in prompt
+
+
 def test_the_role_says_the_conversation_lives_on_and_what_arrives_wakes_it():
     prompt = role_prompt(WORKLOAD)
 
