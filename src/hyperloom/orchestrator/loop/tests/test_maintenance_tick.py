@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -35,16 +36,13 @@ class _Reconciler:
 
     An open bring-up round holds one of those leases and can only be settled in
     the reconciler, so a second sweep here would reap a lease a live round still
-    holds. ``raises`` stands in for a report this pass could not produce.
+    holds. ``raises`` stands in for a cleanup-rate read the database refused.
     """
 
     def __init__(self, reaped=0, raises=False, unverifiable=0, rate=(0, 0)):
-        self.last_report = (
-            None
-            if raises
-            else SimpleNamespace(leases_reaped=reaped, leases_unverifiable=unverifiable, failed_tasks=["t1"])
-        )
+        self.last_report = SimpleNamespace(leases_reaped=reaped, leases_unverifiable=unverifiable, failed_tasks=["t1"])
         self._rate = rate
+        self._raises = raises
 
     async def cleanup_confirmation_rate(self):
         """The ratio that says whether retained lanes are routine.
@@ -54,6 +52,8 @@ class _Reconciler:
         summary that looks complete and is missing the one number the retention
         decision rests on.
         """
+        if self._raises:
+            raise sqlite3.OperationalError("database is locked")
         return self._rate
 
 
@@ -90,7 +90,7 @@ def _patch_retention(monkeypatch: pytest.MonkeyPatch, *, events=5, tasks=2, rais
 
     async def _run(_db):
         if raises:
-            raise RuntimeError("vacuum failed")
+            raise sqlite3.OperationalError("vacuum failed")
         return SimpleNamespace(events_deleted=events, tasks_deleted=tasks)
 
     monkeypatch.setattr(db_maint, "run_db_retention", _run)
@@ -148,8 +148,7 @@ class TestNoSingleStepCanEndTheRun:
 
         await run_lease_and_db_reclaim(_host(reconciler=_Reconciler(raises=True)), summary, reason="r")
 
-        assert "leases_reaped" not in summary
-        assert "leases_unverifiable" not in summary
+        assert "cleanup_unconfirmed" not in summary
         assert "running_tasks_reclaimed" not in summary
         assert summary["events_pruned"] == 5
 
