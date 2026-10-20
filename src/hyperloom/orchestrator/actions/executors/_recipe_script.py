@@ -21,42 +21,16 @@ log = logging.getLogger(__name__)
 _UNGUARDED_EXPORT_RE = re.compile(r"^[^\S\n]*export\s+([A-Za-z_][A-Za-z0-9_]*)=(?!\"?\$\{?\1[:-])", re.MULTILINE)
 
 
-def _agentx_server_script_name(bench: Mapping[str, Any], envs: Mapping[str, Any]) -> str:
-    """Name of the launcher the AgentX client delegates to, or ``""`` when nothing pins a framework.
-
-    Mirrors ``mlperf_agentic_client.sh``: the ``AGENTX_SERVER_SCRIPT`` override first,
-    then the ``{framework}_{gpu}.sh`` fallback. Recipe-recorded values beat the ambient
-    env because the recipe is the record of what actually ran.
-    """
-    override = str(envs.get("AGENTX_SERVER_SCRIPT") or os.environ.get("AGENTX_SERVER_SCRIPT") or "").strip()
-    if override:
-        return override
-    framework = str(bench.get("framework") or envs.get("FRAMEWORK") or "").strip().lower()
-    if not framework:
-        return ""
-    gpu = (
-        str(
-            envs.get("GPU_TYPE")
-            or envs.get("RUNNER_TYPE")
-            or bench.get("runner_type")
-            or os.environ.get("GPU_TYPE")
-            or os.environ.get("RUNNER_TYPE")
-            or "mi300x"
-        )
-        .strip()
-        .lower()
-    )
-    return f"{framework}_{gpu}.sh"
-
-
 def resolve_launch_server_script(bench: Mapping[str, Any]) -> str:
     """Path of the script that boots the server, or ``""`` when unresolvable.
 
     ``benchmark_script`` names a server launcher on every non-AgentX run. The
     MLPerf switch pins its client there instead, so for that one recipe
     shape the launcher is the builtin the client delegates to. Resolution
-    mirrors ``mlperf_agentic_client.sh``: the same ``<checkout>/benchmarks/``
-    directory and no recursive search.
+    mirrors ``mlperf_agentic_client.sh``: the same ``AGENTX_SERVER_SCRIPT`` override,
+    the same ``{framework}_{gpu}.sh`` fallback, the same ``<checkout>/benchmarks/``
+    directory and no recursive search. Recipe-recorded values beat the ambient
+    env because the recipe is the record of what actually ran.
     """
     envs = bench.get("envs") if isinstance(bench.get("envs"), dict) else {}
     script = Path(str(bench.get("benchmark_script") or "").strip()).name
@@ -64,9 +38,24 @@ def resolve_launch_server_script(bench: Mapping[str, Any]) -> str:
         return ""
 
     if is_agentx_client_script(script):
-        script = _agentx_server_script_name(bench, envs)
+        script = str(envs.get("AGENTX_SERVER_SCRIPT") or os.environ.get("AGENTX_SERVER_SCRIPT") or "").strip()
         if not script:
-            return ""
+            framework = str(bench.get("framework") or envs.get("FRAMEWORK") or "").strip().lower()
+            if not framework:
+                return ""
+            gpu = (
+                str(
+                    envs.get("GPU_TYPE")
+                    or envs.get("RUNNER_TYPE")
+                    or bench.get("runner_type")
+                    or os.environ.get("GPU_TYPE")
+                    or os.environ.get("RUNNER_TYPE")
+                    or "mi300x"
+                )
+                .strip()
+                .lower()
+            )
+            script = f"{framework}_{gpu}.sh"
 
     for root in (
         str(bench.get("inferencex_path") or "").strip(),

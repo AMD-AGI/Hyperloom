@@ -50,7 +50,6 @@ cognitive-complexity src/hyperloom/orchestrator/actions/executors/_multi_node_se
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::_wait_for_server_health_async 107
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::_wait_for_workers_ready_async 76
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::restart_server_for_round 55
-cognitive-complexity src/hyperloom/orchestrator/actions/executors/_nogit_patch.py::_apply_patch_no_git 35
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_patch_snapshot.py::_patch_touched_paths_split 32
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_ray_serving.py::ServingLease._await_or_cancel 32
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_subprocess_kill.py::_communicate_with_watchdog 62
@@ -263,7 +262,6 @@ cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_kv_metrics.p
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::_wait_for_server_health_async 23
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::_wait_for_workers_ready_async 22
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::restart_server_for_round 27
-cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_nogit_patch.py::_apply_patch_no_git 24
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_ray_serving.py::_serving_actor_body 21
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_subprocess_kill.py::_communicate_with_watchdog 23
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_workload_envs.py::materialize_config_with_envs 109
@@ -581,7 +579,7 @@ function-lines src/hyperloom/orchestrator/actions/executors/_multi_node_server_l
 function-lines src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::_wait_for_server_health_async 188
 function-lines src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::_wait_for_workers_ready_async 97
 function-lines src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::restart_server_for_round 251
-function-lines src/hyperloom/orchestrator/actions/executors/_nogit_patch.py::_apply_patch_no_git 148
+function-lines src/hyperloom/orchestrator/actions/executors/_nogit_patch.py::_apply_patch_no_git 135
 function-lines src/hyperloom/orchestrator/actions/executors/_partition_shape.py::validate_session_shape 127
 function-lines src/hyperloom/orchestrator/actions/executors/_patch_snapshot.py::replayed_stack_ops 81
 function-lines src/hyperloom/orchestrator/actions/executors/_patch_source_pr.py::materialize_candidate_patches 94

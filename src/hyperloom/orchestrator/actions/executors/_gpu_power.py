@@ -27,7 +27,7 @@ import subprocess  # nosec B404 - fixed read-only amd-smi invocation.
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, NamedTuple
+from typing import Any, Callable
 
 from hyperloom.common.env import env_float
 from hyperloom.common.gpu_power_settings import gpu_power_sampling_unavailable
@@ -197,48 +197,6 @@ def _power_throttled(per_gpu: dict[str, dict[str, Any]], serving: list[int]) -> 
     )
 
 
-class _PowerTally(NamedTuple):
-    """What a round's measured-phase samples say about each card it could have served on."""
-
-    peak_vram_fraction: dict[int, float]
-    watts: dict[int, list[float]]
-
-
-def _tally_power_samples(samples: list[dict[int, tuple[float | None, float | None]]]) -> _PowerTally:
-    """Collapse the measured-phase samples into each card's peak VRAM share and its power readings."""
-    peak_vram: dict[int, float] = {}
-    watts: dict[int, list[float]] = {}
-    for reading in samples:
-        for gpu, (power, fraction) in reading.items():
-            if fraction is not None:
-                peak_vram[gpu] = max(peak_vram.get(gpu, 0.0), fraction)
-            if power is not None:
-                watts.setdefault(gpu, []).append(power)
-    return _PowerTally(peak_vram, watts)
-
-
-def _unreadable_serving_gpus(
-    samples: list[dict[int, tuple[float | None, float | None]]],
-    scope: set[int] | None,
-    tally: _PowerTally,
-) -> list[int]:
-    """The in-scope cards that cannot be ruled out as serving yet have no power reading.
-
-    Such a card would drop out of the total and escape its own limit, so it leaves the whole round unmeasured: a
-    card holding a model with no power reading, or a card whose VRAM was never read (absent from ``amd-smi``, or
-    reported N/A).
-    """
-    if not samples:
-        return []
-    in_scope = scope if scope is not None else {gpu for reading in samples for gpu in reading}
-    return sorted(
-        gpu
-        for gpu in in_scope
-        if gpu not in tally.peak_vram_fraction
-        or (tally.peak_vram_fraction[gpu] >= _SERVING_VRAM_FRACTION and gpu not in tally.watts)
-    )
-
-
 class GpuPowerRecorder:
     """Samples GPU power on a background thread while the round is in its ``measured`` phase.
 
@@ -373,10 +331,28 @@ class GpuPowerRecorder:
             clocks = {gpu: list(values) for gpu, values in self._clocks.items()}
             limits = {gpu: set(values) for gpu, values in self._clock_limits.items()}
             deltas = self._complete_throttle_totals()
-        tally = _tally_power_samples(samples)
-        peak_vram, watts = tally
+        peak_vram: dict[int, float] = {}
+        watts: dict[int, list[float]] = {}
+        for reading in samples:
+            for gpu, (power, fraction) in reading.items():
+                if fraction is not None:
+                    peak_vram[gpu] = max(peak_vram.get(gpu, 0.0), fraction)
+                if power is not None:
+                    watts.setdefault(gpu, []).append(power)
         serving = sorted(gpu for gpu, frac in peak_vram.items() if frac >= _SERVING_VRAM_FRACTION and gpu in watts)
-        unread = _unreadable_serving_gpus(samples, self._gpus, tally)
+        # A card that may be serving but cannot be read would drop out of the total and escape its own limit, so it
+        # leaves the whole round unmeasured: a card holding a model with no power reading, or a card in scope whose
+        # VRAM was never read (absent from amd-smi, or reported N/A), so it cannot be ruled out as serving.
+        in_scope = self._gpus if self._gpus is not None else {gpu for reading in samples for gpu in reading}
+        unread = (
+            sorted(
+                gpu
+                for gpu in in_scope
+                if gpu not in peak_vram or (peak_vram[gpu] >= _SERVING_VRAM_FRACTION and gpu not in watts)
+            )
+            if samples
+            else []
+        )
         per_gpu = {
             str(gpu): {
                 **_power_fields(watts[gpu], peak_vram.get(gpu, 0.0)),

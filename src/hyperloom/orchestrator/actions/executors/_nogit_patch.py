@@ -141,34 +141,52 @@ class _StripLevelProbe(NamedTuple):
     tried_levels: list[int]
     #: One line per level probed, for the feedback a failed apply carries back to the author.
     stderrs: list[str]
-    #: Why the sweep stopped early; empty when every candidate level was probed.
-    cli_error: str
 
 
 def _detect_strip_level(framework_root: Path, patch_path: Path) -> _StripLevelProbe:
-    """Probe the candidate ``-p`` levels and report the first one a forward dry run accepts."""
+    """Probe the candidate ``-p`` levels and report the first one a forward dry run accepts.
+
+    Raises:
+        FileNotFoundError: the ``patch`` CLI is not installed.
+        subprocess.TimeoutExpired: a probe did not answer inside its timeout.
+    """
     tried_levels: list[int] = []
     stderrs: list[str] = []
     for lvl in _P_LEVELS:
         tried_levels.append(lvl)
-        try:
-            cp = subprocess.run(
-                ["patch", f"-p{lvl}", "--dry-run", "-i", str(patch_path)],
-                capture_output=True,
-                text=True,
-                timeout=60,
-                check=False,
-                cwd=str(framework_root),
-                # ``patch`` prompts ("Assume -R? [n]") on an already-applied hunk; without a closed stdin it can
-                # inherit the parent's and block until the 60s timeout.
-                stdin=subprocess.DEVNULL,
-            )
-        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-            return _StripLevelProbe(None, tried_levels, stderrs, f"patch CLI unavailable or timed out: {exc}")
+        cp = subprocess.run(
+            ["patch", f"-p{lvl}", "--dry-run", "-i", str(patch_path)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+            cwd=str(framework_root),
+            # ``patch`` prompts ("Assume -R? [n]") on an already-applied hunk; without a closed stdin it can
+            # inherit the parent's and block until the 60s timeout.
+            stdin=subprocess.DEVNULL,
+        )
         stderrs.append(f"-p{lvl}: {cp.stderr.strip()}" if cp.stderr.strip() else f"-p{lvl}: (no stderr)")
         if cp.returncode == 0:
-            return _StripLevelProbe(lvl, tried_levels, stderrs, "")
-    return _StripLevelProbe(None, tried_levels, stderrs, "")
+            return _StripLevelProbe(lvl, tried_levels, stderrs)
+    return _StripLevelProbe(None, tried_levels, stderrs)
+
+
+def _nogit_failure(
+    patch_path: Path,
+    message: str,
+    *,
+    tried_levels: list[int],
+    records: list[dict[str, Any]] | None = None,
+) -> "tuple[bool, str, list[dict[str, Any]], Any]":
+    """The canonical no-git failure: the message, whatever was backed up, and the author's feedback."""
+    from ._apply_feedback import ApplyFeedback
+
+    return (
+        False,
+        message,
+        records or [],
+        ApplyFeedback(patch=str(patch_path), channel="nogit", tried_levels=tried_levels, stderr=message),
+    )
 
 
 def _bak_name(patch_stem: str, rel_target: Path, seq: int) -> str:
@@ -176,6 +194,80 @@ def _bak_name(patch_stem: str, rel_target: Path, seq: int) -> str:
     flat = _UNSAFE_NAME_RE.sub("_", str(rel_target))
     safe_stem = _UNSAFE_NAME_RE.sub("_", patch_stem)
     return f"{safe_stem}__{flat}__{seq:04d}.bak"
+
+
+class _BackupSite(NamedTuple):
+    """Where one no-git apply keeps its backups and how it names them."""
+
+    #: The patch's target tree, already resolved, so a target can be tested against it.
+    framework_root: Path
+    backup_root: Path
+    patch_stem: str
+    seq_offset: int
+
+
+class _BackupPlan(NamedTuple):
+    """The backup records a target walk wrote, and why it stopped."""
+
+    #: Records already persisted; on a failure these are the ones a revert still owns.
+    records: list[dict[str, Any]]
+    #: Empty when every target was backed up.
+    error: str
+
+
+def _resolve_patch_target(raw: str, framework_root: Path, strip_level: int) -> tuple[Path, Path] | None:
+    """The ``(relative, absolute)`` target a diff header names, or ``None`` when it escapes ``framework_root``."""
+    rel = Path(strip_path_components(raw, strip_level))
+    if rel.is_absolute() or ".." in rel.parts:
+        return None
+    abs_path = (framework_root / rel).resolve()
+    return (rel, abs_path) if _is_within(abs_path, framework_root) else None
+
+
+def _back_up_existing_file(abs_path: Path, bak: Path) -> tuple[dict[str, Any] | None, str]:
+    """Copy ``abs_path`` to ``bak`` and describe how to restore it."""
+    try:
+        mode = abs_path.stat().st_mode & 0o7777
+        shutil.copy2(abs_path, bak)
+    except OSError as exc:
+        return None, f"backup of {abs_path} failed: {exc}"
+    return {
+        "target": str(abs_path),
+        "existed": True,
+        "backup_path": str(bak),
+        "revert_action": "restore",
+        "mode": mode,
+        "pre_image_sha256": _file_digest(abs_path),
+    }, ""
+
+
+def _back_up_patch_targets(manifest: list[Any], site: _BackupSite, strip_level: int) -> _BackupPlan:
+    """Back up every file ``manifest`` touches, stopping at the first target that cannot be recorded.
+
+    A record is appended only once the ledger has it, so a file is never mutated without a persisted way back.
+    """
+    records: list[dict[str, Any]] = []
+    for entry in manifest:
+        target = _resolve_patch_target(entry.path, site.framework_root, strip_level)
+        if target is None:
+            return _BackupPlan(records, f"patch target escapes framework root: {entry.path}")
+        rel, abs_path = target
+        if entry.is_new or not abs_path.exists():
+            record: dict[str, Any] | None = {
+                "target": str(abs_path),
+                "existed": False,
+                "backup_path": None,
+                "revert_action": "delete",
+            }
+        else:
+            bak = site.backup_root / _bak_name(site.patch_stem, rel, site.seq_offset + len(records))
+            record, err = _back_up_existing_file(abs_path, bak)
+            if err:
+                return _BackupPlan(records, err)
+        if not append_record(site.backup_root, record):
+            return _BackupPlan(records, f"backup ledger write failed for {(record or {}).get('target')}")
+        records.append(record)
+    return _BackupPlan(records, "")
 
 
 def _rejected_hunks(reject_path: Path) -> str:
@@ -198,13 +290,7 @@ def _apply_patch_no_git(
     try:
         patch_text = patch_path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
-        err_msg = f"cannot read patch file: {exc}"
-        return (
-            False,
-            err_msg,
-            [],
-            ApplyFeedback(patch=str(patch_path), channel="nogit", tried_levels=[], stderr=err_msg),
-        )
+        return _nogit_failure(patch_path, f"cannot read patch file: {exc}", tried_levels=[])
 
     # Feed the CLI a copy with contradicting index headers removed; keep the original path in feedback so advisories
     # point at what the author wrote.
@@ -220,16 +306,11 @@ def _apply_patch_no_git(
             patch_path.name,
         )
 
-    probe = _detect_strip_level(framework_root, patch_input)
+    try:
+        probe = _detect_strip_level(framework_root, patch_input)
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        return _nogit_failure(patch_path, f"patch CLI unavailable or timed out: {exc}", tried_levels=[])
     detected_level, tried_levels = probe.level, probe.tried_levels
-    if probe.cli_error:
-        feedback = ApplyFeedback(
-            patch=str(patch_path),
-            channel="nogit",
-            tried_levels=tried_levels,
-            stderr=probe.cli_error,
-        )
-        return False, probe.cli_error, [], feedback
     if detected_level is None:
         # Before reporting failure, distinguish "does not apply" from "already
         # applied". A specialist commonly writes a superset patch AND the subset
@@ -249,12 +330,8 @@ def _apply_patch_no_git(
         # correct revert).
         if _reverse_applies_cleanly(framework_root, patch_input):
             if not mark_prepared(backup_root):
-                err_msg = "backup prepare record could not be persisted"
-                return (
-                    False,
-                    err_msg,
-                    [],
-                    ApplyFeedback(patch=str(patch_path), channel="nogit", tried_levels=tried_levels, stderr=err_msg),
+                return _nogit_failure(
+                    patch_path, "backup prepare record could not be persisted", tried_levels=tried_levels
                 )
             log.info(
                 "nogit patch: %s is already fully applied (clean reverse dry-run); treating as a no-op",
@@ -273,86 +350,24 @@ def _apply_patch_no_git(
         )
         return False, err_msg, [], feedback
 
-    def _fail(err_message: str, recs: list[dict[str, Any]]) -> "tuple[bool, str, list[dict[str, Any]], Any]":
-        """Return the canonical 4-tuple failure result with structured feedback."""
-        return (
-            False,
-            err_message,
-            recs,
-            ApplyFeedback(
-                patch=str(patch_path),
-                channel="nogit",
-                tried_levels=tried_levels,
-                stderr=err_message,
-            ),
-        )
-
-    framework_root_resolved = framework_root.resolve()
     backup_root.mkdir(parents=True, exist_ok=True)
-    backups: list[dict[str, Any]] = []
     patch_stem = patch_path.stem
-
-    def _resolve_target(raw: str) -> tuple[Path | None, Path | None, str]:
-        """Resolve a raw diff-header path to (rel, abs, error)."""
-        rel = Path(strip_path_components(raw, detected_level))  # type: ignore[arg-type]
-        if rel.is_absolute() or ".." in rel.parts:
-            return None, None, f"patch target escapes framework root: {raw}"
-        abs_path = (framework_root_resolved / rel).resolve()
-        if not _is_within(abs_path, framework_root_resolved):
-            return None, None, f"patch target escapes framework root: {raw}"
-        return rel, abs_path, ""
-
-    def _record(record: dict[str, Any]) -> str:
-        """Persist a backup record and add it to the in-memory list.
-
-        Returns:
-            An error string when the record could not be persisted; the caller
-            must then abort rather than mutate an unrecorded file.
-        """
-        if not append_record(backup_root, record):
-            return f"backup ledger write failed for {record.get('target')}"
-        backups.append(record)
-        return ""
-
-    def _backup_existing(abs_path: Path, rel: Path) -> tuple[dict[str, Any] | None, str]:
-        """Copy ``abs_path`` to a uniquely named backup and return the record."""
-        seq = seq_offset + len(backups)
-        bak = backup_root / _bak_name(patch_stem, rel, seq)
-        try:
-            mode = abs_path.stat().st_mode & 0o7777
-            shutil.copy2(abs_path, bak)
-        except OSError as exc:
-            return None, f"backup of {abs_path} failed: {exc}"
-        return {
-            "target": str(abs_path),
-            "existed": True,
-            "backup_path": str(bak),
-            "revert_action": "restore",
-            "mode": mode,
-            "pre_image_sha256": _file_digest(abs_path),
-        }, ""
+    site = _BackupSite(framework_root.resolve(), backup_root, patch_stem, seq_offset)
 
     try:
         manifest = parse_patch_manifest(patch_text)
     except ValueError as exc:
-        return _fail(f"unparseable patch: {exc}", backups)
+        return _nogit_failure(patch_path, f"unparseable patch: {exc}", tried_levels=tried_levels)
 
-    for entry in manifest:
-        rel, abs_path, err = _resolve_target(entry.path)
-        if err:
-            return _fail(err, backups)
-        if entry.is_new or not abs_path.exists():
-            record = {"target": str(abs_path), "existed": False, "backup_path": None, "revert_action": "delete"}
-        else:
-            record, err = _backup_existing(abs_path, rel)
-            if err:
-                return _fail(err, backups)
-        err = _record(record)
-        if err:
-            return _fail(err, backups)
+    plan = _back_up_patch_targets(manifest, site, detected_level)
+    backups = plan.records
+    if plan.error:
+        return _nogit_failure(patch_path, plan.error, tried_levels=tried_levels, records=backups)
 
     if not mark_prepared(backup_root):
-        return _fail("backup prepare record could not be persisted", backups)
+        return _nogit_failure(
+            patch_path, "backup prepare record could not be persisted", tried_levels=tried_levels, records=backups
+        )
 
     # Rejects land under the backup root, where no other apply writes; ``--no-backup-if-mismatch`` drops ``.orig``.
     reject_path = backup_root / f"{patch_stem}.rej"
@@ -368,7 +383,7 @@ def _apply_patch_no_git(
             stdin=subprocess.DEVNULL,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        return _fail(f"patch apply failed: {exc}", backups)
+        return _nogit_failure(patch_path, f"patch apply failed: {exc}", tried_levels=tried_levels, records=backups)
     if cp2.returncode != 0:
         rejected_hunks = _rejected_hunks(reject_path)
         apply_stderr = cp2.stderr.strip() or cp2.stdout.strip()
