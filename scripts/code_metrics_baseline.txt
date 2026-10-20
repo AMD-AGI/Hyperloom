@@ -180,10 +180,6 @@ cognitive-complexity src/hyperloom/orchestrator/specialists/runner.py::Specialis
 cognitive-complexity src/hyperloom/orchestrator/specialists/subprocess_.py::SpecialistSubprocessDispatcher._reap_loop 47
 cognitive-complexity src/hyperloom/orchestrator/specialists/subprocess_.py::SpecialistSubprocessDispatcher.run 97
 cognitive-complexity src/hyperloom/orchestrator/specialists/subprocess_.py::_codex_mcp_config 99
-cognitive-complexity src/hyperloom/orchestrator/state/_shared_state/phase_state.py::_PhaseStateMixin.record_explore_accepted 38
-cognitive-complexity src/hyperloom/orchestrator/state/_shared_state/render.py::_RenderMixin._format_variant_line 36
-cognitive-complexity src/hyperloom/orchestrator/state/_shared_state/render.py::_RenderMixin.to_proposal_scores_summary 74
-cognitive-complexity src/hyperloom/orchestrator/state/_shared_state/render.py::_RenderMixin.to_warm_start_summary 42
 cognitive-complexity src/hyperloom/orchestrator/state/gaps.py::GapsStateMixin.upsert_gap 31
 cognitive-complexity src/hyperloom/orchestrator/state/shared_state.py::SharedState._append_roofline_snapshot_history 41
 cognitive-complexity src/hyperloom/orchestrator/state/shared_state.py::SharedState._build_explore_search 45
@@ -792,7 +788,6 @@ function-lines src/hyperloom/orchestrator/specialists/subprocess_.py::Specialist
 function-lines src/hyperloom/orchestrator/specialists/subprocess_.py::SpecialistSubprocessDispatcher._reap_loop 126
 function-lines src/hyperloom/orchestrator/specialists/subprocess_.py::SpecialistSubprocessDispatcher.run 348
 function-lines src/hyperloom/orchestrator/specialists/subprocess_.py::_codex_mcp_config 139
-function-lines src/hyperloom/orchestrator/state/_shared_state/render.py::_RenderMixin.to_warm_start_summary 96
 function-lines src/hyperloom/orchestrator/state/shared_state.py::SharedState._append_roofline_snapshot_history 153
 function-lines src/hyperloom/orchestrator/state/shared_state.py::SharedState._build_hot_kernel_summaries 87
 function-lines src/hyperloom/orchestrator/state/shared_state.py::SharedState.record_trace_analyze 110
