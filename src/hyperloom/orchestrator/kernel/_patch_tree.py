@@ -20,30 +20,13 @@ from hyperloom.common.unified_diff import PatchOp, PatchTarget
 
 
 def _safe_name(value: str) -> str:
-    """Sanitize a filename component to a safe, short identifier.
-
-    Non-alphanumeric characters (other than ``._-``) become underscores and the
-    result is truncated to 80 characters.
-
-    Args:
-        value (str): The raw string to sanitize.
-
-    Returns:
-        str: A filesystem-safe identifier, or ``"kernel_agent"`` when empty.
-    """
+    """Sanitize a filename component to a safe, short identifier."""
     cleaned = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in value)
     return cleaned[:80] or "kernel_agent"
 
 
 def _path_hash(path: Path) -> str:
-    """Return a short, stable hash for ``path`` to disambiguate backups.
-
-    Args:
-        path (Path): The path to hash.
-
-    Returns:
-        str: The first 16 hex characters of the SHA-256 of the path string.
-    """
+    """Return a short, stable hash for ``path`` to disambiguate backups."""
     return hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:16]
 
 
@@ -53,20 +36,8 @@ _MAX_BACKUP_DIR_ATTEMPTS: int = 200
 def _claim_backup_dir(backup_root: Path, kernel_id: str, target: Path) -> Path:
     """Create a backup directory this apply alone owns.
 
-    Suffixes ``-2``, ``-3``, … when an earlier attempt already claimed the name,
-    which a constant or absent ``kernel_id`` would otherwise reuse.
-    ``mkdir(exist_ok=False)`` makes the claim atomic against a concurrent caller.
-
-    Args:
-        backup_root (Path): Directory the per-attempt backups live under.
-        kernel_id (str): Kernel identifier; falls back to the target's stem.
-        target (Path): File being replaced.
-
-    Returns:
-        Path: The newly created backup directory.
-
-    Raises:
-        RuntimeError: If every suffix is taken.
+    ``mkdir(exist_ok=False)`` makes the claim atomic against a concurrent caller,
+    which a constant or absent ``kernel_id`` would otherwise let reuse a name.
     """
     base = Path(backup_root) / f"{_safe_name(kernel_id or target.stem)}_{_path_hash(target)}"
     for suffix in range(1, _MAX_BACKUP_DIR_ATTEMPTS + 1):
@@ -80,17 +51,7 @@ def _claim_backup_dir(backup_root: Path, kernel_id: str, target: Path) -> Path:
 
 
 def _copy_to_backup(path: Path, backup_dir: Path, group: str) -> dict[str, str]:
-    """Copy a file into the backup tree and return the manifest entry.
-
-    Args:
-        path (Path): The file to back up.
-        backup_dir (Path): Root of the backup tree.
-        group (str): Sub-directory grouping (e.g. ``"source"`` / ``"artifacts"``).
-
-    Returns:
-        dict[str, str]: A manifest entry with ``path`` (original) and
-            ``backup_path`` (backup copy) keys.
-    """
+    """Copy a file into the backup tree and return the manifest entry."""
     dst = backup_dir / group / f"{_path_hash(path)}_{path.name}"
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(path, dst)
@@ -105,23 +66,8 @@ def _contained_dest(
 ) -> Path:
     """Resolve ``rel_path`` under its coordinate and authorized deploy roots.
 
-    Rejects absolute paths and any ``..`` traversal, and confirms the resolved
-    destination stays inside ``repo_root``. When ``deploy_roots`` is provided,
-    it must also stay inside an explicitly authorized framework root.
-
-    Args:
-        repo_root (Path): The framework repo root that destinations must stay in.
-        rel_path (str): Repo-relative target path from the patch manifest.
-        deploy_roots (Iterable[Path] | None): Authorized framework roots.
-            ``None`` preserves coordinate-only validation for legacy callers;
-            an empty iterable rejects every destination.
-
-    Returns:
-        Path: The validated absolute destination path.
-
-    Raises:
-        ValueError: If the path is absolute, contains ``..``, or escapes
-            ``repo_root``.
+    ``deploy_roots=None`` keeps the coordinate-only check for legacy callers; an
+    empty iterable rejects every destination.
     """
     if rel_path.startswith("/"):
         raise ValueError(f"absolute path not allowed in patch: {rel_path}")
@@ -144,16 +90,7 @@ def _contained_dest(
 
 
 def _within_root(path: Path, root: Path) -> bool:
-    """Return True when ``path`` (symlinks resolved) stays inside ``root``.
-
-    Args:
-        path (Path): candidate path (need not exist).
-        root (Path): the containment root.
-
-    Returns:
-        bool: True when the resolved ``path`` equals or is nested under the
-            resolved ``root``; False on any resolution error or escape.
-    """
+    """Return True when ``path`` (symlinks resolved) stays inside ``root``."""
     try:
         p = path.resolve()
         r = root.resolve()
@@ -172,30 +109,10 @@ def apply_snapshot(
 ) -> dict[str, Any]:
     """Apply a content-addressed snapshot atomically (all-or-nothing).
 
-    Each descriptor asserts a final filesystem state rather than replaying a
-    diff: ``write`` copies the byte-exact file from ``snapshot_dir`` onto the
-    live repo, ``delete`` removes the live file. The whole set is staged with a
-    full pre-flight (containment + source existence) before any write; if any
-    single operation fails, every already-touched path is restored from backup
-    and the call returns ``status="failed"`` — the repo is never left partially
-    applied. There is no fuzzy fallback.
-
-    Args:
-        descriptors (list[PatchTarget]): Output of
-            :func:`repo_relative_manifest`.
-        snapshot_dir (str | Path): Directory holding byte-exact final contents
-            for every ``write`` path (mirrored at the same relative path).
-        repo_root (str | Path): Framework repo root the targets live under.
-        backup_dir (str | Path): Where per-path backups + the revert manifest
-            are written.
-        deploy_roots (Iterable[str | Path] | None): Authorized framework roots
-            under which every write/delete destination must remain. ``None``
-            preserves the legacy coordinate-root-only contract.
-
-    Returns:
-        dict[str, Any]: ``status="ok"`` with ``source_backups`` (the revert
-            manifest entries) and ``touched`` paths, or ``status="failed"`` with
-            an ``error`` and the offending path.
+    Each descriptor asserts a final filesystem state rather than replaying a diff,
+    and the whole set pre-flights before any write: a failure restores every
+    touched path from backup, so the repo is never left partially applied and
+    there is no fuzzy fallback.
     """
     root = Path(repo_root)
     allowed_roots = None if deploy_roots is None else [Path(path) for path in deploy_roots]
@@ -393,10 +310,9 @@ def _delete_recorded_backups(candidates: set[str], backup_root: Path) -> _Backup
 def _revert_backup_trusted(backup_path: str, backup_root: Path) -> bool:
     """True when a manifest ``backup_path`` is a real backup under ``backup_root``.
 
-    The manifest JSON is untrusted at revert time; every ``copy2`` source must
-    stay inside the apply-time backup tree so a tampered entry cannot read an
-    arbitrary host file. Legitimate entries (written by ``_copy_to_backup``)
-    always satisfy this.
+    The manifest JSON is untrusted at revert time, so every ``copy2`` source must
+    stay inside the apply-time backup tree or a tampered entry could read an
+    arbitrary host file.
     """
     if not backup_path:
         return False

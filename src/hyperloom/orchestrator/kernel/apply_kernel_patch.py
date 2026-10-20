@@ -1470,11 +1470,10 @@ def _nothing_restored() -> _RestoreTally:
 def _already_reverted_result(manifest_file: Path, manifest: dict[str, Any]) -> dict[str, Any]:
     """Report a manifest whose backups are already back in place as having nothing left to undo.
 
-    A completed revert already moved each backup back into place, so restoring
-    from them again fails -- on a tree that is in fact clean. An apply that
-    reverted itself (failed JIT invalidation) and is then unwound again by the
-    stack would otherwise report that failure as an unfinished teardown, and
-    every retry would repeat it.
+    An apply that reverted itself (failed JIT invalidation) and is then unwound
+    again by the stack would otherwise report restoring-from-nothing as an
+    unfinished teardown, on a tree that is in fact clean, and every retry would
+    repeat it.
     """
     return {
         "status": "skipped",
@@ -1867,11 +1866,7 @@ class _PatchRefused(Exception):
 
 
 def _patch_rebuild_argv(request: KernelPatchRequest) -> list[str]:
-    """The argv this call overrides the strategy's rebuild command with.
-
-    Raises:
-        _PatchRefused: When the command relies on shell syntax.
-    """
+    """The argv this call overrides the strategy's rebuild command with."""
     try:
         return _coerce_rebuild_command(request.rebuild_command) if request.rebuild_command else []
     except ValueError as exc:
@@ -1974,11 +1969,7 @@ def _rebuild_not_run() -> _RebuildRecords:
 
 
 def _refuse_untrusted_jit_strategies(jit_strategies: Iterable[dict[str, Any]]) -> None:
-    """Stop before any mutation when a runtime-JIT strategy has no trustworthy build dir.
-
-    Raises:
-        _PatchRefused: Naming the strategy whose JIT build dir cannot be trusted.
-    """
+    """Stop before any mutation when a runtime-JIT strategy has no trustworthy build dir."""
     for strategy in jit_strategies:
         invalidation_error = _runtime_jit_invalidation_error(strategy)
         if invalidation_error:
@@ -1988,12 +1979,7 @@ def _refuse_untrusted_jit_strategies(jit_strategies: Iterable[dict[str, Any]]) -
 
 
 def _invalidate_and_rebuild(deployment: _PatchDeployment, plan: _RebuildPlan) -> _RebuildRecords:
-    """Clear every cache the patched roots serve from, then rebuild those roots.
-
-    Raises:
-        _PatchRefused: When a cache could not be invalidated or a rebuild
-            failed; the tree is restored from the manifest first.
-    """
+    """Clear every cache the patched roots serve from, then rebuild those roots."""
     jit_build_backup = _invalidate_jit_build(deployment, plan)
     cpp_itfs_cache_backup = _invalidate_cpp_itfs_cache(deployment, plan)
     return _RebuildRecords(
@@ -2004,12 +1990,7 @@ def _invalidate_and_rebuild(deployment: _PatchDeployment, plan: _RebuildPlan) ->
 
 
 def _invalidate_jit_build(deployment: _PatchDeployment, plan: _RebuildPlan) -> dict[str, Any]:
-    """Move the AITER JIT build state aside so the next import recompiles the patched kernel.
-
-    Raises:
-        _PatchRefused: When the cache was not invalidated; benchmarking against
-            an unknown or stale binary is refused and the tree is restored.
-    """
+    """Move the AITER JIT build state aside so the next import recompiles the patched kernel."""
     if plan.pod_records is not None:
         # Each pod's record in manifest["multinode"] holds its JIT backup; revert and finalize read it there.
         backup: dict[str, Any] = {"status": "remote"}
@@ -2039,12 +2020,8 @@ def _invalidate_jit_build(deployment: _PatchDeployment, plan: _RebuildPlan) -> d
 def _invalidate_cpp_itfs_cache(deployment: _PatchDeployment, plan: _RebuildPlan) -> dict[str, Any]:
     """Move the aiter cpp_itfs runtime cache aside so the re-baseline recompiles from clean state.
 
-    aiter cpp_itfs kernels runtime-compile into ``$HOME/.aiter/build/`` with a
+    aiter cpp_itfs kernels runtime-compile into ``$HOME/.aiter/build/`` under a
     param-hashed dir name, so pristine and patched collide.
-
-    Raises:
-        _PatchRefused: When the cache could not be moved aside; re-baselining
-            against a stale runtime cache is refused.
     """
     backup = _invalidate_aiter_cpp_itfs_cache(plan.cpp_itfs_target, deployment.backup_dir)
     if backup.get("status") == "ok":
@@ -2068,12 +2045,7 @@ def _invalidate_cpp_itfs_cache(deployment: _PatchDeployment, plan: _RebuildPlan)
 
 
 def _rebuild_patched_roots(deployment: _PatchDeployment, plan: _RebuildPlan) -> dict[str, Any]:
-    """Rebuild every distinct compiled root the patch touched.
-
-    Raises:
-        _PatchRefused: When a root failed to rebuild; every touched path is
-            restored first.
-    """
+    """Rebuild every distinct compiled root the patch touched."""
     record: dict[str, Any] = {}
     for strategy in plan.strategies:
         record = _run_strategy_rebuild(
@@ -2138,11 +2110,7 @@ class _WholeFilePreflight(NamedTuple):
 
 
 def _apply_whole_file_patch(request: KernelPatchRequest) -> dict[str, Any]:
-    """Replace one target file with the patch, rebuild its root, and publish it to every pod.
-
-    Raises:
-        _PatchRefused: When the patch cannot be validated, landed or rebuilt.
-    """
+    """Replace one target file with the patch, rebuild its root, and publish it to every pod."""
     preflight = _whole_file_preflight(request)
     strategy = preflight.strategy
     prepared = _prepare_whole_file_apply(request, preflight)
@@ -2169,13 +2137,7 @@ def _apply_whole_file_patch(request: KernelPatchRequest) -> dict[str, Any]:
 
 
 def _whole_file_preflight(request: KernelPatchRequest) -> _WholeFilePreflight:
-    """Validate the patch, the target and the rebuild command before any file or pod is touched.
-
-    Raises:
-        _PatchRefused: When a path is missing, the replacement is incompatible,
-            the rebuild command relies on shell syntax, or the JIT build dir
-            this strategy pins cannot be trusted.
-    """
+    """Validate the patch, the target and the rebuild command before any file or pod is touched."""
     patch = Path(request.patch_path).resolve()
     target = Path(request.target_file).resolve()
     if not patch.is_file():
@@ -2235,11 +2197,7 @@ def _fan_whole_file_out_to_pods(
     deployment: _PatchDeployment,
     preflight: _WholeFilePreflight,
 ) -> dict[str, Any]:
-    """Push the patched file to every RayJob pod, restoring the sandbox copy if one refuses it.
-
-    Raises:
-        _PatchRefused: When a pod refused the patch.
-    """
+    """Push the patched file to every RayJob pod, restoring the sandbox copy if one refuses it."""
     pod_backup_dir = os.environ.get(
         "HYPERLOOM_MN_KERNEL_BACKUP_DIR",
         _MN_POD_BACKUP_DIR_DEFAULT,
@@ -2355,14 +2313,7 @@ def _apply_kernel_patch_snapshot(request: KernelPatchRequest) -> dict[str, Any]:
 
 
 def _snapshot_plan(request: KernelPatchRequest) -> _SnapshotPlan:
-    """Parse the patch manifest, resolve every destination, and pick the roots to rebuild.
-
-    Raises:
-        _PatchRefused: When the patch is missing or unparseable, the rebuild
-            command relies on shell syntax, no repo root is known, a
-            destination escapes the deploy roots, the set spans several AITER
-            JIT roots, or a pinned JIT build dir cannot be trusted.
-    """
+    """Parse the patch manifest, resolve every destination, and pick the roots to rebuild."""
     patch = Path(request.patch_path).resolve()
     target = Path(request.target_file).resolve()
     if not patch.is_file():
@@ -2407,11 +2358,8 @@ def _snapshot_plan(request: KernelPatchRequest) -> _SnapshotPlan:
 def _snapshot_repo_root(request: KernelPatchRequest, primary_strategy: dict[str, Any], target: Path) -> Path:
     """The root the patch's repo-relative descriptors resolve against.
 
-    Resolve against the explicit root, else the strategy root. Never guess
-    ``target.parent`` -- a wrong root breaks the byte-for-byte contract.
-
-    Raises:
-        _PatchRefused: When neither the caller nor the strategy names a root.
+    The explicit root, else the strategy root; never ``target.parent`` -- a
+    guessed root breaks the byte-for-byte contract.
     """
     resolved_root = str(request.repo_root or "") or primary_strategy["root"]
     if not resolved_root:
@@ -2432,11 +2380,7 @@ def _snapshot_write_paths(
     repo_root: Path,
     deploy_roots: list[Path],
 ) -> list[Path]:
-    """Resolve every write descriptor to the absolute path it lands on.
-
-    Raises:
-        _PatchRefused: When a destination escapes the authorized roots.
-    """
+    """Resolve every write descriptor to the absolute path it lands on."""
     write_paths: list[Path] = []
     for desc in descriptors:
         try:
@@ -2486,12 +2430,7 @@ def _prepare_snapshot_apply(request: KernelPatchRequest, plan: _SnapshotPlan) ->
 
 
 def _land_snapshot(request: KernelPatchRequest, deployment: _PatchDeployment, plan: _SnapshotPlan) -> list[str]:
-    """Write the whole snapshot onto the live tree and prove every path landed byte-exact.
-
-    Raises:
-        _PatchRefused: When the apply or the verification failed; the tree is
-            left as the apply found it.
-    """
+    """Write the whole snapshot onto the live tree and prove every path landed byte-exact."""
     applied = apply_snapshot(
         descriptors=plan.descriptors,
         snapshot_dir=request.snapshot_dir,
@@ -2563,11 +2502,7 @@ def _fan_snapshot_out_to_pods(
     deployment: _PatchDeployment,
     plan: _SnapshotPlan,
 ) -> dict[str, Any]:
-    """Push every written path to every RayJob pod, restoring the whole repo if one refuses.
-
-    Raises:
-        _PatchRefused: When a pod refused a path; the repo is restored first.
-    """
+    """Push every written path to every RayJob pod, restoring the whole repo if one refuses."""
     pod_backup_dir = os.environ.get("HYPERLOOM_MN_KERNEL_BACKUP_DIR", _MN_POD_BACKUP_DIR_DEFAULT)
     snap = Path(request.snapshot_dir)
     jit_build_dir = _snapshot_jit_build_dir(plan)
