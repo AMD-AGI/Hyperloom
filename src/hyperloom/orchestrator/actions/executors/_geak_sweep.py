@@ -339,16 +339,8 @@ def _executable_final_launcher(result: Mapping[str, Any]) -> Path | None:
     return path
 
 
-def _resolve_replay_script(result: Mapping[str, Any]) -> _ReplayScript:
-    """Pick the script the sweep replays, preferring GEAK's deployed launcher over the bench fallback."""
-    launcher = _executable_final_launcher(result)
-    if launcher is not None:
-        return _ReplayScript(launcher, True)
-    if _requires_deployment(result):
-        raise _ReplayUnavailable(
-            "missing_deployment_launcher",
-            "GEAK accepted tuning requires file deployment, but its final launch script is unavailable.",
-        )
+def _bench_script_fallback(result: Mapping[str, Any]) -> _ReplayScript:
+    """The bench script the sweep replays when GEAK deployed no executable launcher."""
     bench_script = result.get("bench_script") or result.get("geak_bench_script")
     fallback = Path(str(bench_script or ""))
     if not fallback.is_file():
@@ -396,12 +388,22 @@ def _build_replay_plan(
     *,
     pin_num_prompts: bool,
 ) -> _ReplayPlan:
-    """Resolve the script, serving identity and benchmark configuration every replayed point shares."""
-    script = _resolve_replay_script(result)
+    """Resolve the script, serving identity and benchmark configuration every replayed point shares.
+
+    The order the checks run in is the order they claim a failure: a deployment GEAK cannot launch is
+    reported ahead of a configuration the sweep cannot read, and that ahead of a missing bench script.
+    """
+    launcher = _executable_final_launcher(result)
+    if launcher is None and _requires_deployment(result):
+        raise _ReplayUnavailable(
+            "missing_deployment_launcher",
+            "GEAK accepted tuning requires file deployment, but its final launch script is unavailable.",
+        )
     try:
         flags, accepted_env = _accepted_config_as_variant(result.get("accepted_config"))
     except ValueError as exc:
         raise _ReplayUnavailable("invalid_accepted_config", str(exc)) from exc
+    script = _ReplayScript(launcher, True) if launcher is not None else _bench_script_fallback(result)
     try:
         serving_env = _replay_serving_env(handoff, handoff.get("baseline_env_spec") or env_spec)
     except (OSError, UnicodeDecodeError, yaml.YAMLError, TypeError, ValueError) as exc:
@@ -520,7 +522,12 @@ def _measured_point_fields(plan: _ReplayPlan, out_dir: Path, summary: _PointSumm
 
 
 async def _measure_sweep_point(plan: _ReplayPlan, point: _SweepPoint, env: Mapping[str, str]) -> _PointMeasurement:
-    """Replay one sweep point under the power recorder and read the outcome it published."""
+    """Replay one sweep point under the power recorder and read the outcome it published.
+
+    Anything the point raises -- the replay, the summary it wrote, or the accuracy result beside it -- is
+    recorded on that point and goes no further, so one unreadable artifact costs its own point and not the
+    rest of the grid. Whatever was already read stays on the report the point writes.
+    """
     cmd = _replay_command(plan, point)
 
     def _run() -> subprocess.CompletedProcess:
@@ -534,16 +541,19 @@ async def _measure_sweep_point(plan: _ReplayPlan, point: _SweepPoint, env: Mappi
         )
 
     power: dict[str, Any] = {}
+    summary = _UNMEASURED
+    on_requested_basis = False
     try:
         proc = await asyncio.to_thread(_run_with_power_sampling, _run, point.out_dir, env, power)
         summary = _point_summary(point.out_dir)
         failure = _replay_point_failure(proc, summary.throughput, summary.basis, plan.requested_basis)
+        if failure is not None:
+            return _PointMeasurement({**power, **failure}, summary, False, failure["error"])
+        on_requested_basis = True
+        measured = _measured_point_fields(plan, point.out_dir, summary)
     except Exception as exc:  # noqa: BLE001
         error = repr(exc)
-        return _PointMeasurement({**power, "status": "failed", "error": error}, _UNMEASURED, False, error)
-    if failure is not None:
-        return _PointMeasurement({**power, **failure}, summary, False, failure["error"])
-    measured = _measured_point_fields(plan, point.out_dir, summary)
+        return _PointMeasurement({**power, "status": "failed", "error": error}, summary, on_requested_basis, error)
     return _PointMeasurement({**power, **measured}, summary, True, None)
 
 
