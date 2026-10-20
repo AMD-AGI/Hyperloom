@@ -43,6 +43,7 @@ from hyperloom_multibranch.notebook.rsi.frontier import (
     Readings,
     ScoringContext,
     headroom_pct,
+    paced,
     score_at,
 )
 from hyperloom_multibranch.notebook.rsi.report import number, table
@@ -173,10 +174,11 @@ class _Round:
 
 
 def session_policy(tree: SearchTree, variation: Variation = VARIATIONS[0]) -> FrontierPolicy:
-    """The policy the scoring would have used in ``tree``'s session, sized to its budget, changed by ``variation``."""
+    """The policy the scoring would have used in ``tree``'s session, sized to its budget and paced by its longest root
+    test, changed by ``variation``."""
 
     base = FrontierPolicy.for_budget("", tree.budget_seconds) if tree.budget_seconds > 0 else FrontierPolicy("")
-    return variation.apply(base)
+    return variation.apply(paced(base, tree.longest_root_test_seconds))
 
 
 def score_archived(

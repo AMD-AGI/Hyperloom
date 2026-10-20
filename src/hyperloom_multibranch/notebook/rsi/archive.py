@@ -68,7 +68,8 @@ class TreeBranch:
 
     ``stop_reason`` is the reason the scheduler gave when it stopped the branch; ``directions`` are the intents its tests
     tried, in the order it first tried them; ``kernel_test_times`` when its kernel-layer tests were requested, which the
-    frontier calibration reads the observation period off.
+    frontier calibration reads the observation period off. ``measured_times`` and ``judged_times`` are when its tests
+    were measured and judged; ``None`` in a tree archived before they were kept.
     """
 
     name: str
@@ -83,6 +84,19 @@ class TreeBranch:
     stop_reason: str = ""
     directions: tuple[TreeDirection, ...] = ()
     kernel_test_times: tuple[float, ...] = ()
+    measured_times: tuple[float, ...] | None = None
+    judged_times: tuple[float, ...] | None = None
+
+    @property
+    def spent_times(self) -> tuple[float, ...]:
+        """When the branch's tests were measured; their request times in a tree archived before that was kept."""
+
+        return self.measured_times if self.measured_times is not None else self.test_times
+
+    def judged_by(self, t_s: float) -> int | None:
+        """How many of the branch's tests were judged by ``t_s``; ``None`` in a tree archived before that was kept."""
+
+        return None if self.judged_times is None else sum(1 for when in self.judged_times if when <= t_s)
 
     def gain_at(self, t_s: float) -> float:
         """The cumulative gain of the branch's latest commit at ``t_s``, or the gain it forked at."""
@@ -113,7 +127,13 @@ class TreeBranch:
             test_times=tests,
             directions=(),
             kernel_test_times=tuple(when for when in self.kernel_test_times if when <= t_s),
+            measured_times=_by(self.measured_times, t_s),
+            judged_times=_by(self.judged_times, t_s),
         )
+
+
+def _by(times: tuple[float, ...] | None, t_s: float) -> tuple[float, ...] | None:
+    return None if times is None else tuple(when for when in times if when <= t_s)
 
 
 @dataclass(frozen=True)
@@ -136,7 +156,8 @@ class SearchTree:
     """One past session as the RSI replays it.
 
     ``roofline_ceiling_pct`` is the roofline bound PRELUDE recorded for the gain metric, as a gain over the baseline;
-    ``None`` when it recorded none, or the tree is older.
+    ``None`` when it recorded none, or the tree is older. ``longest_root_test_seconds`` is the longest of the root tests
+    the baseline anchored on, start to finish, which paces the frontier's window; ``None`` likewise.
     """
 
     session_id: str
@@ -148,6 +169,7 @@ class SearchTree:
     noise: MeasurementNoise = field(default_factory=MeasurementNoise)
     policy_versions: Mapping[str, str] = field(default_factory=dict)
     roofline_ceiling_pct: float | None = None
+    longest_root_test_seconds: float | None = None
 
 
 def tree_document(tree: SearchTree) -> dict[str, object]:
@@ -171,6 +193,31 @@ def session_start(snapshot: NotebookSnapshot) -> float:
         *(record.requested_at for record in snapshot.records),
     ]
     return min((at for at in times if at > 0), default=snapshot.taken_at)
+
+
+def longest_root_test_seconds(snapshot: NotebookSnapshot) -> float | None:
+    """The longest start-to-finish time of the root tests the baseline anchored on, the one PRELUDE logs; ``None``
+    before a baseline or when none of them recorded both times."""
+
+    baseline = snapshot.baseline
+    anchored = set(baseline.request_ids) if baseline is not None else set()
+    walls = [
+        record.result.finished_at - record.result.started_at
+        for record in snapshot.records
+        if record.request_id in anchored
+        and record.result is not None
+        and record.result.started_at is not None
+        and record.result.finished_at is not None
+    ]
+    return max(walls, default=None)
+
+
+def _measured_times(records: Sequence[TestRecord], start: float) -> tuple[float, ...]:
+    return tuple(sorted(item.measured_at - start for item in records if item.measured and item.measured_at is not None))
+
+
+def _judged_times(records: Sequence[TestRecord], start: float) -> tuple[float, ...]:
+    return tuple(sorted(item.judged_at - start for item in records if item.judged and item.judged_at is not None))
 
 
 def _parent_branch(node: BranchNode, view: LineageView) -> str:
@@ -281,6 +328,8 @@ def tree_from_snapshot(
                     if record.request.intent_fingerprint in kernel
                 )
             ),
+            measured_times=_measured_times(tests[node.branch], start),
+            judged_times=_judged_times(tests[node.branch], start),
         )
         for node in view.branches
     )
@@ -298,6 +347,7 @@ def tree_from_snapshot(
         ),
         policy_versions=dict(snapshot.fingerprints[-1].policy_versions) if snapshot.fingerprints else {},
         roofline_ceiling_pct=(ceiling / anchor - 1.0) * 100.0 if ceiling else None,
+        longest_root_test_seconds=longest_root_test_seconds(snapshot),
     )
 
 
@@ -425,6 +475,7 @@ __all__ = [
     "TreeDirection",
     "WeightedTree",
     "archive_session",
+    "longest_root_test_seconds",
     "session_start",
     "similar_trees",
     "tree_document",

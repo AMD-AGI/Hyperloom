@@ -353,11 +353,27 @@ class FrontierScore:
 
 
 @dataclass(frozen=True)
+class PendingCandidate:
+    """A measured explore that beats its branch's head by at least the gate's bar while its confirm is queued or running.
+
+    ``metric`` is the one the gate's bar is on; ``value`` is the explore's, read as the gate reads it, the mean over its
+    measure-phase rounds at the session's concurrency; ``gain_over_head_pct`` is over the head's recorded value.
+    """
+
+    request_id: str
+    confirm_request_id: str
+    parent_commit: str
+    metric: str
+    value: float
+    gain_over_head_pct: float
+
+
+@dataclass(frozen=True)
 class BranchProgress:
     """One branch at a glance; ``frontier`` is filled by a scoring progress query, such as the RSI's frontier scoring.
 
-    ``judged_since_commit`` counts the branch's tests judged since its last commit (since it opened, before any), and
-    ``llm_usd`` what its specialist's LLM cost.
+    ``judged_since_commit`` counts the branch's tests judged since its last commit (since it opened, before any),
+    ``llm_usd`` what its specialist's LLM cost, and ``pending`` its candidates waiting for their confirm.
     """
 
     branch: str
@@ -371,6 +387,7 @@ class BranchProgress:
     frontier: FrontierScore | None = None
     judged_since_commit: int = 0
     llm_usd: float = 0.0
+    pending: tuple[PendingCandidate, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -706,6 +723,7 @@ __all__ = [
     "NotebookSnapshot",
     "OpShares",
     "PeerReplay",
+    "PendingCandidate",
     "QuarantineEvent",
     "RecordedValue",
     "RegressionCase",

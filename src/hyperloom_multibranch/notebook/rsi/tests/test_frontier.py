@@ -11,24 +11,35 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
-from hyperloom_multibranch.contracts.notebook.records import LineageEvent, NotebookSnapshot, ToolResultPointer
-from hyperloom_multibranch.contracts.notebook.vocab import FrontierBasis, LineageKind
+from hyperloom_multibranch.contracts.notebook.peers import Purpose, Verdict
+from hyperloom_multibranch.contracts.notebook.records import (
+    LineageEvent,
+    NotebookSnapshot,
+    PendingCandidate,
+    TestRecord,
+    ToolResultPointer,
+)
+from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, FrontierBasis, LineageKind
 from hyperloom_multibranch.notebook import LocalNotebook
-from hyperloom_multibranch.notebook.rsi.archive import SearchTree
+from hyperloom_multibranch.notebook.rsi.archive import SearchTree, longest_root_test_seconds
 from hyperloom_multibranch.notebook.rsi.frontier import (
     FRONTIER_LOG_FORMAT,
     OBSERVATION_SECONDS,
     WINDOW_SECONDS,
     FrontierPolicy,
     FrontierScoring,
+    ScoringContext,
+    paced,
     remaining_prior,
+    score_at,
     score_progress,
 )
 from hyperloom_multibranch.notebook.rsi.similarity import TaskConditions, task_conditions, task_similarity
 from hyperloom_multibranch.notebook.rsi.tests.trees import branch, tree
-from hyperloom_multibranch.notebook.tests.factories import FakeClock, profile
-from hyperloom_multibranch.notebook.tests.sessions import METRIC, scripted_session
+from hyperloom_multibranch.notebook.tests.factories import FakeClock, intent, judgement, profile, request, result
+from hyperloom_multibranch.notebook.tests.sessions import GEMM_AGAIN, METRIC, scripted_session
 
 POLICY = FrontierPolicy(METRIC)
 TASK = task_conditions(profile())
@@ -93,19 +104,75 @@ def test_a_prior_needs_sessions_at_least_half_similar_that_add_up_to_one_and_a_h
     assert backed is not None and backed.basis is FrontierBasis.PRIOR and backed.expected_gain_pct == pytest.approx(3.0)
 
 
-async def test_a_branch_too_young_for_a_trend_keeps_a_floor_until_a_window_has_passed(tmp_path: Path) -> None:
+async def test_a_new_branch_keeps_a_floor_until_two_of_its_tests_are_judged(tmp_path: Path) -> None:
     clock = FakeClock()
-    observer = await scripted_session(tmp_path / "notebook", clock)
-    scheduler = LocalNotebook(tmp_path / "notebook", Writer(Role.SCHEDULER, "scheduler"), clock=clock)
+    root = tmp_path / "notebook"
+    observer = await scripted_session(root, clock)
+    scheduler = LocalNotebook(root, Writer(Role.SCHEDULER, "scheduler"), clock=clock)
+    toolbox, gate = (LocalNotebook(root, Writer(role, role.value), clock=clock) for role in (Role.TOOLBOX, Role.GATE))
     await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, "s3", from_commit="c1", reason="fill"))
 
     fresh = _scores(await observer.snapshot())["s3"]
     clock.advance(WINDOW_SECONDS)
-    settled = _scores(await observer.snapshot())["s3"]
+    waited = _scores(await observer.snapshot())["s3"]
+    for request_id in ("r7", "r8"):
+        await toolbox.write_request(request(request_id, intent("s3", "c1", target=request_id)))
+        await toolbox.write_result(result(request_id))
+        flat = judgement(0.2, (request_id,), verdict=Verdict.FLAT)
+        await gate.write_judgement(request_id, flat, Conclusion.RECORDED_ONLY)
+    judged = _scores(await observer.snapshot())["s3"]
 
     assert fresh is not None and fresh.expected_gain_pct == POLICY.new_branch_floor_pct
     assert fresh.basis is FrontierBasis.NEW and fresh.components["trend_pct"] == 0.0
-    assert settled is not None and settled.expected_gain_pct == 0.0 and settled.basis is FrontierBasis.TREND
+    assert waited is not None and waited.basis is FrontierBasis.NEW
+    assert judged is not None and judged.expected_gain_pct == 0.0 and judged.basis is FrontierBasis.TREND
+
+
+def test_an_archived_branch_without_judged_times_keeps_the_floor_for_one_window_only() -> None:
+    context = ScoringContext(TASK, (), POLICY)
+    late = WINDOW_SECONDS + 1.0
+
+    assert score_at(branch("s9", []), 60.0, context).basis is FrontierBasis.NEW
+    assert score_at(branch("s9", []), late, context).basis is FrontierBasis.TREND
+    assert score_at(branch("s9", [], judged_times=()), late, context).basis is FrontierBasis.NEW
+
+
+def test_a_candidate_waiting_for_its_confirm_lifts_the_score_to_its_gain_in_points_of_the_baseline(
+    snapshot: NotebookSnapshot,
+) -> None:
+    waiting = PendingCandidate("r6", "r6c", "c1", METRIC, 1092.0, 5.0)
+    rows = tuple(
+        dataclasses.replace(row, pending=(waiting,)) if row.branch == "s1" else row for row in snapshot.progress
+    )
+    pending = dataclasses.replace(snapshot, progress=rows)
+
+    lifted = _scores(pending)["s1"]
+    capped = _scores(dataclasses.replace(pending, profile=profile(roofline_ceiling={METRIC: 1050.0})))["s1"]
+
+    assert lifted is not None and lifted.basis is FrontierBasis.PENDING
+    assert lifted.expected_gain_pct == pytest.approx(5.2) and lifted.components["pending_pct"] == pytest.approx(5.2)
+    assert capped is not None and capped.basis is FrontierBasis.HEADROOM
+
+
+async def test_the_branchs_test_count_leaves_out_the_tests_still_waiting_for_a_result(tmp_path: Path) -> None:
+    clock = FakeClock()
+    observer = await scripted_session(tmp_path / "notebook", clock)
+    toolbox = LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"), clock=clock)
+    await toolbox.write_request(request("r6", GEMM_AGAIN))
+
+    scored = _scores(await observer.snapshot())["s1"]
+
+    assert scored is not None and scored.components["tests"] == 2.0
+
+
+def test_the_window_holds_four_of_the_longest_root_tests_when_that_is_longer(snapshot: NotebookSnapshot) -> None:
+    root_test = request("b2", intent(INTEGRATION_BRANCH, "c0"), RecipeDelta(), purpose=Purpose.BASELINE)
+    timed = TestRecord(root_test, dataclasses.replace(result("b2"), started_at=100.0, finished_at=700.0))
+    with_root = dataclasses.replace(snapshot, records=(*snapshot.records, timed))
+
+    assert (longest_root_test_seconds(snapshot), longest_root_test_seconds(with_root)) == (None, 600.0)
+    assert paced(POLICY, 600.0).window_seconds == 4 * 600.0
+    assert paced(POLICY, 300.0) == POLICY and paced(POLICY, None) == POLICY
 
 
 def test_the_prior_counts_only_branches_that_spent_as_many_tests() -> None:

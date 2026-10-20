@@ -120,6 +120,7 @@ def test_the_gain_that_followed_runs_to_the_stop_or_the_horizon() -> None:
     assert gain_after(SESSIONS[0], steady, 5400.0) == pytest.approx(0.6)
     assert gain_after(SESSIONS[0], steady, 5400.0, 600.0) == pytest.approx(0.2)
     assert session_policy(SESSIONS[0]).window_seconds == 900.0
+    assert session_policy(dataclasses.replace(SESSIONS[0], longest_root_test_seconds=600.0)).window_seconds == 2400.0
 
 
 def test_rank_correlation_ranks_ties_alike_and_needs_a_spread() -> None:

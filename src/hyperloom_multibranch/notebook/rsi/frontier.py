@@ -6,18 +6,21 @@
 :class:`FrontierScoring` is a ``ProgressQuery`` over the notebook's: the same rows, each running specialist branch's
 ``frontier`` filled with ``FrontierScore(expected_gain_pct, components, basis)``. The components:
 
-* ``trend_pct``: the cumulative gain the branch reached over the last window, in points over the baseline;
-* ``tests`` and ``gpu_hours``: what the branch has spent;
+* ``trend_pct``: the cumulative gain the branch reached over the last window, in points over the baseline; the window
+  spans at least :data:`WINDOW_TESTS` of the session's longest root tests (:func:`paced`);
+* ``tests`` and ``gpu_hours``: what the branch has spent, its tests counted once measured;
 * ``headroom_pct``: how far the head's recorded value is from the roofline bound PRELUDE recorded for the metric;
 * ``prior_remaining_pct``: what similar archived branches still gained after spending as many tests, weighted by task
   similarity, with ``prior_effective_sessions``, the sessions behind it each counted by its similarity; a session less
   than half similar does not count, and the prior is left out while they add up to less than 1.5;
 * ``observing``: 1 while a kernel-layer direction the branch tested lately may still be paying off;
-* ``amdahl_ceiling_pct``: the most that speeding up the head's largest op could gain, when the head was profiled.
+* ``amdahl_ceiling_pct``: the most that speeding up the head's largest op could gain, when the head was profiled;
+* ``pending_pct``: the gain of the branch's best candidate waiting for its confirm, in points over the baseline.
 
 The expected gain is the prior where there is one, else the trend; a branch under observation keeps at least
-``observation_floor_pct``, and so does a branch scored by its trend that has not yet been open a window nor committed,
-since its trend cannot be anything but zero; the headroom and the Amdahl ceiling cap it, and it is never negative.
+``observation_floor_pct``, and a branch scored by its trend keeps ``new_branch_floor_pct`` until :data:`SETTLED_TESTS` of
+its tests are judged, since its trend cannot be anything but zero before; a candidate waiting for its confirm raises it
+to its own gain; the headroom and the Amdahl ceiling cap it, and it is never negative.
 ``basis`` names which of them the score rests on. The formula is a prototype: what the score means is the scheduler's
 call (gongzheng's), and it stays here until then. :func:`score_at` is the formula alone, on a branch as an archived
 tree has it, so the live scoring and the calibration score with the same one.
@@ -51,6 +54,7 @@ from hyperloom_multibranch.notebook.local.files import encode_json
 from hyperloom_multibranch.notebook.rsi.archive import (
     SearchTree,
     TreeBranch,
+    longest_root_test_seconds,
     session_start,
     similar_trees,
     tree_from_snapshot,
@@ -68,6 +72,10 @@ NEW_BRANCH_FLOOR_PCT = OBSERVATION_FLOOR_PCT
 MIN_EFFECTIVE_SESSIONS = 1.5
 #: The session length the default window and observation suit; a shorter session scales both down in proportion.
 REFERENCE_BUDGET_SECONDS = 4 * HOUR
+#: How many of the longest root tests a window spans at least, so that it holds an explore and its confirm.
+WINDOW_TESTS = 4
+#: How many judged tests end a branch's new-branch floor.
+SETTLED_TESTS = 2
 
 
 @dataclass(frozen=True)
@@ -95,6 +103,14 @@ class FrontierPolicy:
         return cls(metric, window_seconds=WINDOW_SECONDS * scale, observation_seconds=OBSERVATION_SECONDS * scale)
 
 
+def paced(policy: FrontierPolicy, longest_test_seconds: float | None) -> FrontierPolicy:
+    """``policy`` with a window of at least :data:`WINDOW_TESTS` of the longest root tests, when that is longer."""
+
+    if not longest_test_seconds or WINDOW_TESTS * longest_test_seconds <= policy.window_seconds:
+        return policy
+    return replace(policy, window_seconds=WINDOW_TESTS * longest_test_seconds)
+
+
 @dataclass(frozen=True)
 class RemainingPrior:
     remaining_pct: float
@@ -113,9 +129,9 @@ def remaining_prior(
 
     total = weighted = 0.0
     for item in similar_trees(history, task, minimum=min_similarity):
-        reached = [branch for branch in _specialists(item.tree.branches) if len(branch.test_times) >= tests]
+        reached = [branch for branch in _specialists(item.tree.branches) if len(branch.spent_times) >= tests]
         for branch in reached:
-            since = sorted(branch.test_times)[tests - 1] if tests else branch.opened_s
+            since = sorted(branch.spent_times)[tests - 1] if tests else branch.opened_s
             total += item.weight / len(reached)
             weighted += item.weight / len(reached) * (branch.final_gain_pct - branch.gain_at(since))
     return RemainingPrior(weighted / total, total) if total else None
@@ -165,13 +181,25 @@ class Readings:
     """What the scoring reads about a branch besides its tree: whether it is ``observing`` and its two bounds.
 
     ``observing`` is whether a kernel-layer direction the branch tested within the observation period may still be
-    paying off, ``headroom_pct`` how far its head is below the roofline bound (:func:`headroom_pct`), and
-    ``amdahl_pct`` the ceiling of the head's largest op (:func:`largest_ceiling_pct`).
+    paying off, ``headroom_pct`` how far its head is below the roofline bound (:func:`headroom_pct`),
+    ``amdahl_pct`` the ceiling of the head's largest op (:func:`largest_ceiling_pct`), and ``pending_pct`` the gain of
+    its best candidate waiting for its confirm, in points over the baseline.
     """
 
     observing: bool = False
     headroom_pct: float | None = None
     amdahl_pct: float | None = None
+    pending_pct: float | None = None
+
+
+def _young(branch: TreeBranch, t_s: float, policy: FrontierPolicy) -> bool:
+    """Too new to have a trend: fewer than :data:`SETTLED_TESTS` tests judged, or, in a tree archived before judgements
+    were kept, open less than a window and without a commit."""
+
+    judged = branch.judged_by(t_s)
+    if judged is None:
+        return t_s - branch.opened_s < policy.window_seconds and not branch.commits
+    return judged < SETTLED_TESTS
 
 
 def score_at(branch: TreeBranch, t_s: float, context: ScoringContext, readings: Readings = Readings()) -> FrontierScore:
@@ -184,22 +212,26 @@ def score_at(branch: TreeBranch, t_s: float, context: ScoringContext, readings: 
     policy = context.policy
     observing = readings.observing
     trend = branch.gain_at(t_s) - branch.gain_at(t_s - policy.window_seconds)
+    tests = len(branch.spent_times)
     components = {
         "trend_pct": trend,
-        "tests": float(len(branch.test_times)),
+        "tests": float(tests),
         "gpu_hours": branch.gpu_seconds / HOUR,
         "observing": float(observing),
     }
     expected, basis = trend, FrontierBasis.TREND
-    prior = remaining_prior(context.history, context.task, len(branch.test_times), min_similarity=policy.min_similarity)
+    prior = remaining_prior(context.history, context.task, tests, min_similarity=policy.min_similarity)
     if prior is not None and prior.effective_sessions >= policy.min_effective_sessions:
         components.update(prior_remaining_pct=prior.remaining_pct, prior_effective_sessions=prior.effective_sessions)
         expected, basis = prior.remaining_pct, FrontierBasis.PRIOR
     if observing and expected < policy.observation_floor_pct:
         expected, basis = policy.observation_floor_pct, FrontierBasis.OBSERVING
-    young = t_s - branch.opened_s < policy.window_seconds and not branch.commits
-    if basis is FrontierBasis.TREND and young and expected < policy.new_branch_floor_pct:
+    if basis is FrontierBasis.TREND and _young(branch, t_s, policy) and expected < policy.new_branch_floor_pct:
         expected, basis = policy.new_branch_floor_pct, FrontierBasis.NEW
+    if readings.pending_pct is not None:
+        components["pending_pct"] = readings.pending_pct
+        if readings.pending_pct > expected:
+            expected, basis = readings.pending_pct, FrontierBasis.PENDING
     for key, bound, capped in (
         ("headroom_pct", readings.headroom_pct, FrontierBasis.HEADROOM),
         ("amdahl_ceiling_pct", readings.amdahl_pct, FrontierBasis.AMDAHL),
@@ -230,8 +262,20 @@ def score_branch(
             observing=_observing(snapshot, row.branch, snapshot.taken_at - policy.observation_seconds),
             headroom_pct=headroom_pct(ceiling, row.head_value.get(policy.metric)),
             amdahl_pct=largest_ceiling_pct(snapshot.op_shares.get(row.head_commit)),
+            pending_pct=_pending_pct(snapshot, row, policy.metric),
         ),
     )
+
+
+def _pending_pct(snapshot: NotebookSnapshot, row: BranchProgress, metric: str) -> float | None:
+    """The best of ``row``'s candidates waiting for their confirm, in points over the baseline, the score's unit."""
+
+    anchor = snapshot.baseline.values.get(metric) if snapshot.baseline is not None else None
+    head = row.head_value.get(metric)
+    if not anchor or not head:
+        return None
+    gains = [(item.value - head) / anchor * 100.0 for item in row.pending if item.metric == metric]
+    return max(gains, default=None)
 
 
 def score_progress(
@@ -243,6 +287,7 @@ def score_progress(
         tree = tree_from_snapshot(snapshot, policy.metric)
     except (NotRecorded, ValueError):
         return snapshot.progress
+    policy = paced(policy, tree.longest_root_test_seconds)
     return tuple(
         replace(row, frontier=score_branch(snapshot, row, tree, history, policy))
         if row.running and row.branch != INTEGRATION_BRANCH
@@ -293,7 +338,7 @@ class FrontierScoring(ProgressQuery):
         snapshot = await self.notebook.snapshot()
         rows = score_progress(snapshot, self.history, self.policy)
         if self.log is not None:
-            line = frontier_log_line(snapshot, rows, self.policy)
+            line = frontier_log_line(snapshot, rows, paced(self.policy, longest_root_test_seconds(snapshot)))
             if line is not None:
                 self._append(self.log, encode_json(line))
         return rows
@@ -319,7 +364,9 @@ __all__ = [
     "OBSERVATION_FLOOR_PCT",
     "OBSERVATION_SECONDS",
     "REFERENCE_BUDGET_SECONDS",
+    "SETTLED_TESTS",
     "WINDOW_SECONDS",
+    "WINDOW_TESTS",
     "FrontierPolicy",
     "FrontierScoring",
     "Readings",
@@ -328,6 +375,7 @@ __all__ = [
     "frontier_log_line",
     "headroom_pct",
     "largest_ceiling_pct",
+    "paced",
     "remaining_prior",
     "score_at",
     "score_branch",

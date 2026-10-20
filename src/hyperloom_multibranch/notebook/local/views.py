@@ -11,11 +11,12 @@ and stop from lineage events.
 from __future__ import annotations
 
 import math
+import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from hyperloom_multibranch.contracts.notebook.interfaces import NotRecorded
-from hyperloom_multibranch.contracts.notebook.peers import TestKind
+from hyperloom_multibranch.contracts.notebook.peers import Purpose, TestKind, TestResult, Validity
 from hyperloom_multibranch.contracts.notebook.records import (
     BranchNode,
     BranchProgress,
@@ -27,6 +28,7 @@ from hyperloom_multibranch.contracts.notebook.records import (
     MergeAttempt,
     MergeState,
     NotebookSnapshot,
+    PendingCandidate,
     QuarantineEvent,
     RecordedValue,
     RegressionCase,
@@ -47,6 +49,7 @@ from hyperloom_multibranch.notebook.changes import describe_change
 from hyperloom_multibranch.notebook.local.state import JudgementWrite, NotebookState
 
 _SPECIALIST_ORIGINS = frozenset({CommitOrigin.COMMIT, CommitOrigin.SPLIT})
+_MEASURE_PHASE = "measure"
 
 
 @dataclass
@@ -224,6 +227,56 @@ def judged_since_commit(records: Sequence[TestRecord], view: LineageView, branch
     )
 
 
+def measured_value(result: TestResult, metric: str, concurrency: int | None) -> float | None:
+    """``metric`` as the gate reads it off ``result``: the mean over its measure-phase rounds at ``concurrency``, or over
+    all of them when none ran there; ``None`` when no measure-phase round reports it."""
+
+    rounds = [item for item in result.rounds if item.phase == _MEASURE_PHASE and metric in item.metrics]
+    chosen = [item for item in rounds if item.concurrency == concurrency] or rounds
+    return statistics.fmean(item.metrics[metric] for item in chosen) if chosen else None
+
+
+def _candidate(
+    record: TestRecord, confirm: str, head: Mapping[str, float], bars: Mapping[str, float], concurrency: int | None
+) -> PendingCandidate | None:
+    if record.result is None:
+        return None
+    for metric, bar in sorted(bars.items()):
+        value, anchor = measured_value(record.result, metric, concurrency), head.get(metric)
+        if value is None or not anchor:
+            continue
+        gain = (value / anchor - 1.0) * 100.0
+        if gain >= bar:
+            return PendingCandidate(record.request_id, confirm, record.request.parent_commit, metric, value, gain)
+    return None
+
+
+def _pending(
+    state: NotebookState, records: Sequence[TestRecord], branch: BranchNode, head: Mapping[str, float]
+) -> tuple[PendingCandidate, ...]:
+    """``branch``'s measured explores on its head, not judged yet, whose confirm is in flight and whose gain over the head
+    reaches the gate's bar."""
+
+    if not state.baselines:
+        return ()
+    bars = state.baselines[-1].threshold_pct
+    concurrency = state.profiles[-1].conc if state.profiles else None
+    confirms = {record.request.retest_of: record.request_id for record in records if record.request.retest_of}
+    waiting = {of: confirm for of, confirm in confirms.items() if state.record(confirm).in_flight}
+    found = (
+        _candidate(record, waiting[record.request_id], head, bars, concurrency)
+        for record in records
+        if record.request_id in waiting
+        and record.request.branch == branch.branch
+        and record.request.purpose is Purpose.EXPLORE
+        and record.request.parent_commit == branch.head_commit
+        and record.judgement is None
+        and record.result is not None
+        and record.result.validity is Validity.SUCCEEDED
+    )
+    return tuple(candidate for candidate in found if candidate is not None)
+
+
 def progress(state: NotebookState, view: LineageView) -> tuple[BranchProgress, ...]:
     records = state.records()
     found = []
@@ -237,6 +290,7 @@ def progress(state: NotebookState, view: LineageView) -> tuple[BranchProgress, .
         commits = [
             node for node in view.commits if node.branch == branch.branch and node.origin is not CommitOrigin.ROOT
         ]
+        head = _value_or_empty(state, view, branch.head_commit)
         found.append(
             BranchProgress(
                 branch=branch.branch,
@@ -246,9 +300,10 @@ def progress(state: NotebookState, view: LineageView) -> tuple[BranchProgress, .
                 tests=len(requests),
                 commits=len(commits),
                 gpu_seconds=sum(result.gpu_seconds for result in results),
-                head_value=_value_or_empty(state, view, branch.head_commit),
+                head_value=head,
                 judged_since_commit=judged_since_commit(records, view, branch.branch),
                 llm_usd=priced_usd(item.usage for item in state.llm_usage if item.usage.branch == branch.branch),
+                pending=_pending(state, records, branch, head),
             )
         )
     return tuple(found)

@@ -72,6 +72,21 @@ def test_the_tree_keeps_when_kernel_tests_ran_and_the_roofline_bound_over_the_ba
     assert tree_from_document(tree_document(searched)) == searched
 
 
+def test_the_tree_keeps_when_each_test_was_measured_and_judged_and_the_longest_root_test(
+    snapshot: NotebookSnapshot,
+) -> None:
+    searched = tree_from_snapshot(snapshot, METRIC)
+    branches = {branch.name: branch for branch in searched.branches}
+    s1, s2 = branches["s1"], branches["s2"]
+    then = s1.as_of(s1.judged_times[0] if s1.judged_times else 0.0)
+
+    assert (len(s1.measured_times or ()), len(s1.judged_times or ())) == (2, 2)
+    assert (len(s2.measured_times or ()), len(s2.judged_times or ())) == (3, 2)
+    assert (len(then.measured_times or ()), len(then.judged_times or ())) == (1, 1)
+    assert searched.longest_root_test_seconds is None
+    assert tree_from_document(tree_document(searched)) == searched
+
+
 def test_a_branch_as_of_a_time_has_only_what_it_had_by_then() -> None:
     times = (0.0, 1800.0, 3600.0, 7200.0)
     grown = branch("s1", LATE_BLOOMER, test_times=times, kernel_test_times=(1800.0, 7200.0), closed_s=7200.0)
