@@ -12,7 +12,8 @@ from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLog
 from hyperloom_multibranch.contracts.fork import RepairRequest
 from hyperloom_multibranch.contracts.intent import Intent, IntentLayer
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
-from hyperloom_multibranch.contracts.notebook.records import BranchLogRecord
+from hyperloom_multibranch.contracts.notebook.records import BranchLogRecord, InboxItem
+from hyperloom_multibranch.contracts.notebook.vocab import InboxKind
 from hyperloom_multibranch.specialist import prompts
 from hyperloom_multibranch.specialist.prompts import (
     ENTRY_CHARS,
@@ -97,11 +98,26 @@ def test_the_role_names_the_config_delta_keys_that_recipe_delta_reads():
     assert "a key the delta does not define is not applied" in prompt
 
 
-def test_the_role_goes_back_to_choosing_after_a_result_instead_of_ending_the_turn():
+def test_the_role_goes_back_to_choosing_after_a_result_and_never_stops_its_branch():
     prompt = role_prompt(WORKLOAD)
 
-    assert "Then go back to step 2 in the same turn: the session decides when your branch stops, not you." in prompt
+    assert "Then go back to step 2: the session decides when your branch stops, not you." in prompt
     assert "When the config knobs are spent, profile and move to source or kernel directions." in prompt
+
+
+def test_the_role_says_the_conversation_lives_on_and_what_arrives_wakes_it():
+    prompt = role_prompt(WORKLOAD)
+
+    assert "This conversation lasts as long as your branch runs" in prompt
+    assert "what arrives for your branch (results, judgements, briefs, the runtime's notices) wakes you" in prompt
+    assert "when this conversation ends a new one starts" not in prompt
+
+
+def test_the_role_says_k_is_a_ceiling_and_a_test_needs_analysis_behind_it():
+    prompt = role_prompt(WORKLOAD)
+
+    assert "K is a ceiling, not a target" in prompt
+    assert "never a test just to fill a slot" in prompt
 
 
 def test_the_role_says_a_profile_refused_as_existing_is_waited_on():
@@ -109,12 +125,21 @@ def test_the_role_says_a_profile_refused_as_existing_is_waited_on():
     assert "wait_test on it rather than profiling again" in role_prompt(WORKLOAD)
 
 
-def test_the_role_waits_for_a_test_only_through_wait_test():
+def test_the_role_keeps_working_while_tests_run_and_ends_the_turn_to_wait():
     prompt = role_prompt(WORKLOAD)
 
-    assert "Wait for a test with wait_test" in prompt
+    assert "While your tests run, keep working" in prompt
+    assert "when nothing is left to do until one lands, end your turn and it wakes you" in prompt
     assert "within a minute with the test's progress" in prompt
     assert "Never wait with sleep, a background shell or by reading the test's files" in prompt
+
+
+def test_the_wake_and_nudge_messages_say_what_arrived_or_that_nothing_did():
+    item = InboxItem(InboxKind.JUDGEMENT, "s1", "r7", "r7 measured +2.1%: committed", 0.0)
+
+    woken = prompts.wake_message([item], [])
+    assert "this arrived for your branch" in woken and "- judgement r7: r7 measured +2.1%: committed" in woken
+    assert "nothing new for your branch" in prompts.nudge_message()
 
 
 def test_the_role_says_a_brief_item_asks_for_the_brief_again_before_the_next_claim():
