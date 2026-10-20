@@ -6,7 +6,7 @@ import logging
 import os
 import re
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -435,53 +435,6 @@ class SearchLimits:
     candidate_cap: int = 0
 
 
-def _limit(value: int, setting: str, default: int) -> int:
-    """A caller's limit; zero reads the ``setting`` environment variable, falling back to ``default``."""
-    return value or int(os.environ.get(setting, default) or default)
-
-
-@dataclass(frozen=True)
-class _Enrichment:
-    """The references enrichment built, how many it dropped or found undistilled, and why it degraded."""
-
-    references: list[PRReference]
-    dropped: int
-    absent: int
-    failure_reason: str
-
-
-def _enriched_references(
-    repo: str,
-    candidates: dict[int, set[str]],
-    details: Iterable[tuple[int, FetchOutcome]],
-    failure_reason: str,
-) -> _Enrichment:
-    """Build a reference from each fetched PR detail, folding fetch failures into ``failure_reason``."""
-    references: list[PRReference] = []
-    dropped = 0
-    absent = 0
-    for number, outcome in details:
-        if isinstance(outcome.error, PRContractError):
-            failure_reason = REASON_CONTRACT_ERROR
-            continue
-        if outcome.error is not None:
-            if not failure_reason:
-                failure_reason = REASON_SERVICE_UNREACHABLE
-            continue
-        if outcome.payload is None:
-            continue
-        if not isinstance(outcome.payload, dict):
-            failure_reason = REASON_CONTRACT_ERROR
-            continue
-        reference = _build_reference(repo, number, outcome.payload, candidates[number])
-        if reference is None:
-            dropped += 1
-            continue
-        absent += int(reference.distill_absent)
-        references.append(reference)
-    return _Enrichment(references, dropped, absent, failure_reason)
-
-
 def discover(
     client: PRMonitorClient,
     context: PRQueryContext,
@@ -493,8 +446,10 @@ def discover(
     """Discover ranked references; zero-valued limits use ``PR_KB_*`` settings."""
     if context.reason:
         return SearchOutcome(reason=context.reason, stats={"http_calls": 0})
-    top_k = _limit(limits.top_k, "PR_KB_TOP_K", DEFAULT_TOP_K)
-    candidate_cap = _limit(limits.candidate_cap, "PR_KB_CANDIDATE_CAP", DEFAULT_CANDIDATE_CAP)
+    top_k = limits.top_k or int(os.environ.get("PR_KB_TOP_K", DEFAULT_TOP_K) or DEFAULT_TOP_K)
+    candidate_cap = limits.candidate_cap or int(
+        os.environ.get("PR_KB_CANDIDATE_CAP", DEFAULT_CANDIDATE_CAP) or DEFAULT_CANDIDATE_CAP
+    )
     if deadline is None:
         budget = budget_sec or float(os.environ.get("PR_KB_BUDGET_SEC", "30") or 30)
         deadline = time.monotonic() + budget
@@ -503,8 +458,7 @@ def discover(
     candidates, failure_reason = _collect_candidates(client, context, deadline=deadline, stats=stats)
     stats["candidates"] = len(candidates)
     if not candidates:
-        reason = failure_reason or REASON_NO_CANDIDATE
-        return SearchOutcome(reason=reason, stats=stats)
+        return SearchOutcome(reason=failure_reason or REASON_NO_CANDIDATE, stats=stats)
 
     numbers = _order_candidates(candidates, candidate_cap)
 
@@ -513,19 +467,36 @@ def discover(
         # Enrichment without time returns nothing but still costs the caller its finalization reserve.
         stats["degraded_reason"] = REASON_SKIPPED_DEADLINE
         return SearchOutcome(reason=REASON_SKIPPED_DEADLINE, stats=stats)
-    outcomes = client.get_many(
-        [client.pr_request(context.repo, number) for number in numbers],
-        budget_sec=remaining,
-    )
+    outcomes = client.get_many([client.pr_request(context.repo, number) for number in numbers], budget_sec=remaining)
     stats["http_calls"] += len(outcomes)
 
-    enriched = _enriched_references(context.repo, candidates, zip(numbers, outcomes), failure_reason)
-    failure_reason = enriched.failure_reason
-    stats["distill_dropped"] = enriched.dropped
-    stats["distill_absent"] = enriched.absent
+    references: list[PRReference] = []
+    dropped = 0
+    absent = 0
+    for number, outcome in zip(numbers, outcomes):
+        if isinstance(outcome.error, PRContractError):
+            failure_reason = REASON_CONTRACT_ERROR
+            continue
+        if outcome.error is not None:
+            failure_reason = failure_reason or REASON_SERVICE_UNREACHABLE
+            continue
+        if outcome.payload is None:
+            continue
+        if not isinstance(outcome.payload, dict):
+            failure_reason = REASON_CONTRACT_ERROR
+            continue
+        reference = _build_reference(context.repo, number, outcome.payload, candidates[number])
+        if reference is None:
+            dropped += 1
+            continue
+        absent += int(reference.distill_absent)
+        references.append(reference)
+
+    stats["distill_dropped"] = dropped
+    stats["distill_absent"] = absent
 
     floors = worth_floors()
-    kept = [ref for ref in enriched.references if not _below_worth_floor(ref, floors)]
+    kept = [ref for ref in references if not _below_worth_floor(ref, floors)]
     interest = components_of_interest(context)
     relevant = filter_references_by_relevance(kept, interest)
     stats["relevance_dropped"] = len(kept) - len(relevant)
@@ -538,10 +509,5 @@ def discover(
     if failure_reason:
         stats["degraded_reason"] = failure_reason
     if not ranked:
-        reason = failure_reason or REASON_NO_CANDIDATE
-        return SearchOutcome(reason=reason, stats=stats)
-    return SearchOutcome(
-        references=tuple(ranked[:top_k]),
-        surfaced_references=tuple(ranked),
-        stats=stats,
-    )
+        return SearchOutcome(reason=failure_reason or REASON_NO_CANDIDATE, stats=stats)
+    return SearchOutcome(references=tuple(ranked[:top_k]), surfaced_references=tuple(ranked), stats=stats)

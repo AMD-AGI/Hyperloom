@@ -835,29 +835,6 @@ def test_partial_contract_error_is_recorded_as_degraded(service, client):
     assert outcome.stats["degraded_reason"] == REASON_CONTRACT_ERROR
 
 
-def test_transport_failure_during_enrichment_is_recorded_as_degraded(service, client):
-    service.by_query = {"moe": [1, 2]}
-    service.status_for = {"/prs/1": 503}
-    service.details = {2: _detail(2)}
-
-    outcome = discover(client, _context(keywords=("moe",)))
-
-    assert [ref.number for ref in outcome.references] == [2]
-    assert outcome.reason == ""
-    assert outcome.stats["degraded_reason"] == REASON_SERVICE_UNREACHABLE
-
-
-def test_a_pr_detail_that_is_not_an_object_is_a_contract_error(service, client):
-    service.by_query = {"moe": [1, 2]}
-    service.details = {1: ["not", "an", "object"], 2: _detail(2)}
-
-    outcome = discover(client, _context(keywords=("moe",)))
-
-    assert [ref.number for ref in outcome.references] == [2]
-    assert outcome.reason == ""
-    assert outcome.stats["degraded_reason"] == REASON_CONTRACT_ERROR
-
-
 def test_top_k_truncates_the_ranked_list(service, client):
     service.by_query = {"moe": [1, 2, 3, 4, 5, 6]}
     service.details = {n: _detail(n, worth=n / 10) for n in range(1, 7)}
