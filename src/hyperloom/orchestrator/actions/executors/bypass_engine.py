@@ -282,7 +282,7 @@ def wait_for_server_ready(
             if do_probe(health_url) == 200:
                 return True
         except (OSError, http.client.HTTPException, ValueError):
-            pass
+            pass  # not answering yet; keep polling until the deadline
         # Checked after the probe, so a server that answered and exited in the
         # same breath is still credited with having come up.
         if server_exited():

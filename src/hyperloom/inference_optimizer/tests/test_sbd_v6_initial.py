@@ -1171,7 +1171,6 @@ def test_preflight_failure_session_dir_error_reaches_the_caller(monkeypatch, tmp
 
 
 def test_preflight_failure_breakdown_error_reaches_the_caller(monkeypatch, tmp_path):
-    import hyperloom.inference_optimizer.breakdown as breakdown_pkg
     import hyperloom.inference_optimizer.cli as optimizer_cli
 
     def write_breakdown_json(*_a, **_k):
@@ -1180,7 +1179,7 @@ def test_preflight_failure_breakdown_error_reaches_the_caller(monkeypatch, tmp_p
     monkeypatch.setattr(optimizer_cli, "_mark_pending_install_event_failed", lambda args, exc: {})
     monkeypatch.setattr(optimizer_cli, "_new_preflight_failure_session_dir", lambda *_a, **_k: tmp_path)
     monkeypatch.setattr(optimizer_cli, "_persist_install_event", lambda *_a, **_k: None)
-    monkeypatch.setattr(breakdown_pkg, "write_breakdown_json", write_breakdown_json)
+    monkeypatch.setattr("hyperloom.inference_optimizer.breakdown.write_breakdown_json", write_breakdown_json)
 
     with pytest.raises(RuntimeError, match="breakdown writer bug"):
         optimizer_cli._persist_preflight_failure_artifacts(argparse.Namespace(), RuntimeError("preflight"))

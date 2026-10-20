@@ -1932,7 +1932,7 @@ def _publish_phase_boundary(boundary: _PhaseBoundary) -> None:
         if stage:
             record_stage_reached(bound_session(), stage)
     except (OSError, ValueError, SessionNotBoundError):
-        pass
+        pass  # phase-boundary telemetry must not block the phase change
 
 
 def record_phase_transition(

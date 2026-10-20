@@ -401,7 +401,7 @@ class _StreamCapture:
                 mirror.write(chunk)
             mirror.flush()
         except (OSError, ValueError):
-            pass
+            pass  # a closed or broken mirror stream must not stop the capture
 
 
 # Glob (relative to the watched path's directory) for nested per-run server logs Magpie writes when its wrapper
