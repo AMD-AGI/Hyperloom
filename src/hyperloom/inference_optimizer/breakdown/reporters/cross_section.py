@@ -15,6 +15,7 @@ from ..variant_funnel import VARIANT_COUNTS, variants_from_timeline
 from .base import (
     RenderedSection,
     as_dict,
+    events_of,
     outcome_of,
     session_of,
     stop_reason_of,
@@ -261,19 +262,31 @@ def _capabilities_split(
 _PAIR_TOLERANCE = 0.005
 
 
-def _graded_axis_headline(outcome: dict[str, Any], gain: float) -> str:
+def _settled_pair(breakdown: dict[str, Any], axis: str, gain: float) -> tuple[float, float] | None:
+    """The settled validation row's before and after on ``axis``, when they reproduce ``gain``.
+
+    The row is the one the gain was measured on, so its baseline is the ledger's own rather than the latest
+    anchor; a pair that does not reproduce the gain is not the one that produced it.
+    """
+    stacks = events_of(breakdown, "stack")
+    settled = as_dict(as_dict(as_dict(stacks[-1].get("ext")).get("validations")).get("settled")) if stacks else {}
+    before = to_float(settled.get("baseline_tput"))
+    after = to_float(settled.get("validated_tput"))
+    if settled.get("graded_objective") != axis or not (before and after):
+        return None
+    return (before, after) if abs(before * (1 + gain / 100) - after) <= _PAIR_TOLERANCE * after else None
+
+
+def _graded_axis_headline(breakdown: dict[str, Any], gain: float) -> str:
     """The headline on the interactivity axis the gain was measured on; ``""`` when it is not one."""
-    axis = as_dict(outcome.get("final")).get("graded_on")
+    axis = as_dict(outcome_of(breakdown).get("final")).get("graded_on")
     if axis not in INTVTY_OBJECTIVES:
         return ""
-    before = to_float(as_dict(as_dict(outcome.get("baseline")).get("perf")).get(axis))
-    after = to_float(as_dict(as_dict(outcome.get("final")).get("perf")).get(axis))
-    # The gain is measured against the ledger's own baseline, which a re-anchored session no longer shares with
-    # ``outcome.baseline``; a pair that does not reproduce the gain is not the one that produced it.
-    if not (before and after) or abs(before * (1 + gain / 100) - after) > _PAIR_TOLERANCE * after:
-        return ""
     sign = "+" if gain > 0 else ""
-    return f"{axis} {before:.2f} → {after:.2f} = {sign}{gain:.2f}% validated gain"
+    pair = _settled_pair(breakdown, axis, gain)
+    if pair is None:
+        return f"{sign}{gain:.2f}% validated gain on {axis}"
+    return f"{axis} {pair[0]:.2f} → {pair[1]:.2f} = {sign}{gain:.2f}% validated gain"
 
 
 def _headline(breakdown: dict[str, Any]) -> str:
@@ -285,7 +298,7 @@ def _headline(breakdown: dict[str, Any]) -> str:
     b = to_float(as_dict(outcome.get("baseline")).get("output_throughput"))
     f = to_float(as_dict(outcome.get("final")).get("output_throughput"))
     g = to_float(as_dict(outcome.get("final")).get("gain_pct"))
-    if g is not None and (axis_line := _graded_axis_headline(outcome, g)):
+    if g is not None and (axis_line := _graded_axis_headline(breakdown, g)):
         return axis_line
     if b and f and g is not None:
         sign = "+" if g > 0 else ""

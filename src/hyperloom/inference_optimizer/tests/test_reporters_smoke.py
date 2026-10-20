@@ -798,13 +798,24 @@ def _section(result: Any, section_id: str) -> Any:
     return next(s for s in result.sections if s.section_id == section_id)
 
 
+def _stack_event(**settled: Any) -> dict[str, Any]:
+    """A ``stack`` event whose settled validation row produced the session's gain."""
+    return {"type": "stack", "ext": {"validations": {"settled": settled}}}
+
+
 def _graded_breakdown() -> dict[str, Any]:
     """An AgentX-graded session: p50 interactivity moved while the tok/s figures barely did."""
     b = _fixture_breakdown()
-    b["outcome"]["baseline"]["perf"] = {"e2e_norm_intvty_p50": 63.02819, "e2e_norm_intvty_p90": 32.3}
-    b["outcome"]["final"]["perf"] = {"e2e_norm_intvty_p50": 79.75949, "e2e_norm_intvty_p90": 46.6}
     b["outcome"]["final"]["graded_on"] = "e2e_norm_intvty_p50"
     b["outcome"]["final"]["gain_pct"] = 26.5457
+    b["timeline"].append(
+        _stack_event(
+            baseline_tput=63.02819,
+            validated_tput=79.75949,
+            validated_gain_pct=26.5457,
+            graded_objective="e2e_norm_intvty_p50",
+        )
+    )
     return b
 
 
@@ -817,30 +828,61 @@ def test_headline_on_an_interactivity_session_quotes_the_graded_axis() -> None:
     assert f"- **Headline**: {expected}" in result.markdown.splitlines()
 
 
-def test_headline_drops_the_axis_pair_when_the_baseline_was_re_anchored() -> None:
-    """The gain is measured against the ledger's baseline; a later anchor makes the pair contradict it."""
+def test_headline_uses_the_settled_row_when_the_baseline_was_re_anchored() -> None:
+    """``outcome.baseline`` holds the latest anchor; the gain was measured against the ledger's baseline."""
     b = _graded_breakdown()
     b["outcome"]["baseline"]["perf"] = {"e2e_norm_intvty_p50": 150.51}
-    b["outcome"]["final"]["perf"] = {"e2e_norm_intvty_p50": 149.54}
     b["outcome"]["final"]["gain_pct"] = 44.52
+    b["timeline"][-1] = _stack_event(
+        baseline_tput=103.479,
+        validated_tput=149.544,
+        validated_gain_pct=44.5158,
+        graded_objective="e2e_norm_intvty_p50",
+    )
 
     headline = render_session_report(b).global_facts.headline
 
-    assert headline == "baseline 2205.00 tok/s → final 2447.50 tok/s = +44.52% validated gain"
+    assert headline == "e2e_norm_intvty_p50 103.48 → 149.54 = +44.52% validated gain"
+
+
+def test_headline_names_only_the_gain_and_axis_without_a_settled_row() -> None:
+    b = _graded_breakdown()
+    b["timeline"] = [e for e in b["timeline"] if e["type"] != "stack"]
+
+    headline = render_session_report(b).global_facts.headline
+
+    assert headline == "+26.55% validated gain on e2e_norm_intvty_p50"
+
+
+def test_headline_names_only_the_gain_and_axis_when_the_settled_row_is_on_another_axis() -> None:
+    b = _graded_breakdown()
+    b["timeline"][-1]["ext"]["validations"]["settled"]["graded_objective"] = "e2e_norm_intvty_p90"
+
+    assert render_session_report(b).global_facts.headline == "+26.55% validated gain on e2e_norm_intvty_p50"
+
+
+def test_headline_names_only_the_gain_and_axis_when_the_pair_does_not_reproduce_it() -> None:
+    b = _graded_breakdown()
+    b["timeline"][-1]["ext"]["validations"]["settled"]["validated_tput"] = 70.0
+
+    assert render_session_report(b).global_facts.headline == "+26.55% validated gain on e2e_norm_intvty_p50"
+
+
+def test_headline_reads_the_last_stack_event() -> None:
+    b = _graded_breakdown()
+    first = _stack_event(
+        baseline_tput=1.0, validated_tput=9.0, validated_gain_pct=800.0, graded_objective="e2e_norm_intvty_p50"
+    )
+    b["timeline"].insert(0, first)
+
+    assert (
+        render_session_report(b).global_facts.headline == "e2e_norm_intvty_p50 63.03 → 79.76 = +26.55% validated gain"
+    )
 
 
 def test_headline_keeps_the_throughput_sentence_when_the_graded_axis_is_throughput() -> None:
     b = _graded_breakdown()
     b["outcome"]["final"]["graded_on"] = "output_throughput"
-
-    headline = render_session_report(b).global_facts.headline
-
-    assert headline == "baseline 2205.00 tok/s → final 2447.50 tok/s = +26.55% validated gain"
-
-
-def test_headline_keeps_the_throughput_sentence_when_the_graded_axis_has_no_value() -> None:
-    b = _graded_breakdown()
-    b["outcome"]["final"]["perf"] = {}
 
     headline = render_session_report(b).global_facts.headline
 
