@@ -12,25 +12,31 @@ from .denial import PolicyDenied
 __all__ = ["deny_malformed_send_message"]
 
 
+def _names_recipients(to: Any) -> bool:
+    """Whether ``to`` is a non-empty string or a non-empty list of non-empty strings."""
+    names = to if isinstance(to, list) else [to]
+    return bool(names) and all(isinstance(name, str) and name.strip() for name in names)
+
+
 def deny_malformed_send_message(payload: dict[str, Any]) -> None:
-    """Refuse a ``SEND_MESSAGE`` without a ``topic``, or with a ``to`` that is not a non-empty string.
+    """Refuse a ``SEND_MESSAGE`` without a ``topic``, or with a ``to`` that names no recipient.
 
     Unknown topics are intentionally not rejected here: the Coordinator soft-degrades them to
     ``"observation"``, so agents can still surface unstructured observations. An absent ``to``
-    broadcasts; a present one names a single recipient. Other shapes (a JSON array of recipients
-    among them) cannot be bound as the ``to_agent`` column of the ``events`` row, so they are denied
-    here rather than crashing the intent handler.
+    broadcasts; a string names one recipient and a list several, each written as its own bus
+    message (an ``events`` row's ``to_agent`` is one name). Other shapes, or a list holding an
+    empty or non-string name, are denied here rather than crashing the intent handler.
 
     Raises:
         PolicyDenied: with ``rule='payload'`` when ``topic`` is missing or blank, or ``to`` is
-            present but not a non-empty string.
+            present but neither a non-empty string nor a non-empty list of them.
     """
     if not str(payload.get("topic", "")).strip():
         raise PolicyDenied("send_message missing topic", rule="payload")
     to = payload.get("to")
-    if to is not None and (not isinstance(to, str) or not to.strip()):
+    if to is not None and not _names_recipients(to):
         raise PolicyDenied(
-            f"send_message to must be a non-empty string, got {to!r}",
+            f"send_message to must be a non-empty string or a non-empty list of them, got {to!r}",
             rule="payload",
-            hint="address one recipient per send_message, or omit 'to' to broadcast.",
+            hint="name one recipient or a list of them, or omit 'to' to broadcast.",
         )
