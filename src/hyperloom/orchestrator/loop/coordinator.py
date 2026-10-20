@@ -280,7 +280,7 @@ class RunOptions:
         max_ticks: Stop after this many ticks, when set.
         stop_when: Custom stop predicate, asked after every tick.
         install_signal_handlers: Whether to arm the stop-signal drain.
-        crash_emergency_threshold: Consecutive tick crashes that end the run.
+        crash_emergency_threshold: Coordinator exceptions within the trailing 24 hours that end the run as ``emergency``.
         closing_grace_sec: Bound on the closing phase; the default when ``None``.
     """
 
