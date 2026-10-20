@@ -13,6 +13,7 @@ from hyperloom.inference_optimizer.protocol.intent import (
     IntentType,
     IntentValidationError,
     _PAYLOAD_REQUIRED,  # type: ignore[attr-defined]
+    validate_envelope,
 )
 from .mcp_context_tools import _resolve_sdk
 
@@ -223,7 +224,14 @@ def coerce_emit_intent_input(raw_input: Any) -> dict[str, Any]:
 
 
 def validate_emit_intent_input(payload: dict[str, Any]) -> None:
-    """Eager single-intent validation (mirrors :func:`validate_envelope`)."""
+    """Eager single-intent validation, by the same rule the harvest will apply.
+
+    The eager path decides only the tool ack; :func:`validate_envelope` decides
+    whether the intent survives. A rule written twice here drifts — a null
+    required field was acked ``ok`` and then dropped by the harvest, leaving the
+    agent told it succeeded with nothing to retry on — so the eager path builds
+    the one-intent envelope and defers to that function.
+    """
     if not isinstance(payload, dict):
         raise IntentValidationError(f"emit_intent input must be an object, got {type(payload).__name__}")
     original_extra = set(payload) - _EMIT_INTENT_TOP_LEVEL_KEYS
@@ -238,18 +246,14 @@ def validate_emit_intent_input(payload: dict[str, Any]) -> None:
     if "intent_type" not in coerced or "payload" not in coerced:
         raise IntentValidationError("emit_intent input requires both 'intent_type' and 'payload'")
     try:
-        intent_type = IntentType(coerced["intent_type"])
+        IntentType(coerced["intent_type"])
     except ValueError as exc:
         raise IntentValidationError(f"emit_intent: unknown intent_type {coerced['intent_type']!r}") from exc
-    inner = coerced["payload"]
-    if not isinstance(inner, dict):
-        raise IntentValidationError(f"emit_intent: 'payload' must be an object, got {type(inner).__name__}")
-    required = _PAYLOAD_REQUIRED.get(intent_type, ())
-    missing = [k for k in required if k not in inner]
-    if missing:
+    if not isinstance(coerced["payload"], dict):
         raise IntentValidationError(
-            f"emit_intent: intent_type={intent_type.value} missing required fields: {missing!r}"
+            f"emit_intent: 'payload' must be an object, got {type(coerced['payload']).__name__}"
         )
+    validate_envelope({"intents": [{"intent_type": coerced["intent_type"], "payload": coerced["payload"]}]})
 
 
 async def _emit_intent_handler(args: dict[str, Any]) -> dict[str, Any]:

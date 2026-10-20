@@ -208,6 +208,51 @@ class LocalRecipeStore:
                 continue
             yield recipe_dir
 
+    def _archive_live_version(
+        self,
+        *,
+        canonical_id: str,
+        snapshot: dict[str, Any],
+        version: int,
+        archived_at: str,
+        replaced_by: dict[str, Any] | None,
+    ) -> None:
+        """Copy the live row into ``history`` under its own version, leaving an identical archive untouched.
+
+        ``replaced_by`` carries the triggering write's provenance, so an audit consumer can
+        attribute the archive to the write that displaced it.
+        """
+        archive_path = self._history_version_path(canonical_id, version)
+        try:
+            existing_archive = _read_json(archive_path)
+        except LocalRecipeStoreError as exc:
+            log.warning(
+                "put_recipe: unreadable history v%s at %s (%s); rewriting it",
+                version,
+                archive_path,
+                exc,
+            )
+            existing_archive = None
+        if (
+            isinstance(existing_archive, dict)
+            and isinstance(existing_archive.get("snapshot"), dict)
+            and existing_archive["snapshot"] == snapshot
+        ):
+            log.debug(
+                "put_recipe: keeping existing history v%s at %s (crash residue)",
+                version,
+                archive_path,
+            )
+            return
+        archive_payload: dict[str, Any] = {
+            "canonical_id": canonical_id,
+            "version": version,
+            "archived_at": archived_at,
+            "replaced_by": dict(replaced_by or {}),
+            "snapshot": snapshot,
+        }
+        atomic_write_json(archive_path, archive_payload, options=WriteOptions(make_parents=True, fsync=True))
+
     # put_recipe
     def put_recipe(
         self,
@@ -253,45 +298,14 @@ class LocalRecipeStore:
             prior_version = int(live.get("version", 0)) if isinstance(live, dict) else 0
             new_version = prior_version + 1 if not created else 1
 
-            if not created:
-                # Archive prior live before overwrite; ``replaced_by`` carries the triggering write's provenance for
-                # audit.
-                archive_path = self._history_version_path(
-                    canonical_id,
-                    prior_version,
+            if live is not None:
+                self._archive_live_version(
+                    canonical_id=canonical_id,
+                    snapshot=dict(live),
+                    version=prior_version,
+                    archived_at=now,
+                    replaced_by=provenance,
                 )
-                try:
-                    existing_archive = _read_json(archive_path)
-                except LocalRecipeStoreError as exc:
-                    log.warning(
-                        "put_recipe: unreadable history v%s at %s (%s); rewriting it",
-                        prior_version,
-                        archive_path,
-                        exc,
-                    )
-                    existing_archive = None
-                snapshot = dict(live) if isinstance(live, dict) else {}
-                if (
-                    isinstance(existing_archive, dict)
-                    and isinstance(existing_archive.get("snapshot"), dict)
-                    and existing_archive["snapshot"] == snapshot
-                ):
-                    log.debug(
-                        "put_recipe: keeping existing history v%s at %s (crash residue)",
-                        prior_version,
-                        archive_path,
-                    )
-                else:
-                    archive_payload: dict[str, Any] = {
-                        "canonical_id": canonical_id,
-                        "version": prior_version,
-                        "archived_at": now,
-                        "replaced_by": dict(provenance or {}),
-                        "snapshot": snapshot,
-                    }
-                    atomic_write_json(
-                        archive_path, archive_payload, options=WriteOptions(make_parents=True, fsync=True)
-                    )
 
             # Build payload via ``Recipe.from_dict`` so dataclass instances and dicts both round-trip into the same
             # on-disk shape.

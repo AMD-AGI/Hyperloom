@@ -1211,33 +1211,13 @@ class SpecialistRunner:
             patches=deduped,
             patch_roots=collected_roots,
         )
-        kept, ungrounded, grounding, spans_roots = _patch_safety.vet_patches(
+        vetted = _patch_safety.vet_patches(
             deduped,
             base_checkout=base_checkout,
             candidate_roots=candidate_roots,
             explicit_root=explicit_root,
         )
-        numeric_warnings = _patch_safety.scan_numeric_claims(done_payload)
-        # Strip, do not forward: the Critic is instructed to reject the whole
-        # proposal_set over these fields, which costs the round every idea the
-        # specialist produced. The audit note below records what the strip took.
-        forbidden_fields = _patch_safety.strip_forbidden_proposal_fields(done_payload)
-        safety = _patch_safety.PatchSafetyReport(
-            kept_patches=kept,
-            ungrounded=ungrounded,
-            grounding=grounding,
-            numeric_warnings=numeric_warnings,
-            forbidden_fields=forbidden_fields,
-        )
-        done_payload["patches_written"] = kept
-        done_payload["patch_grounding"] = grounding
-        if collected_roots:
-            done_payload["patch_roots"] = {p: r for p, r in collected_roots.items() if p in kept}
-        if ungrounded:
-            done_payload["patches_ungrounded"] = [d["detail"] for d in ungrounded[:8]]
-        if spans_roots:
-            done_payload["patches_span_multiple_roots"] = True
-        notes.extend(safety.notes())
+        notes.extend(_patch_safety.admit_payload(done_payload, vetted, collected_roots).notes())
         recovered = bool(done_payload.get("_recovered_from_partial"))
         # ``partial`` keeps an infra failure visible without making the attempt
         # retry-eligible, which would discard whatever was salvaged.
