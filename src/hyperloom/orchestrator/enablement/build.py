@@ -62,130 +62,124 @@ class EnablementBuild(CoordinatorCollaborator):
 
         if is_multi_node():
             return
-        try:
-            from hyperloom.common.failure_signature import (
-                MISSING_MODEL_ARCH,
-                MISSING_WEIGHT,
-                NOT_IMPLEMENTED,
-                is_targeted_build_candidate,
-            )
-            from .runtime.build_actions import TargetedBuildAction
+        from hyperloom.common.failure_signature import (
+            MISSING_MODEL_ARCH,
+            MISSING_WEIGHT,
+            NOT_IMPLEMENTED,
+            is_targeted_build_candidate,
+        )
+        from .runtime.build_actions import TargetedBuildAction
 
-            state = self.shared_state
-            # The round's own filed observation; wrapper text is the fallback,
-            # named by ``degraded`` in the log line below.
-            verdict, loaded = recorded_verdict(
-                state.enablement.launch_observation_path,
-                wrapper_text=launch_log,
-                session_dir=session_root(self),
-            )
-            signature = verdict.signature
-            framework = (getattr(state, "framework", "") or "").strip().lower()
-            gpu_type = (getattr(state, "gpu_type", "") or "").strip().lower()
+        state = self.shared_state
+        # The round's own filed observation; wrapper text is the fallback,
+        # named by ``degraded`` in the log line below.
+        verdict, loaded = recorded_verdict(
+            state.enablement.launch_observation_path,
+            wrapper_text=launch_log,
+            session_dir=session_root(self),
+        )
+        signature = verdict.signature
+        framework = (getattr(state, "framework", "") or "").strip().lower()
+        gpu_type = (getattr(state, "gpu_type", "") or "").strip().lower()
 
-            # Two escalation triggers: 1.
-            is_compiled_gap = is_targeted_build_candidate(signature, launch_log)
-            arch_stall = (
-                signature.kind in (MISSING_MODEL_ARCH, MISSING_WEIGHT, NOT_IMPLEMENTED)
-                and framework == "vllm"
-                and int(attempt or 0) >= 1
-            )
-            if not is_compiled_gap and not arch_stall:
-                return
+        # Two escalation triggers: 1.
+        is_compiled_gap = is_targeted_build_candidate(signature, launch_log)
+        arch_stall = (
+            signature.kind in (MISSING_MODEL_ARCH, MISSING_WEIGHT, NOT_IMPLEMENTED)
+            and framework == "vllm"
+            and int(attempt or 0) >= 1
+        )
+        if not is_compiled_gap and not arch_stall:
+            return
 
-            # Derive novelty fields from the current failure + session context.
-            existing_stack = state.enablement.kept_stack_action or {}
-            repo_url = str(existing_stack.get("repo_url") or "").strip()
-            ref = str(existing_stack.get("ref") or "").strip()
+        # Derive novelty fields from the current failure + session context.
+        existing_stack = state.enablement.kept_stack_action or {}
+        repo_url = str(existing_stack.get("repo_url") or "").strip()
+        ref = str(existing_stack.get("ref") or "").strip()
 
-            # Pick the component from the failure evidence: sgl_kernel when the offending symbol/log names sgl-kernel;
-            # vllm_source when vLLM's own C extension is implicated; aiter (default) for all other compiled-miss gaps.
-            sym_lower = (signature.offending_symbol or "").lower()
-            log_lower = launch_log.lower()
-            if arch_stall and not is_compiled_gap:
-                # Arch/weight deep-failure on vLLM after source patches: the fix is a from-source vLLM build that
-                # natively implements the arch, not an aiter/sgl-kernel op build.
-                component = "vllm_source"
-            elif "sgl_kernel" in sym_lower or "sgl-kernel" in sym_lower or "sgl_kernel" in log_lower:
-                component = "sgl_kernel"
-            elif framework == "vllm" and (
-                "vllm/_c" in log_lower
-                or "vllm.extension" in log_lower
-                or "_c.so" in log_lower
-                or "vllm._c" in sym_lower
-            ):
-                component = "vllm_source"
-            else:
-                component = "aiter"
+        # Pick the component from the failure evidence: sgl_kernel when the offending symbol/log names sgl-kernel;
+        # vllm_source when vLLM's own C extension is implicated; aiter (default) for all other compiled-miss gaps.
+        sym_lower = (signature.offending_symbol or "").lower()
+        log_lower = launch_log.lower()
+        if arch_stall and not is_compiled_gap:
+            # Arch/weight deep-failure on vLLM after source patches: the fix is a from-source vLLM build that
+            # natively implements the arch, not an aiter/sgl-kernel op build.
+            component = "vllm_source"
+        elif "sgl_kernel" in sym_lower or "sgl-kernel" in sym_lower or "sgl_kernel" in log_lower:
+            component = "sgl_kernel"
+        elif framework == "vllm" and (
+            "vllm/_c" in log_lower or "vllm.extension" in log_lower or "_c.so" in log_lower or "vllm._c" in sym_lower
+        ):
+            component = "vllm_source"
+        else:
+            component = "aiter"
 
-            source_pr_url = ""
-            # When no operator-pinned/kept ref, try the top discovery candidate.
-            if not ref:
-                from .runtime.build_actions import resolve_build_ref
+        source_pr_url = ""
+        # When no operator-pinned/kept ref, try the top discovery candidate.
+        if not ref:
+            from .runtime.build_actions import resolve_build_ref
 
-                _component_hints = {
-                    "aiter": ("aiter",),
-                    "sgl_kernel": ("sglang", "sgl-kernel", "sgl_kernel"),
-                    "vllm_source": ("vllm",),
-                    "framework_ext": (),
-                }
-                hints = _component_hints.get(component, ())
-                default_repo = repo_url or ""
-                for _cand in list(state.enablement.candidate_refs or []):
-                    _repo, _ref, _pr_url = resolve_build_ref(str(_cand), default_repo)
-                    if not _ref:
+            _component_hints = {
+                "aiter": ("aiter",),
+                "sgl_kernel": ("sglang", "sgl-kernel", "sgl_kernel"),
+                "vllm_source": ("vllm",),
+                "framework_ext": (),
+            }
+            hints = _component_hints.get(component, ())
+            default_repo = repo_url or ""
+            for _cand in list(state.enablement.candidate_refs or []):
+                _repo, _ref, _pr_url = resolve_build_ref(str(_cand), default_repo)
+                if not _ref:
+                    continue
+                if hints:
+                    _repo_lower = (_repo or _cand).lower()
+                    if not any(h in _repo_lower for h in hints):
                         continue
-                    if hints:
-                        _repo_lower = (_repo or _cand).lower()
-                        if not any(h in _repo_lower for h in hints):
-                            continue
-                    repo_url = _repo or repo_url
-                    ref = _ref
-                    source_pr_url = _pr_url
-                    break
+                repo_url = _repo or repo_url
+                ref = _ref
+                source_pr_url = _pr_url
+                break
 
-            reason = (
-                f"Rung-5 arch-stall auto-escalation: {signature.kind} persists on vLLM "
-                f"after {int(attempt or 0)} source-patch attempt(s) — build vLLM from source"
-                if (arch_stall and not is_compiled_gap)
-                else f"Rung-5 auto-escalation from {signature.kind}"
+        reason = (
+            f"Rung-5 arch-stall auto-escalation: {signature.kind} persists on vLLM "
+            f"after {int(attempt or 0)} source-patch attempt(s) — build vLLM from source"
+            if (arch_stall and not is_compiled_gap)
+            else f"Rung-5 auto-escalation from {signature.kind}"
+        )
+        if not _repo_matches_targeted_build_component(repo_url, component):
+            log.warning(
+                "ENABLEMENT: targeted_build repo/component mismatch component=%s repo_url=%s",
+                component,
+                repo_url,
             )
-            if not _repo_matches_targeted_build_component(repo_url, component):
-                log.warning(
-                    "ENABLEMENT: targeted_build repo/component mismatch component=%s repo_url=%s",
-                    component,
-                    repo_url,
-                )
-                return
-            action = TargetedBuildAction(
-                gap_id=f"gap.enablement.{signature.kind}",
-                framework=framework or "vllm",
-                component=component,
-                capability=str(signature.offending_symbol or signature.kind or ""),
-                reason=reason,
-                repo_url=repo_url,
-                ref=ref,
-                gpu_arch=gfx_arch_for_gpu_type(gpu_type) or "",
-                build_budget_sec=0,
-                source_pr_url=source_pr_url,
-            )
-            task_id = await self._coord.build_lifecycle.enqueue_targeted_build(action)
-            if task_id:
-                from hyperloom.common.bringup import failure_digest
+            return
+        action = TargetedBuildAction(
+            gap_id=f"gap.enablement.{signature.kind}",
+            framework=framework or "vllm",
+            component=component,
+            capability=str(signature.offending_symbol or signature.kind or ""),
+            reason=reason,
+            repo_url=repo_url,
+            ref=ref,
+            gpu_arch=gfx_arch_for_gpu_type(gpu_type) or "",
+            build_budget_sec=0,
+            source_pr_url=source_pr_url,
+        )
+        task_id = await self._coord.build_lifecycle.enqueue_targeted_build(action)
+        if task_id:
+            from hyperloom.common.bringup import failure_digest
 
-                log.info(
-                    "ENABLEMENT: enqueued targeted_build kind=%s component=%s arch_stall=%s "
-                    "gpu_arch=%s digest=%s degraded=%s task=%s",
-                    signature.kind,
-                    component,
-                    bool(arch_stall and not is_compiled_gap),
-                    action.gpu_arch,
-                    failure_digest(verdict.observation)[:12],
-                    loaded.degraded or "-",
-                    task_id,
-                )
-        except Exception:
-            log.debug("enablement: targeted-build escalation failed", exc_info=True)
+            log.info(
+                "ENABLEMENT: enqueued targeted_build kind=%s component=%s arch_stall=%s "
+                "gpu_arch=%s digest=%s degraded=%s task=%s",
+                signature.kind,
+                component,
+                bool(arch_stall and not is_compiled_gap),
+                action.gpu_arch,
+                failure_digest(verdict.observation)[:12],
+                loaded.degraded or "-",
+                task_id,
+            )
 
     async def maybe_enqueue_specialist_requested_build(
         self,
@@ -223,7 +217,7 @@ class EnablementBuild(CoordinatorCollaborator):
 
                 try:
                     payload = _json.loads(done_path.read_text())
-                except Exception:  # noqa: BLE001 — malformed/partial done is non-fatal
+                except (OSError, ValueError):  # unreadable or partial done file: retry next tick
                     return
             req = payload.get("needs_targeted_build") if isinstance(payload, dict) else None
             if not isinstance(req, dict) or not req:
@@ -295,20 +289,17 @@ class EnablementBuild(CoordinatorCollaborator):
 
         A build settles no round; a failed one reaches the lane through ``last_build_failure`` in the next mandate.
         """
-        try:
-            built = [t for t in await self.tasks.by_state("succeeded") if t.kind == "targeted_build"]
-            # Oldest first so a newer, already-routed build cannot hide an older one that still needs routing.
-            for task in sorted(built, key=lambda t: str(getattr(t, "updated_at", "") or "")):
-                task_id = str(getattr(task, "task_id", "") or "")
-                # Skip rows already accounted for (tracked by enablement_build_manifest), unless what they were routed
-                # to was cancelled before it ran, which leaves the build no more launched than an unrouted one.
-                routed = self._build_routing_record(task_id)
-                if routed is not None and not await self._build_probe_was_cancelled(routed):
-                    continue
-                await self._route_succeeded_build(task, routed)
-                return
-        except Exception:
-            log.debug("enablement: route_build_outcomes failed", exc_info=True)
+        built = [t for t in await self.tasks.by_state("succeeded") if t.kind == "targeted_build"]
+        # Oldest first so a newer, already-routed build cannot hide an older one that still needs routing.
+        for task in sorted(built, key=lambda t: str(getattr(t, "updated_at", "") or "")):
+            task_id = str(getattr(task, "task_id", "") or "")
+            # Skip rows already accounted for (tracked by enablement_build_manifest), unless what they were routed
+            # to was cancelled before it ran, which leaves the build no more launched than an unrouted one.
+            routed = self._build_routing_record(task_id)
+            if routed is not None and not await self._build_probe_was_cancelled(routed):
+                continue
+            await self._route_succeeded_build(task, routed)
+            return
 
     async def _route_succeeded_build(self, task: "Task", routed: dict[str, Any] | None) -> None:
         """Turn a succeeded targeted build into a launch probe."""

@@ -1434,7 +1434,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             ``True`` when the configuration was accepted, ``False`` when a
             performance winner was not comparable or did not beat the anchor.
         """
-        from hyperloom.common.perf_metric import VERDICT_KEEP, constraint_fields, graded_axes_of
+        from hyperloom.common.perf_metric import VERDICT_KEEP, baseline_on_axis, constraint_fields, graded_axes_of
 
         prebaseline_enablement = (
             task_kind == "integrate_patch"
@@ -1671,7 +1671,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                         entry=stack_entry,
                         throughput_before=graded.reference,
                         throughput_after=graded.candidate,
-                        baseline_tput=self.shared_state.baseline_tput,
+                        baseline_tput=baseline_on_axis(self.shared_state, graded.objective),
                         objective=graded.objective,
                         degrade_reason=graded.degrade_reason,
                     )

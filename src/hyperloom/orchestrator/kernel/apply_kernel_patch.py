@@ -2185,7 +2185,7 @@ def _whole_file_preflight(request: KernelPatchRequest) -> _WholeFilePreflight:
     try:
         strategy = _detect_strategy(target)
         _validate_patch_source(patch, target)
-    except Exception as exc:
+    except (ValueError, OSError, py_compile.PyCompileError) as exc:
         raise _PatchRefused({"status": "failed", "error": str(exc)}) from exc
     # Coerce/validate the rebuild_command BEFORE any file/pod mutation so an
     # invalid (shell-control) command fails all-or-nothing instead of aborting
