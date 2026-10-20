@@ -76,15 +76,32 @@ def test_the_role_profiles_through_a_profile_test_and_tracelens_never_roofline()
     assert "roofline" not in prompt
 
 
-def test_the_role_profiles_on_demand_never_the_root_prelude_profiled():
+def test_the_role_profiles_the_root_only_while_no_brief_lists_its_ceilings():
     prompt = role_prompt(WORKLOAD)
 
-    assert "The session's root was profiled in PRELUDE: never profile the root" in prompt
-    assert "profile your head only once it carries gains you committed" in prompt
+    assert "never profile the root" not in prompt
+    assert "Profile the session's root only while no brief lists ceilings for it" in prompt
+    assert "Profile a later head only once it carries gains you committed" in prompt
 
 
 def test_the_role_says_an_explore_delta_carries_the_claimed_change():
     assert "an empty delta tests nothing" in role_prompt(WORKLOAD)
+
+
+def test_the_role_names_the_config_delta_keys_that_recipe_delta_reads():
+    prompt = role_prompt(WORKLOAD)
+    example = prompt.split("with exactly these keys: ", 1)[1].split(". extra_server_args", 1)[0]
+
+    config = RecipeDelta.from_document(json.loads(example)).config
+    assert (config.server_args, dict(config.envs)) == ("--flag value --other-flag", {"NAME": "value"})
+    assert "a key the delta does not define is not applied" in prompt
+
+
+def test_the_role_goes_back_to_choosing_after_a_result_instead_of_ending_the_turn():
+    prompt = role_prompt(WORKLOAD)
+
+    assert "Then go back to step 2 in the same turn: the session decides when your branch stops, not you." in prompt
+    assert "When the config knobs are spent, profile and move to source or kernel directions." in prompt
 
 
 def test_the_role_says_a_profile_refused_as_existing_is_waited_on():

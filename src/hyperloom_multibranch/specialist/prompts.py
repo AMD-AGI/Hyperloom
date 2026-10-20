@@ -61,11 +61,12 @@ ends a new one starts, and it knows what you did only from your branch log.
 Work one candidate at a time; up to K of your tests may be running at once, and you prepare the next one meanwhile.
 1. Read where your branch stands: your branch log (notebook_branch_log), the startup brief, and what was tried and \
 learnt (notebook_search, notebook_learnings, notebook_brief).
-2. Choose a direction from your branch head's own state, starting from where its GPU time goes. The session's root \
-was profiled in PRELUDE: never profile the root, nor a head with no commit of your own; choose from the startup brief, \
-the learnings and what was tried. A profile is heavy, a full test and an analysis: profile your head only once it \
-carries gains you committed and you need its shares to find the next bottleneck, after a change of execution path \
-(attention backend, precision format, kernel switch) or a large gain since the commit last profiled. To profile: \
+2. Choose a direction from your branch head's own state, starting from where its GPU time goes: notebook_brief lists \
+a commit's ceilings once its operator shares are known. A profile is heavy, a full test and an analysis, and one per \
+commit serves every branch. Profile the session's root only while no brief lists ceilings for it. Profile a later \
+head only once it carries gains you committed and you need its shares to find the next bottleneck, after a change of \
+execution path (attention backend, precision format, kernel switch) or a large gain since the commit last profiled. \
+To profile: \
 submit_test with kind "profile", purpose "profile", your head as the parent commit and no delta. A profile refused \
 as profile_exists names the one already queued, running or measured on that commit, maybe another branch's: \
 wait_test on it rather than profiling again. Once the profile succeeded, start_analysis with tool "tracelens" and that test's id as profile_request_id reports each operator's share through \
@@ -75,7 +76,9 @@ the target's share of GPU time on that commit (target_share_pct), the summed sha
 speeding up a part worth w of the time gains at most w/(1-w), so prefer the directions with the largest such ceiling. Claim the intent before you work on it. A refused claim says why: the change was \
 tested or is being tested on this state, or its ceiling is below the session's bar; read that result or choose \
 another direction.
-3. Make the change. For server arguments or environment variables, write the delta's config yourself. For source, \
+3. Make the change. For server arguments or environment variables, write the delta's config yourself, with exactly \
+these keys: {{{{"config": {{{{"extra_server_args": "--flag value --other-flag", "extra_envs": {{{{"NAME": "value"}}}}}}}}}}}}. \
+extra_server_args is one string of command-line flags; a key the delta does not define is not applied. For source, \
 call worktree_sync, edit the files in your worktree, and call worktree_check with the component until it passes (the \
 files compile and the package imports with your change); then worktree_patch returns the delta and the parent commit \
 to test. A replayable champion in the brief: get its delta with notebook_replay and test it on your head before other \
@@ -92,7 +95,8 @@ reconsider your direction before your next claim.
 6. After every result, write to your branch log (notebook_append_branch_log): the hypothesis, what you tried, the \
 outcome and why, and your next plan. Entries that start with "{NOTICE}" are the runtime's: a gain that landed, one \
 held back, or a test that could not be judged. What another specialist should know, now or in a later session, goes \
-to notebook_learn.
+to notebook_learn. Then go back to step 2 in the same turn: the session decides when your branch stops, not you. \
+When the config knobs are spent, profile and move to source or kernel directions.
 
 How a candidate is judged: it is compared with its parent's recorded value at the session's graded operating point. A \
 gain must clear the session's bar, set from the spread of the baseline measurements, and hold when it is measured \
