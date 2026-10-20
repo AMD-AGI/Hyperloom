@@ -13,7 +13,6 @@ import re
 import shutil
 import subprocess
 import time
-from collections.abc import Sequence
 from enum import Enum, auto
 from pathlib import Path
 from typing import Any, Callable, NamedTuple, NoReturn
@@ -135,15 +134,19 @@ class _Halt(Enum):
 
 
 class _VariantAborted(Exception):
-    """A variant ended before its result was assembled, carrying what the grid records for it."""
+    """A variant ended before its result was assembled, carrying what the grid records for it.
+
+    ``never_started`` is why the variants after this one never ran; the loop that owns the grid
+    writes their rows, so a ``STOP`` carries the reason rather than a copy of the rows.
+    """
 
     def __init__(
-        self, result: VariantResult, *, halt: _Halt = _Halt.ON_FAILURE, trailing: Sequence[VariantResult] = ()
+        self, result: VariantResult, *, halt: _Halt = _Halt.ON_FAILURE, never_started: str | None = None
     ) -> None:
         super().__init__(result.error_class)
         self.result = result
         self.halt = halt
-        self.trailing = tuple(trailing)
+        self.never_started = never_started
 
 
 def _resolve_session_dir() -> Path:
@@ -905,7 +908,6 @@ async def run_grid(
             error_summary=f"{stopped.interrupted}; {teardown}",
             extra_args=attempt.variant.extra_server_args,
         )
-        ends_the_batch = stopped.ends_the_batch
         raise _VariantAborted(
             VariantResult(
                 name=attempt.variant.name,
@@ -920,10 +922,8 @@ async def run_grid(
                 note=attempt.variant.note,
                 nonfatal_warnings=[f"server_survived_teardown:{pid}" for pid in attempt.server_survivors],
             ),
-            halt=_Halt.STOP if ends_the_batch else _Halt.ON_FAILURE,
-            trailing=[_not_run_skip_result(rest, stopped) for rest in grid[attempt.idx + 1 :]]
-            if ends_the_batch
-            else (),
+            halt=_Halt.STOP if stopped.ends_the_batch else _Halt.ON_FAILURE,
+            never_started=stopped.never_started,
         )
 
     # How many full benchmark passes one variant costs.
@@ -954,7 +954,10 @@ async def run_grid(
             spent_on,
             len(grid) - idx,
         )
-        results.extend(_not_run_skip_result(variant, deadline_stop) for variant in grid[idx:])
+        results.extend(
+            _not_run_skip_result(v, error=deadline_stop.never_started, error_class=deadline_stop.error_class)
+            for v in grid[idx:]
+        )
         return True
 
     for i, variant in enumerate(grid):
@@ -1655,7 +1658,7 @@ async def run_grid(
                     extra_args=variant.extra_server_args,
                 )
                 no_ws_halt = _Halt.ON_FAILURE if rc != 0 else _Halt.CONTINUE
-                no_ws_trailing: list[VariantResult] = []
+                no_ws_never_started: str | None = None
                 if agentx_preflight_abort:
                     # Environment, not variant.
                     log.error(
@@ -1669,20 +1672,7 @@ async def run_grid(
                         no_ws_error_summary,
                     )
                     no_ws_halt = _Halt.STOP
-                    # Recorded rather than dropped: a grid that just returns fewer points than it declared reads as a grid
-                    # that was that size.
-                    no_ws_trailing = [
-                        VariantResult(
-                            name=rest.name,
-                            extra_server_args=rest.extra_server_args,
-                            extra_envs=dict(rest.extra_envs),
-                            status="skipped",
-                            error="AgentX preflight aborted the grid before this variant ran",
-                            error_class=AGENTX_PREFLIGHT_ERROR_CLASS,
-                            note=rest.note,
-                        )
-                        for rest in grid[i + 1 :]
-                    ]
+                    no_ws_never_started = "AgentX preflight aborted the grid before this variant ran"
                 raise _VariantAborted(
                     VariantResult(
                         name=variant.name,
@@ -1697,7 +1687,7 @@ async def run_grid(
                         note=variant.note,
                     ),
                     halt=no_ws_halt,
-                    trailing=no_ws_trailing,
+                    never_started=no_ws_never_started,
                 )
             report_path = workspace / "benchmark_report.json"
             report, measurement = await _settled_measurement(
@@ -1882,7 +1872,13 @@ async def run_grid(
         except _VariantAborted as abort:
             results.append(abort.result)
             await _report_finished_variant(i)
-            results.extend(abort.trailing)
+            if abort.halt is _Halt.STOP:
+                # Recorded rather than dropped: a grid that just returns fewer points than it declared reads as a
+                # grid that was that size.
+                results.extend(
+                    _not_run_skip_result(rest, error=abort.never_started, error_class=abort.result.error_class)
+                    for rest in grid[i + 1 :]
+                )
             if abort.halt is _Halt.STOP or (abort.halt is _Halt.ON_FAILURE and not keep_going_on_failure):
                 break
     await asyncio.to_thread(
@@ -1912,15 +1908,15 @@ def _teardown_variant_server(slot: Path, lifecycle: dict[str, Any] | None) -> li
     return stop_agentx_servers(slot)
 
 
-def _not_run_skip_result(variant: GridVariant, stopped: StoppedByTheRun) -> VariantResult:
+def _not_run_skip_result(variant: GridVariant, *, error: str | None, error_class: str | None) -> VariantResult:
     """Build the ``skipped`` result for a variant the run never got to."""
     return VariantResult(
         name=variant.name,
         extra_server_args=variant.extra_server_args,
         extra_envs=dict(variant.extra_envs),
         status="skipped",
-        error=stopped.never_started,
-        error_class=stopped.error_class,
+        error=error,
+        error_class=error_class,
         note=variant.note,
     )
 
