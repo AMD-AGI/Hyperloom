@@ -26,7 +26,7 @@ def resolve_kernel_opt_max_failures() -> int:
 # Independent bounded budget for integration-fault *attempts* (separate from the REVERT ``max_attempts`` quota).
 _MAX_INTEGRATE_FAULT_ATTEMPTS = 2
 
-# Minimum GPU share for a reusable hot kernel to still owe a kernel_opt attempt.
+# Minimum GPU share for a reusable hot kernel to stay owed work until a backend produces a patch for it.
 _DEFAULT_HOT_KERNEL_MIN_GPU_PCT = 5.0
 
 

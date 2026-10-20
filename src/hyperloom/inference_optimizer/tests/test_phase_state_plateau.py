@@ -384,6 +384,30 @@ def test_kernel_holds_while_work_pending_untried_hot_kernel():
     assert compute_next_phase(state, flags=PhaseFlags(kernel_enabled=True)) is None
 
 
+def test_a_hot_kernel_a_backend_patched_stops_holding_kernel():
+    # A reusable kernel over the GPU-share floor holds KERNEL until a patch for it exists.
+    state = _skip_to_sweep_state("KERNEL_AGENT")
+    state.last_trace_analyze = {
+        "hot_kernels_top15": [
+            {
+                "kernel_id": "k003",
+                "name": "moe_align",
+                "source_file": "/repo/moe.py",
+                "gpu_pct": 25.2,
+                "reusable_native_kernel": True,
+            }
+        ],
+        "task_groups": [],
+    }
+    assert kernel_work_pending(state) is True
+
+    state.record_kernel_integrate_result(
+        {"kernel_id": "k003", "patch_path": "/tmp/k003.patch", "target_file": "/repo/moe.py", "decision": "REVERT"}
+    )
+
+    assert kernel_work_pending(state) is False
+
+
 @pytest.mark.parametrize("status", ["no_gain", "timeout"])
 def test_geak_terminal_exits_kernel_ignoring_per_kernel_pending_work(status):
     state = _skip_to_sweep_state("KERNEL_AGENT")

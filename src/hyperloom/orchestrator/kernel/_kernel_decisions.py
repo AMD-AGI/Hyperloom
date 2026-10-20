@@ -9,7 +9,7 @@ import hashlib
 import json
 import logging
 import os
-from typing import Any
+from typing import Any, NamedTuple
 
 from kernelforge.knowledge.kb_store.identity.implementation import normalize_operator_name
 from kernelforge.knowledge.kb_store.identity.kernel_recipe import KERNEL_RECIPE_PRODUCERS
@@ -764,70 +764,57 @@ def kernel_opt_attempts_count(state) -> int:
     return len(state.kernel_opt_task_attempts or {})
 
 
-def untried_hot_reusable_kernels(
-    state,
-    *,
-    min_gpu_pct: float | None = None,
-    top_n: int | None = None,
-) -> list[str]:
-    """Hot kernels still owing a ``kernel_opt`` attempt (reusable, gpu_pct >= min_gpu_pct, untouched); capped to top_n by TraceLens rank, one kernel_id per task_group."""
-    info = state.last_trace_analyze or {}
-    hot = info.get("hot_kernels_top15") or info.get("hot_kernels") or []
-    task_groups = info.get("task_groups") or []
-    if not isinstance(hot, list):
-        return []
+def _attempt_records(state) -> list[dict[str, Any]]:
+    """Every record that says a kernel patch was produced or measured: queued patches and integrate verdicts."""
+    return [*state.pending_kernel_integrations.values(), *state.kernel_integrate_attempts.values()]
 
-    if min_gpu_pct is None:
-        min_gpu_pct = resolve_hot_kernel_min_gpu_pct()
+
+def _attempted_operators(state, records: list[dict[str, Any]]) -> set[str]:
+    """Normalized operator names some backend already produced a patch for.
+
+    A Forge rewrite or fusion and a GEAK adoption name the kernel by its symbol or by a kernel-recipe id, never by
+    the trace's synthetic ``kNNN`` ordinal, so the operator name is the identity they share with a trace row.
+    """
+    names = [str(record.get("kernel_id") or "") for record in records]
+    integration = state.kernel_rewrite_controller_result.get("integration", {})
+    names.extend(str(row.get("operator_id") or "") for row in integration.get("results", []))
+    return {normalize_operator_name(_canonical_kernel_recipe_operator(name) or name) for name in names if name.strip()}
+
+
+class _HotRow(NamedTuple):
+    """One reusable hot trace row the gate ranks, with the identities an attempt can match it by."""
+
+    order: tuple[bool, int, float]
+    kernel_id: str
+    source_file: str
+    members: list[str]
+    group_key: str
+    identity: tuple[str, str, float]
+
+
+def _resolve_hot_kernel_top_n(top_n: int | None) -> int:
+    """The gate's per-ranking cap: the caller's, else ``HYPERLOOM_KERNEL_OPT_GATE_TOP_N``, never below one."""
     if top_n is None:
         try:
-            top_n = int(
-                os.environ.get(
-                    "HYPERLOOM_KERNEL_OPT_GATE_TOP_N",
-                    _DEFAULT_HOT_KERNEL_GATE_TOP_N,
-                )
-            )
+            top_n = int(os.environ.get("HYPERLOOM_KERNEL_OPT_GATE_TOP_N", _DEFAULT_HOT_KERNEL_GATE_TOP_N))
         except (TypeError, ValueError):
             top_n = _DEFAULT_HOT_KERNEL_GATE_TOP_N
-    top_n = max(1, int(top_n))
+    return max(1, int(top_n))
 
-    kid_to_group: dict[str, tuple[list[str], str]] = {}
-    group_key_aliases: dict[str, set[str]] = {}
-    for g in task_groups:
-        if not isinstance(g, dict):
-            continue
-        members = [str(m) for m in (g.get("kernel_ids") or []) if m]
-        group_key = str(g.get("task_group_key") or "")
-        aliases = {
-            group_key,
-            *[str(alias) for alias in (g.get("legacy_task_group_keys") or []) if str(alias)],
-        }
-        group_key_aliases[group_key] = {alias for alias in aliases if alias}
-        for m in members:
-            kid_to_group[m] = (members, group_key)
 
-    integrated = IntegratedStack.of(state.optimization_stack)
-    integrated_operators = _forge_loop_operators_in_optimization_stack(state)
-    rejected = set(state.rejected_kernel_ids or [])
-    _ensure_kernel_task_state(state)
-    attempts = state.kernel_opt_task_attempts or {}
-
-    # TraceLens' order: task priority, then member impact. Rows it never ranked (bypass route, injected collectives)
-    # follow in emitted order under their own top_n, so they cannot fall behind TraceLens' cap.
-    rows: list[tuple[tuple[bool, int, float], str, str, list[str], str, tuple[str, str, float]]] = []
+def _hot_rows(
+    hot: list[Any],
+    kid_to_group: dict[str, tuple[list[str], str]],
+    min_gpu_pct: float,
+) -> list[_HotRow]:
+    """The reusable, dispatchable trace rows at or above the GPU-share floor, in TraceLens' order."""
+    rows: list[_HotRow] = []
     for k in hot:
-        if not isinstance(k, dict):
+        if not isinstance(k, dict) or k.get("reusable_native_kernel") is not True:
             continue
-        if k.get("reusable_native_kernel") is not True:
-            continue
-        # Bypass path tags a kernel non-dispatchable when its shape is geometry-only (launch_grid/tile_name) and would
-        # fail the kernel-opt gate.
+        # Bypass path tags a kernel non-dispatchable when its shape is geometry-only (launch_grid/tile_name).
         if k.get("shape_dispatchable") is False:
             continue
-        try:
-            gpu_pct = float(k.get("gpu_pct") or 0.0)
-        except (TypeError, ValueError):
-            gpu_pct = 0.0
         # Vendor-playbook groups (mori's dispatch+combine) are gated on the sum of the group's members, not each
         # member's own share, and may pin a per-playbook floor -- see effective_hot_kernel_gpu_pct's docstring.
         if effective_hot_kernel_gpu_pct(k) < effective_hot_kernel_min_gpu_pct(k, min_gpu_pct):
@@ -835,125 +822,110 @@ def untried_hot_reusable_kernels(
         kid = str(k.get("kernel_id") or "")
         if not kid:
             continue
+        try:
+            gpu_pct = float(k.get("gpu_pct") or 0.0)
+        except (TypeError, ValueError):
+            gpu_pct = 0.0
         src = str(k.get("source_file") or "")
         group_info = kid_to_group.get(kid)
-        members = sorted(group_info[0]) if group_info else [kid]
-        group_key = group_info[1] if group_info else ""
-        # Identity of the underlying kernel, independent of the synthetic per-row kernel_id.
-        identity = (src, str(k.get("name") or k.get("operation") or ""), gpu_pct)
         rank = int(k.get("tracelens_pitem_rank") or 0)
-        order = (rank <= 0, rank, -float(k.get("impact_score") or 0.0))
-        rows.append((order, kid, src, members, group_key, identity))
-    rows.sort(key=lambda x: x[0])
+        rows.append(
+            _HotRow(
+                order=(rank <= 0, rank, -float(k.get("impact_score") or 0.0)),
+                kernel_id=kid,
+                source_file=src,
+                members=sorted(group_info[0]) if group_info else [kid],
+                group_key=group_info[1] if group_info else "",
+                # Identity of the underlying kernel, independent of the synthetic per-row kernel_id.
+                identity=(src, str(k.get("name") or k.get("operation") or ""), gpu_pct),
+            )
+        )
+    rows.sort(key=lambda row: row.order)
+    return rows
 
-    ranked: list[tuple[tuple[bool, int, float], str, str, list[str], str, tuple[str, str, float]]] = []
+
+def _rank_hot_rows(rows: list[_HotRow], top_n: int) -> list[_HotRow]:
+    """One row per task group, capped to ``top_n`` per ranking.
+
+    Rows TraceLens never ranked (bypass route, injected collectives) follow in emitted order under their own
+    ``top_n``, so they cannot fall behind TraceLens' cap.
+    """
+    ranked: list[_HotRow] = []
     seen_groups: set[str | tuple[str, ...]] = set()
     seen_identities: set[tuple[str, str, float]] = set()
     for row in rows:
-        dedup_key: str | tuple[str, ...] = row[4] or tuple(row[3])
+        dedup_key: str | tuple[str, ...] = row.group_key or tuple(row.members)
         if dedup_key in seen_groups:
             continue
-        # Fallback dedup: when the trace carries no ``task_groups`` metadata every row degenerates to its own group,
-        # so the SAME kernel appearing under several synthetic ids (identical source_file+name+gpu_pct, e.g.
-        # k001/k002) is treated as several distinct hot kernels.
-        identity = row[5]
-        if identity[0] and identity[1]:
-            if identity in seen_identities:
+        # Without ``task_groups`` metadata every row is its own group, so the same kernel under several synthetic ids
+        # (identical source_file+name+gpu_pct) is collapsed on its identity instead.
+        if row.identity[0] and row.identity[1]:
+            if row.identity in seen_identities:
                 continue
-            seen_identities.add(identity)
+            seen_identities.add(row.identity)
         seen_groups.add(dedup_key)
         ranked.append(row)
-    ranked = [r for r in ranked if not r[0][0]][:top_n] + [r for r in ranked if r[0][0]][:top_n]
+    return [r for r in ranked if not r.order[0]][:top_n] + [r for r in ranked if r.order[0]][:top_n]
+
+
+def untried_hot_reusable_kernels(
+    state,
+    *,
+    min_gpu_pct: float | None = None,
+    top_n: int | None = None,
+) -> list[str]:
+    """Reusable hot kernels (gpu_pct >= min_gpu_pct) no backend has produced a patch for yet.
+
+    Capped to ``top_n`` by TraceLens rank, one kernel_id per task_group. A kernel counts as tried once a patch for
+    it was queued for integration, gated end to end, landed on the optimization stack, or published by the rewrite
+    controller.
+    """
+    info = state.last_trace_analyze or {}
+    hot = info.get("hot_kernels_top15") or info.get("hot_kernels") or []
+    if not isinstance(hot, list):
+        return []
+    if min_gpu_pct is None:
+        min_gpu_pct = resolve_hot_kernel_min_gpu_pct()
+
+    kid_to_group: dict[str, tuple[list[str], str]] = {}
+    group_key_aliases: dict[str, set[str]] = {}
+    for g in info.get("task_groups") or []:
+        if not isinstance(g, dict):
+            continue
+        members = [str(m) for m in (g.get("kernel_ids") or []) if m]
+        group_key = str(g.get("task_group_key") or "")
+        aliases = {group_key, *[str(alias) for alias in (g.get("legacy_task_group_keys") or []) if str(alias)]}
+        group_key_aliases[group_key] = {alias for alias in aliases if alias}
+        for m in members:
+            kid_to_group[m] = (members, group_key)
+
+    integrated = IntegratedStack.of(state.optimization_stack)
+    records = _attempt_records(state)
+    tried_operators = _attempted_operators(state, records) | _forge_loop_operators_in_optimization_stack(state)
 
     untried: list[str] = []
-
-    def _attempt_for_member(member_id: str) -> dict[str, Any]:
-        """Ledger entry covering ``member_id``, tolerating synthetic-id churn."""
-        for value in attempts.values():
-            if not isinstance(value, dict):
-                continue
-            if member_id in {
-                str(value.get("current_kernel_id") or ""),
-                str(value.get("kernel_id") or ""),
-                str(value.get("task_group_primary_kernel_id") or ""),
-            }:
-                return value
-            for key in ("task_group_kernel_ids", "opfanout_collapsed_ids"):
-                if member_id in {str(m) for m in (value.get(key) or []) if m}:
-                    return value
-        return {}
-
-    def _member_is_rejected(member_id: str) -> bool:
-        """True when ``member_id`` (or its ledger twin) is out of play."""
-        if member_id in rejected:
-            return True
-        attempt = _attempt_for_member(member_id)
-        if not attempt:
-            return False
-        if str(attempt.get("rejected_reason") or "").strip():
-            return True
-        return str(attempt.get("integration_status") or "").strip().lower() == "rejected"
-
-    def _matches_current_task(member_id: str, group_key: str, source: str) -> bool:
-        if group_key:
-            aliases = group_key_aliases.get(group_key) or {group_key}
-            return any(
-                isinstance(attempt, dict)
-                and (
-                    str(attempt.get("stable_task_key") or "") == group_key
-                    or str(attempt.get("task_group_key") or "") == group_key
-                    or str(attempt.get("stable_task_key") or "") in aliases
-                    or str(attempt.get("task_group_key") or "") in aliases
-                )
-                for attempt in attempts.values()
-            )
-        attempt = _attempt_for_member(member_id)
-        if not isinstance(attempt, dict) or not attempt:
-            return False
-        recorded_source = str(attempt.get("last_source_file") or "")
-        return not source or not recorded_source or source == recorded_source
-
-    for _order, kid, src, members, group_key, _identity in ranked:
-        if members and all(
-            _member_is_rejected(member) and _matches_current_task(member, group_key, src) for member in members
-        ):
-            continue
+    for row in _rank_hot_rows(_hot_rows(hot, kid_to_group, min_gpu_pct), _resolve_hot_kernel_top_n(top_n)):
+        aliases = group_key_aliases.get(row.group_key)
         if integrated.covers(
-            kernel_ids=members,
-            task_group_key=group_key,
-            source_file=src,
-            task_group_aliases=group_key_aliases.get(group_key),
+            kernel_ids=row.members,
+            task_group_key=row.group_key,
+            source_file=row.source_file,
+            task_group_aliases=aliases,
         ):
             continue
-        # A kernel-recipe lane (forge-loop/flydsl/fusion) landed under its own long-form recipe id, which never
-        # equals this row's synthetic kNNN id or its trace source_file -- see _forge_loop_operators_in_optimization_stack.
-        row_name = str(_identity[1] or "")
-        if row_name and normalize_operator_name(row_name) in integrated_operators:
+        if row.identity[1] and normalize_operator_name(row.identity[1]) in tried_operators:
             continue
-        stable_attempt = next(
-            (
-                attempt
-                for attempt in attempts.values()
-                if group_key
-                and isinstance(attempt, dict)
-                and (
-                    str(attempt.get("stable_task_key") or "") == group_key
-                    or str(attempt.get("task_group_key") or "") == group_key
-                    or str(attempt.get("stable_task_key") or "") in (group_key_aliases.get(group_key) or {group_key})
-                    or str(attempt.get("task_group_key") or "") in (group_key_aliases.get(group_key) or {group_key})
-                )
-            ),
-            None,
-        )
-        if stable_attempt is not None and int(stable_attempt.get("attempts", 0)) > 0:
-            continue
-        # Resolve through ``_attempt_for_member`` rather than comparing ids inline: a row's own id is not the only id
-        # it covers.
-        if not group_key and any(
-            _matches_current_task(member, group_key, src)
-            and int((_attempt_for_member(member) or {}).get("attempts", 0)) > 0
-            for member in members
+        if any(
+            record_matches_task(
+                record,
+                kernel_id=member,
+                task_group_key=row.group_key,
+                source_file=row.source_file,
+                task_group_aliases=aliases,
+            )
+            for record in records
+            for member in row.members
         ):
             continue
-        untried.append(kid)
+        untried.append(row.kernel_id)
     return untried

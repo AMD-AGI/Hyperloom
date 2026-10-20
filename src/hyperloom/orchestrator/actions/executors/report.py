@@ -784,7 +784,7 @@ def _format_completeness_annotations(summary: dict[str, Any]) -> list[str]:
     if pending_keeps:
         lines.append(f"- ⚠ kernel_opt KEEPs awaiting integrate: {', '.join(pending_keeps)}.")
     if untried:
-        lines.append(f"- ⚠ reusable hot kernels with no kernel_opt attempt: {', '.join(untried)}.")
+        lines.append(f"- ⚠ reusable hot kernels no backend produced a patch for: {', '.join(untried)}.")
     lines.append("")
     return lines
 

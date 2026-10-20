@@ -20,7 +20,7 @@ from hyperloom.inference_optimizer import gpu_types
 from hyperloom.inference_optimizer.cli import parser as cli_parser
 from hyperloom.orchestrator.kernel import request_handlers as krh
 
-from .conftest import seed_kernel_keep
+from .conftest import seed_integrate_verdict, seed_kernel_keep
 from hyperloom.orchestrator.actions.executors import trace_analyze as ta
 from hyperloom.orchestrator.actions.executors.baseline import (
     BaselineExecutor,
@@ -3479,11 +3479,9 @@ def test_record_trace_analyze_persists_task_groups(session_dir):
     )
     assert state.last_trace_analyze.get("task_groups") == groups
     # After k002 + k004 attempted, group-aware collapse reports no untried kernels.
-    seed_kernel_keep(
+    seed_integrate_verdict(
         state,
         "k002",
-        decision="REVERT",
-        micro=0.0,
         source_file="/sgl-workspace/aiter/aiter/ops/moe_op.py",
         task_group_key="k002",
     )

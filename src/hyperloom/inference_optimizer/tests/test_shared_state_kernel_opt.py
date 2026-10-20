@@ -9,6 +9,7 @@ import pytest
 
 from hyperloom.orchestrator.state.shared_state import SharedState
 
+from .conftest import seed_integrate_verdict
 from .conftest import seed_kernel_keep as _seed_keep
 
 
@@ -411,14 +412,7 @@ def test_untried_hot_kernels_skips_when_any_group_member_attempted(state: Shared
             {"primary_kernel_id": "k002", "kernel_ids": ["k001", "k002"]},
         ],
     )
-    _seed_keep(
-        state,
-        "k002",
-        decision="REVERT",
-        micro=0.0,
-        source_file="/p/moe_op.py",
-        task_group_key="k002",
-    )
+    seed_integrate_verdict(state, "k002", source_file="/p/moe_op.py", task_group_key="k002")
     untried = state.untried_hot_reusable_kernels()
     assert untried == []
 

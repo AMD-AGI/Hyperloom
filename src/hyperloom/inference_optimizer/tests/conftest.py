@@ -125,6 +125,27 @@ def seed_kernel_keep(
     return task_key
 
 
+def seed_integrate_verdict(
+    state,
+    kernel_id: str,
+    *,
+    decision: str = "REVERT",
+    source_file: str = "",
+    task_group_key: str = "",
+) -> dict[str, Any] | None:
+    """Settle one end-to-end integrate verdict on ``kernel_id`` through the real ledger writer."""
+    return state.record_kernel_integrate_result(
+        {
+            "kernel_id": kernel_id,
+            "patch_path": f"/tmp/{kernel_id}.patch",
+            "target_file": source_file,
+            "task_group_key": task_group_key,
+            "decision": decision,
+            "status": "ok",
+        }
+    )
+
+
 def make_coordinator(session_dir: Path, *, shared_state_overrides: dict[str, Any] | None = None, **coord_kwargs: Any):
     """Build a real Coordinator with idle mock backends and optional state overrides.
 
