@@ -241,6 +241,54 @@ def _classified_streams(streams: BootStreams) -> tuple[tuple[str, str, rules.Fai
     return tuple(out)
 
 
+def _progress_across(
+    streams: Sequence[tuple[str, str, rules.FailureSignature]],
+) -> tuple[LadderStage | None, dict[str, str]]:
+    """Return the highest milestone any stream witnessed and the markers proving it.
+
+    The first stream to carry a marker owns it: streams arrive in precedence
+    order, so a later one restating a milestone does not overwrite the witness.
+    """
+    witnessed: LadderStage | None = None
+    markers: dict[str, str] = {}
+    for _name, text, _sig in streams:
+        stage, witness = _witness_progress(text)
+        for key, marker in witness.items():
+            markers.setdefault(key, marker)
+        if stage is not None and (witnessed is None or stage > witnessed):
+            witnessed = stage
+    return witnessed, markers
+
+
+def _failing_stream(
+    streams: Sequence[tuple[str, str, rules.FailureSignature]],
+) -> tuple[str, str, rules.FailureSignature] | None:
+    """Return the stream a rule fired on, else the highest-precedence one with content.
+
+    When no rule fires anywhere the observation still needs a frame and an
+    excerpt, so the first stream stands in rather than nothing.
+    """
+    for entry in streams:
+        if entry[2].is_actionable:
+            return entry
+    return streams[0] if streams else None
+
+
+def _placed_stage(kind: str, witnessed: LadderStage | None, floor: LadderStage) -> LadderStage:
+    """Return the ladder stage a failure of *kind* sits on.
+
+    A milestone the run witnessed puts the failure above it however the rule is
+    normally placed, and a kind the vocabulary does not place falls to the first
+    milestone not yet witnessed.
+    """
+    mapped = _KIND_STAGE.get(kind)
+    if mapped is None:
+        return _next_stage(witnessed if witnessed is not None else floor)
+    if witnessed is not None and mapped <= witnessed:
+        return _next_stage(witnessed)
+    return mapped
+
+
 def classify(
     streams: BootStreams,
     *,
@@ -265,24 +313,8 @@ def classify(
     redact_roots = (session_root,) if session_root.strip() else ()
     classified = _classified_streams(streams)
 
-    witnessed: LadderStage | None = None
-    progress_witness: dict[str, str] = {}
-    for _name, text, _sig in classified:
-        stage, witness = _witness_progress(text)
-        for key, marker in witness.items():
-            progress_witness.setdefault(key, marker)
-        if stage is not None and (witnessed is None or stage > witnessed):
-            witnessed = stage
-
-    chosen: tuple[str, str, rules.FailureSignature] | None = None
-    for entry in classified:
-        if entry[2].is_actionable:
-            chosen = entry
-            break
-    if chosen is None:
-        # No rule fired anywhere: keep the highest-precedence stream with
-        # content so the observation still carries a frame and an excerpt.
-        chosen = classified[0] if classified else None
+    witnessed, progress_witness = _progress_across(classified)
+    chosen = _failing_stream(classified)
 
     floor = LadderStage.PROCESS_START if classified else LadderStage.ARGV_PARSE
     stage_reached = witnessed if witnessed is not None else floor
@@ -311,15 +343,7 @@ def classify(
             server_elapsed_sec=server_elapsed_sec,
         )
 
-    mapped = _KIND_STAGE.get(signature.kind)
-    if mapped is None:
-        # Unplaced by the vocabulary: the first milestone not witnessed.
-        mapped = _next_stage(witnessed) if witnessed is not None else _next_stage(floor)
-    elif witnessed is not None and mapped <= witnessed:
-        # A witnessed milestone completed, so the failure is above it however
-        # the rule is normally placed.
-        mapped = _next_stage(witnessed)
-
+    mapped = _placed_stage(signature.kind, witnessed, floor)
     anchor, failure_line = _failure_site(text, signature, root)
     excerpt: Excerpt = render_excerpt(
         text,

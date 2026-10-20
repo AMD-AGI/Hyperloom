@@ -168,6 +168,10 @@ PATCH_SOURCES = (PATCH_SOURCE_SPECIALIST, PATCH_SOURCE_UPSTREAM_PR)
 #: Verdicts that accept the candidate, so the attempt leaves it in the tree.
 KEEP_STATUSES: frozenset[str] = frozenset({"kept", "advanced", "kept_inert"})
 
+#: Set on every result the bench-and-gate stage returned, whatever its verdict:
+#: that attempt reached the bench, and no result an earlier stage returned did.
+RESULT_BENCHED = "benched"
+
 
 def resolve_patch_source(params: Mapping[str, Any]) -> str:
     """Return the declared patch source, defaulting to the specialist lane.
@@ -2787,7 +2791,7 @@ class IntegratePatchExecutor:
         try:
             result = await self._stage_apply(attempt, params, extra)
             if result is None:
-                result = await self._stage_gate(attempt, params, extra)
+                result = {**await self._stage_gate(attempt, params, extra), RESULT_BENCHED: True}
         except BaseException:
             try:
                 self._finish_attempt(attempt, {"status": "cancelled"})
@@ -4648,6 +4652,7 @@ __all__ = [
     "DEFAULT_KEEP_THRESHOLD_PCT",
     "IntegratePatchExecutor",
     "KEEP_STATUSES",
+    "RESULT_BENCHED",
     "_detect_p_level",
     "_git_apply",
     "_git_apply_reverse",

@@ -633,7 +633,7 @@ class FrameworkEventRecorder:
         ):
             if name in fields:
                 row[name] = str(fields.get(name) or "")
-        for name in ("adopted", "attribution_eligible"):
+        for name in ("adopted", "attribution_eligible", "benched"):
             if name in fields:
                 row[name] = None if fields.get(name) is None else bool(fields.get(name))
         for name in (
