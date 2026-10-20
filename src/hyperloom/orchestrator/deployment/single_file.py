@@ -64,6 +64,6 @@ def build_single_file(state: dict, root: Path, hook: Path, dest: Path) -> dict:
         "validation": "not_run",
         "accepted_performance": {"tput": state["current_best"].get("tput")},
         "usage": "Copy hyperloom_optimize.py beside the original user script and run that script in its original runtime. "
-        "Accepted runtime settings are baked into the module; it sets them on import, so it does not depend on the "
-        "launching environment.",
+        "Accepted runtime settings are baked into the module and applied on import -- import it once, early, before any "
+        "other import (side effect only), and again at the usual call site after the model is loaded.",
     }
