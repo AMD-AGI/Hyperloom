@@ -15,6 +15,7 @@ import statistics
 import sys
 import tempfile
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, Callable
 
 from kernelforge.tools.process_group import kill_process_group
@@ -489,130 +490,80 @@ async def _sweep_run(cmd: list[str], env: dict[str, str], timeout_sec: int) -> t
     return proc.returncode, output
 
 
-@dataclass(frozen=True)
-class _SweepPoint:
-    """One point as the driver ran it: the case and constants asked for, its output, and how the case flag fared."""
-
-    case: str
-    exported: dict[str, str]
-    described: str
-    output: str
-    rejected_before: bool
-    flag_exit: int | None
-
-    def failure(self, message: str, **extra: Any) -> dict:
-        """A sweep failure naming this point's case and constants, with the tail of what the driver printed."""
-        return _sweep_failure(message, case_id=self.case, constants=self.exported, **extra, output=self.output[-1500:])
+class _PointRefused(Exception):
+    """The driver's output does not measure the point; ``args`` are the refusal and the failure fields it adds."""
 
 
-@dataclass(frozen=True)
-class _OverrideEcho:
-    """What the driver's ``sweep_const`` lines say about the constants one point exported."""
-
-    unread: list[str]
-    consumption: dict[str, str]
-    diverged: list[str]
-
-
-def _override_echo(exported: dict[str, str], output: str) -> _OverrideEcho:
-    """Read which exported constants the driver echoed back, and which it read at another value."""
+def _override_consumption(
+    exported: dict[str, str], output: str, prefix_constants: bool, described: str
+) -> dict[str, str]:
+    """Which exported constants the driver echoed back; raises _PointRefused when the output does not measure them."""
     echoed = dict(_SWEEP_ECHO_RE.findall(output))
-    unread = sorted(name for name in exported if name not in echoed)
     consumption = {name: ("consumed" if name in echoed else "unread") for name in exported}
+    unread = [name for name in exported if name not in echoed]
+    if unread and prefix_constants:
+        raise _PointRefused(
+            f"{described}: NOTHING READ {', '.join(unread)} -- no "
+            f"'{SWEEP_ECHO}: NAME VALUE' line came back, so this point ran the "
+            f"default configuration and is not a measurement of the constant",
+            {"override_consumption": consumption},
+        )
     diverged = sorted(
         f"{name}: asked {exported[name]}, read {echoed[name]}"
         for name in exported
         if name in echoed and echoed[name] != exported[name]
     )
-    return _OverrideEcho(unread, consumption, diverged)
+    if diverged:
+        message = f"{described}: DRIVER READ A DIFFERENT CONFIGURATION ({'; '.join(diverged)})"
+        raise _PointRefused(message, {"override_consumption": consumption})
+    return consumption
 
 
-def _override_failure(point: _SweepPoint, echo: _OverrideEcho, prefix_constants: bool) -> dict | None:
-    """The failure for a point whose driver left a prefixed constant unread or read one at another value, else None."""
-    if echo.unread and prefix_constants:
-        return point.failure(
-            f"{point.described}: NOTHING READ {', '.join(echo.unread)} -- no "
-            f"'{SWEEP_ECHO}: NAME VALUE' line came back, so this point ran the "
-            f"default configuration and is not a measurement of the constant",
-            override_consumption=echo.consumption,
-        )
-    if echo.diverged:
-        return point.failure(
-            f"{point.described}: DRIVER READ A DIFFERENT CONFIGURATION ({'; '.join(echo.diverged)})",
-            override_consumption=echo.consumption,
-        )
-    return None
-
-
-def _case_timing_failure(point: _SweepPoint, seen: dict[str, float], duplicates: set[str]) -> dict | None:
-    """The failure for a point whose case came back with no time, more than one or an unusable one, else None."""
-    case = point.case
+def _requested_case_ms(
+    case: str, seen: dict[str, float], duplicates: set[str], flag_exit: int | None, described: str
+) -> float:
+    """The one usable time the driver reported for the requested case; raises _PointRefused when there is none."""
     if case not in seen:
         # The retry ran the driver's WHOLE suite, so what came back is the set of cases this driver knows.
         misnamed = (
-            f" -- {SWEEP_CASE_FLAG} was rejected (exit {point.flag_exit}) for a case "
+            f" -- {SWEEP_CASE_FLAG} was rejected (exit {flag_exit}) for a case "
             "this driver does not declare, which is the case id and not the flag"
-            if point.flag_exit is not None
+            if flag_exit is not None
             else ""
         )
-        return point.failure(
-            f"{point.described}: DRIVER REPORTED NO TIMING FOR CASE {case!r} "
-            f"(reported: {sorted(seen) or 'nothing'}){misnamed}"
-        )
+        reported = f"(reported: {sorted(seen) or 'nothing'}){misnamed}"
+        raise _PointRefused(f"{described}: DRIVER REPORTED NO TIMING FOR CASE {case!r} {reported}", {})
     if case in duplicates:
-        return point.failure(f"{point.described}: DRIVER REPORTED CASE {case!r} MORE THAN ONCE")
+        raise _PointRefused(f"{described}: DRIVER REPORTED CASE {case!r} MORE THAN ONCE", {})
     case_ms = seen[case]
     if not math.isfinite(case_ms) or case_ms <= 0.0:
-        return point.failure(f"{point.described}: DRIVER REPORTED AN UNUSABLE TIME FOR CASE {case!r}: {case_ms}")
-    return None
+        raise _PointRefused(f"{described}: DRIVER REPORTED AN UNUSABLE TIME FOR CASE {case!r}: {case_ms}", {})
+    return case_ms
 
 
-def _sweep_result(point: _SweepPoint, bench: BenchRun, seen: dict[str, float], echo: _OverrideEcho) -> dict:
-    """The exploratory result of a point whose case came back with one usable time."""
-    case = point.case
-    case_ms = seen[case]
-    # Two different facts, and only the first is safe to infer from the output: ``narrowed`` says nothing but this
-    # case came back, which is what makes the wall_ms lines this case's spread.
-    selected_by_flag = not point.rejected_before and point.flag_exit is None
-    narrowed = set(seen) == {case}
-    selection = SELECTION_NARROWED if (selected_by_flag and narrowed) else SELECTION_WHOLE_SUITE
-    result = {
-        "success": True,
-        "kind": EXPLORATORY_KIND,
-        "case_id": case,
-        "case_ms": round(case_ms, 6),
-        "constants": point.exported,
-        "narrowed": narrowed,
-        "case_selection": selection,
-        "override_consumption": echo.consumption,
-        "warmup_iters": bench.warmup_iters,
-        "bench_iters": bench.bench_iters,
-    }
-    samples = [float(m) for m in re.findall(r"wall_ms:\s*([\d.]+)", point.output)]
-    if narrowed and samples:
-        result["n_samples"] = len(samples)
-        result["wall_min_ms"] = round(min(samples), 6)
-        result["wall_max_ms"] = round(max(samples), 6)
-    notes = []
-    if selection == SELECTION_WHOLE_SUITE:
-        how = (
-            f"rejected {SWEEP_CASE_FLAG} (exit {point.flag_exit}), so it was re-run without it and"
-            if point.flag_exit is not None
-            else (
-                f"is known to reject {SWEEP_CASE_FLAG}, so it was not asked again and"
-                if point.rejected_before
-                else f"ignored {SWEEP_CASE_FLAG} and"
-            )
-        )
-        notes.append(f"driver {how} ran its whole suite: {', '.join(sorted(seen))}")
-    if echo.unread:
+def _whole_suite_note(flag_exit: int | None, rejected_before: bool, seen: dict[str, float]) -> str:
+    """Why the driver timed every case it knows instead of the one it was asked for."""
+    if flag_exit is not None:
+        how = f"rejected {SWEEP_CASE_FLAG} (exit {flag_exit}), so it was re-run without it and"
+    elif rejected_before:
+        how = f"is known to reject {SWEEP_CASE_FLAG}, so it was not asked again and"
+    else:
+        how = f"ignored {SWEEP_CASE_FLAG} and"
+    return f"driver {how} ran its whole suite: {', '.join(sorted(seen))}"
+
+
+def _sweep_caveats(whole_suite: str, consumption: dict[str, str], samples: list[float], spread: bool) -> str:
+    """The bracketed caveats on what an exploratory sweep number does not show."""
+    notes = [whole_suite] if whole_suite else []
+    unread = [name for name, state in consumption.items() if state == "unread"]
+    if unread:
         notes.append(
             f"UNCONFIRMED: no '{SWEEP_ECHO}: NAME VALUE' line came back for "
-            f"{', '.join(echo.unread)}, so nothing proves the source read the "
+            f"{', '.join(unread)}, so nothing proves the source read the "
             "override; this number means something only against a no-override "
             "reference measured in the same round"
         )
-    if "wall_min_ms" not in result:
+    if not spread:
         notes.append(
             # Lines came back, but they timed every case the driver ran, so their spread is not this case's and "none
             # came back" would be a lie about what the driver printed.
@@ -623,11 +574,7 @@ def _sweep_result(point: _SweepPoint, bench: BenchRun, seen: dict[str, float], e
             else "no per-iteration wall_ms lines came back: this point has no "
             "measured spread, so a small difference against it means nothing"
         )
-    suffix = "".join(f" [{note}]" for note in notes)
-    result["message"] = (
-        f"SWEEP (EXPLORATORY, NOT AN ACCEPTANCE RESULT): {case} = {case_ms:.6f} ms at {point.described}{suffix}"
-    )
-    return result
+    return "".join(f" [{note}]" for note in notes)
 
 
 async def sweep_case(
@@ -649,48 +596,64 @@ async def sweep_case(
     except ValueError as error:
         return _sweep_failure(str(error).upper())
     described = ", ".join(f"{k}={v}" for k, v in exported.items()) or "no overrides"
+    point_failure = partial(_sweep_failure, case_id=case, constants=exported)
 
-    bench = BenchRun(driver_script, warmup_iters=warmup_iters, bench_iters=bench_iters)
-    base_cmd = bench_command(bench)
+    base_cmd = bench_command(BenchRun(driver_script, warmup_iters=warmup_iters, bench_iters=bench_iters))
     memo_key = _case_flag_memo_key(base_cmd)
     rejected_before = _CASE_FLAG_REJECTED.get(memo_key, False)
-    carried_flag = not rejected_before
-    cmd = (base_cmd + [SWEEP_CASE_FLAG, case]) if carried_flag else list(base_cmd)
-
+    cmd = list(base_cmd) if rejected_before else base_cmd + [SWEEP_CASE_FLAG, case]
     returncode, full_output = await _sweep_run(cmd, env, timeout_sec)
     # Set only when the flagged invocation is what failed, which is what tells the message and the memo apart from a
     # configuration that will not run.
     flag_exit: int | None = None
-    if returncode not in (0, None) and carried_flag:
+    if returncode not in (0, None) and not rejected_before:
         flag_exit = returncode
         returncode, full_output = await _sweep_run(base_cmd, env, timeout_sec)
     if returncode is None:
-        return _sweep_failure(
-            f"{described}: TIMEOUT after {timeout_sec}s",
-            case_id=case,
-            constants=exported,
-        )
-    point = _SweepPoint(case, exported, described, full_output, rejected_before, flag_exit)
+        return point_failure(f"{described}: TIMEOUT after {timeout_sec}s")
+    tail = full_output[-1500:]
     if returncode != 0:
         retried = f" (also exit {flag_exit} with {SWEEP_CASE_FLAG})" if flag_exit is not None else ""
-        return point.failure(
-            f"{described}: CONFIGURATION DID NOT RUN (exit {returncode}){retried}",
-            case_selection=SELECTION_REJECTED,
-        )
+        message = f"{described}: CONFIGURATION DID NOT RUN (exit {returncode}){retried}"
+        return point_failure(message, case_selection=SELECTION_REJECTED, output=tail)
+    try:
+        consumption = _override_consumption(exported, full_output, prefix_constants, described)
+        seen, _unscored, duplicates = parse_case_timings(full_output)
+        # The requested case exists and the flagged invocation still failed, which leaves the flag itself as what the
+        # driver would not take.
+        if flag_exit is not None and case in seen:
+            _CASE_FLAG_REJECTED[memo_key] = True
+        case_ms = _requested_case_ms(case, seen, duplicates, flag_exit, described)
+    except _PointRefused as refused:
+        message, fields = refused.args
+        return point_failure(message, **fields, output=tail)
 
-    echo = _override_echo(exported, full_output)
-    failure = _override_failure(point, echo, prefix_constants)
-    if failure is not None:
-        return failure
-    seen, _unscored, duplicates = parse_case_timings(full_output)
-    # The requested case exists and the flagged invocation still failed, which leaves the flag itself as what the
-    # driver would not take.
-    if flag_exit is not None and case in seen:
-        _CASE_FLAG_REJECTED[memo_key] = True
-    failure = _case_timing_failure(point, seen, duplicates)
-    if failure is not None:
-        return failure
-    return _sweep_result(point, bench, seen, echo)
+    # Two different facts, and only the first is safe to infer from the output: ``narrowed`` says nothing but this
+    # case came back, which is what makes the wall_ms lines this case's spread.
+    narrowed = set(seen) == {case}
+    selected = narrowed and not rejected_before and flag_exit is None
+    whole_suite = "" if selected else _whole_suite_note(flag_exit, rejected_before, seen)
+    samples = [float(m) for m in re.findall(r"wall_ms:\s*([\d.]+)", full_output)]
+    spread = narrowed and bool(samples)
+    return {
+        "success": True,
+        "kind": EXPLORATORY_KIND,
+        "case_id": case,
+        "case_ms": round(case_ms, 6),
+        "constants": exported,
+        "narrowed": narrowed,
+        "case_selection": SELECTION_NARROWED if selected else SELECTION_WHOLE_SUITE,
+        "override_consumption": consumption,
+        "warmup_iters": warmup_iters,
+        "bench_iters": bench_iters,
+        **(
+            {"n_samples": len(samples), "wall_min_ms": round(min(samples), 6), "wall_max_ms": round(max(samples), 6)}
+            if spread
+            else {}
+        ),
+        "message": f"SWEEP (EXPLORATORY, NOT AN ACCEPTANCE RESULT): {case} = {case_ms:.6f} ms at {described}"
+        + _sweep_caveats(whole_suite, consumption, samples, spread),
+    }
 
 
 def _sweep_cli(argv: list[str] | None = None) -> int:
