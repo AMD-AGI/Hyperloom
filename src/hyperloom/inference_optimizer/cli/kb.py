@@ -174,11 +174,9 @@ def _bootstrap_recipe_kb(
         )
         if kb is None:
             print("Recipe KB       : REMOTE (KB Store current Recipe warm replay)")
-    except Exception as exc:  # noqa: BLE001 — defensive
-        print(
-            f"WARNING: T0 recipe-snapshot anchor failed mid-flight: {exc}\nContinuing without warm-start.",
-            file=sys.stderr,
-        )
+    except Exception as exc:
+        log.warning("T0 recipe-snapshot anchor failed mid-flight: %s", exc, exc_info=True)
+        print(f"WARNING: T0 recipe-snapshot anchor failed: {exc}\nContinuing without warm-start.", file=sys.stderr)
         args.kb_degraded_reason = getattr(args, "kb_degraded_reason", None) or "t0_runtime_fail"
     return kb
 
