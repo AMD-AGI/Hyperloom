@@ -152,6 +152,17 @@ def test_github_searches_for_the_request_keywords(monkeypatch) -> None:
     assert captured["terms"] == ("deepseekv4", "causallm", "architectures")
 
 
+def test_github_backend_failure_reaches_the_caller(monkeypatch) -> None:
+    """A github backend bug is not turned into an empty result."""
+
+    def broken_github(repo_url, *, limit, states=("open",), terms=()):
+        raise RuntimeError("github backend bug")
+
+    monkeypatch.setattr(src.github_backend, "search_perf_prs", broken_github)
+    with pytest.raises(RuntimeError, match="github backend bug"):
+        src.enumerate_candidates(_minimal_request(search_modes=("github",)))
+
+
 def test_github_without_keywords_searches_the_perf_terms(monkeypatch) -> None:
     """Perf discovery names no failure and keeps the perf term set."""
     captured: dict[str, object] = {}

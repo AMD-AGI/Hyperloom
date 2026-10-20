@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import subprocess
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
@@ -32,6 +33,8 @@ from .controller_publication import (
     load_controller_publication,
 )
 from .patch_conflict_merge import LandingContext, apply_patch_resolving_conflicts
+
+log = logging.getLogger(__name__)
 
 _CONTROLLER_SOURCE = "kernel_rewrite_controller"
 _CONTROLLER_BACKEND = "forge"
@@ -396,7 +399,8 @@ async def integrate_controller_patches(
         rounds_run += 1
         try:
             validation = await validate(publication)
-        except Exception as error:  # noqa: BLE001 - translated into a skipped_invalid result
+        except Exception as error:  # noqa: BLE001 - translated into a reverted_e2e_failed result
+            log.warning("E2E validation raised for %s: %s", publication.operator_id, error)
             result = PatchIntegrationResult(
                 operator_id=publication.operator_id,
                 status="reverted_e2e_failed",
@@ -459,7 +463,8 @@ async def integrate_controller_patches(
         try:
             await record_keep(_keep_result(publication, validation, keep_commit))
             shared_state.save(Path(session_dir))
-        except Exception as error:  # noqa: BLE001 - KEEP is already committed to Git
+        except Exception as error:  # noqa: BLE001 - KEEP is already committed to Git; record_keep runs the whole writeback
+            log.warning("KEEP %s committed but recording it failed: %s", publication.operator_id, error)
             record_reason = f"Git KEEP committed; SharedState recording failed: {error}"
         else:
             record_reason = ""

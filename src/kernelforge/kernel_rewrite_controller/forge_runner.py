@@ -197,7 +197,8 @@ def _notify_checkpoint(callback: Callable[[], None] | None) -> bool:
         return True
     try:
         callback()
-    except Exception:  # noqa: BLE001 - a probe failure must not end the campaign
+    except Exception:  # a probe failure must not end the campaign
+        log.debug("checkpoint recovery probe raised", exc_info=True)
         return False
     return True
 
@@ -228,8 +229,8 @@ def run_forge_loop(
         start_new_session=True,
     )
     timed_out = False
-    # Counted rather than logged per tick: the probe fires about once a second for up to ninety minutes, so one line
-    # each would bury the run while none at all hides a probe that never worked and cost every interim publication.
+    # Counted into one warning: the probe fires about once a second for up to ninety minutes, so a warning per tick
+    # would bury the run; each failure's traceback is logged at debug.
     probe_failures = 0
     while True:
         remaining = invocation.deadline_unix - time.time()

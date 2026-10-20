@@ -405,20 +405,17 @@ class ConversationCollaborator(CoordinatorCollaborator):
         setter = getattr(backend, "set_context_provider", None)
         if setter is None:
             return
-        try:
-            from ..roles.mcp_context_tools import ContextProvider
+        from ..roles.mcp_context_tools import ContextProvider
 
-            provider = ContextProvider(
-                shared_state=self.shared_state,
-                inbox_reader=self._context_inbox_reader,
-                analysis_reader=self._context_analysis_reader,
-                recent_outcomes_reader=self._context_recent_outcomes_reader,
-                running_tasks_reader=self._context_running_tasks_reader,
-                reference_reader=self._context_reference_reader,
-            )
-            setter(provider)
-        except Exception:
-            log.exception("Coordinator: failed to attach orchestration context tools")
+        provider = ContextProvider(
+            shared_state=self.shared_state,
+            inbox_reader=self._context_inbox_reader,
+            analysis_reader=self._context_analysis_reader,
+            recent_outcomes_reader=self._context_recent_outcomes_reader,
+            running_tasks_reader=self._context_running_tasks_reader,
+            reference_reader=self._context_reference_reader,
+        )
+        setter(provider)
 
     def _context_reference_reader(self, name: str = "") -> str:
         """Resolve a reference doc by stem; reject path traversal."""
@@ -757,10 +754,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
             pid = str(getattr(p, "proposal_msg_id", "") or "")
             if not pid or pid in seen:
                 continue
-            try:
-                pm = await self.bus.lookup_by_id(pid)
-            except Exception:  # noqa: BLE001 — defensive
-                pm = None
+            pm = await self.bus.lookup_by_id(pid)
             if pm is not None:
                 extra.append(pm)
                 seen.add(pid)

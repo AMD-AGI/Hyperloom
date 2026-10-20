@@ -612,7 +612,7 @@ def quiet_ray_init(num_gpus: Optional[int] = None, log_path: Optional[Path] = No
         # Foreign cluster: replace with a local head, then retry exactly once.
         try:
             ray.shutdown()
-        except Exception:  # noqa: BLE001
+        except (RuntimeError, OSError):
             pass
         force_restart_local_cluster(num_gpus=num_gpus, log_path=log_path)
         _init(_RAY_ADDRESS_AUTO)

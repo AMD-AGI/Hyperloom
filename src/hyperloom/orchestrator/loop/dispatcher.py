@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import collections
 import math
+import sqlite3
 import time
 from collections.abc import Awaitable, Callable
 from functools import partial
@@ -62,7 +63,7 @@ from .task_settlement import (
     unpromotable_payload,
 )
 from ..specialists.wall_budget import limit_wall_budget_extension
-from ..state.task_registry import Task, TaskNotFound
+from ..state.task_registry import IllegalTransition, Task, TaskNotFound
 from .time_budget import (
     TIME_BUDGET_EXEMPT_ACTIONS,
     expected_action_cost_minutes,
@@ -1404,7 +1405,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 "cancelled",
                 evidence={"reason": denied.rule, "error": str(denied)},
             )
-        except Exception:
+        except (sqlite3.Error, TaskNotFound, IllegalTransition):
             log.exception(
                 "dispatcher: could not cancel over-budget task=%s kind=%s",
                 task.task_id,
