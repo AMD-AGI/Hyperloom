@@ -32,7 +32,7 @@ import json
 import shutil
 import sys
 from collections.abc import Iterable, Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Any
 
@@ -92,10 +92,12 @@ PRELUDE_BRANCH = "prelude"
 #: keeps the other half.
 PRELUDE_TERMINATE_GRACE_SECONDS = 120.0
 BASELINE_REFUSED = "another baseline test was refused"
+#: ``--reuse-prelude`` finds an earlier session's root by this reason and reads its ``child_session`` back.
 ROOT_COMMITTED = "root committed"
 CHILD_REUSED = "child reused"
-#: What :func:`prelude_argv` hands the child of a workload; the kernel optimizer only scopes the session's recipes.
-CHILD_WORKLOAD_FIELDS = ("model", "framework", "gpu_type", "tp", "conc", "precision", "inferencex")
+#: The workload fields a reused PRELUDE must match: all of them but the kernel optimizer, which only scopes the
+#: session's recipes, so a field added to :class:`Workload` has to match as well.
+CHILD_WORKLOAD_FIELDS = tuple(field.name for field in fields(Workload) if field.name != "kernel_optimizer")
 
 
 class PreludeFailed(RuntimeError):
@@ -108,6 +110,15 @@ class WarmStartSource:
 
     recipe_kb: RecipeDownloader
     blobs: BlobStore
+
+
+@dataclass(frozen=True)
+class _DerivedRoot:
+    """The root recipe a finished child session gives, before the session commits it."""
+
+    child: Path
+    artifacts: PreludeArtifacts
+    recipe: Recipe
 
 
 @dataclass(frozen=True)
@@ -171,7 +182,7 @@ def reused_prelude(session: Path, workload: Workload, image_digest: str) -> Reus
 def _rooted_child(decisions: Path) -> Path:
     for line in decisions.read_text(encoding="utf-8").splitlines():
         row = json.loads(line)
-        if DecisionKind(row["kind"]) is DecisionKind.PRELUDE and row["reason"] == ROOT_COMMITTED:
+        if row.get("kind") == DecisionKind.PRELUDE.value and row["reason"] == ROOT_COMMITTED:
             return Path(row["detail"]["child_session"])
     raise ValueError(f"{decisions} records no {ROOT_COMMITTED!r}")
 
@@ -209,23 +220,36 @@ class Prelude:
 
         spawned = self._clock.now()
         child = await self._run_child(workload, budget, hard_stop)
-        return await self._root_on(child, workload, base_image_digest, (self._clock.now() - spawned) * workload.tp)
+        derived = await self._derive_root(child, workload.framework, base_image_digest)
+        return await self._commit_root(derived, workload, (self._clock.now() - spawned) * workload.tp)
 
     async def reuse(self, earlier: ReusedPrelude, workload: Workload, base_image_digest: str) -> PreludeResult:
         """Root the session as :meth:`root` does, on the child session of ``earlier``, without starting a child: the
-        GPU time that child used is the earlier session's. The child session is only read."""
+        GPU time that child used is the earlier session's. The child session is only read; raises
+        :class:`PreludeFailed`, committing nothing, when the root it gives now is not the one ``earlier`` committed."""
 
         self._decisions.record(Decision(DecisionKind.PRELUDE, CHILD_REUSED, PRELUDE_BRANCH, asdict(earlier)))
-        return await self._root_on(Path(earlier.child_session), workload, base_image_digest, 0.0)
+        derived = await self._derive_root(Path(earlier.child_session), workload.framework, base_image_digest)
+        if derived.recipe.digest() != earlier.root_recipe_digest:
+            raise PreludeFailed(
+                f"the child session {derived.child} now gives the root recipe {derived.recipe.digest()}, not "
+                f"{earlier.root_recipe_digest} that {earlier.session} committed"
+            )
+        return await self._commit_root(derived, workload, 0.0)
 
-    async def _root_on(
-        self, child: Path, workload: Workload, base_image_digest: str, child_gpu_seconds: float
-    ) -> PreludeResult:
+    async def _derive_root(self, child: Path, framework: str, base_image_digest: str) -> _DerivedRoot:
         try:
             artifacts = _succeeded(await asyncio.to_thread(read_prelude, child))
-            recipe = await self._root_recipe(artifacts, workload.framework, base_image_digest)
-            saved = await asyncio.to_thread(self._save_foreign_patches, artifacts)
+            recipe = await self._root_recipe(artifacts, framework, base_image_digest)
         except (PreludeReadError, OSError, BlobError) as exc:
+            raise PreludeFailed(f"cannot root the session on the baseline prelude in {child}: {exc}") from exc
+        return _DerivedRoot(child, artifacts, recipe)
+
+    async def _commit_root(self, derived: _DerivedRoot, workload: Workload, child_gpu_seconds: float) -> PreludeResult:
+        child, artifacts, recipe = derived.child, derived.artifacts, derived.recipe
+        try:
+            saved = await asyncio.to_thread(self._save_foreign_patches, artifacts)
+        except OSError as exc:
             raise PreludeFailed(f"cannot root the session on the baseline prelude in {child}: {exc}") from exc
         atomic_write_json(self._layout.root_recipe, recipe.to_document())
         root = await self._repo.init_root(recipe)

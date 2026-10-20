@@ -334,6 +334,17 @@ def _file_handler(path: Path) -> logging.Handler:
     return handler
 
 
+def _reused_image_digest(env: Mapping[str, str]) -> str:
+    """The image digest an earlier PRELUDE must have run on; raises ValueError when the environment names none."""
+
+    digest = env.get(IMAGE_DIGEST_VAR)
+    if not digest:
+        raise ValueError(
+            f"--reuse-prelude compares the earlier session's image with {IMAGE_DIGEST_VAR}, which is not set"
+        )
+    return digest
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -342,8 +353,7 @@ def main(argv: list[str] | None = None) -> int:
         require_workload_switch(settings.workload, os.environ)
         require_priced_models(settings.max_llm_usd, os.environ)
         if args.reuse_prelude is not None:
-            image_digest = os.environ.get(IMAGE_DIGEST_VAR, "")
-            reused = reused_prelude(args.reuse_prelude, settings.workload, image_digest)
+            reused = reused_prelude(args.reuse_prelude, settings.workload, _reused_image_digest(os.environ))
             settings = replace(settings, reuse_prelude=reused)
     except ValueError as exc:
         parser.print_usage(sys.stderr)

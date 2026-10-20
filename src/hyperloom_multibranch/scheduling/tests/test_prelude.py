@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import subprocess
 import sys
 import time
 from collections.abc import Sequence
@@ -18,13 +19,15 @@ from typing import Any
 import pytest
 
 import hyperloom
+from hyperloom.common.io import atomic_write_json
 from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.contracts.measurement import Purpose, TestKind
-from hyperloom.contracts.recipe import RecipeDelta
+from hyperloom.contracts.recipe import Recipe, RecipeDelta
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.notebook.codec import encode
 from hyperloom_multibranch.notebook.knowledge.warm_start import RecipeDownloader
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.scheduling.budget import HardStop, SessionBudget
@@ -41,10 +44,11 @@ from hyperloom_multibranch.scheduling.prelude import (
     PreludeResult,
     WarmStartSource,
     prelude_argv,
+    reused_prelude,
 )
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry, RegisteredProcess
 from hyperloom_multibranch.scheduling.requests import SessionTests
-from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, Workload
+from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, ReusedPrelude, Workload
 from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     OneChampionKB,
     LAUNCH_FLAG,
@@ -506,3 +510,59 @@ async def test_a_prelude_cancelled_near_the_hard_stop_leaves_close_its_share(tmp
 
     assert time.monotonic() - started < budget.close_grace_seconds / 2
     assert await processes.leftovers() == ()
+
+
+def _logged(layout: SessionLayout) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in layout.decisions.read_text().splitlines()]
+
+
+async def _rooted_session(tmp_path: Path, child: Path) -> SessionLayout:
+    """A session in ``tmp_path`` whose PRELUDE rooted on ``child``, with the manifest naming its workload."""
+
+    layout = create_session(tmp_path, WORKLOAD.model_basename, _clock())
+    budget = SessionBudget.from_hours(2.0, NOW)
+    await _prelude(layout, _registry(layout, child), _peers(layout)).root(
+        WORKLOAD, budget, HardStop(budget, _clock()), IMAGE
+    )
+    atomic_write_json(layout.manifest, {"settings": {"workload": encode(WORKLOAD)}})
+    return layout
+
+
+async def test_a_reused_prelude_whose_child_now_gives_another_root_fails_and_commits_nothing(tmp_path: Path) -> None:
+    child = child_with_patch(tmp_path)
+    earlier = await _rooted_session(tmp_path / "earlier", child)
+    reused = reused_prelude(earlier.root, WORKLOAD, IMAGE)
+    moved = ("git", "-C", str(tmp_path / "framework"), "remote", "set-url", "origin", "https://example.invalid/moved")
+    subprocess.run(moved, check=True)
+    layout = create_session(tmp_path / "later", WORKLOAD.model_basename, _clock())
+
+    with pytest.raises(PreludeFailed) as failed:
+        await _prelude(layout, _registry(layout, None), _peers(layout)).reuse(reused, WORKLOAD, IMAGE)
+
+    assert reused.root_recipe_digest in str(failed.value)
+    assert re.search(r"root recipe \S+, not", str(failed.value))
+    assert not layout.root_recipe.exists() and not layout.repo.exists()
+    assert [entry["reason"] for entry in _logged(layout)] == ["child reused"]
+
+
+async def test_a_reused_prelude_skips_decision_rows_of_a_kind_it_does_not_know(tmp_path: Path) -> None:
+    child = child_with_patch(tmp_path)
+    earlier = await _rooted_session(tmp_path / "earlier", child)
+    rows = earlier.decisions.read_text().splitlines()
+    unknown = json.dumps({"kind": "from-a-later-version", "reason": "root committed", "detail": {}})
+    earlier.decisions.write_text("\n".join([unknown, *rows]) + "\n")
+
+    reused = reused_prelude(earlier.root, WORKLOAD, IMAGE)
+
+    assert reused.child_session == str(child)
+
+
+async def test_a_prelude_of_a_workload_differing_only_in_its_kernel_optimizer_is_reused(tmp_path: Path) -> None:
+    child = child_with_patch(tmp_path)
+    earlier = await _rooted_session(tmp_path / "earlier", child)
+    forge = replace(WORKLOAD, kernel_optimizer=KernelOptimizer.FORGE)
+
+    reused = reused_prelude(earlier.root, forge, IMAGE)
+
+    root = Recipe.from_document(json.loads(earlier.root_recipe.read_text()))
+    assert reused == ReusedPrelude(str(earlier.root), str(child), root.digest())
