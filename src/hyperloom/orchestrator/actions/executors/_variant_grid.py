@@ -16,16 +16,17 @@ import os
 import tempfile
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import yaml
 
+from hyperloom.common.coerce import to_str_list
 from hyperloom.common.launch_log_evidence import settings_the_engine_rewrote
 from hyperloom.inference_optimizer.grid_server_args import MULTI_VALUE_FLAGS
 from . import _framework_switch_manifest as _switch_manifest
 from ._grid_runner import GridVariant, _build_variant_yaml
 from ._launch_restatement import config_envs, named_settings, restates_the_baseline
-from ._proposal_identity import normalize_proposal
+from ._proposal_identity import effective_fingerprint, normalize_proposal
 from ._server_argv import ConfigUnreadable, config_server_argv
 from ._spec_decode_context_copy import context_copy_refusal
 
@@ -239,6 +240,13 @@ def _is_config_replay_variant(variant: Any) -> bool:
     return str(getattr(variant, "provenance", "") or "").strip() in _CONFIG_REPLAY_PROVENANCE
 
 
+class ObservedLaunch(NamedTuple):
+    """What the server was running when the round opened, as its launch evidence settled it."""
+
+    config: Mapping[str, Any]
+    env: Mapping[str, str]
+
+
 def observed_launch_from_state(state: Any) -> tuple[dict[str, Any], dict[str, str]]:
     """The running server's resolved config and env, empty unless ``current_best`` observed them.
 
@@ -262,6 +270,42 @@ def observed_launch_from_state(state: Any) -> tuple[dict[str, Any], dict[str, st
     # Same shape as a variant's extra_envs, so the two compare directly.
     env = {str(k): str(v) for k, v in raw_env.items()} if isinstance(raw_env, Mapping) else {}
     return config, env
+
+
+def _variant_control_fields(variant: Any) -> dict[str, Any]:
+    """Return non-default remove/unset/replace controls for identity and ledger rows."""
+    remove_args = to_str_list(getattr(variant, "remove_args", []))
+    unset_envs = to_str_list(getattr(variant, "unset_envs", []))
+    args_mode = str(getattr(variant, "args_mode", "append") or "append").strip().lower()
+    out: dict[str, Any] = {}
+    if remove_args:
+        out["remove_args"] = remove_args
+    if unset_envs:
+        out["unset_envs"] = unset_envs
+    if args_mode == "replace":
+        out["args_mode"] = "replace"
+    return out
+
+
+def _stamp_canonical_fingerprints(
+    grid: list[GridVariant], *, base_remove_args: list[str], base_unset_envs: list[str], base_args_mode: str
+) -> None:
+    """Attach each variant's effective fingerprint, so no later reader has to recompute it."""
+    for gv in grid:
+        gv.canonical_fp = effective_fingerprint(  # type: ignore[attr-defined]
+            gv.extra_server_args,
+            gv.extra_envs,
+            controls=_variant_control_fields(gv),
+            base_remove_args=base_remove_args,
+            base_unset_envs=base_unset_envs,
+            base_args_mode=base_args_mode,
+        )
+
+
+def _skip_baseline_noop(name: str, reason: str, skipped: list[dict[str, Any]]) -> None:
+    """Record a variant skipped because it launches the server the stack is already running."""
+    log.info("explore: skipping baseline-noop variant %s (%s)", name, reason)
+    skipped.append({"name": name, "reason": "baseline_noop", "detail": reason})
 
 
 def _setting_already_holds(proposed: list[str], observed: Any) -> bool:

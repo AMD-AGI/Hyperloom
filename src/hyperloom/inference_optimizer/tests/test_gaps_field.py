@@ -468,54 +468,25 @@ async def test_warm_specialist_params_noop_when_gap_unknown(coord):
     assert params["gap_symptom"] == "preset"
 
 
-# 7. Recipe KB traverse fallback (defensive)
-class _StubKnowledgePlane:
-    """Minimal KnowledgePlane double returning one issue_node row from ``recipe_kb_traverse_issues``."""
+# 7. refresh_gaps derives gaps only from baseline and attempts
+class _TraversePlane:
+    """KnowledgePlane double whose traverse rows refresh_gaps must not merge."""
 
-    def __init__(self, rows: list[dict[str, Any]] | None = None, raises: Exception | None = None):
-        self._rows = rows or []
-        self._raises = raises
-        self.pr_monitor_enabled = False
+    pr_monitor_enabled = False
 
     def recipe_kb_traverse_issues(self, *, model_class: str, gpu_type: str):
-        if self._raises is not None:
-            raise self._raises
-        return list(self._rows)
+        return [{"canonical_id": "issue.kb.fp8_kv_prior", "symptom": "prior session", "layer": "kernel_agent"}]
 
 
 @pytest.mark.asyncio
-async def test_refresh_gaps_merges_recipe_kb_traverse_rows(coord):
-    coord.knowledge_plane = _StubKnowledgePlane(
-        rows=[
-            {
-                "canonical_id": "issue.kb.fp8_kv_prior",
-                "symptom": "prior session refuted fp8 kv at bs=256",
-                "layer": "kernel_agent",
-                "severity": "medium",
-                "domain_hint": "kernel_switch_specialist",
-            },
-        ]
-    )
+async def test_refresh_gaps_ignores_plane_traverse_method(coord):
     coord.shared_state.baseline_tput = 900.0
-    await coord.gap_refresh.refresh_gaps(
-        reason="recipe_kb_refresh", workload_id=coord.recipe_journal.workload_canonical_id()
-    )
-    found = coord.shared_state.find_gap("issue.kb.fp8_kv_prior")
-    assert found is not None
-    assert found["source"] == "recipe_kb"
-
-
-@pytest.mark.asyncio
-async def test_refresh_gaps_absorbs_recipe_kb_traverse_exception(coord):
-    """Recipe KB outages must NOT crash the refresh (best-effort facets can't block the calling path)."""
-    coord.knowledge_plane = _StubKnowledgePlane(
-        raises=RuntimeError("traverse down"),
-    )
-    coord.shared_state.baseline_tput = 900.0
-    # Must not raise.
-    await coord.gap_refresh.refresh_gaps(
-        reason="recipe_kb_refresh", workload_id=coord.recipe_journal.workload_canonical_id()
-    )
+    workload_id = coord.recipe_journal.workload_canonical_id()
+    await coord.gap_refresh.refresh_gaps(reason="plain", workload_id=workload_id)
+    expected = [dict(g) for g in coord.shared_state.gaps]
+    coord.knowledge_plane = _TraversePlane()
+    await coord.gap_refresh.refresh_gaps(reason="with_plane", workload_id=workload_id)
+    assert [dict(g) for g in coord.shared_state.gaps] == expected
 
 
 @pytest.mark.asyncio

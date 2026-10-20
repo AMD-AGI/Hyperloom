@@ -226,3 +226,20 @@ def test_phase_budget_help_quotes_the_real_default() -> None:
     # at all, since nothing would enforce what it set.
     assert quoted == real
     assert ps.PHASE_ENABLEMENT not in ps.DEFAULT_PHASE_BUDGET_PCT
+
+
+def test_a_failing_marker_record_propagates_after_the_history_row_is_appended(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+
+    def _boom(_marker) -> None:
+        raise RuntimeError("marker bug")
+
+    monkeypatch.setattr(phase_event, "record_marker", _boom)
+    state = SimpleNamespace(phase="kernel_agent", macro_cycle=0, phase_history=[])
+
+    with pytest.raises(RuntimeError, match="marker bug"):
+        ps.append_phase_history_event(state, reason="arm_dropped", evidence={"k": 1}, ts="t", ts_unix=1.0)
+
+    assert [row["reason"] for row in state.phase_history] == ["arm_dropped"]

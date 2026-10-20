@@ -18,7 +18,6 @@ from typing import Any, NamedTuple
 import yaml
 
 from hyperloom.common.coerce import to_str_list
-from hyperloom.common.env import is_truthy
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.perf_metric import (
@@ -62,7 +61,6 @@ from ._accuracy_gate import (
     parse_eval_results,
 )
 from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
-from ._proposal_identity import effective_fingerprint
 from .measured_variants import GAIN_BELOW_THRESHOLD, MeasuredOn, measured_verdict, stack_of_measured
 from ._grid_base import (
     TS_FAILED,
@@ -95,6 +93,7 @@ from hyperloom.inference_optimizer.grid_server_args import (
 from ._ray_serving import maybe_serving_lease
 from ._spec_decode_context_copy import CONTEXT_COPY_REFUSAL
 
+from ._launch_restatement import observed_launch_after
 from ._server_lifecycle import (
     resolve_lifecycle_params,
     teardown_lifecycle_server,
@@ -104,6 +103,10 @@ from ._variant_grid import (
     _grid_variants_from_payload,
     _seed_grid_payload,
     _seed_lever_variants,
+    _skip_baseline_noop,
+    _stamp_canonical_fingerprints,
+    _variant_control_fields,
+    ObservedLaunch,
     filter_baseline_noop_variants,
     filter_context_copy_drafts,
     filter_operator_pinned_envs,
@@ -151,23 +154,11 @@ def _decision_fields(gv: Any) -> dict[str, Any]:
     }
 
 
-def _explore_eval_disabled(shared_state: Any, params: dict[str, Any]) -> bool:
-    """Whether Magpie lm_eval is opted out for this explore run.
-
-    ``--no-eval`` persists on ``SharedState.eval_disabled``. Task param
-    ``disable_run_eval`` is the same opt-out for internally queued explores.
-    """
-    if is_truthy(params.get("disable_run_eval")):
-        return True
-    return bool(getattr(shared_state, "eval_disabled", False))
-
-
 def _variant_with_eval_off(gv: Any) -> Any:
     """Return a copy of ``gv`` with ``RUN_EVAL`` forced off.
 
     The variant layer is the last one :func:`run_grid` applies over the
-    accumulated stack, so forcing the key here is what makes a session-level
-    ``--no-eval`` hold whatever the stack carries.
+    accumulated stack, so forcing the key here holds whatever the stack carries.
     """
     envs = dict(gv.extra_envs)
     envs["RUN_EVAL"] = "false"
@@ -191,21 +182,6 @@ def _carry_variant_metadata(src: Any, dst: Any) -> Any:
         if hasattr(src, attr):
             setattr(dst, attr, getattr(src, attr))
     return dst
-
-
-def _variant_control_fields(variant: Any) -> dict[str, Any]:
-    """Return non-default remove/unset/replace controls for identity and ledger rows."""
-    remove_args = to_str_list(getattr(variant, "remove_args", []))
-    unset_envs = to_str_list(getattr(variant, "unset_envs", []))
-    args_mode = str(getattr(variant, "args_mode", "append") or "append").strip().lower()
-    out: dict[str, Any] = {}
-    if remove_args:
-        out["remove_args"] = remove_args
-    if unset_envs:
-        out["unset_envs"] = unset_envs
-    if args_mode == "replace":
-        out["args_mode"] = "replace"
-    return out
 
 
 def _keep_uses_effective_args(
@@ -245,7 +221,6 @@ class _Workload(NamedTuple):
     gpu_type: str
     benchmark_script: str | None
     result_dir: str | None
-    eval_disabled: bool
 
 
 class _Launch(NamedTuple):
@@ -339,7 +314,7 @@ class _VariantRun(NamedTuple):
     remove_args: list[str]
     unset_envs: list[str]
     extra_envs: dict[str, str]
-    warmup_gv: GridVariant
+    launched_gv: GridVariant
     decision_gv: GridVariant
     lifecycle: dict[str, Any] | None
 
@@ -815,6 +790,32 @@ class _ExploreRound:
     on_the_synthetic_benchmark: bool
     is_revalidation: bool
     workload_signature: str
+    observed: ObservedLaunch
+    # The launch the round opened on, and the fingerprints it has since put on the
+    # server. A variant only skipped -- a restatement of the stack, or a verdict the
+    # session already holds -- has not claimed the launch, so its twin still gets a turn.
+    opening_stack: dict[str, Any] = field(init=False)
+    launched_fps: set[str] = field(default_factory=set)
+    judged_without_measuring: int = 0
+
+    def __post_init__(self) -> None:
+        self.opening_stack = self.launched_stack()
+
+    def launched_stack(self) -> dict[str, Any]:
+        """The stack as it launches: its args with the recipe's inherited ones and the removals applied.
+
+        A KEEP can switch the stack to ``replace`` mode, which carries those
+        inherited args in its own, so only the composed args say which settings a
+        KEEP changed.
+        """
+        stack = stack_of_measured(self.measured_against())
+        stack["extra_server_args"] = compose_server_args(
+            inherited_args=self.launch.inherited_args,
+            base_extra_args=self.stack.extra_args,
+            remove_args=self.stack.remove_args,
+            args_mode=self.stack.args_mode,
+        )
+        return stack
 
     def measured_against(self) -> dict[str, Any]:
         """The stack this variant launched on top of, as it stands now.
@@ -881,6 +882,53 @@ class _ExploreRound:
         )
         return True
 
+    def launched_already(self, gv: GridVariant) -> bool:
+        """Whether this round already launched ``gv``'s fingerprint, recording the duplicate if so."""
+        fp = str(getattr(gv, "canonical_fp", "") or "")
+        if fp not in self.launched_fps:
+            return False
+        self.ledger.skipped.append({"name": gv.name, "fingerprint": fp, "reason": "round_dup"})
+        return True
+
+    def record_launch(self, gv: GridVariant) -> None:
+        """Claim the launch for ``gv``'s fingerprint, so a later twin of it is a round duplicate."""
+        self.launched_fps.add(str(getattr(gv, "canonical_fp", "") or ""))
+
+    def restates_the_stack(self, gv: GridVariant) -> bool:
+        """Whether ``gv`` only restates the launch the stack runs as it stands, recording the skip if so.
+
+        The observed launch is what the server ran when the round opened; a KEEP
+        since then has made the observed value of whatever it changed stale, and
+        ``observed_launch_after`` leaves that out.
+        """
+        config, env = observed_launch_after(
+            self.observed.config,
+            self.observed.env,
+            self.opening_stack,
+            self.launched_stack(),
+            self.launch.framework,
+        )
+        _, restated = filter_baseline_noop_variants(
+            [gv],
+            framework=self.launch.framework,
+            base_yaml_path=self.workload.config_path,
+            base_extra_args=self.stack.extra_args,
+            base_extra_envs=dict(self.stack.extra_envs),
+            base_remove_args=list(self.stack.remove_args),
+            base_unset_envs=list(self.stack.unset_envs),
+            base_args_mode=self.stack.args_mode,
+            model_path=self.workload.model_path,
+            gpu_type=self.workload.gpu_type,
+            benchmark_script=self.workload.benchmark_script,
+            observed_server_config=config,
+            observed_server_env=env,
+        )
+        if not restated:
+            return False
+        _skip_baseline_noop(gv.name, restated[0][1], self.ledger.skipped)
+        self.judged_without_measuring += 1
+        return True
+
     def already_measured(self, gv: GridVariant) -> bool:
         """Whether the session ledger already holds a verdict for ``gv`` on this stack, recording the skip if so.
 
@@ -908,6 +956,7 @@ class _ExploreRound:
         )
         log.info("explore: skipping already-measured variant %s (%s)", gv.name, detail)
         self.ledger.skipped.append({"name": gv.name, "fingerprint": fp, "reason": ALREADY_MEASURED, "detail": detail})
+        self.judged_without_measuring += 1
         return True
 
     def context_copy_refusal(self, gv: GridVariant) -> str:
@@ -1117,11 +1166,12 @@ class _ExploreRound:
 
         A variant reaped by the overtime gate counts: ``KILLED_OVERTIME`` is a
         real signal, not an absence of one. A round whose every variant already
-        had its verdict is answered too, as if it had measured them again.
+        had its verdict, or only restated the stack, is answered too, as if it
+        had measured them again.
         """
         measured = any(t.get("outcome") in ("KEEP", "REVERT", TS_KILLED_OVERTIME) for t in self.ledger.tested.values())
-        already = sum(sd.get("reason") == ALREADY_MEASURED for sd in self.ledger.skipped)
-        return measured or bool(self.ledger.winners) or (bool(self.runnable) and already == len(self.runnable))
+        answered_otherwise = bool(self.runnable) and self.judged_without_measuring == len(self.runnable)
+        return measured or bool(self.ledger.winners) or answered_otherwise
 
     def budget_error(self, status: str) -> dict[str, Any]:
         """Why a round that measured nothing measured nothing, when the run stopped it.
@@ -1209,7 +1259,8 @@ class ExploreExecutor:
         setup = _RoundSetup(params, ss, workload, _launch_defaults(workload.config_path, baseline.args_mode), baseline)
         grid = self._proposed_grid(setup)
         ledger = _RoundLedger()
-        runnable = self._runnable_variants(setup, grid.variants, ledger)
+        observed = ObservedLaunch(*observed_launch_from_state(ss))
+        runnable = self._runnable_variants(setup, grid.variants, ledger, observed)
         anchor = _round_grading_anchor(ss)
         reuse = _ServerReuse.of(resolve_lifecycle_params(workload.config_path))
         # Seeded by the Coordinator from the durable cursor: this executor holds no
@@ -1244,6 +1295,7 @@ class ExploreExecutor:
             on_the_synthetic_benchmark=not agentx_active(benchmark_mode=getattr(ss, "benchmark_mode", "")),
             is_revalidation=is_stack_revalidation(params),
             workload_signature=workload_signature(),
+            observed=observed,
         )
 
     def _materialize_workload(
@@ -1261,7 +1313,6 @@ class ExploreExecutor:
             params.get("output_dir") or extra.get("workspace") or runs_dir(self.session_dir, "explore", task_id)
         )
         output_root.mkdir(parents=True, exist_ok=True)
-        eval_disabled = _explore_eval_disabled(shared_state, params)
         model_path = resolve_session_model_path(
             params=params,
             state_model_path=str(getattr(shared_state, "model_path", "") or "") if shared_state else "",
@@ -1280,13 +1331,12 @@ class ExploreExecutor:
                 model_path=model_path or None,
                 gpu_type=gpu_type or None,
                 benchmark_script=benchmark_script,
-                extra_envs={"RUN_EVAL": "false"} if eval_disabled else None,
                 out_name="explore_base.with_envs.yaml",
                 grading=getattr(shared_state, "grading", None),
             )
         except FrameworkScriptMismatchError as exc:
             raise _RoundRefusal("framework_script_mismatch", str(exc)) from exc
-        return _Workload(config_path, output_root, model_path, gpu_type, benchmark_script, result_dir, eval_disabled)
+        return _Workload(config_path, output_root, model_path, gpu_type, benchmark_script, result_dir)
 
     def _proposed_grid(self, setup: _RoundSetup) -> _RoundGrid:
         """The variants this round was asked to measure, before any filter sees them."""
@@ -1324,12 +1374,45 @@ class ExploreExecutor:
         return _RoundGrid(grid, lever_payload)
 
     def _runnable_variants(
-        self, setup: _RoundSetup, grid: list[GridVariant], ledger: _RoundLedger
+        self, setup: _RoundSetup, grid: list[GridVariant], ledger: _RoundLedger, observed: ObservedLaunch
     ) -> list[GridVariant]:
-        """The variants worth launching: nothing the stack already runs, and one per fingerprint."""
-        observed_config, observed_env = observed_launch_from_state(setup.shared_state)
-        kept, noop_dropped = filter_baseline_noop_variants(
+        """The variants worth launching, in the order the round will take them.
+
+        Every variant carries its fingerprint from here on. In-round duplicates
+        are judged at their turn, against what this round has actually launched:
+        a twin of a variant that was only skipped has not claimed the launch.
+        """
+        _stamp_canonical_fingerprints(
             grid,
+            base_remove_args=setup.baseline.remove_args,
+            base_unset_envs=setup.baseline.unset_envs,
+            base_args_mode=setup.baseline.args_mode,
+        )
+        shaped = self._shaped_for_the_cluster(setup, list(grid), ledger) if grid else []
+        runnable = self._past_the_opening_restatements(setup, shaped, ledger, observed)
+        log.info(
+            "explore grid: payload=%d → runnable=%d (leading baseline_noop=%d)",
+            len(grid),
+            len(runnable),
+            len(shaped) - len(runnable),
+        )
+        return runnable
+
+    @staticmethod
+    def _past_the_opening_restatements(
+        setup: _RoundSetup, runnable: list[GridVariant], ledger: _RoundLedger, observed: ObservedLaunch
+    ) -> list[GridVariant]:
+        """The grid from its first variant that changes something, dropping the restatements ahead of it.
+
+        A variant that restates the stack's observed launch changes nothing while
+        the stack stays as observed. The ones ahead of every other variant can
+        only launch on it, so they go before a serving lease is taken; any other
+        is judged at its turn, against the stack a KEEP has moved.
+        """
+        if not runnable:
+            return runnable
+        kept, restated = filter_baseline_noop_variants(
+            runnable,
             framework=setup.launch.framework,
             base_yaml_path=setup.workload.config_path,
             base_extra_args=setup.baseline.extra_args,
@@ -1340,48 +1423,14 @@ class ExploreExecutor:
             model_path=setup.workload.model_path,
             gpu_type=setup.workload.gpu_type,
             benchmark_script=setup.workload.benchmark_script,
-            observed_server_config=observed_config,
-            observed_server_env=observed_env,
+            observed_server_config=observed.config,
+            observed_server_env=observed.env,
         )
-        for name, reason in noop_dropped:
-            log.info("explore: skipping baseline-noop variant %s (%s)", name, reason)
-            ledger.skipped.append({"name": name, "reason": "baseline_noop", "detail": reason})
-        runnable = self._one_variant_per_fingerprint(kept, setup.baseline, ledger)
-        log.info(
-            "explore dedup: payload=%d → runnable=%d (round_dup=%d baseline_noop=%d)",
-            len(grid),
-            len(runnable),
-            sum(1 for sd in ledger.skipped if sd.get("reason") == "round_dup"),
-            len(noop_dropped),
-        )
-        if not runnable:
-            return runnable
-        return self._shaped_for_the_cluster(setup, runnable, ledger)
-
-    @staticmethod
-    def _one_variant_per_fingerprint(
-        grid: list[GridVariant], baseline: _RoundBaseline, ledger: _RoundLedger
-    ) -> list[GridVariant]:
-        """Keep the first variant of each fingerprint and record the ones it stands in for.
-
-        The fingerprint is attached to the variant so the result loop needn't recompute it.
-        """
-        unique_in_round: dict[str, GridVariant] = {}
-        for gv in grid:
-            fp = effective_fingerprint(
-                gv.extra_server_args,
-                gv.extra_envs,
-                controls=_variant_control_fields(gv),
-                base_remove_args=baseline.remove_args,
-                base_unset_envs=baseline.unset_envs,
-                base_args_mode=baseline.args_mode,
-            )
-            gv.canonical_fp = fp  # type: ignore[attr-defined]
-            if fp in unique_in_round:
-                ledger.skipped.append({"name": gv.name, "fingerprint": fp, "reason": "round_dup"})
-                continue
-            unique_in_round[fp] = gv
-        return list(unique_in_round.values())
+        kept_ids = {id(gv) for gv in kept}
+        leading = next((i for i, gv in enumerate(runnable) if id(gv) in kept_ids), len(runnable))
+        for name, reason in restated[:leading]:
+            _skip_baseline_noop(name, reason, ledger.skipped)
+        return runnable[leading:]
 
     @staticmethod
     def _shaped_for_the_cluster(
@@ -1425,7 +1474,11 @@ class ExploreExecutor:
         """Measure every variant the round can still afford, in the order the grid gives them."""
         try:
             for idx, gv in enumerate(explore_round.runnable):
-                if explore_round.already_measured(gv):
+                if (
+                    explore_round.launched_already(gv)
+                    or explore_round.restates_the_stack(gv)
+                    or explore_round.already_measured(gv)
+                ):
                     continue
                 needed_sec = explore_round.variant_cost_sec()
                 stop = variant_budget_stop(
@@ -1441,6 +1494,7 @@ class ExploreExecutor:
                         {"name": gv.name, "reason": CONTEXT_COPY_REFUSAL, "detail": refusal}
                     )
                     continue
+                explore_round.record_launch(gv)
                 run = self._stage_variant(explore_round, idx, gv)
                 try:
                     if await self._measure_variant(explore_round, run) is _RoundStep.END_OF_ROUND:
@@ -1475,13 +1529,10 @@ class ExploreExecutor:
                 args_mode=str(getattr(gv, "args_mode", "append") or "append"),
             ),
         )
-        # ``--no-eval`` opted the session out of accuracy entirely, so it holds
-        # for every round. The decision round additionally skips eval when a
-        # warmup preceded it: it is timed against a throughput-only anchor, and
-        # ``parse_eval_results`` falls back to the score the warmup took. Without
-        # a warmup there is nothing to fall back to, so the decision round keeps
-        # its own eval.
-        eval_off = explore_round.workload.eval_disabled
+        # The decision round skips eval when a warmup preceded it: it is timed
+        # against a throughput-only anchor, and ``parse_eval_results`` falls back
+        # to the score the warmup took. Without a warmup there is nothing to fall
+        # back to, so the decision round keeps its own eval.
         slot = explore_round.workload.output_root / f"v{idx:02d}_{_safe(gv.name)}"
         slot.mkdir(parents=True, exist_ok=True)
         return _VariantRun(
@@ -1495,10 +1546,8 @@ class ExploreExecutor:
             remove_args=remove_args,
             unset_envs=unset_envs,
             extra_envs=extra_envs,
-            warmup_gv=_variant_with_eval_off(run_gv) if eval_off else run_gv,
-            decision_gv=_variant_with_eval_off(run_gv)
-            if (explore_round.budget.use_warm_decision or eval_off)
-            else run_gv,
+            launched_gv=run_gv,
+            decision_gv=_variant_with_eval_off(run_gv) if explore_round.budget.use_warm_decision else run_gv,
             lifecycle=explore_round.reuse.lifecycle_params(slot),
         )
 
@@ -1535,7 +1584,7 @@ class ExploreExecutor:
         warmup_results = await self._launch_round(
             explore_round,
             _RoundLaunch(
-                variant=run.warmup_gv,
+                variant=run.launched_gv,
                 slot=warmup_slot,
                 lifecycle=run.lifecycle,
                 expected_sec=explore_round.budget.warmup_expected_sec,
