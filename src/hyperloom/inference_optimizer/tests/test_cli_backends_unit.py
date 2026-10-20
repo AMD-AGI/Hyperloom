@@ -42,6 +42,7 @@ def _stub_backends(monkeypatch):
     """Replace heavy backend classes with lightweight stubs (no SDK / network)."""
     monkeypatch.setattr(clib, "ClaudeBackend", lambda **kw: ("claude", kw))
     monkeypatch.setattr(clib, "CodexBackend", lambda **kw: ("codex", kw))
+    monkeypatch.setattr(clib, "DeepSeekBackend", lambda **kw: ("deepseek", kw))
     monkeypatch.setattr(clib, "MockCriticBackend", lambda: ("mock_critic",))
     monkeypatch.setattr(
         clib,
@@ -79,10 +80,14 @@ def _build(**over):
 def _isolated_provider_env(monkeypatch):
     """Every case in this module resolves backends from the environment, so the machine running the suite must not be able to change the answer."""
     _clear_provider_env(monkeypatch)
+    # An operator override outranks the credential rule every case here exercises.
+    monkeypatch.delenv(clib.ORCHESTRATION_BACKEND_ENV, raising=False)
+    monkeypatch.delenv(llm_config.AGENT_BACKEND_ENV, raising=False)
     # Orchestration selection ranks the installed SDKs after the credential, and which extras the suite happens to
     # run with is exactly the kind of machine state this fixture exists to hold still.
     monkeypatch.setattr(llm_config, "claude_agent_sdk_installed", lambda: True)
     monkeypatch.setattr(llm_config, "codex_agent_sdk_installed", lambda: True)
+    monkeypatch.setattr(llm_config, "deepseek_harness_sdk_installed", lambda: True)
 
 
 def test_build_backends_mock_defaults() -> None:
@@ -293,6 +298,47 @@ def test_build_backends_dual_config_keeps_claude_for_orchestration(monkeypatch) 
     _set_dual_protocol_gateway(monkeypatch)
 
     assert _build()["orchestration"][0] == "claude"
+
+
+def test_an_operator_override_outranks_the_credential_rule(monkeypatch) -> None:
+    """The harness returns unenforced intents, so only an explicit ask selects it."""
+    _clear_provider_env(monkeypatch)
+    _set_dual_protocol_gateway(monkeypatch)
+    monkeypatch.setenv(clib.ORCHESTRATION_BACKEND_ENV, "deepseek")
+
+    name, kwargs = _build()["orchestration"]
+    assert name == "deepseek"
+    # The role only reads state and answers with intents.
+    assert kwargs["permission_mode"] == "read-only"
+
+
+def test_the_harness_is_never_selected_by_credentials_alone(monkeypatch) -> None:
+    """A DeepSeek gateway configures Claude's and Codex's protocols, not this route."""
+    _clear_provider_env(monkeypatch)
+    _set_dual_protocol_gateway(monkeypatch)
+
+    assert _build()["orchestration"][0] == "claude"
+
+
+def test_asking_for_the_harness_without_its_sdk_fails_at_launch(monkeypatch) -> None:
+    """Naming a backend whose SDK cannot import must not be answered hours in."""
+    _clear_provider_env(monkeypatch)
+    _set_dual_protocol_gateway(monkeypatch)
+    monkeypatch.setenv(clib.ORCHESTRATION_BACKEND_ENV, "deepseek")
+    monkeypatch.setattr(llm_config, "deepseek_harness_sdk_installed", lambda: False)
+
+    with pytest.raises(ValueError, match="requires the DeepSeek Harness SDK"):
+        _build()
+
+
+def test_an_unknown_orchestration_backend_is_rejected(monkeypatch) -> None:
+    """Silently falling back would hide a typo behind a whole run on the wrong CLI."""
+    _clear_provider_env(monkeypatch)
+    _set_dual_protocol_gateway(monkeypatch)
+    monkeypatch.setenv(clib.ORCHESTRATION_BACKEND_ENV, "clause")
+
+    with pytest.raises(ValueError, match="not in"):
+        _build()
 
 
 def test_build_backends_dual_config_drops_claude_when_its_sdk_is_absent(monkeypatch) -> None:

@@ -34,6 +34,7 @@ from .backends import (
     ModelRouting,
     _build_backends,
     _build_proposal_scorer,
+    _orchestration_banner,
     critic_review_target,
     orchestration_runs_on_codex,
 )
@@ -2661,21 +2662,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         session_dir, prompts=prompts, orchestration_phase=_initial_phase, macro_cycle=_initial_macro_cycle
     )
 
-    def _backend_kind(role: str) -> str:
-        backend = backends.get(role)
-        name = str(getattr(backend, "name", "") or "").strip().lower()
-        if name == "claude":
-            return "Claude"
-        if name == "codex":
-            return "Codex"
-        if backend is None:
-            return "DISABLED"
-        return backend.__class__.__name__
-
-    orchestration_str = (
-        f"Claude({args.claude_model})"
-        if _backend_kind("orchestration") == "Claude"
-        else f"{_backend_kind('orchestration')}({args.codex_model})"
+    orchestration_str = _orchestration_banner(
+        backends.get("orchestration"),
+        claude_model=args.claude_model,
+        codex_model=args.codex_model,
     )
     kernel_str = "DISABLED" if no_kernel else "programmatic"
     if critic_choice == "mock":

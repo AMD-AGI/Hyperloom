@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, NamedTuple, NoReturn
 
 from hyperloom.common import provenance
+from hyperloom.common.agent_runtime_requirements import agent_runtime_requirements
 from hyperloom.common.env_safety import (
     filter_untrusted_env_mapping,
     is_allowed_dotenv_key,
@@ -493,14 +494,7 @@ def _load_kernel_agent_env_fallback() -> dict[str, Any]:
 
 def _ensure_python_sdks(python_exe: str, pip_extra: list[str]) -> dict[str, Any]:
     """Probe-then-install runtime-imported Python SDKs using the same interpreter that imports them."""
-    # Both agent runtimes ship by default: Hyperloom routes every LLM interaction through one of them, and a
-    # deployment may be Anthropic-only, OpenAI-only, or both.
-    candidates = (
-        ("claude_agent_sdk", "claude-agent-sdk>=0.2.110"),
-        ("openai_codex", "openai-codex>=0.144"),
-        ("openai", "openai>=1.50"),
-        ("httpx", "httpx>=0.27"),
-    )
+    candidates = agent_runtime_requirements()
     installed: list[str] = []
     already_present: list[str] = []
     for module_name, pip_spec in candidates:
