@@ -4167,7 +4167,6 @@ class _IntegrateRebaseline(NamedTuple):
 
     workspace: Path
     server_args: str
-    baseline_accuracy: float
     executor: Any
     ctx: Any
 
@@ -4360,7 +4359,6 @@ def _integrate_rebaseline(
     return _IntegrateRebaseline(
         workspace=workspace,
         server_args=extra_args,
-        baseline_accuracy=float(state.baseline_accuracy or 0.0),
         executor=BaselineExecutor(session_dir=session_dir, shared_state=state),
         ctx=RunnerContext(task=task, lease=None),
     )
@@ -4464,6 +4462,7 @@ def _integrate_accuracy_verdict(
     bench_result: dict[str, Any],
     rebaseline: _IntegrateRebaseline,
     performance: Any,
+    baseline_accuracy: float,
 ) -> _AccuracyVerdict:
     """Grade the accuracy of a candidate that already cleared the throughput bar.
 
@@ -4477,7 +4476,7 @@ def _integrate_accuracy_verdict(
         return _AccuracyVerdict(None, performance.decision)
     gate = _grade_integrate_accuracy(
         bench_result,
-        baseline_accuracy=rebaseline.baseline_accuracy,
+        baseline_accuracy=baseline_accuracy,
         workspace=rebaseline.workspace,
         strict=_applyback_verdict_pending(payload),
         server_args=rebaseline.server_args,
@@ -4740,7 +4739,12 @@ async def integrate_handler(
     performance = assess_integrate_performance(state, bench_result, **performance_policy)
     if performance.graded.degrade_reason:
         log.info("integrate_handler: grading unavailable (%s)", performance.graded.degrade_reason)
-    accuracy = _integrate_accuracy_verdict(payload, bench_result, rebaseline, performance)
+    # Read after the re-baseline, not before it: the executor shares this state
+    # object and a salvaged sibling accuracy during the run republishes the
+    # reference this candidate is graded against.
+    accuracy = _integrate_accuracy_verdict(
+        payload, bench_result, rebaseline, performance, float(state.baseline_accuracy or 0.0)
+    )
     if accuracy.gate is not None and accuracy.gate["blocked"] and accuracy.gate["infeasible"]:
         # A gate that cannot run under this serving configuration measured nothing
         # about the patch, so it is an integration fault: faults carry their own
