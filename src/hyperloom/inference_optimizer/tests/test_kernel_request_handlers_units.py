@@ -2437,7 +2437,7 @@ class TestRunGemmTuningHandler:
         task = captured["task"]
         assert task.kind == "gemm_shape_capture"
         assert task.params["baseline_double_run"] is False
-        assert task.params["disable_run_eval"] is True
+        assert task.params["extra_envs"]["RUN_EVAL"] == "false"
         assert task.params["extra_server_args"] == "--enforce-eager --port 8888"
         assert "--port" in task.params["remove_args"]
         assert task.params["extra_envs"]["KEEP_ME"] == "1"

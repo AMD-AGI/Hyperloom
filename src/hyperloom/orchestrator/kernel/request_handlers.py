@@ -2511,7 +2511,6 @@ async def _capture_tunableop_recording(run: _ShapeCaptureRun, state: Any, payloa
             "remove_args": [*run.remove_args, "--port"],
             "config_path": config_path,
             "timeout_sec": _capture_timeout_sec(payload),
-            "disable_run_eval": True,
             "baseline_double_run": False,
         }
     )

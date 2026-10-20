@@ -169,7 +169,7 @@ TP / flag change — the CLI fans out across all pods; never per-pod invocations
 **Sandbox-only exports** (consumed by `install.sh` / `optimize` /
 `_workload_envs.py` in the **sandbox**; never ask the platform to bake them into
 pod env — nothing in the pods reads them, and they shadow real pod values):
-`KERNEL_OPT_*`, `RANDOM_RANGE_RATIO`, `RUN_EVAL`, the `optimize`-flag mirrors
+`KERNEL_OPT_*`, `RANDOM_RANGE_RATIO`, the `optimize`-flag mirrors
 (`MODEL_PATH`, `TP`, `EP`, …), all `PD_*` knobs, and
 `HYPERLOOM_MN_POLL_TIMEOUT_S` / `HYPERLOOM_MN_HEALTH_WAIT_S`.
 

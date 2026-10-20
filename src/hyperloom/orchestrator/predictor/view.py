@@ -33,7 +33,6 @@ class SessionView(Protocol):
     max_model_len: int
     baseline_tput: float
     baseline_accuracy: float
-    eval_disabled: bool
     cumulative_gain_validated: float
     current_best: dict[str, Any]
     optimization_stack: list[dict[str, Any]]
