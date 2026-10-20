@@ -832,7 +832,7 @@ def _focus_custom_specialist(inp: SpecialistPromptInputs) -> list[str]:
 
 def _focus_speculative_decoding_specialist(inp: SpecialistPromptInputs) -> list[str]:
     """Render the speculative-decoding focus for this session's target model."""
-    return speculative_decoding_focus(model_name=inp.model_name, model_path=inp.model_path)
+    return speculative_decoding_focus(inp.model_info)
 
 
 _DOMAIN_FOCUS_TEMPLATES: dict[str, "Callable[[SpecialistPromptInputs], list[str]]"] = {
@@ -991,10 +991,6 @@ class SpecialistPromptInputs:
 
     # Operator-defined specialist focus, rendered verbatim; empty when not configured.
     custom_specialist_prompt: str = ""
-
-    # Target model: canonical name, and the local path or Hub repo id it was launched from.
-    model_name: str = ""
-    model_path: str = ""
 
 
 # Section 1 — Identity & autonomy

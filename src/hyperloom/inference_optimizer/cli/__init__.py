@@ -54,7 +54,7 @@ from ..gpu_types import (
     _resolve_gpu_type,
 )
 from ..model_config_utils import (
-    summarize_model_config,
+    describe_model,
 )
 from .bootstrap import (
     LaunchInfo,
@@ -1834,7 +1834,7 @@ def _reexport_session_environment(
         # Backfill model_info for sessions created before the field existed (or whose config was unreadable at
         # launch); fail-soft to {}.
         if not state.model_info:
-            state.model_info = summarize_model_config(resume_model_path)
+            state.model_info = describe_model(resume_model_path, state.model_name)
             if state.model_info:
                 state.save(session_dir)
                 print("  backfilled model_info (from config.json)")

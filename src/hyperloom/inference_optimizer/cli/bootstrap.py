@@ -36,7 +36,7 @@ from hyperloom.common.workload_defaults import (
 )
 from ..session.paths import _SESSION_SKELETON
 from .model_gate import _load_model_arch, _load_model_config_tags
-from ..model_config_utils import summarize_model_config
+from ..model_config_utils import describe_model
 
 log = logging.getLogger(__name__)
 
@@ -502,7 +502,7 @@ def _seed_shared_state(
         model_architectures=_cfg_tags.get("architectures", []),
         model_type=_cfg_tags.get("model_type", ""),
         # config.json structural summary, persisted for downstream collectors.
-        model_info=summarize_model_config(str(args.model)),
+        model_info=describe_model(str(args.model), _model_identity),
         framework=os.environ.get("FRAMEWORK", "sglang"),
         # The only copy of the budgets. Validated at the CLI, so anything that reaches here is usable, and archived
         # with the session so a resume restores them without a second source to reconcile.

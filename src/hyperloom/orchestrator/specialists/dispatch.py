@@ -39,13 +39,14 @@ _SOURCE_PATCH_FAMILY = "source_patch"
 #: ``(SharedState field, param key, conversion)`` for the values a specialist is warmed with. The converted value
 #: decides: an empty string, an empty container and a zero are not exported, because an absent key is how the
 #: specialist reads "this session has none".
+# Domains whose focus reads the target model from ``model_info``.
+_MODEL_INFO_DOMAINS: frozenset[str] = frozenset({"static_recon_specialist", "speculative_decoding_specialist"})
+
 _STATE_PARAMS: tuple[tuple[str, str, Callable[[Any], Any]], ...] = (
     ("warm_start_recipe", "warm_start_recipe", dict),
     ("warm_start_pitfalls", "warm_start_pitfalls", list),
     ("warm_start_lessons", "warm_start_lessons", list),
     ("framework", "framework", str.strip),
-    ("model_name", "model_name", str.strip),
-    ("model_path", "model_path", str.strip),
     ("tp", "tp", int),
     ("precision", "precision", str),
     ("conc", "conc", int),
@@ -161,7 +162,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             if _arch_notes:
                 params["arch_notes"] = _arch_notes
 
-        if domain == "static_recon_specialist" and "model_info" not in params:
+        if domain in _MODEL_INFO_DOMAINS and "model_info" not in params:
             _minfo = getattr(state, "model_info", None)
             if isinstance(_minfo, dict) and _minfo:
                 params["model_info"] = dict(_minfo)

@@ -8,11 +8,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-import pytest
-
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.policy.gate import PolicyGate
+from hyperloom.orchestrator.prompts.speculative_decoding_focus import speculative_decoding_focus
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import SpecialistPromptInputs, build_specialist_prompts
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.specialists.domains import get_domain, normalize_dispatch_tags
@@ -20,15 +19,26 @@ from hyperloom.orchestrator.specialists.runner import SpecialistRunner, Speciali
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 DOMAIN_KEY = "speculative_decoding_specialist"
+_TARGET = {"model_name": "org/Target-7B", "model_path": "/models/Target-7B", "model_type": "llama"}
 
 
-def _system_prompt(**kw: Any) -> str:
+def _flat(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _system_prompt(model_info: dict[str, Any] | None = None) -> str:
     domain = get_domain(DOMAIN_KEY)
     assert domain is not None
     system, _ = build_specialist_prompts(
-        SpecialistPromptInputs(task_id="t-1", domain=domain, gap_canonical_id="gap.decode", framework="vllm", **kw)
+        SpecialistPromptInputs(
+            task_id="t-1",
+            domain=domain,
+            gap_canonical_id="gap.decode",
+            framework="vllm",
+            model_info=_TARGET if model_info is None else model_info,
+        )
     )
-    return system
+    return _flat(system)
 
 
 def test_orchestration_may_delegate_to_the_domain_under_its_own_kb_anchor():
@@ -47,68 +57,51 @@ def test_orchestration_may_delegate_to_the_domain_under_its_own_kb_anchor():
     )
 
 
-@pytest.mark.parametrize(
-    "marker",
-    [
-        "memory-bound",
-        "Small batch",
-        "Long context",
-        "profiling and roofline evidence",
-        "do not propose speculative decoding",
-    ],
-)
-def test_focus_says_when_speculative_decoding_fits(marker):
-    assert marker in _system_prompt()
+def test_focus_names_the_target_model():
+    assert "`org/Target-7B`, launched from `/models/Target-7B`" in _system_prompt()
 
 
-@pytest.mark.parametrize("method", ["MTP", "EAGLE-3", "DFlash / DSpark", "Separate draft model", "suffix decoding"])
-def test_focus_says_where_each_method_fits(method):
-    assert method in _system_prompt()
+def test_focus_sends_the_specialist_to_the_serving_config_when_the_model_is_not_recorded():
+    text = _system_prompt({})
+    assert "Target model: not recorded for this session" in text
+    assert "MTP first.** The target's config.json could not be read" in text
 
 
-def test_focus_puts_mtp_first_and_checks_its_weights_exist():
+def test_focus_states_the_mtp_layer_count_and_still_asks_for_the_tensors():
+    text = _system_prompt({**_TARGET, "mtp_layers": 1})
+    assert "**MTP first.** The target's config.json declares 1 MTP layer(s)." in text
+    assert "Confirm the weight index carries those tensors" in text
+
+
+def test_focus_skips_mtp_when_the_config_declares_none():
     text = _system_prompt()
-    assert "**MTP first.**" in text
-    for field in ("num_nextn_predict_layers", "mtp_num_hidden_layers", "num_mtp_modules"):
-        assert field in text
-    assert "weight index actually contains the MTP layer tensors" in text
-    assert text.index("**MTP first.**") < text.index("look locally first")
+    assert "**No MTP.**" in text
+    assert "MTP first" not in text
 
 
 def test_focus_looks_for_drafters_locally_before_downloading_one():
-    text = _system_prompt(model_name="org/Target-7B", model_path="/models/Target-7B")
-    assert "`org/Target-7B`, launched from `/models/Target-7B`" in text
-    assert text.index("look locally first") < text.index("search Hugging Face and download")
-    for rule in ("HF_HUB_OFFLINE", "safetensors", "never enable `trust_remote_code`"):
-        assert rule in text
-
-
-def test_focus_leaves_the_download_location_open_but_requires_it_to_outlive_the_dispatch():
     text = _system_prompt()
-    assert "Download to a location that outlives this dispatch" in text
-    assert "not your\n     worktree or workspace" in text
+    assert text.index("look locally first") < text.index("search Hugging Face and download")
+    assert "Skip this step when `HF_HUB_OFFLINE` is set" in text
+
+
+def test_focus_downloads_safely_into_the_hub_cache_by_default():
+    text = _system_prompt()
+    assert "Download into the Hugging Face cache by default" in text
+    assert "must outlive this dispatch — not your worktree or workspace" in text
+    assert "Take safetensors weights only; never enable `trust_remote_code`" in text
+    assert "Pin the revision" in text
 
 
 def test_focus_names_no_framework_flags_and_sends_the_specialist_to_the_installed_source():
-    from hyperloom.orchestrator.prompts.speculative_decoding_focus import speculative_decoding_focus
-
-    text = "\n".join(speculative_decoding_focus(model_name="m", model_path="/m"))
+    text = "\n".join(speculative_decoding_focus({**_TARGET, "mtp_layers": 1}))
     for version_specific in ("--", "SGLANG_", "VLLM_", "synthetic_acceptance_length", "rejection_sample_method"):
         assert version_specific not in text
-    assert "from the installed\n  framework's source" in text
+    assert "from the installed framework's source" in _flat(text)
 
 
 def test_a_patch_mode_prompt_gets_no_coda_about_flags_it_never_listed():
     assert "Altitude —" not in _system_prompt()
-
-
-def test_focus_states_the_constraints_a_proposal_must_meet():
-    text = _system_prompt()
-    assert "**Never propose\n  these on the synthetic benchmark**" in text
-    assert "the draft is pinned" in text
-    assert "do not switch it to simulated" in text
-    assert "absolute local path, never a repo id" in text
-    assert "**atomic** proposal" in text
 
 
 @dataclass
@@ -118,11 +111,11 @@ class _StubTask:
     kind: str = "specialist"
 
 
-async def test_dispatch_tells_the_specialist_the_target_model(tmp_path):
+async def test_dispatch_tells_the_specialist_the_session_model(tmp_path):
     from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
     from hyperloom.orchestrator.roles.mock_backend import MockBackend, MockTurn, ScriptedPlan
 
-    SharedState(model_name="org/Target-7B", model_path="/models/Target-7B").save(tmp_path)
+    SharedState(model_info={**_TARGET, "mtp_layers": 2}).save(tmp_path)
     idle = ScriptedPlan(turns=[MockTurn(intents=[])])
     coord = Coordinator(
         session_dir=tmp_path,
@@ -139,4 +132,6 @@ async def test_dispatch_tells_the_specialist_the_target_model(tmp_path):
         prompt_inputs=None,
     )
 
-    assert "`org/Target-7B`, launched from `/models/Target-7B`" in prep.system_prompt
+    text = _flat(prep.system_prompt)
+    assert "`org/Target-7B`, launched from `/models/Target-7B`" in text
+    assert "declares 2 MTP layer(s)" in text

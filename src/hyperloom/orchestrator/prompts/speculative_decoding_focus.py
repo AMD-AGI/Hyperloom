@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from typing import Any
+
 _ROLE: tuple[str, ...] = (
     "You are the **speculative decoding specialist**. You decide whether",
     "speculative decoding should be on for this workload, which method, and",
@@ -94,14 +97,6 @@ _CONSTRAINTS: tuple[str, ...] = (
 
 
 _DRAFTER_STEPS: tuple[str, ...] = (
-    "1. **MTP first.** If the target has MTP layers, use MTP and stop here.",
-    "   Check both a non-zero MTP layer count in config.json — the field name",
-    "   varies by model family (`num_nextn_predict_layers`,",
-    "   `mtp_num_hidden_layers`, `num_mtp_modules`, ...) — **and** that the",
-    "   weight index actually contains the MTP layer tensors — some quantized",
-    "   or converted checkpoints keep the config field but drop the weights.",
-    "   Fall back to the methods below only when MTP is absent or fails to",
-    "   start on the installed framework.",
     "2. **Drafter-based methods (EAGLE / EAGLE-3, DFlash / DSpark, draft",
     "   model): look locally first.** Search the directories next to the",
     "   target's weights and the Hugging Face cache (`$HF_HUB_CACHE`, else",
@@ -116,22 +111,22 @@ _DRAFTER_STEPS: tuple[str, ...] = (
     "     for a drafter.",
     "   - Check the download size against the remaining wall budget and",
     "     free disk.",
-    "   - Download to a location that outlives this dispatch — not your",
-    "     worktree or workspace, which may be cleaned up — because every later",
-    "     benchmark launch of the proposal loads the drafter from that path.",
-    "     Pin the revision.",
+    "   - Download into the Hugging Face cache by default. Any location must",
+    "     outlive this dispatch — not your worktree or workspace, which may be",
+    "     cleaned up — because every later benchmark launch of the proposal",
+    "     loads the drafter from that path. Pin the revision.",
     "   - Record the repo id and commit sha in the proposal.",
     "4. If no drafter trained for this target exists locally or on Hugging",
     "   Face, say so; never substitute one trained for a different target.",
 )
 
 
-def speculative_decoding_focus(*, model_name: str, model_path: str) -> list[str]:
+def speculative_decoding_focus(model_info: Mapping[str, Any]) -> list[str]:
     """Render the speculative-decoding focus block for one target model.
 
     Args:
-        model_name: Canonical name of the target model.
-        model_path: What the target was launched from: a local path or a Hugging Face repo id.
+        model_info: The session's model description (``model_config_utils.describe_model``); empty when its
+            ``config.json`` could not be read.
 
     Returns:
         Markdown lines of the focus block.
@@ -144,12 +139,37 @@ def speculative_decoding_focus(*, model_name: str, model_path: str) -> list[str]
         *_METHODS,
         "",
         "**Choosing the method and finding drafter weights**",
-        f"Target model: `{model_name or '(unknown)'}`, launched from `{model_path or '(unknown)'}`"
-        " (a local path or a Hugging Face repo id).",
+        _target_line(model_info),
+        _mtp_step(model_info),
         *_DRAFTER_STEPS,
         "",
         *_CONSTRAINTS,
     ]
+
+
+def _target_line(model_info: Mapping[str, Any]) -> str:
+    """Name the target model the drafter must be trained for."""
+    if not model_info:
+        return "Target model: not recorded for this session; identify it from the serving configuration you tune."
+    return (
+        f"Target model: `{model_info.get('model_name')}`, launched from `{model_info.get('model_path')}` "
+        "(a local path or a Hugging Face repo id)."
+    )
+
+
+def _mtp_step(model_info: Mapping[str, Any]) -> str:
+    """Step 1: use MTP when ``config.json`` declares MTP layers and the weights carry them."""
+    if not model_info:
+        return "1. **MTP first.** The target's config.json could not be read; check it for an MTP layer count."
+    layers = int(model_info.get("mtp_layers") or 0)
+    if not layers:
+        return "1. **No MTP.** The target's config.json declares no MTP layers; go to the drafter-based methods."
+    return (
+        f"1. **MTP first.** The target's config.json declares {layers} MTP layer(s). Confirm the weight index "
+        "carries those tensors — some quantized or converted checkpoints keep the config field but drop the "
+        "weights — then use MTP and stop here. Fall back to the methods below only when the tensors are "
+        "missing or MTP fails to start on the installed framework."
+    )
 
 
 __all__ = ["speculative_decoding_focus"]

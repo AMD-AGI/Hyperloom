@@ -732,8 +732,6 @@ class SpecialistRunner:
                 prior_attempts=[e for e in (params.get("prior_attempts") or []) if isinstance(e, dict)],
                 pr_lead=dict(params.get("pr_lead") or {}),
                 custom_specialist_prompt=custom_specialist_prompt,
-                model_name=str(params.get("model_name") or ""),
-                model_path=str(params.get("model_path") or ""),
             )
 
         system_prompt, user_prompt = build_specialist_prompts(prompt_inputs)
