@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import shlex
@@ -162,15 +163,11 @@ def _term_then_kill(pids: list[int], kill_wait_s: float, pgid: int | None = None
     """SIGTERM, then SIGKILL, ``pids`` (and process group ``pgid``) until none of them is alive; return the survivors."""
     for sig, wait_s in ((signal.SIGTERM, 5.0), (signal.SIGKILL, kill_wait_s)):
         for pid in pids:
-            try:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.kill(pid, sig)
-            except (ProcessLookupError, PermissionError):
-                pass
         if pgid is not None:
-            try:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.killpg(pgid, sig)
-            except (ProcessLookupError, PermissionError):
-                pass
         deadline = time.monotonic() + wait_s
         while time.monotonic() < deadline and any(_pid_alive(pid) for pid in pids):
             time.sleep(0.5)
