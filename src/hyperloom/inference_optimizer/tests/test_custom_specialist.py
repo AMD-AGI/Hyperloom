@@ -785,9 +785,9 @@ async def test_operator_work_pending(rounds, queued, expected):
 @pytest.mark.parametrize(
     ("next_phase", "held"),
     [
-        (("SWEEP", "no_kernel_skipped", {"passed_through_reason": "optimize_no_more_leverage"}), True),
+        (("SWEEP", "optimize_no_more_leverage", {"kernel_skipped": True}), True),
         (("KERNEL_AGENT", "optimize_no_more_leverage", {}), True),
-        (("SWEEP", "no_kernel_skipped", {"passed_through_reason": "optimize_phase_budget_exhausted"}), False),
+        (("SWEEP", "optimize_phase_budget_exhausted", {"kernel_skipped": True}), False),
         (("CLOSE", "time_exhausted", {"terminal": True}), False),
     ],
 )

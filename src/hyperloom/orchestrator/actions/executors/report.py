@@ -267,7 +267,6 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
         "resume; the run stopped instead of falling back to a different tree."
     ),
     # Search / phase plateaus and completions.
-    "no_kernel_skipped": "No kernel candidates were available, so the kernel phase was skipped and the run closed.",
     "sweep_done": "SWEEP finished the concurrency ladder.",
     "sweep_failed": "The concurrency sweep reached a failed terminal result.",
     "optimize_no_more_leverage": (

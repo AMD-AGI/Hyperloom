@@ -548,7 +548,6 @@ def test_saving_a_stopped_session_again_does_not_move_its_stop_time(tmp_path):
 
 def test_stop_reason_vocab_has_v08_additions():
     for new in (
-        "no_kernel_skipped",
         "sweep_done",
         "prelude_baseline_failed",
         "time_exhausted_during_prelude",

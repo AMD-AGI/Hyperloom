@@ -1750,12 +1750,7 @@ def _framework_transition(
         return None
     if bool(flags.get("kernel_enabled")):
         return _transition_result(PHASE_KERNEL_AGENT, normal[0], normal[1], inputs)
-    return _transition_result(
-        PHASE_SWEEP,
-        "no_kernel_skipped",
-        {"passed_through_reason": normal[0], **normal[1]},
-        inputs,
-    )
+    return _transition_result(PHASE_SWEEP, normal[0], {**normal[1], "kernel_skipped": True}, inputs)
 
 
 def _kernel_transition(inputs: dict[str, Any]) -> tuple[str, str, dict[str, Any]] | None:
