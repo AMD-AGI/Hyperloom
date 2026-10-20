@@ -10,15 +10,15 @@ environment compiler reads, like the repository, from the session's blob store a
 on; its learnings tool recalls this session's learnings only, as MB1 runs on no Experience KB
 (:func:`~hyperloom_multibranch.scheduling.mb_fakes.mb_fake_learning_recall`). Every test is measured on a
 :class:`MeasurementHost`: this machine's cards, the image the launcher names in ``HYPERLOOM_ACTIVE_IMAGE_REF`` and
-``HYPERLOOM_ACTIVE_IMAGE_DIGEST``, the tool commits Hyperloom pins and an InferenceX checkout at its commit; the
-canonical measurement is rendered with the workload's model and GPU type and that checkout, from the shipped baseline
-of an InferenceX workload and from the Magpie AgentX benchmark the session writes for an AgentX one, which the PRELUDE
-child is bound to as well. The gate's session service and the specialist
-runtime judge on one rule, :func:`workload_rule`; the runtime settles through a rule gate that asks the scheduler's fork
-desk for branches, and the MCP service's ``request_repair`` and ``decline_repair`` conclude a blocked candidate through
-the same gate, which the scheduler has land each fork it admits and record each fork and repair it voids. A specialist
-declares a correctness fix with the MCP service's ``fix_case``; the runtime proves it with the repro runner the
-regression set uses and has the setup's critic review it. The runtime's specialist sessions come from a
+``HYPERLOOM_ACTIVE_IMAGE_DIGEST``, the Magpie commit Hyperloom pins and an InferenceX checkout at the commit the
+workload's benchmark pins (:class:`InferenceXCheckout`); the canonical measurement is rendered with the workload's model
+and GPU type and that checkout, from the shipped baseline of an InferenceX workload and from the Magpie AgentX benchmark
+the session writes for an AgentX one, which the PRELUDE child is bound to as well. The gate's session service and the
+specialist runtime judge on one rule, :func:`workload_rule`; the runtime settles through a rule gate that asks the
+scheduler's fork desk for branches, and the MCP service's ``request_repair`` and ``decline_repair`` conclude a blocked
+candidate through the same gate, which the scheduler has land each fork it admits and record each fork and repair it
+voids. A specialist declares a correctness fix with the MCP service's ``fix_case``; the runtime proves it with the repro
+runner the regression set uses and has the setup's critic review it. The runtime's specialist sessions come from a
 :data:`SpecialistSessions`: :func:`model_backed_sessions` runs each branch's specialist as an agent CLI in a worktree of
 its own, briefed by the session's :class:`SessionBriefs`, whose warm-start leads the session binds once PRELUDE has read
 them and which reads the repository for a replay's branch head. :func:`load_peers` reads the measurement host, checks
@@ -39,6 +39,7 @@ import shutil
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import partial
+from types import ModuleType
 from typing import TYPE_CHECKING
 
 from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV
@@ -108,16 +109,25 @@ SpecialistSessions = Callable[[SessionWiring], "ModelSessions"]
 
 
 @dataclass(frozen=True)
+class InferenceXCheckout:
+    """The InferenceX commit a session's measurements are signed with and this machine's checkout at it, which every
+    measurement point names: Hyperloom's synthetic pin for an InferenceX workload, the one the installed Magpie pins
+    for an AgentX one (Magpie's native runs need its own checkout)."""
+
+    commit: str
+    path: str
+
+
+@dataclass(frozen=True)
 class MeasurementHost:
-    """What the toolbox measures on and the session's workload does not name: the cards of the machine, the image
-    the tests run in (its digest is also the base image every recipe must carry, the root recipe's first), the
-    Magpie and InferenceX commits the runner checks out and this machine's InferenceX checkout at that commit, which
-    every measurement point names."""
+    """What the toolbox measures on: the cards of the machine, the image the tests run in (its digest is also the
+    base image every recipe must carry, the root recipe's first), the Magpie commit the runner checks out and the
+    InferenceX checkout of the session's workload."""
 
     cards: tuple[int, ...]
     image: ActiveImage
-    tools: ToolCommits
-    inferencex_path: str
+    magpie_commit: str
+    inferencex: InferenceXCheckout
 
 
 def workload_environment(workload: Workload) -> Mapping[str, str]:
@@ -187,7 +197,7 @@ def _canonical(out_dir: Path, workload: Workload, host: MeasurementHost) -> Cano
         primary_concurrency=workload.conc,
         model_path=resolve_serving_model_path(workload.model),
         gpu_type=workload.gpu_type,
-        inferencex_path=host.inferencex_path,
+        inferencex_path=host.inferencex.path,
     )
 
 
@@ -223,8 +233,8 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
         image_ref=image.ref,
         image_digest=image.digest,
         gpu_type=workload.gpu_type,
-        magpie_commit=host.tools.magpie,
-        inferencex_commit=host.tools.inferencex,
+        magpie_commit=host.magpie_commit,
+        inferencex_commit=host.inferencex.commit,
         blobs=setup.blobs,
         blob_root=str(setup.blobs.root),
     )
@@ -292,19 +302,27 @@ def machine_cards() -> tuple[int, ...]:
     return tuple(range(detect_gpu_count()))
 
 
-def measurement_host(env: Mapping[str, str]) -> MeasurementHost:
-    """This machine's cards, the image ``env`` names, the tool commits Hyperloom pins, ``env`` overriding as
-    ``install.sh`` lets it, and the InferenceX checkout ``INFERENCEX_PATH`` names or ``install.sh`` left; raises
-    :class:`PeersUnavailable` when the image or a commit cannot be pinned, an unnamed image included, or no writable
-    checkout at the pinned InferenceX commit is found."""
+def measurement_host(env: Mapping[str, str], workload: Workload) -> MeasurementHost:
+    """This machine's cards, the image ``env`` names, the Magpie commit Hyperloom pins, ``env`` overriding as
+    ``install.sh`` lets it, and the InferenceX checkout of ``workload`` (:func:`_synthetic_checkout`,
+    :func:`_agentx_checkout`); raises :class:`PeersUnavailable` when the image or a commit cannot be pinned, an unnamed
+    image included, or no writable checkout at the workload's InferenceX commit is found."""
 
-    from hyperloom.inference_optimizer import inferencex_checkout
     from hyperloom.measure.pins import ImagePinError, ToolPinError, active_image, pinned_tool_commits
 
     try:
         image, tools = active_image(env), pinned_tool_commits(env)
     except (ImagePinError, ToolPinError) as exc:
         raise PeersUnavailable(f"the measurement pins cannot be read: {exc}") from exc
+    checkout = _synthetic_checkout(env, tools) if workload.inferencex is not None else _agentx_checkout(env, tools)
+    return MeasurementHost(machine_cards(), image, tools.magpie, checkout)
+
+
+def _synthetic_checkout(env: Mapping[str, str], tools: ToolCommits) -> InferenceXCheckout:
+    """The InferenceX checkout ``INFERENCEX_PATH`` names or ``install.sh`` left, at the commit Hyperloom pins."""
+
+    from hyperloom.inference_optimizer import inferencex_checkout
+
     checkout = env.get("INFERENCEX_PATH", "").strip() or inferencex_checkout.detect()
     if not (
         checkout and inferencex_checkout.checkout_ok(checkout, ref=tools.inferencex) and os.access(checkout, os.W_OK)
@@ -313,7 +331,47 @@ def measurement_host(env: Mapping[str, str]) -> MeasurementHost:
             f"no InferenceX checkout at {tools.inferencex[:12]} is writable at {checkout or 'any detected path'}: "
             "run install.sh, or set INFERENCEX_PATH to one"
         )
-    return MeasurementHost(machine_cards(), image, tools, checkout)
+    return InferenceXCheckout(tools.inferencex, checkout)
+
+
+def _magpie_inferencex() -> ModuleType:
+    """The installed Magpie's InferenceX module, which owns the native AgentX checkout: its pin, its default clone
+    location and its project-root resolution."""
+
+    from Magpie.modes.benchmark import inferencex
+
+    return inferencex
+
+
+def _agentx_checkout(env: Mapping[str, str], tools: ToolCommits) -> InferenceXCheckout:
+    """The InferenceX checkout Magpie's native AgentX runs on: the commit the installed Magpie pins, at
+    ``MAGPIE_INFERENCEX_PATH`` or Magpie's default clone location, resolved to its project root as Magpie resolves it
+    (the repository root or its ``inferencex-e2e`` directory). A Magpie that pins no commit is older than the
+    ``MAGPIE_REF`` Hyperloom pins and is refused."""
+
+    from hyperloom.inference_optimizer import inferencex_checkout
+
+    try:
+        magpie = _magpie_inferencex()
+    except ImportError as exc:
+        raise PeersUnavailable(f"Magpie, which runs an AgentX workload, cannot be imported: {exc}") from exc
+    commit = getattr(magpie, "INFERENCEX_DEFAULT_REF", None)
+    if not commit:
+        raise PeersUnavailable(
+            "the installed Magpie pins no InferenceX commit for AgentX (no INFERENCEX_DEFAULT_REF): "
+            f"install Magpie at MAGPIE_REF {tools.magpie}"
+        )
+    path = env.get("MAGPIE_INFERENCEX_PATH", "").strip() or magpie.InferenceXManager().default_dir
+    try:
+        root = magpie.resolve_inferencex_root(path)
+    except (OSError, RuntimeError):
+        root = ""
+    if not (root and inferencex_checkout.checkout_ok(root, ref=commit) and os.access(root, os.W_OK)):
+        raise PeersUnavailable(
+            f"no InferenceX checkout at {commit}, the commit Magpie pins for AgentX, is writable at {path}: "
+            "set MAGPIE_INFERENCEX_PATH to one"
+        )
+    return InferenceXCheckout(commit, root)
 
 
 def machine_parallel_tests(tp: int) -> int:
@@ -422,7 +480,7 @@ def load_peers(workload: Workload) -> PeerFactory:
     It creates nothing, so the command line calls it before the session directory exists.
     """
 
-    host = measurement_host(os.environ)
+    host = measurement_host(os.environ, workload)
     require_framework_package(workload.framework)
     return partial(local_peers, host, model_backed_sessions(specialist_command(os.environ)))
 
@@ -431,6 +489,7 @@ __all__ = [
     "AGENTX_ENV",
     "CLAIM_TTL_SECONDS",
     "GATE_WRITER",
+    "InferenceXCheckout",
     "MeasurementHost",
     "SessionWiring",
     "SpecialistSessions",

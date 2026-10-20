@@ -10,11 +10,13 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import subprocess
 import urllib.request
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -30,7 +32,8 @@ from hyperloom.common.perf_metric import agentx_enabled
 from hyperloom.common.visible_devices import COUNTING_VISIBLE_DEVICE_VARS
 from hyperloom.measure import compile as compile_module
 from hyperloom.measure.compile import ComponentLayout, LocalBlobStore, PackageBase, UnsupportedComponentError
-from hyperloom.measure.pins import ActiveImage, ToolCommits, pinned_tool_commits
+from hyperloom.measure.hosted_spec import SpecContext
+from hyperloom.measure.pins import ActiveImage, pinned_tool_commits
 from hyperloom_multibranch.contracts.gate import RegressionOutcome
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent
@@ -49,8 +52,10 @@ from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import DecisionLog
 from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.layout import SESSION_PREFIX, SessionLayout, create_session
+from hyperloom_multibranch.scheduling import local_peers as local_peers_module
 from hyperloom_multibranch.scheduling.local_peers import (
     AGENTX_ENV,
+    InferenceXCheckout,
     MeasurementHost,
     SessionWiring,
     local_peers,
@@ -71,6 +76,7 @@ from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOpt
 from hyperloom_multibranch.specialist.model_sessions import ModelSessions
 from hyperloom_multibranch.specialist.runtime import SessionStart, SpecialistRuntime
 from hyperloom_multibranch.specialist.worktree import BranchWorktree
+from hyperloom_multibranch.toolbox import local_hosted
 from hyperloom_multibranch.toolbox.local_hosted import LocalHostedToolbox
 from hyperloom_multibranch.toolbox.mcp_tools import McpSpecialistTokens
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
@@ -80,7 +86,7 @@ WORKLOAD = Workload(
 )
 AGENTX = replace(WORKLOAD, inferencex=None)
 IMAGE = ActiveImage("registry.example/sglang:v1", "sha256:" + "2" * 64)
-HOST = MeasurementHost((0, 1, 2, 3), IMAGE, ToolCommits("a" * 40, "b" * 40), "/opt/InferenceX")
+HOST = MeasurementHost((0, 1, 2, 3), IMAGE, "a" * 40, InferenceXCheckout("b" * 40, "/opt/InferenceX"))
 IMAGE_VARS = ("HYPERLOOM_ACTIVE_IMAGE_REF", "HYPERLOOM_ACTIVE_IMAGE_DIGEST")
 
 
@@ -219,9 +225,12 @@ def test_the_host_is_this_machines_cards_on_the_launchers_image_and_the_pinned_t
     checkout = _inferencex_checkout(tmp_path / "InferenceX")
     env = {IMAGE_VARS[0]: IMAGE.ref, IMAGE_VARS[1]: IMAGE.digest, "INFERENCEX_PATH": str(checkout)}
 
-    host = measurement_host(env)
+    host = measurement_host(env, WORKLOAD)
 
-    assert host == MeasurementHost((4, 5, 6, 7), IMAGE, pinned_tool_commits({}), str(checkout))
+    tools = pinned_tool_commits({})
+    assert host == MeasurementHost(
+        (4, 5, 6, 7), IMAGE, tools.magpie, InferenceXCheckout(tools.inferencex, str(checkout))
+    )
     assert machine_parallel_tests(2) == 2
 
 
@@ -233,9 +242,74 @@ def test_a_machine_without_an_inferencex_checkout_refuses_the_peers(
     env = {IMAGE_VARS[0]: IMAGE.ref, IMAGE_VARS[1]: IMAGE.digest}
 
     with pytest.raises(PeersUnavailable, match="no InferenceX checkout"):
-        measurement_host(env)
+        measurement_host(env, WORKLOAD)
     with pytest.raises(PeersUnavailable, match=f"no InferenceX checkout .*{tmp_path.name}"):
-        measurement_host({**env, "INFERENCEX_PATH": str(tmp_path)})
+        measurement_host({**env, "INFERENCEX_PATH": str(tmp_path)}, WORKLOAD)
+
+
+def _git_checkout(root: Path) -> str:
+    """A Magpie-layout InferenceX repository at ``root``, its project in ``inferencex-e2e``; its HEAD commit."""
+
+    _inferencex_checkout(root / "inferencex-e2e")
+    git = ["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t"]
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run([*git, "add", "-A"], check=True)
+    subprocess.run([*git, "commit", "-q", "-m", "c"], check=True)
+    return subprocess.run([*git, "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+
+
+def _magpie(monkeypatch: pytest.MonkeyPatch, default_dir: Path, **pin: str) -> None:
+    """The installed Magpie, as its InferenceX module: ``pin`` its ``INFERENCEX_DEFAULT_REF`` (absent when empty),
+    ``default_dir`` its default clone location, and its root resolver taking the ``inferencex-e2e`` project."""
+
+    def resolve_inferencex_root(path: str) -> str:
+        project = Path(path) / "inferencex-e2e"
+        if not (project / "benchmarks" / "benchmark_lib.sh").is_file():
+            raise RuntimeError(f"Expected one supported InferenceX project at {path}")
+        return str(project)
+
+    module = SimpleNamespace(
+        **pin,
+        InferenceXManager=lambda: SimpleNamespace(default_dir=str(default_dir)),
+        resolve_inferencex_root=resolve_inferencex_root,
+    )
+    monkeypatch.setattr(local_peers_module, "_magpie_inferencex", lambda: module)
+
+
+@pytest.mark.usefixtures("four_cards")
+def test_an_agentx_host_measures_on_the_checkout_at_the_commit_magpie_pins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    default, named = tmp_path / "default", tmp_path / "named"
+    default_commit, named_commit = _git_checkout(default), _git_checkout(named)
+    env = {IMAGE_VARS[0]: IMAGE.ref, IMAGE_VARS[1]: IMAGE.digest, "INFERENCEX_PATH": str(tmp_path / "synthetic")}
+    tools = pinned_tool_commits({})
+
+    _magpie(monkeypatch, default, INFERENCEX_DEFAULT_REF=default_commit)
+    assert measurement_host(env, AGENTX) == MeasurementHost(
+        (4, 5, 6, 7), IMAGE, tools.magpie, InferenceXCheckout(default_commit, str(default / "inferencex-e2e"))
+    )
+    _magpie(monkeypatch, default, INFERENCEX_DEFAULT_REF=named_commit)
+    host = measurement_host({**env, "MAGPIE_INFERENCEX_PATH": str(named)}, AGENTX)
+    assert host.inferencex == InferenceXCheckout(named_commit, str(named / "inferencex-e2e"))
+
+
+@pytest.mark.usefixtures("four_cards")
+def test_an_agentx_host_refuses_a_checkout_off_the_magpie_pin_and_a_magpie_without_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _git_checkout(tmp_path / "InferenceX")
+    env = {IMAGE_VARS[0]: IMAGE.ref, IMAGE_VARS[1]: IMAGE.digest}
+    pinned = "4" * 40
+
+    _magpie(monkeypatch, tmp_path / "InferenceX", INFERENCEX_DEFAULT_REF=pinned)
+    with pytest.raises(PeersUnavailable, match=f"no InferenceX checkout at {pinned}.* at {tmp_path}/InferenceX"):
+        measurement_host(env, AGENTX)
+    with pytest.raises(PeersUnavailable, match=f"no InferenceX checkout at {pinned}.* at {tmp_path}/missing"):
+        measurement_host({**env, "MAGPIE_INFERENCEX_PATH": str(tmp_path / "missing")}, AGENTX)
+    _magpie(monkeypatch, tmp_path / "InferenceX")
+    with pytest.raises(PeersUnavailable, match=f"INFERENCEX_DEFAULT_REF.*MAGPIE_REF {pinned_tool_commits({}).magpie}"):
+        measurement_host(env, AGENTX)
 
 
 @pytest.mark.parametrize("mask", ["ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"])
@@ -263,7 +337,7 @@ def test_a_framework_whose_source_cannot_be_laid_out_refuses_the_peers(
 @pytest.mark.usefixtures("four_cards")
 def test_a_session_nobody_names_the_image_of_refuses_the_peers() -> None:
     with pytest.raises(PeersUnavailable, match=f"{IMAGE_VARS[0]}, {IMAGE_VARS[1]} not set"):
-        measurement_host({})
+        measurement_host({}, WORKLOAD)
 
 
 @pytest.mark.parametrize(
@@ -278,7 +352,7 @@ def test_a_session_nobody_names_the_image_of_refuses_the_peers() -> None:
 @pytest.mark.usefixtures("four_cards")
 def test_pins_that_cannot_be_read_refuse_the_peers(env: dict[str, str], named: str) -> None:
     with pytest.raises(PeersUnavailable, match=named):
-        measurement_host(env)
+        measurement_host(env, WORKLOAD)
 
 
 def test_a_machine_that_shows_no_card_fits_no_test(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -296,9 +370,11 @@ class _Built:
 
 
 @asynccontextmanager
-async def _peers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workload: Workload) -> AsyncIterator[_Built]:
-    """The real peers of a session of ``workload`` in ``tmp_path``, with the wiring their specialist sessions were
-    built on; every variable the build exports is restored afterwards."""
+async def _peers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workload: Workload, host: MeasurementHost = HOST
+) -> AsyncIterator[_Built]:
+    """The real peers of a session of ``workload`` on ``host`` in ``tmp_path``, with the wiring their specialist
+    sessions were built on; every variable the build exports is restored afterwards."""
 
     for name in (*workload_environment(workload), BENCHMARK_CONFIG_ENV):
         monkeypatch.setenv(name, "")
@@ -322,7 +398,7 @@ async def _peers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workload: Work
 
         return ModelSessions(factory, worktrees)
 
-    peers = local_peers(HOST, sessions, setup)
+    peers = local_peers(host, sessions, setup)
     [wiring] = wired
     try:
         yield _Built(layout, setup, peers, wiring)
@@ -346,12 +422,25 @@ async def test_an_agentx_session_measures_the_agentx_benchmark_its_prelude_child
     (tmp_path / "models" / "Llama-3-8B").mkdir(parents=True)
     monkeypatch.setenv("HL_MODEL_BASE", str(tmp_path / "models"))
     workload = replace(AGENTX, model="meta-llama/Llama-3-8B")
+    host = replace(HOST, inferencex=InferenceXCheckout("c" * 40, "/opt/InferenceX-agentx/inferencex-e2e"))
+    specs: list[SpecContext] = []
+    build = local_hosted.build_local_toolbox
 
-    async with _peers(tmp_path / "workspace", monkeypatch, workload) as built:
+    def signed(*args: object) -> LocalHostedToolbox:
+        specs.append(args[-1])
+        return build(*args)
+
+    monkeypatch.setattr(local_hosted, "build_local_toolbox", signed)
+
+    async with _peers(tmp_path / "workspace", monkeypatch, workload, host) as built:
         toolbox = built.layout.toolbox
         assert benchmark_config_path() == (toolbox / "benchmark.yaml").resolve()
         canonical = yaml.safe_load((toolbox / "canonical" / "canonical.yaml").read_text())["benchmark"]
         assert is_magpie_agentx(canonical) and canonical["agentx"]["mode"] == "canonical"
+        assert canonical["inferencex_path"] == host.inferencex.path
+        assert [(spec.magpie_commit, spec.inferencex_commit) for spec in specs] == [
+            (host.magpie_commit, host.inferencex.commit)
+        ]
         assert (canonical["model"], canonical["envs"]["MODEL_PATH"]) == (
             workload.model,
             str(tmp_path / "models" / "Llama-3-8B"),
@@ -380,7 +469,7 @@ async def test_the_real_peers_live_inside_the_session_directory(built: _Built) -
     assert (canonical["model"], canonical["runner_type"], canonical["inferencex_path"]) == (
         WORKLOAD.model,
         WORKLOAD.gpu_type,
-        HOST.inferencex_path,
+        HOST.inferencex.path,
     )
     assert not (layout.toolbox / "measurement-config.json").exists()
     assert benchmark_config_path() is None and not (layout.toolbox / "benchmark.yaml").exists()

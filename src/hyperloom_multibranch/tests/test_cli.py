@@ -9,6 +9,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -27,6 +28,7 @@ from hyperloom_multibranch import cli
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.scheduling.budget import MB_DEFAULT_MAX_HOURS
+from hyperloom_multibranch.scheduling import local_peers
 from hyperloom_multibranch.scheduling.local_peers import AGENTX_ENV
 from hyperloom_multibranch.scheduling.peers import PeerFactory
 from hyperloom_multibranch.scheduling.roster import RosterCaps
@@ -263,11 +265,19 @@ def test_a_benchmark_yaml_the_operator_names_exits_two(
     assert not any(tmp_path.iterdir())
 
 
+def _magpie(monkeypatch: pytest.MonkeyPatch, **pin: str) -> None:
+    """The installed Magpie's InferenceX module: ``pin`` its ``INFERENCEX_DEFAULT_REF`` (absent when empty), its
+    project at the checkout's root."""
+
+    magpie = SimpleNamespace(**pin, resolve_inferencex_root=str)
+    monkeypatch.setattr(local_peers, "_magpie_inferencex", lambda: magpie)
+
+
 @pytest.fixture
 def ready_environment(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory) -> None:
-    """No Experience KB, no Recipe KB, the launcher's image named, the shipped tool pins, an InferenceX checkout, a
-    model the price sheet lists, a writable RSI archive outside the test's workspace, and the framework's package
-    installed in the image."""
+    """No Experience KB, no Recipe KB, the launcher's image named, the shipped tool pins, an InferenceX checkout that is
+    also the one a Magpie pinning an AgentX commit runs on, a model the price sheet lists, a writable RSI archive
+    outside the test's workspace, and the framework's package installed in the image."""
 
     for name in ("HYPERLOOM_KB_URL", "HYPERLOOM_KB_TOKEN", "MAGPIE_REF", "INFERENCEX_REF"):
         monkeypatch.delenv(name, raising=False)
@@ -277,6 +287,8 @@ def ready_environment(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.
     (inferencex / "benchmarks").mkdir()
     (inferencex / "benchmarks" / "benchmark_lib.sh").write_text("")
     monkeypatch.setenv("INFERENCEX_PATH", str(inferencex))
+    monkeypatch.setenv("MAGPIE_INFERENCEX_PATH", str(inferencex))
+    _magpie(monkeypatch, INFERENCEX_DEFAULT_REF="4" * 40)
     monkeypatch.delenv("KB_STORE_URL", raising=False)
     monkeypatch.delenv("KB_STORE_TOKEN", raising=False)
     monkeypatch.setenv("CLAUDE_MODEL", DEFAULT_CLAUDE_MODEL)
@@ -361,6 +373,21 @@ def test_tool_pins_that_cannot_be_read_fail_loudly_before_creating_anything(
 
     captured = capsys.readouterr()
     assert "measurement pins" in captured.err and "MAGPIE_REF" in captured.err
+    assert captured.out == ""
+    assert not any(tmp_path.iterdir())
+
+
+@pytest.mark.usefixtures("ready_environment", "agent_cli")
+def test_an_agentx_run_on_a_magpie_that_pins_no_inferencex_commit_fails_loudly_before_creating_anything(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    _magpie(monkeypatch)
+
+    assert cli.main(["run", *AGENTX_ARGS]) == cli.EXIT_FAILED
+
+    captured = capsys.readouterr()
+    assert "INFERENCEX_DEFAULT_REF" in captured.err and "MAGPIE_REF" in captured.err
     assert captured.out == ""
     assert not any(tmp_path.iterdir())
 
