@@ -191,7 +191,7 @@ def test_strict_fingerprint_falls_back_for_a_weakref_hostile_object(probe_module
 
 
 def test_fingerprint_tolerates_a_storageless_tensor(probe_module, tmp_path):
-    """A tensor whose ``data_ptr`` raises still fingerprints (meta/fake tensors)."""
+    """A tensor whose ``data_ptr`` raises RuntimeError (sparse tensors) still fingerprints."""
     probe = probe_module.HostProbe(out_dir=str(tmp_path), roots=())
 
     class _MetaTensor:
@@ -205,6 +205,19 @@ def test_fingerprint_tolerates_a_storageless_tensor(probe_module, tmp_path):
     fingerprint = probe._fingerprint(_MetaTensor(), strict=True)
     assert fingerprint[0] == "T"
     assert -1 in fingerprint
+
+
+def test_fingerprint_does_not_hide_a_tensor_like_without_data_ptr(probe_module, tmp_path):
+    probe = probe_module.HostProbe(out_dir=str(tmp_path), roots=())
+
+    class _NoDataPtr:
+        __slots__ = ()
+        shape = (4,)
+        dtype = "bfloat16"
+        device = "cpu"
+
+    with pytest.raises(AttributeError, match="data_ptr"):
+        probe._fingerprint(_NoDataPtr(), strict=True)
 
 
 def test_fingerprint_summarises_a_wide_container(probe_module, tmp_path):

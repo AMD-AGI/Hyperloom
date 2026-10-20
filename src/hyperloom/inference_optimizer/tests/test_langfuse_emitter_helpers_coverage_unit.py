@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from hyperloom.inference_optimizer.trace import langfuse_emitter as lfe
 
 
@@ -235,8 +237,6 @@ def test_load_json_missing_and_malformed(tmp_path: Path) -> None:
 
 
 def test_end_obs_propagates_failure_of_the_bare_end_fallback() -> None:
-    import pytest
-
     class _EndAlwaysFails:
         def end(self, end_time: "datetime | None" = None) -> None:
             if end_time is not None:
@@ -248,8 +248,6 @@ def test_end_obs_propagates_failure_of_the_bare_end_fallback() -> None:
 
 
 def test_set_trace_attrs_propagates_update_trace_failure() -> None:
-    import pytest
-
     class _UpdateFails:
         def update_trace(self, **kwargs: Any) -> None:
             raise RuntimeError("sdk down")
@@ -259,8 +257,6 @@ def test_set_trace_attrs_propagates_update_trace_failure() -> None:
 
 
 def test_set_trace_attrs_propagates_otel_failure() -> None:
-    import pytest
-
     class _OtelFails:
         def set_attribute(self, key: str, value: Any) -> None:
             raise RuntimeError("otel down")
@@ -273,3 +269,100 @@ def test_set_trace_attrs_propagates_otel_failure() -> None:
 
     with pytest.raises(RuntimeError):
         lfe._set_trace_attrs(_SpanV4OtelFails(), name="n")
+
+
+def test_to_ns_unrepresentable_naive_datetime_is_none() -> None:
+    assert lfe._to_ns(datetime.min.replace(tzinfo=None)) is None
+
+
+def test_to_ns_unexpected_failure_surfaces() -> None:
+    class _BrokenClock(datetime):
+        def timestamp(self) -> float:
+            raise RuntimeError("clock broke")
+
+    with pytest.raises(RuntimeError, match="clock broke"):
+        lfe._to_ns(_BrokenClock(2026, 1, 1, tzinfo=timezone.utc))
+
+
+def _circular_list() -> list:
+    cycle: list = []
+    cycle.append(cycle)
+    return cycle
+
+
+def test_otel_attr_value_unserialisable_falls_back_to_str() -> None:
+    assert lfe._otel_attr_value({(1, 2): 1}) == "{(1, 2): 1}"
+    assert lfe._otel_attr_value(_circular_list()) == "[[...]]"
+
+
+def test_otel_attr_value_unexpected_serialiser_failure_surfaces(monkeypatch) -> None:
+    def _boom(*_a: Any, **_k: Any) -> str:
+        raise RuntimeError("encoder broke")
+
+    monkeypatch.setattr("json.dumps", _boom)
+
+    with pytest.raises(RuntimeError, match="encoder broke"):
+        lfe._otel_attr_value({"a": 1})
+
+
+def test_set_trace_attrs_propagates_metadata_otel_failure() -> None:
+    class _OtelFails:
+        def set_attribute(self, key: str, value: Any) -> None:
+            raise RuntimeError("otel rejected metadata")
+
+    class _SpanV4OtelFails:
+        _otel_span = _OtelFails()
+
+        def update_trace(self, **kwargs: Any) -> None:
+            raise AttributeError("v4")
+
+    with pytest.raises(RuntimeError, match="otel rejected metadata"):
+        lfe._set_trace_attrs(_SpanV4OtelFails(), metadata={"k": "v"})
+
+
+def _cyclic_receipt() -> dict:
+    payload: dict = {"enabled": True}
+    payload["self"] = payload
+    return payload
+
+
+def _receipt_emitter(tmp_path: Path, monkeypatch, payload: dict, calls: list) -> lfe.LangfuseEmitter:
+    emitter = lfe.LangfuseEmitter(tmp_path)
+    monkeypatch.setattr(emitter, "receipt", lambda: payload)
+    monkeypatch.setattr(
+        lfe, "record_metadata_langfuse", lambda session_dir, receipt: calls.append((session_dir, receipt))
+    )
+    return emitter
+
+
+@pytest.mark.parametrize(
+    ("unwritable_dir", "payload"),
+    [(True, {"enabled": True}), (False, {1: "a", "b": 2}), (False, _cyclic_receipt())],
+    ids=["os_error", "type_error", "value_error"],
+)
+def test_a_receipt_that_cannot_be_written_still_records_the_metadata(
+    tmp_path: Path, monkeypatch, unwritable_dir: bool, payload: dict
+) -> None:
+    session_dir = tmp_path
+    if unwritable_dir:
+        session_dir = tmp_path / "not-a-dir"
+        session_dir.write_text("x", encoding="utf-8")
+    calls: list = []
+    emitter = _receipt_emitter(session_dir, monkeypatch, payload, calls)
+
+    emitter._write_receipt()
+
+    assert calls == [(session_dir, payload)]
+
+
+def test_unexpected_receipt_write_failure_surfaces(tmp_path: Path, monkeypatch) -> None:
+    calls: list = []
+    emitter = _receipt_emitter(tmp_path, monkeypatch, {"enabled": True}, calls)
+
+    def _boom(*_a: Any, **_k: Any) -> None:
+        raise RuntimeError("writer broke")
+
+    monkeypatch.setattr(lfe, "atomic_write_json", _boom)
+
+    with pytest.raises(RuntimeError, match="writer broke"):
+        emitter._write_receipt()

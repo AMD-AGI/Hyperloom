@@ -40,6 +40,57 @@ def test_attach_recipe_audit_hook_appends_jsonl(tmp_path) -> None:
     assert "ts" in row
 
 
+def _circular_event() -> dict:
+    event: dict = {"method": "get_recipe"}
+    event["self"] = event
+    return event
+
+
+def _hook_session_dir(tmp_path: Path, case: str) -> Path:
+    if case == "unwritable":
+        blocker = tmp_path / "not-a-dir"
+        blocker.write_text("x", encoding="utf-8")
+        return blocker
+    return tmp_path
+
+
+@pytest.mark.parametrize(
+    ("case", "event"),
+    [
+        ("unwritable", {"method": "get_recipe"}),
+        ("serialisable", {"method": "get_recipe", "value": object()}),
+        ("serialisable", _circular_event()),
+    ],
+    ids=["os_error", "type_error", "value_error"],
+)
+def test_failed_audit_append_still_records_the_warm_start_read(tmp_path, monkeypatch, case, event) -> None:
+    from hyperloom.inference_optimizer.breakdown.recorder import warm_start_event
+    from hyperloom.orchestrator.knowledge.recipe_kb import LocalRecipeStore, RecipeKB
+
+    seen: list = []
+    monkeypatch.setattr(warm_start_event, "record_read", lambda session_dir, audit_event: seen.append(audit_event))
+    kb = RecipeKB(local=LocalRecipeStore(root=tmp_path / "kb"))
+    cli_kb._attach_recipe_audit_hook(kb, _hook_session_dir(tmp_path, case))
+
+    kb.audit_hook(event)
+
+    assert seen == [event]
+
+
+def test_unexpected_audit_append_failure_reaches_the_hook_caller(tmp_path, monkeypatch) -> None:
+    from hyperloom.orchestrator.knowledge.recipe_kb import LocalRecipeStore, RecipeKB
+
+    def explode(*_a, **_k):
+        raise RuntimeError("append broke")
+
+    monkeypatch.setattr(cli_kb, "append_jsonl", explode)
+    kb = RecipeKB(local=LocalRecipeStore(root=tmp_path / "kb"))
+    cli_kb._attach_recipe_audit_hook(kb, tmp_path)
+
+    with pytest.raises(RuntimeError, match="append broke"):
+        kb.audit_hook({"method": "get_recipe"})
+
+
 def test_attach_recipe_audit_hook_noop_without_session_dir(tmp_path) -> None:
     from hyperloom.orchestrator.knowledge.recipe_kb import LocalRecipeStore, RecipeKB
 
