@@ -253,7 +253,6 @@ cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_kv_metrics.p
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::_wait_for_server_health_async 23
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::_wait_for_workers_ready_async 22
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::restart_server_for_round 27
-cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_ray_serving.py::_serving_actor_body 21
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_workload_envs.py::materialize_config_with_envs 109
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._run_once 54
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._run_single_benchmark 38

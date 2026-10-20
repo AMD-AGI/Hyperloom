@@ -353,6 +353,34 @@ class ActorLaunch:
     stdin_path: str | None = None
 
 
+def _child_env_for(launch: ActorLaunch) -> dict[str, str]:
+    """Return the environment the serving subprocess runs in.
+
+    ``merge`` layers the launch's variables over this process's and leaves the
+    visible-device keys to Ray; ``replace`` starts from the launch's own and
+    carries those keys back in.
+    """
+    env = launch.env
+    env_mode = launch.env_mode
+    if env_mode == "merge":
+        child_env = dict(os.environ)
+        for key, value in (env or {}).items():
+            if key in _VISIBLE_DEVICE_ENV_KEYS:
+                continue
+            child_env[key] = value
+    elif env_mode == "replace":
+        child_env = dict(env or {})
+        for key in _VISIBLE_DEVICE_ENV_KEYS:
+            if key in os.environ:
+                child_env[key] = os.environ[key]
+    else:
+        raise ValueError(f"unsupported env_mode {env_mode!r}; expected 'merge' or 'replace'")
+    from ._ray_backend import align_hip_with_ray_rocr
+
+    align_hip_with_ray_rocr(child_env)
+    return child_env
+
+
 def _serving_actor_body() -> Any:
     """Build the ServingActor class (imports ray lazily so import is cheap)."""
     import ray
@@ -368,24 +396,7 @@ def _serving_actor_body() -> Any:
 
         def start(self, launch: ActorLaunch, *, scrub_benchmark_env=False) -> int:
             """Launch the serving subprocess; Ray has set visible devices."""
-            env = launch.env
-            env_mode = launch.env_mode
-            if env_mode == "merge":
-                child_env = dict(os.environ)
-                for key, value in (env or {}).items():
-                    if key in _VISIBLE_DEVICE_ENV_KEYS:
-                        continue
-                    child_env[key] = value
-            elif env_mode == "replace":
-                child_env = dict(env or {})
-                for key in _VISIBLE_DEVICE_ENV_KEYS:
-                    if key in os.environ:
-                        child_env[key] = os.environ[key]
-            else:
-                raise ValueError(f"unsupported env_mode {env_mode!r}; expected 'merge' or 'replace'")
-            from ._ray_backend import align_hip_with_ray_rocr
-
-            align_hip_with_ray_rocr(child_env)
+            child_env = _child_env_for(launch)
             if scrub_benchmark_env:
                 scrub_benchmark_process_env(child_env)
             start_kwargs = {
