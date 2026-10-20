@@ -169,69 +169,66 @@ def _clamp_within(raw: float | None) -> tuple[float | None, float | None]:
 
 def attach_perfmodel_breakdown(snapshot: dict[str, Any], state: Any, *, arm: str) -> None:
     """Add ``roofline_provenance`` (+ ``perfmodel_breakdown`` when the PerfModel succeeds) for *arm*."""
-    try:
-        from .roofline_ceiling import (
-            ComputeTarget,
-            DecodeShape,
-            apply_runtime_dtype,
-            compute_roofline_from_perfmodel,
-            load_model_meta,
-            resolve_compute_peak_provenance,
-            resolve_runtime_dtype,
-            resolve_runtime_workload,
-        )
+    from .roofline_ceiling import (
+        ComputeTarget,
+        DecodeShape,
+        apply_runtime_dtype,
+        compute_roofline_from_perfmodel,
+        load_model_meta,
+        resolve_compute_peak_provenance,
+        resolve_runtime_dtype,
+        resolve_runtime_workload,
+    )
 
-        runtime = resolve_runtime_workload(state, arm=arm)
-        meta = load_model_meta(runtime.model_path, precision_hint=runtime.precision)
-        if meta is None:
-            return
-        rt = resolve_runtime_dtype(state, meta, arm=arm)
-        meta = apply_runtime_dtype(meta, rt)
-        compute_precision_tag = rt.compute_precision_tag or runtime.precision or "bf16"
-        pm_bd = compute_roofline_from_perfmodel(
-            meta=meta,
-            target=ComputeTarget(gpu_type=runtime.gpu_type, num_gpus=runtime.tp, precision_tag=compute_precision_tag),
-            shape=DecodeShape(isl=runtime.isl, osl=runtime.osl, concurrency=runtime.concurrency),
-        )
-        snapshot["roofline_provenance"] = {
-            "formula": "perfmodel" if pm_bd is not None else "legacy",
-            **resolve_compute_peak_provenance(runtime.gpu_type, compute_precision_tag),
-            "runtime_weight_dtype": rt.weight_dtype_tag,
-            "runtime_weight_dtype_bytes": rt.weight_dtype_bytes,
-            "runtime_activation_dtype_bytes": rt.activation_dtype_bytes,
-            "quantization": rt.quantization,
-            "dtype_source": rt.source,
-            "effective_concurrency": runtime.concurrency,
-            "runtime_tp": runtime.tp,
-            "runtime_isl": runtime.isl,
-            "runtime_osl": runtime.osl,
-            "runtime_precision": runtime.precision,
-            "runtime_framework": runtime.framework,
+    runtime = resolve_runtime_workload(state, arm=arm)
+    meta = load_model_meta(runtime.model_path, precision_hint=runtime.precision)
+    if meta is None:
+        return
+    rt = resolve_runtime_dtype(state, meta, arm=arm)
+    meta = apply_runtime_dtype(meta, rt)
+    compute_precision_tag = rt.compute_precision_tag or runtime.precision or "bf16"
+    pm_bd = compute_roofline_from_perfmodel(
+        meta=meta,
+        target=ComputeTarget(gpu_type=runtime.gpu_type, num_gpus=runtime.tp, precision_tag=compute_precision_tag),
+        shape=DecodeShape(isl=runtime.isl, osl=runtime.osl, concurrency=runtime.concurrency),
+    )
+    snapshot["roofline_provenance"] = {
+        "formula": "perfmodel" if pm_bd is not None else "legacy",
+        **resolve_compute_peak_provenance(runtime.gpu_type, compute_precision_tag),
+        "runtime_weight_dtype": rt.weight_dtype_tag,
+        "runtime_weight_dtype_bytes": rt.weight_dtype_bytes,
+        "runtime_activation_dtype_bytes": rt.activation_dtype_bytes,
+        "quantization": rt.quantization,
+        "dtype_source": rt.source,
+        "effective_concurrency": runtime.concurrency,
+        "runtime_tp": runtime.tp,
+        "runtime_isl": runtime.isl,
+        "runtime_osl": runtime.osl,
+        "runtime_precision": runtime.precision,
+        "runtime_framework": runtime.framework,
+    }
+    if pm_bd is not None:
+        snapshot["perfmodel_breakdown"] = {
+            "decode_tok_per_s": pm_bd.decode_tok_per_s,
+            "prefill_tok_per_s": pm_bd.prefill_tok_per_s,
+            "decode_mem_tok_per_s": pm_bd.decode_mem_tok_per_s,
+            "decode_cmp_tok_per_s": pm_bd.decode_cmp_tok_per_s,
+            "bound_kind": pm_bd.bound_kind,
+            "hbm_bw_gbps": pm_bd.hbm_bw_gbps,
+            "peak_achievable_tflops": pm_bd.peak_achievable_tflops,
+            "ops": [
+                {
+                    "name": op.name,
+                    "flops": op.flops,
+                    "bytes_moved": op.bytes_moved,
+                    "ai": op.ai,
+                    "time_s": op.time_s,
+                    "bound": op.bound,
+                    "pct_time": op.pct_time,
+                }
+                for op in pm_bd.ops
+            ],
         }
-        if pm_bd is not None:
-            snapshot["perfmodel_breakdown"] = {
-                "decode_tok_per_s": pm_bd.decode_tok_per_s,
-                "prefill_tok_per_s": pm_bd.prefill_tok_per_s,
-                "decode_mem_tok_per_s": pm_bd.decode_mem_tok_per_s,
-                "decode_cmp_tok_per_s": pm_bd.decode_cmp_tok_per_s,
-                "bound_kind": pm_bd.bound_kind,
-                "hbm_bw_gbps": pm_bd.hbm_bw_gbps,
-                "peak_achievable_tflops": pm_bd.peak_achievable_tflops,
-                "ops": [
-                    {
-                        "name": op.name,
-                        "flops": op.flops,
-                        "bytes_moved": op.bytes_moved,
-                        "ai": op.ai,
-                        "time_s": op.time_s,
-                        "bound": op.bound,
-                        "pct_time": op.pct_time,
-                    }
-                    for op in pm_bd.ops
-                ],
-            }
-    except Exception:  # noqa: BLE001 — PerfModel serialization is best-effort
-        pass
 
 
 @dataclass(frozen=True)
