@@ -27,6 +27,9 @@ from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_INTVTY_P50
 
 log = logging.getLogger(__name__)
 
+#: Decimal places every ratio and percentage in this module is reported to.
+_REPORTED_PLACES: int = 3
+
 #: The per-request metric a graded interactivity axis is a percentile of.
 _SAMPLE_METRIC: str = "e2e_output_token_throughput"
 
@@ -138,9 +141,9 @@ def bootstrap_delta_ci(
     tail = (1.0 - confidence) / 2.0
     low, high = quantile(deltas, tail), quantile(deltas, 1.0 - tail)
     return {
-        "delta_pct": round((point - base) / base * 100.0, 3),
-        "ci_low_pct": round(low, 3),
-        "ci_high_pct": round(high, 3),
+        "delta_pct": round((point - base) / base * 100.0, _REPORTED_PLACES),
+        "ci_low_pct": round(low, _REPORTED_PLACES),
+        "ci_high_pct": round(high, _REPORTED_PLACES),
         "crosses_zero": low <= 0.0 <= high,
         "n_candidate": len(candidate),
         "n_reference": len(reference),
@@ -179,7 +182,7 @@ def regime_fingerprint(records: list[dict[str, Any]]) -> dict[str, float] | None
             continue
         out[f"{key}_p50_ms"] = round(median, 2)
         out[f"{key}_mean_ms"] = round(sum(values) / len(values), 2)
-        out[f"{key}_inflation"] = round(out[f"{key}_mean_ms"] / median, 3)
+        out[f"{key}_inflation"] = round(out[f"{key}_mean_ms"] / median, _REPORTED_PLACES)
     return out or None
 
 
@@ -190,7 +193,7 @@ def regimes_differ(candidate: dict[str, float] | None, reference: dict[str, floa
     left, right = candidate.get("ttft_inflation"), reference.get("ttft_inflation")
     if not left or not right:
         return None
-    return round(max(left, right) / min(left, right), 3)
+    return round(max(left, right) / min(left, right), _REPORTED_PLACES)
 
 
 def comparison_regimes(

@@ -35,6 +35,11 @@ from ...state.shared_state import SharedState
 log = logging.getLogger(__name__)
 
 
+def _reference_workspace(state: Any) -> str:
+    """The run a comparison grades against: the baseline, until a KEEP replaces it."""
+    return str(getattr(state, "baseline_workspace", "") or "")
+
+
 def _count_server_boot_failures(session_dir: Path | None) -> int:
     """Count ``warmup_failed`` variants (server boot failures) from the journal."""
     if session_dir is None:
@@ -499,17 +504,15 @@ def _build_summary_dict(
             # Read off the two runs' per-request exports; absent when either run no longer has them.
             "interval": comparison_interval(
                 (state.current_best or {}).get("workspace"),
-                getattr(state, "baseline_workspace", ""),
+                _reference_workspace(state),
                 graded.objective,
             ),
             "regimes": comparison_regimes(
                 (state.current_best or {}).get("workspace"),
-                getattr(state, "baseline_workspace", ""),
+                _reference_workspace(state),
             ),
             # Read off the current best's own requests: a front-end cost is a property of one run, not of a pair.
-            "input_cost": input_cost(
-                (state.current_best or {}).get("workspace") or getattr(state, "baseline_workspace", "")
-            ),
+            "input_cost": input_cost((state.current_best or {}).get("workspace") or _reference_workspace(state)),
             "comparable": graded.comparable,
             "degrade_reason": graded.degrade_reason,
             "verdict": graded.verdict,

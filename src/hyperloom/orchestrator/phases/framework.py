@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from ..state.task_registry import Task
     from .machine import Transition
 from ..loop.proposals import PendingProposal, integrate_review_in_flight, record_proposal
-from hyperloom.inference_optimizer.grid_server_args import dedupe_extra_server_args
+from hyperloom.inference_optimizer.grid_server_args import ARGS_MODE_APPEND, ARGS_MODE_REPLACE, dedupe_extra_server_args
 from hyperloom.inference_optimizer.grid_server_args import (
     merge_server_args,
     tokenize_server_args_preserving_json,
@@ -172,11 +172,11 @@ def _lever_controls(entry: dict[str, Any]) -> dict[str, Any]:
     """
     remove_args = [text for text in (str(a).strip() for a in (entry.get("remove_args") or [])) if text]
     unset_envs = [text for text in (str(e).strip() for e in (entry.get("unset_envs") or [])) if text]
-    mode = str(entry.get("args_mode") or "append").strip().lower()
+    mode = str(entry.get("args_mode") or ARGS_MODE_APPEND).strip().lower()
     return {
         "remove_args": remove_args,
         "unset_envs": unset_envs,
-        "args_mode": mode if mode in {"append", "replace"} else "append",
+        "args_mode": mode if mode in {ARGS_MODE_APPEND, ARGS_MODE_REPLACE} else ARGS_MODE_APPEND,
     }
 
 
@@ -3126,7 +3126,7 @@ class FrameworkPhase(ProposalBench):
                 "extra_envs": extra_envs,
                 "remove_args": list(config_levers.get("remove_args") or []),
                 "unset_envs": list(config_levers.get("unset_envs") or []),
-                "args_mode": str(config_levers.get("args_mode") or "append"),
+                "args_mode": str(config_levers.get("args_mode") or ARGS_MODE_APPEND),
                 "framework_agent_authoring": True,
             },
             observation={
@@ -3224,7 +3224,7 @@ class FrameworkPhase(ProposalBench):
                 config_levers.get("extra_envs"),
                 remove_args=config_levers.get("remove_args"),
                 unset_envs=config_levers.get("unset_envs"),
-                args_mode=str(config_levers.get("args_mode") or "append"),
+                args_mode=str(config_levers.get("args_mode") or ARGS_MODE_APPEND),
             )
             threshold = _phase_state.resolve_keep_threshold(self.state)
             for rec in read_pr_ledger():

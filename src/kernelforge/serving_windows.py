@@ -32,6 +32,10 @@ _STEP_RE = re.compile(r"^step\[(?P<kind>[A-Z_]+)\s+bs=(?P<bs>\d+)")
 #: it is where the indexer and prefill-MoE wins live, and it would otherwise drown them.
 DECODE_KINDS: frozenset[str] = frozenset({"VERIFY", "DRAFT", "DECODE", "IDLE"})
 
+#: Microseconds per millisecond; the traces are in us and the report is in ms.
+_US_PER_MS: float = 1000.0
+#: Decimal places every millisecond figure in this module is reported to.
+_REPORTED_PLACES: int = 3
 #: Kernels named per window class.
 TOP_N: int = 15
 
@@ -133,10 +137,10 @@ def hot_kernels_by_class(trace_path: str | Path | None) -> dict[str, dict[str, A
         out[window_class] = {
             "steps": len(members),
             "is_decode": members[0].is_decode,
-            "step_ms_median": round(_median([(w.end_us - w.start_us) / 1000.0 for w in members]), 3),
-            "kernel_ms_total": round(total_us / 1000.0, 3),
+            "step_ms_median": round(_median([(w.end_us - w.start_us) / _US_PER_MS for w in members]), _REPORTED_PLACES),
+            "kernel_ms_total": round(total_us / _US_PER_MS, _REPORTED_PLACES),
             "kernels": [
-                {"name": name, "ms": round(us / 1000.0, 3), "pct": round(us / total_us * 100.0, 2)}
+                {"name": name, "ms": round(us / _US_PER_MS, _REPORTED_PLACES), "pct": round(us / total_us * 100.0, 2)}
                 for name, us in ranked
             ],
         }
