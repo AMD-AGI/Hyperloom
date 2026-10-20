@@ -6,6 +6,7 @@
 from __future__ import annotations
 import asyncio
 import hashlib
+import sqlite3
 import time
 import uuid
 from collections.abc import Awaitable
@@ -151,7 +152,7 @@ class ClosePhase(CoordinatorCollaborator):
                         "failed",
                         {"reason": "close_post_opt_roofline_timeout"},
                     )
-            except Exception:
+            except (sqlite3.Error, TaskNotFound, IllegalTransition):
                 log.debug(
                     "CLOSE step 0: failed to mark timed-out post-opt roofline task",
                     exc_info=True,
@@ -564,7 +565,7 @@ class ClosePhase(CoordinatorCollaborator):
                         "nothing; %s still carries the pre-refresh close section",
                         pkg_path,
                     )
-        except Exception:
+        except (OSError, ValueError):
             log.warning(
                 "CLOSE step 6 (close section refresh) failed; the artifact package may still carry "
                 "the pre-refresh close section",
@@ -905,7 +906,7 @@ class ClosePhase(CoordinatorCollaborator):
                     "cancelled",
                     evidence={"reason": "closing_phase"},
                 )
-        except Exception:
+        except (sqlite3.Error, TaskNotFound, IllegalTransition):
             log.exception(
                 "closing_phase: cancel of queued tasks failed (non-fatal)",
             )

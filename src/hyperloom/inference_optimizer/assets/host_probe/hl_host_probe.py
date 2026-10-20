@@ -9,12 +9,14 @@ import atexit
 import importlib.abc
 import importlib.util
 import json
+import logging
 import os
 import sys
 import threading
 import time
 import weakref
 
+log = logging.getLogger(__name__)
 
 SCHEMA = "hyperloom.host_probe/1"
 
@@ -419,8 +421,8 @@ class HostProbe:
                         nbytes=nbytes,
                         shape_sig=probe._shape_signature(args),
                     )
-                except Exception:  # noqa: BLE001 - never break the benchmark
-                    pass
+                except Exception:
+                    log.debug("host call record failed for %s", api, exc_info=True)
 
         wrapper._hl_host_probe = True  # type: ignore[attr-defined]
         try:
@@ -456,8 +458,8 @@ class HostProbe:
                                 nbytes=int(getattr(self, "nbytes", 0) or 0),
                                 shape_sig=probe._shape_signature((self,)),
                             )
-                        except Exception:  # noqa: BLE001
-                            pass
+                        except Exception:
+                            log.debug("host call record failed for %s", api, exc_info=True)
                     return result
 
                 wrapper._hl_host_probe = True  # type: ignore[attr-defined]
@@ -554,7 +556,8 @@ class HostProbe:
                     if stats.started:
                         stats.wall_s += time.perf_counter() - stats.started
                         stats.started = 0.0
-        except Exception:  # noqa: BLE001 - a profile hook must never raise
+        except Exception:
+            log.debug("profile hook failed", exc_info=True)
             return
 
     def _sample_args(self, frame, stats: _CallStats) -> None:

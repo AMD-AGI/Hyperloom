@@ -30,6 +30,7 @@ does not land -- and can never produce an unmeasured KEEP.
 from __future__ import annotations
 
 import ast
+import logging
 import re
 import subprocess
 from collections.abc import Sequence
@@ -47,6 +48,8 @@ from hyperloom.orchestrator.actions.executors.integrate_patch import (
     _git_restore_to_head,
 )
 from hyperloom.orchestrator.specialists.patch_safety import patch_file_targets
+
+log = logging.getLogger(__name__)
 
 STRATEGY_STRICT = "strict"
 STRATEGY_THREE_WAY = "three_way"
@@ -539,6 +542,7 @@ async def _resolve_conflicts(
             # optional SDK; its failures share no base class, and an escape
             # would abort integration with a marked-up tree still on disk.
             except Exception as failure:  # noqa: BLE001 - a broken resolver costs the lane, nothing else
+                log.warning("conflict resolver failed for %s: %s", relative, failure)
                 return strategy, f"{relative}: resolver call failed ({failure!r})"
             if error:
                 return strategy, error

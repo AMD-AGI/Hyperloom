@@ -184,7 +184,7 @@ def test_explicit_agent_backend_wins_over_credential_shape(clean_agent_env, monk
     monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-key")
     provider, model = _resolve_agent_choice("codex", None)
     assert provider == "codex"
-    assert model == "gpt-5.6-sol"
+    assert model == "gpt-6-astra"
 
 
 def test_explicit_claude_wins_over_openai_credentials(clean_agent_env, monkeypatch):

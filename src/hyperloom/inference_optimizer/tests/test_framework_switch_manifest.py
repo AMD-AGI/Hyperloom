@@ -983,7 +983,7 @@ async def test_a_raising_parity_leg_does_not_read_as_a_pass(tmp_path, monkeypatc
     executor = IntegratePatchExecutor(session_dir=tmp_path)
 
     async def _raising_bench(*_args, **_kwargs):
-        raise RuntimeError("bench harness exploded")
+        raise OSError("bench harness exploded")
 
     monkeypatch.setattr(executor, "_bench_patch", _raising_bench)
     verdict = await executor._switch_off_parity(

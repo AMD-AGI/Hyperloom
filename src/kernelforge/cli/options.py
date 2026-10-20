@@ -195,7 +195,8 @@ _agent_runtime_options = option_group(
         "--agent-fallback-provider",
         default=None,
         callback=_validate_fallback_provider,
-        help="Fallback provider name, or 'none'",
+        help="Fallback provider name, or 'none'. Under model relay it is the member preferred when the primary "
+        "cannot run, and 'none' refuses to start a session that has no profile to resume on any other member",
     ),
     click.option(
         "--agent-precheck/--no-agent-precheck",

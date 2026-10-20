@@ -210,7 +210,7 @@ def mark_ray_backend_unhealthy() -> None:
         import ray
 
         ray.shutdown()
-    except Exception:  # noqa: BLE001 - recovery must never raise
+    except (RuntimeError, OSError):
         pass
     if _BACKEND is not None:
         _BACKEND._ensured = False
