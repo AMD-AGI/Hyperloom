@@ -1720,35 +1720,28 @@ class BenchmarkRunExecutor:
         return any(_hit(tail) for _, tail in _iter_log_tails(root, max_bytes=_LOG_SCAN_MAX_BYTES))
 
     @staticmethod
-    def _record_baseline_convergence(
+    def _warn_on_cold_start_delta(
         result: dict[str, Any],
         warmup_tput: Any,
     ) -> None:
-        """Record how steady the baseline anchor actually is."""
-        try:
-            from hyperloom.orchestrator.measurement.convergence import assess_convergence
-
-            warm = float(warmup_tput or 0.0)
-            measured = float(result.get("output_throughput") or 0.0)
-            verdict = assess_convergence([warm, measured])
-            record: dict[str, Any] = verdict.to_dict()
-            if warm > 0 and measured > 0:
-                delta_pct = (measured - warm) / warm * 100.0
-                record["cold_start_delta_pct"] = round(delta_pct, 2)
-                if delta_pct > _COLD_START_DELTA_WARN_PCT:
-                    result.setdefault("nonfatal_warnings", [])
-                    result["nonfatal_warnings"].append("baseline_cold_start_delta_high")
-                    log.warning(
-                        "baseline_executor: measured round is %.1f%% above the warm-up round "
-                        "(%.1f -> %.1f tok/s); the server may still have been ramping, so the "
-                        "anchor every later gain is graded against may be low",
-                        delta_pct,
-                        warm,
-                        measured,
-                    )
-            result["baseline_convergence"] = record
-        except Exception:
-            log.debug("baseline convergence record failed", exc_info=True)
+        """Warn when the measured round climbed far enough above the warm-up to suggest a server still ramping."""
+        warm = float(warmup_tput or 0.0)
+        measured = float(result.get("output_throughput") or 0.0)
+        if warm <= 0 or measured <= 0:
+            return
+        delta_pct = (measured - warm) / warm * 100.0
+        if delta_pct <= _COLD_START_DELTA_WARN_PCT:
+            return
+        result.setdefault("nonfatal_warnings", [])
+        result["nonfatal_warnings"].append("baseline_cold_start_delta_high")
+        log.warning(
+            "baseline_executor: measured round is %.1f%% above the warm-up round "
+            "(%.1f -> %.1f tok/s); the server may still have been ramping, so the "
+            "anchor every later gain is graded against may be low",
+            delta_pct,
+            warm,
+            measured,
+        )
 
     @staticmethod
     def _eval_failure_evidence(result: dict[str, Any]) -> tuple[bool, str]:
@@ -2785,7 +2778,7 @@ class BenchmarkRunExecutor:
                     }
                     result["launch_evidence"] = measured_evidence
                 result["warmup_round_tput"] = warmup_tput
-                self._record_baseline_convergence(result, warmup_tput)
+                self._warn_on_cold_start_delta(result, warmup_tput)
                 # The Coordinator promotes ``subprocess_runtime_sec`` into the explore soft-kill anchor.
                 if isinstance(warmup_runtime, (int, float)) and warmup_runtime > 0:
                     result["measure_round_runtime_sec"] = result.get(
