@@ -86,18 +86,14 @@ _AUTO_COMPUTE_BOUND_ENV = "HYPERLOOM_PROFILE_AUTO_COMPUTE_BOUND"
 
 
 async def _reap_session_orphans(session_dir: Path | str) -> list[int]:
-    """Reap this session's own orphaned serving processes. Never raises."""
+    """Reap this session's own orphaned serving processes."""
     from ._server_lifecycle import reap_orphaned_servers
 
     resolved = Path(session_dir)
     if resolved == Path("."):
         log.debug("roofline: no session_dir resolved; skipping orphan reap")
         return []
-    try:
-        return await asyncio.to_thread(reap_orphaned_servers, resolved)
-    except Exception:
-        log.debug("roofline: orphan reap failed", exc_info=True)
-        return []
+    return await asyncio.to_thread(reap_orphaned_servers, resolved)
 
 
 def _gpu_trace_unsupported_reason(profile_result: dict[str, Any]) -> str:
@@ -356,14 +352,11 @@ def _preflight_probe(session_dir: Path, task_id: str, *, reaped: Sequence[int]) 
 
 
 def _drain_instrumentation(executor: Any) -> dict[str, Any] | None:
-    """Take the profile executor's per-attempt instrumentation report, if it keeps one. Never raises."""
+    """Take the profile executor's per-attempt instrumentation report, if it keeps one."""
     drain = getattr(executor, "drain_instrumentation_report", None)
     if not callable(drain):
         return None
-    try:
-        report = drain()
-    except Exception as exc:  # noqa: BLE001 - evidence collection is never fatal
-        return {"error": repr(exc)}
+    report = drain()
     return report if isinstance(report, dict) else None
 
 
