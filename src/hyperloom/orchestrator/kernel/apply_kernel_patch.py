@@ -92,6 +92,7 @@ def _coerce_rebuild_command(rebuild_command: "list[str] | str | None") -> list[s
 
 # Pod-local multi-node backup dir; overridable via $HYPERLOOM_MN_KERNEL_BACKUP_DIR.
 _MN_POD_BACKUP_DIR_DEFAULT = "/var/kernel_patch_backups"
+_MANIFEST_MULTINODE = "multinode"
 
 
 def _is_multi_node() -> bool:
@@ -1453,16 +1454,17 @@ def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
 
 
 class _RestoreTally(NamedTuple):
-    """One revert step's outcome: what it put back, and what it refused to."""
+    """One revert step's outcome: what it put back, what it refused to, and what it reports."""
 
     restored: list[str]
     untrusted: list[dict[str, str]]
     issues: list[dict[str, Any]]
+    reported: dict[str, Any]
 
 
 def _nothing_restored() -> _RestoreTally:
     """An empty tally, for a revert step whose manifest recorded nothing to undo."""
-    return _RestoreTally([], [], [])
+    return _RestoreTally([], [], [], {})
 
 
 def _already_reverted_result(manifest_file: Path, manifest: dict[str, Any]) -> dict[str, Any]:
@@ -1504,7 +1506,7 @@ def _restore_backed_up_artifacts(manifest: dict[str, Any], backup_root: Path) ->
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
             restored.append(str(dst))
-    return _RestoreTally(restored, untrusted, [])
+    return _RestoreTally(restored, untrusted, [], {})
 
 
 def _restore_patched_sources(manifest: dict[str, Any], backup_root: Path) -> _RestoreTally:
@@ -1542,11 +1544,11 @@ def _restore_source_backup_set(manifest: dict[str, Any], backup_root: Path) -> _
         if dst.suffix.lower() in PYTHON_SOURCE_SUFFIXES and not cache_cleared:
             manifest["revert_cache_clear"] = _clear_python_kernel_caches(dst)
             cache_cleared = True
-    return _RestoreTally(restored, untrusted, [])
+    return _RestoreTally(restored, untrusted, [], {})
 
 
 def _restore_primary_source_backup(manifest: dict[str, Any], backup_root: Path) -> _RestoreTally:
-    """Undo a single-file apply from the manifest shape earlier releases wrote."""
+    """Undo a whole-file apply from the single ``source_backup`` record it wrote."""
     source_backup = manifest.get("source_backup") or {}
     if not source_backup:
         return _nothing_restored()
@@ -1564,14 +1566,14 @@ def _restore_primary_source_backup(manifest: dict[str, Any], backup_root: Path) 
                 "backup_path": str(source_backup.get("backup_path", "")),
             }
         ]
-        return _RestoreTally([], untrusted, [])
+        return _RestoreTally([], untrusted, [], {})
     if not src.exists():
         return _nothing_restored()
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dst)
     if dst.suffix.lower() in PYTHON_SOURCE_SUFFIXES:
         manifest["revert_cache_clear"] = _clear_python_kernel_caches(dst)
-    return _RestoreTally([str(dst)], [], [])
+    return _RestoreTally([str(dst)], [], [], {})
 
 
 def _manifest_jit_build_dir(strategy: dict[str, Any]) -> str:
@@ -1594,12 +1596,11 @@ def _restore_jit_build_state(manifest: dict[str, Any], backup_root: Path) -> _Re
         expected_jit_build_dir=_manifest_jit_build_dir(manifest.get("strategy") or {}) or None,
         backup_root=backup_root,
     )
-    manifest["jit_build_restore"] = jit_build_restore
+    reported = {"jit_build_restore": jit_build_restore}
     if jit_build_restore.get("status") != "ok":
-        return _RestoreTally([], [], [{"kind": "jit_build_restore", **jit_build_restore}])
-    if jit_build_restore.get("restored_to"):
-        return _RestoreTally([str(jit_build_restore["restored_to"])], [], [])
-    return _nothing_restored()
+        return _RestoreTally([], [], [{"kind": "jit_build_restore", **jit_build_restore}], reported)
+    restored_to = jit_build_restore.get("restored_to")
+    return _RestoreTally([str(restored_to)] if restored_to else [], [], [], reported)
 
 
 def _restore_cpp_itfs_cache_state(manifest: dict[str, Any]) -> _RestoreTally:
@@ -1611,12 +1612,12 @@ def _restore_cpp_itfs_cache_state(manifest: dict[str, Any]) -> _RestoreTally:
     manifest["cpp_itfs_cache_restore"] = cpp_itfs_cache_restore
     if cpp_itfs_cache_restore.get("status") != "ok":
         return _nothing_restored()
-    return _RestoreTally(list(cpp_itfs_cache_restore.get("restored", [])), [], [])
+    return _RestoreTally(list(cpp_itfs_cache_restore.get("restored", [])), [], [], {})
 
 
 def _revert_on_patched_pods(manifest: dict[str, Any]) -> _RestoreTally:
     """Fan a best-effort revert out to every pod that received the apply."""
-    multinode_info = manifest.get("multinode") or {}
+    multinode_info = manifest.get(_MANIFEST_MULTINODE) or {}
     if not (multinode_info.get("records_by_host") or multinode_info.get("host_backup_map")):
         return _nothing_restored()
     source_backup = manifest.get("source_backup") or {}
@@ -1635,10 +1636,8 @@ def _revert_on_patched_pods(manifest: dict[str, Any]) -> _RestoreTally:
             mn_revert = {"status": "failed", "error": str(exc)}
     if not mn_revert:
         return _nothing_restored()
-    manifest["multinode_revert"] = mn_revert
-    if mn_revert.get("status") == "ok":
-        return _nothing_restored()
-    return _RestoreTally([], [], [{"kind": "multinode_revert", **mn_revert}])
+    failed = [] if mn_revert.get("status") == "ok" else [{"kind": "multinode_revert", **mn_revert}]
+    return _RestoreTally([], [], failed, {"multinode_revert": mn_revert})
 
 
 def _write_revert_outcome(
@@ -1650,11 +1649,13 @@ def _write_revert_outcome(
     restored = [path for step in steps for path in step.restored]
     untrusted = [entry for step in steps for entry in step.untrusted]
     issues = [issue for step in steps for issue in step.issues]
+    reported = {key: record for step in steps for key, record in step.reported.items()}
     reverted_at = now_iso(timespec="auto")
     partial = bool(untrusted or issues)
     manifest["status"] = "reverted_partial" if partial else "reverted"
     manifest["reverted_at"] = reverted_at
     manifest["restored_paths"] = restored
+    manifest.update(reported)
     if untrusted:
         manifest["skipped_untrusted_backups"] = untrusted
     if issues:
@@ -1665,11 +1666,12 @@ def _write_revert_outcome(
         "manifest_path": str(manifest_file),
         "restored_paths": restored,
         "reverted_at": reverted_at,
+        **reported,
     }
-    # jit_build_restore and multinode_revert are attached only when their step ran.
-    for key in ("jit_build_restore", "skipped_untrusted_backups", "revert_issues", "multinode_revert"):
-        if manifest.get(key):
-            result[key] = manifest[key]
+    if untrusted:
+        result["skipped_untrusted_backups"] = untrusted
+    if issues:
+        result["revert_issues"] = issues
     return result
 
 
@@ -1694,7 +1696,7 @@ def finalize_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
         }
     backup_root = manifest_file.resolve().parent
     issues: list[dict[str, Any]] = []
-    multinode = manifest.get("multinode") or {}
+    multinode = manifest.get(_MANIFEST_MULTINODE) or {}
     records_by_host = dict(multinode.get("records_by_host") or {})
     remote_result: dict[str, Any] = {}
     if records_by_host:
@@ -1894,10 +1896,6 @@ class _PatchDeployment:
         self.manifest[key] = value
         self.persist()
 
-    def record_fanout(self, block: dict[str, Any]) -> None:
-        """Record how far the pod fan-out got, so a revert reaches the pods it already patched."""
-        self.record("multinode", block)
-
 
 @dataclass
 class _PodFanout:
@@ -2076,7 +2074,7 @@ def _rebuild_patched_roots(deployment: _PatchDeployment, plan: _RebuildPlan) -> 
         _PatchRefused: When a root failed to rebuild; every touched path is
             restored first.
     """
-    record = _rebuild_not_run().rebuild
+    record: dict[str, Any] = {}
     for strategy in plan.strategies:
         record = _run_strategy_rebuild(
             strategy,
@@ -2126,7 +2124,7 @@ def _finish_apply(deployment: _PatchDeployment, outcome: _ApplyOutcome) -> dict[
     }
     # Only attach the multinode key when fan-out actually ran.
     if outcome.multinode:
-        result["multinode"] = outcome.multinode
+        result[_MANIFEST_MULTINODE] = outcome.multinode
     return result
 
 
@@ -2275,7 +2273,7 @@ def _fan_whole_file_out_to_pods(
         ) from exc
     # Persist multinode info now so a later rebuild failure reverts pod-side patches too.
     block = fanout.block("ok", preflight.target, pod_backup_dir)
-    deployment.record_fanout(block)
+    deployment.record(_MANIFEST_MULTINODE, block)
     return block
 
 
@@ -2591,7 +2589,7 @@ def _fan_snapshot_out_to_pods(
             )
             # Persist after every file so a later dispatch failure can
             # revert all already-patched files on every pod.
-            deployment.record_fanout(fanout.block("partial", plan.target, pod_backup_dir))
+            deployment.record(_MANIFEST_MULTINODE, fanout.block("partial", plan.target, pod_backup_dir))
     except Exception as exc:
         revert = revert_kernel_patch(deployment.manifest_path)
         raise _PatchRefused(
@@ -2603,7 +2601,7 @@ def _fan_snapshot_out_to_pods(
             }
         ) from exc
     block = fanout.block("ok", plan.target, pod_backup_dir)
-    deployment.record_fanout(block)
+    deployment.record(_MANIFEST_MULTINODE, block)
     return block
 
 
