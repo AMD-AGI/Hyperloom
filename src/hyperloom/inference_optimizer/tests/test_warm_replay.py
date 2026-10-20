@@ -2577,7 +2577,7 @@ def test_rollback_restores_a_nogit_tree_from_its_backups(tmp_path, monkeypatch):
     restored: list[list] = []
     monkeypatch.setattr(
         prelude_mod,
-        "_revert_warm_patch_state",
+        "revert_warm_patch_state",
         lambda root, *, pre_sha="", snapshot_manifest=None, nogit_backups=None: (
             restored.append(nogit_backups) or {"ok": True, "errors": []}
         ),

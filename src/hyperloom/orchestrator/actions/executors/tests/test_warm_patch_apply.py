@@ -20,7 +20,7 @@ from hyperloom.orchestrator.actions.executors._warm_patch_apply import (
     _apply_warm_patches,
     _revert_legacy_warm_patch_trees,
     _revert_patches,
-    _revert_warm_patch_state,
+    revert_warm_patch_state,
     _revert_warm_patch_trees,
     _stamp_warm_patch_outcome,
 )
@@ -875,7 +875,7 @@ def test_teardown_undoes_a_nogit_apply(tmp_path, output_dir, backup_intact, capl
         Path(backups[0]["backup_path"]).write_text("# fp8 module\ncorrupt = True\n")
     caplog.clear()
 
-    restore = _revert_warm_patch_state(str(install_root), nogit_backups=backups)
+    restore = revert_warm_patch_state(str(install_root), nogit_backups=backups)
 
     warnings = [record.getMessage() for record in caplog.records if record.levelno >= logging.WARNING]
     if backup_intact:

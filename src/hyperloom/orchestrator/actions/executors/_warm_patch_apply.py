@@ -238,7 +238,7 @@ def _verify_three_way_clean(
     return True, ""
 
 
-def _revert_warm_patch_state(
+def revert_warm_patch_state(
     target_repo: str,
     *,
     pre_sha: str = "",
@@ -294,7 +294,7 @@ def _revert_warm_patch_trees(trees: Iterable[Mapping[str, Any]]) -> dict[str, An
         manifest = tree.get("snapshot_manifest")
         if not backups and not manifest:
             continue
-        outcome = _revert_warm_patch_state(
+        outcome = revert_warm_patch_state(
             root,
             pre_sha=str(tree.get("pre_sha") or ""),
             snapshot_manifest=manifest,
@@ -409,8 +409,8 @@ def _warm_patch_trees(patch_roots: list[str]) -> _WarmPatchTrees:
             roots[idx] = toplevel
     absent = ""
     trees: dict[str, dict[str, Any]] = {}
-    # Ordered by first use so the primary tree stays the one ``target_repo`` named, which is what the single-tree
-    # result fields report.
+    # Ordered by first use: the single-tree result fields report the first recorded root's tree, so that one has to
+    # stay primary.
     for root in dict.fromkeys(root for root in roots if root):
         if not Path(root).is_dir():
             absent = absent or root
