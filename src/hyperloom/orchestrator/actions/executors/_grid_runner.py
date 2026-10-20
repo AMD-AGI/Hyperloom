@@ -80,13 +80,8 @@ from hyperloom.inference_optimizer.grid_server_args import (
     merge_server_args as merge_server_args,
     compose_server_args as compose_server_args,
     shell_safe_dedupe as shell_safe_dedupe,
-    SGLANG_MOE_RUNNER_BACKEND_RE as SGLANG_MOE_RUNNER_BACKEND_RE,
-    moe_runner_requires_aiter as moe_runner_requires_aiter,
 )
-from ._grid_variant_yaml import (
-    _build_variant_yaml as _build_variant_yaml,
-    variant_conc as variant_conc,
-)
+from ._grid_variant_yaml import _build_variant_yaml
 from ._grid_variant_filter import (
     resolve_skip_spec as resolve_skip_spec,
     _MN_PARAMS_PRIORITY as _MN_PARAMS_PRIORITY,
@@ -662,7 +657,6 @@ def _missing_workspace_error(proc: _RoundProcess, server_log: Any) -> _RoundErro
 def _variant_rounds(variant_expected_sec: Any, auto_warmup_requested: bool) -> _RoundBudget:
     """How many full benchmark passes one variant costs, and how many are warmups."""
     _mn_warmup_rounds = 0
-    _mn_warmup_rounds = 0
     if variant_expected_sec is not None:
         from ._multi_node_env import (
             is_multi_node as _mn_is_multi_node,
@@ -716,21 +710,6 @@ class _WatchdogStop(NamedTuple):
     cause: str
     recorded: str
     error: str | None = None
-
-
-#: The returncodes the two liveness watchdogs reap a measured round with.
-_WATCHDOG_RETURNCODES: frozenset[int] = frozenset({SERVER_DEAD_RETURNCODE, DETOKENIZER_STALL_RETURNCODE})
-
-
-class _ReapedRound(NamedTuple):
-    """A reaped round's slot once the artifacts it leaked have been salvaged into it.
-
-    ``server.log`` is one of those artifacts, so the cause of death is only on disk
-    after the salvage: read it earlier and a dead server reports no reason at all.
-    """
-
-    server_log: Path
-    artifacts: list[Any]
 
 
 class _GridRecipe(NamedTuple):
@@ -1363,20 +1342,13 @@ async def _run_measured_round(run: _GridRun, at: _VariantSlot, rounds: _VariantR
     return _MeasuredRound(proc, started_unix, workspaces_before, round_survivors)
 
 
-def _salvage_reaped_round(at: _VariantSlot, round_: _MeasuredRound) -> _ReapedRound:
-    """Salvage a reaped round's leaked artifacts into the workspace it produced."""
-    destination = select_run_workspace(at.path, known_before=round_.workspaces_before) or at.path
-    artifacts = harvest_leaked_artifacts(destination, subprocess_started_unix=round_.started_unix)
-    return _ReapedRound(at.path / "server.log", artifacts)
-
-
-def _watchdog_stop(returncode: Any, reaped: _ReapedRound) -> _WatchdogStop:
-    """What the liveness watchdog behind ``returncode`` says killed the round it reaped."""
+def _watchdog_stop(returncode: Any, server_log: Path) -> _WatchdogStop:
+    """What killed the round a liveness watchdog reaped: engine/worker init, or a server that went silent."""
     if returncode == SERVER_DEAD_RETURNCODE:
         return _WatchdogStop(
             "server_init_dead",
             "server_init_dead (engine/worker bootstrap failed; parent hung)",
-            server_log_death_excerpt(str(reaped.server_log))
+            server_log_death_excerpt(str(server_log))
             or "server engine/worker init failed; parent process hung and was reaped by the liveness watchdog",
         )
     return _WatchdogStop(
@@ -1388,10 +1360,14 @@ def _watchdog_stop(returncode: Any, reaped: _ReapedRound) -> _WatchdogStop:
     )
 
 
-def _abort_on_watchdog(run: _GridRun, at: _VariantSlot, round_: _MeasuredRound, reaped: _ReapedRound) -> NoReturn:
+def _abort_on_watchdog(run: _GridRun, at: _VariantSlot, round_: _MeasuredRound) -> NoReturn:
     """End the variant on a measured round a liveness watchdog reaped."""
     runtime_sec = round(max(0.0, time.time() - round_.started_unix), 2)
-    stop = _watchdog_stop(round_.proc.returncode, reaped)
+    destination = select_run_workspace(at.path, known_before=round_.workspaces_before) or at.path
+    # server.log is itself one of the salvaged artifacts, so the cause of death only reaches the slot here.
+    harvested = harvest_leaked_artifacts(destination, subprocess_started_unix=round_.started_unix)
+    server_log = at.path / "server.log"
+    stop = _watchdog_stop(round_.proc.returncode, server_log)
     log.warning(
         "grid_runner: variant %s aborted: %s after %.1fs",
         _variant_tag(run, at),
@@ -1403,8 +1379,8 @@ def _abort_on_watchdog(run: _GridRun, at: _VariantSlot, round_: _MeasuredRound, 
         _VariantFailure(stop.error_class, stop.recorded, stop.error),
         returncode=round_.proc.returncode,
         runtime_sec=runtime_sec,
-        server_log_path=_existing_log_path(reaped.server_log),
-        nonfatal_warnings=[f"harvested_leaked_artifact:{src}" for src, _ in reaped.artifacts],
+        server_log_path=_existing_log_path(server_log),
+        nonfatal_warnings=[f"harvested_leaked_artifact:{src}" for src, _ in harvested],
     )
 
 
@@ -1424,8 +1400,8 @@ def _refuse_reaped_round(run: _GridRun, at: _VariantSlot, round_: _MeasuredRound
             returncode=returncode,
             runtime_sec=round(max(0.0, time.time() - round_.started_unix), 2),
         )
-    if returncode in _WATCHDOG_RETURNCODES:
-        _abort_on_watchdog(run, at, round_, _salvage_reaped_round(at, round_))
+    if returncode in (SERVER_DEAD_RETURNCODE, DETOKENIZER_STALL_RETURNCODE):
+        _abort_on_watchdog(run, at, round_)
     stopped = stopped_by_the_run(returncode)
     if stopped is not None:
         attempt = _RoundAttempt(at, returncode, round_.started_unix, at.path / "server.log", round_.server_survivors)
@@ -2007,8 +1983,6 @@ __all__ = [
     "stopped_by_the_run",
     # Re-exported from the sibling modules to keep the namespace intact.
     "_resolve_probe_python",
-    "SGLANG_MOE_RUNNER_BACKEND_RE",
-    "moe_runner_requires_aiter",
     "resolve_skip_spec",
     "_MN_PARAMS_PRIORITY",
     "_MN_BACKENDS_PRIORITY",

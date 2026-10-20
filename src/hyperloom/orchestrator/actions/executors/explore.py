@@ -70,13 +70,13 @@ from ._grid_base import (
     TS_SKIPPED_DEDUP,
 )
 from .benchmark_result import double_run_requested
+from ._grid_variant_yaml import _build_variant_yaml
 from ._grid_runner import (
     DEFAULT_KEEP_THRESHOLD_PCT,
     _MN_BACKENDS_PRIORITY,
     _MN_PARAMS_PRIORITY,
     GridVariant,
     SessionDirField,
-    _build_variant_yaml,
     _num_gpus_for_config,
     apply_aiter_moe_pin_filter,
     apply_compatibility_filter,

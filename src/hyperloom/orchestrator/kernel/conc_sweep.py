@@ -44,8 +44,8 @@ from ..actions.executors._grid_runner import (
     VariantResult,
     run_grid,
     session_grid_bounds,
-    variant_conc,
 )
+from ..actions.executors._grid_variant_yaml import variant_conc
 from ..actions.executors._subprocess_kill import resolve_benchmark_timeouts, session_deadline_to_remaining_sec
 from ..actions.cancel_channel import current_cancel_scope
 from ..actions.stop_attribution import (
