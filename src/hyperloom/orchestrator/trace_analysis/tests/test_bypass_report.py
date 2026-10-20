@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import csv
 import io
-from pathlib import Path
 
 from hyperloom.orchestrator.trace_analysis import _bypass_report as report
 from hyperloom.orchestrator.trace_analysis._kernel_partition import partition_kernels
@@ -1017,29 +1016,13 @@ def test_pseudo_op_flydsl_sets_deterministic_implementation_contract():
     assert cand["kernel_kind"] == "flydsl"
 
 
-def test_build_candidates_discovers_benchmark_files_when_enabled(tmp_path, monkeypatch):
-    # discover_benchmarks populates benchmark_files/kernel_repo on a routable candidate (seeds the rocprof roofline
-    # enrichment); off by default.
-    repo = tmp_path / "aiter"
-    (repo / "op_tests").mkdir(parents=True)
-    (repo / "csrc").mkdir(parents=True)
-    src = repo / "csrc" / "foo_kernel.cu"
-    src.write_text("// foo_op\n", encoding="utf-8")
-    (repo / "op_tests" / "test_foo.py").write_text("def test():\n    foo_op(x)\n", encoding="utf-8")
-    monkeypatch.setattr(report, "resolve_source_verdict", lambda *a, **k: _verdict(str(src)))
+def test_build_candidates_keeps_empty_benchmark_fields(monkeypatch):
+    # The bypass route discovers no benchmark files, yet every candidate still carries both keys.
+    monkeypatch.setattr(report, "resolve_source_verdict", lambda *a, **k: _verdict("/repo/aiter/csrc/foo_kernel.cu"))
     base = [{"name": "triton_foo_kernel", "op_name": "aiter::foo_op", "gpu_time_us": 100.0, "count": 1}]
-
-    on = report.build_candidates(
-        _analyze([dict(k) for k in base]), framework="vllm", target_platform="MI300X", discover_benchmarks=True
-    )["hot_kernels"][0]
-    assert on["reusable_native_kernel"] and on["source_file"] == str(src)
-    assert any(Path(f).name == "test_foo.py" for f in on["benchmark_files"])
-    assert on["kernel_repo"] == str(repo.resolve())
-
-    off = report.build_candidates(_analyze([dict(k) for k in base]), framework="vllm", target_platform="MI300X")[
-        "hot_kernels"
-    ][0]
-    assert off["benchmark_files"] == [] and off["kernel_repo"] == ""
+    cand = report.build_candidates(_analyze(base), framework="vllm", target_platform="MI300X")["hot_kernels"][0]
+    assert cand["reusable_native_kernel"] and cand["source_file"] == "/repo/aiter/csrc/foo_kernel.cu"
+    assert cand["benchmark_files"] == [] and cand["kernel_repo"] == ""
 
 
 def test_build_candidates_attaches_task_group_and_summary_counts(monkeypatch):

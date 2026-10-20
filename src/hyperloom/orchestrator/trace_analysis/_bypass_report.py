@@ -16,7 +16,6 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import Any
 
-from ._bypass_benchmark_resolver import find_benchmark_files, repo_root_from_source
 from ._bypass_classify import classify_kernel
 from ._bypass_fusion import analyze_fusion
 from ._analysis_md import AnalysisReport, render_report
@@ -161,6 +160,36 @@ def _tile_name_shape_entries(kernel_name: str, call_count: int) -> list[dict[str
         return []
     body = "<br>".join(f"{axis}{val}" for axis, val in matches)
     return [{"call_num": int(call_count) if call_count else 1, "shape": body}]
+
+
+def _shape_fields(k: dict[str, Any]) -> dict[str, Any]:
+    """A kernel row's candidate shape fields, from the first evidence that yields a shape: its own cpu_op dims, the
+    unambiguous same-name capture-time backfill, its launch geometry, then the tile in its Triton autotune name."""
+    count = k.get("count")
+    dtypes = k.get("op_dtypes", [])
+    entries = _trace_shape_entries(k.get("op_shapes"), dtypes, count)
+    provenance = "torch_trace"
+    if not entries and not k.get("backfill_ambiguous"):
+        backfill_dtypes = k.get("backfill_dtypes", [])
+        entries = _trace_shape_entries(k.get("backfill_shapes"), backfill_dtypes, count)
+        if entries:
+            dtypes, provenance = backfill_dtypes, "capture_backfill"
+    if not entries:
+        entries = _launch_grid_shape_entries(k.get("launch_grid"), k.get("launch_block"), count)
+        provenance = "launch_grid"
+    if not entries:
+        entries = _tile_name_shape_entries(k.get("name", ""), count)
+        provenance = "tile_name"
+    if not entries:
+        provenance = "unresolved"
+    return {
+        "shapes": entries,
+        "input_shapes": entries,
+        "input_dtypes": dtypes,
+        "shape_provenance": provenance,
+        # launch_grid / tile_name shapes are geometry, so the kernel-opt gate rejects them.
+        "shape_dispatchable": provenance in _DISPATCHABLE_SHAPE_PROVENANCE,
+    }
 
 
 def _source_type_for_op(op_name: str) -> str:
@@ -326,152 +355,93 @@ def _short_name(kernel_name: str) -> str:
     return n[:80] if n else "unknown_kernel"
 
 
+def _candidate(idx: int, k: dict[str, Any], *, framework: str, target_platform: str) -> dict[str, Any]:
+    """One top device kernel's candidate row: classification, source verdict, shape evidence, roofline and ROI."""
+    kname, op_name = k.get("name", ""), k.get("op_name", "")
+    kc = classify_kernel(kname, op_name=op_name)
+    # Native HIP-graph kernels arrive with op_name=""; op_to_source_patchable, not source presence, gates routing.
+    resolution = resolve_source_verdict(kname, kernel_file=k.get("op_kernel_file", ""), op_name=op_name)
+    location = resolution.location
+    source_file = location.source_file if location else ""
+    shape = _shape_fields(k)
+    if not kc.reusable:
+        skip_reason = kc.skip_reason
+    elif not source_file:
+        skip_reason = "source file not resolved"
+    elif not resolution.patchable:
+        skip_reason = f"non-patchable: {resolution.reason}" if resolution.reason else "non-patchable kernel"
+    elif not shape["shape_dispatchable"]:
+        skip_reason = f"shape not dispatchable (provenance={shape['shape_provenance']}); need operand dims"
+    else:
+        skip_reason = ""
+    source_type, kernel_kind = _implementation_contract(
+        op_name=op_name, source_file=source_file, trace_kernel_kind=k.get("op_kernel_backend", "")
+    )
+    cand: dict[str, Any] = {
+        "kernel_id": f"k{idx:03d}",
+        "name": op_name or _short_name(kname),
+        "kernel_category": kc.category,
+        "device_kernel_name": kname[:120],
+        "device_kernel_names": [kname[:120]],
+        "duration_us": k.get("gpu_time_us", 0.0),
+        "gpu_pct": k.get("gpu_pct", 0.0),
+        "percent_of_total": k.get("gpu_pct", 0.0),
+        "call_count": k.get("count", 0),
+        "bound_type": _UNKNOWN_BOUND,
+        "efficiency_percent": 0.0,
+        "roofline_attainment_pct": None,
+        "flops_per_byte": None,
+        "arithmetic_intensity": None,
+        "compute_utilization_pct": None,
+        "bandwidth_utilization_pct": None,
+        "rocprof_roofline": None,
+        # Placeholder roofline: bound_type/AI/util above are structural defaults, NOT measured.
+        "roofline_measured": False,
+        "roofline_source": _RL_PLACEHOLDER,
+        "library": "",
+        "backend": framework,
+        "framework": framework,
+        "source_file": source_file,
+        # None for native kernels resolved by symbol index.
+        "source_line": location.line if location else None,
+        "source_resolution_method": resolution.method,
+        "source_type": source_type,
+        "kernel_kind": kernel_kind,
+        "reusable_native_kernel": kc.reusable,
+        "skip_reason": skip_reason,
+        "identity_route": "bypass",
+        "op_to_source_patchable": resolution.patchable,
+        "op_to_source_reason": resolution.reason,
+        "op_to_source_status": "resolved" if resolution.patchable else "non_rewritable",
+        "recommended_backends": list(_REUSABLE_BACKENDS) if kc.reusable else [],
+        "benchmark_files": [],
+        "kernel_repo": "",
+        **shape,
+    }
+    if shape["shape_dispatchable"]:
+        # Analytical roofline from the operand shape and measured time; rocprof enrichment later refines it.
+        aggregate = KernelAggregate(kc.category, shape["shapes"][0]["shape"], cand["duration_us"], cand["call_count"])
+        cand.update(compute_roofline(aggregate, gpu_type=target_platform) or {})
+    # Optimization ROI = GPU-time share x headroom (1 - efficiency); with no analytical efficiency it is gpu_pct.
+    cand["optimization_priority"] = round(cand["gpu_pct"] * (1.0 - cand["efficiency_percent"] / 100.0), 4)
+    # Deterministic per-kernel hint for the specialist prompt's action slot.
+    cand["suggestion"] = _build_suggestion(kc.category, cand["bound_type"])
+    cand["recommended_actions"] = [cand["suggestion"]]
+    return cand
+
+
 def build_candidates(
     analyze_out: dict[str, Any],
     *,
     framework: str,
     target_platform: str,
     top_k: int = 15,
-    discover_benchmarks: bool = False,
 ) -> dict[str, Any]:
     """Turn classified top device kernels into the candidate payload."""
-    kernels = analyze_out.get("kernels") or []
-    hot_kernels: list[dict[str, Any]] = []
-    for idx, k in enumerate(kernels[: top_k if top_k and top_k > 0 else len(kernels)], start=1):
-        kname = k.get("name", "") or ""
-        op_name = k.get("op_name", "") or ""
-        kc = classify_kernel(kname, op_name=op_name)
-        kernel_id = f"k{idx:03d}"
-        display = op_name or _short_name(kname)
-
-        # Native HIP-graph kernels arrive with op_name=""; op_to_source_patchable, not source presence, gates routing.
-        resolution = resolve_source_verdict(
-            kname,
-            kernel_file=k.get("op_kernel_file", "") or "",
-            op_name=op_name,
-        )
-        location = resolution.location
-        source_file = location.source_file if location else ""
-        source_line = location.line if location else None
-        source_method = resolution.method
-        if not kc.reusable:
-            skip_reason = kc.skip_reason
-        elif not source_file:
-            skip_reason = "source file not resolved"
-        elif not resolution.patchable:
-            skip_reason = f"non-patchable: {resolution.reason}" if resolution.reason else "non-patchable kernel"
-        else:
-            skip_reason = ""
-
-        _count = k.get("count") or 0
-        op_shapes = k.get("op_shapes") or []
-        op_dtypes = k.get("op_dtypes") or []
-        shape_entries = _trace_shape_entries(op_shapes, op_dtypes, _count)
-        shape_provenance = "torch_trace" if shape_entries else ""
-        if not shape_entries and not k.get("backfill_ambiguous"):
-            bf_shapes = k.get("backfill_shapes") or []
-            bf_dtypes = k.get("backfill_dtypes") or []
-            shape_entries = _trace_shape_entries(bf_shapes, bf_dtypes, _count)
-            if shape_entries:
-                op_dtypes = bf_dtypes
-                shape_provenance = "capture_backfill"
-        if not shape_entries:
-            shape_entries = _launch_grid_shape_entries(k.get("launch_grid"), k.get("launch_block"), _count)
-            if shape_entries:
-                shape_provenance = "launch_grid"
-        if not shape_entries:
-            shape_entries = _tile_name_shape_entries(kname, _count)
-            if shape_entries:
-                shape_provenance = "tile_name"
-        if not shape_provenance:
-            shape_provenance = "unresolved"
-
-        bench_files: list[str] = []
-        kernel_repo = ""
-        if discover_benchmarks and kc.reusable and source_file:
-            kernel_repo = repo_root_from_source(source_file)
-            bench_files = find_benchmark_files(op_name, source_file)
-        source_type, kernel_kind = _implementation_contract(
-            op_name=op_name,
-            source_file=source_file,
-            trace_kernel_kind=str(k.get("op_kernel_backend") or ""),
-        )
-
-        cand: dict[str, Any] = {
-            "kernel_id": kernel_id,
-            "name": display,
-            "kernel_category": kc.category,
-            "device_kernel_name": kname[:120],
-            "device_kernel_names": [kname[:120]],
-            "duration_us": k.get("gpu_time_us", 0.0),
-            "gpu_pct": k.get("gpu_pct", 0.0),
-            "percent_of_total": k.get("gpu_pct", 0.0),
-            "call_count": k.get("count", 0),
-            "bound_type": _UNKNOWN_BOUND,
-            "efficiency_percent": 0.0,
-            "roofline_attainment_pct": None,
-            "flops_per_byte": None,
-            "arithmetic_intensity": None,
-            "compute_utilization_pct": None,
-            "bandwidth_utilization_pct": None,
-            "rocprof_roofline": None,
-            # Placeholder roofline: bound_type/AI/util above are structural defaults, NOT measured.
-            "roofline_measured": False,
-            "roofline_source": _RL_PLACEHOLDER,
-            "library": "",
-            "backend": framework,
-            "framework": framework,
-            "source_file": source_file,
-            # None for native kernels resolved by symbol index.
-            "source_line": source_line,
-            "source_resolution_method": source_method,
-            "source_type": source_type,
-            "kernel_kind": kernel_kind,
-            "reusable_native_kernel": kc.reusable,
-            "skip_reason": skip_reason,
-            "identity_route": "bypass",
-            "op_to_source_patchable": resolution.patchable,
-            "op_to_source_reason": resolution.reason,
-            "op_to_source_status": "resolved" if resolution.patchable else "non_rewritable",
-            "recommended_backends": list(_REUSABLE_BACKENDS) if kc.reusable else [],
-            "benchmark_files": bench_files,
-            "kernel_repo": kernel_repo,
-            "shapes": shape_entries,
-            "input_shapes": shape_entries,
-            "input_dtypes": op_dtypes,
-            "shape_provenance": shape_provenance,
-            # launch_grid / tile_name shapes are geometry, so the kernel-opt gate rejects them.
-            "shape_dispatchable": shape_provenance in _DISPATCHABLE_SHAPE_PROVENANCE,
-        }
-        # Analytical roofline: derive bound_type / AI / efficiency from captured shapes + measured time for EVERY
-        # estimable kernel (rocprof enrichment later refines it to a measured roofline).
-        _roofline_shape = (
-            shape_entries[0]["shape"] if shape_entries and shape_provenance in _DISPATCHABLE_SHAPE_PROVENANCE else ""
-        )
-        aggregate = KernelAggregate(
-            category=kc.category,
-            shape_str=_roofline_shape,
-            gpu_time_us=float(cand["duration_us"] or 0.0),
-            call_count=int(cand["call_count"] or 1),
-        )
-        rl = compute_roofline(aggregate, gpu_type=target_platform)
-        if rl:
-            cand.update(rl)
-        # A reusable, patchable kernel with a resolved source but only a geometry shape (launch_grid / tile_name) is
-        # visible but not auto-dispatchable: the kernel-opt gate requires operand dims.
-        if kc.reusable and source_file and resolution.patchable and not cand["shape_dispatchable"]:
-            cand["skip_reason"] = f"shape not dispatchable (provenance={shape_provenance}); need operand dims"
-        # Optimization ROI = GPU-time share x headroom (1 - efficiency); with no analytical efficiency, headroom=1 so
-        # it degrades to gpu_pct.
-        eff = cand.get("efficiency_percent")
-        eff = float(eff) if isinstance(eff, (int, float)) else 0.0
-        headroom = 1.0 - min(max(eff, 0.0), 100.0) / 100.0
-        cand["optimization_priority"] = round(float(cand.get("gpu_pct") or 0.0) * headroom, 4)
-        # Deterministic per-kernel hint for the specialist prompt's action slot.
-        suggestion = _build_suggestion(kc.category, str(cand.get("bound_type") or ""))
-        cand["suggestion"] = suggestion
-        cand["recommended_actions"] = [suggestion]
-        hot_kernels.append(cand)
+    hot_kernels = [
+        _candidate(idx, k, framework=framework, target_platform=target_platform)
+        for idx, k in enumerate((analyze_out.get("kernels") or [])[:top_k], start=1)
+    ]
 
     # Group repeated shapes of one operator and editable source into one task; stamp that shared contract onto each
     # member.
@@ -483,14 +453,12 @@ def build_candidates(
             c["task_group"] = g
 
     # 1-based rank by optimization ROI, stamped WITHOUT reordering hot_kernels (that list stays gpu_pct-sorted).
-    for rank, c in enumerate(
-        sorted(hot_kernels, key=lambda x: x.get("optimization_priority") or 0.0, reverse=True), start=1
-    ):
+    for rank, c in enumerate(sorted(hot_kernels, key=lambda x: x["optimization_priority"], reverse=True), start=1):
         c["priority_rank"] = rank
 
-    # ``routable_kernels`` = the subset actually dispatchable to kernel-opt: reusable + resolved source that
-    # TraceLens confirms patchable + a dispatch-grade operand shape. The four-key document shape and the split are
-    # owned by the shared builder both routes call.
+    # A candidate routes to kernel-opt exactly when nothing gave it a skip reason: reusable, a source TraceLens
+    # confirms patchable, and a dispatch-grade operand shape. The four-key document shape and the split are owned by
+    # the shared builder both routes call.
     header = {
         "source": "bypass",
         "framework": framework,
@@ -498,15 +466,7 @@ def build_candidates(
         "aggregation_scope": analyze_out.get("aggregation_scope", "full_trace"),
     }
     return build_kernel_candidates_document(
-        header,
-        hot_kernels,
-        task_groups,
-        is_routable=lambda c: bool(
-            c.get("reusable_native_kernel")
-            and c.get("source_file")
-            and c.get("op_to_source_patchable")
-            and c.get("shape_dispatchable")
-        ),
+        header, hot_kernels, task_groups, is_routable=lambda c: not c["skip_reason"]
     )
 
 
