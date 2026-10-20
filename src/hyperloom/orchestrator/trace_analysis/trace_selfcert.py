@@ -44,19 +44,22 @@ CHUNK_QUALITY_ALTERNATE_MARGIN = 0.10
 MIN_REPEATS_DEFAULT = 3
 MIN_REPEATS_XDIT = 2
 
-#: Iteration-root patterns, verbatim from ``split_trace.main``.
-#: The primary vLLM shape wins outright; the backup list (vLLM's older shapes and
+#: Iteration-root patterns by family, verbatim from ``split_trace.main`` (the backup
+#: family's three as alternatives of one expression).
+#: The primary vLLM shape wins outright; the backup family (vLLM's older shapes and
 #: SGLang's per-step annotations) is consulted only when the primary matches
 #: nothing. Reproducing that precedence matters -- a looser or differently
 #: ordered pattern set would count steps the splitter never sees.
-_PRIMARY_ROOT_PATTERNS = (
-    re.compile(r"execute_\d+_context_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)_generation_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)"),
-)
-_BACKUP_ROOT_PATTERNS = (
-    re.compile(r"execute_context_\d+\(\d+\)_generation_\d+\(\d+\)"),
-    re.compile(r"execute_context_\d+\(\d+_\d+\)_generation_\d+\(\d+\)"),
-    re.compile(r"step\[(?:EXTEND|DECODE|MIXED)\b.*\]"),
-)
+_ROOT_PATTERNS = {
+    "primary": re.compile(
+        r"execute_\d+_context_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)_generation_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)"
+    ),
+    "backup": re.compile(
+        r"execute_context_\d+\(\d+\)_generation_\d+\(\d+\)"
+        r"|execute_context_\d+\(\d+_\d+\)_generation_\d+\(\d+\)"
+        r"|step\[(?:EXTEND|DECODE|MIXED)\b.*\]"
+    ),
+}
 _SGLANG_STEP_RE = re.compile(r"step\[(\w+)\s+bs=(\d+)(?:\s+toks=(\d+))?\]")
 _STEP_MARKER_RE = re.compile(r"(?i)profilerstep|denoise|iteration|(?:^|[^a-z])step|step(?:$|[^a-z])")
 _ROOFLINE_TASK_RE = re.compile(r"/runs/[a-z_]+/([0-9a-f]{32})/")
@@ -235,82 +238,63 @@ def certify_capture_sidecars(
 # groups 6/7/8: the second pass
 
 
+def _span(ev: dict[str, Any]) -> tuple[float, float]:
+    """An X event's start and duration in microseconds; a missing or empty value reads as zero."""
+    return float(ev.get("ts") or 0.0), float(ev.get("dur") or 0.0)
+
+
 class StepPass:
     """Second-pass state: step annotations and per-step subtree attribution."""
 
     def __init__(self) -> None:
         self.steps: list[dict[str, Any]] = []
         self.root_family: str | None = None
-        self._primary_roots: list[dict[str, Any]] = []
-        self._backup_roots: list[dict[str, Any]] = []
         self.gpu_annotations: list[dict[str, Any]] = []
         self.runtime_ts: list[float] = []
         self.runtime_corr: list[Any] = []
         self.graph_corrs: set[Any] = set()
-        self.kernel_by_corr: dict[Any, list[tuple[float, float, float]]] = {}
+        self.kernel_by_corr: dict[Any, list[tuple[float, float]]] = {}
         self.cpu_op_total = 0
         self.cpu_op_with_meta = 0
 
     def scan(self, path: Path) -> list[str]:
         errors: list[str] = []
         runtime: list[tuple[float, Any]] = []
+        roots: dict[str, list[dict[str, Any]]] = {}
         fobj = _open_trace_binary(path)
         try:
             for ev in stream_events(fobj, errors=errors):
                 cat = ev.get("cat", "")
-                if cat == "cuda_runtime":
-                    args = ev.get("args") or {}
-                    corr = args.get("correlation")
-                    if corr is None:
-                        continue
+                args = ev.get("args") or {}
+                if cat == "cuda_runtime" and (corr := args.get("correlation")) is not None:
                     runtime.append((float(ev.get("ts") or 0.0), corr))
                     if "GraphLaunch" in (ev.get("name") or ""):
                         self.graph_corrs.add(corr)
-                    continue
-                if cat == "cpu_op":
-                    args = ev.get("args") or {}
+                elif cat == "cpu_op":
                     self.cpu_op_total += 1
-                    if args.get("Input Dims") or args.get("Input type"):
-                        self.cpu_op_with_meta += 1
+                    self.cpu_op_with_meta += bool(args.get("Input Dims") or args.get("Input type"))
+                elif ev.get("ph") != "X":
                     continue
-                if ev.get("ph") != "X":
-                    continue
-                if cat == "user_annotation":
+                elif cat == "user_annotation":
                     name = ev.get("name") or ""
-                    primary = any(p.match(name) for p in _PRIMARY_ROOT_PATTERNS)
-                    backup = any(p.match(name) for p in _BACKUP_ROOT_PATTERNS)
-                    if primary or backup:
-                        ts = float(ev.get("ts") or 0.0)
-                        dur = float(ev.get("dur") or 0.0)
-                        root = {"name": name, "ts": ts, "end": ts + dur, "dur_us": dur}
-                        if primary:
-                            self._primary_roots.append(root)
-                        if backup:
-                            self._backup_roots.append(root)
-                    continue
-                if cat == "gpu_user_annotation":
-                    ts = float(ev.get("ts") or 0.0)
-                    dur = float(ev.get("dur") or 0.0)
+                    family = next((family for family, pattern in _ROOT_PATTERNS.items() if pattern.match(name)), None)
+                    if family is not None:
+                        ts, dur = _span(ev)
+                        root = {"name": name, "ts": ts, "end": ts + dur, "dur_us": dur, **iter_details_from_name(name)}
+                        roots.setdefault(family, []).append(root)
+                elif cat == "gpu_user_annotation":
+                    ts, dur = _span(ev)
                     self.gpu_annotations.append({"name": ev.get("name") or "", "ts": ts, "dur": dur})
-                    continue
-                if cat == "kernel":
-                    ts = float(ev.get("ts") or 0.0)
-                    dur = float(ev.get("dur") or 0.0)
-                    corr = (ev.get("args") or {}).get("correlation")
-                    self.kernel_by_corr.setdefault(corr, []).append((ts, ts + dur, dur))
+                elif cat == "kernel":
+                    ts, dur = _span(ev)
+                    self.kernel_by_corr.setdefault(args.get("correlation"), []).append((ts, ts + dur))
         finally:
             fobj.close()
         runtime.sort(key=lambda x: x[0])
         self.runtime_ts = [t for t, _ in runtime]
         self.runtime_corr = [c for _, c in runtime]
-        if self._primary_roots:
-            roots, self.root_family = self._primary_roots, "primary"
-        elif self._backup_roots:
-            roots, self.root_family = self._backup_roots, "backup"
-        else:
-            roots, self.root_family = [], None
-        roots.sort(key=lambda s: s["ts"])
-        self.steps = [{**r, **iter_details_from_name(r["name"])} for r in roots]
+        self.root_family = next((family for family in _ROOT_PATTERNS if family in roots), None)
+        self.steps = sorted(roots.get(self.root_family, ()), key=lambda s: s["ts"])
         return errors
 
     def attribute_steps(self) -> None:
@@ -320,17 +304,14 @@ class StepPass:
             hi = bisect_right(self.runtime_ts, step["end"])
             corrs = set(self.runtime_corr[lo:hi])
             intervals: list[tuple[float, float]] = []
-            kernels = 0
             for corr in corrs:
-                for k_ts, k_end, _dur in self.kernel_by_corr.get(corr, ()):
-                    intervals.append((k_ts, k_end))
-                    kernels += 1
+                intervals.extend(self.kernel_by_corr.get(corr, ()))
             step.update(
                 {
                     "index": idx,
                     "runtime_launch_count": hi - lo,
                     "graph_launch_count": sum(1 for c in corrs if c in self.graph_corrs),
-                    "kernel_count": kernels,
+                    "kernel_count": len(intervals),
                     "gpu_busy_us": round(_union_ms(intervals) * 1000.0, 3) if intervals else 0.0,
                 }
             )
