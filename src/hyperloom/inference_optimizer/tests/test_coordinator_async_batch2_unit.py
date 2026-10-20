@@ -2107,6 +2107,25 @@ async def test_record_specialist_result_logs_ungrounded_patches(coord: Coordinat
 
 
 @pytest.mark.asyncio
+async def test_record_specialist_result_logs_proposals_whose_env_files_are_missing(coord: Coordinator) -> None:
+    """A proposal dropped at admission for an env file no stage wrote reaches the failure log the same way."""
+    task = _ptask("rec-spec-env", "specialist")
+    await coord.specialist_dispatch.record_specialist_result(
+        task=task,
+        done_payload={
+            "domain": "candidate_discovery_specialist",
+            "gap_canonical_id": "g1",
+            "proposal_set": [],
+            "proposals_env_ungrounded": ["proposal 'tuned-gemm': AITER_CONFIG_GEMM_BF16 points at /tmp/t.csv"],
+        },
+        source="specialist:rec-spec-env",
+    )
+    failures = [f for f in coord.shared_state.last_action_failures if f["task_id"] == "rec-spec-env"]
+    assert [f["error_class"] for f in failures] == ["proposal_env_file_missing"]
+    assert "AITER_CONFIG_GEMM_BF16" in failures[0]["error_excerpt"]
+
+
+@pytest.mark.asyncio
 async def test_record_specialist_result_no_dead_research_evidence_log(
     coord: Coordinator,
     caplog,
