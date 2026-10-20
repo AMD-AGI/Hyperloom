@@ -12,7 +12,6 @@ from collections.abc import Mapping
 from typing import Any
 
 from hyperloom.common.env import env_float, env_int
-from hyperloom.common.gpu_identity import gfx_arch_for_gpu_type
 from hyperloom.common.visible_devices import (
     HIP_LEVEL_VARS,
     VISIBLE_DEVICE_VARS,
@@ -21,6 +20,7 @@ from hyperloom.common.visible_devices import (
     mask_tokens,
     parse_device_list,
 )
+from hyperloom.inference_optimizer.gpu_types import geak_identity_pin
 
 
 def _is_autofilled_rocr(*, value: str, recipe_envs: Mapping[str, Any]) -> bool:
@@ -345,16 +345,8 @@ def _pin_renumbers_devices(pin: Mapping[str, Any] | None) -> bool:
 
 
 def _resolve_handoff_gpu_identity(gpu_type: str | None) -> dict[str, str]:
-    """The handoff's ``gpu_type``, plus GEAK's explicit product/ISA pin.
-
-    Only the concrete R9700 carries a pin; other boards keep GEAK's own device
-    probe, and a bare architecture is never promoted to a product.
-    """
-    identity = {"gpu_type": str(gpu_type or "")}
-    product = identity["gpu_type"].strip().lower()
-    if product != "r9700":
-        return identity
-    return {**identity, "expected_target": product, "expected_gfx": gfx_arch_for_gpu_type(product) or ""}
+    """The handoff's ``gpu_type``, plus GEAK's explicit product/ISA pin for a board that carries one."""
+    return {"gpu_type": str(gpu_type or ""), **geak_identity_pin(gpu_type or "")}
 
 
 def _resolve_handoff_gpu_ids_space(*, gpu_pin: Mapping[str, Any] | None) -> str:

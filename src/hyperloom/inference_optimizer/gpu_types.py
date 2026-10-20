@@ -9,7 +9,7 @@ import os
 import re
 import sys
 
-from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
+from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES, gfx_arch_for_gpu_type
 
 #: Derived, not typed out again: a board added to the identities table is
 #: accepted by the CLI and resolvable in the same commit. Listing it separately
@@ -27,6 +27,14 @@ _GFX_TO_RUNNER: dict[str, str] = {
 }
 
 _RUNNER_SUPPORTED_FRAMEWORKS = {"gfx12": frozenset({"vllm"})}
+
+_R9700 = "r9700"
+
+#: Boards whose targeted-build (compiled / AITER) path has not been validated.
+_TARGETED_BUILD_UNVALIDATED_GPU_TYPES: frozenset[str] = frozenset({_R9700})
+
+#: Boards whose GEAK handoff names the product and ISA instead of leaving them to GEAK's device probe.
+_GEAK_PINNED_IDENTITY_GPU_TYPES: frozenset[str] = frozenset({_R9700})
 
 #: Re-exported from ``hyperloom.common`` so provenance and this module cannot
 #: disagree about which arch a board dispatches to.
@@ -47,9 +55,22 @@ def gpu_runner_type(gpu_type: str) -> str:
     normalized = str(gpu_type or "").strip().lower()
     if normalized in ("mi325x", "mi308x"):
         return "mi300x"
-    if normalized == "r9700":
+    if normalized == _R9700:
         return "gfx12"
     return normalized
+
+
+def targeted_build_validated(gpu_type: str) -> bool:
+    """Whether the targeted-build (compiled / AITER) path has been validated on this board."""
+    return str(gpu_type or "").strip().lower() not in _TARGETED_BUILD_UNVALIDATED_GPU_TYPES
+
+
+def geak_identity_pin(gpu_type: str) -> dict[str, str]:
+    """The ``expected_target`` / ``expected_gfx`` pair a GEAK handoff carries for this board, if any."""
+    product = str(gpu_type or "").strip().lower()
+    if product not in _GEAK_PINNED_IDENTITY_GPU_TYPES:
+        return {}
+    return {"expected_target": product, "expected_gfx": gfx_arch_for_gpu_type(product) or ""}
 
 
 def _runner_framework_error(gpu_type: str, framework: str) -> str | None:
