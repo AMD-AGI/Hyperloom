@@ -7,11 +7,13 @@ PRELUDE gets the whole remaining budget, and spends none of it on a child when i
 whatever it leaves is split into the EXPLORE, FINAL and CLOSE windows, FINAL's no shorter than the
 longest baseline test. The
 FINAL candidates are fixed while every branch still stands, then exploration ends and FINAL validates them. A
-failed PRELUDE, an EXPLORE that ran out of cards to measure on, a stop signal, the session deadline or an unhandled error skip straight to CLOSE, which always runs
-and kills every process the session started. The deadline plus the CLOSE grace bounds CLOSE itself; a stop signal
-brings that hard stop forward to the CLOSE grace from the signal, once, and the unwinding of the cancelled phases
-and CLOSE share it. An unhandled error brings it forward the same way when CLOSE starts, and so does a first signal
-that arrives during CLOSE; CLOSE is cut short if it still runs then. A second signal, whenever it arrives, cuts the
+failed PRELUDE, an EXPLORE that ran out of cards to measure on, a stop signal, the session deadline before FINAL
+starts or an unhandled error skip straight to CLOSE, which always runs and kills every process the session started.
+FINAL waits for the validation tests it started, past the deadline and the hard stop if need be, and moves the hard
+stop to no sooner than one CLOSE grace from its end. The deadline plus the CLOSE grace bounds CLOSE itself; a stop
+signal brings that hard stop forward to the CLOSE grace from the signal, once, and the unwinding of the cancelled
+phases and CLOSE share it. An unhandled error brings it forward the same way when CLOSE starts, and so does a first
+signal that arrives during CLOSE; CLOSE is cut short if it still runs then. A second signal, whenever it arrives, cuts the
 unwinding and CLOSE short at once. A CLOSE cut short releases what the session holds, closing the toolbox within
 its own short bound and killing every registered process, and writes the report.
 """
@@ -205,11 +207,12 @@ class Session:
             peers.lifecycle,
         )
         self._explorer = Explorer(context, self._branches, integrator, steering)
-        self._selector = FinalSelector(checks, settings.workload, clock)
+        self._selector = FinalSelector(checks, settings.workload)
         sources = ExportSources(self._notebook, peers.repo, blobs, dashboard)
         closing = SessionExports(layout, sources, metric, budget, kb_client=services.recipe_kb)
         self._closer = Closer(layout, self._stopper, closing, clock)
         self._signals = StopSignals()
+        self._in_final = False
 
     async def run(self) -> SessionOutcome:
         """Run every phase and CLOSE; an unhandled error propagates once CLOSE has run."""
@@ -239,9 +242,13 @@ class Session:
         deadline = asyncio.ensure_future(self._clock.sleep(budget.remaining(self._clock.now())))
         try:
             await asyncio.wait({phases, signal, deadline}, return_when=asyncio.FIRST_COMPLETED)
+            if self._in_final:
+                await asyncio.wait({phases, signal}, return_when=asyncio.FIRST_COMPLETED)
         finally:
             signal.cancel()
             deadline.cancel()
+        if self._in_final:
+            hard_stop.follow_final()
         if phases.done():
             return phases.result()
         if self._signals.received is not None:
@@ -313,8 +320,9 @@ class Session:
             return SessionOutcome(reason, None, None, NO_CARDS_LEFT)
         candidates = await self._final_candidates()
         await self._stopper.end_exploration(reason)
+        self._in_final = True
         self._phase("final", candidates=encode(candidates.each))
-        final = await self._selector.select(candidates, deadlines.final_end)
+        final = await self._selector.select(candidates)
         self._decisions.record(Decision(DecisionKind.FINAL, final.reason, detail={"chosen": encode(final.chosen)}))
         return SessionOutcome(reason, final, None, "")
 

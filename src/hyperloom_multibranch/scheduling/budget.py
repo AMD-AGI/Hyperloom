@@ -7,9 +7,10 @@ The baseline-prelude child gets all the remaining time; whatever it leaves, R, i
 out by the main flow's phase shares: FINAL keeps R*5/92, but never less than the longest
 root test of the baseline (one test of this workload), CLOSE keeps R*2/92 and EXPLORE
 runs until both reserves are all that is left. The deadline plus the CLOSE grace is the
-hard stop. The constants are re-declared because their owners are modules this package
-must not import; each names its source. A GPU-hour budget keeps FINAL's share the same way:
-EXPLORE ends once the tests have used the rest of it.
+hard stop, except that FINAL waits for the validation tests it started, past its reserve and the hard stop if need
+be, and a FINAL that ends later leaves CLOSE one CLOSE grace from its end. The constants are re-declared because
+their owners are modules this package must not import; each names its source. A GPU-hour budget keeps FINAL's share
+the same way: EXPLORE ends once the tests have used the rest of it.
 """
 
 from __future__ import annotations
@@ -57,7 +58,7 @@ class BudgetExhausted(RuntimeError):
 
 @dataclass(frozen=True)
 class PhaseDeadlines:
-    """Absolute clock times at which EXPLORE and FINAL end; CLOSE ends at the budget's deadline."""
+    """Absolute clock times at which EXPLORE and FINAL's reserve end; FINAL's validation may run past ``final_end``."""
 
     explore_end: float
     final_end: float
@@ -85,7 +86,7 @@ class SessionBudget:
 
     @property
     def hard_stop_at(self) -> float:
-        """The deadline plus the CLOSE grace: nothing of the session may run past it."""
+        """The deadline plus the CLOSE grace: nothing of the session but FINAL may run past it."""
         return self.deadline + self.close_grace_seconds
 
     def remaining(self, now: float) -> float:
@@ -112,10 +113,12 @@ class SessionBudget:
 
 
 class HardStop:
-    """When nothing of the session may run any longer: the budget's hard stop until :meth:`bring_forward` moves it.
+    """When nothing of the session may run any longer: the budget's hard stop until :meth:`bring_forward` or
+    :meth:`follow_final` moves it.
 
     A stop signal or an unhandled error brings it forward to the CLOSE grace from that moment, once, so the unwinding
-    of the phases, a cancelled PRELUDE's child and CLOSE all share that one grace.
+    of the phases, a cancelled PRELUDE's child and CLOSE all share that one grace. FINAL does not stop at it: once
+    FINAL ends, the hard stop is no sooner than one CLOSE grace from then.
     """
 
     def __init__(self, budget: SessionBudget, clock: Clock) -> None:
@@ -134,6 +137,14 @@ class HardStop:
         if not self._brought_forward:
             self._at = min(self._at, self._clock.now() + self._grace)
             self._brought_forward = True
+        return self._at
+
+    def follow_final(self) -> float:
+        """Move the hard stop to the CLOSE grace from now, as FINAL ends, unless it is later or was brought forward;
+        return it."""
+
+        if not self._brought_forward:
+            self._at = max(self._at, self._clock.now() + self._grace)
         return self._at
 
 

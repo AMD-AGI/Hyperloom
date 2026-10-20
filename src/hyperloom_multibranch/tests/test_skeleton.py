@@ -134,6 +134,7 @@ from hyperloom_multibranch.scheduling.tests.peer_fakes import (
 )
 from hyperloom_multibranch.scheduling.tests.child_sessions import child_with_patch
 from hyperloom_multibranch.tests.fakes import RecordingVerifier
+from hyperloom_multibranch.toolbox.attempts import TestJob
 from hyperloom_multibranch.toolbox.tools.base import JobStatus
 from hyperloom_multibranch.specialist.prompts import prompt_versions
 from hyperloom_multibranch.specialist.runtime import MAX_LOSS_RESTARTS, SessionCrashed
@@ -184,6 +185,8 @@ FIX_REASONS = tuple(FIXES)
 FIX_CASE = AttachmentRef(FIX_CASE_ID, "dir", "a" * 64)
 #: An agent CLI as the AI work socket starts one: leading a session of its own.
 AGENT_ARGV = ("sleep", "600")
+#: How long each FINAL test of a slow toolbox runs: longer than the whole budget.
+FINAL_TEST_SECONDS = 2 * SETTINGS.max_hours * 3600
 
 
 def _reply(document: dict[str, object]) -> str:
@@ -966,6 +969,71 @@ async def test_final_is_reserved_the_longest_baseline_test_when_its_share_is_sho
     share = SETTINGS.max_hours * MB_SECONDS_PER_HOUR * MB_FINAL_SHARE / 92
     assert longest > share
     assert final_window == pytest.approx(longest)
+
+
+def _slow_final(stage: Stage, *, interrupt: bool = False) -> type[RecordingToolbox]:
+    """A toolbox each of whose FINAL tests runs :data:`FINAL_TEST_SECONDS` before it measures; with ``interrupt``, the
+    operator stops the session as the first one would end, every one runs as long again, and the integration branch's
+    tests are never all withdrawn. A test double for validation that outlasts the budget, not a placeholder."""
+
+    class SlowFinalToolbox(RecordingToolbox):
+        def __init__(self, notebook: LocalNotebook, effect: Callable[[TestRequest], float], conc: int) -> None:
+            super().__init__(notebook, effect, conc=conc)
+            measure = self.executor.run
+
+            async def run(job: TestJob) -> TestResult:
+                if job.request.purpose is Purpose.FINAL:
+                    await stage.time.sleep(FINAL_TEST_SECONDS)
+                    if interrupt and not stage.signalled_at:
+                        stage.signalled_at = stage.time.now()
+                        os.kill(os.getpid(), signal.SIGTERM)
+                    if interrupt:
+                        await stage.time.sleep(FINAL_TEST_SECONDS)
+                return await measure(job)
+
+            self.executor.run = run  # type: ignore[method-assign]
+
+        async def cancel_branch(self, branch_id: str, reason: str = "branch stopped") -> int:
+            if interrupt and branch_id == INTEGRATION_BRANCH:
+                await asyncio.Event().wait()
+            return await super().cancel_branch(branch_id, reason)
+
+    return SlowFinalToolbox
+
+
+async def test_a_final_whose_validation_outlasts_the_budget_still_chooses_and_close_follows_it(tmp_path: Path) -> None:
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.toolbox_type = _slow_final(stage)
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error, outcome.exit_code) == (SessionStopReason.TIME_EXHAUSTED, "", 0)
+    assert outcome.final is not None and outcome.final.chosen is not None
+    assert outcome.final.chosen.commit == await stage.root()
+    assert outcome.close is not None and outcome.close.stop.clean
+    budget = SessionBudget.from_hours(SETTINGS.max_hours, START)
+    [final] = [row for row in _decisions(stage) if row["kind"] == "final"]
+    assert float(str(final["at"])) > budget.hard_stop_at
+    assert stage.time.now() <= float(str(final["at"])) + budget.close_grace_seconds
+
+
+async def test_a_stop_signal_cuts_a_final_past_the_hard_stop_short_and_close_gets_one_close_grace(
+    tmp_path: Path,
+) -> None:
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.toolbox_type = _slow_final(stage, interrupt=True)
+
+    outcome = await stage.run()
+
+    assert outcome.stop_reason is SessionStopReason.SIGNAL and outcome.exit_code == 1
+    assert outcome.final is None and outcome.close is not None
+    assert STOP_OVERRAN in outcome.close.stop.failures
+    budget = SessionBudget.from_hours(SETTINGS.max_hours, START)
+    grace = budget.close_grace_seconds
+    assert budget.hard_stop_at < stage.signalled_at
+    assert stage.signalled_at + grace - TOOLBOX_CLOSE_SECONDS <= stage.time.now() <= stage.signalled_at + grace
+    final_tests = {rid for rid, test in stage.toolbox.requests.items() if test.purpose is Purpose.FINAL}
+    assert final_tests and final_tests <= stage.toolbox.withdrawn.keys()
 
 
 async def test_an_unreadable_steering_reply_keeps_every_branch_and_k_as_they_were(tmp_path: Path) -> None:

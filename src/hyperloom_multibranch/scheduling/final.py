@@ -8,7 +8,8 @@ its branch. Each is validated through the toolbox as a session measurement: one 
 :attr:`~hyperloom_multibranch.scheduling.settings.Workload.final_concs`, read per conc from its rounds, and a
 cold-start reproduction the rule gate judges against the commit's own recorded value and holds to the accuracy gate,
 and the regression set of the commit's own ancestry run on the commit itself. The toolbox measures a
-sweep over the concs its request names and the primary one alone when it names none, so FINAL names them.
+sweep over the concs its request names and the primary one alone when it names none, so FINAL names them. FINAL
+waits for every validation test it started, past its reserve and the session's deadline if need be.
 The primary operating point (the workload's conc) decides; a candidate
 whose other sweep points fall more than :data:`MB_SWEEP_DEGRADATION_PCT` below the other candidate's at the same conc
 is passed over while the other one does not degrade in turn. An AgentX workload defines no other operating point, so
@@ -29,7 +30,6 @@ from hyperloom_multibranch.contracts.judgement import Verdict
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.records import BranchProgress
 from hyperloom_multibranch.contracts.toolbox import RequestRejected, TestWithdrawn
-from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.integrator import defects_beyond_gain
 from hyperloom_multibranch.scheduling.requests import (
     NO_DELTA,
@@ -200,28 +200,26 @@ class _Reproduction:
 class FinalSelector:
     """Validates the candidates through the toolbox, the rule gate and the regression set."""
 
-    def __init__(self, checks: SessionChecks, workload: Workload, clock: Clock) -> None:
+    def __init__(self, checks: SessionChecks, workload: Workload) -> None:
         self._tests = checks.tests
         self._gate = checks.gate
         self._regression = checks.regression
         self._workload = workload
         self._metric = workload.metric
-        self._clock = clock
 
-    async def select(self, candidates: FinalCandidates, deadline: float) -> FinalChoice:
-        """Validate every candidate concurrently by ``deadline`` (clock seconds) and pick one."""
+    async def select(self, candidates: FinalCandidates) -> FinalChoice:
+        """Validate every candidate concurrently and pick one, however long the validation runs: no clock bounds it,
+        the toolbox's per-test timeout bounds a test that hangs, and only a cancel cuts it short."""
 
-        checks = await asyncio.gather(*(self._bounded(candidate, deadline) for candidate in candidates.each))
+        checks = await asyncio.gather(*(self._validated(candidate) for candidate in candidates.each))
         choice = pick_final(tuple(checks), self._metric, self._workload.conc)
         if self._workload.final_concs == (self._workload.conc,):
             return replace(choice, reason=f"{choice.reason}; {PRIMARY_POINT_ONLY}")
         return choice
 
-    async def _bounded(self, candidate: FinalCandidate, deadline: float) -> CandidateCheck:
+    async def _validated(self, candidate: FinalCandidate) -> CandidateCheck:
         try:
-            return await self._clock.wait_for(self._check(candidate), deadline - self._clock.now())
-        except asyncio.TimeoutError:
-            return CandidateCheck(candidate, error="the FINAL deadline passed before validation finished")
+            return await self._check(candidate)
         except TestWithdrawn as exc:
             return CandidateCheck(candidate, error=f"a validation test was withdrawn: {exc}")
         except RequestRejected as exc:

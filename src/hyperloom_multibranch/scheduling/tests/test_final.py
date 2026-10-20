@@ -68,6 +68,8 @@ METRIC = "output_throughput"
 CONC = 64
 WORKLOAD = Workload("org/model", "vllm", 8, CONC, "fp8", "mi355x", KernelOptimizer.FORGE, InferenceXShape(1024, 1024))
 START = 100.0
+#: Far longer than FINAL's reserve of any budget the tests set.
+VALIDATION_SECONDS = 24 * 3600.0
 INTEGRATION = FinalCandidate("integration", INTEGRATION_BRANCH, "i1", 1040.0)
 BRANCH = FinalCandidate("best_branch", "b02", "c7", 1060.0)
 
@@ -237,7 +239,7 @@ class Bench:
         return FinalCandidates(integration, replace(BRANCH, commit=self.commits["c7"]) if both else None)
 
     def selector(self, workload: Workload = WORKLOAD) -> FinalSelector:
-        return FinalSelector(SessionChecks(self.tests, self.gate, self.regression), workload, self.time.clock)
+        return FinalSelector(SessionChecks(self.tests, self.gate, self.regression), workload)
 
     def fail(self, tag: str, fate: Fate, kind: TestKind | None = None) -> None:
         """Every FINAL test of ``tag``'s commit (of ``kind`` when given) ends in ``fate``."""
@@ -262,7 +264,7 @@ async def test_each_candidate_is_swept_and_reproduced_with_accuracy_as_a_session
         frozenset({"c7"}): {MAIN_POINT: 1000.0, CONC: 1060.0},
     }
     bench = await Bench(tmp_path).build(curves)
-    choice = await bench.selector().select(bench.candidates(), deadline=START + 3600.0)
+    choice = await bench.selector().select(bench.candidates())
 
     assert choice.chosen == bench.candidates().integration
     assert [check.reproduced for check in choice.checks] == [True, False]
@@ -288,7 +290,7 @@ async def test_an_agentx_candidate_is_measured_at_the_primary_operating_point_al
     }
     bench = await Bench(tmp_path).build(curves)
 
-    choice = await bench.selector(replace(WORKLOAD, inferencex=None)).select(bench.candidates(), START + 3600.0)
+    choice = await bench.selector(replace(WORKLOAD, inferencex=None)).select(bench.candidates())
 
     sweeps = [test.concurrency for test in bench.final_tests().values() if test.kind is TestKind.SWEEP]
     assert sweeps == [(CONC,), (CONC,)]
@@ -302,7 +304,7 @@ async def test_an_unmeasured_test_a_failed_sweep_or_a_failed_accuracy_disqualifi
     bench.fail("c7", Fate.MEASUREMENT)
     bench.fail("i1", Fate.CANDIDATE, TestKind.SWEEP)
 
-    choice = await bench.selector().select(bench.candidates(), START + 3600.0)
+    choice = await bench.selector().select(bench.candidates())
 
     assert choice.chosen is None
     assert choice.checks[0].error == "the sweep ended candidate_failed (serve_flag)"
@@ -312,7 +314,7 @@ async def test_an_unmeasured_test_a_failed_sweep_or_a_failed_accuracy_disqualifi
     gate = bench.handle(Role.GATE)
     rule = InferenceXRule(gate, CONC)
     bench.gate = RefusingAccuracyGate(gate, bench.toolbox, rule, bench.toolbox, polling=Polling(GATE_POLL_SECONDS))
-    alone = await bench.selector().select(bench.candidates(both=False), START + 3600.0)
+    alone = await bench.selector().select(bench.candidates(both=False))
     assert alone.chosen is None and not alone.checks[0].accuracy_passed and alone.checks[0].reproduced
 
 
@@ -324,7 +326,7 @@ async def test_a_candidate_the_regression_set_fails_on_its_own_commit_is_not_eli
     bench = await Bench(tmp_path).build(curves)
     bench.regression.failures = {bench.commits["i1"]: "case kv-overflow reproduced"}
 
-    choice = await bench.selector().select(bench.candidates(), START + 3600.0)
+    choice = await bench.selector().select(bench.candidates())
 
     assert choice.chosen == bench.candidates().best_branch
     assert [check.regression_passed for check in choice.checks] == [False, True]
@@ -337,7 +339,7 @@ async def test_a_cold_start_that_dropped_requests_is_not_reproduced(tmp_path: Pa
     rule = InferenceXRule(gate, CONC)
     bench.gate = DroppingRequestsGate(gate, bench.toolbox, rule, bench.toolbox, polling=Polling(GATE_POLL_SECONDS))
 
-    choice = await bench.selector().select(bench.candidates(both=False), START + 3600.0)
+    choice = await bench.selector().select(bench.candidates(both=False))
 
     check = choice.checks[0]
     assert check.reproduced is False and check.accuracy_passed and check.regression_passed
@@ -364,30 +366,43 @@ async def test_a_sweep_that_failed_after_measuring_the_primary_conc_disqualifies
     bench = await Bench(tmp_path).build({frozenset({"i1"}): {MAIN_POINT: 1040.0}})
     bench.tests = CrashedSweepTests(bench.toolbox, bench.time.clock)
 
-    choice = await bench.selector().select(bench.candidates(both=False), START + 3600.0)
+    choice = await bench.selector().select(bench.candidates(both=False))
 
     [check] = choice.checks
     assert choice.chosen is None and check.reproduced and check.accuracy_passed
     assert (check.curve, check.error) == ({}, "the sweep ended candidate_failed (server crashed)")
 
 
-async def test_a_candidate_unfinished_at_the_deadline_is_not_eligible_and_its_tests_are_taken_back(
-    tmp_path: Path,
-) -> None:
+async def test_final_waits_for_its_validation_however_long_it_runs(tmp_path: Path) -> None:
+    bench = await Bench(tmp_path).build({frozenset({"i1"}): {MAIN_POINT: 1040.0, CONC: 1040.0}})
+    bench.toolbox.executor.gate.clear()
+    selecting = asyncio.ensure_future(bench.selector().select(bench.candidates(both=False)))
+
+    await bench.time.sleep(VALIDATION_SECONDS)
+    bench.toolbox.executor.gate.set()
+    choice = await selecting
+
+    assert choice.chosen == bench.candidates().integration and not choice.checks[0].error
+
+
+async def test_a_cancelled_final_takes_its_tests_back(tmp_path: Path) -> None:
     bench = await Bench(tmp_path).build({})
     bench.toolbox.executor.gate.clear()
+    selecting = asyncio.ensure_future(bench.selector().select(bench.candidates(both=False)))
+    while len(bench.final_tests()) < 2:
+        await asyncio.sleep(0)
 
-    choice = await bench.selector().select(bench.candidates(both=False), START + 600.0)
+    selecting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await selecting
 
-    assert choice.chosen is None
-    assert "deadline" in choice.checks[0].error
-    assert bench.toolbox.withdrawn.keys() == bench.final_tests().keys() and bench.final_tests()
+    assert bench.toolbox.withdrawn.keys() == bench.final_tests().keys()
 
 
 async def test_a_withdrawn_test_cancels_the_candidates_other_measurements(tmp_path: Path) -> None:
     bench = await Bench(tmp_path).build({})
     bench.toolbox.executor.gate.clear()
-    selecting = asyncio.ensure_future(bench.selector().select(bench.candidates(both=False), START + 3600.0))
+    selecting = asyncio.ensure_future(bench.selector().select(bench.candidates(both=False)))
     while len(bench.final_tests()) < 2:
         await asyncio.sleep(0)
     [sweep] = [rid for rid, request in bench.final_tests().items() if request.kind is TestKind.SWEEP]
