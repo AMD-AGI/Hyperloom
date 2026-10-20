@@ -255,7 +255,7 @@ class KernelExitFacts:
 class KernelPhase(CoordinatorCollaborator):
     """KERNEL_AGENT phase handler: drives kernel-level optimization tasks."""
 
-    # Relative-change floor for the pre-GEAK reprofile: effectively "any change", absorbing float noise.
+    # Relative-change floor for the Forge kernel-entry reprofile: effectively "any change", absorbing float noise.
     _REPROFILE_CHANGE_TOL: float = 1e-5
 
     async def exit_facts(self) -> KernelExitFacts:
