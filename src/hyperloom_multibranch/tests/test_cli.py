@@ -364,6 +364,50 @@ def test_a_model_without_a_price_runs_the_session_on_its_tokens_and_says_so(
     assert f"{warned}, which the price sheet does not list" in caplog.text
 
 
+@pytest.mark.parametrize(
+    ("judge", "specialists", "named"),
+    [
+        ("no-such-model", DEFAULT_CODEX_MODEL, "the judge's model no-such-model"),
+        (DEFAULT_CLAUDE_MODEL, "no-such-model", "the specialists' model no-such-model"),
+    ],
+)
+@pytest.mark.usefixtures("ready_environment")
+def test_a_dollar_cap_over_a_model_without_a_price_exits_two_before_creating_anything(
+    judge: str,
+    specialists: str,
+    named: str,
+    agent_cli: list[RunSettings],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    _codex_specialists(monkeypatch, specialists)
+    monkeypatch.setenv("CLAUDE_MODEL", judge)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["run", *WORKLOAD_ARGS, "--max-llm-usd", "5"])
+
+    assert exc.value.code == cli.EXIT_USAGE
+    captured = capsys.readouterr()
+    assert f"--max-llm-usd cannot count the dollars of {named}, which the price sheet does not list" in captured.err
+    assert captured.out == ""
+    assert agent_cli == []
+    assert not any(tmp_path.iterdir())
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_dollar_cap_over_priced_models_runs_the_session(
+    agent_cli: list[RunSettings], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    _codex_specialists(monkeypatch, DEFAULT_CODEX_MODEL)
+
+    assert cli.main(["run", *WORKLOAD_ARGS, "--max-llm-usd", "5"]) == 0
+
+    assert [run.max_llm_usd for run in agent_cli] == [5.0]
+
+
 @pytest.mark.usefixtures("ready_environment", "agent_cli")
 def test_a_framework_whose_source_cannot_be_laid_out_fails_loudly_before_creating_anything(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]

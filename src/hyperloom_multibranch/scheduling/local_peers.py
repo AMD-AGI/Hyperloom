@@ -325,10 +325,18 @@ def machine_parallel_tests(tp: int) -> int:
     return max_parallel_tests(len(machine_cards()), tp)
 
 
+def specialist_model(env: Mapping[str, str]) -> str:
+    """The model every specialist of a session runs on: the one ``env`` names for the backend it is credentialed
+    for."""
+
+    return resolve_forge_llm_model(preferred_agent_backend(env), env={**env, **provider_model_defaults(env)})
+
+
 def specialist_command(env: Mapping[str, str]) -> AgentCommand:
     """The agent CLI every specialist of a session runs: the backend ``env`` is credentialed for, found on its
-    ``PATH``, on the model ``env`` names for it; raises :class:`PeersUnavailable` when that CLI is not installed. A
-    model the price sheet does not list records its tokens only, which no dollar cap counts, and says so here."""
+    ``PATH``, on :func:`specialist_model`; raises :class:`PeersUnavailable` when that CLI is not installed. A model the
+    price sheet does not list records its tokens only, which the command line accepts only without a dollar cap, and
+    says so here."""
 
     from hyperloom_multibranch.specialist.agent_session import AgentCommand
 
@@ -336,7 +344,7 @@ def specialist_command(env: Mapping[str, str]) -> AgentCommand:
     executable = shutil.which(backend, path=env.get("PATH"))
     if executable is None:
         raise PeersUnavailable(f"the {backend} CLI the specialists run is not on PATH")
-    model = resolve_forge_llm_model(backend, env={**env, **provider_model_defaults(env)})
+    model = specialist_model(env)
     if price_of(model) is None:
         logger.warning("the specialists run on %s, which the price sheet does not list: they record tokens only", model)
     return AgentCommand(backend, executable, model)
@@ -434,6 +442,7 @@ __all__ = [
     "model_backed_sessions",
     "require_framework_package",
     "specialist_command",
+    "specialist_model",
     "workload_environment",
     "workload_rule",
 ]

@@ -13,7 +13,9 @@ FINAL's share is left, and FINAL still runs. ``--max-llm-usd`` caps the dollars 
 ends with ``llm_budget_exhausted`` once their recorded spend reaches it, and FINAL still runs. Each call is priced from
 the price sheet, cached tokens at cache rates: a specialist launch's calls from its log when the launch ends, a launch
 cut short, lost or stopped included, so the stop can come up to one launch late, and each call of the scheduler's own
-judge and patch resolver as it returns. The rule gate's fix critic is not counted. A session whose toolbox has fewer
+judge and patch resolver as it returns. The rule gate's fix critic is not counted. A cap is a usage error when the
+price sheet has no rate for the model the specialists run on or the one the judge and the patch resolver ask, whose
+calls would record tokens only. A session whose toolbox has fewer
 usable cards left than one test needs ends EXPLORE with ``no_measurement_cards`` and skips FINAL. Exit codes: 0 when
 the session ran its course, its wall-clock, GPU-hour or LLM budget spent included, 1 when it failed or was stopped,
 ``no_measurement_cards`` included, 2 on a usage error. The environment and the peers a session needs are checked before
@@ -23,8 +25,7 @@ PRELUDE reads warm-start leads from and CLOSE writes the final recipe back to is
 :data:`RSI_ARCHIVE_DEFAULT`, set in this process's environment for every reader of it, and must be a writable
 directory; the measurement pins must be readable, the image the session runs on named by both
 ``HYPERLOOM_ACTIVE_IMAGE_REF`` and ``HYPERLOOM_ACTIVE_IMAGE_DIGEST`` included; the framework's package must be
-installed in the image; the agent CLI the specialists run must be installed; and the price sheet must have a rate for
-the model the specialists run on and for the one the judge and the patch resolver ask.
+installed in the image; and the agent CLI the specialists run must be installed.
 A session uses no Experience KB, whatever ``HYPERLOOM_KB_URL`` names (see
 :data:`~hyperloom_multibranch.scheduling.mb_fakes.MB_FAKE_EXPERIENCE_KB`).
 """
@@ -45,6 +46,7 @@ from hyperloom.common.env import EnvValueError
 from hyperloom.common.perf_metric import agentx_enabled
 from hyperloom.inference_optimizer.session.paths import workspace_root
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient, RemoteRecipeConfigurationError
+from hyperloom_multibranch.contracts.llm_prices import price_of
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.rulegate.critic import LlmCritic, anthropic_critic
@@ -53,7 +55,12 @@ from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.layout import create_session
 from hyperloom_multibranch.scheduling.lifecycle import Session, SessionHost, SessionServices
 from hyperloom_multibranch.scheduling.llm import anthropic_completion, default_model
-from hyperloom_multibranch.scheduling.local_peers import AGENTX_ENV, load_peers, machine_parallel_tests
+from hyperloom_multibranch.scheduling.local_peers import (
+    AGENTX_ENV,
+    load_peers,
+    machine_parallel_tests,
+    specialist_model,
+)
 from hyperloom_multibranch.scheduling.peers import PeerFactory, PeersUnavailable
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.roster import RosterCaps
@@ -111,7 +118,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-llm-usd",
         type=float,
         default=0.0,
-        help="Dollars the session's recorded LLM calls, all but the fix critic's, may cost; EXPLORE ends there; 0 = none.",
+        help=(
+            "Dollars the session's recorded LLM calls, all but the fix critic's, may cost; EXPLORE ends there; 0 = none."
+            " Refused when the price sheet lists no rate for the judge's or the specialists' model."
+        ),
     )
     run.add_argument(
         "--max-branches", type=int, default=DEFAULT_MAX_BRANCHES, help="Specialist branches not stopped, at most."
@@ -198,6 +208,22 @@ def require_workload_switch(workload: Workload, env: Mapping[str, str]) -> None:
         raise ValueError(f"{AGENTX_ENV}={env[AGENTX_ENV]!r} contradicts --workload {workload.kind.value}")
 
 
+def require_priced_models(max_llm_usd: float, env: Mapping[str, str]) -> None:
+    """Raise ValueError when ``max_llm_usd`` caps the session's LLM dollars and the price sheet lists no rate for the
+    model the judge and the patch resolver ask or the one the specialists of ``env`` run on: their calls would record
+    tokens only, which the cap cannot count."""
+
+    if not max_llm_usd:
+        return
+    models = {"the judge's": default_model(), "the specialists'": specialist_model(env)}
+    unpriced = [f"{whose} model {model}" for whose, model in models.items() if price_of(model) is None]
+    if unpriced:
+        raise ValueError(
+            f"--max-llm-usd cannot count the dollars of {' or '.join(unpriced)}, which the price sheet does not list;"
+            " run on a listed model or without a dollar cap"
+        )
+
+
 def recipe_kb_from_env() -> RemoteRecipeClient | None:
     """The Recipe KB client ``KB_STORE_URL`` and ``KB_STORE_TOKEN`` configure, ``None`` when neither is set; raises
     :class:`EnvironmentIncomplete` when only one is."""
@@ -262,6 +288,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         settings = settings_from(args)
         require_workload_switch(settings.workload, os.environ)
+        require_priced_models(settings.max_llm_usd, os.environ)
     except ValueError as exc:
         parser.print_usage(sys.stderr)
         print(f"{parser.prog}: error: {exc}", file=sys.stderr)
@@ -287,6 +314,7 @@ __all__ = [
     "build_parser",
     "main",
     "recipe_kb_from_env",
+    "require_priced_models",
     "require_rsi_archive",
     "require_workload_switch",
     "run_session",
