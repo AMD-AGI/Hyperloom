@@ -3702,7 +3702,24 @@ def enrich_candidates_with_runtime_metadata(
         _enrich_kernel_contract(item, model_params)
 
 
-def _enrich_kernel_contract(item: dict[str, Any], model_params: dict[str, Any] | None) -> None:
+# Kernel-name tag -> torch.distributed op; the first match wins, so the bare "reduce" stays last.
+_COLLECTIVE_OPS = {
+    "all_reduce": "all_reduce",
+    "allreduce": "all_reduce",
+    "all_gather": "all_gather",
+    "allgather": "all_gather",
+    "reduce_scatter": "reduce_scatter",
+    "reducescatter": "reduce_scatter",
+    "all_to_all": "all_to_all",
+    "alltoall": "all_to_all",
+    "broadcast": "broadcast",
+    # aiter cross_device_reduce_* kernels use all-reduce semantics.
+    "cross_device_reduce": "all_reduce",
+    "reduce": "reduce",
+}
+
+
+def _enrich_kernel_contract(item: dict[str, Any], model_params: dict[str, Any]) -> None:
     """Populate per-kernel-class contract fields used to build a faithful harness.
 
     - Collectives (all_reduce / all_gather / reduce_scatter / ...): record
@@ -3715,48 +3732,19 @@ def _enrich_kernel_contract(item: dict[str, Any], model_params: dict[str, Any] |
     These are advisory metadata; absent fields are simply not set.
     """
     name = str(item.get("name") or "").lower()
-    mp = model_params or {}
-    contract = item.get("kernel_contract")
-    if not isinstance(contract, dict):
-        contract = {}
+    contract = item.get("kernel_contract") or {}
     # --- collectives ---
-    _COLL = (
-        ("all_reduce", "allreduce"),
-        ("all_gather", "allgather"),
-        ("reduce_scatter", "reducescatter"),
-        ("all_to_all", "alltoall"),
-        ("broadcast",),
-        # aiter cross_device_reduce_* kernels use all-reduce semantics.
-        ("cross_device_reduce",),
-        ("reduce",),
-    )
-    _OPMAP = {
-        "all_reduce": "all_reduce",
-        "allreduce": "all_reduce",
-        "all_gather": "all_gather",
-        "allgather": "all_gather",
-        "reduce_scatter": "reduce_scatter",
-        "reducescatter": "reduce_scatter",
-        "all_to_all": "all_to_all",
-        "alltoall": "all_to_all",
-        "broadcast": "broadcast",
-        "cross_device_reduce": "all_reduce",
-        "reduce": "reduce",
-    }
-    if bool(item.get("is_multigpu")) or any(tag in name for grp in _COLL for tag in grp):
-        op = next((_OPMAP[t] for grp in _COLL for t in grp if t in name), "all_reduce")
+    collective_op = next((op for tag, op in _COLLECTIVE_OPS.items() if tag in name), None)
+    if item.get("is_multigpu") or collective_op:
+        op = collective_op or "all_reduce"
         contract["kind"] = "collective"
         contract["collective_op"] = op
-        ws = (
-            mp.get("WORLD_SIZE")
-            or mp.get("TP_SIZE")
-            or mp.get("TENSOR_PARALLEL_SIZE")
-            or item.get("num_gpus_recommended")
-        )
+        tp = model_params.get("TP_SIZE") or model_params.get("TENSOR_PARALLEL_SIZE")
+        ws = model_params.get("WORLD_SIZE") or tp or item.get("num_gpus_recommended")
         if ws:
             contract["world_size"] = int(ws)
-        if mp.get("TP_SIZE") or mp.get("TENSOR_PARALLEL_SIZE"):
-            contract["tp_size"] = int(mp.get("TP_SIZE") or mp.get("TENSOR_PARALLEL_SIZE"))
+        if tp:
+            contract["tp_size"] = int(tp)
         contract.setdefault("reduce_op", "sum")
         contract["reference"] = f"torch.distributed.{op}"
         contract["e2e_note"] = "comm-bound collective: a 1-GPU GEAK slot cannot reproduce inter-GPU traffic"
@@ -3769,10 +3757,10 @@ def _enrich_kernel_contract(item: dict[str, Any], model_params: dict[str, Any] |
             ("NUM_ATTENTION_HEADS", "num_heads"),
             ("NUM_KEY_VALUE_HEADS", "num_kv_heads"),
         ):
-            if mp.get(src) is not None:
-                contract[dst] = mp.get(src)
+            if model_params.get(src) is not None:
+                contract[dst] = model_params[src]
         contract.setdefault("kv_layout", "unknown")  # to be confirmed from trace; flag for reviewer
-        contract["seqlen_regime"] = "prefill" if "prefill" in name else ("decode" if "decode" in name else "mixed")
+        contract["seqlen_regime"] = next((regime for regime in ("prefill", "decode") if regime in name), "mixed")
         contract["reference"] = "torch.nn.functional.scaled_dot_product_attention"
     # E2E-TRANSFER honesty flag: warn when a kernel-level win is unlikely to move
     # serving E2E so neither the pipeline nor a reviewer over-trusts a micro-speedup.
