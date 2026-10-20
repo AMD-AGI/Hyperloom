@@ -86,7 +86,7 @@ def _read_text_safe(
                 return source_contents[candidate]
     try:
         return Path(path).read_text(errors="replace")
-    except Exception:  # noqa: BLE001 - best-effort
+    except OSError:
         return ""
 
 
