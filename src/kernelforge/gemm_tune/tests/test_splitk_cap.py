@@ -188,16 +188,17 @@ def test_support_fn_none_falls_back_to_static_cap(tmp_path):
     assert _read(art)[1][_HDR.index("splitK")] == "2"  # fell back to static cap=2
 
 
-def test_support_fn_defect_surfaces_instead_of_the_static_cap(tmp_path):
+@pytest.mark.parametrize("defect", [TypeError, ValueError, IndexError])
+def test_support_fn_defect_surfaces_instead_of_the_static_cap(tmp_path, defect):
     art = tmp_path / "a.csv"
     prof = tmp_path / "p.csv"
     _write(art, [_row(64, 5120, 5120, 9, 3, 20.0, "B3")])
     _write(prof, [_row(64, 5120, 5120, 9, 3, 20.0, "B3"), _row(64, 5120, 5120, 8, 2, 20.6, "B2")])
 
     def broken(m, n, k):
-        raise TypeError("trial defect")
+        raise defect("trial defect")
 
-    with pytest.raises(TypeError, match="^trial defect$"):
+    with pytest.raises(defect, match="^trial defect$"):
         _cap_splitk_to_serve_safe(art, prof, 2, forwarding_libtypes=_CK_FORWARDS, support_fn=broken)
 
 

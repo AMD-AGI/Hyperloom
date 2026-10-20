@@ -233,3 +233,13 @@ def test_read_hwcr_reports_an_unreadable_msr_as_none(monkeypatch, opener):
     monkeypatch.setattr(pa.os, "geteuid", lambda: 0)
     monkeypatch.setattr("builtins.open", opener)
     assert pa.read_hwcr() is None
+
+
+def test_read_hwcr_does_not_hide_an_unexpected_failure(monkeypatch):
+    def _broken(*_a, **_k):
+        raise TypeError("msr reader broke")
+
+    monkeypatch.setattr(pa.os, "geteuid", lambda: 0)
+    monkeypatch.setattr("builtins.open", _broken)
+    with pytest.raises(TypeError, match="msr reader broke"):
+        pa.read_hwcr()

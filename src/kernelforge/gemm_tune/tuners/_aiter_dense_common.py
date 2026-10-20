@@ -1410,14 +1410,11 @@ def _cap_splitk_to_serve_safe(
             continue
         try:
             key = columns.shape_key(row)
-            maxsk = _shape_splitk_ceiling(
-                support_fn,
-                max_splitk,
-                (int(row[columns.m]), int(row[columns.n]), int(row[columns.k])),
-            )
+            shape = (int(row[columns.m]), int(row[columns.n]), int(row[columns.k]))
         except (ValueError, IndexError):
             out.append(row)
             continue
+        maxsk = _shape_splitk_ceiling(support_fn, max_splitk, shape)
         if sk <= maxsk:
             out.append(row)
             has_splitk = has_splitk or sk > 0
