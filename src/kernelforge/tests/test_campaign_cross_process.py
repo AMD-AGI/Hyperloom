@@ -438,7 +438,7 @@ def test_resume_ends_the_relay_blockage_epoch_of_a_recovered_keep(tmp_path, monk
     interrupted = store.load()
     interrupted.agent_relay.active_profile_id = "claude"
     interrupted.agent_relay.active_no_improvement_streak = 2
-    interrupted.agent_relay.profiles_tried_since_keep = ["codex"]
+    interrupted.agent_relay.intervention_kind = "cross_harness"
     store.save(interrupted)
 
     resumed = _make_loop(workspace, kernel, driver, tracker, session_count=0, resume=True)
@@ -447,7 +447,7 @@ def test_resume_ends_the_relay_blockage_epoch_of_a_recovered_keep(tmp_path, monk
     recovered = LoopStateStore(str(workspace)).load()
     assert recovered.best.iteration == 1
     assert recovered.agent_relay.active_no_improvement_streak == 0
-    assert recovered.agent_relay.profiles_tried_since_keep == []
+    assert recovered.agent_relay.intervention_kind == ""
 
 
 def test_resume_repairs_publication_after_state_advanced_once(tmp_path, monkeypatch):

@@ -168,9 +168,9 @@ an attempt available. PARTIAL evidence may use the second attempt; an exhausted
 commit continues with its published or checkpoint evidence.
 
 The campaign is TIME-driven (`--max-hours`). When the search stalls, the loop
-hands it to another Agent profile (see *Model relay* below), and the
-supervisor injects fresh directions once no untried profile is left, rather
-than self-terminating on plateau.
+hands it to another Agent profile (see *Model relay* below), or the supervisor
+injects fresh directions when no other profile is available, rather than
+self-terminating on plateau.
 
 ## Round admission
 
@@ -294,12 +294,19 @@ model relay is disabled for the session.
 A blockage is three consecutive non-improving search iterations produced by the
 active profile. Infrastructure, API, device-contention and integrity failures,
 and outcomes no profile produced (such as a stacked merge), do not count; a
-KEEP ends the blockage. At a blockage the loop switches the complete search
-actor (orchestration, specialists, Plan Critic and Implementer) at the next clean
-iteration boundary to the first available profile not tried since the last
-KEEP, preferring a different harness, and forces the next round to diversify.
-When every profile has been tried, the supervisor below is the last
-intervention.
+KEEP ends the blockage. Every blockage takes the first of these the session can
+run, checked against the startup check:
+
+1. Switch to an available profile on a different harness and model (Claude Code
+   and Codex).
+2. Otherwise, switch to an available profile on the same harness with a
+   different model.
+3. Otherwise, run the supervisor below on the active profile.
+
+A switch replaces the complete search actor (orchestration, specialists, Plan
+Critic and Implementer) at the next clean iteration boundary and forces the next
+round to diversify. With both `claude` and `codex` available, the search
+therefore alternates between them at every blockage until a KEEP.
 
 A session starts on the profile a resumed campaign was running, else the
 primary, else the `--agent-fallback-provider` member, else any available member.
@@ -322,7 +329,7 @@ every profile and each switch.
 
 ## Stalled-search supervisor
 
-When the search plateaus and no untried Agent profile is left (see
+When the search plateaus and no other Agent profile is available (see
 *Model relay* above), `forge-loop` escalates to a supervisor backend.
 A campaign without relay escalates after three stalled iterations instead, at
 most once every three iterations; the startup log states which schedule

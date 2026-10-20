@@ -132,7 +132,7 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 | Option | Default | Meaning |
 |:--|:--|:--|
 | `--agent-backend <name>` | provider default | Registered local Agent provider; the model-relay primary of a new campaign. A resumed campaign refuses a different provider. |
-| `--supervisor-backend <name>` | follows the active Agent profile | Registered provider for the AVO supervisor, the last intervention of a model-relay blockage. Omit it so one `--agent-backend` controls every local agent. |
+| `--supervisor-backend <name>` | follows the active Agent profile | Registered provider for the AVO supervisor, run at a model-relay blockage when no other Agent profile is available. Omit it so one `--agent-backend` controls every local agent. |
 | `--agent-cli <path>` | provider default | Provider executable path or command. |
 | `--model <name>` | provider default | Model of the primary Agent profile for this session, on resume as well. |
 | `--agent-reasoning-effort <v>` | provider default | Provider reasoning effort value. |

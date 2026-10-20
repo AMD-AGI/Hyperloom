@@ -135,7 +135,6 @@ def test_outcome_the_active_profile_did_not_produce_does_not_change_its_streak(p
 def test_three_search_failures_reach_blockage_and_keep_resets_the_epoch():
     state = AgentRelayState(
         active_profile_id="claude_opus",
-        profiles_tried_since_keep=["codex_gpt"],
         intervention_kind=INTERVENTION_CROSS_HARNESS,
     )
     for _ in range(3):
@@ -150,7 +149,6 @@ def test_three_search_failures_reach_blockage_and_keep_resets_the_epoch():
     apply_relay_keep(state)
 
     assert state.active_no_improvement_streak == 0
-    assert state.profiles_tried_since_keep == []
     assert state.intervention_kind == ""
 
 
@@ -180,20 +178,31 @@ def test_same_harness_profile_is_used_when_cross_harness_is_unavailable():
     assert intervention.target_profile_id == "claude_sonnet"
 
 
-def test_supervisor_is_used_after_all_available_profiles_were_tried():
-    state = AgentRelayState(
-        active_profile_id="claude_opus",
-        profiles_tried_since_keep=["codex_gpt", "claude_sonnet"],
-    )
+def test_supervisor_is_used_only_when_no_other_profile_is_available():
+    state = AgentRelayState(active_profile_id="claude_opus")
 
     intervention = select_relay_intervention(
         state,
         profiles=_profiles(),
-        availability=_snapshot(),
+        availability=_snapshot(codex=False, sonnet=False),
     )
 
     assert intervention.kind == INTERVENTION_SUPERVISOR
     assert intervention.target_profile_id == ""
+
+
+def test_every_blockage_without_a_keep_switches_harness_again():
+    profiles = _profiles()[:2]
+    state = AgentRelayState(active_profile_id="claude_opus")
+    visited = []
+    for iteration in (4, 7, 10):
+        intervention = select_relay_intervention(state, profiles=profiles, availability=_snapshot())
+        assert intervention.kind == INTERVENTION_CROSS_HARNESS
+        apply_profile_switch(state, intervention=intervention, iteration=iteration)
+        visited.append(state.active_profile_id)
+
+    assert visited == ["codex_gpt", "claude_opus", "codex_gpt"]
+    assert state.blockage_epoch == 3
 
 
 def test_profile_switch_is_persistable_before_the_target_runs():
@@ -211,7 +220,6 @@ def test_profile_switch_is_persistable_before_the_target_runs():
 
     assert state.active_profile_id == "codex_gpt"
     assert state.previous_profile_id == "claude_opus"
-    assert state.profiles_tried_since_keep == ["claude_opus"]
     assert state.active_no_improvement_streak == 0
     assert state.blockage_epoch == 1
     assert state.switch_iteration == 4
@@ -393,8 +401,8 @@ def test_keep_after_a_switch_keeps_the_intervention_in_its_provenance(tmp_path):
     assert (result.agent_profile_id, result.agent_model, result.blockage_epoch) == ("codex_gpt", "gpt-6-astra", 1)
 
 
-def test_an_unavailable_active_profile_is_replaced_even_if_already_tried():
-    state = AgentRelayState(active_profile_id="codex_gpt", profiles_tried_since_keep=["claude_opus"])
+def test_an_unavailable_active_profile_is_replaced_by_another_harness():
+    state = AgentRelayState(active_profile_id="codex_gpt")
 
     replacement = select_replacement_for_unavailable(
         state,

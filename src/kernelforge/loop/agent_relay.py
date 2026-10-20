@@ -178,7 +178,6 @@ class AgentRelayState:
     active_profile_id: str = ""
     active_no_improvement_streak: int = 0
     blockage_epoch: int = 0
-    profiles_tried_since_keep: list[str] = field(default_factory=list)
     intervention_kind: str = ""
     previous_profile_id: str = ""
     switch_iteration: int = 0
@@ -194,8 +193,6 @@ class AgentRelayState:
             raise ValueError("agent relay switch_iteration must be non-negative")
         if self.intervention_kind not in INTERVENTION_KINDS:
             raise ValueError(f"unsupported relay intervention kind: {self.intervention_kind!r}")
-        if len(set(self.profiles_tried_since_keep)) != len(self.profiles_tried_since_keep):
-            raise ValueError("agent relay tried profiles must be unique")
 
 
 @dataclass(frozen=True)
@@ -224,9 +221,8 @@ def decision_counts_toward_blockage(decision: str) -> bool:
 
 
 def apply_relay_keep(state: AgentRelayState) -> AgentRelayState:
-    """A KEEP ends the blockage epoch: the streak and the profiles tried since the last KEEP start over."""
+    """A KEEP ends the blockage epoch: the streak starts over and the switch record is cleared."""
     state.active_no_improvement_streak = 0
-    state.profiles_tried_since_keep = []
     state.intervention_kind = ""
     state.previous_profile_id = ""
     state.switch_iteration = 0
@@ -263,7 +259,11 @@ def select_relay_intervention(
     profiles: Sequence[AgentProfile],
     availability: AgentAvailabilitySnapshot,
 ) -> RelayIntervention:
-    """Select the first viable untried profile, then fall back to Supervisor."""
+    """The first intervention this environment can run, checked in a fixed order at every blockage.
+
+    A different harness and model, else the same harness with a different model, else the Supervisor on the active
+    profile. Availability is the session's startup snapshot.
+    """
     by_id = _profile_mapping(profiles)
     active = by_id.get(state.active_profile_id)
     if active is None:
@@ -271,11 +271,10 @@ def select_relay_intervention(
             kind=INTERVENTION_SUPERVISOR,
             reason="active profile is not present in campaign configuration",
         )
-    excluded = set(state.profiles_tried_since_keep) | {active.profile_id}
     candidates = [
         profile
         for profile in profiles
-        if profile.profile_id not in excluded and _profile_is_available(profile, availability)
+        if profile.profile_id != active.profile_id and _profile_is_available(profile, availability)
     ]
     for profile in candidates:
         if profile.provider != active.provider:
@@ -293,7 +292,7 @@ def select_relay_intervention(
             )
     return RelayIntervention(
         kind=INTERVENTION_SUPERVISOR,
-        reason="no untried relay profile is available",
+        reason="no other relay profile is available",
     )
 
 
@@ -303,11 +302,7 @@ def select_replacement_for_unavailable(
     profiles: Sequence[AgentProfile],
     availability: AgentAvailabilitySnapshot,
 ) -> RelayIntervention | None:
-    """Choose an available profile to take over from an active profile this session cannot run.
-
-    Unlike a blockage, unavailability says nothing about the search, so profiles tried since the last KEEP stay
-    eligible: running one again is better than not running at all.
-    """
+    """Choose an available profile to take over from an active profile this session cannot run."""
     by_id = _profile_mapping(profiles)
     active = by_id.get(state.active_profile_id)
     candidates = [
@@ -389,8 +384,6 @@ def apply_profile_switch(
     if iteration < 1:
         raise ValueError("relay switch iteration must be positive")
     previous = state.active_profile_id
-    if previous and previous not in state.profiles_tried_since_keep:
-        state.profiles_tried_since_keep.append(previous)
     state.previous_profile_id = previous
     state.active_profile_id = intervention.target_profile_id
     state.active_no_improvement_streak = 0
@@ -449,7 +442,6 @@ def migrate_run_state_relay_fields(payload: object) -> dict[str, Any]:
             "active_profile_id": "",
             "active_no_improvement_streak": 0,
             "blockage_epoch": 0,
-            "profiles_tried_since_keep": [],
             "intervention_kind": "",
             "previous_profile_id": "",
             "switch_iteration": 0,

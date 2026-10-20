@@ -41,7 +41,7 @@ class RelayRuntimeMixin:
     def _supervisor_banner(self) -> str:
         """How the Supervisor is scheduled this session, in the operator's terms."""
         if self._search_actors is not None:
-            return "  Supervisor: enabled as the last intervention of a relay blockage, once no untried profile is left"
+            return "  Supervisor: enabled at a relay blockage when no other Agent profile is available"
         return (
             f"  Supervisor: enabled (after {self.ic.supervise_after} stalls, "
             f"cooldown {self.ic.supervise_cooldown}, no intervention cap)"
