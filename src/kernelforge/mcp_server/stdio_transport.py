@@ -14,9 +14,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sys
 from collections.abc import Awaitable, Callable
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 
 class InvalidParamsError(ValueError):
@@ -111,4 +114,5 @@ async def serve(
         except InvalidParamsError as exc:
             write_error(request_id, -32602, str(exc))
         except Exception as exc:  # noqa: BLE001 - convert failures to JSON-RPC
+            log.warning("MCP request %s failed: %s", method, exc)
             write_error(request_id, -32603, f"{type(exc).__name__}: {exc}")
