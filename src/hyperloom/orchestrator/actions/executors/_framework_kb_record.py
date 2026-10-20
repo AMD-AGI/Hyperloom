@@ -136,7 +136,7 @@ async def write_framework_lesson(
                 target_framework=attribution.name("target_framework"),
             )
         )
-    except Exception as exc:  # noqa: BLE001 — KB write is best-effort
+    except (OSError, ValueError, TypeError) as exc:
         log.warning("integrate_patch: framework KB writeback failed: %r", exc)
         return
     log.info(

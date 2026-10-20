@@ -478,7 +478,7 @@ async def test_bench_exception_reverts(tmp_path, monkeypatch):
     ex = IntegratePatchExecutor(session_dir=session)
 
     async def _raise(self, *args, **kwargs):
-        raise RuntimeError("boom")
+        raise OSError("boom")
 
     monkeypatch.setattr(IntegratePatchExecutor, "_bench_patch", _raise)
     res = await ex(

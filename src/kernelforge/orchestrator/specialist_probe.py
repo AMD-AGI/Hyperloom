@@ -204,6 +204,7 @@ def probe_primitive_status() -> tuple[Any, str]:
     try:
         primitive = resolve_probe_primitive()
     except Exception as error:  # noqa: BLE001 - an unimportable seam is reported
+        log.warning("probe primitive %s could not be imported: %s", PRIMITIVE_PATH, error)
         return None, (
             f"the measurement primitive {PRIMITIVE_PATH} could not be imported: {type(error).__name__}: {error}"
         )
