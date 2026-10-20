@@ -50,7 +50,6 @@ from .dispatch_admission import (
     LaneAdmission,
     acquire_gpu_lease,
     gpu_pool_for_specialist,
-    serving_slot_probe,
     specialist_gpu_count,
 )
 from .sub_agent_runner import SubAgentResult
@@ -608,14 +607,9 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         for lane in lease.lanes:
             holders[lane] = max(0, int(holders.get(lane, 0)) - 1)
 
-    async def _admit_gpu_specialist(
-        self,
-        task: Task,
-        extra_context: dict[str, Any],
-        *,
-        slot_probe: Callable[[], bool] | None,
-    ) -> GpuAdmission:
+    async def _admit_gpu_specialist(self, task: Task, extra_context: dict[str, Any]) -> GpuAdmission:
         """Take the GPU leases a specialist needs, recording the devices it may use in ``extra_context``."""
+        from ..actions.executors._ray_backend import ray_serving_priority_enabled, serving_slot_busy
         from ..specialists.profile import holds_serving_slot, requires_gpu
 
         params = task.params or {}
@@ -623,7 +617,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             return GpuAdmission(True)
         # Probed immediately before admitting this GPU specialist, not once per pass, so a serving
         # start that races the pass does not slip through.
-        if slot_probe is not None and slot_probe():
+        if ray_serving_priority_enabled() and serving_slot_busy():
             # Serving is active — keep the task queued rather than piling onto the contended GPU.
             return GpuAdmission(False)
         serving_tp = self.resolve_serving_tp()
@@ -714,7 +708,6 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             return
         holders = await self.locks.lane_holders()
         capacities = await self.locks.lane_capacities()
-        slot_probe = serving_slot_probe()
         for task in queued:
             if task.task_id in self._inflight_actions:
                 continue
@@ -726,7 +719,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             extra_context = self._dispatch_context(task)
             gpus = GpuAdmission(True)
             if task.kind == "specialist":
-                gpus = await self._admit_gpu_specialist(task, extra_context, slot_probe=slot_probe)
+                gpus = await self._admit_gpu_specialist(task, extra_context)
                 if not gpus.admitted:
                     await self._release_lane_lease(lanes.lease, holders)
                     continue

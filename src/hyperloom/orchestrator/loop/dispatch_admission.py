@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import logging as _logging
-from collections.abc import Callable
 from typing import Any, NamedTuple
 
 from hyperloom.common.env import is_truthy
@@ -80,20 +79,6 @@ def specialist_gpu_count(task: Task, default_gpu_count: int, serving_tp: int) ->
         )
         return serving_tp
     return gpu_count
-
-
-def serving_slot_probe() -> Callable[[], bool] | None:
-    """The serving-slot probe when serving priority is on; ``None`` leaves GPU specialists unpaused.
-
-    Read once per dispatch pass (a pure env-var read, zero cost) and best-effort throughout: any
-    failure here leaves dispatch ungated rather than blocked.
-    """
-    try:
-        from ..actions.executors._ray_backend import ray_serving_priority_enabled, serving_slot_busy
-
-        return serving_slot_busy if ray_serving_priority_enabled() else None
-    except Exception:  # noqa: BLE001 — never block dispatch on the probe
-        return None
 
 
 async def acquire_gpu_lease(gpu_pool: Any, task: Task, *, gpu_count: int, ttl_sec: float) -> Any:

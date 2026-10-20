@@ -7,7 +7,8 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from typing import TYPE_CHECKING, Any, Callable, NamedTuple
+from operator import itemgetter
+from typing import TYPE_CHECKING, Any, Callable
 from ..bus.gpu_pool import gpus_by_task_sync
 from ..phases import machine_state as _phase_state
 from ..policy.projection import resource_pools_summary
@@ -334,31 +335,23 @@ def _explore_search_entries(explore_search: Any) -> list[dict[str, Any]]:
     return entries
 
 
-class PriorGains(NamedTuple):
-    """Prior measured gains split by the current acceptance bar, each best first."""
-
-    above_bar: list[tuple[str, float]]
-    below_bar: list[tuple[str, float]]
-
-
-def _prior_gains_by_bar(entries: list[dict[str, Any]], keep_pct: float) -> PriorGains:
-    """Split recorded gains by the acceptance bar, dropping rows without a numeric gain."""
-    gains = PriorGains([], [])
+def _prior_gains_by_bar(
+    entries: list[dict[str, Any]], keep_pct: float
+) -> tuple[list[tuple[str, float]], list[tuple[str, float]]]:
+    """Recorded gains at or above the acceptance bar and below it, each best first, rows without a gain dropped."""
+    above_bar: list[tuple[str, float]] = []
+    below_bar: list[tuple[str, float]] = []
     for e in entries:
         try:
             g = float(e.get("gain_pct"))
         except (TypeError, ValueError):
             continue
         name = str(e.get("name") or e.get("fingerprint") or "")[:48]
-        (gains.above_bar if g >= keep_pct else gains.below_bar).append((name, g))
-    gains.above_bar.sort(key=_gain_of, reverse=True)
-    gains.below_bar.sort(key=_gain_of, reverse=True)
-    return gains
-
-
-def _gain_of(row: tuple[str, float]) -> float:
-    """The gain of a ``(name, gain_pct)`` row."""
-    return row[1]
+        (above_bar if g >= keep_pct else below_bar).append((name, g))
+    return (
+        sorted(above_bar, key=itemgetter(1), reverse=True),
+        sorted(below_bar, key=itemgetter(1), reverse=True),
+    )
 
 
 class ConversationCollaborator(CoordinatorCollaborator):
@@ -887,17 +880,17 @@ class ConversationCollaborator(CoordinatorCollaborator):
         if cycle < 1:
             return ""
         stable = keep / 2.0
-        gains = _prior_gains_by_bar(_explore_search_entries(state.explore_search), keep)
+        above_bar, below_bar = _prior_gains_by_bar(_explore_search_entries(state.explore_search), keep)
         lines: list[str] = [
             f"Current acceptance bar (macro_cycle={cycle}): KEEP>={keep:.2f}% stack_stable>={stable:.2f}%.",
             "Historical results are evidence only — any fingerprint may be re-proposed.",
         ]
-        if gains.above_bar:
+        if above_bar:
             lines.append("Prior results above the bar (consider re-proposing if conditions changed):")
-            lines.extend(f"  {name}: prior gain {g:+.2f}% >= {keep:.2f}%" for name, g in gains.above_bar[:8])
-        if gains.below_bar:
+            lines.extend(f"  {name}: prior gain {g:+.2f}% >= {keep:.2f}%" for name, g in above_bar[:8])
+        if below_bar:
             lines.append("Prior results below the bar (reference):")
-            lines.extend(f"  {name}: prior gain {g:+.2f}% < {keep:.2f}%" for name, g in gains.below_bar[:5])
+            lines.extend(f"  {name}: prior gain {g:+.2f}% < {keep:.2f}%" for name, g in below_bar[:5])
         return "\n".join(lines)
 
     def target_gap_advisory_block(self) -> str:
