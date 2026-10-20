@@ -167,6 +167,18 @@ _TEXT_DECODER_CONFIG_KEYS = (
 _VERDICT_TEXT_COERCIBLE = "text_coercible"
 
 _VERDICT_VISION_ONLY = "vision_only"
+_UNSUPPORTED_ARCH_DEGRADED = (
+    "DEGRADED MODE: model '{name}' carries a multimodal signal "
+    "({signal}; architecture '{arch}', model_type '{mt}') but exposes a text-generation path. "
+    "Hyperloom is running it on the TEXT path only — any image/audio inputs are ignored, so "
+    "benchmark numbers reflect the text decoder alone. Pass --no-allow-mm-text-fallback to fail-fast instead."
+)
+_UNSUPPORTED_ARCH_REJECTED = (
+    "Unsupported model '{name}': architecture '{arch}' (model_type '{mt}') is not a supported "
+    "text-generation model. Hyperloom only supports decoder-only causal LM models (architectures "
+    "containing ForCausalLM or LMHeadModel). Rejected because: {signal}. Submit a text-generation "
+    "checkpoint instead."
+)
 
 _TEXT_COERCIBLE_MODEL_TYPES = frozenset(
     {
@@ -1613,168 +1625,152 @@ def _preflight_model_config_compat(
     return True
 
 
-def _preflight_unsupported_model_arch(
+def _unsupported_arch_check_row(
+    status: str,
+    allow: bool,
+    detail: Mapping[str, Any],
+    skip_reason: str | None = None,
+    verdict: str | None = None,
+) -> dict[str, Any]:
+    """One ``unsupported_model_arch`` check row with the gate's fixed key order."""
+    return {
+        "gate_id": "unsupported_model_arch",
+        "order": 1,
+        "status": status,
+        "skip_reason": skip_reason,
+        "verdict": verdict,
+        "detail": {
+            "architecture": detail.get("architecture"),
+            "model_type": detail.get("model_type"),
+            "signal": detail.get("signal"),
+            "allow_mm_text_fallback": allow,
+            "action": detail.get("action", "proceed"),
+        },
+    }
+
+
+def _warn_text_coercible_arch(
     args: argparse.Namespace,
     session_dir: Path,
-) -> bool:
-    """Gate multimodal/vision models before expensive bring-up."""
-    # Scriptable diffusion frameworks (xDiT) are server-less image workloads, not decoder-only causal LMs.
-    if framework_registry.is_scriptable(getattr(args, "framework", "")):
-        _record_model_gate_check(
-            args,
-            session_dir,
-            {
-                "gate_id": "unsupported_model_arch",
-                "order": 1,
-                "status": "skipped",
-                "skip_reason": "scriptable_framework",
-                "verdict": None,
-                "detail": {
-                    "architecture": None,
-                    "model_type": None,
-                    "signal": None,
-                    "allow_mm_text_fallback": bool(getattr(args, "allow_mm_text_fallback", True)),
-                    "action": "proceed",
-                },
-            },
-        )
-        return False
-
-    model = str(getattr(args, "model", "") or "")
-    hit = _detect_unsupported_model(model)
-    if hit is None:
-        config = _load_model_config_dict(model)
-        architectures = _config_architectures(config) if isinstance(config, dict) else []
-        _record_model_gate_check(
-            args,
-            session_dir,
-            {
-                "gate_id": "unsupported_model_arch",
-                "order": 1,
-                "status": "passed" if isinstance(config, dict) else "unknown",
-                "skip_reason": None,
-                "verdict": "plain_text" if isinstance(config, dict) else None,
-                "detail": {
-                    "architecture": architectures[0] if architectures else None,
-                    "model_type": str(config.get("model_type") or "") if isinstance(config, dict) else None,
-                    "signal": None,
-                    "allow_mm_text_fallback": bool(getattr(args, "allow_mm_text_fallback", True)),
-                    "action": "proceed",
-                },
-            },
-        )
-        return False
-
+    hit: Mapping[str, Any],
+    model: str,
+    allow: bool,
+) -> None:
+    """Persist degraded mode and record a warned unsupported_model_arch check."""
     name = Path(model).name or model
     arch = hit.get("architecture") or "<unknown>"
     mt = hit.get("model_type") or "<unknown>"
-    verdict = str(hit.get("verdict") or _VERDICT_VISION_ONLY)
-    allow_fallback = bool(getattr(args, "allow_mm_text_fallback", True))
+    signal = str(hit.get("signal") or "")
+    warning = _UNSUPPORTED_ARCH_DEGRADED.format(
+        name=name, signal=hit.get("signal", "multimodal config"), arch=arch, mt=mt
+    )
+    print(f"WARNING: {warning}", file=sys.stderr)
+    log.warning(warning)
+    from hyperloom.orchestrator.state.shared_state import SharedState
 
-    if verdict == _VERDICT_TEXT_COERCIBLE and allow_fallback:
-        warning = (
-            f"DEGRADED MODE: model '{name}' carries a multimodal signal "
-            f"({hit.get('signal', 'multimodal config')}; architecture '{arch}', "
-            f"model_type '{mt}') but exposes a text-generation path. Hyperloom "
-            f"is running it on the TEXT path only — any image/audio inputs are "
-            f"ignored, so benchmark numbers reflect the text decoder alone. "
-            f"Pass --no-allow-mm-text-fallback to fail-fast instead."
-        )
-        print(f"WARNING: {warning}", file=sys.stderr)
-        log.warning(warning)
-        try:
-            from hyperloom.orchestrator.state.shared_state import SharedState
-
-            state = SharedState.load_or_init(session_dir)
-            state.degraded_mode = True
-            state.model_warnings = list(state.model_warnings or []) + [
-                {
-                    "kind": "multimodal_text_fallback",
-                    "model_name": name,
-                    "architecture": arch,
-                    "model_type": mt,
-                    "signal": str(hit.get("signal") or ""),
-                    "detail": warning,
-                }
-            ]
-            state.save(session_dir)
-        except (OSError, ValueError) as exc:  # the marker is advisory; the run proceeds without it
-            print(
-                f"WARNING: failed to persist degraded-mode marker: {exc!r}",
-                file=sys.stderr,
-            )
-        _record_model_gate_check(
-            args,
-            session_dir,
+    try:
+        state = SharedState.load_or_init(session_dir)
+        state.degraded_mode = True
+        state.model_warnings = [
+            *state.model_warnings,
             {
-                "gate_id": "unsupported_model_arch",
-                "order": 1,
-                "status": "warned",
-                "skip_reason": None,
-                "verdict": verdict,
-                "detail": {
-                    "architecture": arch,
-                    "model_type": mt,
-                    "signal": str(hit.get("signal") or ""),
-                    "allow_mm_text_fallback": allow_fallback,
-                    "action": "proceed",
-                },
-            },
-            degraded_warning={
                 "kind": "multimodal_text_fallback",
+                "model_name": name,
                 "architecture": arch,
                 "model_type": mt,
-                "signal": str(hit.get("signal") or ""),
+                "signal": signal,
+                "detail": warning,
             },
-        )
-        return False
-
-    reason = (
-        f"Unsupported model '{name}': architecture '{arch}' (model_type "
-        f"'{mt}') is not a supported text-generation model. Hyperloom only "
-        f"supports decoder-only causal LM models (architectures containing "
-        f"ForCausalLM or LMHeadModel). Rejected because: "
-        f"{hit.get('signal', 'unknown architecture')}. Submit a "
-        f"text-generation checkpoint instead."
-    )
-    # Persist the stop reason for CI and session diagnostics.
-    _persist_gate_stop_report(
-        session_dir,
-        stop_reason="unsupported_model_arch",
-        reason=reason,
-        warning_label="unsupported-model",
-    )
+        ]
+        state.save(session_dir)
+    except (OSError, ValueError) as exc:  # the marker is advisory; the run proceeds without it
+        print(f"WARNING: failed to persist degraded-mode marker: {exc!r}", file=sys.stderr)
+    detail = {"architecture": arch, "model_type": mt, "signal": signal}
     _record_model_gate_check(
         args,
         session_dir,
-        {
-            "gate_id": "unsupported_model_arch",
-            "order": 1,
-            "status": "failed",
-            "skip_reason": None,
-            "verdict": verdict,
-            "detail": {
-                "architecture": arch,
-                "model_type": mt,
-                "signal": str(hit.get("signal") or ""),
-                "allow_mm_text_fallback": allow_fallback,
-                "action": "fail_fast",
-            },
-        },
+        _unsupported_arch_check_row("warned", allow, detail, verdict=str(hit.get("verdict") or _VERDICT_VISION_ONLY)),
+        degraded_warning={"kind": "multimodal_text_fallback", **detail},
+    )
+
+
+def _reject_unsupported_arch(
+    args: argparse.Namespace,
+    session_dir: Path,
+    hit: Mapping[str, Any],
+    model: str,
+    allow: bool,
+) -> None:
+    """Fail-fast: stop report, failed gate check, breakdown, Langfuse."""
+    name = Path(model).name or model
+    arch = hit.get("architecture") or "<unknown>"
+    mt = hit.get("model_type") or "<unknown>"
+    signal = str(hit.get("signal") or "")
+    reason = _UNSUPPORTED_ARCH_REJECTED.format(
+        name=name, arch=arch, mt=mt, signal=hit.get("signal", "unknown architecture")
+    )
+    _persist_gate_stop_report(
+        session_dir, stop_reason="unsupported_model_arch", reason=reason, warning_label="unsupported-model"
+    )
+    final_json = "reports/final.json" if (session_dir / "reports" / "final.json").is_file() else None
+    _record_model_gate_check(
+        args,
+        session_dir,
+        _unsupported_arch_check_row(
+            "failed",
+            allow,
+            {"architecture": arch, "model_type": mt, "signal": signal, "action": "fail_fast"},
+            verdict=str(hit.get("verdict") or _VERDICT_VISION_ONLY),
+        ),
         failure={
             "gate_id": "unsupported_model_arch",
             "stop_reason": "unsupported_model_arch",
             "exit_code": 2,
             "message": reason,
-            "artifacts": {
-                "final_json": "reports/final.json" if (session_dir / "reports" / "final.json").is_file() else None,
-            },
+            "artifacts": {"final_json": final_json},
         },
     )
-    # Delivery-artifact parity: emit session_breakdown.json here too since fail-fast exits before coordinator.run()'s
-    # finally.
     _write_model_gate_breakdown(session_dir, failure_label="unsupported-model")
-    # Langfuse parity: this gate exits before coordinator.run()'s finally, so push the breakdown to Langfuse here too.
     _emit_breakdown_to_langfuse(session_dir)
     print(f"ERROR: {reason}", file=sys.stderr)
+
+
+def _preflight_unsupported_model_arch(
+    args: argparse.Namespace,
+    session_dir: Path,
+) -> bool:
+    """Gate multimodal/vision models before expensive bring-up."""
+    allow = bool(getattr(args, "allow_mm_text_fallback", True))
+    # Scriptable diffusion frameworks (xDiT) are server-less image workloads, not decoder-only causal LMs.
+    if framework_registry.is_scriptable(getattr(args, "framework", "")):
+        _record_model_gate_check(
+            args,
+            session_dir,
+            _unsupported_arch_check_row("skipped", allow, {}, skip_reason="scriptable_framework"),
+        )
+        return False
+    model = str(getattr(args, "model", "") or "")
+    hit = _detect_unsupported_model(model)
+    if hit is None:
+        config = _load_model_config_dict(model)
+        passed = config is not None
+        architectures = _config_architectures(config) if passed else []
+        _record_model_gate_check(
+            args,
+            session_dir,
+            _unsupported_arch_check_row(
+                "passed" if passed else "unknown",
+                allow,
+                {
+                    "architecture": architectures[0] if architectures else None,
+                    "model_type": str(config.get("model_type") or "") if passed else None,
+                },
+                verdict="plain_text" if passed else None,
+            ),
+        )
+        return False
+    if str(hit.get("verdict") or _VERDICT_VISION_ONLY) == _VERDICT_TEXT_COERCIBLE and allow:
+        _warn_text_coercible_arch(args, session_dir, hit, model, allow)
+        return False
+    _reject_unsupported_arch(args, session_dir, hit, model, allow)
     return True
