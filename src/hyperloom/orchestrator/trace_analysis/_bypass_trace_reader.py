@@ -39,6 +39,9 @@ _STREAM_OVERLAP_SEVERE_SHARE = 0.25
 _TRACE_EXTS = (".trace.json.gz", ".pt.trace.json.gz", ".trace.json", ".json.gz", ".json")
 
 _DECODER = json.JSONDecoder()
+# The ``"traceEvents":`` member and, once buffered, the first character of its value.
+_TRACE_EVENTS_OPENER = re.compile(r'"traceEvents"[ \t\r\n]*:[ \t\r\n]*([^ \t\r\n])?')
+_ELEMENT_SEPARATORS = re.compile(r"[ \t\r\n,]*")
 
 # Hard caps keep a corrupt trace from turning the streaming reader into an unbounded accumulator.
 _MAX_TRACE_PREFIX_CHARS = 16 * 1024 * 1024
@@ -233,6 +236,139 @@ class _ObjectBalance:
         return end
 
 
+class _TraceStructureError(Exception):
+    """The ``traceEvents`` stream cannot be read past this point; the message says why."""
+
+
+class _TraceEventStream:
+    """Read state of one pass over a ``traceEvents`` array: the decoded text, the cursor in it, and the diagnostics."""
+
+    def __init__(self, fileobj, chunk_size: int, errors: list[str]) -> None:
+        self.errors = errors
+        self._fileobj = fileobj
+        self._chunk_size = chunk_size
+        self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        self._buf = ""
+        self._pos = 0
+        self._eof = False
+        self._emitted = 0
+
+    def _refill(self, max_bytes: int) -> None:
+        """Decode one bounded chunk and turn gzip failures into stream errors."""
+        try:
+            chunk = self._fileobj.read(min(self._chunk_size, max_bytes))
+        except (EOFError, gzip.BadGzipFile) as exc:
+            self.errors.append(f"trace input error: {type(exc).__name__}: {exc}")
+            chunk = b""
+        self._eof = not chunk
+        self._buf += self._decoder.decode(chunk, final=self._eof)
+
+    def open_array(self) -> None:
+        """Consume the trace prefix through the ``[`` that opens the ``traceEvents`` array."""
+        while (opener := _TRACE_EVENTS_OPENER.search(self._buf)) is None or opener.group(1) is None:
+            if self._eof:
+                raise _TraceStructureError(
+                    "traceEvents array not found" if opener is None else "traceEvents array opener not found"
+                )
+            if len(self._buf) >= _MAX_TRACE_PREFIX_CHARS:
+                raise _TraceStructureError(f"traceEvents prefix exceeds {_MAX_TRACE_PREFIX_CHARS} characters")
+            self._refill(_MAX_TRACE_PREFIX_CHARS - len(self._buf))
+        if opener.group(1) != "[":
+            raise _TraceStructureError("traceEvents value is not an array")
+        self._buf = self._buf[opener.end() :]
+
+    def next_element(self) -> str:
+        """Skip separators to the next array element and return its first character."""
+        while True:
+            # Parsed input is discarded once it exceeds one refill chunk.
+            if self._pos > self._chunk_size:
+                self._buf = self._buf[self._pos :]
+                self._pos = 0
+            self._pos = _ELEMENT_SEPARATORS.match(self._buf, self._pos).end()
+            if self._pos < len(self._buf):
+                return self._buf[self._pos]
+            if self._eof:
+                raise _TraceStructureError(f"traceEvents array unterminated after {self._emitted} event(s)")
+            self._refill(self._chunk_size)
+
+    def skip_element(self) -> None:
+        """Record a non-object element as malformed and skip it through the separator that ends it."""
+        start = scan = self._pos
+        curly_depth = square_depth = 0
+        in_string = escaped = False
+        boundary: int | None = None
+        while boundary is None:
+            buf = self._buf
+            while scan < len(buf):
+                char = buf[scan]
+                if in_string:
+                    if escaped:
+                        escaped = False
+                    elif char == "\\":
+                        escaped = True
+                    elif char == '"':
+                        in_string = False
+                elif char == '"':
+                    in_string = True
+                elif char == "{":
+                    curly_depth += 1
+                elif char == "}":
+                    curly_depth = max(0, curly_depth - 1)
+                elif char == "[":
+                    square_depth += 1
+                elif char == "]":
+                    if curly_depth == 0 and square_depth == 0:
+                        boundary = scan
+                        break
+                    square_depth = max(0, square_depth - 1)
+                elif char == "," and curly_depth == 0 and square_depth == 0:
+                    boundary = scan + 1
+                    break
+                scan += 1
+            if boundary is None:
+                self._refill_element(start, "element", f"traceEvents array unterminated after {self._emitted} event(s)")
+        self.errors.append(f"traceEvents element malformed after {self._emitted} event(s): expected an object")
+        self._pos = boundary
+
+    def read_object(self) -> Iterator[dict]:
+        """Yield the object element at the cursor, or record it as malformed and skip it."""
+        start = self._pos
+        balance = _ObjectBalance(start)
+        while True:
+            try:
+                obj, end = _DECODER.raw_decode(self._buf, start)
+                break
+            except json.JSONDecodeError as exc:
+                # raw_decode cannot distinguish corrupt input from an object the buffer merely has not reached the end
+                # of yet, so balance braces to tell the two apart.
+                object_end = balance.advance(self._buf)
+                if object_end is not None:
+                    self.errors.append(f"traceEvents object malformed after {self._emitted} event(s): {exc.msg}")
+                    self._pos = object_end
+                    return
+                self._refill_element(
+                    start, "object", f"traceEvents object truncated after {self._emitted} event(s): unterminated object"
+                )
+        if end - start > _MAX_EVENT_CHARS:
+            raise _TraceStructureError(
+                f"traceEvents object exceeds {_MAX_EVENT_CHARS} characters after {self._emitted} event(s)"
+            )
+        yield obj
+        self._emitted += 1
+        self._pos = end
+
+    def _refill_element(self, start: int, kind: str, eof_message: str) -> None:
+        """Read more of the element at ``start``, refusing one longer than ``_MAX_EVENT_CHARS``."""
+        buffered = len(self._buf) - start
+        if buffered >= _MAX_EVENT_CHARS:
+            raise _TraceStructureError(
+                f"traceEvents {kind} exceeds {_MAX_EVENT_CHARS} characters after {self._emitted} event(s)"
+            )
+        if self._eof:
+            raise _TraceStructureError(eof_message)
+        self._refill(_MAX_EVENT_CHARS - buffered)
+
+
 def stream_events(
     fileobj,
     bufsize: int = 8 * 1024 * 1024,
@@ -240,210 +376,16 @@ def stream_events(
     errors: list[str] | None = None,
 ) -> Iterator[dict]:
     """Yield each object inside the ``traceEvents`` array, one at a time."""
-
-    def _record(message: str) -> None:
-        """Append one structural error when the caller requested diagnostics."""
-        if errors is not None:
-            errors.append(message)
-
-    chunk_size = max(1, int(bufsize))
-    utf8_decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
-    buf = ""
-    eof = False
-
-    def _refill(max_bytes: int | None = None) -> bool:
-        """Decode one bounded chunk and turn gzip failures into stream errors."""
-        nonlocal buf, eof
-        if eof:
-            return False
-        read_size = chunk_size
-        if max_bytes is not None:
-            read_size = max(1, min(read_size, max_bytes))
-        try:
-            chunk = fileobj.read(read_size)
-        except (EOFError, gzip.BadGzipFile) as exc:
-            _record(f"trace input error: {type(exc).__name__}: {exc}")
-            eof = True
-            tail = utf8_decoder.decode(b"", final=True)
-            if tail:
-                buf += tail
-            return bool(tail)
-        if not chunk:
-            eof = True
-            tail = utf8_decoder.decode(b"", final=True)
-            if tail:
-                buf += tail
-            return bool(tail)
-        buf += utf8_decoder.decode(chunk, final=False)
-        return True
-
-    def _trim_consumed() -> None:
-        """Discard parsed input once it exceeds one refill chunk."""
-        nonlocal buf, pos
-        if pos > chunk_size:
-            buf = buf[pos:]
-            pos = 0
-
-    key = '"traceEvents"'
-    search_from = 0
-    while True:
-        key_pos = buf.find(key, search_from)
-        if key_pos < 0:
-            if eof:
-                _record("traceEvents array not found")
-                return
-            if len(buf) >= _MAX_TRACE_PREFIX_CHARS:
-                _record(f"traceEvents prefix exceeds {_MAX_TRACE_PREFIX_CHARS} characters")
-                return
-            search_from = max(0, len(buf) - len(key) + 1)
-            _refill(_MAX_TRACE_PREFIX_CHARS - len(buf))
-            continue
-
-        pos = key_pos + len(key)
-        while pos >= len(buf):
-            if eof:
-                break
-            if len(buf) >= _MAX_TRACE_PREFIX_CHARS:
-                _record(f"traceEvents prefix exceeds {_MAX_TRACE_PREFIX_CHARS} characters")
-                return
-            _refill(_MAX_TRACE_PREFIX_CHARS - len(buf))
-        while pos < len(buf) and buf[pos] in " \t\r\n":
-            pos += 1
-            if pos == len(buf) and not eof:
-                if len(buf) >= _MAX_TRACE_PREFIX_CHARS:
-                    _record(f"traceEvents prefix exceeds {_MAX_TRACE_PREFIX_CHARS} characters")
-                    return
-                _refill(_MAX_TRACE_PREFIX_CHARS - len(buf))
-        if pos < len(buf) and buf[pos] == ":":
-            break
-        search_from = key_pos + len(key)
-
-    pos += 1
-    while True:
-        while pos < len(buf) and buf[pos] in " \t\r\n":
-            pos += 1
-        if pos < len(buf):
-            break
-        if eof:
-            _record("traceEvents array opener not found")
-            return
-        if len(buf) >= _MAX_TRACE_PREFIX_CHARS:
-            _record(f"traceEvents prefix exceeds {_MAX_TRACE_PREFIX_CHARS} characters")
-            return
-        _refill(_MAX_TRACE_PREFIX_CHARS - len(buf))
-    if buf[pos] != "[":
-        _record("traceEvents value is not an array")
-        return
-
-    buf = buf[pos + 1 :]
-    pos = 0
-    emitted = 0
-    while True:
-        while True:
-            while pos < len(buf) and buf[pos] in " \t\r\n,":
-                pos += 1
-            if pos < len(buf):
-                break
-            if eof:
-                _record(f"traceEvents array unterminated after {emitted} event(s)")
-                return
-            _trim_consumed()
-            _refill()
-
-        if buf[pos] == "]":
-            return
-
-        if buf[pos] != "{":
-            invalid_start = pos
-            scan = pos
-            curly_depth = 0
-            square_depth = 0
-            in_string = False
-            escaped = False
-            boundary: int | None = None
-            while boundary is None:
-                while scan < len(buf):
-                    char = buf[scan]
-                    if in_string:
-                        if escaped:
-                            escaped = False
-                        elif char == "\\":
-                            escaped = True
-                        elif char == '"':
-                            in_string = False
-                    elif char == '"':
-                        in_string = True
-                    elif char == "{":
-                        curly_depth += 1
-                    elif char == "}":
-                        curly_depth = max(0, curly_depth - 1)
-                    elif char == "[":
-                        square_depth += 1
-                    elif char == "]":
-                        if curly_depth == 0 and square_depth == 0:
-                            boundary = scan
-                            break
-                        square_depth = max(0, square_depth - 1)
-                    elif char == "," and curly_depth == 0 and square_depth == 0:
-                        boundary = scan + 1
-                        break
-                    scan += 1
-                if boundary is not None:
-                    break
-                buffered = len(buf) - invalid_start
-                if buffered >= _MAX_EVENT_CHARS:
-                    _record(f"traceEvents element exceeds {_MAX_EVENT_CHARS} characters after {emitted} event(s)")
-                    return
-                if eof:
-                    _record(f"traceEvents array unterminated after {emitted} event(s)")
-                    return
-                _refill(_MAX_EVENT_CHARS - buffered)
-            _record(f"traceEvents element malformed after {emitted} event(s): expected an object")
-            pos = boundary
-            _trim_consumed()
-            continue
-
-        object_start = pos
-        obj: dict[str, Any] | None = None
-        decoded_end = object_start
-        balance = _ObjectBalance(object_start)
-        while True:
-            try:
-                obj, decoded_end = _DECODER.raw_decode(buf, object_start)
-            except json.JSONDecodeError as exc:
-                # raw_decode cannot distinguish corrupt input from an object the buffer merely has not reached the end
-                # of yet, so balance braces to tell the two apart.
-                object_end = balance.advance(buf)
-                if object_end is not None:
-                    _record(f"traceEvents object malformed after {emitted} event(s): {exc.msg}")
-                    pos = object_end
-                    break
-                buffered = len(buf) - object_start
-                if buffered >= _MAX_EVENT_CHARS:
-                    _record(f"traceEvents object exceeds {_MAX_EVENT_CHARS} characters after {emitted} event(s)")
-                    return
-                if eof:
-                    _record(f"traceEvents object truncated after {emitted} event(s): unterminated object")
-                    return
-                _refill(_MAX_EVENT_CHARS - buffered)
-                continue
-            break
-
-        if obj is None:
-            _trim_consumed()
-            continue
-        if decoded_end - object_start > _MAX_EVENT_CHARS:
-            _record(f"traceEvents object exceeds {_MAX_EVENT_CHARS} characters after {emitted} event(s)")
-            return
-        if not isinstance(obj, dict):
-            _record(f"traceEvents object malformed after {emitted} event(s): invalid object boundary")
-            pos = decoded_end
-            _trim_consumed()
-            continue
-        yield obj
-        emitted += 1
-        pos = decoded_end
-        _trim_consumed()
+    stream = _TraceEventStream(fileobj, max(1, int(bufsize)), [] if errors is None else errors)
+    try:
+        stream.open_array()
+        while (first := stream.next_element()) != "]":
+            if first == "{":
+                yield from stream.read_object()
+            else:
+                stream.skip_element()
+    except _TraceStructureError as exc:
+        stream.errors.append(str(exc))
 
 
 def _stream_overlap_health(stream_events: dict[Any, list[tuple[float, float, str]]]) -> dict[str, Any]:
