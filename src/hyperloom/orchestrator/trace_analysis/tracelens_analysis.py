@@ -2789,6 +2789,54 @@ def _stamp_candidate_metadata(item: dict[str, Any], op_cat_map: dict[str, str] |
     item.setdefault("source_path", item.get("source_file", ""))
 
 
+def _recover_csv_invocations(item: dict[str, Any], perf_report_csv_dir: Path | str | None) -> None:
+    """Fill a candidate's missing shapes, invocation cases and raw arg spec from ``ops_unique_args.csv``.
+
+    The fused-MoE expert kernel's trace event carries no Input Dims, so it takes the sidecar's fused-MoE rows
+    instead of an exact-name match.
+    """
+    had_observed_shapes = bool(item.get("shapes"))
+    operation = str(item.get("name") or "")
+    if _is_fused_moe_candidate(item):
+        fused_moe_shapes = resolve_fused_moe_shapes_from_csv(perf_report_csv_dir)
+        invocation_cases = resolve_fused_moe_invocation_cases_from_csv(perf_report_csv_dir)
+        if not item.get("shapes") and fused_moe_shapes:
+            item["shapes"] = fused_moe_shapes
+            item["shape_provenance"] = "torch_trace"
+    else:
+        invocation_cases = resolve_invocation_cases_from_csv(perf_report_csv_dir, operation)
+    if not item.get("shapes"):
+        csv_shapes = resolve_shapes_from_csv_for_op(perf_report_csv_dir, operation)
+        if csv_shapes:
+            item["shapes"] = csv_shapes
+            item["shape_provenance"] = "torch_trace"
+    if invocation_cases:
+        if had_observed_shapes:
+            invocation_cases = [
+                {
+                    "operation": operation,
+                    "input_shapes": (item.get("input_shapes") or item.get("shapes") or []),
+                    "input_dtypes": item.get("input_dtypes") or [],
+                    "raw_arg_spec": item.get("raw_arg_spec") or {},
+                },
+                *invocation_cases,
+            ]
+        item["invocation_cases"] = invocation_cases
+    # Mark trace-extracted shapes so the dispatch-time validator knows their provenance.
+    if item.get("shapes"):
+        item.setdefault("shape_provenance", "torch_trace")
+    # Forward the full ordered arg metadata so GEAK's harness builder can
+    # reconstruct the exact call signature.
+    if not item.get("raw_arg_spec"):
+        raw_spec = (
+            invocation_cases[0].get("raw_arg_spec")
+            if invocation_cases
+            else resolve_raw_arg_spec_from_csv(perf_report_csv_dir, operation)
+        )
+        if raw_spec:
+            item["raw_arg_spec"] = raw_spec
+
+
 def _finalize_candidates(
     top: list[dict[str, Any]],
     *,
@@ -2809,10 +2857,6 @@ def _finalize_candidates(
         The finalized candidate list (the same ``top`` object).
     """
     op_cat_map = load_op_category_map(perf_report_csv_dir) if perf_report_csv_dir is not None else {}
-    # Recover the fused-MoE expert kernel's operand shapes (its trace event carries
-    # no Input Dims) once from the sidecar and graft onto candidates lacking shapes.
-    _fused_moe_shapes: list[str] | None = None
-    _fused_moe_invocation_cases: list[dict[str, Any]] | None = None
     # Denominator for the duration-derived gpu_pct fallback below.
     sum_dur = sum(float(it.get("duration_us") or 0.0) for it in top) or 1.0
     for idx, item in enumerate(top, 1):
@@ -2820,58 +2864,7 @@ def _finalize_candidates(
         item.setdefault("source_file", "")
         item.setdefault("source_type", "unknown")
         item.setdefault("shapes", [])
-        had_observed_shapes = bool(item.get("shapes"))
-        operation = str(item.get("name") or "")
-        if _is_fused_moe_candidate(item):
-            if _fused_moe_shapes is None:
-                _fused_moe_shapes = resolve_fused_moe_shapes_from_csv(perf_report_csv_dir)
-            if _fused_moe_invocation_cases is None:
-                _fused_moe_invocation_cases = resolve_fused_moe_invocation_cases_from_csv(perf_report_csv_dir)
-            invocation_cases = list(_fused_moe_invocation_cases or [])
-            if not item.get("shapes") and _fused_moe_shapes:
-                item["shapes"] = list(_fused_moe_shapes)
-                item["shape_provenance"] = "torch_trace"
-        else:
-            invocation_cases = resolve_invocation_cases_from_csv(
-                perf_report_csv_dir,
-                operation,
-            )
-        if not item.get("shapes"):
-            csv_shapes = resolve_shapes_from_csv_for_op(
-                perf_report_csv_dir,
-                operation,
-            )
-            if csv_shapes:
-                item["shapes"] = csv_shapes
-                item["shape_provenance"] = "torch_trace"
-        if invocation_cases:
-            if had_observed_shapes:
-                invocation_cases = [
-                    {
-                        "operation": operation,
-                        "input_shapes": (item.get("input_shapes") or item.get("shapes") or []),
-                        "input_dtypes": item.get("input_dtypes") or [],
-                        "raw_arg_spec": item.get("raw_arg_spec") or {},
-                    },
-                    *invocation_cases,
-                ]
-            item["invocation_cases"] = invocation_cases
-        # Mark trace-extracted shapes so the dispatch-time validator knows their provenance.
-        if item.get("shapes"):
-            item.setdefault("shape_provenance", "torch_trace")
-        # Forward the full ordered arg metadata so GEAK's harness builder can
-        # reconstruct the exact call signature.
-        if not item.get("raw_arg_spec"):
-            raw_spec = (
-                invocation_cases[0].get("raw_arg_spec")
-                if invocation_cases
-                else resolve_raw_arg_spec_from_csv(
-                    perf_report_csv_dir,
-                    str(item.get("name") or ""),
-                )
-            )
-            if raw_spec:
-                item["raw_arg_spec"] = raw_spec
+        _recover_csv_invocations(item, perf_report_csv_dir)
         item["kernel_id"] = f"k{idx:03d}"
         item["duration_us"] = round(item["duration_us"], 3)
         # Keep TraceLens' authoritative pct_e2e when present, including a real
@@ -2888,11 +2881,11 @@ def _finalize_candidates(
         # MoE kernel source before the patchability gate.
         if item["source_type"] == "flydsl":
             _sf = str(item.get("source_file") or "").strip()
-            if (not _sf) or (not os.path.isfile(_sf)):
+            if not os.path.isfile(_sf):
                 _fb = _resolve_flydsl_source_fallback()
                 if _fb:
                     item["source_file"] = _fb
-                    item["kernel_repo"] = find_repo_root(_fb) or item.get("kernel_repo", "")
+                    item["kernel_repo"] = find_repo_root(_fb) or item["kernel_repo"]
                     item["flydsl_source_from_fallback"] = True
         # Downgrade thin dispatch wrappers to vendor_binary so recommend_backends drops them.
         if item["source_type"] != "vendor_binary" and is_vendor_dispatch_wrapper(
