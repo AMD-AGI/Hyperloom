@@ -44,6 +44,7 @@ _FIND_SPEC = (
 )
 _PROBE_TIMEOUT_SEC = 120
 _AGENTX_DEFAULT_PYTHON = "python3"
+_UTF8 = "utf-8"
 
 
 class FarmError(Exception):
@@ -187,14 +188,14 @@ def place_farm(config_path: Path, farm: Farm) -> Mapping[str, Any]:
     an overlay: ``apply_native_runtime`` writes it into ``launch_overrides.env`` and binds the rebuilt files as source
     evidence, and an interpreter the YAML names becomes the launch executable.
     """
-    config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    config = yaml.safe_load(config_path.read_text(encoding=_UTF8)) or {}
     if is_magpie_agentx(config.get("benchmark") or {}):
         python = named_python(config)
         apply_native_runtime(config_path, {"runtime_python_exe": python} if python else {}, str(farm.site))
-        return server_environment(yaml.safe_load(config_path.read_text(encoding="utf-8")))
+        return server_environment(yaml.safe_load(config_path.read_text(encoding=_UTF8)))
     envs = config.setdefault("benchmark", {}).setdefault("envs", {})
     prepend_pythonpath(envs, farm.site)
-    config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_UTF8)
     return envs
 
 

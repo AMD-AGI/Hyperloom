@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from hyperloom.inference_optimizer.session import paths as session_paths
-from hyperloom.orchestrator.actions.executors._subprocess_kill import run_with_session_kill
+from hyperloom.orchestrator.actions.executors import run_with_session_kill
 from hyperloom.orchestrator.trace_analysis.tracelens_arch_benchmark import resolve_arch_json_path
 from hyperloom.orchestrator.trace_analysis.tracelens_skill_runner import discover_capture_folder
 

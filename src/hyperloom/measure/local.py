@@ -12,8 +12,7 @@
   way ``conc_sweep`` does, stepping down a level when the boot fails;
 * accuracy is the ``RUN_EVAL`` switch in the point's own YAML, which must say what the caller asked for.
 
-Nothing in the old flow changes: this file only calls what ``orchestrator.actions.executors`` exports, and the pick of a
-free port that its server lifecycle makes (``_server_lifecycle``).
+Nothing in the old flow changes: this file only calls what ``orchestrator.actions.executors`` exports.
 """
 
 from __future__ import annotations
@@ -55,15 +54,16 @@ from hyperloom.measure.spec import Attachment
 from hyperloom.measure.spec import EnvRoot as SpecEnvRoot
 from hyperloom.orchestrator.actions.executors import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
+    REUSE_PORT_DEFAULT,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
     GridVariant,
     VariantResult,
+    assign_free_port,
     resolve_lifecycle_params,
     run_grid,
+    run_grid_warmup_enabled,
     teardown_lifecycle_server,
 )
-from hyperloom.orchestrator.actions.executors._grid_runner import _run_grid_warmup_enabled
-from hyperloom.orchestrator.actions.executors._server_lifecycle import REUSE_PORT_DEFAULT, _assign_free_port
 from hyperloom.orchestrator.actions.executors.benchmark_backend import resolve_backend
 from hyperloom.orchestrator.actions.stop_attribution import (
     ORCHESTRATOR_CANCELLED_CLASS,
@@ -110,14 +110,12 @@ SUPPORTED_KINDS = _SUPPORTED_KINDS
 _PROCESS_LOCK = threading.Lock()
 
 #: What a boot round pins in its round's environment, on top of the point and of what the backend says a boot round is
-#: (``boot_phase_envs``). A boot round only brings a server up and leaves it for the rounds that measure: Magpie runs
-#: the server phase and then a full client round whatever ``MAGPIE_RUN_PHASE`` says (Magpie issue 130), so the client
-#: round has to be made small instead. It must not evaluate (``RUN_EVAL``: 1319 questions on a GSM8K point) and it
-#: needs one request, not the point's ``NUM_PROMPTS``. Both are in Magpie's ``CLIENT_ONLY_REUSE_ENV_KEYS``, the
-#: variables a persistent server's reuse check leaves out, so the rounds that measure on that server see the same
-#: server: every variable a boot round adds must be one of those keys, or the reuse check refuses the rounds after it.
-#: ``NUM_WARMUPS`` stays the point's: Magpie's InferenceX scripts take their warmups from the concurrency, not from it,
-#: and it is not one of those keys. An AgentX point has no evaluation round and no prompt count; its boot round carries
+#: (``boot_phase_envs``). A boot round only brings a server up for the rounds that measure, yet Magpie runs the server
+#: phase and then a full client round whatever ``MAGPIE_RUN_PHASE`` says, so that round has to be made small: no
+#: evaluation (``RUN_EVAL``: 1319 questions on a GSM8K point) and one request, not the point's ``NUM_PROMPTS``. Both are
+#: in Magpie's ``CLIENT_ONLY_REUSE_ENV_KEYS``, which a persistent server's reuse check leaves out; a variable outside
+#: those keys would make the check refuse the rounds that measure. ``NUM_WARMUPS`` stays the point's (Magpie takes its
+#: warmups from the concurrency). An AgentX point has no evaluation round and no prompt count; its boot round carries
 #: only what the backend says.
 _BOOT_CLIENT_ENVS = {"RUN_EVAL": "false", "NUM_PROMPTS": "1"}
 #: The warmup round of a graded test, the one that evaluates (``_eval_then_measure``).
@@ -399,7 +397,7 @@ def _free_port_for(point: Path, server_lifecycle: dict[str, Any] | None) -> Iter
         return
     config = _point_config(point)
     benchmark = config.get("benchmark") or {}
-    benchmark["envs"] = {**(benchmark.get("envs") or {}), "PORT": _assign_free_port(REUSE_PORT_DEFAULT)}
+    benchmark["envs"] = {**(benchmark.get("envs") or {}), "PORT": assign_free_port(REUSE_PORT_DEFAULT)}
     config["benchmark"] = benchmark
     with tempfile.TemporaryDirectory(prefix="hl-port-") as work:
         pinned = Path(work) / Path(point).name
@@ -431,7 +429,7 @@ async def _single(run: _Run) -> None:
     lifecycle = _one_eval_lifecycle(run, warmup)
     if lifecycle is None:
         measured: VariantResult | None = await _grid(
-            run, 0, "test", warmup_before_measure=None if warmup is None else bool(warmup)
+            run, 0, _TEST, warmup_before_measure=None if warmup is None else bool(warmup)
         )
         run.add(0, measured)
     else:
@@ -449,7 +447,7 @@ def _one_eval_lifecycle(run: _Run, warmup: int | None) -> _Lifecycle | None:
     as the plan is ``run_grid``'s own default.
     """
     call = run.call
-    if not call.accuracy or not (_run_grid_warmup_enabled() if warmup is None else bool(warmup)):
+    if not call.accuracy or not (run_grid_warmup_enabled() if warmup is None else bool(warmup)):
         return None
     if is_magpie_agentx(_point_config(call.points[0]).get("benchmark") or {}):
         return None
@@ -474,7 +472,7 @@ async def _eval_then_measure(run: _Run, lifecycle: _Lifecycle) -> VariantResult 
         measured = await _grid(
             run,
             0,
-            "test",
+            _TEST,
             server_lifecycle=lifecycle.settings(cleanup=True),
             server_already_ready=True,
             base_extra_envs=_MEASURED_ENVS,
@@ -733,7 +731,7 @@ def _eval_returncode(result: VariantResult) -> int:
 
 def _warmup_rounds(point: int, result: VariantResult, workspace: Path) -> list[RoundOutcome]:
     """The warmup round of a graded test and, unless it failed, the accuracy round of its evaluation."""
-    rounds = [RoundOutcome(point, "warmup", workspace, _result_returncode(result))]
+    rounds = [RoundOutcome(point, _WARMUP, workspace, _result_returncode(result))]
     warnings = list(result.nonfatal_warnings)
     if not _is_failure(result):
         rounds.append(RoundOutcome(point, _ACCURACY, workspace, _eval_returncode(result), read_accuracy(workspace)))
@@ -751,7 +749,7 @@ def _rounds(run: _Run, point: int, result: VariantResult) -> list[RoundOutcome]:
         return _warmup_rounds(point, result, workspace)
     rounds = []
     if any(w == _WARMUP_DISCARDED for w in result.nonfatal_warnings):
-        rounds.append(RoundOutcome(point, "warmup", workspace.parent / "warmup_round", 0))
+        rounds.append(RoundOutcome(point, _WARMUP, workspace.parent / "warmup_round", 0))
     if result.note != _BOOT_ONLY_NOTE:
         rounds.append(RoundOutcome(point, "measure", workspace, _result_returncode(result)))
     if run.call.accuracy and run.warmup is None and not _is_failure(result):

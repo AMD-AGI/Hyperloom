@@ -28,7 +28,7 @@ from typing import Any, Protocol
 
 from hyperloom.common.io import atomic_write_json
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cancel_scope
-from hyperloom.orchestrator.actions.executors._subprocess_kill import COOPERATIVE_REAP_BUDGET_SEC
+from hyperloom.orchestrator.actions.executors import COOPERATIVE_REAP_BUDGET_SEC
 from hyperloom_multibranch.contracts.notebook.records import ToolResultPointer
 
 log = logging.getLogger(__name__)
