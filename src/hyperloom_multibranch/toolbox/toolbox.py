@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
@@ -28,7 +28,6 @@ from hyperloom_multibranch.contracts.notebook.interfaces import (
     UnknownRequest,
 )
 from hyperloom_multibranch.contracts.notebook.records import ClaimKey, Withdrawal
-from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import (
     CancelOutcome,
     MeasurementCapacity,
@@ -39,7 +38,6 @@ from hyperloom_multibranch.contracts.toolbox import (
     TestRecordSink,
     TestWithdrawn,
     UnknownTestRequest,
-    WorkloadKind,
 )
 from hyperloom_multibranch.contracts.gate import ResultUnverified
 from hyperloom_multibranch.toolbox.analysis import (
@@ -49,7 +47,7 @@ from hyperloom_multibranch.toolbox.analysis import (
     AnalysisAsk,
     analysis_request,
 )
-from hyperloom_multibranch.toolbox.acceptance import Acceptance, MeasurementPlanner, check_kind
+from hyperloom_multibranch.toolbox.acceptance import Acceptance, AcceptanceSetup, check_kind
 from hyperloom_multibranch.toolbox.attachments import store_attachment
 from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES, AttemptRunner, Executor, TestJob
 from hyperloom_multibranch.toolbox.quarantine import Quarantine
@@ -76,24 +74,6 @@ class ToolboxStores:
     health: NodeHealth
     claims: ClaimService | None = None
     records: RecordSearch | None = None
-
-
-@dataclass(frozen=True)
-class AcceptanceSetup:
-    """What acceptance judges a request against: the repository, the planner and the active image.
-
-    ``workload_kind`` is the campaign's workload (default InferenceX, the MB1 scenario, design 7.3): in an InferenceX
-    campaign every ``explore`` and ``confirm`` request is accepted with ``accuracy=True``; AgentX leaves requests as
-    submitted. A recipe on an image other than ``active_image_digest`` is refused; ``None`` skips the check.
-    ``supported_kinds`` are the kinds the backend runs (a sweep counts as ``test``); any other kind is refused at
-    acceptance as ``unsupported_kind``, and ``None`` accepts every kind.
-    """
-
-    repo: ExperimentRepo
-    planner: MeasurementPlanner
-    active_image_digest: str | None
-    workload_kind: WorkloadKind = WorkloadKind.INFERENCEX
-    supported_kinds: Collection[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -130,14 +110,7 @@ class RealToolbox:
         self._executor = executor
         self._queue = WorkQueue(tuning.policy or QueuePolicy())
         self._quarantine = Quarantine(stores.health)
-        self._acceptance = Acceptance(
-            acceptance.repo,
-            acceptance.planner,
-            active_image_digest=acceptance.active_image_digest,
-            is_accepted=self._is_accepted,
-            workload_kind=acceptance.workload_kind,
-            live_profile=self._live_profile,
-        )
+        self._acceptance = Acceptance(acceptance, is_accepted=self._is_accepted, live_profile=self._live_profile)
         self._runner = AttemptRunner(
             executor,
             avoid=lambda: self._quarantine.nodes,

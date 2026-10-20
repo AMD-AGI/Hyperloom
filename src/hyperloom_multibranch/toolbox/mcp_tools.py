@@ -410,7 +410,7 @@ def register_specialist_tools(
     options: SpecialistToolOptions = SpecialistToolOptions(),
 ) -> None:
     """Register every specialist tool; ``notebooks(branch)`` is the notebook handle that writes as that branch."""
-    claim_ttl_seconds, toolbox_loop, learnings = options.claim_ttl_seconds, options.toolbox_loop, options.learnings
+    toolbox_loop = options.toolbox_loop
     if toolbox_loop is None:
         with contextlib.suppress(RuntimeError):
             toolbox_loop = asyncio.get_running_loop()
@@ -475,14 +475,21 @@ def register_specialist_tools(
         handler=_poll_inbox(notebooks),
         **own,
     )
+    _register_notebook_tools(server, notebooks, options)
+
+
+def _register_notebook_tools(server: McpServer, notebooks: NotebookFor, options: SpecialistToolOptions) -> None:
+    """Register the notebook's tools, whose definitions the notebook itself owns."""
     # Binding to no notebook is enough to read the definitions; no handler of this probe is ever called.
-    for tool in notebook_tools(cast(Notebook, None), branch="", ttl_seconds=claim_ttl_seconds):
+    for tool in notebook_tools(cast(Notebook, None), branch="", ttl_seconds=options.claim_ttl_seconds):
         server.register(
             tool.name,
             description=tool.description,
             schema=tool.input_schema,
-            handler=_notebook_handler(tool.name, notebooks, claim_ttl_seconds, learnings, options.briefing_for),
-            **own,
+            handler=_notebook_handler(
+                tool.name, notebooks, options.claim_ttl_seconds, options.learnings, options.briefing_for
+            ),
+            scopes=_SPECIALIST_SCOPES,
         )
 
 

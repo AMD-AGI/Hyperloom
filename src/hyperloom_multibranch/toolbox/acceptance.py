@@ -76,6 +76,24 @@ class MeasurementPlanner(Protocol):
 
 
 @dataclass(frozen=True)
+class AcceptanceSetup:
+    """What acceptance judges a request against: the repository, the planner and the active image.
+
+    ``workload_kind`` is the campaign's workload (default InferenceX, the MB1 scenario, design 7.3): in an InferenceX
+    campaign every ``explore`` and ``confirm`` request is accepted with ``accuracy=True``; AgentX leaves requests as
+    submitted. A recipe on an image other than ``active_image_digest`` is refused; ``None`` skips the check.
+    ``supported_kinds`` are the kinds the backend runs (a sweep counts as ``test``); any other kind is refused at
+    acceptance as ``unsupported_kind``, and ``None`` accepts every kind.
+    """
+
+    repo: ExperimentRepo
+    planner: MeasurementPlanner
+    active_image_digest: str | None
+    workload_kind: WorkloadKind = WorkloadKind.INFERENCEX
+    supported_kinds: Collection[str] | None = None
+
+
+@dataclass(frozen=True)
 class Prepared:
     """What acceptance learned: the compiled environment, handed to the executor with every attempt."""
 
@@ -85,22 +103,19 @@ class Prepared:
 class Acceptance:
     def __init__(
         self,
-        repo: ExperimentRepo,
-        planner: MeasurementPlanner,
+        setup: AcceptanceSetup,
         *,
-        active_image_digest: str | None,
         is_accepted: Callable[[str], bool],
-        workload_kind: WorkloadKind = WorkloadKind.INFERENCEX,
         live_profile: Callable[[TestRequest], str | None] = _no_live_profile,
     ) -> None:
         """``live_profile`` answers, for a PROFILE request, the id of the profile of the same commit and recipe that
         is queued, running or measured, or ``None``; the toolbox reads it from its submit log."""
-        self._repo = repo
-        self._planner = planner
-        self._image = active_image_digest
+        self._repo = setup.repo
+        self._planner = setup.planner
+        self._image = setup.active_image_digest
         self._is_accepted = is_accepted
         self._live_profile = live_profile
-        self._workload = workload_kind
+        self._workload = setup.workload_kind
 
     def with_required_accuracy(self, request: TestRequest) -> TestRequest:
         """The request an InferenceX campaign runs: ``baseline``, ``explore``, ``confirm``, ``integration`` and
