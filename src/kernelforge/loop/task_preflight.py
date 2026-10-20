@@ -595,6 +595,10 @@ class DriverContract:
     expected_case_ids: list[str] | None = None
 
 
+def _stage_seconds(since: float) -> float:
+    return round(time.monotonic() - since, 3)
+
+
 @dataclass
 class _PreflightWork:
     """Mutable accumulators for one preflight run; stages append reasons, details and diagnostics."""
@@ -615,7 +619,7 @@ class _PreflightWork:
             )
             keys = ("passed", "outcome", "snr_db", "allclose", "max_diff", "message")
             self.details["correctness"] = {k: cres.get(k) for k in keys}
-            self.details["correctness"]["seconds"] = round(time.monotonic() - stage_started, 3)
+            self.details["correctness"]["seconds"] = _stage_seconds(stage_started)
             has_metric = (
                 cres.get("snr_db") is not None or cres.get("allclose") is not None or cres.get("max_diff") is not None
             )
@@ -639,7 +643,7 @@ class _PreflightWork:
             reported_cases = bres.get("case_times") or {}
             self.details["bench"] = {k: bres.get(k) for k in ("success", "median_ms", "message")}
             self.details["bench"]["case_count"] = len(reported_cases)
-            self.details["bench"]["seconds"] = round(time.monotonic() - stage_started, 3)
+            self.details["bench"]["seconds"] = _stage_seconds(stage_started)
             declared = set(expected_case_ids or ())
             missing_cases = sorted(declared - set(reported_cases))
             undeclared_cases = sorted(set(reported_cases) - declared) if declared else []
@@ -695,7 +699,7 @@ class _PreflightWork:
         self.details["graph"] = {
             "replays": replays,
             "required": iters,
-            "seconds": round(time.monotonic() - stage_started, 3),
+            "seconds": _stage_seconds(stage_started),
         }
         if replays >= iters:
             return True, True
@@ -723,7 +727,7 @@ class _PreflightWork:
         self.details["profile"] = {
             "ok": profile_ok,
             "contract": profile_detail if profile_ok else "",
-            "seconds": round(time.monotonic() - stage_started, 3),
+            "seconds": _stage_seconds(stage_started),
         }
         if not profile_ok:
             self.diagnostics["profile"] = profile_detail
@@ -783,7 +787,7 @@ async def _preflight_async(
         reasons=work.reasons,
         details=work.details,
         diagnostics=work.diagnostics,
-        duration_sec=round(time.monotonic() - started, 3),
+        duration_sec=_stage_seconds(started),
     )
 
 

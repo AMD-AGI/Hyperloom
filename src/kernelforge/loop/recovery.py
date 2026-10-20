@@ -105,10 +105,8 @@ class CallerRecovery:
     result_json: str | None
 
 
-def _warm_start_keep_bundle(
-    workspace_dir: str, base_commit: str, warm: dict, external_id: str
-) -> tuple[KeepIdentity, KeepScore, KeepBundle]:
-    """KeepIdentity, KeepScore and KeepBundle for HEAD's improving warm-start diff."""
+def _warm_start_scores(warm: dict) -> KeepScore:
+    """KeepScore for a validated improving warm-start, or raise ValueError."""
     baseline_ms = warm.get("pristine_ms")
     best_ms = warm.get("keep_baseline_ms")
     mean_case_speedup = warm.get("mean_case_speedup")
@@ -121,18 +119,25 @@ def _warm_start_keep_bundle(
         or mean_case_speedup <= 1.0
     ):
         raise ValueError("validated warm-start is missing improving measurements")
-    score = KeepScore(
-        baseline_wall_ms=float(baseline_ms),
-        best_wall_ms=float(best_ms),
-        mean_case_speedup=float(mean_case_speedup),
-        search_start_mean_case_speedup=float(mean_case_speedup),
-        search_start_ms=float(best_ms),
+    baseline_ms = float(baseline_ms)
+    best_ms = float(best_ms)
+    mean_case_speedup = float(mean_case_speedup)
+    return KeepScore(
+        baseline_wall_ms=baseline_ms,
+        best_wall_ms=best_ms,
+        mean_case_speedup=mean_case_speedup,
+        search_start_mean_case_speedup=mean_case_speedup,
+        search_start_ms=best_ms,
     )
+
+
+def _warm_start_identity(workspace_dir: str, base_commit: str, warm: dict, external_id: str) -> KeepIdentity:
+    """KeepIdentity for HEAD when it differs from ``base_commit``."""
     head = git("rev-parse", "HEAD", cwd=workspace_dir).stdout.strip()
     if not head or head == base_commit:
         raise ValueError("validated warm-start has no committed patch")
     solution = str(warm.get("solution_slug") or "warm-start")
-    keep = KeepIdentity(
+    return KeepIdentity(
         campaign_id=f"warm-start:{solution}",
         session_index=0,
         experiment_id=external_id,
@@ -140,6 +145,12 @@ def _warm_start_keep_bundle(
         commit_hash=head,
         plan=f"apply prior solution {solution}",
     )
+
+
+def _warm_start_bundle(
+    workspace_dir: str, base_commit: str, keep: KeepIdentity, score: KeepScore, warm: dict
+) -> KeepBundle:
+    """KeepBundle for the non-empty warm-start diff from ``base_commit`` to ``keep.commit_hash``."""
     patch = git("diff", base_commit, keep.commit_hash, "--", ".", cwd=workspace_dir).stdout
     changed_files = [
         line.strip()
@@ -150,21 +161,17 @@ def _warm_start_keep_bundle(
     ]
     if not patch.strip() or not changed_files:
         raise ValueError("validated warm-start produced no publishable diff")
-    return (
-        keep,
-        score,
-        KeepBundle(
-            validation_text=("validated KB warm-start passed canonical correctness"),
-            benchmark={
-                "median_ms": score.best_wall_ms,
-                "mean_case_speedup": score.mean_case_speedup,
-                "case_times": dict(warm.get("case_times") or {}),
-                "unscored_cases": list(warm.get("unscored_cases") or []),
-                "warm_start": True,
-            },
-            changed_files=changed_files,
-            patch=patch,
-        ),
+    return KeepBundle(
+        validation_text=("validated KB warm-start passed canonical correctness"),
+        benchmark={
+            "median_ms": score.best_wall_ms,
+            "mean_case_speedup": score.mean_case_speedup,
+            "case_times": dict(warm.get("case_times") or {}),
+            "unscored_cases": list(warm.get("unscored_cases") or []),
+            "warm_start": True,
+        },
+        changed_files=changed_files,
+        patch=patch,
     )
 
 
@@ -197,10 +204,12 @@ def publish_warm_start_recovery(
     """Publish a validated warm-start as a kill-recoverable local best."""
     if warm.get("applied") is not True:
         return None
+    score = _warm_start_scores(warm)
     case_times = dict(warm.get("case_times") or {})
     unscored_cases = list(warm.get("unscored_cases") or [])
     external_id = caller.caller_experiment_id or caller.experience_id or "warm-start"
-    keep, score, bundle = _warm_start_keep_bundle(workspace_dir, base_commit, warm, external_id)
+    keep = _warm_start_identity(workspace_dir, base_commit, warm, external_id)
+    bundle = _warm_start_bundle(workspace_dir, base_commit, keep, score, warm)
     errors: list[str] = []
     try:
         manifest = BestResultPublisher(workspace_dir).publish(keep, score, bundle)

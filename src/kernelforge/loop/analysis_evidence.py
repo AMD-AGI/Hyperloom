@@ -160,31 +160,36 @@ class AnalysisEvidenceMixin:
             except OSError:
                 log.debug("failed to build orchestration knowledge index", exc_info=True)
 
-        context = OrchestrationContext(
-            analysis_commit=canonical_commit,
-            workspace=str(workspace),
-            gpu_target=self.config.gpu_target,
-            objective=(
-                "Preserve correctness and complete benchmark case coverage while "
-                "maximizing equal-weight mean incumbent-to-candidate case speedup."
-            ),
-            program_context=(self.ic.program_md or f"Optimize the kernel at {self.ic.kernel_file}."),
-            source_map_path=str(source_map_path),
-            editable_sources=tuple(self._target_source_files()),
-            cases=cases,
-            knowledge_index=knowledge_index,
-            supervisor_guidance=self._supervisor_ruling,
-            last_critic_verdict=self._last_critic_verdict,
-            last_critic_review=self._last_critic_review,
-            search_mode=self.run_state.search_mode,
-            search_reason_codes=tuple(self.run_state.search_reason_codes),
-            search_objective=self.run_state.search_objective,
-            search_mode_residence_remaining=(self.run_state.search_mode_residence_remaining),
-            evidence_refs=evidence_refs,
+        return self._with_evidence_standing(
+            OrchestrationContext(
+                analysis_commit=canonical_commit,
+                workspace=str(workspace),
+                gpu_target=self.config.gpu_target,
+                objective=(
+                    "Preserve correctness and complete benchmark case coverage while "
+                    "maximizing equal-weight mean incumbent-to-candidate case speedup."
+                ),
+                program_context=(self.ic.program_md or f"Optimize the kernel at {self.ic.kernel_file}."),
+                source_map_path=str(source_map_path),
+                editable_sources=tuple(self._target_source_files()),
+                cases=cases,
+                knowledge_index=knowledge_index,
+                supervisor_guidance=self._supervisor_ruling,
+                last_critic_verdict=self._last_critic_verdict,
+                last_critic_review=self._last_critic_review,
+                search_mode=self.run_state.search_mode,
+                search_reason_codes=tuple(self.run_state.search_reason_codes),
+                search_objective=self.run_state.search_objective,
+                search_mode_residence_remaining=(self.run_state.search_mode_residence_remaining),
+                evidence_refs=evidence_refs,
+            )
         )
+
+    def _with_evidence_standing(self, context):
+        """``context`` with where its Analysis evidence stands against its commit: freshness, scores and diff."""
         state = self.run_state.analysis
         commit = context.analysis_commit
-        standing = self._analysis_cumulative_diff(evidence_commit=state.evidence_commit, canonical_commit=commit)
+        cumulative_diff = self._analysis_cumulative_diff(evidence_commit=state.evidence_commit, canonical_commit=commit)
         return replace(
             context,
             canonical_commit=commit,
@@ -193,8 +198,8 @@ class AnalysisEvidenceMixin:
             evidence_status=state.evidence_status,
             evidence_mean_case_speedup=state.evidence_mean_case_speedup,
             current_mean_case_speedup=self.best_mean_case_speedup,
-            cumulative_diff_path=standing.path,
-            cumulative_diff_error=standing.error,
+            cumulative_diff_path=cumulative_diff.path,
+            cumulative_diff_error=cumulative_diff.error,
         )
 
     def _orchestration_evidence_refs(
