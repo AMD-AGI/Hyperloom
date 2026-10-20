@@ -129,8 +129,6 @@ def launch_enablement_allowed(shared_state: Any) -> bool:
 
 def eval_enablement_allowed(shared_state: Any) -> bool:
     """Whether a baseline accuracy-eval failure may route into enablement."""
-    if bool(getattr(shared_state, "eval_disabled", False)):
-        return False
     return resolve_enablement_mode(shared_state) in (ENABLEMENT_MODE_EVAL, ENABLEMENT_MODE_ALL)
 
 
@@ -632,14 +630,10 @@ def framework_run_eval_envs(params: dict[str, Any]) -> dict[str, Any] | None:
         params: The integrate_patch task params.
 
     Returns:
-        ``{"RUN_EVAL": "false"}`` when the session disabled evals,
         ``{"RUN_EVAL": "true"}`` for eval-origin enablement patches or for
         framework-authored perf patches with a positive baseline accuracy
         to compare against; else ``None``.
     """
-    # The session's opt-out outranks every force-on below.
-    if is_truthy(params.get("disable_run_eval")):
-        return {"RUN_EVAL": "false"}
     if bool(params.get("enablement")):
         return {"RUN_EVAL": "true"} if is_eval_origin(params) else None
     fw_authored = bool(params.get("framework_agent_authoring") or params.get("framework_agent_candidate_id"))

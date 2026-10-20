@@ -12,7 +12,7 @@ from collections.abc import Awaitable
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 from hyperloom.common.deadline import Deadline
 import logging as _logging
 from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close_out
@@ -71,6 +71,13 @@ def _task_is_dead(task: Task | None) -> bool:
     if task is None:
         return False
     return str(getattr(task, "state", "") or "") in _DEAD_TASK_STATES
+
+
+class CloseArtifact(NamedTuple):
+    """The file a close step produced, as the close-out records it."""
+
+    path: str = ""
+    digest: str = ""
 
 
 class ClosePhase(CoordinatorCollaborator):
@@ -378,8 +385,10 @@ class ClosePhase(CoordinatorCollaborator):
                     "report",
                     status="done",
                     task_id=report_task.task_id,
-                    artifact_path=str(_receipt_path.relative_to(Path(self.session_dir))) if _receipt_path else "",
-                    artifact_digest=hashlib.sha256(_receipt_path.read_bytes()).hexdigest() if _receipt_path else "",
+                    artifact=CloseArtifact(
+                        path=str(_receipt_path.relative_to(Path(self.session_dir))) if _receipt_path else "",
+                        digest=hashlib.sha256(_receipt_path.read_bytes()).hexdigest() if _receipt_path else "",
+                    ),
                 )
                 _close_out.record_close_artifacts(self.session_dir, final_json_path=_json_path, final_md_path=_md_path)
                 self._coord.writeback.emit_lifecycle(
@@ -409,7 +418,7 @@ class ClosePhase(CoordinatorCollaborator):
                 "session_breakdown",
                 status="done",
                 task_id=bd_task.task_id,
-                artifact_path=_close_out.SESSION_BREAKDOWN_PATH,
+                artifact=CloseArtifact(path=_close_out.SESSION_BREAKDOWN_PATH),
             )
         else:
             await self._record_close_step(
@@ -455,11 +464,11 @@ class ClosePhase(CoordinatorCollaborator):
             # receipt names the path only.
             _close_out.record_close_artifacts(self.session_dir, artifact_package_path=pkg_path)
             await self._record_close_step(
-                "artifact_package", status="done", detail=str(pkg_path), artifact_path=str(pkg_path)
+                "artifact_package", status="done", detail=str(pkg_path), artifact=CloseArtifact(path=str(pkg_path))
             )
         else:
             await self._record_close_step(
-                "artifact_package", status="skipped", detail="no artifacts matched or dest unwritable"
+                "artifact_package", status="skipped", detail="no artifacts matched or session dir missing"
             )
         return pkg_path
 
@@ -781,8 +790,7 @@ class ClosePhase(CoordinatorCollaborator):
         status: str,
         task_id: str = "",
         detail: str = "",
-        artifact_path: str = "",
-        artifact_digest: str = "",
+        artifact: CloseArtifact = CloseArtifact(),
     ) -> None:
         """Record one settled close step (best-effort, per-step persist).
 
@@ -802,8 +810,8 @@ class ClosePhase(CoordinatorCollaborator):
                 task_id=task_id,
                 detail=detail,
                 optional=step in _OPTIONAL_CLOSE_STEPS,
-                artifact_path=artifact_path,
-                artifact_digest=artifact_digest,
+                artifact_path=artifact.path,
+                artifact_digest=artifact.digest,
                 error=detail if status == "failed" else "",
             ),
         )
@@ -852,12 +860,14 @@ class ClosePhase(CoordinatorCollaborator):
         now = time.time()
         decision = _phase_state.compute_next_phase(
             state,
-            kernel_enabled=machine.kernel_enabled(),
-            optimize_enabled=machine.optimize_enabled(),
-            enablement_enabled=self._coord.enablement_lane.enablement_admitted(),
             enablement_in_flight=enablement_in_flight,
             kernel_work_in_flight=kernel_facts.agent_in_flight,
             now_unix=now,
+            flags=_phase_state.PhaseFlags(
+                kernel_enabled=machine.kernel_enabled(),
+                optimize_enabled=machine.optimize_enabled(),
+                enablement_enabled=self._coord.enablement_lane.enablement_admitted(),
+            ),
         )
         assert decision is not None and decision[0] == _phase_state.PHASE_CLOSE
         target, reason, evidence = decision
@@ -866,7 +876,9 @@ class ClosePhase(CoordinatorCollaborator):
             state.consume_pending_escalate_hint()
         elif state.pending_escalate_hint:
             state.discard_pending_escalate_hint()
-        _phase_state.record_phase_transition(state, to_phase=target, reason=reason, evidence=evidence, ts_unix=now)
+        _phase_state.record_phase_transition(
+            state, to_phase=target, reason=reason, evidence=evidence, at=_phase_state.PhaseClock(ts_unix=now)
+        )
         machine.fire_phase_exit(Transition(from_phase=prior, to_phase=target, reason=reason, evidence=evidence))
         _phase_state.record_lifecycle_event(
             state, step=target, status=_phase_state.LIFECYCLE_STATUS_ENTER, phase=target, detail=f"reason={reason}"

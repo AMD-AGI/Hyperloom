@@ -19,6 +19,7 @@ from hyperloom.orchestrator.phases.machine_state import (
     _config_lever_dry,
     compute_next_phase,
     kernel_work_pending,
+    PhaseFlags,
 )
 from hyperloom.orchestrator.state import shared_state
 from hyperloom.orchestrator.state.shared_state import (
@@ -295,7 +296,7 @@ def test_compute_next_phase_skip_to_close_routes_to_close():
         baseline_tput=1000.0,
         plateau_overrides={},
     )
-    out = compute_next_phase(state, kernel_enabled=True)
+    out = compute_next_phase(state, flags=PhaseFlags(kernel_enabled=True))
     assert out is not None
     target, reason, evidence = out
     assert target == PHASE_CLOSE
@@ -326,7 +327,7 @@ def _skip_to_sweep_state(phase: str) -> SharedState:
 
 def test_skip_to_sweep_from_optimize_is_non_terminal():
     # skip_to_sweep exhausts the explore lever, non-terminal.
-    out = compute_next_phase(_skip_to_sweep_state("FRAMEWORK_AGENT"), kernel_enabled=True)
+    out = compute_next_phase(_skip_to_sweep_state("FRAMEWORK_AGENT"), flags=PhaseFlags(kernel_enabled=True))
     assert out is not None
     _target, reason, evidence = out
     assert reason == "optimize_no_more_leverage"
@@ -335,7 +336,7 @@ def test_skip_to_sweep_from_optimize_is_non_terminal():
 
 def test_compute_next_phase_skip_to_sweep_from_explore_routes_to_kernel():
     # Exhausted explore leverage switches lever EXPLORE -> KERNEL, non-terminal.
-    out = compute_next_phase(_skip_to_sweep_state("FRAMEWORK_AGENT"), kernel_enabled=True)
+    out = compute_next_phase(_skip_to_sweep_state("FRAMEWORK_AGENT"), flags=PhaseFlags(kernel_enabled=True))
     assert out is not None
     target, reason, evidence = out
     assert target == PHASE_KERNEL_AGENT
@@ -344,7 +345,7 @@ def test_compute_next_phase_skip_to_sweep_from_explore_routes_to_kernel():
 
 
 def test_kernel_with_no_pending_work_routes_to_sweep():
-    out = compute_next_phase(_skip_to_sweep_state("KERNEL_AGENT"), kernel_enabled=True)
+    out = compute_next_phase(_skip_to_sweep_state("KERNEL_AGENT"), flags=PhaseFlags(kernel_enabled=True))
     assert out is not None
     target, reason, _ = out
     assert target == PHASE_SWEEP
@@ -358,7 +359,7 @@ def test_kernel_holds_while_work_pending_keep():
     }
 
     assert kernel_work_pending(state) is True
-    assert compute_next_phase(state, kernel_enabled=True) is None
+    assert compute_next_phase(state, flags=PhaseFlags(kernel_enabled=True)) is None
 
 
 def test_kernel_holds_while_work_pending_partial_attempt():
@@ -372,7 +373,7 @@ def test_kernel_holds_while_work_pending_partial_attempt():
     }
 
     assert kernel_work_pending(state) is True
-    assert compute_next_phase(state, kernel_enabled=True) is None
+    assert compute_next_phase(state, flags=PhaseFlags(kernel_enabled=True)) is None
 
 
 def test_kernel_holds_while_work_pending_untried_hot_kernel():
@@ -380,7 +381,7 @@ def test_kernel_holds_while_work_pending_untried_hot_kernel():
     state.untried_hot_reusable_kernels = lambda: ["k017"]
 
     assert kernel_work_pending(state) is True
-    assert compute_next_phase(state, kernel_enabled=True) is None
+    assert compute_next_phase(state, flags=PhaseFlags(kernel_enabled=True)) is None
 
 
 @pytest.mark.parametrize("status", ["no_gain", "timeout"])
@@ -391,7 +392,7 @@ def test_geak_terminal_exits_kernel_ignoring_per_kernel_pending_work(status):
     state.untried_hot_reusable_kernels = lambda: ["k017"]
 
     assert kernel_work_pending(state) is False
-    out = compute_next_phase(state, kernel_enabled=True)
+    out = compute_next_phase(state, flags=PhaseFlags(kernel_enabled=True))
     assert out is not None
     target, reason, _ = out
     assert target == PHASE_SWEEP
@@ -411,7 +412,7 @@ def test_kernel_holds_while_work_pending_retryable_failed_kernel():
     }
 
     assert kernel_work_pending(state) is True
-    assert compute_next_phase(state, kernel_enabled=True) is None
+    assert compute_next_phase(state, flags=PhaseFlags(kernel_enabled=True)) is None
 
 
 def test_kernel_exits_when_all_attempts_are_rejected_or_integrated():
@@ -432,7 +433,7 @@ def test_kernel_exits_when_all_attempts_are_rejected_or_integrated():
     }
 
     assert kernel_work_pending(state) is False
-    out = compute_next_phase(state, kernel_enabled=True)
+    out = compute_next_phase(state, flags=PhaseFlags(kernel_enabled=True))
     assert out is not None
     target, reason, _ = out
     assert target == PHASE_SWEEP
@@ -577,7 +578,7 @@ def test_compute_next_phase_advances_on_plateau():
         plateau_overrides={},
         framework_agent_phase_done=True,
     )
-    target, reason, _ = compute_next_phase(state, kernel_enabled=True)
+    target, reason, _ = compute_next_phase(state, flags=PhaseFlags(kernel_enabled=True))
     assert target == "KERNEL_AGENT"
     assert reason == "optimize_no_more_leverage"
     triggered, _ = _config_lever_dry(state, {})
@@ -607,7 +608,7 @@ def test_compute_next_phase_honors_explore_plateau_overrides():
         framework_agent_phase_done=True,
     )
 
-    target, reason, evidence = compute_next_phase(state, kernel_enabled=True)
+    target, reason, evidence = compute_next_phase(state, flags=PhaseFlags(kernel_enabled=True))
 
     assert target == "KERNEL_AGENT"
     assert reason == "optimize_no_more_leverage"

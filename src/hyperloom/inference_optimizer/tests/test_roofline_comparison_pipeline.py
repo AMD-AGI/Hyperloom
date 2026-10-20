@@ -1048,3 +1048,18 @@ class TestRecordTraceAnalyzeStampsTwoSidedRoofline:
         assert perf["decode_mem_tok_per_s"] == 8000.0
         assert perf["decode_cmp_tok_per_s"] == 40_000.0
         assert perf["bound_kind"] == "memory"
+
+
+def test_attach_perfmodel_breakdown_propagates_perfmodel_failure(monkeypatch):
+    from hyperloom.inference_optimizer import roofline_ceiling, roofline_snapshot
+
+    def perfmodel_fails(*_args, **_kwargs):
+        raise RuntimeError("perfmodel bug")
+
+    monkeypatch.setattr(roofline_ceiling, "resolve_runtime_workload", perfmodel_fails)
+    snapshot: dict[str, Any] = {"snapshot_id": 1}
+
+    with pytest.raises(RuntimeError):
+        roofline_snapshot.attach_perfmodel_breakdown(snapshot, SimpleNamespace(), arm="baseline")
+
+    assert snapshot == {"snapshot_id": 1}

@@ -104,7 +104,7 @@ __all__ = ["main"]
 from .. import framework_registry
 from ..session.manifest import load_manifest, write_manifest
 from ..protocol.action_surfaces import ACTION_CATALOGUE
-from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator, CoordinatorSettings, RunOptions
 from hyperloom.orchestrator.collaborator import OrchestrationPrompt as _OrchestrationPrompt
 from hyperloom.inference_optimizer.framework_paths import resolve_framework_tree, resolve_kernel_search_roots
 from hyperloom.orchestrator.state.objective import AnyObjective, Objective, build_objective
@@ -113,6 +113,9 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
     TRANSPORT_TOOLS,
     build_orchestration_prompt,
     default_enabled_actions,
+    PromptAssets,
+    PromptCycle,
+    SessionContext,
 )
 from hyperloom.inference_optimizer.breakdown.stop_reasons import SUPERVISOR_RESTART_REASON
 
@@ -366,24 +369,25 @@ def _build_orchestration_prompt(
     return build_orchestration_prompt(
         action_registry=ACTION_CATALOGUE,
         enabled_actions=enabled,
-        framework=framework,
-        kernel_enabled=not no_kernel,
-        framework_agent_phase_enabled=not no_framework_agent,
-        objective_kind=kind,
-        objective_value=value,
-        max_minutes=int(context.max_minutes),
-        macro_cycle=int(macro_cycle),
-        cycle_directive=cycle_directive,
-        cycle_strategy=cycle_strategy,
-        phase=phase,
-        transport=context.transport,
-        benchmark_mode=context.benchmark_mode,
-        agentx_corpus_shape=context.agentx_corpus_shape,
-        agentx_grading=context.agentx_grading,
-        agentx_backend=context.agentx_backend,
-        rules_fragment_path=_orchestration_rules_fragment_path(),
-        framework_source_roots=resolve_kernel_search_roots(),
-        session_framework_tree=resolve_framework_tree(framework),
+        session=SessionContext(
+            framework=framework,
+            kernel_enabled=not no_kernel,
+            framework_agent_phase_enabled=not no_framework_agent,
+            objective_kind=kind,
+            objective_value=value,
+            max_minutes=int(context.max_minutes),
+            framework_source_roots=resolve_kernel_search_roots(),
+            session_framework_tree=resolve_framework_tree(framework),
+            transport=context.transport,
+            benchmark_mode=context.benchmark_mode,
+            agentx_corpus_shape=context.agentx_corpus_shape,
+            agentx_grading=context.agentx_grading,
+            agentx_backend=context.agentx_backend,
+        ),
+        cycle=PromptCycle(
+            macro_cycle=int(macro_cycle), cycle_directive=cycle_directive, cycle_strategy=cycle_strategy, phase=phase
+        ),
+        assets=PromptAssets(rules_fragment_path=_orchestration_rules_fragment_path()),
     )
 
 
@@ -1077,11 +1081,6 @@ def _resolve_run_max_model_len(args: argparse.Namespace) -> tuple[int, str]:
     )
 
 
-def _resume_can_disable_eval(baseline_accuracy: float) -> bool:
-    """Whether ``--no-eval`` may still disable the accuracy eval for a resumed session."""
-    return float(baseline_accuracy or 0.0) <= 0.0
-
-
 def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
     """Map ``--*-pct`` CLI flags to a ``phase -> pct`` override dict.
 
@@ -1110,15 +1109,12 @@ def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
 
 
 def _detect_checkpoint_precision(model_path: str | None) -> str:
-    """Detect weight precision from model config.json; returns '' on failure."""
+    """Detect weight precision from model config.json; returns '' when it names none."""
     if not model_path:
         return ""
-    try:
-        from hyperloom.inference_optimizer.model_config_utils import summarize_model_config
+    from hyperloom.inference_optimizer.model_config_utils import summarize_model_config
 
-        summary = summarize_model_config(str(model_path))
-    except Exception:  # noqa: BLE001
-        return ""
+    summary = summarize_model_config(str(model_path))
     quant = (summary.get("quantization") or "").strip().lower()
     if quant:
         if quant.startswith("fp8"):
@@ -1780,22 +1776,6 @@ def _restore_phase_toggles(args: argparse.Namespace, state, session_dir: Path) -
                 f"  framework phase       : WARN --no-framework-agent ignored; "
                 f"session is already in phase={cur_phase!r} "
                 f"(cannot retroactively skip)"
-            )
-    # Same persistence contract for the eval toggle.
-    if state.eval_disabled:
-        args.no_eval = True
-        print("  accuracy eval         : DISABLED (persisted from original run)")
-    elif bool(getattr(args, "no_eval", False)):
-        anchored = float(state.baseline_accuracy or 0.0)
-        if _resume_can_disable_eval(anchored):
-            state.eval_disabled = True
-            state.save(session_dir)
-            print("  accuracy eval         : DISABLING for resume (--no-eval + no anchored accuracy)")
-        else:
-            print(
-                f"  accuracy eval         : WARN --no-eval ignored; "
-                f"session already anchored accuracy={anchored:.4f} "
-                f"(cannot retroactively ungrade prior KEEPs)"
             )
 
 
@@ -2615,12 +2595,16 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     coordinator = Coordinator(
         session_dir,
         backends=backends,
-        model_class=(getattr(args, "model_class", None) or os.environ.get("MODEL_CLASS") or ""),
-        phase_budget_pct=phase_budget_pct or None,
-        # KnowledgePlane facade (None when --degraded-pr).
-        knowledge_plane=knowledge_plane,
-        # Advisory multi-model specialist-proposal scorer, disabled by default (enable via --proposal-scoring).
-        proposal_scorer=_build_proposal_scorer(args, session_dir),
+        settings=CoordinatorSettings(
+            model_class=getattr(args, "model_class", None) or os.environ.get("MODEL_CLASS") or "",
+            phase_budget_pct=phase_budget_pct or None,
+        ),
+        advisory=AdvisoryServices(
+            # KnowledgePlane facade (None when --degraded-pr).
+            knowledge_plane=knowledge_plane,
+            # Advisory multi-model specialist-proposal scorer, disabled by default (enable via --proposal-scoring).
+            proposal_scorer=_build_proposal_scorer(args, session_dir),
+        ),
     )
     framework_for_prompt = os.environ.get("FRAMEWORK", "").strip().lower() or "sglang"
     max_minutes_for_prompt = int(round(float(args.max_hours) * 60))
@@ -2732,11 +2716,13 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     try:
         stop_reason = await coordinator.run(
             objective=objective,
-            max_minutes=args.max_hours * 60.0,
-            tick_interval_sec=args.tick_interval_sec,
-            max_ticks=args.max_ticks,
-            install_signal_handlers=True,
-            closing_grace_sec=args.closing_grace_sec,
+            options=RunOptions(
+                max_minutes=args.max_hours * 60.0,
+                tick_interval_sec=args.tick_interval_sec,
+                max_ticks=args.max_ticks,
+                install_signal_handlers=True,
+                closing_grace_sec=args.closing_grace_sec,
+            ),
         )
     finally:
         state = coordinator.shared_state
