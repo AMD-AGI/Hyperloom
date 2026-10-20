@@ -1095,27 +1095,26 @@ def _author_run_error_verdict(run_error: Exception, *, backend: Any, timeout_s: 
     return AUTHOR_RC_FAILED, classify_llm_error(run_error) in RETRYABLE_KINDS
 
 
-def _run_registered_author_once(prompt: str, workspace: AuthorWorkspace, agent: AuthorAgent) -> tuple[int, bool]:
-    """One authoring run, with whether its failure was the transport's rather than the task's."""
-    backend, timeout_s = agent.backend, agent.timeout_s
-    workdir, log_path = workspace.workdir, workspace.log_path
-    progress: list[str] = []
-    requested_targets = list(dict.fromkeys(str(path) for path in workspace.target_files if str(path)))
-    requested_module_dirs = list(dict.fromkeys(str(path) for path in workspace.new_module_dirs if str(path)))
-    try:
-        guard = _AuthorWorkspaceGuard(workdir, requested_targets, requested_module_dirs)
-    except AuthorSafetyError as exc:
-        detail = _safety_detail(exc)
-        heading = (
-            "author workspace could not be inspected before run"
-            if exc.transient
-            else "author workspace safety rejected before run"
-        )
-        _record_author_log(log_path, progress, error=f"{heading}: {detail}")
-        log.error("%s: %s", heading, detail)
-        # A workspace the guard could not read is the box's problem, not the transport's.
-        return (AUTHOR_RC_FAILED if exc.transient else AUTHOR_RC_SAFETY), False
-    targets = guard.target_files
+def _author_result_verdict(result: Any, *, backend: Any) -> tuple[int, bool]:
+    """The exit code for an agent run that returned, and whether another attempt is worth spending."""
+    if result.end_reason == "agent_stopped":
+        return AUTHOR_RC_OK, False
+    log.warning(
+        "%s author ended without success (end_reason=%s subtype=%s)",
+        backend.name,
+        result.end_reason,
+        result.subtype or "none",
+    )
+    # The backends flatten a transport failure the SDK swallowed into this end_reason rather than an exception, so
+    # session_resume owns which of them is worth another attempt; a turn cap is the task's own answer.
+    return AUTHOR_RC_FAILED, is_api_failure(result)
+
+
+def _run_author_session(
+    prompt: str, workdir: str, agent: AuthorAgent, guard: _AuthorWorkspaceGuard, progress: list[str]
+) -> Any:
+    """Run one agent session on the author's GPU, allowed to write exactly what the guard will accept."""
+    session_timeout = max(1, int(agent.timeout_s))
     spec = AgentRunSpec(
         system_prompt=_author_system_prompt(guard.new_module_dirs),
         user_prompt=prompt,
@@ -1123,7 +1122,7 @@ def _run_registered_author_once(prompt: str, workspace: AuthorWorkspace, agent: 
         cwd=workdir,
         model=agent.model,
         writable=True,
-        timeout_sec=max(1, int(timeout_s)),
+        timeout_sec=session_timeout,
         tool_policy=AgentToolPolicy(
             read=True,
             search=True,
@@ -1131,7 +1130,7 @@ def _run_registered_author_once(prompt: str, workspace: AuthorWorkspace, agent: 
             shell=True,
             max_turns=max(1, int(agent.max_turns)),
         ),
-        target_files=targets,
+        target_files=guard.target_files,
         allow_dirty_targets=True,
         allow_untracked=True,
         # The author phase runs in a worktree a long campaign has already left dirty in ways it never touches, so the
@@ -1140,35 +1139,58 @@ def _run_registered_author_once(prompt: str, workspace: AuthorWorkspace, agent: 
         # Keep the backend's built-in measurement protections; the outer provider-neutral transaction enforces the
         # exact target allowlist.
         protected_globs=[],
-        hooks=_target_file_hooks(targets, workdir, allows_new_path=guard.permits_new_path),
+        hooks=_target_file_hooks(guard.target_files, workdir, allows_new_path=guard.permits_new_path),
         progress_log=progress,
     )
-
-    async def _run() -> Any:
-        return await asyncio.wait_for(
-            backend.run(spec),
-            timeout=watchdog_timeout_sec(max(1, int(timeout_s))),
-        )
-
     previous_gpu = os.environ.get("HIP_VISIBLE_DEVICES")
     os.environ["HIP_VISIBLE_DEVICES"] = agent.gpu
-    result = None
-    run_error: BaseException | None = None
     try:
-        result = asyncio.run(_run())
-    except BaseException as exc:  # noqa: BLE001 - safety restoration must always run
-        run_error = exc
+        return asyncio.run(asyncio.wait_for(agent.backend.run(spec), timeout=watchdog_timeout_sec(session_timeout)))
     finally:
         if previous_gpu is None:
             os.environ.pop("HIP_VISIBLE_DEVICES", None)
         else:
             os.environ["HIP_VISIBLE_DEVICES"] = previous_gpu
 
+
+def _run_registered_author_once(prompt: str, workspace: AuthorWorkspace, agent: AuthorAgent) -> tuple[int, bool]:
+    """One authoring run, with whether its failure was the transport's rather than the task's."""
+    progress: list[str] = []
+    requested_targets = list(dict.fromkeys(str(path) for path in workspace.target_files if str(path)))
+    requested_module_dirs = list(dict.fromkeys(str(path) for path in workspace.new_module_dirs if str(path)))
+    try:
+        guard = _AuthorWorkspaceGuard(workspace.workdir, requested_targets, requested_module_dirs)
+    except AuthorSafetyError as exc:
+        detail = _safety_detail(exc)
+        heading = (
+            "author workspace could not be inspected before run"
+            if exc.transient
+            else "author workspace safety rejected before run"
+        )
+        _record_author_log(workspace.log_path, progress, error=f"{heading}: {detail}")
+        log.error("%s: %s", heading, detail)
+        # A workspace the guard could not read is the box's problem, not the transport's.
+        return (AUTHOR_RC_FAILED if exc.transient else AUTHOR_RC_SAFETY), False
+    result = None
+    run_error: BaseException | None = None
+    try:
+        result = _run_author_session(prompt, workspace.workdir, agent, guard, progress)
+    except BaseException as exc:  # noqa: BLE001 - safety restoration must always run
+        run_error = exc
+    text = str(getattr(result, "text", "") or "")
+
     def _with_run_error(reason: str) -> str:
         """Keep the session's own failure beside a verdict about the workspace."""
         if run_error is None:
             return reason
         return f"{reason}; the agent run also failed: {type(run_error).__name__}: {run_error}"
+
+    def _rejected(reason: str, rc: int) -> tuple[int, bool]:
+        """Record a workspace verdict and end the attempt; the retry loop never spends another one on it."""
+        reason = _with_run_error(reason)
+        _record_author_log(workspace.log_path, progress, text=text, error=reason)
+        log.error("%s", reason)
+        return rc, False
 
     try:
         enforcement = guard.enforce()
@@ -1178,16 +1200,13 @@ def _run_registered_author_once(prompt: str, workspace: AuthorWorkspace, agent: 
             if exc.transient
             else "author workspace safety restoration failed"
         )
-        reason = _with_run_error(f"{heading}: {_safety_detail(exc)}")
-        _record_author_log(log_path, progress, text=str(getattr(result, "text", "") or ""), error=reason)
-        log.error("%s", reason)
-        return (AUTHOR_RC_FAILED if exc.transient else AUTHOR_RC_SAFETY), False
+        return _rejected(f"{heading}: {_safety_detail(exc)}", AUTHOR_RC_FAILED if exc.transient else AUTHOR_RC_SAFETY)
     except Exception as exc:
         detail = f"{type(exc).__name__}: internal workspace guard failure"
         _record_author_log(
-            log_path,
+            workspace.log_path,
             progress,
-            text=str(getattr(result, "text", "") or ""),
+            text=text,
             error=_with_run_error(f"author workspace safety rejection: {detail}"),
         )
         # The agent-facing log stays content-free (a guard defect is not something the author can act on), but the
@@ -1200,12 +1219,9 @@ def _run_registered_author_once(prompt: str, workspace: AuthorWorkspace, agent: 
         detail = ", ".join(violations[:20])
         if len(violations) > 20:
             detail += f", ... ({len(violations)} paths)"
-        reason = _with_run_error(f"author workspace rejected and restored non-target paths: {detail}")
-        _record_author_log(log_path, progress, text=str(getattr(result, "text", "") or ""), error=reason)
-        log.error("%s", reason)
         # Deterministic: the same guard, worktree and prompt reject the next attempt the same way, and the loop is
         # told so rather than spending one on it.
-        return AUTHOR_RC_SAFETY, False
+        return _rejected(f"author workspace rejected and restored non-target paths: {detail}", AUTHOR_RC_SAFETY)
 
     if enforcement.created:
         log.info(
@@ -1217,28 +1233,16 @@ def _run_registered_author_once(prompt: str, workspace: AuthorWorkspace, agent: 
         if not isinstance(run_error, Exception):
             raise run_error
         _record_author_log(
-            log_path,
+            workspace.log_path,
             progress,
             error=f"{type(run_error).__name__}: {run_error}",
             created=enforcement.created,
         )
-        return _author_run_error_verdict(run_error, backend=backend, timeout_s=timeout_s)
+        return _author_run_error_verdict(run_error, backend=agent.backend, timeout_s=agent.timeout_s)
 
     assert result is not None
-    final_text = str(getattr(result, "text", "") or "")
-    _record_author_log(log_path, progress, text=final_text, created=enforcement.created)
-    end_reason = result.end_reason
-    if end_reason == "agent_stopped":
-        return AUTHOR_RC_OK, False
-    log.warning(
-        "%s author ended without success (end_reason=%s subtype=%s)",
-        backend.name,
-        end_reason,
-        result.subtype or "none",
-    )
-    # The backends flatten a transport failure the SDK swallowed into this end_reason rather than an exception, so
-    # session_resume owns which of them is worth another attempt; a turn cap is the task's own answer.
-    return AUTHOR_RC_FAILED, is_api_failure(result)
+    _record_author_log(workspace.log_path, progress, text=text, created=enforcement.created)
+    return _author_result_verdict(result, backend=agent.backend)
 
 
 def run_author(prompt: str, workspace: AuthorWorkspace, agent: AuthorAgent) -> int:
