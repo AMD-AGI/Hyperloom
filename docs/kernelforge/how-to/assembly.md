@@ -189,7 +189,7 @@ in the authoritative correctness suite. The framework checks declared coverage;
 it cannot infer missing workload cases from arbitrary Python or an assembly ABI.
 
 The correctness commands must emit exactly one record through
-`kernelforge.loop.numerical.emit_evidence(cases)`. Each case contains its `id`
+`kernelforge.evaluation.correctness.numerical.emit_evidence(cases)`. Each case contains its `id`
 and `source_before`, `candidate`, and `source_after` measurements. Use
 `measure_outputs(callback, reference, repetitions=5)` for each measurement. The
 callback runs the chosen implementation and returns the tensor to check; reset

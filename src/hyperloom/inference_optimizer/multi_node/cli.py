@@ -116,7 +116,7 @@ def _multinode_server_log_dir() -> str:
         return explicit
     try:
         return str(_state_file().parent / "server_logs")
-    except Exception:  # noqa: BLE001 - state file unresolvable (dev/single box)
+    except RuntimeError:  # state file unresolvable (dev/single box)
         return str(Path(tempfile.gettempdir()) / "multi_node_logs")
 
 

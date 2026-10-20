@@ -245,7 +245,7 @@ file-shaped row would miss.
 ### X6 -- A persisted schema change needs a version bump and a migration
 
 **Severity:** blocking
-**Fires when:** a field is added, removed or retyped on a type carrying `SCHEMA_VERSION`, `from_dict`, `ensure_schema`, or `files.txt` touches `src/hyperloom/inference_optimizer/breakdown/**` or `src/kernelforge/durable_io.py`, or the diff contains `CREATE TABLE`.
+**Fires when:** a field is added, removed or retyped on a type carrying `SCHEMA_VERSION`, `from_dict`, `ensure_schema`, or `files.txt` touches `src/hyperloom/inference_optimizer/breakdown/**` or `src/kernelforge/tools/durable_io.py`, or the diff contains `CREATE TABLE`.
 **The rule:** Any added, removed or renamed field in a persisted record -- run state, session state, sqlite schema, SBD document -- comes with a schema-version bump and a migration step following the file's existing convention. The check is to load a payload written at the previous version: strict field-set validation in `from_dict` and `CREATE TABLE IF NOT EXISTS` both fail to save you, and the symptom is that every existing workspace dies at startup, `--resume` included.
 **Seen in:** PR #1497 -- `search_start_mean_case_speedup` was added to `RunState` with `SCHEMA_VERSION` left at 19 and no migration, killing every campaign with an existing workspace at startup.
 **Not a finding when:** the field is optional with a default and the loader tolerates unknown or missing keys on the old-version path -- verify by reading the loader, not by assuming `total=False` is enough.

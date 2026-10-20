@@ -202,7 +202,7 @@ def _load_result_json(attempt_root: str) -> BuildResult | None:
     try:
         data = json.loads(result_path.read_text(encoding="utf-8"))
         return BuildResult.from_state(data)
-    except Exception:  # noqa: BLE001 — missing/corrupt result falls back
+    except (OSError, ValueError):
         return None
 
 
@@ -210,12 +210,12 @@ def _read_build_system_requires(worktree_dir: Any) -> list[str]:
     """Return a checkout's PEP 518 ``[build-system].requires`` for pre-install."""
     try:
         import tomllib  # py3.11+
-    except Exception:  # noqa: BLE001
+    except ImportError:
         return []
     pyproject = Path(worktree_dir) / "pyproject.toml"
     try:
         data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001 — no/invalid pyproject → skip pre-install
+    except (OSError, ValueError):
         return []
     reqs = (data.get("build-system") or {}).get("requires") or []
     out: list[str] = []
@@ -297,7 +297,7 @@ def run_aiter_build(
                 disk_preflight(root, 1, per_candidate_gb=_AITER_DISK_PER_CANDIDATE_GB)
             except DiskPreflightError as exc:
                 return _fail("preflight_disk", str(exc))
-    except Exception as exc:  # noqa: BLE001
+    except (OSError, ValueError) as exc:
         return _fail("preflight_disk", f"disk preflight raised: {exc!r}")
 
     # 2. Toolchain + ABI preflight --------------------------------------------
@@ -337,7 +337,7 @@ def run_aiter_build(
         worktree_dir = ws.worktree_dir
         venv_dir = ws.venv_dir
         attempt_py = str(venv_dir / "bin" / "python")
-    except Exception as exc:  # noqa: BLE001
+    except (OSError, subprocess.SubprocessError) as exc:
         return _fail("compile_error", f"workspace preparation failed: {exc!r}")
 
     # 4. ROCm constraint file -------------------------------------------------
@@ -346,7 +346,7 @@ def run_aiter_build(
         write_rocm_constraints(attempt_py, str(constraint_path), replacing="amd-aiter", run=_run)
     except AbiMismatchError as exc:
         return _fail("abi_mismatch", str(exc))
-    except Exception as exc:  # noqa: BLE001
+    except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
         return _fail("preflight_toolchain", f"ROCm constraint probe failed: {exc!r}")
 
     # 5. pip install (pinned ref or tag-desc autoselect) ----------------------
@@ -533,7 +533,7 @@ def run_sgl_kernel_build(
                 disk_preflight(root, 1, per_candidate_gb=_SGLANG_DISK_PER_CANDIDATE_GB)
             except DiskPreflightError as exc:
                 return _fail("preflight_disk", str(exc))
-    except Exception as exc:  # noqa: BLE001
+    except (OSError, ValueError) as exc:
         return _fail("preflight_disk", f"disk preflight raised: {exc!r}")
 
     tc_ok, tc_msg = check_rocm_toolchain_alignment(env=dict(_os.environ), run=_run)
@@ -567,7 +567,7 @@ def run_sgl_kernel_build(
         worktree_dir = ws.worktree_dir
         venv_dir = ws.venv_dir
         attempt_py = str(venv_dir / "bin" / "python")
-    except Exception as exc:  # noqa: BLE001
+    except (OSError, subprocess.SubprocessError) as exc:
         return _fail("compile_error", f"workspace preparation failed: {exc!r}")
 
     constraint_path = root / ROCM_CONSTRAINTS_FILE
@@ -575,7 +575,7 @@ def run_sgl_kernel_build(
         write_rocm_constraints(attempt_py, str(constraint_path), replacing="sglang-kernel", run=_run)
     except AbiMismatchError as exc:
         return _fail("abi_mismatch", str(exc))
-    except Exception as exc:  # noqa: BLE001
+    except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
         return _fail("preflight_toolchain", f"ROCm constraint probe failed: {exc!r}")
 
     sgl_kernel_dir = worktree_dir / "sgl-kernel"
@@ -750,7 +750,7 @@ def run_vllm_source_build(
                 disk_preflight(root, 1, per_candidate_gb=_VLLM_DISK_PER_CANDIDATE_GB)
             except DiskPreflightError as exc:
                 return _fail("preflight_disk", str(exc))
-    except Exception as exc:  # noqa: BLE001
+    except (OSError, ValueError) as exc:
         return _fail("preflight_disk", f"disk preflight raised: {exc!r}")
 
     tc_ok, tc_msg = check_rocm_toolchain_alignment(env=dict(_os.environ), run=_run)
@@ -798,7 +798,7 @@ def run_vllm_source_build(
         worktree_dir = ws.worktree_dir
         venv_dir = ws.venv_dir
         attempt_py = str(venv_dir / "bin" / "python")
-    except Exception as exc:  # noqa: BLE001
+    except (OSError, subprocess.SubprocessError) as exc:
         return _fail("compile_error", f"workspace preparation failed: {exc!r}")
 
     constraint_path = root / ROCM_CONSTRAINTS_FILE
@@ -806,7 +806,7 @@ def run_vllm_source_build(
         write_rocm_constraints(attempt_py, str(constraint_path), replacing="vllm", run=_run)
     except AbiMismatchError as exc:
         return _fail("abi_mismatch", str(exc))
-    except Exception as exc:  # noqa: BLE001
+    except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
         return _fail("preflight_toolchain", f"ROCm constraint probe failed: {exc!r}")
 
     # vLLM's ROCm setup.py asserts ``CUDA_HOME is not set`` and reuses it as the toolchain root even on ROCm.
@@ -839,7 +839,7 @@ def run_vllm_source_build(
                 timeout_sec=1800,
                 run=_run,
             )
-    except Exception:
+    except OSError:
         import logging as _logmod
 
         _logmod.getLogger(__name__).debug("vLLM source build: build-requires pre-install skipped", exc_info=True)

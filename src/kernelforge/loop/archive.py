@@ -14,7 +14,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from kernelforge.durable_io import atomic_write_text, fsync_directory
+from kernelforge.tools.durable_io import atomic_write_text, fsync_directory
 
 log = logging.getLogger(__name__)
 
@@ -398,7 +398,7 @@ class CandidateArchive:
             os.rename(temp_dir, d)
             temp_dir = None
             fsync_directory(self.root)
-        except Exception as e:  # noqa: BLE001
+        except (OSError, TypeError, ValueError) as e:
             self._mark_degraded(f"record iteration {rec.iteration}", e)
             return None
         finally:
