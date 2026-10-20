@@ -241,12 +241,20 @@ def device_pin(recipe_envs: Mapping[str, Any]) -> DevicePin:
     return DevicePin(tp=_resolve_handoff_tp(gpu_ids=gpu_ids, tp=tp), gpu_ids=gpu_ids, gpu_ids_space=space, pin=pin)
 
 
-def build_handoff(state: Any, reference: SameConfigReference, *, session_dir: Path, agentx: bool) -> dict[str, Any]:
-    """The handoff one GEAK e2e run reads its workload, reference and devices from."""
+def build_handoff(
+    state: Any, reference: SameConfigReference, *, session_dir: Path, agentx: bool, e2e_metric: str
+) -> dict[str, Any]:
+    """The handoff one GEAK e2e run reads its workload, reference and devices from.
+
+    ``e2e_metric`` is the axis the phase also exports as ``E2E_METRIC`` to the
+    runner: a handoff that named a different axis than the one the runner
+    searches on would have GEAK measuring against a reference it was never
+    graded against, so both come from the phase's single resolution of it.
+    """
     recipe_path = str(state.baseline_config_path or "")
     recipe_envs = read_recipe_bench_envs(recipe_path)
     devices = device_pin(recipe_envs)
-    handoff = _handoff_payload(state, reference, devices, session_dir=session_dir, agentx=agentx)
+    handoff = _handoff_payload(state, reference, devices, session_dir=session_dir, agentx=agentx, e2e_metric=e2e_metric)
     if devices.pin:
         # ABSOLUTE ids + the var they came from, so a consumer that writes
         # ROCR_VISIBLE_DEVICES itself re-applies the same pin instead of
@@ -284,16 +292,15 @@ def build_handoff(state: Any, reference: SameConfigReference, *, session_dir: Pa
 
 
 def _handoff_payload(
-    state: Any, reference: SameConfigReference, devices: DevicePin, *, session_dir: Path, agentx: bool
+    state: Any,
+    reference: SameConfigReference,
+    devices: DevicePin,
+    *,
+    session_dir: Path,
+    agentx: bool,
+    e2e_metric: str,
 ) -> dict[str, Any]:
     """The fields every handoff carries, whatever the recipe adds to them."""
-    from ..actions.executors._workload_envs import geak_metric_axis
-
-    # GEAK's E2E_METRIC and the workload spec's metric_basis are the same
-    # decision, so they resolve through one helper: a handoff that named a
-    # different axis than the one KEEP is decided on would have GEAK searching
-    # against a reference it was never measured against.
-    e2e_metric, _ = geak_metric_axis(benchmark_mode=str(state.benchmark_mode or ""), grading=state.grading or None)
     measurement = reference.measurement
     return {
         # v2 adds baseline_env_spec; v3 adds actual GPU-pinning metadata.

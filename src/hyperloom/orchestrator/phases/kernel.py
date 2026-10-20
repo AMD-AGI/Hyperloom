@@ -1657,7 +1657,9 @@ class KernelPhase(CoordinatorCollaborator):
             return None
         state = self.shared_state
         reference = _geak_handoff.same_config_reference(state, env_spec, writeback=self._coord.writeback, agentx=agentx)
-        payload = _geak_handoff.build_handoff(state, reference, session_dir=self.session_dir, agentx=agentx)
+        payload = _geak_handoff.build_handoff(
+            state, reference, session_dir=self.session_dir, agentx=agentx, e2e_metric=self._geak_e2e_metric()
+        )
         path = _geak_handoff.write_handoff(payload, session_dir=self.session_dir)
         recorder = self.timeline()
         if recorder is not None:
@@ -1731,18 +1733,22 @@ class KernelPhase(CoordinatorCollaborator):
         )
         return _communicate_or_kill_tree(proc, cmd, kill_timeout=kill_timeout, term_grace=term_grace)
 
-    def _geak_runner_env(self) -> dict[str, str]:
-        """The environment the whole GEAK chain inherits, on this session's metric and spend tag."""
-        from hyperloom.common.llm_attribution import inject_env
-
+    def _geak_e2e_metric(self) -> str:
+        """The axis GEAK searches and gates on, for both the runner env and the handoff it reads."""
         # GEAK must search and gate on the axis this session keeps candidates on: a kernel accepted on another
         # axis need not move that one. geak_metric_axis owns the mapping and its rationale.
         metric, _ = geak_metric_axis(
             benchmark_mode=str(self.shared_state.benchmark_mode or ""),
             grading=self.shared_state.grading or None,
         )
+        return metric
+
+    def _geak_runner_env(self) -> dict[str, str]:
+        """The environment the whole GEAK chain inherits, on this session's metric and spend tag."""
+        from hyperloom.common.llm_attribution import inject_env
+
         runner_env = dict(os.environ)
-        runner_env["E2E_METRIC"] = metric
+        runner_env["E2E_METRIC"] = self._geak_e2e_metric()
         # Only injection point needed for the whole GEAK chain: geak_runner and run_e2e both hand their full
         # environment to the child, so the tag reaches the Claude CLI that actually spends.
         inject_env(runner_env, component="geak", operation="optimize_kernel")
