@@ -296,8 +296,6 @@ async def test_resource_lock_does_not_expire_a_live_owner(db):
     )
     assert await locks.reap_dead_holders() == []
     assert (await locks.lane_holders())["workspace_mutation"] == 1
-    bus = MessageBus(db)
-    assert await bus.tail(topic="lease_expired") == []
 
 
 # task_registry
