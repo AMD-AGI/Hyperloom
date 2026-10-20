@@ -70,9 +70,7 @@ def _lever_envs(entry: Mapping[str, Any]) -> dict[str, str]:
 def _lever_server_args(entry: Mapping[str, Any], extra_envs: Mapping[str, str]) -> str | None:
     """A config lever's server args as one argv string, or ``None`` when Magpie's transport cannot carry them.
 
-    Magpie passes argv unquoted, so a token holding whitespace or a quoting form
-    the tokenizer cannot round-trip would reach the server as several arguments.
-    Such a lever loses its args, and ``extra_envs`` says what it still carries.
+    Magpie passes argv unquoted, so a token that cannot round-trip would reach the server split apart.
     """
     kept = " while preserving its environment overrides" if extra_envs else ""
     args = entry.get("extra_args")
@@ -1468,10 +1466,8 @@ class FrameworkPhase(ProposalBench):
     async def _claim_local_explore_specialist(self, params: dict[str, Any], cand_id: str) -> tuple[Any, bool]:
         """Claim a specialist row for a local-exploration round, stepping past an idempotency key whose run failed.
 
-        The registry de-duplicates by key and hands back whatever row it finds, so a
-        candidate whose specialist failed keeps resolving to that failure: the phase
-        re-selects the candidate every tick, logs a dispatch, and nothing runs. The
-        task is ``None`` once the candidate has used up its attempts.
+        The registry de-duplicates by key, so without the step past, a candidate
+        whose specialist failed keeps resolving to that failure and nothing runs.
         """
         lanes, ttl = self._coord.gpu_lanes.framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
         base_idem = f"framework_agent_local_explore:{cand_id}{self._coord.dispatcher.cycle_idem_suffix()}"
@@ -2199,11 +2195,7 @@ class FrameworkPhase(ProposalBench):
         return first_str(latest.get("batch_id")) if isinstance(latest, dict) else ""
 
     def _clear_superseded_progress(self, cand_id: str) -> bool:
-        """Drop this candidate's non-adopted rows; ``False`` once an adoption has already had the last word.
-
-        An adopted patch is the last word on a candidate; any other row is an
-        outcome a later attempt may better, so it makes way for this one.
-        """
+        """Drop this candidate's non-adopted rows; ``False`` once an adoption has already had the last word."""
         rows = self.shared_state.framework_agent_phase_progress
         if not isinstance(rows, list):
             rows = []
@@ -2379,12 +2371,7 @@ class FrameworkPhase(ProposalBench):
         )
 
     def _routes_to_integrate_patch(self, task: "Task", deliverable: Mapping[str, Any]) -> bool:
-        """Whether ``maybe_autosubmit_specialist_patches`` will route this deliverable, which then owns its terminal row.
-
-        Three deliverables are routable and so are full results rather than empty
-        ones: ``patches_written`` surviving safety vetting, a config-lever
-        ``proposal_set``, and a non-diff tuned artifact whose source file exists.
-        """
+        """Whether ``maybe_autosubmit_specialist_patches`` will route this deliverable, which then owns its terminal row."""
         if to_list(deliverable.get("patches_written")):
             return True
         if _framework_config_levers_from_done(deliverable):
@@ -2716,14 +2703,9 @@ class FrameworkPhase(ProposalBench):
     def _round_deliverable(self, done_payload: dict[str, Any], spec_params: Mapping[str, Any]) -> dict[str, Any]:
         """The config a patch deliverable ships with, which an ENABLEMENT round carries alongside its patch.
 
-        In an ENABLEMENT round a companion lever is inseparable from the patch it
-        ships with: the patch clears a framework guard the server then asserts on
-        through a launch flag, so a round that applies one without the other cannot
-        boot and can never be kept -- and with no KEEP the recipe is never emitted.
-        The lane decides this, not the deliverable: ``atomic`` is authored by the
-        specialist and is not reliably set even when its own reason says the flag is
-        required to boot. While optimizing, a patch stays its own outcome and only an
-        explicitly atomic lever rides with it.
+        The lane decides this, not the deliverable: an ENABLEMENT patch clears a
+        guard the server asserts on through a launch flag, so one without the
+        other cannot boot.
         """
         is_enablement_round = bool(spec_params.get("enablement"))
         companion_levers = _framework_config_levers_from_done(
@@ -2749,12 +2731,9 @@ class FrameworkPhase(ProposalBench):
     ) -> tuple[str, dict[str, Any]]:
         """This round's config layered over what earlier enablement rounds already established.
 
-        ``_rearm_on_advanced`` accumulates the established config "so a later kept
-        round replays every advance", but the accumulation only reached the emitted
-        recipe -- each new round still launched from whatever the latest deliverable
-        happened to restate. A flag the architecture requires does not stop being
-        required because the next specialist is working on a different blocker, and a
-        round that omits it goes back to a wall an earlier round already cleared.
+        A flag the architecture requires stays required while a later specialist
+        works a different blocker, so a round restating only its own config would
+        launch back into a wall an earlier round cleared.
         """
         established = dict(getattr(self.shared_state.enablement, "accepted_config", None) or {})
         inherited_envs = {str(k): str(v) for k, v in to_mapping(established.get("extra_envs")).items()}

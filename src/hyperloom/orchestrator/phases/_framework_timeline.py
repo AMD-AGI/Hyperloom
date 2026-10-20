@@ -35,11 +35,7 @@ def _recorder(coord: Any):
 def _record_run(coord: Any, task: Any, *, role: str, status: str, **fields: Any) -> None:
     """Record one specialist dispatch, or its completion.
 
-    ``role`` is one of ``discovery``, ``authoring`` or ``config`` -- not
-    derivable from the arm, since the source arm dispatches twice per
-    candidate. Dispatch and terminal status land on one row keyed by the task
-    id; a falsy id records nothing rather than keying a row on the empty
-    string.
+    ``role`` is not derivable from the arm: the source arm dispatches twice per candidate.
     """
     recorder = _recorder(coord)
     if recorder is None:
@@ -74,12 +70,7 @@ class ProposalStep(NamedTuple):
 
 
 def _record_step(coord: Any, proposal_id: str, step: ProposalStep) -> None:
-    """Record one step of a candidate's lifecycle, keyed by ``STEP_*`` value.
-
-    Steps are recorded as they happen rather than derived from counters: a
-    candidate re-authored twice then retried once is three rows a reader can
-    follow.
-    """
+    """Record one step of a candidate's lifecycle, keyed by ``STEP_*`` value."""
     recorder = _recorder(coord)
     if recorder is None or not proposal_id:
         return
@@ -100,12 +91,7 @@ def _record_review_outcome(
     reason: str = "",
     **outcome: Any,
 ) -> None:
-    """Record what the phase did with the Critic's ruling on a candidate.
-
-    The consequence is recorded onto the ruling because on its own a routed
-    candidate does not say what let it through. ``verdict`` is only passed on
-    the deny path, which is the only one carrying the rationale.
-    """
+    """Record what the phase did with the Critic's ruling on a candidate."""
     recorder = _recorder(coord)
     if recorder is None or not proposal_id:
         return
@@ -145,9 +131,7 @@ def _source_action_reasoning(
 def _patch_material(session_dir: Path, paths: Iterable[str]) -> list[dict[str, str]]:
     """Each distinct session-local patch as ``{path, sha256, content}``, in the order given.
 
-    A patch outside the session, not UTF-8, or carrying a credential is left
-    out, so the session breakdown only ever holds patch text that is safe to
-    publish whole.
+    Filtered so the result only ever holds patch text that is safe to publish whole.
     """
     root = Path(session_dir).resolve()
     material: list[dict[str, str]] = []
@@ -183,8 +167,7 @@ def _patch_material(session_dir: Path, paths: Iterable[str]) -> list[dict[str, s
 def _record_kb_exposure(recorder: Any, proposal_id: str, params: Mapping[str, Any]) -> None:
     """Add the Experience KB read a specialist was shown to the proposal it produced.
 
-    The proposal row is an upsert whose lists merge, so a candidate shaped by
-    both a discovery and an authoring specialist keeps both reads' refs.
+    The proposal row is an upsert whose lists merge, so both specialists' reads survive.
     """
     read_id = first_str(params.get("kb_read_id"))
     refs = to_list(params.get("kb_rendered_refs"))
@@ -255,12 +238,7 @@ def _attempt_artifacts(result: Mapping[str, Any]) -> dict[str, str]:
 
 
 def _adoption_basis(accuracy_pass: Any) -> str:
-    """What stood behind an adoption, on the same rule the config arm writes it under.
-
-    A KEEP no accuracy gate ruled on rests on throughput alone, a weaker claim
-    that must not read alike. Only an adoption carries a basis -- on a reverted
-    row ``accuracy_pass`` would name the gate that refused it.
-    """
+    """What stood behind an adoption, on the same rule the config arm writes it under."""
     return "accuracy_pass" if accuracy_pass is not None else "keep_verdict_unscored"
 
 
@@ -322,9 +300,7 @@ def _record_source_attempt(
 ) -> None:
     """Record one authored deliverable's measured attempt -- a patch, or server args and envs -- on the framework event.
 
-    A pure timeline recorder: the control-plane ledger write sits beside the call
-    to this function, not inside it, so a phase with no open recorder still
-    records the attempt.
+    A pure timeline recorder: the control-plane ledger write sits beside the call, not inside it.
     """
     recorder = _recorder(coord)
     if recorder is None:
@@ -398,10 +374,8 @@ def _record_source_attempt(
 def _record_discovered(coord: Any, task: Any, *, raw: Any, candidates: list[dict[str, Any]]) -> None:
     """Record what one discovery round produced, including what it dropped.
 
-    Walks ``raw`` -- the specialist's ``proposal_set`` before auditing --
-    rather than only the surviving ``candidates``: a round that found five
-    upstream PRs and judged all five already landed is a very different result
-    from one that found nothing.
+    Walks the pre-audit ``proposal_set``, so a round whose finds were all judged
+    already-landed does not read as a round that found nothing.
     """
     recorder = _recorder(coord)
     if recorder is None:
