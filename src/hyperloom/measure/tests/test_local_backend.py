@@ -91,6 +91,12 @@ class _Grid:
         return [self.answers.get(name) or self.result(name)]
 
 
+@pytest.fixture(autouse=True)
+def magpie_backend(monkeypatch) -> None:
+    """The benchmark backend is read from the process environment; a test that does not pick one runs on Magpie."""
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "magpie")
+
+
 @pytest.fixture
 def grid(monkeypatch, tmp_path) -> _Grid:
     fake = _Grid(tmp_path)
@@ -402,9 +408,10 @@ def _lifecycle(call: dict[str, Any]) -> dict[str, Any] | None:
     return call.get("server_lifecycle")
 
 
-#: What a boot round adds to the point: the server phase, no evaluation, and one request of the client round Magpie runs
-#: after its server phase whatever the phase says.
-BOOT_ENVS = {"MAGPIE_RUN_PHASE": "server", "RUN_EVAL": "false", "NUM_PROMPTS": "1"}
+#: What a boot round adds to the point on Magpie: no evaluation, and one request of the client round Magpie runs after
+#: its server phase whatever the phase says. Not the phase itself: Magpie sets that, and a variable it does not know
+#: would make its reuse check refuse every round that measures (``test_local_reuse_identity``).
+BOOT_ENVS = {"RUN_EVAL": "false", "NUM_PROMPTS": "1"}
 
 
 def _envs_handed_to_magpie(tmp_path: Path, call: dict[str, Any]) -> dict[str, Any]:
@@ -468,7 +475,7 @@ def test_every_boot_of_a_sweep_arm_does_not_evaluate_and_asks_one_request_and_no
         level = (8, 4)[index]
         envs = _envs_handed_to_magpie(tmp_path, boot)
         assert (envs["RUN_EVAL"], envs["NUM_PROMPTS"]) == ("false", "1"), f"the boot at {level}"
-        assert envs["MAGPIE_RUN_PHASE"] == "server" and envs["CONC"] == level
+        assert "MAGPIE_RUN_PHASE" not in envs and envs["CONC"] == level
         assert envs["NUM_WARMUPS"] == min(level, 8), "a variable outside the reuse check is the point's own"
     for level, round_ in zip((4, 2), measured, strict=True):
         envs = _envs_handed_to_magpie(tmp_path, round_)
@@ -495,14 +502,18 @@ def test_a_boot_does_not_pin_what_the_point_pins_for_a_graded_round(grid, server
     assert grid.calls[0]["base_yaml_path"] == call.points[0]
 
 
-def test_an_agentx_boot_is_left_as_it_was(grid, server, tmp_path, monkeypatch):
-    """An AgentX point has no evaluation round and no prompt count: its boot round keeps only the server phase."""
+@pytest.mark.parametrize(
+    ("backend", "boot_envs"), [("magpie", {}), ("bypass", {"MAGPIE_RUN_PHASE": "server"})], ids=["magpie", "bypass"]
+)
+def test_an_agentx_boot_carries_only_what_its_backend_says(grid, server, tmp_path, monkeypatch, backend, boot_envs):
+    """An AgentX point has no evaluation round and no prompt count: its boot round keeps only the backend's phase."""
     point = _agentx_point(tmp_path, monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", backend)
 
     _run(_call(tmp_path, point, prep="conc_sweep"))
 
     boot, *measured = grid.calls
-    assert boot["base_extra_envs"] == {"MAGPIE_RUN_PHASE": "server"}
+    assert boot["base_extra_envs"] == boot_envs
     assert all("base_extra_envs" not in c for c in measured)
 
 

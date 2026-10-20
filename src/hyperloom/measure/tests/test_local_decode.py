@@ -16,7 +16,7 @@ from hyperloom.measure.decode import OUTPUTS_PATH, parse_outputs, plan_pass
 from hyperloom.measure.local import LocalMeasurementBackend, TestCallRefused
 from hyperloom.measure.socket import TestCall
 from hyperloom.measure.tests.decode_fixtures import expected_tokens, fake_server
-from hyperloom.measure.tests.test_local_backend import _Grid, _call, grid  # noqa: F401  (grid is a fixture)
+from hyperloom.measure.tests.test_local_backend import _Grid, _call, grid, magpie_backend  # noqa: F401  (fixtures)
 
 ISL, OSL, CONC = 12, 1024, 3
 
@@ -76,7 +76,7 @@ def test_the_pass_runs_after_the_measured_round_on_a_booted_server_and_leaves_it
     assert [c["grid"][0].name for c in grid.calls] == ["test", "decode_server"]
     measured, boot = grid.calls
     assert boot["lifecycle_boot_only"] is True and boot["server_lifecycle"]["cleanup"] is False
-    assert boot["base_extra_envs"] == {"MAGPIE_RUN_PHASE": "server", "RUN_EVAL": "false", "NUM_PROMPTS": "1"}
+    assert boot["base_extra_envs"] == {"RUN_EVAL": "false", "NUM_PROMPTS": "1"}
     assert "base_extra_envs" not in measured, "the measured round is the one that evaluates, as the call asked"
     assert grid.configs[0]["benchmark"]["envs"]["RUN_EVAL"] == "true"
     plan = plan_pass(ISL, OSL, 5000)

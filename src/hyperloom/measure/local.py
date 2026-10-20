@@ -59,6 +59,7 @@ from hyperloom.orchestrator.actions.executors import (
     teardown_lifecycle_server,
 )
 from hyperloom.orchestrator.actions.executors._server_lifecycle import REUSE_PORT_DEFAULT, _assign_free_port
+from hyperloom.orchestrator.actions.executors.benchmark_backend import resolve_backend
 from hyperloom.orchestrator.actions.stop_attribution import (
     ORCHESTRATOR_CANCELLED_CLASS,
     SESSION_TIME_EXHAUSTED_CLASS,
@@ -103,15 +104,16 @@ SUPPORTED_KINDS = _SUPPORTED_KINDS
 #: The old flow reads the process environment, so two tests in one process would see each other's settings.
 _PROCESS_LOCK = threading.Lock()
 
-#: What a boot round pins in its round's environment, on top of the point. A boot round only brings a server up and
-#: leaves it for the rounds that measure: Magpie runs the server phase and then a full client round whatever
-#: ``MAGPIE_RUN_PHASE`` says (Magpie issue 130), so the client round has to be made small instead. It must not evaluate
-#: (``RUN_EVAL``: 1319 questions on a GSM8K point) and it needs one request, not the point's ``NUM_PROMPTS``. Both are
-#: in Magpie's ``CLIENT_ONLY_REUSE_ENV_KEYS``, the variables a persistent server's reuse check leaves out, so the
-#: rounds that measure on that server see the same server. ``NUM_WARMUPS`` stays the point's: Magpie's InferenceX
-#: scripts take their warmups from the concurrency, not from it, and it is not one of those keys. An AgentX point has no
-#: evaluation round and no prompt count; its boot round is left as it is.
-_BOOT_PHASE_ENVS = {"MAGPIE_RUN_PHASE": "server"}
+#: What a boot round pins in its round's environment, on top of the point and of what the backend says a boot round is
+#: (``boot_phase_envs``). A boot round only brings a server up and leaves it for the rounds that measure: Magpie runs
+#: the server phase and then a full client round whatever ``MAGPIE_RUN_PHASE`` says (Magpie issue 130), so the client
+#: round has to be made small instead. It must not evaluate (``RUN_EVAL``: 1319 questions on a GSM8K point) and it
+#: needs one request, not the point's ``NUM_PROMPTS``. Both are in Magpie's ``CLIENT_ONLY_REUSE_ENV_KEYS``, the
+#: variables a persistent server's reuse check leaves out, so the rounds that measure on that server see the same
+#: server: every variable a boot round adds must be one of those keys, or the reuse check refuses the rounds after it.
+#: ``NUM_WARMUPS`` stays the point's: Magpie's InferenceX scripts take their warmups from the concurrency, not from it,
+#: and it is not one of those keys. An AgentX point has no evaluation round and no prompt count; its boot round carries
+#: only what the backend says.
 _BOOT_CLIENT_ENVS = {"RUN_EVAL": "false", "NUM_PROMPTS": "1"}
 
 
@@ -521,10 +523,11 @@ async def _sweep(run: _Run) -> None:
 
 
 def _boot_envs(point: Path) -> dict[str, str]:
-    """The environment a boot round of ``point`` is run with: the server phase, and no evaluation and one request."""
+    """The environment a boot round of ``point`` is run with: the backend's boot phase, no evaluation, one request."""
+    phase = dict(resolve_backend().boot_phase_envs)
     if is_magpie_agentx(_point_config(point).get("benchmark") or {}):
-        return dict(_BOOT_PHASE_ENVS)
-    return {**_BOOT_PHASE_ENVS, **_BOOT_CLIENT_ENVS}
+        return phase
+    return {**phase, **_BOOT_CLIENT_ENVS}
 
 
 async def _boot_server(run: _Run, lifecycle: _Lifecycle, point: int, name: str) -> VariantResult:
