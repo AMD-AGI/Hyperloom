@@ -259,11 +259,13 @@ controlled by the CLI flag `--enable-roofline`, which defaults **on**. Pass
 
 ### Schema compatibility
 
-`session_breakdown.json` emits `hyperloom.session_breakdown.v7.0`. V7 is a
-breaking cutover for one rename: `throughput_tok_s_per_gpu` in
-`outcome.baseline`, `outcome.final` and the `baseline` event's `measurement` is
-now `output_throughput`; archived V6 documents keep the old key.
-Re-exporting a session directory created before V7 emits a null
+`session_breakdown.json` emits `hyperloom.session_breakdown.v6.1`. 6.1 renames
+one key inside the 6 major, a declared exception to the major-bump rule:
+`throughput_tok_s_per_gpu` in `outcome.baseline`, `outcome.final` and the
+`baseline` event's `measurement` is now `output_throughput`, and the old key is
+no longer written. Archived 6.0 documents and documents exported by 1.1.x keep
+the old key, so readers must accept both keys or migrate.
+Re-exporting a 6.0 session directory emits a null
 `outcome.baseline.output_throughput` and the `contract_digest` recorded at
 session creation, and the default output overwrites the archived
 `<session_dir>/session_breakdown.json`.
@@ -276,7 +278,7 @@ emitted. Ordering that relied on the old collapsed windows changes as a result.
 V5 was the preceding cutover, for optimization results: adopted optimizations
 are reported only through `optimizations`, and the `optimization_stack`,
 `attribution`, GEAK invocation, Forge invocation, and GEMM-tuning projections
-are no longer emitted. Consumers reading archived v2 / v3 / v4 / v5 / v6 documents
+are no longer emitted. Consumers reading archived v2 / v3 / v4 / v5 documents
 need a downstream migration, as described in
 [`session_breakdown.json` integration in Hyperloom](session-breakdown.md).
 

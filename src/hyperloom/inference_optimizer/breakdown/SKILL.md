@@ -18,7 +18,7 @@ globs:
 
 A single JSON file: **`<session_dir>/session_breakdown.json`**.
 
-- Schema:   `hyperloom.session_breakdown.v7.0` (hardcoded; see `SCHEMA_VERSION` in `breakdown/schema.py`).
+- Schema:   `hyperloom.session_breakdown.v6.1` (hardcoded; see `SCHEMA_VERSION` in `breakdown/schema.py`).
 - Producer: `src/hyperloom/inference_optimizer/breakdown/exporter.py`
 - Filename: `BREAKDOWN_FILENAME` (= `session_breakdown.json`)
 
@@ -153,14 +153,16 @@ this reference is partial — `breakdown/exporter.py` is authoritative.
 
 - `schema_version` (in `schema.py`) carries the **major** contract
   version; it is bumped ONLY on breaking changes (renamed/removed
-  fields, changed semantics).
-- New exports carry `hyperloom.session_breakdown.v7.0`. V7 is a breaking
-  cutover only because `throughput_tok_s_per_gpu` in `outcome.baseline`,
-  `outcome.final` and the `baseline` event measurement is renamed to
-  `output_throughput`; archived V6 documents keep the old key. Re-exporting a
-  pre-v7 session directory yields a null `outcome.baseline.output_throughput`,
-  keeps the session's old `contract_digest`, and overwrites the archived file
-  at the default output path.
+  fields, changed semantics), apart from the declared 6.1 rename below.
+- New exports carry `hyperloom.session_breakdown.v6.1`. 6.1 renames one key
+  inside the 6 major, a declared exception to the major-bump rule:
+  `throughput_tok_s_per_gpu` in `outcome.baseline`, `outcome.final` and the
+  `baseline` event measurement is now `output_throughput`, and the old key is
+  no longer written. Archived 6.0 documents and 1.1.x exports keep the old key,
+  so readers must accept both or migrate. Re-exporting a 6.0 session directory
+  yields a null `outcome.baseline.output_throughput`, keeps the session's old
+  `contract_digest`, and overwrites the archived file at the default output
+  path.
 - V6 was a breaking
   cutover for the timeline: the actions record their own events as they run,
   so an event's `start_time` is when the work began rather than when its
@@ -177,7 +179,7 @@ this reference is partial — `breakdown/exporter.py` is authoritative.
   reshaped, and the `optimization_stack`, `attribution`, `geak_invocations`,
   `forge_invocations`, and `gemm_tuning` projections are gone. Consumers
   MUST match on the `vN` major prefix, never on exact-string equality, and
-  archived V2/V3/V4/V5/V6 documents need a migration before a V7 reader sees them.
+  archived V2/V3/V4/V5 documents need a migration before a V6 reader sees them.
 - `optimizations` carries its own `schema_version` (currently `5`),
   independent of the envelope's.
 - Adding optional fields is **never** a breaking change.
