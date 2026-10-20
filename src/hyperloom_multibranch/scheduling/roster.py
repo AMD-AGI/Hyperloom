@@ -9,6 +9,7 @@ not copy. The branch cap counts specialist branches that are admitted or running
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, replace
 from enum import Enum
 from pathlib import Path
@@ -28,10 +29,12 @@ class BranchKind(str, Enum):
 
 
 class BranchOrigin(str, Enum):
-    """Where a branch's start comes from: the root commit (integration), the opening batch, a later batch that refills
-    freed slots, or a rule-gate request: a fork for a correctness fix or a repair of a blocked gain."""
+    """Where a branch's start comes from: the root commit (integration), a direction the user wrote, which opens ahead
+    of the opening batch, the opening batch, a later batch that refills freed slots, or a rule-gate request: a fork for
+    a correctness fix or a repair of a blocked gain."""
 
     ROOT = "root"
+    USER = "user"
     FIRST_BATCH = "first_batch"
     REFILL = "refill"
     FORK = "fork"
@@ -103,6 +106,12 @@ class BranchEntry:
     @property
     def counts_toward_cap(self) -> bool:
         return self.kind is BranchKind.SPECIALIST and self.stop is None
+
+
+def specialist_open(entries: Iterable[BranchEntry]) -> bool:
+    """Whether a specialist branch among ``entries`` is admitted or running."""
+
+    return any(entry.counts_toward_cap for entry in entries)
 
 
 @dataclass(frozen=True)

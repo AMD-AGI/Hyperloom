@@ -3,6 +3,9 @@
 
 """EXPLORE: open the opening batch, then let the judge steer the branches until the EXPLORE deadline or a soft stop.
 
+The branches the user wrote a direction for open first, from the root commit; the opening judge call then sizes the
+opening batch into the slots they leave.
+
 The loop wakes every :data:`EXPLORE_TICK_SECONDS`: it stops the repair branches that used up their time, moves the forks
 and repairs queued on the fork desk onto the free slots, has the rule gate land each admitted fork and starts
 the admitted forks and repairs, and every judge interval asks the judge, applies what it decided and rebuilds the
@@ -48,8 +51,15 @@ from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind
 from hyperloom_multibranch.scheduling.events import SessionEvents, behind_integration_pct
 from hyperloom_multibranch.scheduling.integrator import Integrator
-from hyperloom_multibranch.scheduling.judge import Judge, JudgeDecision, JudgeView
-from hyperloom_multibranch.scheduling.roster import BranchEntry, BranchKind, BranchOrigin, BranchStop, StopCause
+from hyperloom_multibranch.scheduling.judge import Judge, JudgeDecision, JudgeView, user_grace
+from hyperloom_multibranch.scheduling.roster import (
+    BranchEntry,
+    BranchKind,
+    BranchOrigin,
+    BranchStop,
+    StopCause,
+    specialist_open,
+)
 from hyperloom_multibranch.scheduling.settle import failure_text, settled
 from hyperloom_multibranch.scheduling.similarity import BranchSimilarity
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
@@ -67,8 +77,8 @@ FORK_NOT_LANDED = "the rule gate did not land the fork"
 class ExploreWindow:
     """The commit branches start from, the roofline ceiling, the clock times EXPLORE and the budget end at, the
     session's whole budget, the GPU seconds the session's tests may use before EXPLORE ends and the dollars the
-    session's recorded LLM calls may cost (``math.inf`` for no limit, for either), and the upper bound of the GPU
-    seconds the PRELUDE child used, which no limit counts."""
+    session's recorded LLM calls may cost (``math.inf`` for no limit, for either), the upper bound of the GPU
+    seconds the PRELUDE child used, which no limit counts, and the directions the user wrote, one user branch each."""
 
     root_commit: str
     roofline_ceiling: Mapping[str, float]
@@ -78,6 +88,7 @@ class ExploreWindow:
     explore_gpu_seconds: float
     max_llm_usd: float
     prelude_gpu_seconds_upper_bound: float
+    user_directions: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -141,13 +152,16 @@ class Explorer:
     async def run(self, window: ExploreWindow) -> SessionStopReason:
         """Explore until the deadline or the judge's soft stop; the integrator is stopped before this returns.
 
-        Nothing is opened when the opening judge call asks for the soft stop or answers only once EXPLORE is over.
+        The user branches open before the opening judge call; the opening batch opens nothing more when that call
+        asks for the soft stop or answers only once EXPLORE is over, and opens one branch when it fails and no
+        specialist branch is open.
         """
 
+        await self._open_users(window)
         opening = await self._ask(window, opening=True)
         first_batch = BatchStart(BranchOrigin.FIRST_BATCH, window.root_commit, window.explore_end)
         if opening is None:
-            await self._open_batch(1, 1, first_batch)
+            await self._open_batch(0 if specialist_open(self._roster.entries()) else 1, 1, first_batch)
         elif await self._apply(opening, first_batch):
             return SessionStopReason.GLOBAL_CONVERGED
         if self._clock.now() >= window.explore_end:
@@ -164,6 +178,10 @@ class Explorer:
                 await self._events.stop_profiling()
             finally:
                 await self._integrator.abandon()
+
+    async def _open_users(self, window: ExploreWindow) -> None:
+        if self._clock.now() < window.explore_end:
+            await self._branches.open_user_branches(window.user_directions, window.root_commit, window.explore_end)
 
     async def _steer(self, window: ExploreWindow, merging: asyncio.Future[None]) -> SessionStopReason:
         next_judge = self._clock.now() + self._interval
@@ -248,6 +266,7 @@ class Explorer:
         integration_value = dict(integration.head_value) if integration is not None else {}
         root = await self._notebook.recorded_value(window.root_commit)
         snapshot = await self._notebook.snapshot()
+        specialists = await self._specialist_states()
         view = JudgeView(
             now=now,
             explore_remaining_seconds=max(window.explore_end - now, 0.0),
@@ -278,7 +297,8 @@ class Explorer:
             specialist_llm_usd=sum(row.llm_usd for row in progress),
             max_llm_usd=None if window.max_llm_usd == math.inf else window.max_llm_usd,
             scheduler_llm_usd=priced_usd(record.usage for record in snapshot.llm_usage if not record.usage.branch),
-            specialists=await self._specialist_states(),
+            specialists=specialists,
+            user_grace=user_grace(self._roster.entries(), snapshot.records, specialists),
         )
         try:
             decision = await self._clock.wait_for(self._judge.decide(view), window.explore_end - now)

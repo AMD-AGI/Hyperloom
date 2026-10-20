@@ -18,7 +18,10 @@ rate for the model the specialists run on or the one the judge, the patch resolv
 would record tokens only. ``--reuse-prelude DIR`` roots the session on the child session the PRELUDE of the
 earlier session in ``DIR`` rooted on instead of starting a child, and still measures the baseline; it is a usage error
 unless that session committed its root on the same workload and on the image ``HYPERLOOM_ACTIVE_IMAGE_DIGEST`` names.
-A session whose toolbox has fewer
+Each ``--specialist-prompt`` file holds a direction the user wrote for one specialist: its branch opens at PRELUDE's
+root ahead of the opening batch, counted within ``--max-branches``, its specialist sees the text in every launch
+prompt, and the judge neither stops it nor lowers its K for its first judged tests; an empty or unreadable file, or
+more files than ``--max-branches``, is a usage error. A session whose toolbox has fewer
 usable cards left than one test needs ends EXPLORE with ``no_measurement_cards`` and skips FINAL. Exit codes: 0 when
 the session ran its course, its wall-clock, GPU-hour or LLM budget spent included, 1 when it failed or was stopped,
 ``no_measurement_cards`` included, 2 on a usage error. The environment and the peers a session needs are checked before
@@ -134,6 +137,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-branches", type=int, default=DEFAULT_MAX_BRANCHES, help="Specialist branches not stopped, at most."
     )
     run.add_argument(
+        "--specialist-prompt",
+        dest="specialist_prompts",
+        action="append",
+        type=Path,
+        default=None,
+        metavar="FILE",
+        help="A direction for one specialist; repeatable, each opens one branch at the root within --max-branches.",
+    )
+    run.add_argument(
         "--max-parallel-tests",
         type=int,
         default=None,
@@ -172,6 +184,21 @@ def _workload_shape(args: argparse.Namespace) -> InferenceXShape | None:
     return InferenceXShape(args.isl, args.osl)
 
 
+def _user_directions(files: list[Path], max_branches: int) -> tuple[str, ...]:
+    if len(files) > max_branches:
+        raise ValueError(f"--specialist-prompt is given {len(files)} times, more than --max-branches {max_branches}")
+    directions = []
+    for path in files:
+        try:
+            text = path.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeDecodeError) as exc:
+            raise ValueError(f"--specialist-prompt {path} cannot be read: {exc}") from exc
+        if not text:
+            raise ValueError(f"--specialist-prompt {path} is empty")
+        directions.append(text)
+    return tuple(directions)
+
+
 def settings_from(args: argparse.Namespace) -> RunSettings:
     """The run's settings; raises ValueError naming the invalid options. :class:`RosterCaps` checks the caps."""
 
@@ -202,7 +229,15 @@ def settings_from(args: argparse.Namespace) -> RunSettings:
         _workload_shape(args),
     )
     caps = RosterCaps(args.max_branches, args.max_k_per_branch, parallel)
-    return RunSettings(workload, args.max_hours, args.max_gpu_hours, args.max_llm_usd, caps, args.judge_interval_sec)
+    return RunSettings(
+        workload,
+        args.max_hours,
+        args.max_gpu_hours,
+        args.max_llm_usd,
+        caps,
+        args.judge_interval_sec,
+        user_directions=_user_directions(args.specialist_prompts or [], caps.max_branches),
+    )
 
 
 def require_workload_switch(workload: Workload, env: Mapping[str, str]) -> None:

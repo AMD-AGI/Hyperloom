@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -40,9 +41,11 @@ from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     RecordedSessions,
     RecordingToolbox,
     RefusingRuntime,
+    SessionStep,
     specialist_runtime,
     tagged,
 )
+from hyperloom_multibranch.specialist.directions import DIRECTIONS
 
 NOW = 1_700_000_000.0
 OPEN_BY = NOW + 3600.0
@@ -110,6 +113,7 @@ class Bench:
         refusing: frozenset[str] = frozenset(),
         runtime: type[RefusingRuntime] = RefusingRuntime,
         clock: Clock = CLOCK,
+        steps: Mapping[str, SessionStep] | None = None,
     ) -> None:
         self.clock = clock
         self.notebook = LocalNotebook(tmp_path / "nb", Writer(Role.SCHEDULER, "scheduler"), clock=clock.now)
@@ -122,7 +126,7 @@ class Bench:
         )
         self.repo_path = tmp_path / "repo"
         self.repo = GitExperimentRepo(self.repo_path, LocalBlobStore(tmp_path / "blobs"))
-        self.sessions = RecordedSessions(self.toolbox, self.repo, self.notebook)
+        self.sessions = RecordedSessions(self.toolbox, self.repo, self.notebook, steps=steps)
         self.runtime = specialist_runtime(
             tmp_path / "nb", self.toolbox, self.repo, self.sessions, now=clock.now, runtime=runtime
         )
@@ -157,6 +161,11 @@ async def _runs_started() -> None:
     """Let the runtime start the runs of the branches it was asked to start; it starts each in a task of its own."""
 
     await asyncio.sleep(SPECIALIST_POLL_SECONDS)
+
+
+async def _relaunched(sessions: RecordedSessions, branch: str) -> None:
+    while len(sessions.directions.get(branch, ())) < 2:
+        await _runs_started()
 
 
 async def test_the_opening_batch_is_recorded_started_and_given_quota(tmp_path: Path) -> None:
@@ -211,6 +220,49 @@ async def test_a_batch_keeps_each_branch_focus_unrendered_and_names_it_in_its_op
         ("b01", "attention"),
         ("b02", ""),
     ]
+
+
+async def test_user_branches_open_at_the_root_at_k_one_on_their_directions_up_to_the_free_slots(tmp_path: Path) -> None:
+    bench = await Bench(tmp_path).rooted()
+    directions = ("Fuse the MoE gate.", "Tune attention.", "Try a bigger batch.", "One too many.")
+
+    opened = await bench.control.open_user_branches(directions, bench.root, OPEN_BY)
+    await _runs_started()
+
+    assert [(entry.branch, entry.origin, entry.k) for entry in opened] == [
+        (branch, BranchOrigin.USER, 1) for branch in ("b01", "b02", "b03")
+    ]
+    assert bench.sessions.started == {"b01": bench.root, "b02": bench.root, "b03": bench.root}
+    rows = [json.loads(line) for line in (tmp_path / "MB-decisions.jsonl").read_text().splitlines()]
+    assert [(row["branch"], row["reason"], row["detail"]["direction"]) for row in rows if row["kind"] == "open"] == [
+        ("b01", "user branch started", "Fuse the MoE gate."),
+        ("b02", "user branch started", "Tune attention."),
+        ("b03", "user branch started", "Try a bigger batch."),
+    ]
+    assert json.loads((tmp_path / "MB-roster.json").read_text())["issued_branch_ids"] == 3
+
+
+async def test_each_user_branchs_specialist_runs_on_its_own_direction_in_every_launch_and_a_judge_opened_one_on_a_built_in_one(
+    tmp_path: Path,
+) -> None:
+    crashed: list[str] = []
+
+    async def crash_once(branch: str) -> None:
+        if not crashed:
+            crashed.append(branch)
+            raise RuntimeError(f"the specialist CLI of {branch} died")
+
+    bench = await Bench(tmp_path, steps={"b01": crash_once}).rooted()
+
+    await bench.control.open_user_branches(("Fuse the MoE gate.", "Tune attention."), bench.root, OPEN_BY)
+    await bench.control.open_branches(1, 1, BatchStart(BranchOrigin.FIRST_BATCH, bench.root, OPEN_BY))
+    await asyncio.wait_for(_relaunched(bench.sessions, "b01"), 5)
+
+    directions = dict(bench.sessions.directions)
+    assert directions.pop("b01") == ["Fuse the MoE gate.", "Fuse the MoE gate."]
+    assert directions.pop("b02") == ["Tune attention."]
+    [built_in] = directions.pop("b03")
+    assert built_in in DIRECTIONS and not directions
 
 
 def _repair_of(parent_commit: str) -> RepairRequest:

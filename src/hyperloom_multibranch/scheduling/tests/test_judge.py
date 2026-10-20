@@ -15,14 +15,17 @@ import pytest
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.lifecycle import SpecialistStatus
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
-from hyperloom_multibranch.contracts.notebook.records import BranchProgress, FrontierScore
+from hyperloom.contracts.measurement import TestKind, Validity
+from hyperloom_multibranch.contracts.notebook.records import BranchProgress, FrontierScore, TestRecord
 from hyperloom_multibranch.contracts.notebook.vocab import FrontierBasis
 from hyperloom_multibranch.notebook import STALL_TESTS
+from hyperloom_multibranch.notebook.tests.factories import intent, request, result
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.events import MB_BIG_GAIN_BARS, MB_BOTTLENECK_SHIFT_PP, EventKind, SessionEvent
 from hyperloom_multibranch.scheduling.judge import (
     JUDGE_PROMPT_VERSION,
     JUDGE_SYSTEM_PROMPT,
+    MB_USER_BRANCH_GRACE_TESTS,
     Judge,
     JudgeDecision,
     JudgeView,
@@ -31,6 +34,7 @@ from hyperloom_multibranch.scheduling.judge import (
     cap_decision,
     parse_decision,
     render_prompt,
+    user_grace,
 )
 from hyperloom_multibranch.scheduling.forks import PendingBranch
 from hyperloom_multibranch.scheduling.llm import CompletionFailed, CompletionReply
@@ -50,13 +54,20 @@ NOW = 1000.0
 STOP_REASON = "no gain left"
 
 
-def _entry(branch: str, *, kind: BranchKind = BranchKind.SPECIALIST, stopped: bool = False) -> BranchEntry:
+def _entry(
+    branch: str,
+    *,
+    kind: BranchKind = BranchKind.SPECIALIST,
+    stopped: bool = False,
+    origin: BranchOrigin = BranchOrigin.FIRST_BATCH,
+    k: int = 1,
+) -> BranchEntry:
     return BranchEntry(
         branch=branch,
         kind=kind,
-        origin=BranchOrigin.ROOT if kind is BranchKind.INTEGRATION else BranchOrigin.FIRST_BATCH,
+        origin=BranchOrigin.ROOT if kind is BranchKind.INTEGRATION else origin,
         start_commit="c-root",
-        k=1,
+        k=k,
         opened_at=0.0,
         stop=BranchStop(StopCause.JUDGE, "flat", 5.0) if stopped else None,
     )
@@ -89,6 +100,7 @@ def _view(
     explore_gpu_hours: float | None = None,
     max_llm_usd: float | None = None,
     specialists: dict[str, SpecialistStatus] | None = None,
+    grace: frozenset[str] = frozenset(),
 ) -> JudgeView:
     return JudgeView(
         now=NOW,
@@ -129,6 +141,7 @@ def _view(
         max_llm_usd=max_llm_usd,
         scheduler_llm_usd=0.27183,
         specialists=specialists or {},
+        user_grace=grace,
     )
 
 
@@ -565,3 +578,76 @@ def test_the_opening_k_is_read_and_clamped() -> None:
     assert cap_decision(parsed, view).open_k == 2
     assert parse_decision(_reply({"open": 2})) == JudgeDecision(open_count=2)
     assert parse_decision(_reply({"open": 2, "open_k": "two"})) is None
+
+
+USER_ROSTER = (
+    _entry(INTEGRATION_BRANCH, kind=BranchKind.INTEGRATION),
+    _entry("b01", origin=BranchOrigin.USER, k=2),
+    _entry("b02", origin=BranchOrigin.USER, k=2),
+)
+
+
+def test_a_user_branch_in_its_grace_is_neither_stopped_nor_lowered_and_one_past_it_is() -> None:
+    decision = JudgeDecision(
+        k=(KOrder("b01", 1), KOrder("b02", 1)),
+        stop=(StopOrder("b01", STOP_REASON),),
+    )
+    in_grace = _view(roster=USER_ROSTER, grace=frozenset({"b01", "b02"}))
+    past_grace = _view(roster=USER_ROSTER, grace=frozenset({"b02"}))
+
+    assert cap_decision(decision, in_grace) == JudgeDecision()
+    assert cap_decision(decision, past_grace) == JudgeDecision(stop=(StopOrder("b01", STOP_REASON),))
+
+
+def test_a_user_branch_in_its_grace_takes_a_higher_k_and_the_last_order_for_it_counts() -> None:
+    view = _view(roster=USER_ROSTER, grace=frozenset({"b01"}))
+
+    assert cap_decision(JudgeDecision(k=(KOrder("b01", 3),)), view).k == (KOrder("b01", 2),)
+    assert cap_decision(JudgeDecision(k=(KOrder("b01", 2), KOrder("b01", 1))), view).k == ()
+
+
+def test_the_opening_call_opens_none_by_default_once_user_branches_opened() -> None:
+    view = _view(opening=True, roster=USER_ROSTER, free_slots=2, grace=frozenset({"b01", "b02"}))
+
+    assert cap_decision(JudgeDecision(open_count=0), view).open_count == 0
+    assert cap_decision(JudgeDecision(open_count=2), view).open_count == 2
+
+
+def _judged(branch: str, number: int, *, judged: bool = True, kind: TestKind = TestKind.TEST) -> TestRecord:
+    request_id = f"{branch}-r{number}"
+    return TestRecord(
+        request(request_id, intent(branch, "c-root"), kind=kind),
+        result(request_id),
+        judged_at=10.0 if judged else None,
+    )
+
+
+def test_a_user_branch_keeps_its_grace_until_enough_of_its_tests_were_judged() -> None:
+    roster = (*USER_ROSTER, _entry("b03"), _entry("b04", origin=BranchOrigin.USER, stopped=True))
+    early = [_judged("b01", n) for n in range(MB_USER_BRANCH_GRACE_TESTS - 1)]
+    unjudged = [_judged("b01", 90, judged=False), _judged("b01", 91, kind=TestKind.PROFILE)]
+    failed = TestRecord(
+        request("b01-r92", intent("b01", "c-root")),
+        result("b01-r92", validity=Validity.MEASUREMENT_FAILED),
+        judged_at=10.0,
+    )
+    done = [_judged("b02", n) for n in range(MB_USER_BRANCH_GRACE_TESTS)]
+
+    assert user_grace(roster, [*early, *unjudged, failed, *done], {}) == frozenset({"b01"})
+
+
+@pytest.mark.parametrize("state", [{"gave_up": True}, {"judge_failed": True}])
+def test_a_user_branch_whose_specialist_is_out_of_service_has_no_grace(state: dict[str, bool]) -> None:
+    status = replace(SpecialistStatus(running=False, crashes=3, lost=0, gave_up=False, judge_failed=False), **state)
+
+    assert user_grace(USER_ROSTER, [], {"b01": status}) == frozenset({"b02"})
+
+
+def test_a_user_branch_row_shows_its_grace_and_the_prompt_explains_it() -> None:
+    rows = {row["branch"]: row for row in _state(_view(roster=USER_ROSTER, grace=frozenset({"b01"})))["branches"]}
+    plain = {row["branch"]: row for row in _state(_view())["branches"]}
+
+    assert (rows["b01"]["origin"], rows["b01"]["grace"], rows["b02"]["grace"]) == ("user", True, False)
+    assert "grace" not in plain["b01"]
+    prose = " ".join(JUDGE_SYSTEM_PROMPT.split())
+    assert f"until {MB_USER_BRANCH_GRACE_TESTS} of its tests were judged, a stop or a lower K you give it" in prose

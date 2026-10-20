@@ -96,7 +96,8 @@ class RunSettings:
     """``max_hours`` is the whole session's wall-clock budget, PRELUDE included, ``max_gpu_hours`` the GPU hours
     the session's tests may use and ``max_llm_usd`` the dollars the session's recorded LLM calls, the specialists'
     and the judge's and patch resolver's, may cost; 0 means no limit for any of them. ``reuse_prelude`` is the earlier
-    PRELUDE the run roots on, ``None`` when it runs a child of its own."""
+    PRELUDE the run roots on, ``None`` when it runs a child of its own. ``user_directions`` are the directions the user
+    wrote, each opening one branch at the root ahead of the opening batch, within the branch cap."""
 
     workload: Workload
     max_hours: float
@@ -105,6 +106,7 @@ class RunSettings:
     caps: RosterCaps
     judge_interval_seconds: float
     reuse_prelude: ReusedPrelude | None = None
+    user_directions: tuple[str, ...] = ()
 
 
 __all__ = [

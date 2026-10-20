@@ -6,7 +6,8 @@ notebook in step.
 
 Opening a branch records its ``OPEN`` lineage, cuts it in the experiment repository at its start commit, starts its
 specialist there and gives it its K; the session's briefs keep the focus a branch the scheduler opens in a batch was
-opened with. A repair the fork desk admitted is opened the same way at the commit its blocked
+opened with. A user branch opens the same way at the root commit, on the direction the user wrote for it, which its
+started decision records. A repair the fork desk admitted is opened the same way at the commit its blocked
 candidate was measured against; a fork is cut by the rule gate, which lands the fix on it first and records its
 ``SPLIT`` lineage, so it gets no ``OPEN``: it is opened at its head once the gate has landed it, and a fork the gate
 does not land is stopped as not started. A repair's specialist starts on the request it was admitted for,
@@ -83,6 +84,16 @@ class BatchStart:
     deadline: float
 
 
+@dataclass(frozen=True)
+class Launch:
+    """What a branch's specialist starts on: the repair the branch was opened for, the focus the session's briefs keep
+    for it unless ``None``, and the direction the user wrote for a user branch."""
+
+    repair: RepairRequest | None = None
+    focus: str | None = None
+    direction: str = ""
+
+
 class BranchControl:
     """Every change to a branch goes through here; ``briefs`` keep the focus of each branch it opens in a batch."""
 
@@ -122,13 +133,37 @@ class BranchControl:
 
         opened = []
         for index in range(count):
-            if self._roster.open_refusal():
+            entry = self._issue(start, k)
+            if entry is None:
                 break
-            branch = self._roster.next_branch_id()
-            entry = self._roster.open(branch, origin=start.origin, start_commit=start.start_commit, k=k)
             aim = focus[index] if index < len(focus) else ""
-            opened.append(await self._open(entry, start.start_commit, start.deadline, repair=None, focus=aim))
+            opened.append(await self._open(entry, start.start_commit, start.deadline, Launch(focus=aim)))
         return tuple(opened)
+
+    async def open_user_branches(
+        self, directions: tuple[str, ...], root_commit: str, deadline: float
+    ) -> tuple[BranchEntry, ...]:
+        """Open one :attr:`BranchOrigin.USER` branch at ``root_commit`` for each of the user's ``directions`` as
+        :meth:`open_branches` opens a batch, unfocused at K :data:`STARTED_K`; the roster entries issued before the
+        roster first refuses one, a branch whose specialist did not start among them, already stopped."""
+
+        start = BatchStart(BranchOrigin.USER, root_commit, deadline)
+        opened = []
+        for direction in directions:
+            entry = self._issue(start, STARTED_K)
+            if entry is None:
+                break
+            opened.append(await self._open(entry, root_commit, deadline, Launch(focus="", direction=direction)))
+        return tuple(opened)
+
+    def _issue(self, start: BatchStart, k: int) -> BranchEntry | None:
+        """A new branch on the roster as ``start`` says, or ``None`` when the roster refuses one; a refused branch
+        takes no id."""
+
+        if self._roster.open_refusal():
+            return None
+        branch = self._roster.next_branch_id()
+        return self._roster.open(branch, origin=start.origin, start_commit=start.start_commit, k=k)
 
     async def start_admitted(self, admitted: AdmittedBranch, deadline: float) -> None:
         """Open a repair, or a fork the rule gate has landed, that the fork desk admitted, and start its specialist by
@@ -141,9 +176,8 @@ class BranchControl:
         if isinstance(start_commit, BaseException):
             await self._fail_start(entry, failure_text(start_commit))
             return
-        await self._open(
-            self._roster.started(entry.branch, start_commit), start_commit, deadline, repair=admitted.repair
-        )
+        started = self._roster.started(entry.branch, start_commit)
+        await self._open(started, start_commit, deadline, Launch(repair=admitted.repair))
 
     async def void_admitted(self, branch: str, reason: str) -> None:
         """Void a fork the rule gate did not land, for ``reason``: it is stopped as not started, freeing its slot, and
@@ -156,29 +190,23 @@ class BranchControl:
 
         return parent_commit if entry.origin.cut_by_scheduler else await self._repo.head(entry.branch)
 
-    async def _open(
-        self,
-        entry: BranchEntry,
-        start_commit: str,
-        deadline: float,
-        *,
-        repair: RepairRequest | None,
-        focus: str | None = None,
-    ) -> BranchEntry:
-        """Record ``OPEN`` and cut a branch the scheduler cuts, give the toolbox its K and start its specialist, on
-        ``repair`` for a repair branch, the session's briefs keeping ``focus`` unless that is ``None``; a branch any of
-        that fails for, or that is not done within :data:`SPECIALIST_START_SECONDS` or by ``deadline``, is stopped
-        with the failure as the reason."""
+    async def _open(self, entry: BranchEntry, start_commit: str, deadline: float, launch: Launch) -> BranchEntry:
+        """Record ``OPEN`` and cut a branch the scheduler cuts, give the toolbox its K and start its specialist on
+        ``launch``; a branch any of that fails for, or that is not done within :data:`SPECIALIST_START_SECONDS` or by
+        ``deadline``, is stopped with the failure as the reason. The started decision records the launch's focus, when
+        it has one, and a user branch's direction."""
 
         seconds = min(SPECIALIST_START_SECONDS, deadline - self._clock.now())
-        started = await settled(self._clock.wait_for(self._launch(entry, start_commit, repair, focus), seconds))
+        started = await settled(self._clock.wait_for(self._launch(entry, start_commit, launch), seconds))
         if isinstance(started, BaseException):
             logger.error("the specialist of %s did not start", entry.branch, exc_info=started)
             await self._fail_start(entry, failure_text(started))
             return entry
         detail: dict[str, object] = {"start_commit": start_commit, "k": entry.k, "from_branch": entry.from_branch}
-        if focus is not None:
-            detail["focus"] = focus
+        if launch.focus is not None:
+            detail["focus"] = launch.focus
+        if launch.direction:
+            detail["direction"] = launch.direction
         kind = DECISION_KINDS.get(entry.origin, DecisionKind.OPEN)
         self._decisions.record(Decision(kind, f"{entry.origin.value} branch started", entry.branch, detail))
         return entry
@@ -291,14 +319,12 @@ class BranchControl:
     async def push_quota(self) -> None:
         await self._toolbox.set_policy(self._roster.quota_policy())
 
-    async def _launch(
-        self, entry: BranchEntry, start_commit: str, repair: RepairRequest | None, focus: str | None
-    ) -> None:
-        """Start the specialist unbriefed, as the runtime briefs each launch itself; a ``focus`` is the one the
+    async def _launch(self, entry: BranchEntry, start_commit: str, launch: Launch) -> None:
+        """Start the specialist unbriefed, as the runtime briefs each launch itself; a ``launch.focus`` is the one the
         session's briefs keep for the branch."""
 
-        if focus is not None:
-            self._briefs.for_branch(entry.branch, focus)
+        if launch.focus is not None:
+            self._briefs.for_branch(entry.branch, launch.focus)
         if entry.origin.cut_by_scheduler:
             reason = f"{entry.origin.value} branch" + (f" of {entry.from_branch}" if entry.from_branch else "")
             await self._notebook.record_lineage(
@@ -307,7 +333,8 @@ class BranchControl:
             await self._repo.create_branch(entry.branch, start_commit)
         await self.push_quota()
         self._specialists.add(entry.branch)
-        started = await settled(self._lifecycle.start(entry.branch, start_commit, BranchTask(repair=repair)))
+        task = BranchTask(repair=launch.repair, direction=launch.direction)
+        started = await settled(self._lifecycle.start(entry.branch, start_commit, task))
         if isinstance(started, BaseException):
             self._specialists.discard(entry.branch)
             raise started

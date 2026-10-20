@@ -313,6 +313,7 @@ class Session:
             explore_gpu_seconds(self._settings.max_gpu_hours),
             self._settings.max_llm_usd or math.inf,
             prelude.child_gpu_seconds_upper_bound,
+            self._settings.user_directions,
         )
         reason = await self._explorer.run(window)
         if reason is SessionStopReason.NO_MEASUREMENT_CARDS:

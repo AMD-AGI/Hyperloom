@@ -10,14 +10,17 @@ branch lies behind the integration head, whether a profile of the integration he
 tokens the session has used, and what is known of each running branch's specialist). The judge answers with one JSON
 object, which :func:`parse_decision` reads and :func:`cap_decision` cuts to the caps and to the branches that are
 still live. A failed call or an unreadable reply gives ``None``, and the scheduler keeps the status quo. The judge
-never calls a peer; the scheduler applies its decision.
+never calls a peer; the scheduler applies its decision. A user branch is in its grace until
+:data:`MB_USER_BRANCH_GRACE_TESTS` of its tests were judged: the judge may neither stop it nor lower its K then, unless
+its specialist gave up or its judging failed.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
+from collections import Counter
+from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -25,13 +28,13 @@ from hyperloom.common.io import append_jsonl
 from hyperloom.common.jsonio import extract_last_json_with_key
 from hyperloom_multibranch.contracts.lifecycle import SpecialistStatus
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
-from hyperloom_multibranch.contracts.notebook.records import BranchProgress
+from hyperloom_multibranch.contracts.notebook.records import BranchProgress, TestRecord
 from hyperloom_multibranch.notebook import STALL_TESTS
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.events import MB_BIG_GAIN_BARS, MB_BOTTLENECK_SHIFT_PP, SessionEvent
 from hyperloom_multibranch.scheduling.forks import PendingBranch
 from hyperloom_multibranch.scheduling.llm import Completion, CompletionFailed
-from hyperloom_multibranch.scheduling.roster import BranchEntry, BranchKind, RosterCaps
+from hyperloom_multibranch.scheduling.roster import BranchEntry, BranchKind, BranchOrigin, RosterCaps, specialist_open
 from hyperloom_multibranch.scheduling.similarity import SimilarBranch
 from hyperloom_multibranch.scheduling.widening import WideningSignals
 from hyperloom_multibranch.specialist.prompts import VERSION_HEX
@@ -48,21 +51,23 @@ _KEY_REASON = "reason"
 _GPU_HOURS_DIGITS = 3
 #: Decimals the dollars in the judge's view are rounded to.
 _USD_DIGITS = 2
+#: Judged tests of a user branch before the judge may stop it or lower its K: the session owner's decision (board #77).
+MB_USER_BRANCH_GRACE_TESTS = 2
 
 JUDGE_SYSTEM_PROMPT = f"""You are the scheduler's judge in a multi-branch LLM inference optimization session.
 Specialist branches explore optimizations in parallel; the integration branch merges their kept commits.
 Each branch has K, the number of tests it may run at once. Within the hard caps you are given, decide:
 how many branches to open, each branch's K (the integration branch included), which specialist branches to stop and
 why, and whether the whole session should stop early.
-You may open branches at any call. opening is true only for the call that sizes the opening batch, which opens at
-least one branch from the root commit. A branch opened at a later call starts from the integration head, briefed on
-its focus: the op it should speed up. Name the focus of each, or leave it out and the branch is briefed on the
-largest op of the integration head's latest profile, or on none when that head was never profiled. The opening batch
-is given no focus. free_branch_slots counts the branches that may still be opened before your stops take effect: a
-branch you stop frees its slot for a branch you open in the same answer, and branches beyond the slots left are not
-opened. pending lists the forks and repairs the rule gate asked for that wait for a slot, oldest first, with how long
-each has waited: a slot your stops free goes to them first and only the slots left open your branches. You do not
-admit them; stop a branch that is worth less than a pending one to let it start.
+You may open branches at any call. opening is true only for the call that sizes the opening batch, which opens from
+the root commit, at least one branch unless user branches opened already. A branch opened at a later call starts from
+the integration head, briefed on its focus: the op it should speed up. Name the focus of each, or leave it out and
+the branch is briefed on the largest op of the integration head's latest profile, or on none when that head was never
+profiled. The opening batch is given no focus. free_branch_slots counts the branches that may still be opened before
+your stops take effect: a branch you stop frees its slot for a branch you open in the same answer, and branches
+beyond the slots left are not opened. pending lists the forks and repairs the rule gate asked for that wait for a
+slot, oldest first, with how long each has waited: a slot your stops free goes to them first and only the slots left
+open your branches. You do not admit them; stop a branch that is worth less than a pending one to let it start.
 Spend the budget where the expected gain is highest: a branch whose frontier expected_gain_pct is low and that is not
 observing a slow-paying direction is a candidate to stop or to lower K; keep K where the gain is high.
 A branch's basis says what its expected gain rests on: its own trend, a prior from similar past sessions, the floor
@@ -119,6 +124,10 @@ heartbeat (gave_up), and whether it was stopped because judging its tests failed
 specialist gave up or whose judging failed makes no more progress but holds its slot until you stop it: stop it, and
 open a branch in its place if one would still pay off. Each lost heartbeat costs minutes: weigh a specialist's lost
 count against its progress, and stop it when it keeps losing its heartbeat without gaining.
+A branch of origin user follows a direction the user wrote; such branches open from the root commit ahead of the
+opening batch, and the opening batch fills the slots they leave. While its grace is true, until
+{MB_USER_BRANCH_GRACE_TESTS} of its tests were judged, a stop or a lower K you give it is not applied, unless its
+specialist gave up or its judging failed.
 Stop the session only when no branch is expected to gain anything worth the remaining time.
 Answer with exactly ONE JSON object and nothing after it."""
 
@@ -139,7 +148,7 @@ JUDGE_PROMPT_VERSION = hashlib.sha256(f"{JUDGE_SYSTEM_PROMPT}\n{_REPLY_FORMAT}".
 @dataclass(frozen=True)
 class JudgeView:
     """What the judge sees; ``opening`` is true only for the call that sizes the opening batch, which opens at least
-    one branch.
+    one branch unless a specialist branch is open already.
 
     ``free_slots`` is the roster's own count of branches that may still be opened; ``pending`` are the forks and
     repairs the fork desk queued for a slot, oldest first; ``history`` is the notebook's
@@ -155,7 +164,8 @@ class JudgeView:
     cost, ``scheduler_llm_usd`` what the judge's, the patch resolver's and the fix critic's recorded calls cost, and
     ``max_llm_usd`` where their sum ends EXPLORE under ``--max-llm-usd``, ``None`` without a limit. ``specialists``
     maps a running specialist branch to what the specialist runtime knows of its specialist; a branch whose
-    specialist's state is not known is not in it.
+    specialist's state is not known is not in it. ``user_grace`` are the user branches in their grace, as
+    :func:`user_grace` finds them.
     """
 
     now: float
@@ -183,6 +193,28 @@ class JudgeView:
     max_llm_usd: float | None
     scheduler_llm_usd: float
     specialists: Mapping[str, SpecialistStatus]
+    user_grace: frozenset[str]
+
+
+def user_grace(
+    roster: Iterable[BranchEntry], records: Iterable[TestRecord], specialists: Mapping[str, SpecialistStatus]
+) -> frozenset[str]:
+    """The live user branches with fewer than :data:`MB_USER_BRANCH_GRACE_TESTS` judged tests whose specialist neither
+    gave up nor was stopped for a failed judging; a test counts when it is :attr:`TestRecord.judged`."""
+
+    judged = Counter(record.request.branch for record in records if record.judged)
+    return frozenset(
+        entry.branch
+        for entry in roster
+        if entry.origin is BranchOrigin.USER
+        and entry.stop is None
+        and judged[entry.branch] < MB_USER_BRANCH_GRACE_TESTS
+        and not _out_of_service(specialists.get(entry.branch))
+    )
+
+
+def _out_of_service(specialist: SpecialistStatus | None) -> bool:
+    return specialist is not None and (specialist.gave_up or specialist.judge_failed)
 
 
 @dataclass(frozen=True)
@@ -268,6 +300,8 @@ def _branch_row(entry: BranchEntry, progress: BranchProgress | None, view: Judge
         row["behind_integration_pct"] = round(behind, 2)
     if entry.stop is not None:
         row["stopped"] = entry.stop.summary
+    if entry.origin is BranchOrigin.USER:
+        row["grace"] = entry.branch in view.user_grace
     specialist = view.specialists.get(entry.branch)
     if specialist is not None:
         row["specialist"] = asdict(specialist)
@@ -404,28 +438,33 @@ def cap_decision(decision: JudgeDecision, view: JudgeView) -> JudgeDecision:
     """``decision`` cut to the caps and to the live branches; applying it twice changes nothing more.
 
     Orders naming an unknown or stopped branch are dropped, the integration branch cannot be stopped, a branch being
-    stopped gets no K order, and a later order for the same branch replaces an earlier one. The opening call opens at
-    least one branch; no call opens more than ``max_branches``. The free slots are not a cut here: they are read before
-    the stops free theirs, and the branches that find no slot are cut as they open.
+    stopped gets no K order, and a later order for the same branch replaces an earlier one. A user branch in its grace
+    is neither stopped nor given a lower K. The opening call opens at least one branch unless a specialist branch is
+    open already; no call opens more than ``max_branches``. The free slots are not a cut here: they are read before the
+    stops free theirs, and the branches that find no slot are cut as they open.
     """
 
     live = {entry.branch: entry for entry in view.roster if entry.stop is None}
     stops = {
         order.branch: order
         for order in decision.stop
-        if order.branch in live and live[order.branch].kind is BranchKind.SPECIALIST
+        if order.branch in live
+        and live[order.branch].kind is BranchKind.SPECIALIST
+        and order.branch not in view.user_grace
     }
     ks = {
         order.branch: KOrder(order.branch, view.caps.clamp_k(order.k))
         for order in decision.k
         if order.branch in live and order.branch not in stops
     }
-    opened = min(max(decision.open_count, 1 if view.opening else 0), view.caps.max_branches)
+    kept = {branch: order for branch, order in ks.items() if branch not in view.user_grace or order.k >= live[branch].k}
+    floor = 1 if view.opening and not specialist_open(view.roster) else 0
+    opened = min(max(decision.open_count, floor), view.caps.max_branches)
     return JudgeDecision(
         open_count=opened,
         open_k=view.caps.clamp_k(decision.open_k),
         focus=decision.focus[:opened],
-        k=tuple(ks.values()),
+        k=tuple(kept.values()),
         stop=tuple(stops.values()),
         session_stop=decision.session_stop,
     )
@@ -463,6 +502,7 @@ class Judge:
 __all__ = [
     "JUDGE_PROMPT_VERSION",
     "JUDGE_SYSTEM_PROMPT",
+    "MB_USER_BRANCH_GRACE_TESTS",
     "Judge",
     "JudgeDecision",
     "JudgeView",
@@ -471,4 +511,5 @@ __all__ = [
     "cap_decision",
     "parse_decision",
     "render_prompt",
+    "user_grace",
 ]

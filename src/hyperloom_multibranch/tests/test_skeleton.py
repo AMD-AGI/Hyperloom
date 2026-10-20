@@ -136,6 +136,7 @@ from hyperloom_multibranch.scheduling.tests.child_sessions import child_with_pat
 from hyperloom_multibranch.tests.fakes import RecordingVerifier
 from hyperloom_multibranch.toolbox.attempts import TestJob
 from hyperloom_multibranch.toolbox.tools.base import JobStatus
+from hyperloom_multibranch.specialist.directions import DIRECTIONS
 from hyperloom_multibranch.specialist.prompts import prompt_versions
 from hyperloom_multibranch.specialist.runtime import MAX_LOSS_RESTARTS, SessionCrashed
 
@@ -1153,6 +1154,75 @@ def _judged_rows(prompt: str) -> dict[str, dict[str, Any]]:
 
     state = json.loads(prompt[prompt.index("{") : prompt.index("\n\nReply with")])
     return {row["branch"]: row for row in state["branches"]}
+
+
+USER_DIRECTION = "Fuse the MoE gate into the router kernel."
+
+
+async def test_a_user_branch_opens_first_at_the_root_and_the_judge_neither_stops_it_in_its_grace_nor_reopens_it(
+    tmp_path: Path,
+) -> None:
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.settings = replace(SETTINGS, user_directions=(USER_DIRECTION,))
+    stops = [{"branch": "b01", "reason": STOP_REASON}, {"branch": "b02", "reason": STOP_REASON}]
+    stage.judge = ScriptedCompletion([OPENING, _reply({"open": 1, "branches": [], "stop": stops})])
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error) == (SessionStopReason.TIME_EXHAUSTED, "")
+    assert _origins(stage) == {"b01": "user", "b02": "first_batch", "b03": "first_batch", "b04": "refill"}
+    root = await stage.root()
+    assert stage.sessions.started["b01"] == stage.sessions.started["b02"] == root
+    directions = {branch: set(runs) for branch, runs in stage.sessions.directions.items()}
+    assert directions.pop("b01") == {USER_DIRECTION}
+    assert sorted(directions) == ["b02", "b03", "b04"]
+    assert all(len(runs) == 1 and runs <= set(DIRECTIONS) for runs in directions.values())
+    opening, steering, *_ = [_judge_state(prompt) for prompt in _judge_prompts(stage)]
+    assert opening["free_branch_slots"] == 2
+    assert [(row["origin"], row["grace"]) for row in opening["branches"] if row["branch"] == "b01"] == [("user", True)]
+    assert {row["branch"]: row.get("grace") for row in steering["branches"]}["b01"] is True
+    decisions = _decisions(stage)
+    [opened] = [row for row in decisions if row["kind"] == "open" and row["branch"] == "b01"]
+    assert (opened["reason"], opened["detail"]["direction"]) == ("user branch started", USER_DIRECTION)
+    stopped = {row["branch"]: row["reason"] for row in decisions if row["kind"] == "stop"}
+    assert stopped["b02"] == f"judge: {STOP_REASON}"
+    assert stopped["b01"].startswith("session_end")
+
+
+async def test_a_failed_opening_judge_call_opens_no_branch_beside_the_user_branches(tmp_path: Path) -> None:
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.settings = replace(SETTINGS, user_directions=(USER_DIRECTION, "Tune the attention block size."))
+    stage.judge = ScriptedCompletion(error=CompletionFailed("judge call failed: RuntimeError: status=529"))
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error) == (SessionStopReason.TIME_EXHAUSTED, "")
+    assert _origins(stage) == {"b01": "user", "b02": "user"}
+    assert stage.sessions.started == {"b01": await stage.root(), "b02": await stage.root()}
+
+
+class NoFirstBranchRuntime(RefusingRuntime):
+    """A runtime that cannot start ``b01``; a failure double, not a placeholder."""
+
+    async def start(self, branch: str, start_commit: str, task: BranchTask = BranchTask()) -> None:
+        if branch == "b01":
+            raise RuntimeError(f"no specialist CLI for {branch}")
+        await super().start(branch, start_commit, task)
+
+
+async def test_a_failed_opening_judge_call_opens_one_branch_when_no_user_branch_started(tmp_path: Path) -> None:
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.settings = replace(SETTINGS, user_directions=(USER_DIRECTION,))
+    stage.judge = ScriptedCompletion(error=CompletionFailed("judge call failed: RuntimeError: status=529"))
+    stage.runtime_type = NoFirstBranchRuntime
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error) == (SessionStopReason.TIME_EXHAUSTED, "")
+    assert _origins(stage) == {"b01": "user", "b02": "first_batch"}
+    assert stage.sessions.started == {"b02": await stage.root()}
+    [stop] = [row for row in _decisions(stage) if row["kind"] == "stop" and row["branch"] == "b01"]
+    assert str(stop["reason"]).startswith(StopCause.START_FAILED.value)
 
 
 async def test_a_judge_asking_for_more_than_its_stops_free_opens_what_fits_and_records_the_cut(tmp_path: Path) -> None:

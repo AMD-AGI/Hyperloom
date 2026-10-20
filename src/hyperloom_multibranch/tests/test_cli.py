@@ -163,6 +163,60 @@ def test_usage_errors_exit_two(argv: list[str], tmp_path: Path, monkeypatch: pyt
     assert not any(tmp_path.iterdir())
 
 
+def test_each_specialist_prompt_file_is_one_user_direction_in_order(tmp_path: Path) -> None:
+    first, second = tmp_path / "first.md", tmp_path / "second.md"
+    first.write_text("  Fuse the MoE gate into the router kernel.\n", encoding="utf-8")
+    second.write_text("Tune the attention block size.", encoding="utf-8")
+
+    settings = _settings("--specialist-prompt", str(first), "--specialist-prompt", str(second))
+
+    assert settings.user_directions == ("Fuse the MoE gate into the router kernel.", "Tune the attention block size.")
+    assert _settings().user_directions == ()
+
+
+def _prompt_file(tmp_path: Path, name: str, text: str | bytes | None) -> str:
+    """A prompt file holding ``text``; none is written for ``None``."""
+
+    path = tmp_path / name
+    if isinstance(text, bytes):
+        path.write_bytes(text)
+    elif text is not None:
+        path.write_text(text, encoding="utf-8")
+    return str(path)
+
+
+@pytest.mark.parametrize(
+    ("files", "extra", "error"),
+    [
+        ([("missing.md", None)], [], "cannot be read"),
+        ([("empty.md", " \n")], [], "is empty"),
+        ([("binary.md", b"\xff\xfe")], [], "cannot be read"),
+        ([("a.md", "a"), ("b.md", "b")], ["--max-branches", "1"], "given 2 times, more than --max-branches 1"),
+    ],
+)
+def test_a_bad_specialist_prompt_exits_two_before_creating_anything(
+    files: list[tuple[str, str | bytes | None]],
+    extra: list[str],
+    error: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    prompts = tmp_path / "prompts"
+    prompts.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("USER_DATA_PATH", str(workspace))
+    argv = [arg for name, text in files for arg in ("--specialist-prompt", _prompt_file(prompts, name, text))]
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["run", *WORKLOAD_ARGS, *argv, *extra])
+
+    assert exc.value.code == cli.EXIT_USAGE
+    assert error in capsys.readouterr().err
+    assert not any(workspace.iterdir())
+
+
 @pytest.fixture(autouse=True)
 def eight_cards(monkeypatch: pytest.MonkeyPatch) -> None:
     """This machine shows eight cards, and the operator names no AgentX switch or benchmark YAML."""
@@ -394,6 +448,20 @@ def test_a_dollar_cap_over_a_model_without_a_price_exits_two_before_creating_any
     assert captured.out == ""
     assert agent_cli == []
     assert not any(tmp_path.iterdir())
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_specialist_prompt_runs_the_session_on_its_direction(
+    agent_cli: list[RunSettings], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("USER_DATA_PATH", str(workspace))
+    prompt = _prompt_file(tmp_path, "direction.md", "Fuse the MoE gate into the router kernel.")
+
+    assert cli.main(["run", *WORKLOAD_ARGS, "--specialist-prompt", prompt]) == 0
+
+    assert [settings.user_directions for settings in agent_cli] == [("Fuse the MoE gate into the router kernel.",)]
 
 
 @pytest.mark.usefixtures("ready_environment")
