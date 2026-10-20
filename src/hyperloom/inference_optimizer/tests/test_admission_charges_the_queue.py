@@ -23,6 +23,8 @@ def _dispatcher(*, queued_kinds: tuple[str, ...], phase_minutes_left: float) -> 
         return None
 
     dispatcher = DispatcherCollaborator.__new__(DispatcherCollaborator)
+    # The phase is staying; a phase on its way out refuses before any of this (test_admission_during_phase_exit).
+    dispatcher.admission_frozen = False
     # ``tasks`` is derived from the coordinator, so the fake queue lives there.
     dispatcher._coord = SimpleNamespace(tasks=SimpleNamespace(queued=lambda: _queued(queued_kinds)))
     dispatcher._phase_denial_for_action = lambda _a: None

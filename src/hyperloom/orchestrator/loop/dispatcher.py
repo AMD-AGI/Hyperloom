@@ -1460,6 +1460,15 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         The single entry point the intent handlers share, so a new gate
         reaches all paths at once.
 
+        A pending transition refuses first. ``admission_frozen`` is set for as
+        long as the phase machine is waiting on in-flight work before it can
+        commit the next phase, and it already stops the pump from dispatching;
+        until it stopped admission too, a round proposed in that window was
+        enqueued and then cancelled by the same tick's drain. One observed
+        FRAMEWORK_AGENT phase spent seventeen minutes that way: eleven rounds
+        reasoned about, reviewed, admitted and cancelled within half a second
+        each, under ``phase_transition:FRAMEWORK_AGENT->KERNEL_AGENT``.
+
         The time gate is charged the queue's own minutes as well as this
         action's. Priced on its own against the phase clock, every round in an
         oversubscribed queue still fits: two observed FRAMEWORK_AGENT phases
@@ -1474,6 +1483,12 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         Returns:
             The first :class:`PolicyDenied` that fires, else ``None``.
         """
+        if self.admission_frozen:
+            return PolicyDenied(
+                f"action={action_name!r} denied: the phase is leaving and admits nothing new",
+                rule="phase_transition_pending",
+                hint="the next phase starts on quiet GPUs; propose again once it has been entered",
+            )
         denied = self._phase_denial_for_action(action_name)
         if denied is not None:
             return denied
