@@ -312,6 +312,13 @@ def _bench_failure_detail(bench_result: dict) -> str:
     return f"{message}\n{textwrap.indent(output[-2000:], '    ')}"
 
 
+_VALIDATE_FAIL_STATUS = {
+    "timeout": "TIMEOUT",
+    "driver_error": "ERROR",
+    "invalid_result": "ERROR",
+}
+
+
 def _build_failure_tail(stdout: bytes, stderr: bytes, limit: int) -> str:
     """The tail of a failed build, taken from whichever stream carried it.
 
@@ -4088,6 +4095,140 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             ),
         )
 
+    def _emit_validation_stages(self, report) -> None:
+        """Print each correctness-suite stage the pipeline just ran."""
+        for result in report.results:
+            status = "PASS" if result.passed else _VALIDATE_FAIL_STATUS.get(result.outcome, "FAIL")
+            snr_str = f" SNR={result.snr_db:.1f}dB" if result.snr_db is not None else ""
+            print(f"  [validate] Stage {result.stage} {result.stage_name}: {status}{snr_str}")
+
+    async def _iteration_bench_result(self, benchmark_measurement: dict | None) -> dict:
+        """Return the three-measurement bench, reusing an in-session result when it still matches."""
+        if benchmark_measurement is not None and self._can_reuse_insession_benchmark(
+            benchmark_measurement,
+            attempt_diff=self._working_tree_diff(),
+        ):
+            print("  [bench] Reusing in-session three-measurement result...")
+            bench_result = dict(benchmark_measurement)
+            bench_result["reused_from_insession"] = True
+            return bench_result
+        print("  [bench] Running three independent benchmark suites...")
+        return await measure_wallclock(
+            BenchRun(self.ic.driver_script, driver_args=[], repeat=self.ic.bench_repeat),
+            measurements=KEEP_MEASUREMENT_COUNT,
+            timeout_sec=self.ic.bench_timeout_sec,
+        )
+
+    def _emit_bench_scores(
+        self,
+        bench_result: dict,
+        sigma_resolution: SigmaResolution,
+        measurement_scores: list[float],
+    ) -> str:
+        """Print the KEEP-bar line and any bench-failure tail; return that tail."""
+        selected_raw_mean_ms = bench_result.get("median_ms")
+        mean_case_speedup = bench_result.get("mean_case_speedup")
+        score_text = f"{mean_case_speedup:.6f}x" if mean_case_speedup is not None else "n/a"
+        sigma = sigma_resolution.sigma
+        required_score = required_keep_speedup(
+            self.best_mean_case_speedup or 1.0,
+            measurement_scores,
+            sigma=sigma,
+            sigma_sample_size=sigma_resolution.sample_size,
+        )
+        sigma_text = f"{sigma:.6f}" if sigma is not None else "n/a"
+        print(
+            f"  [bench] pristine-relative scores="
+            f"{[round(score, 6) for score in measurement_scores]}; "
+            f"sigma={sigma_text}; "
+            f"{_sigma_attribution_note(sigma_resolution)}"
+            f"mean score={score_text}; required={required_score:.6f}x; "
+            f"raw mean={selected_raw_mean_ms} ms  "
+            f"({bench_result.get('message', '')})"
+        )
+        bench_error_output = (
+            "" if bench_result.get("success") else "BENCH FAILED: " + _bench_failure_detail(bench_result)
+        )
+        if bench_error_output:
+            print(f"  [bench] {bench_error_output}")
+        return bench_error_output
+
+    async def _decide_iteration_keep(
+        self,
+        iteration: int,
+        iter_start: float,
+        report,
+        bench_result: dict,
+        sigma_resolution: SigmaResolution,
+    ) -> IterationResult:
+        """Registers, KEEP threshold, optional canonical suite, and the IterationResult."""
+        measurement_scores = list(bench_result.get("measurement_mean_case_speedups") or [])
+        selected_raw_mean_ms = bench_result.get("median_ms")
+        mean_case_speedup = bench_result.get("mean_case_speedup")
+        snr_db = report.results[-1].snr_db if report.results else None
+        bench_error_output = self._emit_bench_scores(bench_result, sigma_resolution, measurement_scores)
+        sigma = sigma_resolution.sigma
+
+        reg_result = await check_registers(build_dir=self.ic.build_dir)
+        vgpr = reg_result.get("vgpr") if reg_result.get("success") else None
+        if vgpr:
+            print(f"  [registers] VGPR={vgpr}")
+
+        improved = bool(bench_result.get("success")) and passes_keep_threshold(
+            measurement_scores,
+            best_mean_case_speedup=(self.best_mean_case_speedup or 1.0),
+            sigma=sigma,
+            sigma_sample_size=sigma_resolution.sample_size,
+        )
+        if improved and self.ic.kernel_backend == "assembly":
+            source_ms = self.ic.pristine_baseline_wall_ms
+            improved = source_ms is not None and selected_raw_mean_ms is not None and selected_raw_mean_ms < source_ms
+
+        canonical_summary = ""
+        if improved and runs_task_suite_acceptance(self.ic.kernel_backend):
+            canonical_started = time.time()
+            canonical = await accept_candidate(
+                self.ic.workspace_dir,
+                timeout_cap_sec=self.ic.validate_stage_timeout_sec,
+                candidate_label=f"iteration {iteration}",
+                kernel_backend=self.ic.kernel_backend,
+            )
+            self._observe_measurement(canonical_started)
+            canonical_summary = f"\n  Canonical correctness suite: {canonical.detail}"
+            if canonical.numerical_evidence is not None:
+                bench_result["numerical_validation"] = canonical.numerical_evidence
+            if not canonical.passed:
+                return IterationResult(
+                    iteration=iteration,
+                    duration_sec=time.time() - iter_start,
+                    validation_passed=False,
+                    validation_summary=(
+                        f"{report.summary()}\n  Canonical correctness suite: FAILED — {canonical.detail}"
+                    ),
+                    validation_outcome=(canonical.outcome or "canonical_correctness_failure"),
+                    wall_ms=selected_raw_mean_ms,
+                    mean_case_speedup=mean_case_speedup,
+                    snr_db=snr_db,
+                    vgpr=vgpr,
+                    error_output=canonical.output,
+                    kept=False,
+                    bench_detail=bench_result,
+                )
+
+        return IterationResult(
+            iteration=iteration,
+            duration_sec=time.time() - iter_start,
+            validation_passed=True,
+            validation_summary=report.summary() + canonical_summary,
+            wall_ms=selected_raw_mean_ms,
+            mean_case_speedup=mean_case_speedup,
+            snr_db=snr_db,
+            vgpr=vgpr,
+            kept=improved,
+            bench_detail=bench_result,
+            error_output=bench_error_output,
+        )
+
     async def run_one_iteration(
         self,
         iteration: int,
@@ -4099,7 +4240,6 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         iter_start = time.time()
         force_jit_rebuild(self._jit_source_files())
 
-        # Step 1: Build (if configured).
         if self.ic.build_command:
             proc = await asyncio.create_subprocess_exec(
                 *self.ic.build_command,
@@ -4121,7 +4261,6 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                     kept=False,
                 )
 
-        # Step 2: driver-owned full correctness suite.
         measurement_started = time.time()
         print("  [validate] Running full correctness suite...")
         report = await run_validation_pipeline(
@@ -4129,19 +4268,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             snr_threshold=self.ic.snr_threshold,
             timeout_per_stage=self.ic.validate_stage_timeout_sec,
         )
-        for r in report.results:
-            status = (
-                "PASS"
-                if r.passed
-                else "TIMEOUT"
-                if r.outcome == "timeout"
-                else "ERROR"
-                if r.outcome in {"driver_error", "invalid_result"}
-                else "FAIL"
-            )
-            snr_str = f" SNR={r.snr_db:.1f}dB" if r.snr_db is not None else ""
-            print(f"  [validate] Stage {r.stage} {r.stage_name}: {status}{snr_str}")
-
+        self._emit_validation_stages(report)
         if not report.all_passed:
             print(f"  [validate] FAILED at stage {report.failed_stage} — skipping bench")
             self._observe_measurement(measurement_started)
@@ -4155,144 +4282,18 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                 kept=False,
             )
 
-        # Step 3: Benchmark (only if validation passed).
-        if benchmark_measurement is not None and self._can_reuse_insession_benchmark(
-            benchmark_measurement,
-            attempt_diff=self._working_tree_diff(),
-        ):
-            print("  [bench] Reusing in-session three-measurement result...")
-            bench_result = dict(benchmark_measurement)
-            bench_result["reused_from_insession"] = True
-        else:
-            print("  [bench] Running three independent benchmark suites...")
-            bench_result = await measure_wallclock(
-                BenchRun(self.ic.driver_script, driver_args=[], repeat=self.ic.bench_repeat),
-                measurements=KEEP_MEASUREMENT_COUNT,
-                timeout_sec=self.ic.bench_timeout_sec,
-            )
+        bench_result = await self._iteration_bench_result(benchmark_measurement)
         self._observe_measurement(measurement_started)
-
         self.last_case_bandwidth = dict(bench_result.get("case_bandwidth") or {})
-        selected_raw_mean_ms = bench_result.get("median_ms")
-        snr_db = report.results[-1].snr_db if report.results else None
-        # A candidate whose bench crashed is reverted for "no speedup" unless the crash itself reaches the agent; the
-        # tool's output tail is the only place the traceback exists.
-        bench_error_output = (
-            "" if bench_result.get("success") else "BENCH FAILED: " + _bench_failure_detail(bench_result)
-        )
-
-        # Collapse per-case times into an equal-weight mean of per-case speedups, rather than allowing expensive cases
-        # to dominate an aggregate ratio.
         self._apply_mean_case_speedup_metric(bench_result)
-        mean_case_speedup = bench_result.get("mean_case_speedup")
         measurement_scores = list(bench_result.get("measurement_mean_case_speedups") or [])
-        score_text = f"{mean_case_speedup:.6f}x" if mean_case_speedup is not None else "n/a"
         sigma_resolution = await self._resolve_keep_sigma(bench_result, measurement_scores)
-        sigma = sigma_resolution.sigma
-        required_score = required_keep_speedup(
-            self.best_mean_case_speedup or 1.0,
-            measurement_scores,
-            sigma=sigma,
-            sigma_sample_size=sigma_resolution.sample_size,
-        )
-        # The bar is a t multiple of the standard error of the mean, so a REVERT is only readable next to the spread
-        # that set it and, when one case supplied that spread, next to the case: a weak candidate and a noisy 10 us
-        # dispatch print the same mean score.
-        sigma_text = f"{sigma:.6f}" if sigma is not None else "n/a"
-        print(
-            f"  [bench] pristine-relative scores="
-            f"{[round(score, 6) for score in measurement_scores]}; "
-            f"sigma={sigma_text}; "
-            f"{_sigma_attribution_note(sigma_resolution)}"
-            f"mean score={score_text}; required={required_score:.6f}x; "
-            f"raw mean={selected_raw_mean_ms} ms  "
-            f"({bench_result.get('message', '')})"
-        )
-        if bench_error_output:
-            # The scoring verdict above has already overwritten ``message`` with "candidate emitted no per-case
-            # timings", which describes the symptom of a crash as if it were a formatting choice.
-            print(f"  [bench] {bench_error_output}")
-
-        # Profiling evidence is produced by the commit-bound Analysis Agent.
-        pmc_diagnosis = ""
-        pmc_full = ""
-
-        # Step 5: Register check (optional — requires build artifacts)
-        vgpr = None
-        reg_result = await check_registers(build_dir=self.ic.build_dir)
-        vgpr = reg_result.get("vgpr") if reg_result.get("success") else None
-        if vgpr:
-            print(f"  [registers] VGPR={vgpr}")
-
-        # Step 6: the mean of the independent pristine-relative scores must clear the current best by the candidate's
-        # own measurement noise.
-        improved = bool(bench_result.get("success")) and passes_keep_threshold(
-            measurement_scores,
-            best_mean_case_speedup=(self.best_mean_case_speedup or 1.0),
-            sigma=sigma,
-            sigma_sample_size=sigma_resolution.sample_size,
-        )
-
-        if improved and self.ic.kernel_backend == "assembly":
-            # A second-stage ASM result must also beat the original caller's aggregate time.
-            source_ms = self.ic.pristine_baseline_wall_ms
-            improved = source_ms is not None and selected_raw_mean_ms is not None and selected_raw_mean_ms < source_ms
-
-        # Step 7: the numerical contract, which only assembly declares and only it
-        # needs. Every other backend was judged by the driver in Step 4 and measured
-        # through it since; re-running that verdict here would answer the same
-        # question with the same command, while reading a task configuration whose
-        # shape the engine has no business knowing. The predicate is shared with the
-        # gate description every agent is given, so the two cannot disagree.
-        canonical_summary = ""
-        if improved and runs_task_suite_acceptance(self.ic.kernel_backend):
-            canonical_started = time.time()
-            canonical = await accept_candidate(
-                self.ic.workspace_dir,
-                timeout_cap_sec=self.ic.validate_stage_timeout_sec,
-                candidate_label=f"iteration {iteration}",
-                kernel_backend=self.ic.kernel_backend,
-            )
-            # The suite only runs for a candidate the round produced, so it is part of that round's measurement and
-            # has to be priced into the next round's admission alongside the validate-and-bench cycle.
-            self._observe_measurement(canonical_started)
-            canonical_summary = f"\n  Canonical correctness suite: {canonical.detail}"
-            if canonical.numerical_evidence is not None:
-                bench_result["numerical_validation"] = canonical.numerical_evidence
-            if not canonical.passed:
-                return IterationResult(
-                    iteration=iteration,
-                    duration_sec=time.time() - iter_start,
-                    validation_passed=False,
-                    validation_summary=(
-                        f"{report.summary()}\n  Canonical correctness suite: FAILED — {canonical.detail}"
-                    ),
-                    validation_outcome=(canonical.outcome or "canonical_correctness_failure"),
-                    wall_ms=selected_raw_mean_ms,
-                    mean_case_speedup=mean_case_speedup,
-                    snr_db=snr_db,
-                    vgpr=vgpr,
-                    error_output=canonical.output,
-                    kept=False,
-                    bench_detail=(bench_result if isinstance(bench_result, dict) else {}),
-                )
-
-        duration = time.time() - iter_start
-
-        return IterationResult(
-            iteration=iteration,
-            duration_sec=duration,
-            validation_passed=True,
-            validation_summary=report.summary() + canonical_summary,
-            wall_ms=selected_raw_mean_ms,
-            mean_case_speedup=mean_case_speedup,
-            snr_db=snr_db,
-            pmc_diagnosis=pmc_diagnosis,
-            vgpr=vgpr,
-            kept=improved,
-            bench_detail=bench_result if isinstance(bench_result, dict) else {},
-            pmc_full=pmc_full,
-            error_output=bench_error_output,
+        return await self._decide_iteration_keep(
+            iteration,
+            iter_start,
+            report,
+            bench_result,
+            sigma_resolution,
         )
 
     def _update_search_policy(self, iteration: int) -> SearchPolicyDecision:
