@@ -21,7 +21,7 @@ from hyperloom.orchestrator.roles import (
     MockBackend,
     ScriptedPlan,
 )
-from hyperloom.orchestrator.roles.mcp_context_tools import ContextProvider
+from hyperloom.orchestrator.roles.mcp_context_tools import ContextProvider, _make_handler
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 from hyperloom.orchestrator.actions.executors.explore import STACK_REVALIDATE_SOURCE
 from hyperloom.orchestrator.loop.coordinator import Coordinator
@@ -202,6 +202,7 @@ def test_recent_outcomes_reader_clamps_top_k(coord: Coordinator) -> None:
 
 
 # -- context reader failure surface -----------------------------------------
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("owner", "source", "tool"),
     [
@@ -210,7 +211,7 @@ def test_recent_outcomes_reader_clamps_top_k(coord: Coordinator) -> None:
         ("tasks", "running_context_sync", "running_tasks"),
     ],
 )
-def test_context_reader_failure_carries_traceback_to_the_log(
+async def test_context_reader_failure_carries_traceback_to_the_log(
     coord: Coordinator,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -230,10 +231,10 @@ def test_context_reader_failure_carries_traceback_to_the_log(
     )
 
     with caplog.at_level(logging.ERROR, logger="hyperloom.orchestrator.roles.mcp_context_tools"):
-        out = getattr(provider, tool)()
+        out = await _make_handler(provider, tool)({})
 
-    assert f"context tool {tool} unavailable" in out
-    assert "projection read exploded" in out
+    assert out["is_error"] is True
+    assert "projection read exploded" in out["content"][0]["text"]
     assert "Traceback (most recent call last)" in caplog.text
 
 
@@ -2104,6 +2105,25 @@ async def test_record_specialist_result_logs_ungrounded_patches(coord: Coordinat
     failures = [f for f in coord.shared_state.last_action_failures if f["task_id"] == "rec-spec-ug"]
     assert [f["error_class"] for f in failures] == ["patch_targets_ungrounded"]
     assert "vllm/nope.py" in failures[0]["error_excerpt"]
+
+
+@pytest.mark.asyncio
+async def test_record_specialist_result_logs_proposals_whose_env_files_are_missing(coord: Coordinator) -> None:
+    """A proposal dropped at admission for an env file no stage wrote reaches the failure log the same way."""
+    task = _ptask("rec-spec-env", "specialist")
+    await coord.specialist_dispatch.record_specialist_result(
+        task=task,
+        done_payload={
+            "domain": "candidate_discovery_specialist",
+            "gap_canonical_id": "g1",
+            "proposal_set": [],
+            "proposals_env_ungrounded": ["proposal 'tuned-gemm': AITER_CONFIG_GEMM_BF16 points at /tmp/t.csv"],
+        },
+        source="specialist:rec-spec-env",
+    )
+    failures = [f for f in coord.shared_state.last_action_failures if f["task_id"] == "rec-spec-env"]
+    assert [f["error_class"] for f in failures] == ["proposal_env_file_missing"]
+    assert "AITER_CONFIG_GEMM_BF16" in failures[0]["error_excerpt"]
 
 
 @pytest.mark.asyncio

@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import base64
 import getpass
+import http.client
 import json
 import os
 import re
@@ -86,13 +87,13 @@ NAME_BLOCKLIST = re.compile(r"\bsev(?!(?-i:[a-z]))|snp.?support|encrypt", re.I)
 
 
 def run(cmd: list[str], timeout: int = 30, stdin: str | None = None) -> tuple[bool, str, str]:
-    """Run a command, returning ``(ok, stdout, stderr)``. Never raises."""
+    """Run a command, returning ``(ok, stdout, stderr)``; a spawn failure or timeout is a failed result."""
     try:
         r = subprocess.run(  # nosec B603 - fixed argv, no shell.
             cmd, capture_output=True, text=True, timeout=timeout, input=stdin
         )
         return r.returncode == 0, r.stdout, r.stderr
-    except Exception as exc:  # noqa: BLE001 - surfaced to the caller as stderr
+    except (OSError, subprocess.TimeoutExpired) as exc:
         return False, "", str(exc)
 
 
@@ -340,7 +341,7 @@ def rf_get(endpoint: RedfishEndpoint, path: str, timeout: int = 30) -> tuple[dic
             return json.loads(r.read().decode()), ""
     except urllib.error.HTTPError as exc:
         return None, f"HTTP {exc.code}"
-    except Exception as exc:  # noqa: BLE001 - reported, never swallowed
+    except (OSError, ValueError, http.client.HTTPException) as exc:
         # urlopen wraps a verification failure in URLError, so the useful error is one level down; without unwrapping,
         # the operator sees a raw OpenSSL string and no indication of which flag fixes it.
         cause = getattr(exc, "reason", exc)

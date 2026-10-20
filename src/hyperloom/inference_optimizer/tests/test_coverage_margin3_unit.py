@@ -85,33 +85,26 @@ def test_retry_policy_env_and_on_retry_error(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_retry_with_backoff_swallows_on_retry_callback_error() -> None:
+async def test_retry_with_backoff_propagates_on_retry_callback_error() -> None:
     from hyperloom.orchestrator.roles.base import RetryPolicy, retry_with_backoff
 
-    calls = {"n": 0}
-    slept: list[float] = []
-
     async def _flaky():
-        calls["n"] += 1
-        if calls["n"] == 1:
-            raise ConnectionError("transient")
-        return "ok"
+        raise ConnectionError("transient")
 
     async def _sleep(delay: float) -> None:
-        slept.append(delay)
+        raise AssertionError("must not sleep after the callback raised")
 
     def _bad_on_retry(*_args):
         raise RuntimeError("telemetry failed")
 
-    out = await retry_with_backoff(
-        _flaky,
-        policy=RetryPolicy(max_attempts=2, base_delay_s=0.0, jitter_s=0.0),
-        retry_on=(ConnectionError,),
-        sleep=_sleep,
-        on_retry=_bad_on_retry,
-    )
-    assert out == "ok"
-    assert slept == [0.0]
+    with pytest.raises(RuntimeError, match="telemetry failed"):
+        await retry_with_backoff(
+            _flaky,
+            policy=RetryPolicy(max_attempts=2, base_delay_s=0.0, jitter_s=0.0),
+            retry_on=(ConnectionError,),
+            sleep=_sleep,
+            on_retry=_bad_on_retry,
+        )
 
 
 def test_gpu_type_resolution_env_probe_and_runner(monkeypatch) -> None:
@@ -174,6 +167,10 @@ def test_gpu_type_autodetect_rocm_and_torch_fallback(monkeypatch) -> None:
 
     fake_torch.cuda.get_device_properties = lambda _idx: (_ for _ in ()).throw(RuntimeError("no gpu"))
     assert gpu_types._autodetect_gpu_type() is None
+
+    fake_torch.cuda.get_device_properties = lambda _idx: (_ for _ in ()).throw(KeyError("device"))
+    with pytest.raises(KeyError, match="device"):
+        gpu_types._autodetect_gpu_type()
 
 
 def test_kernel_decision_retry_budget_env(monkeypatch) -> None:

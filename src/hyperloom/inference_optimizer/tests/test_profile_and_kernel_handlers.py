@@ -1955,7 +1955,7 @@ async def test_roofline_executor_skips_when_framework_atom(monkeypatch):
     )
 
     monkeypatch.setenv("FRAMEWORK", "atom")
-    rexec = RooflineExecutor(shared_state=SimpleNamespace())
+    rexec = RooflineExecutor(shared_state=SimpleNamespace(lifecycle=None, phase=""))
 
     # Sentinel: prove the lazy import / sub-step orchestration is reached.
     from hyperloom.orchestrator.actions.executors import profile as profile_mod
@@ -3823,68 +3823,16 @@ async def test_coordinator_request_trace_analyze_uses_handler(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_coordinator_request_unknown_kind_auto_rejected(session_dir):
-    """REQUEST with no registered handler emits an auto-reject RESPONSE."""
-    c = Coordinator(session_dir, backends=_backends_silent())
-    try:
-        c.shared_state.kernel_enabled = True
-        await c.router.handle_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.REQUEST,
-                payload={
-                    "target_agent": "kernel_agent",
-                    "kind": "invent_brand_new_kind",
-                },
-            ),
-        )
-        req_msgs = await c.bus.tail(topic="request", to_agent="kernel_agent")
-        assert req_msgs, "request must be recorded on bus"
-        resp_msgs = await c.bus.tail(topic="response", to_agent="orchestration")
-        assert resp_msgs, "auto-reject RESPONSE must be emitted"
-        r = resp_msgs[0]
-        assert r.from_agent == "kernel_agent"
-        assert r.payload["status"] == "failed"
-        assert r.payload["result"]["error_class"] == "unknown_kernel_kind"
-        assert r.payload["source"] == "coordinator_auto_reject"
-        assert "valid_kinds" in r.payload["result"]
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_coordinator_request_kernel_disabled_auto_rejected(session_dir):
-    """REQUEST to kernel_agent when kernel_enabled=False emits agent_disabled RESPONSE."""
-    c = Coordinator(session_dir, backends=_backends_silent())
-    try:
-        c.shared_state.kernel_enabled = False
-        await c.router.handle_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.REQUEST,
-                payload={
-                    "target_agent": "kernel_agent",
-                    "kind": "trace_analyze",
-                    "params": {"trace_input": "/tmp/t.json.gz"},
-                },
-            ),
-        )
-        resp_msgs = await c.bus.tail(topic="response", to_agent="orchestration")
-        assert resp_msgs, "auto-reject RESPONSE must be emitted"
-        r = resp_msgs[0]
-        assert r.payload["status"] == "failed"
-        assert r.payload["result"]["error_class"] == "agent_disabled"
-        assert r.payload["source"] == "coordinator_auto_reject"
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("payload", "kernel_enabled", "error_class"),
+    ("payload", "kernel_enabled", "error_class", "result_keys"),
     [
-        ({"target_agent": "kernel_agent", "kind": "trace_analyze"}, False, "agent_disabled"),
-        ({"target_agent": "kernel_agent", "kind": "invent_brand_new_kind"}, True, "unknown_kernel_kind"),
+        ({"target_agent": "kernel_agent", "kind": "trace_analyze"}, False, "agent_disabled", ()),
+        (
+            {"target_agent": "kernel_agent", "kind": "invent_brand_new_kind"},
+            True,
+            "unknown_kernel_kind",
+            ("valid_kinds",),
+        ),
     ],
 )
 async def test_coordinator_auto_reject_answers_in_one_envelope(
@@ -3892,6 +3840,7 @@ async def test_coordinator_auto_reject_answers_in_one_envelope(
     payload,
     kernel_enabled,
     error_class,
+    result_keys,
 ):
     """Every refusal the coordinator makes before a handler runs answers the requester the same way."""
     c = Coordinator(session_dir, backends=_backends_silent())
@@ -3912,6 +3861,7 @@ async def test_coordinator_auto_reject_answers_in_one_envelope(
         assert reply.payload["source"] == "coordinator_auto_reject"
         assert reply.payload["result"]["status"] == "failed"
         assert reply.payload["result"]["error_class"] == error_class
+        assert [k for k in result_keys if k not in reply.payload["result"]] == []
         assert c.shared_state.last_action_failures[-1]["error_class"] == error_class
     finally:
         await c.stop()

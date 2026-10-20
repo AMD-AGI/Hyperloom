@@ -372,15 +372,19 @@ def _install_fake_psutil(monkeypatch, procs, iter_raises=False):
 
     fake = types.ModuleType("psutil")
 
-    class NoSuchProcess(Exception):
+    class Error(Exception):
         pass
 
-    class AccessDenied(Exception):
+    class NoSuchProcess(Error):
         pass
 
-    class ZombieProcess(Exception):
+    class AccessDenied(Error):
         pass
 
+    class ZombieProcess(NoSuchProcess):
+        pass
+
+    fake.Error = Error
     fake.NoSuchProcess = NoSuchProcess
     fake.AccessDenied = AccessDenied
     fake.ZombieProcess = ZombieProcess
@@ -388,7 +392,7 @@ def _install_fake_psutil(monkeypatch, procs, iter_raises=False):
 
     def _process_iter(fields):
         if iter_raises:
-            raise RuntimeError("enum blew up")
+            raise Error("enum blew up")
         return iter(procs)
 
     fake.process_iter = _process_iter

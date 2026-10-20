@@ -130,10 +130,7 @@ async def retry_with_backoff(
                 raise
             delay = policy.delay_for(attempt)
             if on_retry is not None:
-                try:
-                    on_retry(attempt, exc, delay)
-                except Exception:  # noqa: BLE001 — telemetry callback never fatal
-                    pass
+                on_retry(attempt, exc, delay)
             log.warning(
                 "LLM call failed (attempt %d/%d: %r); retrying in %.2fs",
                 attempt,
