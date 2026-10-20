@@ -95,7 +95,15 @@ def test_the_role_names_the_config_delta_keys_that_recipe_delta_reads():
 
     config = RecipeDelta.from_document(json.loads(example)).config
     assert (config.server_args, dict(config.envs)) == ("--flag value --other-flag", {"NAME": "value"})
-    assert "a key the delta does not define is not applied" in prompt
+    assert "a key the delta does not define is refused, and the error lists the keys it takes" in prompt
+
+
+def test_the_role_says_a_direction_another_branch_tests_comes_back_as_a_peer_outcome():
+    prompt = role_prompt(WORKLOAD)
+
+    assert (
+        "another branch is testing it (testing_elsewhere), whose outcome then reaches you as a peer_outcome" in prompt
+    )
 
 
 def test_the_role_goes_back_to_choosing_after_a_result_and_never_stops_its_branch():

@@ -99,11 +99,12 @@ poll_inbox. Name the direction as an intent: the target (a bottleneck or an oper
 (config, source or kernel). For a source or kernel intent on a commit with operator shares, also give notebook_claim \
 the target's share of GPU time on that commit (target_share_pct), the summed share of the operators it speeds up: \
 speeding up a part worth w of the time gains at most w/(1-w), so prefer the directions with the largest such ceiling. Claim the intent before you work on it. A refused claim says why: the change was \
-tested or is being tested on this state, or its ceiling is below the session's bar; read that result or choose \
-another direction.
+tested or is being tested on this state, its ceiling is below the session's bar, or another branch is testing it \
+(testing_elsewhere), whose outcome then reaches you as a peer_outcome; read that result or choose another direction.
 3. Make the change. For server arguments or environment variables, write the delta's config yourself, with exactly \
 these keys: {{{{"config": {{{{"extra_server_args": "--flag value --other-flag", "extra_envs": {{{{"NAME": "value"}}}}}}}}}}}}. \
-extra_server_args is one string of command-line flags; a key the delta does not define is not applied. For source, \
+extra_server_args is one string of command-line flags; a key the delta does not define is refused, and the error \
+lists the keys it takes. For source, \
 call worktree_sync, edit the files in your worktree, and call worktree_check with the component until it passes (the \
 files compile and the package imports with your change); then worktree_patch returns the delta and the parent commit \
 to test. A replayable champion in the brief: get its delta with notebook_replay and test it on your head before other \
