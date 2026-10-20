@@ -382,6 +382,21 @@ async def test_baseline_is_measured_through_the_toolbox(tmp_path: Path) -> None:
         assert (request.accuracy, request.intent_fingerprint, request.priority) == (True, None, None)
 
 
+async def test_measuring_the_baseline_reports_its_longest_root_test(tmp_path: Path) -> None:
+    layout = _layout(tmp_path)
+    peers = _peers(layout)
+    prelude = _prelude(layout, _registry(layout, child_with_patch(tmp_path)), peers)
+    budget = SessionBudget.from_hours(2.0, NOW)
+    result = await prelude.root(WORKLOAD, budget, HardStop(budget, _clock()), IMAGE)
+
+    longest = await prelude.measure_baseline(result.root_commit)
+
+    assert longest == FakeToolboxConfig().attempt_seconds
+    logged = [json.loads(line) for line in layout.decisions.read_text().splitlines()]
+    [established] = [entry for entry in logged if entry["reason"] == "baseline established"]
+    assert established["detail"]["longest_test_seconds"] == longest
+
+
 async def test_child_failing_before_its_launch_info_fails_prelude(tmp_path: Path) -> None:
     layout = _layout(tmp_path)
     peers = _peers(layout)

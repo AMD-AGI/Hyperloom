@@ -71,7 +71,12 @@ from hyperloom_multibranch.rulegate.fix_case import FIX_CASE_ID
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.regression import FixProof, ReproRun
 from hyperloom_multibranch.rulegate.service import Polling
-from hyperloom_multibranch.scheduling.budget import MB_SECONDS_PER_HOUR, SessionBudget, explore_gpu_seconds
+from hyperloom_multibranch.scheduling.budget import (
+    MB_FINAL_SHARE,
+    MB_SECONDS_PER_HOUR,
+    SessionBudget,
+    explore_gpu_seconds,
+)
 from hyperloom_multibranch.scheduling import branches
 from hyperloom_multibranch.scheduling.events import PROFILE_UNAVAILABLE
 from hyperloom_multibranch.scheduling.explore import EXPLORE_TICK_SECONDS, FORK_NOT_LANDED, OPEN_CUT_REASON
@@ -705,7 +710,7 @@ async def test_spent_gpu_hours_end_explore_as_a_completed_session_that_still_run
     outcome = await stage.run()
 
     assert (outcome.stop_reason, outcome.error, outcome.exit_code) == (SessionStopReason.GPU_HOURS_EXHAUSTED, "", 0)
-    explore_end = SessionBudget.from_hours(SETTINGS.max_hours, START).phases_after_prelude(START).explore_end
+    explore_end = SessionBudget.from_hours(SETTINGS.max_hours, START).phases_after_prelude(START, 0.0).explore_end
     [final_phase] = [row for row in _decisions(stage) if row["kind"] == "phase" and row["reason"] == "final"]
     assert float(str(final_phase["at"])) < explore_end
     assert outcome.final is not None and outcome.final.chosen is not None
@@ -741,7 +746,7 @@ async def test_spent_specialist_llm_dollars_end_explore_as_a_completed_session_t
     outcome = await stage.run()
 
     assert (outcome.stop_reason, outcome.error, outcome.exit_code) == (SessionStopReason.LLM_BUDGET_EXHAUSTED, "", 0)
-    explore_end = SessionBudget.from_hours(SETTINGS.max_hours, START).phases_after_prelude(START).explore_end
+    explore_end = SessionBudget.from_hours(SETTINGS.max_hours, START).phases_after_prelude(START, 0.0).explore_end
     [final_phase] = [row for row in _decisions(stage) if row["kind"] == "phase" and row["reason"] == "final"]
     assert float(str(final_phase["at"])) < explore_end
     assert outcome.final is not None and outcome.final.chosen is not None
@@ -775,7 +780,7 @@ async def test_a_judge_soft_stop_ends_explore_early_and_still_runs_final(tmp_pat
     outcome = await stage.run()
 
     assert (outcome.stop_reason, outcome.error, outcome.exit_code) == (SessionStopReason.GLOBAL_CONVERGED, "", 0)
-    explore_end = SessionBudget.from_hours(SETTINGS.max_hours, START).phases_after_prelude(START).explore_end
+    explore_end = SessionBudget.from_hours(SETTINGS.max_hours, START).phases_after_prelude(START, 0.0).explore_end
     [final_phase] = [row for row in _decisions(stage) if row["kind"] == "phase" and row["reason"] == "final"]
     assert float(str(final_phase["at"])) < explore_end
     root = await stage.root()
@@ -913,9 +918,25 @@ async def test_forks_admitted_while_the_opening_batch_starts_cut_the_batch_and_t
     assert cut["detail"] == {"requested": 3, "opened": 1, "open_cut": 2}
 
 
+async def test_final_is_reserved_the_longest_baseline_test_when_its_share_is_shorter(tmp_path: Path) -> None:
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+
+    await stage.run()
+
+    decisions = _decisions(stage)
+    [baseline] = [row for row in decisions if row["kind"] == "prelude" and row["reason"] == "baseline established"]
+    [explore] = [row for row in decisions if row["kind"] == "phase" and row["reason"] == "explore"]
+    longest = float(str(baseline["detail"]["longest_test_seconds"]))
+    final_window = float(str(explore["detail"]["final_end"])) - float(str(explore["detail"]["explore_end"]))
+    share = SETTINGS.max_hours * MB_SECONDS_PER_HOUR * MB_FINAL_SHARE / 92
+    assert longest > share
+    assert final_window == pytest.approx(longest)
+
+
 async def test_an_unreadable_steering_reply_keeps_every_branch_and_k_as_they_were(tmp_path: Path) -> None:
     stage = _stage(tmp_path, child=child_with_patch(tmp_path))
     stage.judge = ScriptedCompletion([OPENING], fallback="Stop b02 and give b01 one test.")
+    stage.settings = replace(SETTINGS, max_hours=1.0)
 
     outcome = await stage.run()
 
@@ -1243,6 +1264,7 @@ async def test_a_branch_the_judge_opens_that_fails_to_start_does_not_have_the_ju
     stage = _stage(tmp_path, child=child_with_patch(tmp_path))
     stage.judge = ScriptedCompletion([_reply({"open": 1})], fallback=_reply({"open": 1}))
     stage.runtime_type = NoRefillRuntime
+    stage.settings = replace(SETTINGS, max_hours=1.0)
 
     outcome = await stage.run()
 

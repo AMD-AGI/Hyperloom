@@ -3,7 +3,8 @@
 
 """One multi-branch session, PRELUDE -> EXPLORE -> FINAL -> CLOSE, on the peers a factory builds for it.
 
-PRELUDE gets the whole remaining budget; whatever it leaves is split into the EXPLORE, FINAL and CLOSE windows. The
+PRELUDE gets the whole remaining budget; whatever it leaves is split into the EXPLORE, FINAL and CLOSE windows, FINAL's
+no shorter than the longest baseline test. The
 FINAL candidates are fixed while every branch still stands, then exploration ends and FINAL validates them. A
 failed PRELUDE, an EXPLORE that ran out of cards to measure on, a stop signal, the session deadline or an unhandled error skip straight to CLOSE, which always runs
 and kills every process the session started. The deadline plus the CLOSE grace bounds CLOSE itself; a stop signal
@@ -276,6 +277,7 @@ class Session:
         )
         try:
             prelude = await self._root_session(budget, hard_stop)
+            longest_root_test = await self._prelude.measure_baseline(prelude.root_commit)
         except PreludeFailed as exc:
             return SessionOutcome(SessionStopReason.PRELUDE_FAILED, None, None, str(exc))
         sockets = await asyncio.to_thread(socket_versions)
@@ -287,7 +289,7 @@ class Session:
                 policy_versions=POLICY_VERSIONS,
             )
         )
-        deadlines = budget.phases_after_prelude(self._clock.now())
+        deadlines = budget.phases_after_prelude(self._clock.now(), longest_root_test)
         self._phase("explore", explore_end=deadlines.explore_end, final_end=deadlines.final_end)
         window = ExploreWindow(
             prelude.root_commit,
@@ -311,14 +313,13 @@ class Session:
         return SessionOutcome(reason, final, None, "")
 
     async def _root_session(self, budget: SessionBudget, hard_stop: HardStop) -> PreludeResult:
-        """PRELUDE: the root commit and the warm-start leads every specialist is briefed on, the integration branch
-        with its K, then the baseline measured on the root."""
+        """PRELUDE's first step: the root commit and the warm-start leads every specialist is briefed on, and the
+        integration branch with its K that the baseline is then measured under."""
 
         prelude = await self._prelude.root(self._settings.workload, budget, hard_stop, self._base_image_digest)
         self._briefs.warm = prelude.warm_leads
         self._roster.add_integration(prelude.root_commit, k=1)
         await self._branches.push_quota()
-        await self._prelude.measure_baseline(prelude.root_commit)
         return prelude
 
     async def _final_candidates(self) -> FinalCandidates:

@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Contract of the session budget: PRELUDE gets everything, the rest splits 85/5/2, then the CLOSE grace; a GPU-hour
+"""Contract of the session budget: PRELUDE gets everything, the rest splits 85/5/2 with FINAL no shorter than the
+longest root test, then the CLOSE grace; a GPU-hour
 budget leaves FINAL its share the same way, counted on the tests with a result.
 
 The re-declared MB_ constants are compared with their sources by reading the source text;
@@ -87,11 +88,33 @@ def test_after_prelude_the_remainder_splits_by_the_main_flow_shares() -> None:
     unit = 100.0
     now = 10 * _HOUR - 92 * unit
 
-    phases = budget.phases_after_prelude(now)
+    phases = budget.phases_after_prelude(now, 0.0)
 
     assert phases.explore_end == pytest.approx(now + 85 * unit)
     assert phases.final_end == pytest.approx(now + 90 * unit)
     assert budget.hard_stop_at == budget.deadline + 120.0
+
+
+def test_final_keeps_at_least_the_longest_root_test_and_explore_ends_that_much_earlier() -> None:
+    budget = SessionBudget.from_hours(10.0, started_at=0.0)
+    unit = 100.0
+    now = 10 * _HOUR - 92 * unit
+
+    phases = budget.phases_after_prelude(now, 20 * unit)
+
+    assert phases.final_end == pytest.approx(now + 90 * unit)
+    assert phases.explore_end == pytest.approx(now + 70 * unit)
+    assert budget.phases_after_prelude(now, 4 * unit) == budget.phases_after_prelude(now, 0.0)
+
+
+def test_a_floor_longer_than_the_time_left_ends_explore_at_once() -> None:
+    budget = SessionBudget.from_hours(1.0, started_at=0.0)
+    now = 0.5 * _HOUR
+
+    phases = budget.phases_after_prelude(now, _HOUR)
+
+    assert phases.explore_end == pytest.approx(now)
+    assert phases.final_end == pytest.approx(budget.deadline - 0.5 * _HOUR * 2 / 92)
 
 
 def test_close_grace_is_two_percent_capped_at_two_minutes() -> None:
@@ -102,7 +125,7 @@ def test_close_grace_is_two_percent_capped_at_two_minutes() -> None:
 def test_phases_after_the_deadline_all_collapse_onto_it() -> None:
     budget = SessionBudget.from_hours(1.0, started_at=0.0)
 
-    phases = budget.phases_after_prelude(2 * _HOUR)
+    phases = budget.phases_after_prelude(2 * _HOUR, 0.0)
 
     assert phases.explore_end == phases.final_end == budget.deadline
     assert budget.remaining(2 * _HOUR) == 0.0

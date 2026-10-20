@@ -4,7 +4,8 @@
 """The session's wall-clock budget, split the way the single-lineage flow splits its own.
 
 The baseline-prelude child gets all the remaining time; whatever it leaves, R, is shared
-out by the main flow's phase shares: FINAL keeps R*5/92, CLOSE keeps R*2/92 and EXPLORE
+out by the main flow's phase shares: FINAL keeps R*5/92, but never less than the longest
+root test of the baseline (one test of this workload), CLOSE keeps R*2/92 and EXPLORE
 runs until both reserves are all that is left. The deadline plus the CLOSE grace is the
 hard stop. The constants are re-declared because their owners are modules this package
 must not import; each names its source. A GPU-hour budget keeps FINAL's share the same way:
@@ -97,10 +98,13 @@ class SessionBudget:
             raise BudgetExhausted(f"{hours * 60:.2f} min left, the baseline prelude needs at least one minute")
         return hours
 
-    def phases_after_prelude(self, now: float) -> PhaseDeadlines:
+    def phases_after_prelude(self, now: float, final_floor_seconds: float) -> PhaseDeadlines:
+        """Split what is left at ``now``: FINAL keeps its share or ``final_floor_seconds``, whichever is longer, and
+        EXPLORE ends that much before FINAL does, at ``now`` at the earliest."""
+
         left = self.remaining(now)
-        final_reserve = left * MB_FINAL_SHARE / _SHARE_TOTAL
         close_reserve = left * MB_CLOSE_SHARE / _SHARE_TOTAL
+        final_reserve = min(max(left * MB_FINAL_SHARE / _SHARE_TOTAL, final_floor_seconds), left - close_reserve)
         return PhaseDeadlines(
             explore_end=self.deadline - final_reserve - close_reserve,
             final_end=self.deadline - close_reserve,

@@ -13,7 +13,8 @@ specialists, the best of them prepared for replay on the root's image, their fil
 Recipe KB, or none of its champions in this session's scope, gives none, and a KB that cannot be read is recorded and
 gives none either. The baseline every recorded value is anchored to is measured through the toolbox in a
 second step, once the caller has put the integration branch on the roster and given the toolbox its K: as many tests
-of the root as the rule gate asks for, from which the gate writes the baseline and its bar.
+of the root as the rule gate asks for, from which the gate writes the baseline and its bar. The longest of those
+tests, start to finish, is how long one test of this workload takes; FINAL's reserve is never shorter.
 
 The child's own measurements never reach the notebook, and nothing records the card time they took, so the session
 keeps an upper bound of it under its own name: the child's wall time from spawn to exit times the workload's TP,
@@ -25,13 +26,13 @@ from __future__ import annotations
 import asyncio
 import shutil
 import sys
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from hyperloom.common.io import atomic_write_json
-from hyperloom.contracts.measurement import Purpose, TestKind
+from hyperloom.contracts.measurement import Purpose, TestKind, TestResult
 from hyperloom.contracts.recipe import PatchRef, Recipe
 from hyperloom.inference_optimizer.model_config_utils import summarize_model_config
 from hyperloom.measure.compile import BlobError, BlobStore
@@ -264,10 +265,10 @@ class Prelude:
             saved[str(copy)] = str(patch.root)
         return saved
 
-    async def measure_baseline(self, root: str) -> None:
-        """Measure the baseline on ``root`` through the toolbox and have the rule gate anchor it; raises
-        :class:`PreludeFailed` when a baseline test is refused, which takes back the ones accepted before it, or the
-        baseline anchors nothing."""
+    async def measure_baseline(self, root: str) -> float:
+        """Measure the baseline on ``root`` through the toolbox and have the rule gate anchor it; return the longest
+        wall time, in seconds, of the root tests it anchored on. Raises :class:`PreludeFailed` when a baseline test is
+        refused, which takes back the ones accepted before it, or the baseline anchors nothing."""
 
         request = integration_test_request(TestKind.TEST, Purpose.BASELINE, root)
         try:
@@ -279,14 +280,30 @@ class Prelude:
             baseline = await self._gate.establish_baseline(root, request_ids)
         except NotMeasured as exc:
             raise PreludeFailed(f"the baseline anchors nothing: {exc}") from exc
+        records = [await self._notebook.record(request_id) for request_id in baseline.request_ids]
+        longest = _longest_wall_seconds(record.result for record in records if record.result is not None)
         self._decisions.record(
             Decision(
                 DecisionKind.PRELUDE,
                 "baseline established",
                 INTEGRATION_BRANCH,
-                {"request_ids": list(baseline.request_ids)},
+                {"request_ids": list(baseline.request_ids), "longest_test_seconds": longest},
             )
         )
+        return longest
+
+
+def _longest_wall_seconds(results: Iterable[TestResult]) -> float:
+    """The longest start-to-finish time among ``results``; 0 for none."""
+
+    return max(
+        (
+            result.finished_at - result.started_at
+            for result in results
+            if result.started_at is not None and result.finished_at is not None
+        ),
+        default=0.0,
+    )
 
 
 def _succeeded(artifacts: PreludeArtifacts) -> PreludeArtifacts:
