@@ -622,10 +622,7 @@ def _stamp_local_authority_row(
     fingerprint: Mapping[str, Any],
     identity: _T0Identity,
 ) -> None:
-    """Stamp the T0 anchor onto the local store's own authority row.
-
-    A remote store publishes from CLOSE instead, so this is a no-op there.
-    """
+    """Stamp the T0 anchor onto the local store's own authority row."""
     if getattr(kb, "mode", "") == "remote":
         log.debug("T0 anchor: remote publication is owned by CLOSE")
         return
@@ -685,11 +682,7 @@ def _record_anchor_session(
 
 
 def _open_warm_start_event(shared_state: Any, canonical_id: str) -> Any:
-    """Open the warm_start event before the KB is consulted.
-
-    The identity is resolved by now, and the event's open interval is what tells
-    the audit hook which reads were T0's.
-    """
+    """Open the warm_start event before the KB is consulted."""
     return _warm_start_event.make_warm_start_recorder(
         macro_cycle=getattr(shared_state, "macro_cycle", 0) or 0,
         requested_canonical_id=canonical_id,
@@ -731,8 +724,8 @@ def _warm_replay_donor(
 ) -> _ConfigDonor:
     """Pick the row whose champion config T0 recommends replaying.
 
-    A true-self (identity ``exact``) champion always replays; a cross-model borrow must clear the trustworthiness
-    gate before it becomes the donor.
+    A true-self (identity ``exact``) champion always replays; a cross-model borrow must clear the
+    trustworthiness gate before it becomes the donor.
     """
     from .remote_recipe import RECORD_KIND_HYPERLOOM_RECIPE
 
