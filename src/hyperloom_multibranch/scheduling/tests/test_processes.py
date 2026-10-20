@@ -18,7 +18,12 @@ import pytest
 
 from hyperloom.common.proctree import descendants, running
 from hyperloom_multibranch.scheduling.clock import Clock
-from hyperloom_multibranch.scheduling.processes import ProcessRegistry, RegisteredProcess
+from hyperloom_multibranch.scheduling.processes import (
+    UNREGISTERED_BRANCH,
+    ProcessRegistry,
+    RegisteredProcess,
+    adopting_orphans,
+)
 
 SPAWNED_AT = 1_700_000_000.0
 CHILD_WITH_GRANDCHILD = ("sh", "-c", "sleep 60 & sleep 60")
@@ -30,6 +35,20 @@ SESSION_LEADING_SERVER = (
     "-c",
     "import subprocess, time; subprocess.Popen(['sleep', '60'], start_new_session=True); time.sleep(60)",
 )
+
+#: A root that, on SIGTERM, starts a server leading a session of its own and exits, the way the main flow's benchmark
+#: script outlived it: the server is started after any tree taken before the signal, and orphaned at once.
+LEAKS_ON_TERM = """
+import pathlib, signal, subprocess, sys, time
+out = pathlib.Path(sys.argv[1])
+def leak(*_):
+    server = subprocess.Popen(['sleep', '60'], start_new_session=True)
+    out.with_suffix('.pid').write_text(str(server.pid))
+    sys.exit(0)
+signal.signal(signal.SIGTERM, leak)
+out.write_text('ready')
+time.sleep(60)
+"""
 
 
 @pytest.fixture
@@ -160,3 +179,31 @@ async def test_a_process_that_leads_no_group_of_its_own_is_not_adopted(registry:
     with pytest.raises(ValueError, match="is not running"):
         registry.adopt(shared.pid, branch="b01", argv=LONG_SLEEP)
     assert await registry.leftovers() == ()
+
+
+async def _read_when_written(path: Path) -> str:
+    deadline = time.monotonic() + 5.0
+    while not path.exists():
+        assert time.monotonic() < deadline, f"{path} was never written"
+        await asyncio.sleep(0.05)
+    return path.read_text(encoding="utf-8")
+
+
+async def test_a_server_the_root_orphans_on_its_way_out_is_a_leftover_until_the_session_kill(
+    registry: ProcessRegistry, tmp_path: Path
+) -> None:
+    ready = tmp_path / "root"
+    with adopting_orphans():
+        proc = await _spawn(registry, tmp_path, (sys.executable, "-c", LEAKS_ON_TERM, str(ready)), "prelude")
+        await _read_when_written(ready)
+
+        assert await registry.terminate(proc, grace_seconds=5.0) == 0
+        server = int(await _read_when_written(ready.with_suffix(".pid")))
+        assert await registry.kill_branch("prelude")
+
+        [leftover] = await registry.leftovers()
+        assert (leftover.pid, leftover.pgid, leftover.branch) == (server, server, UNREGISTERED_BRANCH)
+        assert leftover.argv == ("sleep", "60")
+        assert await registry.kill_all()
+        assert not running(server)
+        assert await registry.leftovers() == ()

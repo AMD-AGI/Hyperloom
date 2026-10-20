@@ -62,7 +62,7 @@ from hyperloom_multibranch.scheduling.local_peers import (
     specialist_model,
 )
 from hyperloom_multibranch.scheduling.peers import PeerFactory, PeersUnavailable
-from hyperloom_multibranch.scheduling.processes import ProcessRegistry
+from hyperloom_multibranch.scheduling.processes import ProcessRegistry, adopting_orphans
 from hyperloom_multibranch.scheduling.roster import RosterCaps
 from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, RunSettings, Workload
 
@@ -260,10 +260,12 @@ def run_session(settings: RunSettings, peer_factory: PeerFactory, services: Sess
     """Create the session directory, print it on one stdout line, run the session and return its exit code.
 
     The session and its peers are built on the event loop they run on, which the specialist tools of the MCP service
-    hand every toolbox call to.
+    hand every toolbox call to. Whatever the session's processes orphan is reparented to this process, so the session
+    stop kills it and reports it while it runs.
     """
 
-    return asyncio.run(_run_session(settings, peer_factory, services))
+    with adopting_orphans():
+        return asyncio.run(_run_session(settings, peer_factory, services))
 
 
 async def _run_session(settings: RunSettings, peer_factory: PeerFactory, services: SessionServices) -> int:
