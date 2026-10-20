@@ -1934,9 +1934,6 @@ class BenchmarkRunExecutor:
     def _prepare_round_patches(self, prepared: _MaterializedRound) -> _RoundPatches:
         """Apply this attempt's warm-replay overlays and settle what they left behind."""
         setup = prepared.setup
-        # No single pre-apply sha: each overlay's own tree records its pre_sha, so the singular field is only a
-        # fallback for a legacy reader.
-        before_apply_sha = ""
 
         def _persist_recipe_snapshot(tree_records: list[dict[str, Any]]) -> bool:
             if setup.shared_state is None:
@@ -1950,7 +1947,7 @@ class BenchmarkRunExecutor:
                     # reader still finds it.
                     "recipe_patch_trees": tree_records,
                     "recipe_patch_target": str(primary.get("root") or ""),
-                    "recipe_patch_pre_sha": str(primary.get("pre_sha") or before_apply_sha),
+                    "recipe_patch_pre_sha": str(primary.get("pre_sha") or ""),
                     "recipe_patch_snapshot_manifest": primary.get("snapshot_manifest"),
                 }
             )
@@ -1965,14 +1962,11 @@ class BenchmarkRunExecutor:
                 return False
             return True
 
-        application = self._apply_recipe_patches(
-            setup.params, setup.output_dir, before_mutation=_persist_recipe_snapshot
-        )
+        application = _apply_warm_patches(setup.params, "", setup.output_dir, before_mutation=_persist_recipe_snapshot)
         settlement = self._settle_patch_application(
             application,
             params=setup.params,
             output_dir=setup.output_dir,
-            before_apply_sha=before_apply_sha,
             live_shared_state=setup.shared_state,
         )
         if settlement.failure is not None:
@@ -2432,7 +2426,6 @@ class BenchmarkRunExecutor:
         *,
         params: Mapping[str, Any],
         output_dir: Any,
-        before_apply_sha: str,
         live_shared_state: Any,
     ) -> _PatchSettlement:
         """Read what applying the recipe's warm patches left behind.
@@ -2475,38 +2468,7 @@ class BenchmarkRunExecutor:
                     )
         else:
             applied = patch_application
-            pre_patch_sha = before_apply_sha
         return _PatchSettlement(applied=applied, pre_patch_sha=pre_patch_sha)
-
-    @staticmethod
-    def _apply_recipe_patches(
-        params: Mapping[str, Any],
-        output_dir: Any,
-        *,
-        before_mutation: Any,
-    ) -> Any:
-        """Apply the recipe's warm patches over the tree they name.
-
-        An overlay recording its own root needs no resolved target, so this only refuses when nothing names a tree
-        at all.
-        """
-        if params.get("patches") and not any(
-            str((entry or {}).get("framework_root") or "").strip()
-            for entry in params["patches"]
-            if isinstance(entry, dict)
-        ):
-            return {
-                "status": "failed",
-                "failure": "missing_target_repo",
-                "patches": [],
-                "applied": [],
-            }
-        return _apply_warm_patches(
-            params,
-            "",
-            output_dir,
-            before_mutation=before_mutation,
-        )
 
     def _round_affordable_before_ignition(
         self,

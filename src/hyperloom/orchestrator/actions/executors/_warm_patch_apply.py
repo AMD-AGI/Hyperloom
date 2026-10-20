@@ -320,10 +320,17 @@ class _WarmPatchTrees(NamedTuple):
     absent_root: str
 
 
+class _OverlayText(NamedTuple):
+    """An overlay's diff text, or why it could not be read."""
+
+    content: str
+    reason: str
+
+
 class _ScreenedPatches(NamedTuple):
     """The overlay text each patch is applied from, grouped by the tree that receives it."""
 
-    contents: dict[int, str]
+    contents: dict[int, _OverlayText]
     by_tree: dict[str, list[str]]
     rejected_ref: str
     rejection: str
@@ -335,7 +342,7 @@ class _WarmPatchPreparation(NamedTuple):
     roots: list[str]
     order: list[str]
     trees: dict[str, dict[str, Any]]
-    contents: dict[int, str]
+    contents: dict[int, _OverlayText]
     by_tree: dict[str, list[str]]
     refusal: dict[str, Any] | None
 
@@ -345,15 +352,8 @@ class _WarmPatchSite(NamedTuple):
 
     index: int
     log_dir: Path
-    screened: str | None
+    overlay: _OverlayText
     required_timeline: bool
-
-
-class _OverlayText(NamedTuple):
-    """An overlay's diff text, or why it could not be read."""
-
-    content: str
-    reason: str
 
 
 class _PatchApplyOutcome(NamedTuple):
@@ -428,30 +428,37 @@ def _warm_patch_trees(patch_roots: list[str]) -> _WarmPatchTrees:
     return _WarmPatchTrees(roots, list(trees), trees, absent)
 
 
-def _warm_patch_text(patch: Mapping[str, Any]) -> str:
+def _warm_patch_text(patch: Mapping[str, Any]) -> _OverlayText:
     """The overlay's diff text, read back from its artifact when it was not carried inline."""
     content = str(patch.get("patch_content") or "")
     patch_ref = str(patch.get("patch_ref") or "")
-    if content or not patch_ref:
-        return content
+    patch_file = str(patch.get("patch_file") or "")
+    if content:
+        return _OverlayText(content, "")
+    if not patch_ref:
+        log.warning("baseline_executor: patch entry has no content/ref, skipping: %s", patch_file)
+        return _OverlayText("", "missing_artifact")
     try:
-        return Path(patch_ref).read_text(
-            encoding="utf-8",
-            errors="replace",
-        )
-    except OSError:
-        return ""
+        return _OverlayText(Path(patch_ref).read_text(encoding="utf-8", errors="replace"), "")
+    except OSError as exc:
+        log.warning("baseline_executor: cannot read patch_ref %s: %s", patch_ref, exc)
+        return _OverlayText("", "missing_artifact" if not Path(patch_ref).is_file() else "artifact_read_failed")
 
 
-def _unusable_patch_reason(content: str) -> str:
-    """Why this overlay cannot be replayed at all, or ``""`` when it can."""
+def _unusable_patch_reason(content: str, patch_file: str) -> str:
+    """Why this overlay may not touch the live checkout, or ``""`` when it may.
+
+    Structural safety gate on untrusted KB-sourced ``patch_content`` before it is git-applied: reject non-diff
+    blobs and any patch whose header path escapes the tree (absolute / ``..``).
+    """
     from ...specialists.patch_safety import is_unified_diff, patch_escapes_tree
 
-    if not content:
-        return "missing_artifact"
     if not is_unified_diff(content) or "GIT binary patch" in content:
+        log.warning("baseline_executor: skipping warm patch %s — not a unified diff", patch_file)
         return "unsafe_or_non_text_diff"
-    if patch_escapes_tree(content) is not None:
+    escape = patch_escapes_tree(content)
+    if escape is not None:
+        log.warning("baseline_executor: skipping warm patch %s — path escapes tree: %r", patch_file, escape)
         return "path_escapes_tree"
     if not _patch_touched_paths_from_text(content):
         return "missing_touched_paths"
@@ -463,22 +470,22 @@ def _screened_patch_contents(
     roots: list[str],
     trees: Mapping[str, Mapping[str, Any]],
 ) -> _ScreenedPatches:
-    """Group every replayable overlay's text under the tree it will be applied to."""
-    contents: dict[int, str] = {}
+    """Read and judge every overlay once, grouping the replayable ones under the tree that receives them."""
+    contents: dict[int, _OverlayText] = {}
     by_tree: dict[str, list[str]] = {root: [] for root in trees}
     rejected_ref, rejection = "", ""
     for idx, patch in enumerate(patches):
-        content = _warm_patch_text(patch)
-        reason = _unusable_patch_reason(content)
+        patch_file = str(patch.get("patch_file") or "")
+        read = _warm_patch_text(patch)
+        reason = read.reason or _unusable_patch_reason(read.content, patch_file)
+        contents[idx] = _OverlayText(read.content, reason)
         if reason:
             if not rejection:
-                rejected_ref, rejection = str(patch.get("patch_file") or ""), reason
+                rejected_ref, rejection = patch_file, reason
             continue
         root = roots[idx]
-        if root not in trees:
-            continue
-        contents[idx] = content
-        by_tree[root].append(content)
+        if root in trees:
+            by_tree[root].append(read.content)
     return _ScreenedPatches(contents, by_tree, rejected_ref, rejection)
 
 
@@ -583,62 +590,6 @@ def _refuse_unpersisted_warm_patch_state(
     }
 
 
-def _overlay_text_for_apply(patch: Mapping[str, Any], screened: str | None) -> _OverlayText:
-    """The overlay's text as the apply will use it: inline when it has one, else read back from its artifact."""
-    patch_content = screened or patch.get("patch_content") or ""
-    patch_ref = patch.get("patch_ref") or ""
-    patch_file = patch.get("patch_file") or ""
-    if patch_content:
-        return _OverlayText(patch_content, "")
-    if not patch_ref:
-        log.warning(
-            "baseline_executor: patch entry has no content/ref, skipping: %s",
-            patch_file,
-        )
-        return _OverlayText("", "missing_artifact")
-    ref_path = Path(patch_ref)
-    if not ref_path.is_file():
-        log.warning(
-            "baseline_executor: patch_ref not found: %s",
-            patch_ref,
-        )
-        return _OverlayText("", "missing_artifact")
-    try:
-        return _OverlayText(ref_path.read_text(encoding="utf-8", errors="replace"), "")
-    except OSError as exc:
-        log.warning(
-            "baseline_executor: cannot read patch_ref %s: %s",
-            patch_ref,
-            exc,
-        )
-        return _OverlayText("", "artifact_read_failed")
-
-
-def _unsafe_overlay_reason(patch_content: str, patch_file: str) -> str:
-    """Why this overlay may not touch the live checkout, or ``""`` when it may.
-
-    Structural safety gate on untrusted KB-sourced patch_content before it is git-applied: reject non-diff
-    blobs and any patch whose header path escapes the tree (absolute / ``..``).
-    """
-    from ...specialists.patch_safety import is_unified_diff, patch_escapes_tree
-
-    if not is_unified_diff(patch_content) or "GIT binary patch" in patch_content:
-        log.warning(
-            "baseline_executor: skipping warm patch %s — not a unified diff",
-            patch_file,
-        )
-        return "unsafe_or_non_text_diff"
-    escape = patch_escapes_tree(patch_content)
-    if escape is not None:
-        log.warning(
-            "baseline_executor: skipping warm patch %s — path escapes tree: %r",
-            patch_file,
-            escape,
-        )
-        return "path_escapes_tree"
-    return ""
-
-
 def _apply_overlay_without_git(tree: dict[str, Any], patch_path: Path) -> str:
     """Overlay a pip-installed tree from file backups, naming the method that landed it."""
     from ._nogit_patch import _apply_patch_no_git
@@ -735,21 +686,17 @@ def _git_apply_overlay(
 def _land_warm_patch(patch: Mapping[str, Any], tree: dict[str, Any], site: _WarmPatchSite) -> _PatchApplyOutcome:
     """Write one overlay into its own recorded tree, reporting the method that landed it or why it did not."""
     patch_file = patch.get("patch_file") or ""
-    overlay = _overlay_text_for_apply(patch, site.screened)
-    if overlay.reason:
-        return _PatchApplyOutcome("", overlay.reason, None)
-    unsafe = _unsafe_overlay_reason(overlay.content, patch_file)
-    if unsafe:
-        return _PatchApplyOutcome("", unsafe, None)
+    if site.overlay.reason:
+        return _PatchApplyOutcome("", site.overlay.reason, None)
     patch_path = site.log_dir / f"{site.index:03d}_{Path(patch_file).stem or 'patch'}.diff"
-    patch_path.write_text(overlay.content, encoding="utf-8")
+    patch_path.write_text(site.overlay.content, encoding="utf-8")
     try:
         if tree["use_nogit"]:
             return _PatchApplyOutcome(_apply_overlay_without_git(tree, patch_path), "", None)
         method = _git_apply_overlay(
             tree["root"],
             patch_path,
-            overlay.content,
+            site.overlay.content,
             required_timeline=site.required_timeline,
         )
         return _PatchApplyOutcome(method, "", None)
@@ -786,7 +733,7 @@ def _apply_warm_patch_sequence(
             continue
         # The patch goes into its own recorded tree, so this is per patch rather than fixed for the whole sequence.
         status["target_repo"] = tree["root"]
-        site = _WarmPatchSite(idx, patch_log_dir, prepared.contents.get(idx), required_timeline)
+        site = _WarmPatchSite(idx, patch_log_dir, prepared.contents[idx], required_timeline)
         outcome = _land_warm_patch(patch, tree, site)
         if outcome.reason:
             status.update(status="failed", reason=outcome.reason)
