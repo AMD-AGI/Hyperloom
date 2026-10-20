@@ -154,49 +154,67 @@ def parse_case_timings(text: str) -> tuple[dict[str, float], list[str], set[str]
     return case_times, unscored, duplicates
 
 
-def _measurement_failure(measurement: Any, index: int, measurements: list[dict]) -> dict | None:
-    """The aggregate's failure for a run that is no result, an exploratory sweep or a failed run, else None."""
-    if not isinstance(measurement, dict):
-        return {
-            "success": False,
-            "message": (f"MEASUREMENT {index}/{len(measurements)} DID NOT RETURN A RESULT"),
-            "measurements": measurements,
-        }
-    if measurement.get("kind") == EXPLORATORY_KIND:
-        return {
-            "success": False,
-            "message": (f"MEASUREMENT {index}/{len(measurements)} IS AN EXPLORATORY SWEEP, WHICH CANNOT BE SCORED"),
-            "measurements": measurements,
-        }
-    if not measurement.get("success"):
-        return {
-            "success": False,
-            "message": (
-                f"MEASUREMENT {index}/{len(measurements)} FAILED: {measurement.get('message', 'benchmark failed')}"
-            ),
-            "output": measurement.get("output", ""),
-            "measurements": measurements,
-        }
-    return None
-
-
-def _append_case_samples(case_samples: dict[str, list[float]], case_times: dict) -> None:
-    """Add one run's case timings to their samples; a timing that is not a finite positive number raises."""
+def _case_milliseconds(case_times: dict) -> dict[str, float]:
+    """Each case's time as a float; raises ValueError naming the first case whose time is not finite and positive."""
+    times: dict[str, float] = {}
     for case_id, value in case_times.items():
-        numeric = float(value)
-        if not math.isfinite(numeric) or numeric <= 0:
+        times[case_id] = float(value)
+        if not math.isfinite(times[case_id]) or times[case_id] <= 0:
             raise ValueError(case_id)
-        case_samples[case_id].append(numeric)
+    return times
 
 
-def _median_aggregate(
-    measurements: list[dict],
-    case_samples: dict[str, list[float]],
-    wall_samples: list[float],
-    unscored: set[str] | None,
-) -> dict:
-    """The aggregate of runs that all passed: per-case medians, and the median wall time if every run had one."""
-    case_times = {case_id: statistics.median(values) for case_id, values in case_samples.items()}
+def _aggregate_refusal(measurements: list, message: str, **extra: Any) -> dict:
+    """The aggregate's refusal, which carries every measurement it was given and no timing."""
+    return {"success": False, "message": message, **extra, "measurements": measurements}
+
+
+def aggregate_benchmark_measurements(measurements: list[dict]) -> dict:
+    """Aggregate complete independent benchmark runs by per-case median."""
+    if not measurements:
+        return {"success": False, "message": "NO BENCHMARK MEASUREMENTS"}
+
+    expected_cases: set[str] = set()
+    expected_unscored: set[str] = set()
+    run_times: list[dict[str, float]] = []
+    wall_samples: list[float] = []
+    for index, measurement in enumerate(measurements, start=1):
+        label = f"MEASUREMENT {index}/{len(measurements)}"
+        if not isinstance(measurement, dict):
+            return _aggregate_refusal(measurements, f"{label} DID NOT RETURN A RESULT")
+        if measurement.get("kind") == EXPLORATORY_KIND:
+            return _aggregate_refusal(measurements, f"{label} IS AN EXPLORATORY SWEEP, WHICH CANNOT BE SCORED")
+        if not measurement.get("success"):
+            failure = f"{label} FAILED: {measurement.get('message', 'benchmark failed')}"
+            return _aggregate_refusal(measurements, failure, output=measurement.get("output", ""))
+
+        # Each measurement after the first has to match the one before it, and so the first.
+        case_times = dict(measurement.get("case_times") or {})
+        case_ids = set(case_times)
+        if index > 1 and case_ids != expected_cases:
+            mismatch = f"expected={sorted(expected_cases)}, got={sorted(case_ids)}"
+            return _aggregate_refusal(measurements, f"MEASUREMENT CASE COVERAGE MISMATCH: {mismatch}")
+        expected_cases = case_ids
+        if not case_ids:
+            return _aggregate_refusal(measurements, "MEASUREMENT REPORTED NO CASE TIMINGS")
+        unscored = {str(case_id) for case_id in measurement.get("unscored_cases") or []}
+        if index > 1 and unscored != expected_unscored:
+            mismatch = f"expected={sorted(expected_unscored)}, got={sorted(unscored)}"
+            return _aggregate_refusal(measurements, f"MEASUREMENT UNSCORED CASE MISMATCH: {mismatch}")
+        expected_unscored = unscored
+        try:
+            run_times.append(_case_milliseconds(case_times))
+        except (TypeError, ValueError) as error:
+            return _aggregate_refusal(measurements, f"MEASUREMENT HAS INVALID CASE TIMING: {error}")
+
+        wall = measurement.get("median_ms")
+        if isinstance(wall, (int, float)) and math.isfinite(float(wall)):
+            wall_samples.append(float(wall))
+
+    case_times = {
+        case_id: statistics.median(times[case_id] for times in run_times) for case_id in sorted(expected_cases)
+    }
+
     # Reported, never scored, so the last measurement stands rather than a median that would have to be taken field by
     # field.
     case_bandwidth: dict[str, dict[str, float | int]] = dict(measurements[-1].get("case_bandwidth") or {})
@@ -205,75 +223,12 @@ def _median_aggregate(
         "success": True,
         "median_ms": representative_wall,
         "case_times": case_times,
-        "unscored_cases": sorted(unscored or set()),
+        "unscored_cases": sorted(expected_unscored),
         "case_bandwidth": case_bandwidth,
         "measurement_count": len(measurements),
         "measurements": measurements,
         "message": (f"BENCH: {len(measurements)} independent measurements, per-case median"),
     }
-
-
-def aggregate_benchmark_measurements(measurements: list[dict]) -> dict:
-    """Aggregate complete independent benchmark runs by per-case median."""
-    if not measurements:
-        return {"success": False, "message": "NO BENCHMARK MEASUREMENTS"}
-
-    expected_cases: set[str] | None = None
-    expected_unscored: set[str] | None = None
-    case_samples: dict[str, list[float]] = {}
-    wall_samples: list[float] = []
-
-    for index, measurement in enumerate(measurements, start=1):
-        failure = _measurement_failure(measurement, index, measurements)
-        if failure is not None:
-            return failure
-
-        case_times = dict(measurement.get("case_times") or {})
-        case_ids = set(case_times)
-        if expected_cases is None:
-            expected_cases = case_ids
-            case_samples = {case_id: [] for case_id in sorted(case_ids)}
-        elif case_ids != expected_cases:
-            return {
-                "success": False,
-                "message": (
-                    f"MEASUREMENT CASE COVERAGE MISMATCH: expected={sorted(expected_cases)}, got={sorted(case_ids)}"
-                ),
-                "measurements": measurements,
-            }
-        if not case_ids:
-            return {
-                "success": False,
-                "message": "MEASUREMENT REPORTED NO CASE TIMINGS",
-                "measurements": measurements,
-            }
-
-        unscored = {str(case_id) for case_id in measurement.get("unscored_cases") or []}
-        if expected_unscored is None:
-            expected_unscored = unscored
-        elif unscored != expected_unscored:
-            return {
-                "success": False,
-                "message": (
-                    f"MEASUREMENT UNSCORED CASE MISMATCH: expected={sorted(expected_unscored)}, got={sorted(unscored)}"
-                ),
-                "measurements": measurements,
-            }
-
-        try:
-            _append_case_samples(case_samples, case_times)
-        except (TypeError, ValueError) as error:
-            return {
-                "success": False,
-                "message": f"MEASUREMENT HAS INVALID CASE TIMING: {error}",
-                "measurements": measurements,
-            }
-
-        wall = measurement.get("median_ms")
-        if isinstance(wall, (int, float)) and math.isfinite(float(wall)):
-            wall_samples.append(float(wall))
-
-    return _median_aggregate(measurements, case_samples, wall_samples, expected_unscored)
 
 
 async def measure_wallclock(run: BenchRun, *, measurements: int, timeout_sec: int = 300) -> dict:
