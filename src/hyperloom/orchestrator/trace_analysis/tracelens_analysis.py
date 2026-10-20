@@ -30,6 +30,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from hyperloom.common.env import env_flag
 from hyperloom.common.io import JsonFormat, atomic_write_json
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer import framework_registry
@@ -1558,11 +1559,163 @@ def is_runtime_api_name(name: str) -> bool:
     return _normalize_profiler_op_name(name).strip().lower() in _RUNTIME_API_NAMES
 
 
+def _trace_name(item: dict[str, Any]) -> str:
+    """Return the normalized trace name for one candidate."""
+    return str(item.get("name") or "").strip().lower()
+
+
+def _workload_dtypes(item: dict[str, Any]) -> list[str]:
+    """Return explicit or shape-derived input dtypes for one workload."""
+    values = item.get("input_dtypes") or _dtypes_from_shapes(item.get("shapes") or [])
+    return [str(value).strip() for value in values if isinstance(value, str) and value.strip()]
+
+
+def _has_workload(item: dict[str, Any]) -> bool:
+    """Return whether the trace row carries driver inputs."""
+    return bool(item.get("input_shapes") or item.get("shapes")) and bool(_workload_dtypes(item))
+
+
+def _is_all_reduce_name(item: dict[str, Any]) -> bool:
+    """Return whether a trace name carries all-reduce semantics."""
+    return any(tag in _trace_name(item) for tag in ("all_reduce", "allreduce", "cross_device_reduce"))
+
+
+def _workload_family(item: dict[str, Any]) -> str:
+    """Collapse prefill and decode rows from one profiled wrapper."""
+    name = _trace_name(item)
+    if name.startswith(("sglang_profiler::", "vllm_profiler::")):
+        name = name.split("->", 1)[0]
+    return re.sub(r"\s+\((?:prefill|decode)\)\s*$", "", name)
+
+
+def _first_shape_record(item: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the first tensor shape record from one invocation."""
+    records = item.get("input_shapes")
+    if isinstance(records, list):
+        for record in records:
+            if isinstance(record, dict) and str(record.get("shape") or "").strip():
+                return dict(record)
+    shapes = item.get("shapes")
+    if isinstance(shapes, list):
+        for shape in shapes:
+            text = str(shape or "").strip()
+            if text:
+                return {"call_num": int(item.get("call_count") or 1), "shape": text}
+    return None
+
+
+def _attach_workload(target: dict[str, Any], donors: list[dict[str, Any]]) -> None:
+    """Attach the donors' traced workload: one donor lends all of it, several their distinct first inputs."""
+    if len(donors) == 1:
+        donor = donors[0]
+        for key in ("input_shapes", "shapes", "input_dtypes", "shape_provenance"):
+            if donor.get(key):
+                target[key] = donor[key]
+        if not target.get("input_dtypes"):
+            target["input_dtypes"] = _workload_dtypes(donor)
+        target["workload_source_kernel"] = str(donor.get("name") or "")
+        return
+    records: list[dict[str, Any]] = []
+    shapes: list[str] = []
+    dtypes: list[str] = []
+    seen_shapes: set[str] = set()
+    for donor in donors:
+        record = _first_shape_record(donor)
+        if record is None:
+            continue
+        shape = str(record["shape"]).strip()
+        if shape in seen_shapes:
+            continue
+        seen_shapes.add(shape)
+        records.append(record)
+        shapes.append(shape)
+        donor_dtypes = _workload_dtypes(donor)
+        if donor_dtypes:
+            dtypes.append(donor_dtypes[0])
+    if records:
+        target["input_shapes"] = records
+        target["shapes"] = shapes
+    if dtypes:
+        target["input_dtypes"] = dtypes
+    provenance = next(
+        (str(donor.get("shape_provenance") or "") for donor in donors if donor.get("shape_provenance")), ""
+    )
+    if provenance:
+        target["shape_provenance"] = provenance
+    target["workload_source_kernels"] = [str(donor.get("name") or "") for donor in donors]
+    hottest = max(donors, key=lambda donor: float(donor.get("duration_us") or 0.0))
+    target["workload_source_kernel"] = str(hottest.get("name") or "")
+
+
+def _attach_collective_workloads(
+    existing: list[dict[str, Any]],
+    extracted: list[dict[str, Any]],
+    note: Callable[[str], None],
+) -> list[dict[str, Any]]:
+    """Give each source-resolved collective its traced workload; return the rows to append.
+
+    A collective that matches a trace row by name updates that row in place. Otherwise it is appended only when it
+    can borrow the trace's sole all-reduce workload family, which ``HYPERLOOM_COLLECTIVE_ALLOW_INFERRED_SHAPES``
+    must opt into.
+    """
+    by_name = {_trace_name(item): item for item in existing if _trace_name(item)}
+    families: dict[str, list[dict[str, Any]]] = {}
+    for row in existing:
+        if _has_workload(row) and _is_all_reduce_name(row):
+            families.setdefault(_workload_family(row), []).append(row)
+    sole_family: list[dict[str, Any]] = []
+    if len(families) == 1 and env_flag("HYPERLOOM_COLLECTIVE_ALLOW_INFERRED_SHAPES"):
+        sole_family = next(iter(families.values()))
+    appended: list[dict[str, Any]] = []
+    for item in extracted:
+        exact = by_name.get(_trace_name(item))
+        target = exact or dict(item)
+        for key in (
+            "source_file",
+            "source_line",
+            "source_function",
+            "source_resolution_method",
+            "candidate_source",
+            "collective_stream",
+            "nccl_summary_total_ms",
+            "duration_provenance",
+        ):
+            target[key] = item[key]
+        if exact is not None and _has_workload(exact):
+            donors, borrowed = [exact], False
+        elif sole_family and _is_all_reduce_name(item):
+            # Shapes are inferred from the sole all-reduce family, valid only
+            # because the symbol is itself an all-reduce. Handing the driver
+            # shapes the traced kernel never ran would yield confident SNR and
+            # latency for a workload that never existed, so ``shape_provenance``
+            # travels with them to mark the values attributed, not observed.
+            donors, borrowed = sole_family, True
+        else:
+            donors, borrowed = [], False
+        if donors:
+            _attach_workload(target, donors)
+        if borrowed:
+            target["shape_provenance"] = "borrowed_sole_all_reduce_family"
+            note(
+                "nccl_summary: attributing the trace's only all-reduce workload "
+                f"to {item.get('source_function')!r}; shapes are inferred"
+            )
+        if exact is None:
+            if not donors:
+                note(
+                    "nccl_summary: no unique traced all-reduce workload for "
+                    f"{item.get('source_function')!r}; dropping candidate"
+                )
+                continue
+            appended.append(target)
+            by_name[_trace_name(target)] = target
+    return appended
+
+
 def _inject_collective_candidates(
     tracelens_dir: Path,
     candidates: list[dict[str, Any]],
     *,
-    source_roots: list[str] | None = None,
     log_path: Path | None = None,
     health_warnings: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
@@ -1574,23 +1727,19 @@ def _inject_collective_candidates(
     the report surfaces it -- a log line alone leaves the lane looking as if the
     workload simply had no collective.
     """
-    if not isinstance(candidates, list) or any(not isinstance(item, dict) for item in candidates):
-        raise ValueError("Collective candidates must be a list of mappings")
     existing = [dict(item) for item in candidates]
-    roots = list(source_roots or [])
-    if not roots:
-        aiter_csrc = _aiter_csrc_root().rstrip("/")
-        if aiter_csrc and Path(aiter_csrc).is_dir():
-            roots.append(aiter_csrc)
+    aiter_csrc = _aiter_csrc_root().rstrip("/")
+    roots = [aiter_csrc] if aiter_csrc and Path(aiter_csrc).is_dir() else []
+    messages: list[str] = []
 
-    def _skip(code: str, detail: str, notes: list[str] | None = None) -> list[dict[str, Any]]:
+    def _skip(code: str, detail: str) -> list[dict[str, Any]]:
         """Record a visible reason the collective lane got no candidate."""
         message = f"nccl_summary: {detail}; skipping injection"
         log.warning(message)
         if log_path is not None:
             # The per-symbol notes are the only record of WHICH symbol failed and
             # they are normally flushed at the end, which a skip never reaches.
-            for note in notes or []:
+            for note in messages:
                 append_log(log_path, note)
             append_log(log_path, message)
         if health_warnings is not None:
@@ -1612,7 +1761,6 @@ def _inject_collective_candidates(
             "no bounded collective source root",
         )
 
-    messages: list[str] = []
     scan_diagnostics: list[dict[str, Any]] = []
     try:
         extracted = extract_collective_candidates(
@@ -1643,164 +1791,8 @@ def _inject_collective_candidates(
         return _skip(
             "collective_symbols_unresolved",
             "no summary row resolved to a device source under " + ", ".join(roots),
-            notes=messages,
         )
-
-    def _name(item: dict[str, Any]) -> str:
-        """Return the normalized trace name for one candidate."""
-        return str(item.get("name") or "").strip().lower()
-
-    def _workload_dtypes(item: dict[str, Any]) -> list[str]:
-        """Return explicit or shape-derived input dtypes for one workload."""
-        values = item.get("input_dtypes") or item.get("dtypes") or []
-        if not values:
-            values = _dtypes_from_shapes(item.get("shapes") or [])
-        return [str(value).strip() for value in values if isinstance(value, str) and value.strip()]
-
-    def _has_workload(item: dict[str, Any]) -> bool:
-        """Return whether the trace row carries driver inputs."""
-        return bool(item.get("input_shapes") or item.get("shapes")) and bool(_workload_dtypes(item))
-
-    def _is_all_reduce_workload(item: dict[str, Any]) -> bool:
-        """Return whether a traced workload has all-reduce semantics."""
-        contract = item.get("kernel_contract")
-        if isinstance(contract, dict) and str(contract.get("kind") or "") == "collective":
-            return str(contract.get("collective_op") or "") == "all_reduce"
-        name = _name(item)
-        return any(tag in name for tag in ("all_reduce", "allreduce", "cross_device_reduce"))
-
-    def _workload_family(item: dict[str, Any]) -> str:
-        """Collapse prefill and decode rows from one profiled wrapper."""
-        name = _name(item)
-        if name.startswith(("sglang_profiler::", "vllm_profiler::")):
-            name = name.split("->", 1)[0]
-        return re.sub(r"\s+\((?:prefill|decode)\)\s*$", "", name)
-
-    def _first_shape_record(item: dict[str, Any]) -> dict[str, Any] | None:
-        """Return the first tensor shape record from one invocation."""
-        records = item.get("input_shapes")
-        if isinstance(records, list):
-            for record in records:
-                if isinstance(record, dict) and str(record.get("shape") or "").strip():
-                    return dict(record)
-        shapes = item.get("shapes")
-        if isinstance(shapes, list):
-            for shape in shapes:
-                text = str(shape or "").strip()
-                if text:
-                    return {
-                        "call_num": int(item.get("call_count") or 1),
-                        "shape": text,
-                    }
-        return None
-
-    def _merge_workloads(
-        target: dict[str, Any],
-        donors: list[dict[str, Any]],
-    ) -> None:
-        """Attach distinct first-input cases from one workload family."""
-        records: list[dict[str, Any]] = []
-        shapes: list[str] = []
-        dtypes: list[str] = []
-        seen_shapes: set[str] = set()
-        for donor in donors:
-            record = _first_shape_record(donor)
-            if record is None:
-                continue
-            shape = str(record["shape"]).strip()
-            if shape in seen_shapes:
-                continue
-            seen_shapes.add(shape)
-            records.append(record)
-            shapes.append(shape)
-            donor_dtypes = _workload_dtypes(donor)
-            if donor_dtypes:
-                dtypes.append(donor_dtypes[0])
-        if records:
-            target["input_shapes"] = records
-            target["shapes"] = shapes
-        if dtypes:
-            target["input_dtypes"] = dtypes
-        provenance = next(
-            (str(donor.get("shape_provenance") or "") for donor in donors if donor.get("shape_provenance")),
-            "",
-        )
-        if provenance:
-            target["shape_provenance"] = provenance
-        target["workload_source_kernels"] = [str(donor.get("name") or "") for donor in donors]
-        hottest = max(
-            donors,
-            key=lambda donor: float(donor.get("duration_us") or 0.0),
-        )
-        target["workload_source_kernel"] = str(hottest.get("name") or "")
-
-    by_name = {_name(item): item for item in existing if _name(item)}
-    workload_rows = [item for item in existing if _has_workload(item) and _is_all_reduce_workload(item)]
-    workload_families: dict[str, list[dict[str, Any]]] = {}
-    for row in workload_rows:
-        family = _workload_family(row)
-        if family:
-            workload_families.setdefault(family, []).append(row)
-    allow_inferred_shapes = os.environ.get("HYPERLOOM_COLLECTIVE_ALLOW_INFERRED_SHAPES", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-    appended: list[dict[str, Any]] = []
-    for item in extracted:
-        exact = by_name.get(_name(item))
-        target = exact or dict(item)
-        for key in (
-            "source_file",
-            "source_line",
-            "source_function",
-            "source_resolution_method",
-            "candidate_source",
-            "collective_stream",
-            "nccl_summary_total_ms",
-            "duration_provenance",
-        ):
-            target[key] = item[key]
-        if exact is not None and _has_workload(exact):
-            donors = [exact]
-            borrowed = False
-        elif allow_inferred_shapes and len(workload_families) == 1 and _is_all_reduce_workload(item):
-            # Shapes are inferred from the sole all-reduce family, valid only
-            # because the symbol is itself an all-reduce. Handing the driver
-            # shapes the traced kernel never ran would yield confident SNR and
-            # latency for a workload that never existed, so ``shape_provenance``
-            # travels with them to mark the values attributed, not observed.
-            donors = next(iter(workload_families.values()))
-            borrowed = True
-        else:
-            donors = []
-            borrowed = False
-        if len(donors) == 1:
-            donor = donors[0]
-            for key in ("input_shapes", "shapes", "input_dtypes", "dtypes", "shape_provenance"):
-                if donor.get(key):
-                    target[key] = donor[key]
-            if not target.get("input_dtypes"):
-                target["input_dtypes"] = _workload_dtypes(donor)
-            target["workload_source_kernel"] = str(donor.get("name") or "")
-        elif donors:
-            _merge_workloads(target, donors)
-        if borrowed:
-            target["shape_provenance"] = "borrowed_sole_all_reduce_family"
-            messages.append(
-                "nccl_summary: attributing the trace's only all-reduce workload "
-                f"to {item.get('source_function')!r}; shapes are inferred"
-            )
-        if exact is None:
-            if not donors:
-                messages.append(
-                    "nccl_summary: no unique traced all-reduce workload for "
-                    f"{item.get('source_function')!r}; dropping candidate"
-                )
-                continue
-            appended.append(target)
-            by_name[_name(target)] = target
+    appended = _attach_collective_workloads(existing, extracted, messages.append)
     if log_path is not None:
         for message in messages:
             append_log(log_path, message)
