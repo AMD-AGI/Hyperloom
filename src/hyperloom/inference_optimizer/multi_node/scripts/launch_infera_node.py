@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import shlex
+import signal
 import subprocess
 import sys
 import tempfile
@@ -20,8 +21,7 @@ from sglang_shape_gate import activate_kernel_shape_tool
 _DEFAULT_DIST_INIT_PORT = 5000
 # Ray GCS port for the vllm multi-node bootstrap.
 _RAY_GCS_PORT = 6379
-# Default HTTP port the infera engine binds via --port (no CLI override is declared); the rank-0 readiness probe uses
-# --health-port (default 8000).
+# Default HTTP port the infera engine binds via --port (no CLI override is declared).
 _DEFAULT_ENGINE_PORT = 30000
 
 
@@ -158,10 +158,29 @@ def _proc_tree(root: int) -> list[int]:
     return out
 
 
+def _term_then_kill(pids: list[int], kill_wait_s: float, pgid: int | None = None) -> list[int]:
+    """SIGTERM, then SIGKILL, ``pids`` (and process group ``pgid``) until none of them is alive; return the survivors."""
+    for sig, wait_s in ((signal.SIGTERM, 5.0), (signal.SIGKILL, kill_wait_s)):
+        for pid in pids:
+            try:
+                os.kill(pid, sig)
+            except (ProcessLookupError, PermissionError):
+                pass
+        if pgid is not None:
+            try:
+                os.killpg(pgid, sig)
+            except (ProcessLookupError, PermissionError):
+                pass
+        deadline = time.monotonic() + wait_s
+        while time.monotonic() < deadline and any(_pid_alive(pid) for pid in pids):
+            time.sleep(0.5)
+        if not any(_pid_alive(pid) for pid in pids):
+            break
+    return [pid for pid in pids if _pid_alive(pid)]
+
+
 def _reap_stale_engines_by_cmdline() -> None:
     """SIGKILL any residual sglang / infera engine process matched by cmdline via /proc, before a fresh launch."""
-    import signal as _sig
-
     kill_wait_s = float(os.environ.get("HYPERLOOM_MN_KILL_WAIT_S", "120") or 120)
     pats = ("sglang.launch_server", "infera.engine.sglang", "infera.engine.vllm", "sglang::sched")
     me = os.getpid()
@@ -185,20 +204,7 @@ def _reap_stale_engines_by_cmdline() -> None:
             victims.append(xpid)
     if not victims:
         return
-    for sig in (_sig.SIGTERM, _sig.SIGKILL):
-        for v in victims:
-            try:
-                os.kill(v, sig)
-            except (ProcessLookupError, PermissionError):
-                pass
-        deadline = time.monotonic() + (5.0 if sig == _sig.SIGTERM else kill_wait_s)
-        while time.monotonic() < deadline:
-            if not any(_pid_alive(v) for v in victims):
-                break
-            time.sleep(0.5)
-        if not any(_pid_alive(v) for v in victims):
-            break
-    remaining = [v for v in victims if _pid_alive(v)]
+    remaining = _term_then_kill(victims, kill_wait_s)
     if remaining:
         _log("reaper: stale engine pids still alive after SIGKILL: " + str(remaining))
     else:
@@ -208,50 +214,23 @@ def _reap_stale_engines_by_cmdline() -> None:
 def _kill_prior(pid_file: Path) -> None:
     """SIGTERM then SIGKILL the prior server's whole process tree, then sweep any residual holder of the managed sglang engine ports."""
     kill_wait_s = float(os.environ.get("HYPERLOOM_MN_KILL_WAIT_S", "120") or 120)
-    pid = None
-    if pid_file.is_file():
-        try:
-            pid = int(pid_file.read_text(encoding="utf-8").strip())
-        except (ValueError, OSError):
-            pid = None
-    targets: list[int] = []
-    if pid and pid > 0 and _pid_alive(pid):
+    try:
+        pid = int(pid_file.read_text(encoding="utf-8").strip())
+    except (ValueError, OSError):
+        pid = 0
+    if pid > 0 and _pid_alive(pid):
         targets = _proc_tree(pid)
-    if targets:
         try:
             pgid = os.getpgid(pid)
         except ProcessLookupError:
             pgid = None
-        for sig in (15, 9):
-            for t in targets:
-                try:
-                    os.kill(t, sig)
-                except (ProcessLookupError, PermissionError):
-                    pass
-            if pgid is not None:
-                try:
-                    os.killpg(pgid, sig)
-                except (ProcessLookupError, PermissionError):
-                    pass
-            deadline = time.monotonic() + (5.0 if sig == 15 else kill_wait_s)
-            while time.monotonic() < deadline:
-                if not any(_pid_alive(t) for t in targets):
-                    break
-                time.sleep(0.5)
-            if not any(_pid_alive(t) for t in targets):
-                break
-        alive = [t for t in targets if _pid_alive(t)]
+        alive = _term_then_kill(targets, kill_wait_s, pgid)
         if alive:
             raise RuntimeError(
-                "prior server pids "
-                + str(alive)
-                + " still alive "
-                + str(int(kill_wait_s))
-                + "s after SIGKILL (wedged, likely D-state on "
-                "slow weight I/O); aborting relaunch to avoid VRAM double-stack -- "
-                "node may need a reboot/GPU reset"
+                f"prior server pids {alive} still alive {int(kill_wait_s)}s after SIGKILL (wedged, likely D-state on "
+                "slow weight I/O); aborting relaunch to avoid VRAM double-stack -- node may need a reboot/GPU reset"
             )
-        _log("killed prior server tree pid=" + str(pid) + " (" + str(len(targets)) + " procs)")
+        _log(f"killed prior server tree pid={pid} ({len(targets)} procs)")
     pid_file.unlink(missing_ok=True)
     # Kill residual engine processes by cmdline (catches an orphaned launch_server holding port_base that ss/tree-kill
     # miss), then sweep ports.
@@ -483,38 +462,12 @@ def _ray_start(role: str, leader: str, env: dict[str, str]) -> None:
     _log(f"ray start ({role}) rc={cp.returncode} {(stderr or stdout).strip()[:300]}")
 
 
-def _wait_health(port: int, timeout_s: int, pid: int | None) -> bool:
-    """Poll http://127.0.0.1:<port>/health until 200 or the pid dies."""
-    import urllib.error
-    import urllib.request
-
-    started = time.monotonic()
-    while time.monotonic() - started < timeout_s:
-        try:
-            with urllib.request.urlopen(
-                f"http://127.0.0.1:{port}/health",
-                timeout=3,
-            ) as resp:  # nosec B310 - fixed loopback health check.
-                if 200 <= resp.status < 300:
-                    return True
-        except (urllib.error.URLError, OSError):
-            pass
-        if pid is not None and pid > 0:
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
-                _log(f"server pid={pid} died during health wait")
-                return False
-            except OSError:
-                pass
-        time.sleep(5)
-    return False
-
-
-def _start_gpu_sampler(out_csv: Path, pid_file: Path, interval_s: int) -> None:
-    """Start a detached rocm-smi sampler for this pod's GPUs."""
+def _start_gpu_sampler(out_csv: Path, pid_file: Path) -> None:
+    """Start a detached rocm-smi sampler for this pod's GPUs: the single-node Magpie GPUMonitor's fields, streamed to
+    ``out_csv`` on shared FS for the client to harvest."""
     import shutil
 
+    interval = max(1, int(os.environ.get("HYPERLOOM_MN_GPU_SAMPLE_INTERVAL_S", "5") or "5"))
     rocm = shutil.which("rocm-smi") or "/opt/rocm/bin/rocm-smi"
     if not Path(rocm).exists():
         _log("rocm-smi not found; skipping GPU sampler")
@@ -525,7 +478,6 @@ def _start_gpu_sampler(out_csv: Path, pid_file: Path, interval_s: int) -> None:
         return
     q_csv = shlex.quote(str(out_csv))
     q_rocm = shlex.quote(rocm)
-    interval = max(1, int(interval_s))
     # header once, then loop: prepend epoch ts to each rocm-smi --csv data row.
     script = (
         "set +e; "
@@ -566,8 +518,8 @@ def _kill_gpu_sampler(pid_file: Path) -> None:
         pass
 
 
-def main() -> int:
-    """Launch (or kill) this pod's Infera multi-node server rank."""
+def _parse_args() -> argparse.Namespace:
+    """The launcher's command line."""
     p = argparse.ArgumentParser(prog="launch_infera_node.py")
     p.add_argument("--framework", required=True, choices=("sglang", "vllm"))
     p.add_argument("--model", default="")
@@ -578,45 +530,37 @@ def main() -> int:
     p.add_argument("--pid-file", default=str(Path(tempfile.gettempdir()) / "mn_infera_server.pid"))
     p.add_argument("--log-file", default=str(Path(tempfile.gettempdir()) / "mn_infera_server.log"))
     p.add_argument("--extra-args", default="")
-    p.add_argument("--health-port", type=int, default=8000, help="leader local readiness probe port (frontend/http)")
-    p.add_argument(
-        "--health-wait-sec", type=int, default=0, help="leader-only: seconds to wait for local /health (0=skip)"
-    )
     p.add_argument("--kill-only", action="store_true", help="kill the prior server via PID file and exit (frees GPU)")
-    args = p.parse_args()
+    return p.parse_args()
 
+
+def main() -> int:
+    """Launch (or kill) this pod's Infera multi-node server rank."""
+    args = _parse_args()
     env = _recover_container_env()
     node_rank = int(env.get("LWS_WORKER_INDEX", "0") or "0")
-    lws_leader = (env.get("LWS_LEADER_ADDRESS", "") or "").strip()
-    if lws_leader:
-        # Multi-pod LWS role (TP > one pod's GPUs): the controller-injected leader address is the torch.distributed
-        # rendezvous host.
-        leader = lws_leader
-    else:
-        # Single-pod role (no LWS rendezvous).
-        leader = _resolve_pod_ip(env)
+    # Multi-pod LWS roles (TP > one pod's GPUs) rendezvous at the controller-injected leader address.
+    leader = env.get("LWS_LEADER_ADDRESS", "").strip() or _resolve_pod_ip(env)
     pid_file = Path(args.pid_file)
     log_file = Path(args.log_file)
-    # GPU metrics sampler paths (shared-FS, per-pod).
-    _samp_dir = os.environ.get("HYPERLOOM_MN_SERVER_LOG_DIR", "").strip()
-    _samp_csv = ""
-    _samp_pid_file = ""
-    if _samp_dir.startswith("/") and "$" not in _samp_dir:
-        _samp_host = _resolve_pod_ip(env)
-        _samp_csv = str(Path(_samp_dir) / f"gpu_metrics_{_samp_host}.csv")
-        _samp_pid_file = str(Path(_samp_dir) / f"gpu_sampler_{_samp_host}.pid")
+    # A forwarded shared-FS dir gets per-pod server.log and GPU metrics files the client reads; PD legs do not collide.
+    shared_dir = os.environ.get("HYPERLOOM_MN_SERVER_LOG_DIR", "").strip()
+    shared = shared_dir.startswith("/") and "$" not in shared_dir
+    if shared:
+        sampler_host = _resolve_pod_ip(env)
+        sampler_csv = Path(shared_dir) / f"gpu_metrics_{sampler_host}.csv"
+        sampler_pid_file = Path(shared_dir) / f"gpu_sampler_{sampler_host}.pid"
 
     try:
         _kill_prior(pid_file)
-        if _samp_pid_file:
-            _kill_gpu_sampler(Path(_samp_pid_file))
+        if shared:
+            _kill_gpu_sampler(sampler_pid_file)
     except RuntimeError as exc:
         _log(f"ERROR {exc}")
         print(json.dumps({"status": "error", "action": "kill", "node_rank": node_rank, "error": str(exc)}))
         return 3
     if args.kill_only:
-        # vllm: also tear down the local ray node so GPUs are freed.
-        if args.framework == "vllm":
+        if args.framework == "vllm":  # also tear down the local ray node so GPUs are freed
             subprocess.run(
                 ["/bin/bash", "-lc", "ray stop --force || true"], env=env, capture_output=True, text=True, timeout=60
             )
@@ -638,24 +582,19 @@ def main() -> int:
     )
 
     advertise_host = _resolve_pod_ip(env)
-    # When a shared-FS (WekaFS) server-log dir is forwarded, write server.log there with a per-pod suffix so the
-    # client can read it and prefill/decode do not collide.
-    _shared_log_dir = os.environ.get("HYPERLOOM_MN_SERVER_LOG_DIR", "").strip()
-    if _shared_log_dir.startswith("/") and "$" not in _shared_log_dir:
-        log_file = Path(_shared_log_dir) / f"mn_infera_server_{advertise_host}_r{node_rank}.log"
+    if shared:
+        log_file = Path(shared_dir) / f"mn_infera_server_{advertise_host}_r{node_rank}.log"
     if args.framework == "sglang":
         activate_kernel_shape_tool(env)
         cmd = _build_sglang_cmd(args, node_rank, leader, advertise_host=advertise_host)
-        pid = _detach_launch(cmd, log_file, pid_file, env)
     else:
-        # vllm: every pod joins the ray cluster; only rank 0 runs infera.engine.vllm.
         _ray_start("head" if node_rank == 0 else "worker", leader, env)
         if node_rank != 0:
             pid_file.write_text("0")  # sentinel; nothing to kill but the ray node
             print(json.dumps({"status": "ok", "node_rank": node_rank, "role": "vllm_ray_worker", "pid": 0}))
             return 0
         cmd = _build_vllm_cmd(args, advertise_host=advertise_host)
-        pid = _detach_launch(cmd, log_file, pid_file, env)
+    pid = _detach_launch(cmd, log_file, pid_file, env)
 
     summary = {
         "status": "ok",
@@ -666,30 +605,12 @@ def main() -> int:
         "pid_file": str(pid_file),
         "log_file": str(log_file),
     }
-
-    # Self-contained GPU metrics: run rocm-smi sampling on this GPU pod (same fields as the single-node Magpie
-    # GPUMonitor) and stream to shared FS for the client to harvest.
-    if _samp_csv:
+    if shared:
         try:
-            _start_gpu_sampler(
-                Path(_samp_csv),
-                Path(_samp_pid_file),
-                int(os.environ.get("HYPERLOOM_MN_GPU_SAMPLE_INTERVAL_S", "5") or "5"),
-            )
-            summary["gpu_metrics_csv"] = _samp_csv
+            _start_gpu_sampler(sampler_csv, sampler_pid_file)
+            summary["gpu_metrics_csv"] = str(sampler_csv)
         except Exception as exc:  # noqa: BLE001 - sampler is optional telemetry
             _log(f"GPU sampler start failed: {exc}")
-
-    # Only the leader serves a local HTTP endpoint; workers have none.
-    if node_rank == 0 and args.health_wait_sec > 0:
-        ok = _wait_health(args.health_port, args.health_wait_sec, pid)
-        summary["health_ok"] = ok
-        if not ok:
-            try:
-                summary["log_tail"] = log_file.read_text(errors="replace")[-2000:]
-            except OSError:
-                pass
-
     print(json.dumps(summary, indent=2))
     return 0
 
