@@ -60,9 +60,6 @@ from ..stop_attribution import (
 )
 from . import _server_lifecycle as _lifecycle
 from ._aiter_jit import (
-    AITER_JIT_PROBE_PATHS,
-    BASELINE_COLD_START_TIMEOUT_SEC,
-    COLD_START_KERNEL_THRESHOLD,
     is_aiter_jit_registry_mismatch,
 )
 from ._jit_cache_env import apply_session_jit_cache, benchmark_framework

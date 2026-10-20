@@ -73,6 +73,11 @@ def prepare_benchmark_runtime(config_path: Path, env: dict[str, str]) -> Prepara
             log.error("grid_runner: %s; failing this benchmark", eval_bounds_msg)
             return PreparationFailure(EVAL_PROBE_UNPATCHABLE_RETURNCODE, eval_bounds_msg)
         log.warning("grid_runner: %s", eval_bounds_msg)
+    # Every Magpie invocation passes here, and the copy of the generic scripts that runs is rewritten at session
+    # start, so this is where an agentic replay can be sure its prefix cache survived the script's own defaults.
+    from ._magpie_patcher import ensure_agentic_prefix_cache
+
+    ensure_agentic_prefix_cache(os.environ.get("MAGPIE_PATH") or None, probe_root)
     from ._workload_envs import prepare_agentx_runtime
 
     _agx_err = prepare_agentx_runtime(env=env, inferencex_path=inferencex_path, config_path=config_path)

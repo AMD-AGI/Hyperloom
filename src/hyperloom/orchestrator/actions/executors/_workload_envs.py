@@ -508,6 +508,17 @@ def apply_agentx_switch(
     envs["RUN_EVAL"] = "false"
     envs["MODEL"] = str(model_path or bench.get("model") or os.environ.get("MODEL_PATH", "")).strip()
     envs["FRAMEWORK"] = framework
+    # The harness decides several things by run type -- whether a context cap applies, and whether the server keeps
+    # its prefix cache -- and reads this, its own signal, to tell them apart. Naming the client script is not that
+    # signal, so without these an AgentX replay was served as a fixed-sequence throughput sweep. Offloading is the
+    # one setting the harness then demands; AgentX keeps its reuse in the GPU KV pool.
+    envs["IS_AGENTIC"] = "1"
+    envs["KV_OFFLOADING"] = "none"
+    # WEKA_LOADER_OVERRIDE is upstream's own per-recipe corpus pin, so it has no
+    # AGENTX_ prefix and would not survive the loop below. aiperf_client.sh
+    # documents it as a supported knob; without forwarding it only works when
+    # the benchmark process happens to inherit the full parent environment,
+    # which is exactly the kind of silent difference this path exists to remove.
     for key, value in _agentx_env.items():
         if _is_agentx_client_key(key, _agentx_env):
             envs[key] = value

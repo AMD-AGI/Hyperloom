@@ -70,12 +70,6 @@ from .benchmark_backend import build_benchmark_command
 from .benchmark_config import prepare_benchmark_runtime
 from .magpie_agentx import LaunchChanges, ServerArgvInvalidError, materialize_variant
 from hyperloom.inference_optimizer.runtime_environment import apply_runtime_override
-from ._inferencex_patcher import (
-    ensure_benchmark_lib_eval_start_patched,
-    ensure_eval_probe_patched,
-    ensure_eval_unbound_outputs_patched,
-    eval_probe_targets_exist,
-)
 from ._jit_cache_env import apply_session_jit_cache, benchmark_framework
 from ._launch_evidence import build_launch_evidence, persist_launch_evidence
 from ...measurement.runtime_findings import persist_runtime_findings, scan_server_log

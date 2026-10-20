@@ -18,7 +18,7 @@ import yaml
 
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.gain_math import gain_pct
-from hyperloom.common.launch_log_evidence import settings_the_engine_rewrote
+from hyperloom.common.launch_log_evidence import launch_flag_setting_name, settings_the_engine_rewrote
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.perf_metric import (
     GRADED_DURATION,
