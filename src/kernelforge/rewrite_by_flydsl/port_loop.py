@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from kernelforge.config import Config
-from kernelforge.loop.validation import run_validation_pipeline
+from kernelforge.evaluation.correctness.pipeline import run_validation_pipeline
 from kernelforge.rewrite_by_flydsl.prompts import build_port_program_md
 from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
 from kernelforge.tracker import UsageAccumulator

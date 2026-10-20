@@ -20,7 +20,7 @@ from kernelforge.cli.options import (
 from kernelforge.option_groups import option_group
 from kernelforge.config import Config
 from kernelforge.knowledge.kb_store.config import KnowledgeConfig
-from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
 from kernelforge.rewrite_by_flydsl.optimize import OptimizeOptions
 from kernelforge.rewrite_by_flydsl.request import ApplybackSwitch, RewriteBudget, RewriteWorkspace
 
