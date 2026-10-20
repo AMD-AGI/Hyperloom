@@ -547,14 +547,15 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
 
     async def maybe_force_stalled_domain_specialist(self) -> None:
         """Force-dispatch a domain specialist for a domain untouched for too many
-        config-arm rounds that still has an open gap in the gaps[] ledger.
+        specialist rounds that still has an open gap in the gaps[] ledger.
 
         A real scheduling event (a domain delegate routed through PolicyGate +
         warmup + the GPU specialist pool). Idempotent per
         ``(anchor, round, macro_cycle)``; a domain with a specialist already
-        queued or running is skipped, and the dispatcher zeroes the per-anchor
-        counter when the forced specialist spawns. At most one forced dispatch
-        per tick.
+        queued or running is skipped. The dispatcher zeroes the anchor's
+        dispatch counter when the forced specialist spawns; its keep counter
+        clears only on a KEEP from that domain's specialist. At most one forced
+        dispatch per tick.
 
         Note:
             Side-effecting: may dispatch a domain specialist via
@@ -563,13 +564,9 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         state = self.shared_state
         if str(getattr(state, "phase", "") or "").upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
             return
-        if not bool(getattr(state, "force_stalled_specialist_enabled", True)):
-            return
-        spec_thr = max(1, int(getattr(state, "force_stalled_specialist_rounds", 0) or FORCE_STALLED_SPECIALIST_ROUNDS))
-        keep_thr = max(1, int(getattr(state, "force_stalled_keep_rounds", 0) or FORCE_STALLED_KEEP_ROUNDS))
         stalled = state.stalled_domains(
-            specialist_threshold=spec_thr,
-            keep_threshold=keep_thr,
+            specialist_threshold=FORCE_STALLED_SPECIALIST_ROUNDS,
+            keep_threshold=FORCE_STALLED_KEEP_ROUNDS,
         )
         if not stalled:
             return
@@ -642,13 +639,11 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             except OSError:
                 log.exception("stalled-domain force: state save failed")
             log.info(
-                "stalled-domain force: dispatched domain=%s anchor=%s gap=%s round=%d (spec_thr=%d keep_thr=%d)",
+                "stalled-domain force: dispatched domain=%s anchor=%s gap=%s round=%d",
                 dom.key,
                 anchor,
                 gap_cid,
                 round_id,
-                spec_thr,
-                keep_thr,
             )
             # One forced dispatch per tick.
             return
