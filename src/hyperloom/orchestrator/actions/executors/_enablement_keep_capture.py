@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import Any, NamedTuple
 
 from hyperloom.inference_optimizer import framework_paths
 
@@ -32,10 +32,12 @@ from ...enablement.recipe.projections import project_launch_evidence
 from . import _patch_snapshot
 from ._nogit_patch import _is_git_tree
 
-if TYPE_CHECKING:
-    from ._integrate_attempt import IntegrateAttempt
-
 log = logging.getLogger(__name__)
+
+#: The ``IntegrateAttempt`` of the round being kept. Naming its type here would reach
+#: ``SharedState`` and close an import cycle back through the loop; the attempt is read,
+#: never built, so the executor that builds it holds the type.
+Attempt = Any
 
 
 class _StackTargets(NamedTuple):
@@ -52,7 +54,7 @@ class _RootIdentity(NamedTuple):
     records: list[dict[str, Any]]
 
 
-def _bind_roots(attempt: IntegrateAttempt, patch_roots: dict[str, str], artifacts: Any) -> _RootIdentity:
+def _bind_roots(attempt: Attempt, patch_roots: dict[str, str], artifacts: Any) -> _RootIdentity:
     """Resolve every tree the accepted stack writes to and the base commit its capture is proven against.
 
     Only what was captured before this round touched each tree, and only where no
@@ -190,7 +192,7 @@ def _stack_targets(
 
 
 def capture_keep_records(
-    attempt: IntegrateAttempt,
+    attempt: Attempt,
     *,
     params: dict[str, Any],
     bench_result: dict[str, Any],
