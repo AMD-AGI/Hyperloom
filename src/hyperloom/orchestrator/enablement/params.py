@@ -442,7 +442,7 @@ class EnablementParams(CoordinatorCollaborator):
                 "never executed and the SAME weights stayed uninitialized."
             )
             return header + "\n" + "\n".join(lines) + "\n" + footer
-        except Exception:
+        except (OSError, ValueError):
             log.debug("enablement: checkpoint weight-facts derivation failed", exc_info=True)
             return ""
 
@@ -477,9 +477,12 @@ class EnablementParams(CoordinatorCollaborator):
         Returns:
             tuple[str, ...]: Ranked candidate refs (best first; possibly empty).
         """
+        import http.client
+
         from .mandate import score_enablement_title
         from hyperloom.agents.framework.models import Candidate, CandidateSearchRequest, PRMonitorConfig
         from hyperloom.agents.framework.sources import enumerate_candidates
+        from hyperloom.agents.framework.sources.pr_monitor import PRMonitorError
         from hyperloom.common.pr_monitor_urls import pr_monitor_base_url
 
         max_candidates = int(getattr(req, "max_search_candidates", 5) or 5)
@@ -508,7 +511,7 @@ class EnablementParams(CoordinatorCollaborator):
                     pr_monitor=pr_monitor,
                 )
                 collected.extend(enumerate_candidates(search))
-            except Exception:
+            except (PRMonitorError, http.client.HTTPException):
                 log.debug(
                     "enablement: candidate discovery failed for repo=%s",
                     repo,
