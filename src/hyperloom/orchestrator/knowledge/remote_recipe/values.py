@@ -767,61 +767,10 @@ def has_new_keep(state: Any) -> bool:
     return False
 
 
-def _adopt_replayed_prior(
-    state: Any,
-    sections: Any,
-    value: dict[str, Any],
-    files: _Files,
-    stack: list[dict[str, Any]],
-) -> None:
-    """Carry forward the exact prior overlays only after replay reproduced."""
-    outcome = _mapping(getattr(state, "warm_replay_outcome", {}))
-    if str(outcome.get("status") or "") != "reproduced":
-        return
-    replayed_refs = {str(ref) for ref in (outcome.get("replayed_patch_refs") or []) if str(ref)}
-    if not replayed_refs:
-        return
-    warm_root = getattr(sections, "warm_start_dir", None)
-    if warm_root is None:
-        raise RemoteRecipeValidationError("replayed prior overlays have no warm-start artifact root")
-    warm_root = Path(warm_root)
-    recipe_path = warm_root / "recipe.json"
-    if not recipe_path.is_file():
-        raise RemoteRecipeValidationError("replayed prior overlays are missing warm-start recipe.json")
-    try:
-        import json
-
-        document = json.loads(recipe_path.read_text(encoding="utf-8"))
-        if not isinstance(document, dict):
-            raise ValueError(f"recipe.json is not a JSON object, got {type(document).__name__}")
-    except (OSError, ValueError) as exc:
-        raise RemoteRecipeValidationError(f"cannot read replayed prior recipe: {exc}") from exc
-    prior_value = _mapping(document.get("value"))
-    if not prior_value:
-        knowledge = _mapping(document.get("knowledge"))
-        prior_value = _mapping(knowledge.get("value"))
-
-    replay_index = next(
-        (index for index, entry in enumerate(stack) if str(entry.get("action") or "").lower() == "replay_warm_recipe"),
-        -1,
-    )
-    if replay_index < 0:
-        raise RemoteRecipeValidationError("replayed prior overlays have no replay_warm_recipe stack entry")
-    # The prior column already lists its overlays in replay order, so the order they are re-adopted in is the order
-    # they were replayed in.
-    candidates = [
-        str(ref) for ref in (_mapping(prior_value.get(PATCH_SECTION)).get("patches") or []) if str(ref) in replayed_refs
-    ]
-    missing_metadata = replayed_refs - set(candidates)
-    if missing_metadata:
-        raise RemoteRecipeValidationError(
-            f"successfully replayed prior overlays are absent from prior knowledge: {sorted(missing_metadata)!r}"
-        )
-
-    # Prior apply roots keyed by the prior ref, so a re-homed overlay carries forward the checkout it must be applied
-    # into.
+def _prior_apply_roots(prior_patch: Mapping[str, Any]) -> dict[str, str]:
+    """Prior apply roots keyed by the prior ref, so a re-homed overlay carries forward the checkout it applies into."""
     prior_roots: dict[str, str] = {}
-    for prov_row in _mapping(prior_value.get(PATCH_SECTION)).get("provenance") or []:
+    for prov_row in prior_patch.get("provenance") or []:
         if not isinstance(prov_row, Mapping):
             continue
         origin = prov_row.get("host_origin")
@@ -831,39 +780,87 @@ def _adopt_replayed_prior(
             root_str = str(root or "").strip()
             if str(ref) and root_str:
                 prior_roots[str(ref)] = root_str
+    return prior_roots
 
+
+def _provenance_with_apply_roots(
+    provenance: Any,
+    stack_index: int,
+    apply_roots: Mapping[str, str],
+) -> list[dict[str, Any]]:
+    """Merge ``apply_roots`` into the provenance row at ``stack_index``, creating it, and order rows by stack index."""
+    rows = [dict(row) for row in (provenance or []) if isinstance(row, Mapping)]
+    row = next((r for r in rows if r.get("stack_index") == stack_index), None)
+    if row is None:
+        row = {
+            "stack_index": stack_index,
+            "base_sha": "",
+            "complete": True,
+            "artifacts_outside_root": 0,
+            "realized": True,
+        }
+        rows.append(row)
+    origin = dict(row.get("host_origin") or {})
+    origin["apply_roots"] = {**dict(origin.get("apply_roots") or {}), **apply_roots}
+    row["host_origin"] = origin
+    rows.sort(key=lambda r: int(r.get("stack_index") or 0))
+    return rows
+
+
+def _adopt_replayed_prior(
+    state: Any,
+    sections: Any,
+    value: dict[str, Any],
+    files: _Files,
+    stack: list[dict[str, Any]],
+) -> None:
+    """Carry forward the exact prior overlays only after replay reproduced."""
+    from ..agent_kb import PatchKB
+
+    outcome = _mapping(getattr(state, "warm_replay_outcome", {}))
+    if outcome.get("status") != "reproduced":
+        return
+    replayed_refs = {str(ref) for ref in (outcome.get("replayed_patch_refs") or []) if str(ref)}
+    if not replayed_refs:
+        return
+    if sections.warm_start_dir is None:
+        raise RemoteRecipeValidationError("replayed prior overlays have no warm-start artifact root")
+    recipe_path = sections.warm_start_dir / "recipe.json"
+    if not recipe_path.is_file():
+        raise RemoteRecipeValidationError("replayed prior overlays are missing warm-start recipe.json")
+    try:
+        document = json.loads(recipe_path.read_text(encoding="utf-8"))
+        if not isinstance(document, dict):
+            raise ValueError(f"recipe.json is not a JSON object, got {type(document).__name__}")
+    except (OSError, ValueError) as exc:
+        raise RemoteRecipeValidationError(f"cannot read replayed prior recipe: {exc}") from exc
+    prior_patch = _mapping(_mapping(document.get("value")).get(PATCH_SECTION))
+
+    replay_index = next(
+        (index for index, entry in enumerate(stack) if str(entry.get("action") or "").lower() == "replay_warm_recipe"),
+        -1,
+    )
+    if replay_index < 0:
+        raise RemoteRecipeValidationError("replayed prior overlays have no replay_warm_recipe stack entry")
+    # The prior column already lists its overlays in replay order, so the order they are re-adopted in is the order
+    # they were replayed in.
+    candidates = list(
+        dict.fromkeys(str(ref) for ref in (prior_patch.get("patches") or []) if str(ref) in replayed_refs)
+    )
+    missing_metadata = replayed_refs - set(candidates)
+    if missing_metadata:
+        raise RemoteRecipeValidationError(
+            f"successfully replayed prior overlays are absent from prior knowledge: {sorted(missing_metadata)!r}"
+        )
+
+    prior_roots = _prior_apply_roots(prior_patch)
+    patch_kb = PatchKB(sections)
+    adopted: list[str] = []
     adopted_roots: dict[str, str] = {}
-    member_index = 0
-    seen: set[str] = set()
-    files_root = warm_root / "files"
-    if files_root.is_symlink():
-        raise RemoteRecipeValidationError("replayed prior files root must not be a symlink")
-    resolved_root = files_root.resolve()
-    for old_ref in candidates:
-        if old_ref in seen:
-            continue
-        seen.add(old_ref)
-        normalized_ref = validate_relative_path(old_ref)
-        source = files_root / normalized_ref
-        cursor = files_root
-        for part in Path(normalized_ref).parts:
-            cursor = cursor / part
-            if cursor.is_symlink():
-                raise RemoteRecipeValidationError(
-                    f"successfully replayed prior overlay resolves through a symlink: {old_ref!r}"
-                )
-        try:
-            source.resolve().relative_to(resolved_root)
-        except ValueError as exc:
-            raise RemoteRecipeValidationError(f"replayed prior overlay escapes files root: {old_ref!r}") from exc
-        if not source.is_file():
+    for member_index, old_ref in enumerate(candidates):
+        source = patch_kb.prior_file(old_ref)
+        if source is None:
             raise RemoteRecipeValidationError(f"successfully replayed prior overlay is missing: {old_ref!r}")
-        try:
-            source.read_bytes()
-        except OSError as exc:
-            raise RemoteRecipeValidationError(
-                f"cannot read successfully replayed prior overlay {old_ref!r}: {exc}"
-            ) from exc
         match = _OVERLAY_REF_RE.match(old_ref)
         old_name = match.group(3) if match else source.stem
         safe_name = _OVERLAY_NAME_RE.sub("-", old_name).strip("._-") or "patch"
@@ -874,38 +871,17 @@ def _adopt_replayed_prior(
             raise RemoteRecipeValidationError(
                 f"cannot adopt successfully replayed prior overlay {old_ref!r}: {exc}"
             ) from exc
-        node = _mapping(value.get(PATCH_SECTION))
-        refs = [str(ref) for ref in (node.get("patches") or []) if str(ref)]
-        if new_ref not in refs:
-            refs.append(new_ref)
-        node["patches"] = sorted(refs)
-        value[PATCH_SECTION] = node
+        adopted.append(new_ref)
         if prior_root := prior_roots.get(old_ref):
             adopted_roots[new_ref] = prior_root
-        member_index += 1
 
+    node = _mapping(value.get(PATCH_SECTION))
+    refs = [str(ref) for ref in (node.get("patches") or []) if str(ref)]
+    node["patches"] = sorted([*refs, *(ref for ref in adopted if ref not in refs)])
     # Re-home the prior apply roots onto the new refs, under the replay stack index the adopted overlays now live at.
     if adopted_roots:
-        node = _mapping(value.get(PATCH_SECTION))
-        rows = [dict(row) for row in (node.get("provenance") or []) if isinstance(row, Mapping)]
-        row = next((r for r in rows if r.get("stack_index") == replay_index), None)
-        if row is None:
-            row = {
-                "stack_index": replay_index,
-                "base_sha": "",
-                "complete": True,
-                "artifacts_outside_root": 0,
-                "realized": True,
-            }
-            rows.append(row)
-        origin = dict(row.get("host_origin") or {})
-        merged_roots = dict(origin.get("apply_roots") or {})
-        merged_roots.update(adopted_roots)
-        origin["apply_roots"] = merged_roots
-        row["host_origin"] = origin
-        rows.sort(key=lambda r: int(r.get("stack_index") or 0))
-        node["provenance"] = rows
-        value[PATCH_SECTION] = node
+        node["provenance"] = _provenance_with_apply_roots(node.get("provenance"), replay_index, adopted_roots)
+    value[PATCH_SECTION] = node
 
 
 def _remap_artifact_refs(value: Any, refs: Mapping[str, str]) -> Any:
