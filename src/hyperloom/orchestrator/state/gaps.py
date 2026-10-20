@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 from ..collaborator import CoordinatorCollaborator
 from hyperloom.common.timeutil import now_iso
 
+from ._shared_state import gap_rows
 from .failure_evidence import UNMEASURED_OUTCOMES, failure_from_variant_outcome
 
 if TYPE_CHECKING:
@@ -74,15 +75,10 @@ def _apply_gap_update(existing: dict[str, Any], entry: dict[str, Any], now: str)
         existing["attempts"] = _merge_gap_attempts(list(existing.get("attempts") or []), incoming_attempts)
 
 
-def _gap_recency_key(gap: dict[str, Any]) -> str:
-    """Sort key for gap trimming: newest-updated timestamp."""
-    return str(gap.get("last_updated_ts") or gap.get("first_seen_ts") or "")
-
-
 def _trim_gaps_to_cap(gaps: list[dict[str, Any]], keep: dict[str, Any]) -> list[dict[str, Any]]:
     """Drop the least recently updated gaps until the ledger fits its cap, always retaining ``keep``."""
     others = [g for g in gaps if g is not keep]
-    others.sort(key=_gap_recency_key)
+    others.sort(key=gap_rows.recency_key)
     keep_count = _GAPS_MAX_ENTRIES - 1
     return (others[-keep_count:] if keep_count > 0 else []) + [keep]
 

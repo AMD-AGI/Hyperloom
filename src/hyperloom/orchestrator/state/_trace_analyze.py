@@ -126,7 +126,7 @@ def _rocprof_roofline_sidecar(kernel_roofline_path: Any) -> dict[str, Any]:
             if not isinstance(row, dict) or not row.get("kernel_id"):
                 continue
             by_kernel_id[str(row["kernel_id"])] = row.get("rocprof_roofline")
-    except Exception:  # noqa: BLE001 — sidecar merge is best-effort
+    except (OSError, ValueError, AttributeError, TypeError):  # sidecar merge is best-effort
         return {}
     return by_kernel_id
 
