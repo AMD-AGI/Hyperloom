@@ -263,6 +263,7 @@ def dispatch_single_task(
             reason=reason,
         )
     except Exception as error:  # noqa: BLE001 - translated into a dispatch failure
+        log.warning("single-task dispatch failed for %s: %s", task_path, error)
         reason = f"single-task dispatch failed: {error}"
         state_store.transition(TASK_STATUS_FAILED, reason=reason)
         return SingleTaskResult(

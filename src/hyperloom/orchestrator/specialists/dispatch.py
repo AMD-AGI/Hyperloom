@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import csv
 import logging as _logging
 import os
 from datetime import datetime, timezone
@@ -148,7 +149,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 tree = resolve_framework_tree(str(getattr(state, "framework", "") or ""))
                 if tree:
                     params["session_framework_tree"] = tree
-            except Exception as exc:  # noqa: BLE001
+            except (KeyError, OSError) as exc:
                 log.debug(
                     "specialist warmup: framework_source_roots lookup failed: %r",
                     exc,
@@ -188,15 +189,9 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 params["target_gap_notes"] = _gap_notes
 
         if "research_hints" not in params:
-            try:
-                from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
+            from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
 
-                _hints_block = _research_hints.summarise_for_prompt(
-                    self.session_dir,
-                )
-            except Exception:
-                log.exception("Coordinator: specialist research hints failed")
-                _hints_block = ""
+            _hints_block = _research_hints.summarise_for_prompt(self.session_dir)
             if _hints_block:
                 params["research_hints"] = _hints_block
 
@@ -253,7 +248,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             if analysis_path:
                 try:
                     executive_summary = extract_workload_summary(analysis_path)
-                except Exception as exc:  # noqa: BLE001
+                except (ValueError, csv.Error) as exc:
                     log.warning(
                         "specialist warmup: extract_workload_summary(%s) failed: %r",
                         analysis_path,

@@ -1998,6 +1998,7 @@ class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
         # ``graded.reference`` is the anchor this winner had to beat, and this
         # call is the last moment it exists: the current_best write that follows
         # overwrites it.
+        from hyperloom.common.perf_metric import baseline_on_axis
         from hyperloom.inference_optimizer.breakdown.recorder import stack_event
 
         stack_event.record_adoption(
@@ -2005,7 +2006,7 @@ class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
             entry=stack_entry,
             throughput_before=graded.reference,
             throughput_after=graded.candidate,
-            baseline_tput=self.shared_state.baseline_tput,
+            baseline_tput=baseline_on_axis(self.shared_state, graded.objective),
             objective=graded.objective,
             degrade_reason=graded.degrade_reason,
         )

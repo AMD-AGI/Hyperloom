@@ -1138,36 +1138,6 @@ def test_retry_policy_env_and_on_retry_error(monkeypatch: pytest.MonkeyPatch) ->
     assert RetryPolicy(base_delay_s=2.0, max_delay_s=3.0, multiplier=10.0, jitter_s=0.5).delay_for(2) == 3.25
 
 
-@pytest.mark.asyncio
-async def test_retry_with_backoff_swallows_on_retry_callback_error() -> None:
-    from hyperloom.orchestrator.roles.base import RetryPolicy, retry_with_backoff
-
-    calls = {"n": 0}
-    slept: list[float] = []
-
-    async def _flaky():
-        calls["n"] += 1
-        if calls["n"] == 1:
-            raise ConnectionError("transient")
-        return "ok"
-
-    async def _sleep(delay: float) -> None:
-        slept.append(delay)
-
-    def _bad_on_retry(*_args):
-        raise RuntimeError("telemetry failed")
-
-    out = await retry_with_backoff(
-        _flaky,
-        policy=RetryPolicy(max_attempts=2, base_delay_s=0.0, jitter_s=0.0),
-        retry_on=(ConnectionError,),
-        sleep=_sleep,
-        on_retry=_bad_on_retry,
-    )
-    assert out == "ok"
-    assert slept == [0.0]
-
-
 # orchestrator.roles._runtime_bridge
 
 

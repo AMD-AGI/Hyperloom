@@ -5,9 +5,11 @@
 
 from __future__ import annotations
 
+import http.client
 from pathlib import Path
 from typing import Any
 
+from hyperloom.agents.framework.sources.pr_monitor import PRMonitorError
 from hyperloom.common.deadline import Deadline
 from hyperloom.orchestrator.lever import LEVER_ENABLEMENT
 
@@ -442,7 +444,7 @@ class EnablementParams(CoordinatorCollaborator):
                 "never executed and the SAME weights stayed uninitialized."
             )
             return header + "\n" + "\n".join(lines) + "\n" + footer
-        except Exception:
+        except (OSError, ValueError):
             log.debug("enablement: checkpoint weight-facts derivation failed", exc_info=True)
             return ""
 
@@ -508,7 +510,7 @@ class EnablementParams(CoordinatorCollaborator):
                     pr_monitor=pr_monitor,
                 )
                 collected.extend(enumerate_candidates(search))
-            except Exception:
+            except (PRMonitorError, http.client.HTTPException):
                 log.debug(
                     "enablement: candidate discovery failed for repo=%s",
                     repo,
