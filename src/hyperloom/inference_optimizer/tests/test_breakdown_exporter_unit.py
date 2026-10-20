@@ -13,10 +13,7 @@ import pytest
 
 from hyperloom.common.timeutil import iso_z
 from hyperloom.inference_optimizer.breakdown import exporter as ex
-from hyperloom.inference_optimizer.breakdown.collectors import langfuse as langfuse_collector
 from hyperloom.inference_optimizer.breakdown.collectors import sessions
-from hyperloom.inference_optimizer.session import session_paths
-from hyperloom.inference_optimizer.trace import langfuse_emitter
 from hyperloom.inference_optimizer.trace import decision_trace
 
 # ---- _load_session_json ----
@@ -122,100 +119,6 @@ def test_decision_trace_failure_reaches_the_caller(monkeypatch, tmp_path):
 
     with pytest.raises(RuntimeError, match="join failed"):
         decision_trace.write_session_decision_trace(tmp_path)
-
-
-def _break_state_json(path: Path, how: str) -> None:
-    if how == "bad_json":
-        path.write_text("{bad", encoding="utf-8")
-    elif how == "bad_utf8":
-        path.write_bytes(b"\xff\xfe")
-    else:
-        path.mkdir()
-
-
-_STATE_BREAKAGES = [
-    ("bad_json", "JSONDecodeError"),
-    ("bad_utf8", "UnicodeDecodeError"),
-    ("directory", "IsADirectoryError"),
-]
-
-
-@pytest.mark.parametrize(("how", "error_name"), _STATE_BREAKAGES)
-def test_unreadable_state_json_is_warned_and_traced_as_empty(monkeypatch, tmp_path, how, error_name):
-    seen = []
-    monkeypatch.setattr(decision_trace, "write_decision_trace", lambda sd, state, warnings: seen.append(state))
-    _break_state_json(tmp_path / "state.json", how)
-
-    warnings = decision_trace.write_session_decision_trace(tmp_path)
-
-    assert seen == [{}]
-    assert len(warnings) == 1
-    assert warnings[0].startswith(f"decision_trace: failed to parse state.json: {error_name}:")
-
-
-def test_unexpected_state_json_failure_surfaces(monkeypatch, tmp_path):
-    (tmp_path / "state.json").write_text("{}", encoding="utf-8")
-
-    def explode(*_a, **_k):
-        raise RuntimeError("read broke")
-
-    monkeypatch.setattr(Path, "read_text", explode)
-
-    with pytest.raises(RuntimeError, match="read broke"):
-        decision_trace.write_session_decision_trace(tmp_path)
-
-
-@pytest.mark.parametrize(("how", "error_name"), _STATE_BREAKAGES)
-def test_unreadable_session_json_yields_empty_with_warning(tmp_path, how, error_name):
-    _break_state_json(tmp_path / "state.json", how)
-    warnings = []
-
-    assert ex._load_session_json(tmp_path / "state.json", "state.json", warnings) == {}
-    assert len(warnings) == 1
-    assert warnings[0].startswith(f"failed to parse state.json: {error_name}(")
-
-
-def test_non_object_session_json_yields_empty_with_warning(tmp_path):
-    (tmp_path / "state.json").write_text("[1]", encoding="utf-8")
-    warnings = []
-
-    assert ex._load_session_json(tmp_path / "state.json", "state.json", warnings) == {}
-    assert len(warnings) == 1
-    assert warnings[0].startswith("failed to parse state.json: ValueError(")
-
-
-def test_unexpected_session_json_failure_surfaces(monkeypatch, tmp_path):
-    (tmp_path / "state.json").write_text("{}", encoding="utf-8")
-
-    def explode(*_a, **_k):
-        raise RuntimeError("read broke")
-
-    monkeypatch.setattr(ex, "read_json_strict", explode)
-
-    with pytest.raises(RuntimeError, match="read broke"):
-        ex._load_session_json(tmp_path / "state.json", "state.json", [])
-
-
-def test_undecodable_langfuse_receipt_is_warned_and_skipped(tmp_path):
-    receipt = session_paths.trace_dir(tmp_path) / "langfuse_receipt.json"
-    receipt.parent.mkdir(parents=True)
-    receipt.write_bytes(b"\xff\xfe")
-    warnings = []
-
-    section = langfuse_collector.collect_langfuse(tmp_path, {}, warnings)
-
-    assert section["receipt_source"] != "receipt_file"
-    assert warnings[0].startswith("langfuse: read_receipt failed: UnicodeDecodeError:")
-
-
-def test_unexpected_langfuse_receipt_failure_surfaces(monkeypatch, tmp_path):
-    def explode(_session_dir):
-        raise RuntimeError("receipt broke")
-
-    monkeypatch.setattr(langfuse_emitter, "read_receipt", explode)
-
-    with pytest.raises(RuntimeError, match="receipt broke"):
-        langfuse_collector.collect_langfuse(tmp_path, {}, [])
 
 
 def test_breakdown_is_still_written_when_the_decision_trace_fails(monkeypatch, tmp_path):

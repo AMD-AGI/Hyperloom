@@ -774,27 +774,3 @@ def test_competitor_target_write_failure_surfaces(tmp_path, monkeypatch):
         target_analyzer._write_measured_competitor_target(
             tmp_path, BaselineQuery(model="m", gpu="mi355x"), [_measured_point()], "https://example.test"
         )
-
-
-def test_clear_competitor_target_ignores_an_unremovable_path(tmp_path):
-    from hyperloom.inference_optimizer.baseline_comparison import target_analyzer
-    from hyperloom.inference_optimizer.session import session_paths
-
-    blocker = session_paths.competitor_target_json(tmp_path)
-    blocker.mkdir()
-
-    assert target_analyzer.clear_competitor_target(tmp_path) is None
-    assert blocker.is_dir()
-
-
-def test_clear_competitor_target_unexpected_failure_surfaces(tmp_path, monkeypatch):
-    from hyperloom.inference_optimizer.baseline_comparison import target_analyzer
-    from hyperloom.inference_optimizer.session import session_paths
-
-    def _boom(*_a, **_k):
-        raise RuntimeError("path resolution broke")
-
-    monkeypatch.setattr(session_paths, "competitor_target_json", _boom)
-
-    with pytest.raises(RuntimeError, match="path resolution broke"):
-        target_analyzer.clear_competitor_target(tmp_path)

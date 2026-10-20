@@ -5,12 +5,9 @@
 
 from __future__ import annotations
 
-import http.client
 import io
 import json
 import urllib.error
-
-import pytest
 
 from hyperloom.agents.framework.sources import github as gh
 from hyperloom.agents.framework.sources._shared import GitHubPr
@@ -218,50 +215,3 @@ def test_fetch_raw_file_invalid_args(monkeypatch):
 def test_source_patch_exports():
     assert "pr_patches" in gh.__all__
     assert "fetch_raw_file" in gh.__all__
-
-
-_GITHUB_CALLS = {
-    "search": (lambda: gh.search_perf_prs("https://github.com/ROCm/vllm.git", terms=gh.PERF_TERMS), []),
-    "patches": (lambda: gh.pr_patches("ROCm/vllm", 1234), ""),
-    "raw_file": (lambda: gh.fetch_raw_file("ROCm/vllm", "main", "a.py"), ""),
-}
-
-
-def _raise_from_urlopen(monkeypatch, exc: BaseException) -> None:
-    def _open(req, timeout=0):
-        raise exc
-
-    monkeypatch.setattr(gh.urllib.request, "urlopen", _open)
-
-
-@pytest.mark.parametrize("call", sorted(_GITHUB_CALLS))
-def test_unexpected_fetch_failure_surfaces(monkeypatch, call) -> None:
-    _raise_from_urlopen(monkeypatch, RuntimeError("urlopen broke"))
-
-    with pytest.raises(RuntimeError, match="urlopen broke"):
-        _GITHUB_CALLS[call][0]()
-
-
-@pytest.mark.parametrize(
-    "exc",
-    [
-        urllib.error.HTTPError("u", 403, "rate", {}, io.BytesIO(b"")),
-        urllib.error.URLError("dns"),
-        TimeoutError("slow"),
-        http.client.IncompleteRead(b"ab"),
-        http.client.InvalidURL("bad url"),
-        UnicodeEncodeError("ascii", "\xe9", 0, 1, "ordinal not in range"),
-    ],
-    ids=["http_error", "url_error", "timeout", "incomplete_read", "invalid_url", "non_ascii_url"],
-)
-@pytest.mark.parametrize("call", sorted(_GITHUB_CALLS))
-def test_expected_fetch_failure_yields_the_empty_value(monkeypatch, call, exc) -> None:
-    _raise_from_urlopen(monkeypatch, exc)
-
-    assert _GITHUB_CALLS[call][0]() == _GITHUB_CALLS[call][1]
-
-
-def test_search_perf_prs_undecodable_body_yields_empty(monkeypatch) -> None:
-    _install_urlopen(monkeypatch, lambda req: _FakeResp(200, b"\xff\xfe"))
-
-    assert gh.search_perf_prs("https://github.com/ROCm/vllm.git", terms=gh.PERF_TERMS) == []

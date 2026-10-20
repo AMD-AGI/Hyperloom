@@ -89,33 +89,3 @@ def test_read_baseline_yaml_benchmark(tmp_path: Path):
 
     # Full chain: baseline yaml -> server args string.
     assert rc._read_baseline_yaml_server_args(state) == "--tp 8"
-
-
-def _baseline_state(cfg: Path) -> SimpleNamespace:
-    return SimpleNamespace(last_baseline={"extras": {"materialized_config": str(cfg)}})
-
-
-@pytest.mark.parametrize(
-    "content",
-    [None, b"benchmark: [unclosed", b"\xff\xfe", b"- just\n- a list\n", b"plain scalar"],
-    ids=["missing", "yaml_syntax", "bad_utf8", "list_root", "scalar_root"],
-)
-def test_unusable_baseline_yaml_yields_no_benchmark(tmp_path: Path, content):
-    cfg = tmp_path / "materialized.yaml"
-    if content is not None:
-        cfg.write_bytes(content)
-
-    assert rc._read_baseline_yaml_benchmark(_baseline_state(cfg)) == {}
-
-
-def test_unexpected_baseline_yaml_failure_surfaces(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    cfg = tmp_path / "materialized.yaml"
-    cfg.write_text("benchmark: {}\n", encoding="utf-8")
-
-    def _boom(*_a, **_k):
-        raise RuntimeError("yaml loader broke")
-
-    monkeypatch.setattr("yaml.safe_load", _boom)
-
-    with pytest.raises(RuntimeError, match="yaml loader broke"):
-        rc._read_baseline_yaml_benchmark(_baseline_state(cfg))

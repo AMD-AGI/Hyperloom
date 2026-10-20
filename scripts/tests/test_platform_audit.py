@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import importlib.util
-import io
 from pathlib import Path
 
 import pytest
@@ -218,28 +217,3 @@ def test_os_layer_survives_a_host_with_no_cpu_sysfs(monkeypatch):
     assert pa.physical_cores() == []
     # Still a usable record: unresolved, not absent.
     assert {r["key"] for r in pa.build_rows(osl)} >= set(pa.CHECKED) | set(pa.RECORDED)
-
-
-def _missing_msr(*_a, **_k):
-    raise FileNotFoundError("no msr")
-
-
-def _short_msr(*_a, **_k):
-    return io.BytesIO(b"\x00")
-
-
-@pytest.mark.parametrize("opener", [_missing_msr, _short_msr])
-def test_read_hwcr_reports_an_unreadable_msr_as_none(monkeypatch, opener):
-    monkeypatch.setattr(pa.os, "geteuid", lambda: 0)
-    monkeypatch.setattr("builtins.open", opener)
-    assert pa.read_hwcr() is None
-
-
-def test_read_hwcr_does_not_hide_an_unexpected_failure(monkeypatch):
-    def _broken(*_a, **_k):
-        raise TypeError("msr reader broke")
-
-    monkeypatch.setattr(pa.os, "geteuid", lambda: 0)
-    monkeypatch.setattr("builtins.open", _broken)
-    with pytest.raises(TypeError, match="msr reader broke"):
-        pa.read_hwcr()

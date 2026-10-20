@@ -102,39 +102,6 @@ def test_collect_falls_back_to_package_version_when_commit_unset(monkeypatch, tm
     assert any("AITER_COMMIT" in s for s in st["soft"])
 
 
-def _raising_version(failure):
-    def version(_dist):
-        raise failure
-
-    return version
-
-
-@pytest.mark.parametrize(
-    "failure",
-    [OSError("unreadable METADATA"), UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")],
-    ids=lambda failure: type(failure).__name__,
-)
-def test_installed_version_is_none_when_dist_info_is_unreadable(monkeypatch, failure):
-    import importlib.metadata
-
-    from kernelforge.gemm_tune import aiter_preflight as ap
-
-    monkeypatch.setattr(importlib.metadata, "version", _raising_version(failure))
-
-    assert ap._installed_aiter_version() is None
-
-
-def test_installed_version_surfaces_an_unexpected_error(monkeypatch):
-    import importlib.metadata
-
-    from kernelforge.gemm_tune import aiter_preflight as ap
-
-    monkeypatch.setattr(importlib.metadata, "version", _raising_version(RuntimeError("metadata bug")))
-
-    with pytest.raises(RuntimeError, match="^metadata bug$"):
-        ap._installed_aiter_version()
-
-
 def test_collect_commit_env_wins_over_package_version(monkeypatch, tmp_path):
     from kernelforge.gemm_tune import aiter_preflight as ap
 

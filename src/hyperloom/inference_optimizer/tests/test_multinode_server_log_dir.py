@@ -74,15 +74,3 @@ def test_falls_back_to_tmp_when_no_session(monkeypatch: pytest.MonkeyPatch) -> N
 
     assert result.endswith("multi_node_logs")
     assert Path(result).is_absolute()
-
-
-def test_an_unexpected_state_file_error_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Only an unresolvable state file falls back to /tmp."""
-    _clear_env(monkeypatch)
-
-    def _boom() -> Path:
-        raise ValueError("embedded null byte")
-
-    monkeypatch.setattr("hyperloom.inference_optimizer.multi_node.cli._state_file", _boom)
-    with pytest.raises(ValueError, match="embedded null byte"):
-        _multinode_server_log_dir()

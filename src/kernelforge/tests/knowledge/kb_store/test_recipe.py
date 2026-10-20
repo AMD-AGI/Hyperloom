@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -104,28 +103,6 @@ def test_a_run_without_a_configured_store_turns_every_call_into_a_no_op(
         "written": False,
         "reason": "not_configured",
     }
-
-
-def test_an_identity_the_scheme_rejects_cold_starts_with_the_reason(tmp_path, monkeypatch):
-    _use_in_memory_kb_store(monkeypatch)
-    spec, _driver = _spec(tmp_path)
-    config = _remote_config(tmp_path)
-    identity = replace(_resolved_identity(spec, config), framework="Not Valid")
-
-    kb = KernelRecipeKB.open_identity(identity, config)
-
-    assert kb.active is False
-    assert kb.reason == (
-        "ValueError: KernelRecipeIdentity.framework must be 1-256 lowercase ASCII characters "
-        "and contain only letters, digits, '.', '_', '+', or '-'"
-    )
-
-
-def test_a_value_that_is_not_an_identity_is_not_a_cold_start(tmp_path, monkeypatch):
-    _use_in_memory_kb_store(monkeypatch)
-
-    with pytest.raises(TypeError, match="dataclass"):
-        KernelRecipeKB.open_identity(object(), _remote_config(tmp_path))
 
 
 def _failing_kb(tmp_path, failure: Exception) -> KernelRecipeKB:

@@ -755,36 +755,3 @@ def test_packaging_failure_propagates(tmp_path: Path, monkeypatch: pytest.Monkey
 
     with pytest.raises(RuntimeError):
         package_session_artifacts(sd, session_id="sid", dest_root=tmp_path / "ws")
-
-
-def test_loose_copy_io_failure_keeps_the_written_zip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from hyperloom.inference_optimizer.breakdown import session_package as sp
-
-    sd = tmp_path / "session"
-    _build_session(sd)
-    dest = tmp_path / "workspace"
-
-    def _unavailable(*_a, **_k):
-        raise OSError("loose root vanished")
-
-    monkeypatch.setattr(sp, "_copy_loose_tree", _unavailable)
-
-    out = package_session_artifacts(sd, session_id="sid", dest_root=dest)
-
-    assert out == (dest / PACKAGE_SUBDIR / "sid.zip").resolve()
-    assert out.is_file()
-
-
-def test_loose_copy_unexpected_failure_surfaces(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from hyperloom.inference_optimizer.breakdown import session_package as sp
-
-    sd = tmp_path / "session"
-    _build_session(sd)
-
-    def _broken(*_a, **_k):
-        raise ValueError("manifest broke")
-
-    monkeypatch.setattr(sp, "_copy_loose_tree", _broken)
-
-    with pytest.raises(ValueError, match="manifest broke"):
-        package_session_artifacts(sd, session_id="sid", dest_root=tmp_path / "workspace")

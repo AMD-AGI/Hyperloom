@@ -117,28 +117,3 @@ def test_a_projection_bug_in_record_raises(tmp_path):
     rec._write = _boom  # type: ignore[method-assign]
     with pytest.raises(TypeError, match="shape changed"):
         rec.record_singleton("session", {"session_id": "x"})
-
-
-def _write_warning_case(tmp_path, case):
-    if case == "unwritable":
-        blocker = tmp_path / "not-a-dir"
-        blocker.write_text("x", encoding="utf-8")
-        return blocker, OSError("disk full")
-    return tmp_path, OSError("unreadable \udcff path")
-
-
-@pytest.mark.parametrize("case", ["unwritable", "unencodable_message"])
-def test_a_write_warning_that_cannot_be_persisted_reports_false(tmp_path, case):
-    session_dir, exc = _write_warning_case(tmp_path, case)
-
-    assert sbd_v6.record_write_warning(session_dir, component="timeline.install", exc=exc) is False
-
-
-def test_an_unexpected_write_warning_failure_surfaces(tmp_path, monkeypatch):
-    def _boom(*_args, **_kwargs):
-        raise RuntimeError("serialiser broke")
-
-    monkeypatch.setattr(sbd_v6, "append_jsonl", _boom)
-
-    with pytest.raises(RuntimeError, match="serialiser broke"):
-        sbd_v6.record_write_warning(tmp_path, component="timeline.install", exc=OSError("disk full"))

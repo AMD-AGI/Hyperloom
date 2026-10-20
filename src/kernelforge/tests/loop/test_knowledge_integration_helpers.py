@@ -207,6 +207,16 @@ def test_bench_once_rejects_scalar_only_result(monkeypatch):
     assert integ._bench_once("drv.py") is None
 
 
+def test_bench_once_none_on_exception(monkeypatch):
+    import kernelforge.mcp_server.tools.bench as bench
+
+    async def boom(*_a, **_k):
+        raise ValueError("bench failed")
+
+    monkeypatch.setattr(bench, "bench_wallclock", boom)
+    assert integ._bench_once("drv.py") is None
+
+
 def test_correctness_once_true(monkeypatch):
     import kernelforge.mcp_server.tools.test as test_mod
 
@@ -216,6 +226,16 @@ def test_correctness_once_true(monkeypatch):
 
     monkeypatch.setattr(test_mod, "test_correctness", fake)
     assert integ._correctness_once("drv.py", 30.0) is True
+
+
+def test_correctness_once_false_on_exception(monkeypatch):
+    import kernelforge.mcp_server.tools.test as test_mod
+
+    async def boom(**_k):
+        raise ValueError("correctness failed")
+
+    monkeypatch.setattr(test_mod, "test_correctness", boom)
+    assert integ._correctness_once("drv.py", 30.0) is False
 
 
 # --------------------------------------------------------------------------- # _cheap_summary

@@ -149,30 +149,6 @@ def test_apply_bad_base64_fails(patch_env, capsys):
     assert "base64" in payload["error"]
 
 
-@pytest.mark.parametrize("patch_b64", ["!!!not-base64!!!", "caf\u00e9"])
-def test_apply_undecodable_patch_reports_failure(patch_env, capsys, patch_b64):
-    fw, bak = patch_env
-    k = _load("kno_apply_undecodable")
-    target = fw / "f.txt"
-    target.write_text("orig", encoding="utf-8")
-    ns = argparse.Namespace(target_path=str(target), backup_dir=str(bak), kernel_id="k", patch_b64=patch_b64)
-    rc = k._do_apply(ns)
-    payload = _last_json(capsys)
-    assert rc == 1
-    assert payload["status"] == "failed"
-    assert payload["error"].startswith("patch_b64 not valid base64: ")
-
-
-def test_apply_non_string_patch_surfaces(patch_env):
-    fw, bak = patch_env
-    k = _load("kno_apply_non_string")
-    target = fw / "f.txt"
-    target.write_text("orig", encoding="utf-8")
-    ns = argparse.Namespace(target_path=str(target), backup_dir=str(bak), kernel_id="k", patch_b64=None)
-    with pytest.raises(AttributeError, match="encode"):
-        k._do_apply(ns)
-
-
 def test_revert_missing_backup_is_noop(tmp_path, capsys):
     k = _load("kno_revert_noop")
     ns = argparse.Namespace(

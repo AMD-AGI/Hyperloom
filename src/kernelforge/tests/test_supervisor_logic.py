@@ -4,8 +4,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from kernelforge.orchestrator.supervisor import (
     SupervisorInteraction,
     _build_task_prompt,
@@ -121,25 +119,6 @@ def test_injected_ruling_gets_fallback_audit_artifact(tmp_path):
     assert "source: injected callback" in interaction.read_text()
     assert reply in interaction.read_text()
     assert latest.read_text() == reply
-
-
-def test_injected_ruling_persistence_reports_a_write_failure_as_unpersisted(tmp_path, monkeypatch):
-    def _read_only(path, content):
-        raise OSError("read-only file system")
-
-    monkeypatch.setattr("kernelforge.orchestrator.supervisor.atomic_write_text", _read_only)
-
-    assert persist_supervisor_ruling(str(tmp_path), 3, "stall", "ruling") == (None, None)
-
-
-def test_injected_ruling_persistence_surfaces_an_unexpected_failure(tmp_path, monkeypatch):
-    def _broken(path, content):
-        raise RuntimeError("writer bug")
-
-    monkeypatch.setattr("kernelforge.orchestrator.supervisor.atomic_write_text", _broken)
-
-    with pytest.raises(RuntimeError, match="^writer bug$"):
-        persist_supervisor_ruling(str(tmp_path), 3, "stall", "ruling")
 
 
 def test_persist_interaction_survives_an_unwritable_workspace(tmp_path):

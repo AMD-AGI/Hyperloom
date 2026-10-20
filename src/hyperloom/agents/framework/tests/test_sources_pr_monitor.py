@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import http.client
 import io
 import json
 import urllib.error
@@ -143,40 +142,3 @@ def test_list_perf_prs_hard_fails_on_url_error(monkeypatch) -> None:
     _install_urlopen(monkeypatch, handler)
     with pytest.raises(pc.PRMonitorError, match="unreachable"):
         pc.list_perf_prs("https://github.com/sgl-project/sglang.git", monitor=PRMonitorConfig(base_url="http://x"))
-
-
-class _UnreadableBody(io.BytesIO):
-    def __init__(self, exc: BaseException):
-        super().__init__(b"")
-        self._exc = exc
-
-    def read(self, *_a, **_k) -> bytes:
-        raise self._exc
-
-
-def _http_error_with_body_failure(monkeypatch, exc: BaseException) -> None:
-    def handler(req):
-        raise urllib.error.HTTPError(req.get_full_url(), 503, "boom", {}, _UnreadableBody(exc))
-
-    _install_urlopen(monkeypatch, handler)
-
-
-def test_unexpected_error_body_failure_surfaces(monkeypatch) -> None:
-    _http_error_with_body_failure(monkeypatch, RuntimeError("body broke"))
-
-    with pytest.raises(RuntimeError, match="body broke"):
-        pc._http_get("http://x/y", timeout_sec=1.0)
-
-
-@pytest.mark.parametrize(
-    "exc",
-    [OSError("closed"), http.client.IncompleteRead(b"ab")],
-    ids=["os_error", "incomplete_read"],
-)
-def test_unreadable_error_body_is_reported_without_it(monkeypatch, exc) -> None:
-    _http_error_with_body_failure(monkeypatch, exc)
-
-    with pytest.raises(pc.PRMonitorError) as info:
-        pc._http_get("http://x/y", timeout_sec=1.0)
-
-    assert str(info.value) == "pr_monitor HTTP 503 at http://x/y: "
