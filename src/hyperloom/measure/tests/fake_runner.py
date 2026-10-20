@@ -18,6 +18,9 @@ test leaves (``profile/torch_trace/...``); ``fake_report: false`` leaves out the
 that printed no readable measurement. ``fake_repro: true`` runs the repro case the sheet carries for real (the shipped
 attachment placement and ``run_case``) against no server, and lists the verdict and log it leaves in the manifest.
 ``fake_decode: true`` lists the decode pass's outputs (``decode/outputs.jsonl``) the runner would leave.
+``fake_eval_in_warmup: true`` lays the rounds out as a graded test with a warmup leaves them (one evaluation, in the
+warmup round): a warmup round and the accuracy round on one directory, the measured round on another, and the lm-eval
+results file of ``fake_accuracy`` below the warmup's.
 """
 
 from __future__ import annotations
@@ -94,11 +97,22 @@ def _write_files(out: Path, config: dict[str, Any], mode: str) -> dict[str, byte
         files[TRACE_PATH] = b"fake trace bytes"
     if config.get("fake_warmup") and REPORT_PATH in files:
         files["warmup_round/benchmark_fake_20261014_000000/benchmark_report.json"] = files[REPORT_PATH]
+    in_warmup = bool(config.get("fake_eval_in_warmup")) and REPORT_PATH in files
+    if in_warmup:
+        report_bytes = files.pop(REPORT_PATH)
+        for variant in ("warmup", "test"):
+            files[f"variant_00_{variant}/{REPORT_PATH}"] = report_bytes
     if mode == "fail_test":
         files["server.log"] = b"ModuleNotFoundError: No module named 'sglang_kernel'\n"
     if mode == "fail_unknown":
         files["server.log"] = b"something odd happened\n"
-    rounds = [{"point": 0, "phase": "measure", "dir": REPORT_PATH.rsplit("/", 1)[0], "returncode": 0}]
+    bench = REPORT_PATH.rsplit("/", 1)[0]
+    rounds = [{"point": 0, "phase": "measure", "dir": bench, "returncode": 0}]
+    if in_warmup:
+        rounds = [
+            {"point": 0, "phase": "warmup", "dir": f"variant_00_warmup/{bench}", "returncode": 0},
+            {"point": 0, "phase": "measure", "dir": f"variant_00_test/{bench}", "returncode": 0},
+        ]
     if config.get("fake_inventory"):
         files["farm_inventory.json"] = json.dumps(config["fake_inventory"]).encode()
     if "fake_accuracy" in config:
@@ -106,7 +120,14 @@ def _write_files(out: Path, config: dict[str, Any], mode: str) -> dict[str, byte
         values = [] if score is None else [{"task": "gsm8k", "metric": "exact_match,flexible-extract", "score": score}]
         if "fake_accuracy_version" in config:
             values = [{**value, "version": config["fake_accuracy_version"]} for value in values]
-        rounds.append({**rounds[0], "phase": "accuracy", "accuracy": values})
+        accuracy_round = {**rounds[0], "phase": "accuracy", "accuracy": values}
+        if in_warmup:
+            rounds.insert(1, accuracy_round)  # chronological: warmup bench, the evaluation, measured bench
+            if score is not None:
+                results = {"results": {"gsm8k": {"exact_match,flexible-extract": float(score)}}}
+                files[f"{rounds[0]['dir']}/eval_output/results_2026-10-14T10-00-00.json"] = json.dumps(results).encode()
+        else:
+            rounds.append(accuracy_round)
     if "fake_warnings" in config:
         rounds[0]["nonfatal_warnings"] = list(config["fake_warnings"])
     if config.get("fake_rounds") or "fake_accuracy" in config or "fake_warnings" in config:

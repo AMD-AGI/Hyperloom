@@ -23,7 +23,7 @@ from hyperloom.measure import local
 from hyperloom.measure.compile import LocalBlobStore, PackageBase, compile_environment
 from hyperloom.measure.local import LocalMeasurementBackend
 from hyperloom.measure.points import default_canonical, generate_points
-from hyperloom.measure.socket import TestCall
+from hyperloom.measure.socket import RoundPlan, TestCall
 from hyperloom.measure.tests._recipes import IMAGE, recipe_with
 from hyperloom.orchestrator.actions.executors import VariantResult
 from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
@@ -98,7 +98,14 @@ class _Rounds:
             base_extra_envs=kwargs.get("base_extra_envs"),
         )
         envs = yaml.safe_load(candidate.read_text())["benchmark"]["envs"]
-        self.rounds.append({"name": variant.name, "boot": bool(kwargs.get("lifecycle_boot_only")), "envs": envs})
+        self.rounds.append(
+            {
+                "name": variant.name,
+                "boot": bool(kwargs.get("lifecycle_boot_only")),
+                "ready": bool(kwargs.get("server_already_ready")),
+                "envs": envs,
+            }
+        )
         workspace = self.tmp_path / "ws" / str(len(self.rounds))
         workspace.mkdir(parents=True)
         return [
@@ -176,6 +183,33 @@ def test_on_magpie_the_boot_and_the_rounds_that_measure_have_one_server_identity
         assert magpie_server_env(round_["envs"]) == stored, f"the round at {round_['name']}"
     assert "MAGPIE_RUN_PHASE" not in boot["envs"], "Magpie sets the phase itself"
     assert (boot["envs"]["RUN_EVAL"], boot["envs"]["NUM_PROMPTS"]) == ("false", "1"), "a boot is still small"
+
+
+def test_on_magpie_the_warmup_and_the_measured_round_of_a_graded_test_have_one_server_identity(
+    rounds, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "magpie")
+    (point,) = _points(tmp_path, accuracy=True)[:1]
+    call = TestCall(
+        points=(point,),
+        output_dir=tmp_path / "out",
+        timeout_sec=900,
+        cwd=str(tmp_path),
+        magpie_python="",
+        task_id="t-1",
+        kind="accuracy",
+        accuracy=True,
+        rounds=RoundPlan(warmup_rounds=1),
+    )
+
+    LocalMeasurementBackend().run_test(call)
+
+    warmup, measured = rounds.rounds
+    assert (warmup["name"], measured["name"]) == ("warmup", "test")
+    assert (warmup["ready"], measured["ready"]) == (False, True), "the measured round reuses the server it booted"
+    assert (warmup["envs"]["RUN_EVAL"], measured["envs"]["RUN_EVAL"]) == ("true", "false"), "one evaluation, first"
+    assert magpie_server_env(measured["envs"]) == magpie_server_env(warmup["envs"]), "Magpie's reuse check passes"
+    assert warmup["envs"]["NUM_PROMPTS"] == measured["envs"]["NUM_PROMPTS"], "both are full rounds"
 
 
 def test_on_bypass_the_boot_round_carries_the_server_phase(rounds, tmp_path, monkeypatch):

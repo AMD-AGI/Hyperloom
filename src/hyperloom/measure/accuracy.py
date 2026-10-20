@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The accuracy values of one measuring round, read from the ``results*.json`` that lm-eval wrote for it (design 4.4.3).
+"""The accuracy values of the round that evaluated, read from the ``results*.json`` lm-eval wrote for it (design 4.4.3).
 
-Only the directory of the round that was measured is read. ``run_grid`` also evaluates in the warm-up round it
-discards; that round's files sit below a ``warmup_round`` directory and never count, even when they are the only
-result there is: a score with nothing behind it from the measured round is no score.
+Only the directory of the round that evaluated is read: the warmup round of a graded test, which is its one
+evaluation, or else the measured round. When ``run_grid`` itself discards a warm-up round and evaluates in it too, that
+round's files sit below a ``warmup_round`` directory and never count, even when they are the only result there is: a
+score with nothing behind it from the measured round is no score.
 """
 
 from __future__ import annotations

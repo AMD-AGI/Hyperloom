@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 import yaml
 
+from hyperloom.common.env import is_truthy
 from hyperloom.contracts.measurement import AccuracyValue, AttachmentRef
 from hyperloom.measure import local
 from hyperloom.measure.local import SUPPORTED_KINDS, LocalMeasurementBackend, TestCallRefused
@@ -250,6 +251,191 @@ def test_a_test_that_did_not_ask_for_accuracy_reports_no_accuracy_round(grid, tm
     outcome = _run(_call(tmp_path))
 
     assert [r.phase for r in outcome.rounds] == ["measure"]
+
+
+# --- a graded test evaluates once, in its warmup round ---------------------------------------------------------------
+
+
+def _graded_call(tmp_path: Path, **kwargs: Any) -> TestCall:
+    """A graded single-point test whose warmup is planned: the case that used to evaluate twice."""
+    point = _point(tmp_path, "graded", run_eval="true")
+    return _call(
+        tmp_path, point, **{"accuracy": True, "kind": "accuracy", "rounds": RoundPlan(warmup_rounds=1), **kwargs}
+    )
+
+
+def _evaluates(kwargs: dict[str, Any], config: dict[str, Any]) -> bool:
+    """Whether a round evaluates, as ``run_grid`` would build it: the round's extra envs laid over the point's own."""
+    envs = {**config["benchmark"]["envs"], **(kwargs.get("base_extra_envs") or {})}
+    return is_truthy(envs["RUN_EVAL"], default=True)
+
+
+def _graded_answers(grid: _Grid, score: float = 0.64) -> VariantResult:
+    """The scripted answers of a graded test: the evaluation's score sits in the warmup round's directory."""
+    warmup = grid.result("warmup", output_throughput=1111.0)
+    _lm_eval_results(Path(warmup.workspace) / "eval_output", score)
+    grid.answers.update(warmup=warmup, test=grid.result("test"))
+    return warmup
+
+
+def test_a_graded_test_runs_one_evaluation_and_it_is_in_the_warmup_round(grid, server, tmp_path):
+    _graded_answers(grid)
+
+    _run(_graded_call(tmp_path))
+
+    assert [c["grid"][0].name for c in grid.calls] == ["warmup", "test"]
+    assert [_evaluates(c, config) for c, config in zip(grid.calls, grid.configs)] == [True, False]
+
+
+def test_the_two_rounds_of_a_graded_test_share_one_server_that_the_measured_round_reclaims(grid, server, tmp_path):
+    _graded_answers(grid)
+
+    _run(_graded_call(tmp_path))
+
+    warmup, measured = grid.calls
+    assert warmup["server_lifecycle"] == {
+        "cleanup": False,
+        "pid_dir": warmup["server_lifecycle"]["pid_dir"],
+        "port": 8123,
+    }
+    assert measured["server_lifecycle"] == {**warmup["server_lifecycle"], "cleanup": True}
+    assert "server_already_ready" not in warmup and measured["server_already_ready"] is True
+    assert warmup["warmup_before_measure"] is measured["warmup_before_measure"] is False, "run_grid does not warm up"
+    assert "lifecycle_boot_only" not in warmup, "the warmup round is a whole round, it measures and evaluates"
+    assert measured["base_extra_envs"] == {"RUN_EVAL": "false"} and "base_extra_envs" not in warmup
+    assert len(server.teardowns) == 1, "and whatever is still up is reclaimed when the test ends"
+
+
+def test_the_accuracy_of_a_graded_test_is_the_one_evaluation_of_the_warmup_round(grid, server, tmp_path):
+    warmup = _graded_answers(grid, 0.64)
+
+    outcome = _run(_graded_call(tmp_path))
+
+    assert [(r.phase, r.returncode) for r in outcome.rounds] == [("warmup", 0), ("accuracy", 0), ("measure", 0)]
+    warmed, accuracy, measured = outcome.rounds
+    assert warmed.output_dir == accuracy.output_dir == Path(warmup.workspace)
+    assert measured.output_dir == Path(grid.answers["test"].workspace) != warmed.output_dir
+    assert accuracy.accuracy == (AccuracyValue("gsm8k", "exact_match,flexible-extract", 0.64),)
+    assert warmed.accuracy == measured.accuracy == ()
+    assert outcome.returncode == 0
+
+
+def test_the_warmup_round_of_a_graded_test_says_what_run_grid_says_of_a_discarded_one(grid, server, tmp_path):
+    _graded_answers(grid)
+    grid.answers["warmup"].nonfatal_warnings.append("harvested_leaked_artifact:x")
+    grid.answers["test"].nonfatal_warnings.append("served_slowly")
+
+    outcome = _run(_graded_call(tmp_path))
+
+    assert [w for r in outcome.rounds for w in r.nonfatal_warnings] == [
+        "run_grid_warmup_discarded_first",
+        "warmup_round_tput:1111.0",
+        "harvested_leaked_artifact:x",
+        "served_slowly",
+    ]
+
+
+def test_the_eval_exit_code_of_a_graded_test_is_the_one_the_warmup_round_recorded(grid, server, tmp_path):
+    warmup = _graded_answers(grid)
+    (Path(warmup.workspace) / "eval_returncode").write_text("3\n", encoding="utf-8")
+
+    outcome = _run(_graded_call(tmp_path))
+
+    assert [(r.phase, r.returncode) for r in outcome.rounds] == [("warmup", 0), ("accuracy", 3), ("measure", 0)]
+    assert outcome.returncode == 3
+
+
+def test_a_warmup_that_fails_ends_a_graded_test_with_nothing_measured_and_no_accuracy(grid, server, tmp_path):
+    grid.answers["warmup"] = grid.result("warmup", status="failed", returncode=7, error="boom", error_class="x")
+    _lm_eval_results(Path(grid.answers["warmup"].workspace) / "eval_output", 0.64)
+
+    outcome = _run(_graded_call(tmp_path))
+
+    assert [c["grid"][0].name for c in grid.calls] == ["warmup"]
+    assert [(r.phase, r.returncode) for r in outcome.rounds] == [("warmup", 7)] and outcome.returncode == 7
+    assert len(server.teardowns) == 1
+
+
+def test_a_measured_round_that_fails_keeps_the_evaluation_the_warmup_made(grid, server, tmp_path):
+    _graded_answers(grid)
+    grid.answers["test"] = grid.result("test", status="failed", returncode=5, error="boom", error_class="x")
+
+    outcome = _run(_graded_call(tmp_path))
+
+    assert [(r.phase, r.returncode) for r in outcome.rounds] == [("warmup", 0), ("accuracy", 0), ("measure", 5)]
+    assert outcome.returncode == 5
+
+
+def test_a_graded_test_the_run_stops_during_its_warmup_reports_the_stop_and_measures_nothing(grid, server, tmp_path):
+    grid.answers["warmup"] = grid.result(
+        "warmup", status="failed", returncode=None, error_class="session_time_exhausted", error="out of time"
+    )
+
+    outcome = _run(_graded_call(tmp_path))
+
+    assert [c["grid"][0].name for c in grid.calls] == ["warmup"]
+    assert outcome.returncode == SESSION_TIME_EXHAUSTED_RETURNCODE
+
+
+def test_a_graded_test_decodes_after_its_measured_round(grid, server, tmp_path, monkeypatch):
+    _graded_answers(grid)
+    point = _point(tmp_path, "graded", run_eval="true", ISL=8, OSL=4)
+    monkeypatch.setattr(local, "run_pass", lambda *a, **k: ())
+    monkeypatch.setattr(local, "write_outputs", lambda *a, **k: None)
+    monkeypatch.setattr(local, "vocab_size_of", lambda model: 1000)
+    grid.answers["decode_server"] = grid.result("decode_server", note="server_lifecycle_boot_only")
+
+    _run(_call(tmp_path, point, accuracy=True, kind="accuracy", decode_pass=True, rounds=RoundPlan(warmup_rounds=1)))
+
+    assert [c["grid"][0].name for c in grid.calls] == ["warmup", "test", "decode_server"]
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "why"),
+    [
+        ({"rounds": RoundPlan(warmup_rounds=0)}, "no warmup is planned, so the one round evaluates"),
+        ({"rounds": RoundPlan(warmup_rounds=None)}, "pytest's own default is no warmup"),
+    ],
+)
+def test_a_graded_test_without_a_warmup_evaluates_in_its_one_round_as_before(grid, server, tmp_path, kwargs, why):
+    result = grid.result("test")
+    _lm_eval_results(Path(result.workspace) / "eval_output", 0.64)
+    grid.answers["test"] = result
+    point = _point(tmp_path, "graded", run_eval="true")
+
+    outcome = _run(_call(tmp_path, point, accuracy=True, kind="accuracy", **kwargs))
+
+    assert [c["grid"][0].name for c in grid.calls] == ["test"], why
+    assert "server_lifecycle" not in grid.calls[0] and "base_extra_envs" not in grid.calls[0]
+    assert [r.phase for r in outcome.rounds] == ["measure", "accuracy"]
+    assert outcome.rounds[1].accuracy[0].score == 0.64
+
+
+def test_a_graded_test_on_a_framework_that_cannot_hold_a_server_keeps_run_grids_warmup(monkeypatch, grid, tmp_path):
+    _Server(monkeypatch, eligible=False)
+
+    _run(_graded_call(tmp_path))
+
+    (kwargs,) = grid.calls
+    assert kwargs["grid"][0].name == "test" and kwargs["warmup_before_measure"] is True
+    assert "server_lifecycle" not in kwargs and "base_extra_envs" not in kwargs
+
+
+def test_a_test_that_is_not_graded_keeps_run_grids_warmup_and_never_holds_a_server(grid, server, tmp_path):
+    _run(_call(tmp_path, rounds=RoundPlan(warmup_rounds=1)))
+
+    (kwargs,) = grid.calls
+    assert kwargs["grid"][0].name == "test" and kwargs["warmup_before_measure"] is True
+    assert "server_lifecycle" not in kwargs and "base_extra_envs" not in kwargs and server.teardowns == []
+
+
+def test_the_default_warmup_of_run_grid_decides_for_a_graded_test_that_states_none(grid, server, tmp_path, monkeypatch):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "1")
+    _graded_answers(grid)
+
+    _run(_graded_call(tmp_path, rounds=RoundPlan(warmup_rounds=None)))
+
+    assert [c["grid"][0].name for c in grid.calls] == ["warmup", "test"]
 
 
 # --- refusals -----------------------------------------------------------------------------------------------------
