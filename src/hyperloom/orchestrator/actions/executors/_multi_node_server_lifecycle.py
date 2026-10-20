@@ -383,11 +383,7 @@ def _round_control_env(
     extra_env: dict[str, str] | None,
     unset_env: list[str] | tuple[str, ...] | set[str] | None,
 ) -> dict[str, str | None]:
-    """The control variables this round's launcher reads out of the environment.
-
-    Per-variant env overrides are forwarded to the SSH-launched sglang via
-    ``multi_node/commands/infera.py::_collect_forward_env``, which reads these.
-    """
+    """The control variables this round's launcher reads out of the environment."""
     forwarded = (
         json.dumps(filter_forward_env({str(k): str(v) for k, v in extra_env.items()}, warn_on_drop=True))
         if extra_env
@@ -402,11 +398,7 @@ def _round_control_env(
 
 
 async def _fan_out_tracelens_patch(torch_profiler_dir: str) -> None:
-    """Apply the TraceLens SGLang patch set on every node before this restart (fail-soft).
-
-    The patch set (roofline vs sglang_gc_patch) follows this controller's shape mode; sglang_gc_patch only matters
-    while capturing, so it waits for a profiling round.
-    """
+    """Apply the TraceLens SGLang patch set on every node before this restart (fail-soft)."""
     from ._server_patcher import resolve_sglang_patch_set
     from ._workload_envs import _tracelens_patch_enabled
 
@@ -460,12 +452,7 @@ def _resolve_restart_waits(
     extra_env: dict[str, str] | None,
     driver_poll_timeout_s: int,
 ) -> _RestartWaits:
-    """Resolve this restart's budgets, widening them for aiter's cold JIT/autotune.
-
-    aiter kernels JIT-compile + autotune on first use (server log: "not found tuned config in /tmp/aiter_configs");
-    a cold compile can exceed the default 900s gate and false-fail an otherwise-healthy variant (the doomed attempt
-    then burns a reclaim+retry cycle before the now-warm relaunch succeeds).
-    """
+    """Resolve this restart's budgets, widening them for aiter's cold JIT/autotune."""
     # Align launch-driver poll with /health wait for JIT-heavy MoE runs.
     poll_timeout_s = max(_poll_timeout_env_s(), driver_poll_timeout_s)
     health_wait_s = _health_wait_env_s()

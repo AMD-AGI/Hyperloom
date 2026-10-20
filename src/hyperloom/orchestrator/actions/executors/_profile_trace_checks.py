@@ -121,17 +121,7 @@ def _check_row(
 
 
 def _instrumentation_preflight_row(bench: Any, patchers: Mapping[str, Any] | None = None) -> dict[str, Any]:
-    """State, before the run, whether the annotations the trace checks look for can land at all.
-
-    When the TraceLens runtime patch is unavailable the env layer turns ``detailed_annotations`` and
-    ``shape_discovery`` off, which makes checks 3 and 5 certain to fail. Recording that decision here gives the
-    post-hoc failures their cause. This only reports it -- the run proceeds unchanged, because a trace without
-    annotations is still a trace.
-
-    ``patchers`` carries each patcher's own outcome. The env block records what the patch results *caused*, which
-    is not the same as which patcher ran and what it returned: a successful patch records its outcome too, so
-    "instrumentation was fine" and "nobody looked" are different records.
-    """
+    """State, before the run, whether the annotations the trace checks look for can land at all."""
     envs = (bench or {}).get("envs") if isinstance(bench, dict) else None
     if not isinstance(envs, dict):
         return _check_row(
@@ -252,11 +242,7 @@ def _build_trace_validate(
     *,
     preflight: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Assemble the profile-stage trace validation block.
-
-    ``preflight`` leads the check list because it was known before the run: when it failed, the trace checks that
-    follow are consequences rather than independent findings.
-    """
+    """Assemble the profile-stage trace validation block."""
     checks = [row for row in (health.get("checks") or []) if isinstance(row, dict)]
     if isinstance(preflight, dict):
         checks = [preflight] + checks
@@ -283,15 +269,7 @@ def _build_trace_validate(
 
 
 def _write_trace_certificate(trace_dir: Path, validate: dict[str, Any]) -> str:
-    """Write the full certificate beside the trace it describes, returning the path (empty when unwritable).
-
-    Deliberately written *outside* ``trace_dir``: the resolver's ``_trace_candidates`` rglobs that directory for
-    anything ending in ``_TRACE_EXTS``, which includes a bare ``.json``, so a certificate stored among the traces
-    becomes a trace candidate itself. That is not hypothetical -- it makes ``require_single_rank`` resolution
-    return nothing (a second unranked candidate) and lets an 82 KB certificate outrank a small real trace in the
-    size fallback. A subdirectory would not help, the scan is recursive. The name carries ``trace_dir``'s so the
-    ``torch_trace`` and ``capture_traces`` certificates of one workspace do not collide.
-    """
+    """Write the full certificate beside the trace it describes, returning the path (empty when unwritable)."""
     target = trace_dir.parent / f"{trace_dir.name}.selfcert.json"
     try:
         atomic_write_json(target, validate)
@@ -606,11 +584,7 @@ def _check_steady_state_split_naming(sample: _TraceSample) -> _TraceCheck:
 
 
 def _check_trace_has_ops(sample: _TraceSample) -> _TraceCheck:
-    """Verdict on whether the torch-profiler active window recorded any real execution.
-
-    A metadata-only trace (no ``cpu_op`` / ``kernel`` events) is unusable for roofline, so flag it and let the
-    caller re-profile rather than cache an empty snapshot.
-    """
+    """Verdict on whether the torch-profiler active window recorded any real execution."""
     if not sample.main_traces:
         return _TraceCheck(
             _check_row(

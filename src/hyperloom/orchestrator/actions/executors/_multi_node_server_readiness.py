@@ -68,11 +68,7 @@ class _WorkerGateRules:
 
 
 def _worker_gate_rules() -> _WorkerGateRules:
-    """Resolve the worker gate's port and fast-fail windows from the environment.
-
-    Read once before the gate opens its client, so a malformed value fails the round before any worker is dialled
-    rather than mid-poll or -- when the fast-fail is switched off -- not at all.
-    """
+    """Resolve the worker gate's port and fast-fail windows from the environment."""
     return _WorkerGateRules(
         health_port=env_int("HYPERLOOM_MN_WORKER_PORT", 30000),
         fast_fail=env_flag("HYPERLOOM_MN_WORKER_WEDGE_FASTFAIL", default=True),
@@ -531,10 +527,7 @@ def _published_ready_timeout_s() -> int:
 
 
 def _rewritten_published_url(state: Mapping[str, Any]) -> str:
-    """The published ``service_url`` when it differs from the reachable one, else ``""``.
-
-    Without a rewrite there is nothing new to prove: the reachable wait already covered that exact endpoint.
-    """
+    """The published ``service_url`` when it differs from the reachable one, else ``""``."""
     from hyperloom.inference_optimizer.multi_node._internal.external_state import reachable_service_url
 
     if str(state.get("backend") or "").strip().lower() != "rayjob":
@@ -634,11 +627,7 @@ async def _wait_for_published_service_ready_async(
 
 
 async def wait_for_restarted_server(health_wait_s: int) -> None:
-    """Hold until the workers, the reachable frontend and the published service all report ready.
-
-    ``cmd_restart_server`` returns once the actors are spawned, but a cold MoE weight-load can need 20-30 min
-    before /health flips, so the downstream baseline must not fire against a not-yet-ready server.
-    """
+    """Hold until the workers, the reachable frontend and the published service all report ready."""
     poll_every_s = int(os.environ.get("HYPERLOOM_MN_HEALTH_POLL_S", "10"))
     # PD restart: ensure BOTH prefill+decode legs are /health-ready (mooncake init done) before the frontend
     # completions probe, so its grace does not expire against a half-ready pair.
