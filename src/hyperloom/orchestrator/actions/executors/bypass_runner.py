@@ -14,10 +14,11 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import yaml
 
+from hyperloom.common.coerce import to_float, to_int
 from hyperloom.common.env import is_truthy
 from hyperloom.common.env_safety import build_benchmark_env
 
@@ -25,32 +26,6 @@ from . import bypass_analysis
 from . import bypass_engine
 from . import bypass_report
 from . import bypass_scriptable
-
-
-def _as_int(value: Any, default: int) -> int:
-    """Coerce to int, tolerating None/str; return default on failure."""
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _as_opt_int(value: Any) -> int | None:
-    """Coerce to int, or None when unset/blank/invalid."""
-    if value is None or str(value).strip() == "":
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _as_float(value: Any, default: float) -> float:
-    """Coerce to float, tolerating None/str; return default on failure."""
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
 
 
 def _run_eval_enabled(bench_envs: dict[str, Any]) -> bool:
@@ -112,81 +87,36 @@ def run_benchmark(
     cleanup: bool = True,
 ) -> int:
     """Run a benchmark, optionally as a lifecycle phase."""
-    cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-    bench = cfg.get("benchmark") or {}
-    framework = str(bench.get("framework") or "sglang").lower()
-    model = str(bench.get("model") or os.environ.get("MODEL", ""))
-    bench_envs = dict(bench.get("envs") or {})
-    timeout_s = float(bench["timeout_seconds"])
+    spec = _read_bench_spec(config_path)
 
     # Scriptable (server-less) frameworks (e.g. xDiT diffusion): no server, no HTTP client.
     from hyperloom.inference_optimizer import framework_registry
 
-    if framework_registry.is_scriptable(framework):
+    if framework_registry.is_scriptable(spec.framework):
         return _run_scriptable_benchmark(
-            framework=framework,
-            model=model,
-            bench=bench,
-            timeout_s=timeout_s,
+            framework=spec.framework,
+            model=spec.model,
+            bench=spec.bench,
+            timeout_s=spec.timeout_s,
             output_dir=output_dir,
         )
 
-    if framework not in bypass_engine.SERVER_FRAMEWORKS:
-        _emit_failure(output_dir, framework, model, f"unsupported framework: {framework!r}")
+    if spec.framework not in bypass_engine.SERVER_FRAMEWORKS:
+        _emit_failure(output_dir, spec.framework, spec.model, f"unsupported framework: {spec.framework!r}")
         return 2
 
-    inferencex_root = bypass_engine.resolve_inferencex_root(bench)
+    inferencex_root = bypass_engine.resolve_inferencex_root(spec.bench)
     # The boot probe runs no benchmark client, so it needs no InferenceX checkout.
     if not inferencex_root or not Path(inferencex_root).is_dir():
         _emit_failure(
             output_dir,
-            framework,
-            model,
+            spec.framework,
+            spec.model,
             f"InferenceX path not resolvable/usable: {inferencex_root!r}",
         )
         return 2
 
-    workspace = bypass_report.create_workspace(output_dir, framework)
-    _snapshot_config(workspace, cfg)
-
-    tp = _as_int(os.environ.get("TP") or bench_envs.get("TP"), 1)
-    conc = _as_int(os.environ.get("CONC") or bench_envs.get("CONC"), 32)
-    isl = _as_int(os.environ.get("ISL") or bench_envs.get("ISL"), 1024)
-    osl = _as_int(os.environ.get("OSL") or bench_envs.get("OSL"), 512)
-    rrr = _as_float(os.environ.get("RANDOM_RANGE_RATIO") or bench_envs.get("RANDOM_RANGE_RATIO"), 0.5)
-    max_model_len = os.environ.get("MAX_MODEL_LEN") or bench_envs.get("MAX_MODEL_LEN")
-    max_model_len_i = _as_int(max_model_len, 0) or None
-    port = _as_int(os.environ.get("PORT") or bench_envs.get("PORT"), bypass_engine.DEFAULT_PORT)
-
-    profiler = (bench.get("profiler") or {}).get("torch_profiler") or {}
-    profile = bool(profiler.get("enabled"))
-    profile_dir = str(workspace / "torch_trace") if profile else None
-    if profile_dir:
-        Path(profile_dir).mkdir(parents=True, exist_ok=True)
-
-    # server_lifecycle.server_ready_timeout_s (injected by inject_lifecycle, default SERVER_READY_TIMEOUT_SEC /
-    # INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC) is the server-boot budget for lifecycle rounds.
-    sl = bench.get("server_lifecycle") or {}
-    r = _Round(
-        framework=framework,
-        model=model,
-        tp=tp,
-        port=port,
-        max_model_len=max_model_len_i,
-        profile=profile,
-        profile_dir=profile_dir,
-        bench_envs=bench_envs,
-        server_log=workspace / "server.log",
-        base_url=f"http://127.0.0.1:{port}",
-        timeout_s=timeout_s,
-        server_ready_timeout_s=_as_float(sl.get("server_ready_timeout_s"), timeout_s),
-        inferencex_root=inferencex_root,
-        conc=conc,
-        isl=isl,
-        osl=osl,
-        rrr=rrr,
-        workspace=workspace,
-    )
+    r = _round_from_spec(spec, output_dir, inferencex_root)
 
     # Multi-node remote client: Hyperloom injects BENCHMARK_BASE_URL (+ MAGPIE_RUN_PHASE=client) so the benchmark
     # targets a head-pod server instead of launching one locally. bypass mirrors that: no local server, client (+eval)
@@ -205,10 +135,8 @@ def run_benchmark(
     if phase == "client":
         return _run_client_phase(r, pid_dir=pid_dir, cleanup=cleanup, start=time.time())
 
-    # YAML-driven lifecycle: run_grid injects benchmark.server_lifecycle (cleanup/pid_dir/port) and drives
-    # warmup(cleanup=false)+measure(cleanup= true) as two identical calls, delegating phase choice to us.
-    if phase == "all" and bool(sl.get("enabled")):
-        return _run_lifecycle_round(r, sl)
+    if phase == "all" and bool(spec.lifecycle.get("enabled")):
+        return _run_lifecycle_round(r, spec.lifecycle)
 
     # phase == "all": start server, run client, always teardown.
     start = time.time()
@@ -220,6 +148,71 @@ def run_benchmark(
     finally:
         _terminate_server(proc)
     return r.finalize(start, rc)
+
+
+class _BenchSpec(NamedTuple):
+    """A bypass config's benchmark block, with the fields every phase reads already coerced."""
+
+    cfg: dict[str, Any]
+    bench: dict[str, Any]
+    framework: str
+    model: str
+    bench_envs: dict[str, Any]
+    timeout_s: float
+    # server_lifecycle, as inject_lifecycle writes it: cleanup/pid_dir/port, plus the server_ready_timeout_s
+    # that bounds a lifecycle round's server boot (default SERVER_READY_TIMEOUT_SEC /
+    # INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC).
+    lifecycle: dict[str, Any]
+
+
+def _read_bench_spec(config_path: Path) -> _BenchSpec:
+    """Read the benchmark block of a bypass config off disk."""
+    cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    bench = cfg.get("benchmark") or {}
+    return _BenchSpec(
+        cfg=cfg,
+        bench=bench,
+        framework=str(bench.get("framework") or "sglang").lower(),
+        model=str(bench.get("model") or os.environ.get("MODEL", "")),
+        bench_envs=dict(bench.get("envs") or {}),
+        timeout_s=float(bench["timeout_seconds"]),
+        lifecycle=bench.get("server_lifecycle") or {},
+    )
+
+
+def _round_from_spec(spec: _BenchSpec, output_dir: Path, inferencex_root: str) -> _Round:
+    """Resolve one round's launch recipe, client workload and report location, environment overriding config."""
+    workspace = bypass_report.create_workspace(output_dir, spec.framework)
+    _snapshot_config(workspace, spec.cfg)
+    envs = spec.bench_envs
+    port = to_int(os.environ.get("PORT") or envs.get("PORT"), bypass_engine.DEFAULT_PORT)
+
+    profiler = (spec.bench.get("profiler") or {}).get("torch_profiler") or {}
+    profile = bool(profiler.get("enabled"))
+    profile_dir = str(workspace / "torch_trace") if profile else None
+    if profile_dir:
+        Path(profile_dir).mkdir(parents=True, exist_ok=True)
+
+    return _Round(
+        framework=spec.framework,
+        model=spec.model,
+        tp=to_int(os.environ.get("TP") or envs.get("TP"), 1),
+        port=port,
+        max_model_len=to_int(os.environ.get("MAX_MODEL_LEN") or envs.get("MAX_MODEL_LEN"), 0) or None,
+        profile=profile,
+        profile_dir=profile_dir,
+        bench_envs=envs,
+        server_log=workspace / "server.log",
+        base_url=f"http://127.0.0.1:{port}",
+        timeout_s=spec.timeout_s,
+        server_ready_timeout_s=to_float(spec.lifecycle.get("server_ready_timeout_s"), spec.timeout_s),
+        inferencex_root=inferencex_root,
+        conc=to_int(os.environ.get("CONC") or envs.get("CONC"), 32),
+        isl=to_int(os.environ.get("ISL") or envs.get("ISL"), 1024),
+        osl=to_int(os.environ.get("OSL") or envs.get("OSL"), 512),
+        rrr=to_float(os.environ.get("RANDOM_RANGE_RATIO") or envs.get("RANDOM_RANGE_RATIO"), 0.5),
+        workspace=workspace,
+    )
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
@@ -291,8 +284,8 @@ class _Round:
         bench_envs = self.bench_envs
         # Honor materializer-computed request sizing (env then YAML envs) so the benchmark scale matches Magpie; fall
         # back to build_client_command defaults (conc*10 / 2*conc) when unset.
-        num_prompts = _as_opt_int(os.environ.get("NUM_PROMPTS") or bench_envs.get("NUM_PROMPTS"))
-        num_warmups = _as_opt_int(os.environ.get("NUM_WARMUPS") or bench_envs.get("NUM_WARMUPS"))
+        num_prompts = to_int(os.environ.get("NUM_PROMPTS") or bench_envs.get("NUM_PROMPTS"))
+        num_warmups = to_int(os.environ.get("NUM_WARMUPS") or bench_envs.get("NUM_WARMUPS"))
         client_cmd = bypass_engine.build_client_command(
             bypass_engine.ClientRun(
                 inferencex_root=self.inferencex_root,
