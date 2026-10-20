@@ -86,14 +86,7 @@ class ConcSweepExecutor:
                 "error": "conc_sweep: ctx.extra['session_dir'] missing",
             }
         session_dir = Path(session_dir_str)
-        try:
-            state = SharedState.load_or_init(session_dir)
-        except Exception as exc:  # noqa: BLE001 — surface as failure
-            return {
-                "status": "failed",
-                "error_class": "shared_state_load_failed",
-                "error": f"conc_sweep: SharedState.load_or_init failed: {exc!r}",
-            }
+        state = SharedState.load_or_init(session_dir)
 
         params = ctx.task.params or {}
         # ``None`` falls back to the ladder run_conc_sweep resolves for this workload; an empty list short-circuits

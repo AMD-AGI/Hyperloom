@@ -104,7 +104,7 @@ def probe_aiter_jit_cache() -> dict[str, Any]:
         info["is_cold"] = kernel_count < COLD_START_KERNEL_THRESHOLD
         info["probe_status"] = "found"
         return info
-    except Exception as exc:  # noqa: BLE001
+    except (OSError, RuntimeError) as exc:
         log.warning("aiter_jit: cache probe failed: %s", exc)
         info["probe_status"] = "error"
         info["is_cold"] = None
@@ -165,7 +165,7 @@ def _any_live_compiler(
                 unknown = True
             except (psutil.NoSuchProcess, psutil.ZombieProcess):
                 continue
-    except Exception as exc:  # noqa: BLE001 — enumeration failed entirely
+    except (psutil.Error, OSError, RuntimeError) as exc:
         log.warning("aiter_jit: compiler-liveness scan failed: %s", exc)
         return None
     return None if unknown else False
