@@ -5,16 +5,18 @@
 long as its branch runs.
 
 Every session starts at the branch head, with the worktree synced to it and a launch prompt built from the brief,
-rebuilt at that head when the setup can, and the branch log. A session that ends as a session should, its model's turn done or its deadline reached, is
-followed by a fresh one: a branch runs until the scheduler stops it. A Claude CLI whose turn ended but that a leftover
-background shell keeps alive is ended, as a turn that finished. One that ends within ``min_session_seconds`` while its
-branch has a test in flight ended to wait for it: the next launch starts once that test has its result. One that is
-lost, exits with an error or otherwise ends within ``min_session_seconds`` raises, and the runtime decides whether to
-restart it. Claude streams partial messages
-into its log, so a long reasoning step shows as log growth and is not taken for a lost session. The session's process registry
-adopts every process the socket starts, so the session stop kills it even when this stop cannot. Each launch's spend,
-its logged tokens at the gateway's rates, is written to the branch's notebook once the launch is collected, however it
-ended.
+rebuilt at that head when the setup can, and the branch log. A Claude CLI keeps its stdin open and lives across turns:
+when a turn ends, the session waits, keeping its heartbeat, until something arrives for the branch (an inbox item or a
+runtime notice) and sends it to the CLI as the next message, so the model goes on with its whole conversation. A turn
+that ends with no test of the branch running and nothing arrived is nudged; ``IDLE_TURNS`` such turns in a row raise.
+A session that ends as a session should, its CLI exiting or its deadline reached, is followed by a fresh one: a
+branch runs until the scheduler stops it. One that ends within ``min_session_seconds`` while its branch has a test in
+flight ended to wait for it: the next launch starts once that test has its result. One that is lost, exits with an
+error or otherwise ends within ``min_session_seconds`` raises, and the runtime decides whether to restart it. Claude
+streams partial messages into its log, so a long reasoning step shows as log growth and is not taken for a lost
+session. The session's process registry adopts every process the socket starts, so the session stop kills it even
+when this stop cannot. The spend of each turn, its logged tokens at the gateway's rates, is written to the branch's
+notebook when the turn ends and when the launch is collected, however it ended.
 """
 
 from __future__ import annotations
@@ -23,10 +25,9 @@ import asyncio
 import contextlib
 import json
 import logging
-import os
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import Protocol
 
@@ -37,18 +38,21 @@ from hyperloom.orchestrator.specialists.agent_runner import (
     STATE_LOST,
     AgentHandle,
     AgentLaunchSpec,
-    AgentRunner,
     AgentStatus,
+    Beat,
+    HeartbeatSink,
+    InteractiveAgentRunner,
     McpEndpoint,
 )
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts, price_of
-from hyperloom_multibranch.contracts.notebook.interfaces import BranchLogStore, UsageSink
+from hyperloom_multibranch.contracts.notebook.interfaces import BranchLogStore, Inbox, UsageSink
 from hyperloom_multibranch.contracts.notebook.records import LlmUsage, NotebookSnapshot
 from hyperloom_multibranch.contracts.notebook.vocab import UsageSource
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST, SpecialistGrant, SpecialistTokens
+from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.llm_usage import launch_usage
-from hyperloom_multibranch.specialist.prompts import launch_prompt
+from hyperloom_multibranch.specialist.prompts import launch_prompt, nudge_message, wake_message
 from hyperloom_multibranch.specialist.runtime import SessionCrashed, SessionStart
 from hyperloom_multibranch.specialist.tools import sync_to_head
 from hyperloom_multibranch.specialist.worktree import BranchWorktree
@@ -59,15 +63,14 @@ logger = logging.getLogger(__name__)
 MCP_SERVER = "hyperloom"
 #: A session ending sooner than this did not work, whatever its exit code: a misconfigured CLI must not relaunch forever.
 MIN_SESSION_S = 120.0
-#: Polls a Claude CLI may stay up after its turn's ``result`` before it is ended: a CLI exits soon after, unless a
-#: background shell it started keeps it alive.
-TURN_END_GRACE_POLLS = 2
+#: Turns in a row a model may end with no test of its branch running and nothing arrived, each nudged, before its
+#: session raises: a model that keeps stopping must not be woken forever.
+IDLE_TURNS = 3
 #: A session silent this long, with no log growth, CPU work or tool call in flight, is hung: a test takes about eight
 #: minutes and one reasoning step can take as long, and Claude streams its reasoning into the log.
 SPECIALIST_LOST_AFTER_S = 600.0
 #: How a launch that ended early to wait for its branch's test ended, as the next launch is told.
 WAITED_END = "its model ended its turn to wait for a test, which has its result now"
-_LOG_TAIL_BYTES = 65536
 PROMPT_FILE, ROLE_FILE, DONE_FILE, HEARTBEAT_FILE = (
     "prompt.md",
     "system_prompt.md",
@@ -94,6 +97,11 @@ class AgentCommand:
         if self.backend not in (AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX):
             raise ValueError(f"a specialist runs claude or codex, not {self.backend!r}")
 
+    @property
+    def interactive(self) -> bool:
+        """Whether one CLI takes message after message on its stdin; codex exec reads one prompt and ends."""
+        return self.backend == AGENT_BACKEND_CLAUDE
+
     def argv(self, role_file: Path, worktree: Path) -> tuple[str, ...]:
         """The command line; the socket adds the MCP configuration."""
         if self.backend == AGENT_BACKEND_CODEX:
@@ -116,6 +124,8 @@ class AgentCommand:
         return (
             self.executable,
             "--print",
+            "--input-format",
+            "stream-json",
             "--output-format",
             "stream-json",
             "--verbose",
@@ -130,8 +140,14 @@ class AgentCommand:
         )
 
     def stdin(self, role: str, prompt: str) -> str:
-        """What the CLI reads: codex takes no system prompt file, so its role opens the prompt."""
-        return f"{role}\n\n{prompt}" if self.backend == AGENT_BACKEND_CODEX else prompt
+        """What the CLI reads first: codex takes no system prompt file, so its role opens the prompt."""
+        return self.message(prompt) if self.interactive else f"{role}\n\n{prompt}"
+
+    @staticmethod
+    def message(text: str) -> str:
+        """``text`` as one stream-json user message, the line an interactive CLI reads as its next turn."""
+        content = [{"type": "text", "text": text}]
+        return json.dumps({"type": "user", "message": {"role": "user", "content": content}}) + "\n"
 
 
 @dataclass(frozen=True)
@@ -146,7 +162,7 @@ class AgentSetup:
     command: AgentCommand
     role: str
     env: Mapping[str, str]
-    runner: AgentRunner
+    runner: InteractiveAgentRunner
     tokens: SpecialistTokens
     processes: Processes
     repo: ExperimentRepo
@@ -157,9 +173,9 @@ class AgentSetup:
     clock: Callable[[], float] = time.time
 
 
-class SessionNotebook(BranchLogStore, UsageSink, Protocol):
-    """A branch's runtime handle as its sessions use it: the branch log, the spend of each launch, and the snapshot
-    that says whether the branch has a test in flight."""
+class SessionNotebook(BranchLogStore, UsageSink, Inbox, Protocol):
+    """A branch's runtime handle as its sessions use it: the branch log, the spend of each turn, the inbox that wakes
+    a CLI whose turn ended, and the snapshot that says whether the branch has a test in flight."""
 
     async def snapshot(self) -> NotebookSnapshot: ...
 
@@ -180,6 +196,8 @@ class AgentSession:
         self._start, self._setup, self._place = start, setup, place
         self._stopped = asyncio.Event()
         self._handle: AgentHandle | None = None
+        self._beat: Beat | None = None
+        self._recorded: Mapping[str, TokenCounts] = {}
 
     async def run(self) -> None:
         grant = self._setup.tokens.issue(self._start.branch, frozenset({SCOPE_SPECIALIST}))
@@ -209,9 +227,10 @@ class AgentSession:
         prompt = launch_prompt(start, head=head, worktree=str(worktree.path), recent=recent, last_end=last_end)
         spec = await asyncio.to_thread(self._spec, grant, prompt)
         started = clock()
+        self._recorded = {}
         handle = self._handle = await self._setup.runner.launch(spec)
         self._adopt(handle, spec.argv)
-        status = await self._wait(handle)
+        status = await self._converse(handle, len(recent))
         if self._handle is not handle:
             return last_end
         self._handle = None
@@ -226,6 +245,49 @@ class AgentSession:
         if failed or seconds < self._setup.min_session_seconds:
             raise SessionCrashed(_describe(status, seconds), lost=status.state == STATE_LOST, worked=bool(last_end))
         return "it reached its deadline" if status.timed_out else "its model finished its turn"
+
+    async def _converse(self, handle: AgentHandle, logged: int) -> AgentStatus:
+        """Wait for the CLI to end; an interactive one whose turn ended is sent what arrived since, or a nudge.
+
+        ``logged`` is how many branch-log entries the launch prompt was built from: notices past it are new."""
+        turns = TurnLog(self._place.workspace / PROCESS_LOG) if self._setup.command.interactive else None
+        seen = _Seen((await self._place.notebook.poll(self._start.branch)).cursor, logged)
+        sent = idle = 0
+        while True:
+            status = await self._wait(handle, turns, sent + 1)
+            if status is not None:
+                return status
+            await self._record_cost()
+            message = await self._wake(handle, seen)
+            if message is None:
+                return await self._setup.runner.poll(handle)
+            idle = 0 if message else idle + 1
+            if idle > IDLE_TURNS:
+                self._handle = None
+                await self._finish(handle, cancel=True)
+                raise SessionCrashed(f"its model ended {IDLE_TURNS} turns in a row with nothing to test", worked=True)
+            await self._setup.runner.send(handle, self._setup.command.message(message or nudge_message()).encode())
+            sent += 1
+
+    async def _wake(self, handle: AgentHandle, seen: _Seen) -> str | None:
+        """Wait, beating the heartbeat, until something arrives for the branch, and move ``seen`` past it. An empty
+        message asks for a nudge: nothing arrived and nothing of the branch runs. ``None`` once the session is stopped
+        or the CLI ended."""
+        notebook, branch = self._place.notebook, self._start.branch
+        while not self._stopped.is_set() and (await self._setup.runner.poll(handle)).state == _RUNNING:
+            if self._beat is not None:
+                self._beat()
+            page = await notebook.poll(branch, seen.cursor)
+            log = await notebook.branch_log(branch)
+            notices = [record for record in log[seen.logged :] if record.entry.content.startswith(NOTICE)]
+            seen.cursor, seen.logged = page.cursor, len(log)
+            if page.items or notices:
+                return wake_message(page.items, notices)
+            if not await self._tests_in_flight():
+                return ""
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(self._stopped.wait(), self._setup.poll_seconds)
+        return None
 
     async def _tests_in_flight(self) -> bool:
         branch = self._start.branch
@@ -276,8 +338,18 @@ class AgentSession:
             heartbeat_path=workspace / HEARTBEAT_FILE,
             mcp_servers=(McpEndpoint(MCP_SERVER, grant.url, grant.token_env),),
             backend=setup.command.backend,
-            heartbeat_sink=grant.heartbeat_sink,
+            heartbeat_sink=self._sink(grant.heartbeat_sink),
+            stdin_open=setup.command.interactive,
         )
+
+    def _sink(self, service: HeartbeatSink) -> HeartbeatSink:
+        """Keep the launch's ``beat`` for the idle wait, and hand it on to the MCP service's sink."""
+
+        def take(beat: Beat) -> None:
+            self._beat = beat
+            service(beat)
+
+        return take
 
     def _adopt(self, handle: AgentHandle, argv: Sequence[str]) -> None:
         branch = self._start.branch
@@ -286,28 +358,17 @@ class AgentSession:
         except ValueError:
             logger.warning("the agent CLI of %s ended before the process registry took it over", branch, exc_info=True)
 
-    async def _wait(self, handle: AgentHandle) -> AgentStatus:
-        ended_polls = 0
+    async def _wait(self, handle: AgentHandle, turns: TurnLog | None, turn: int) -> AgentStatus | None:
+        """The CLI's status once it ended, was lost or the session stopped; ``None`` once ``turns`` shows its
+        ``turn``-th turn ended with the CLI still up."""
         while True:
             status = await self._setup.runner.poll(handle)
             if status.state != _RUNNING or self._stopped.is_set():
                 return status
-            ended = self._setup.command.backend == AGENT_BACKEND_CLAUDE and turn_ended(
-                self._place.workspace / PROCESS_LOG
-            )
-            ended_polls = ended_polls + 1 if ended else 0
-            if ended_polls > TURN_END_GRACE_POLLS:
-                return await self._end_held_turn(handle, status)
+            if turns is not None and await asyncio.to_thread(turns.ended) >= turn:
+                return None
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(self._stopped.wait(), self._setup.poll_seconds)
-
-    async def _end_held_turn(self, handle: AgentHandle, status: AgentStatus) -> AgentStatus:
-        """End a CLI whose turn is over but that a leftover background shell keeps alive; its turn finished."""
-        logger.info("the turn of %s ended but its CLI did not exit; ending it", self._start.branch)
-        await self._setup.runner.cancel(handle)
-        while (await self._setup.runner.poll(handle)).state == _RUNNING:
-            await asyncio.sleep(self._setup.poll_seconds)
-        return AgentStatus("exited", 0, status.last_heartbeat_unix)
 
     async def _finish(self, handle: AgentHandle, *, cancel: bool) -> None:
         if cancel:
@@ -316,12 +377,17 @@ class AgentSession:
         await self._record_cost()
 
     async def _record_cost(self) -> None:
+        """Record what the launch used since its last record."""
         used = await asyncio.to_thread(launch_usage, self._place.workspace / PROCESS_LOG)
-        if not used.tokens:
+        added = {
+            model: _less(counts, self._recorded.get(model, TokenCounts())) for model, counts in used.tokens.items()
+        }
+        added = {model: counts for model, counts in added.items() if counts != TokenCounts()}
+        if not added:
             return
-        usage = LlmUsage(
-            self._start.branch, UsageSource.SPECIALIST, self._cost(used.tokens), used.total, used.session_id
-        )
+        self._recorded = used.tokens
+        total = sum(added.values(), TokenCounts())
+        usage = LlmUsage(self._start.branch, UsageSource.SPECIALIST, self._cost(added), total, used.session_id)
         await self._place.notebook.record_llm_usage(usage)
 
     def _cost(self, tokens: Mapping[str, TokenCounts]) -> float | None:
@@ -332,22 +398,40 @@ class AgentSession:
         return sum(price.cost_usd(counts) for price, counts in prices if price is not None)
 
 
-def turn_ended(process_log: Path) -> bool:
-    """Whether a Claude stream-json log has the ``result`` event that ends its one turn."""
-    try:
-        with process_log.open("rb") as handle:
-            handle.seek(max(0, handle.seek(0, os.SEEK_END) - _LOG_TAIL_BYTES))
-            tail = handle.read().decode(errors="replace")
-    except OSError:
-        return False
-    for line in tail.splitlines():
-        if '"result"' not in line:
-            continue
-        with contextlib.suppress(json.JSONDecodeError):
-            row = json.loads(line)
-            if isinstance(row, dict) and row.get("type") == "result":
-                return True
-    return False
+@dataclass
+class _Seen:
+    """What a launch has shown its CLI: the inbox cursor it read up to, and how many branch-log entries."""
+
+    cursor: str
+    logged: int
+
+
+class TurnLog:
+    """Counts the turns a Claude stream-json log says ended, a ``result`` row each, reading only what was appended."""
+
+    def __init__(self, process_log: Path) -> None:
+        self._path, self._offset, self._partial, self._ended = process_log, 0, b"", 0
+
+    def ended(self) -> int:
+        try:
+            with self._path.open("rb") as handle:
+                handle.seek(self._offset)
+                appended = handle.read()
+        except OSError:
+            return self._ended
+        self._offset += len(appended)
+        *lines, self._partial = (self._partial + appended).split(b"\n")
+        for line in lines:
+            if b'"result"' not in line:
+                continue
+            with contextlib.suppress(json.JSONDecodeError):
+                row = json.loads(line)
+                self._ended += isinstance(row, dict) and row.get("type") == "result"
+        return self._ended
+
+
+def _less(counts: TokenCounts, earlier: TokenCounts) -> TokenCounts:
+    return TokenCounts(*(max(0, getattr(counts, item.name) - getattr(earlier, item.name)) for item in fields(counts)))
 
 
 def _describe(status: AgentStatus, seconds: float) -> str:
@@ -359,6 +443,7 @@ def _describe(status: AgentStatus, seconds: float) -> str:
 
 
 __all__ = [
+    "IDLE_TURNS",
     "MCP_SERVER",
     "MIN_SESSION_S",
     "AgentCommand",

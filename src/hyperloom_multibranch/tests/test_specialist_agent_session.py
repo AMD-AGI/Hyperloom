@@ -22,12 +22,14 @@ from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.tests.factories import intent, request, result
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.specialist.agent_session import (
+    IDLE_TURNS,
     WAITED_END,
     AgentCommand,
     AgentSession,
     AgentSetup,
     BranchPlace,
 )
+from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.runtime import SessionCrashed, SessionStart
 from hyperloom_multibranch.specialist.worktree import SourceBase
 
@@ -45,20 +47,42 @@ class _Clock:
     now = 1_800_000_000.0
 
 
+def _text(line: str) -> str:
+    """The text of a stream-json user message, or ``line`` itself when it is not one (codex reads plain text)."""
+    try:
+        message = json.loads(line)
+    except json.JSONDecodeError:
+        return line
+    return message["message"]["content"][0]["text"]
+
+
 class _Runner:
-    """Launches nothing: launch ``n`` runs until the test ends it with ``end(n, status, seconds)``."""
+    """Launches nothing: launch ``n`` runs until the test ends it with ``end(n, status, seconds)``; ``sent`` holds
+    the text of every message sent to a running CLI, ``beats`` counts the beats its session gave."""
 
     def __init__(self, clock: _Clock) -> None:
         self.clock, self.specs, self.prompts, self.cancelled, self.collected = clock, [], [], [], []
         self.ends: dict[int, tuple[AgentStatus, float]] = {}
+        self.sent: list[str] = []
+        self.beats = 0
 
     def end(self, n: int, status: AgentStatus, seconds: float) -> None:
         self.ends[n] = (status, seconds)
 
     async def launch(self, spec):
         self.specs.append(spec)
-        self.prompts.append((spec.workspace / "prompt.md").read_text())
+        self.prompts.append(_text((spec.workspace / "prompt.md").read_text()))
+        spec.heartbeat_sink(self._beat)
         return AgentHandle(spec.task_id, FIRST_PID + len(self.specs), self.clock.now)
+
+    def _beat(self) -> None:
+        self.beats += 1
+
+    async def send(self, handle, data):
+        self.sent.append(_text(data.decode()))
+
+    async def close_stdin(self, handle):
+        pass
 
     async def poll(self, handle):
         ended = self.ends.pop(handle.pid - FIRST_PID, None)
@@ -186,20 +210,95 @@ async def test_a_session_that_ends_as_it_should_is_followed_by_a_fresh_one(rig):
     assert rig.worktree.head() == rig.root
 
 
-async def test_a_cli_held_open_after_its_turn_ended_is_ended_as_a_finished_turn(rig):
+def _end_turn(rig, *rows) -> None:
+    """Append ``rows`` and the ``result`` row that ends a turn to the CLI's log."""
+    with (rig.workspace / "process.log").open("a") as log:
+        for row in (*rows, {"type": "result", "subtype": "success"}):
+            log.write(json.dumps(row) + "\n")
+
+
+async def test_a_claude_cli_lives_on_after_its_turn_and_what_arrives_for_its_branch_wakes_it(rig):
+    await rig.toolbox_notebook.write_request(request("r1", intent(BRANCH, rig.root)))
     session = rig.session()
     running = asyncio.create_task(session.run())
-    await _until(lambda: len(rig.runner.specs) == 1, "the first launch")
-    rig.clock.now += 3600.0
-    (rig.workspace / "process.log").write_text(json.dumps({"type": "result", "subtype": "success"}) + "\n")
+    await _until(lambda: len(rig.runner.specs) == 1, "the launch")
+    spec = rig.runner.specs[0]
+    assert spec.stdin_open and spec.argv[spec.argv.index("--input-format") + 1] == "stream-json"
+    assert "--include-partial-messages" in spec.argv
 
-    await _until(lambda: len(rig.runner.specs) == 2, "a fresh session")
+    _end_turn(rig)
+    beats = rig.runner.beats
+    await _until(lambda: rig.runner.beats > beats, "an idle session to keep its heartbeat")
+    assert rig.runner.sent == []
+    await rig.toolbox_notebook.write_result(result("r1"))
+    await _until(lambda: len(rig.runner.sent) == 1, "the result to wake the CLI")
     await session.stop()
     await asyncio.wait_for(running, 1)
 
-    assert rig.runner.cancelled[0] == 1
-    assert "ended: its model finished its turn" in rig.runner.prompts[1]
-    assert "--include-partial-messages" in rig.runner.specs[0].argv
+    assert len(rig.runner.specs) == 1
+    assert "this arrived for your branch" in rig.runner.sent[0] and "result r1" in rig.runner.sent[0]
+
+
+async def test_a_runtime_notice_written_while_the_turn_is_over_reaches_the_cli(rig):
+    await rig.toolbox_notebook.write_request(request("r1", intent(BRANCH, rig.root)))
+    session = rig.session()
+    running = asyncio.create_task(session.run())
+    await _until(lambda: len(rig.runner.specs) == 1, "the launch")
+
+    _end_turn(rig)
+    await rig.notebook.append_branch_log(
+        BranchLogEntry(BRANCH, BranchLogType.RESULT, f"{NOTICE} you may now have 3 tests running at once")
+    )
+    await _until(lambda: len(rig.runner.sent) == 1, "the notice to wake the CLI")
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+
+    assert "you may now have 3 tests running at once" in rig.runner.sent[0]
+
+
+async def test_turns_that_end_with_nothing_running_are_nudged_until_too_many_in_a_row_raise(rig):
+    session = rig.session()
+    running = asyncio.create_task(session.run())
+    await _until(lambda: len(rig.runner.specs) == 1, "the launch")
+
+    for nudged in range(1, IDLE_TURNS + 1):
+        _end_turn(rig)
+        await _until(lambda n=nudged: len(rig.runner.sent) == n, f"nudge {nudged}")
+    _end_turn(rig)
+
+    with pytest.raises(SessionCrashed, match=f"{IDLE_TURNS} turns in a row") as raised:
+        await asyncio.wait_for(running, 1)
+    assert not raised.value.lost
+    assert all("nothing new for your branch" in text for text in rig.runner.sent)
+    assert (rig.runner.cancelled, rig.runner.collected) == ([1], [1])
+
+
+async def test_each_turn_records_the_tokens_it_added(rig):
+    await rig.toolbox_notebook.write_request(request("r1", intent(BRANCH, rig.root)))
+    session = rig.session(command=AgentCommand("claude", "claude", model="claude-opus-5-5"))
+    running = asyncio.create_task(session.run())
+    await _until(lambda: len(rig.runner.specs) == 1, "the launch")
+    init = {"type": "system", "subtype": "init", "session_id": "sess-1"}
+
+    def call(n: int, tokens: int) -> dict:
+        usage = {"input_tokens": tokens, "output_tokens": 10}
+        return {"type": "assistant", "message": {"id": f"m{n}", "model": "claude-opus-5-5", "usage": usage}}
+
+    async def recorded() -> list:
+        return [record.usage.tokens for record in (await rig.notebook.snapshot()).llm_usage]
+
+    _end_turn(rig, init, call(1, 1_000))
+    await _until(lambda: rig.runner.beats > 0, "the first turn to end")
+    first = await recorded()
+    await rig.toolbox_notebook.write_result(result("r1"))
+    await _until(lambda: len(rig.runner.sent) == 1, "the result to wake the CLI")
+    _end_turn(rig, call(2, 500))
+    await _until(lambda: len(rig.runner.sent) == 2, "the second turn to end")
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+
+    assert first == [TokenCounts(1_000, 10)]
+    assert await recorded() == [TokenCounts(1_000, 10), TokenCounts(500, 10)]
 
 
 async def test_a_launch_ended_early_to_wait_for_its_test_is_no_crash_and_the_next_waits_for_the_result(rig):
@@ -330,12 +429,14 @@ def test_codex_reads_its_role_with_the_prompt(tmp_path):
 _STAND_IN = """#!/usr/bin/env python3
 import json, os, pathlib, sys
 role = pathlib.Path(sys.argv[sys.argv.index("--system-prompt-file") + 1])
+first = json.loads(sys.stdin.readline())
 seen = {
-    "prompt": sys.stdin.read(),
+    "prompt": first["message"]["content"][0]["text"],
     "mcp_config": "--mcp-config" in sys.argv,
     "token": os.environ.get("HYPERLOOM_SPECIALIST_MCP_TOKEN"),
 }
 (role.parent / "seen.json").write_text(json.dumps(seen))
+sys.stdin.read()
 """
 
 

@@ -62,7 +62,7 @@ import json, os, pathlib, re, sys, time, urllib.request
 
 argv = sys.argv
 workspace = pathlib.Path(argv[argv.index("--system-prompt-file") + 1]).parent
-prompt = sys.stdin.read()
+prompt = json.loads(sys.stdin.readline())["message"]["content"][0]["text"]
 launch = len(list(workspace.glob("seen-*.txt")))
 (workspace / f"seen-{launch}.txt").write_text(prompt)
 if launch:

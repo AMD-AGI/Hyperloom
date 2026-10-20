@@ -7,8 +7,10 @@ The role says how a long-running specialist works through the session's tools, h
 declares a correctness fix with its repro case, and which gains the toolbox refuses as fake (main's ``FAKE_GAINS``
 catalog, so a new row reaches the role). The
 launch prompt opens with the repair a repair branch was opened for and the startup brief, right after the role, then
-the branch, its head, K and the branch's latest memory, so a new session goes on where the last one stopped.
-:func:`prompt_versions` names the text of both for the session's manifest fingerprint.
+the branch, its head, K and the branch's latest memory, so a new session goes on where the last one stopped. A
+session whose turn ended is woken by :func:`wake_message`, with what its inbox and the runtime's notices brought, or
+by :func:`nudge_message` when nothing came and it has nothing running.
+:func:`prompt_versions` names the text of all of them for the session's manifest fingerprint.
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ from collections.abc import Sequence
 
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import BASH_KILL_SAFETY_PREAMBLE
 from hyperloom_multibranch.contracts.fork import RepairRequest
-from hyperloom_multibranch.contracts.notebook.records import BranchLogRecord
+from hyperloom_multibranch.contracts.notebook.records import BranchLogRecord, InboxItem
 from hyperloom_multibranch.rulegate.fix_case import CASE_SCRIPT
 from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.runtime import SessionStart
@@ -48,7 +50,28 @@ _LOG = "Your branch log, the latest {count} entries, oldest first:\n{entries}"
 _FIRST = "Your branch log is empty: this is the first session on your branch."
 _ENDED = "Your previous session ended: {last_end}. Go on from your branch log."
 _ENTRY = "- [{entry_id}] {kind}{tests}: {content}"
-_LAUNCH = (_REPAIR, _BRIEF, _STANDING, _LOG, _FIRST, _ENDED, _ENTRY, str(RECENT_ENTRIES), str(ENTRY_CHARS))
+_WAKE = """\
+Since your last turn ended, this arrived for your branch:
+{items}
+Read what bears on your work (test_result, notebook_brief) and carry on from where you stopped."""
+_WAKE_ITEM = "- {kind} {pointer}: {summary}"
+_NUDGE = """\
+Your turn ended with no test of yours running and nothing new for your branch. The session decides when your branch \
+stops: choose your next direction from the profile, the learnings and what was tried, and test it."""
+_LAUNCH = (
+    _REPAIR,
+    _BRIEF,
+    _STANDING,
+    _LOG,
+    _FIRST,
+    _ENDED,
+    _ENTRY,
+    _WAKE,
+    _WAKE_ITEM,
+    _NUDGE,
+    str(RECENT_ENTRIES),
+    str(ENTRY_CHARS),
+)
 
 _ROLE = f"""\
 You are a long-running optimization specialist on one branch of a Hyperloom multi-branch session.
@@ -168,6 +191,18 @@ def launch_prompt(
     return "\n\n".join(sections) + "\n"
 
 
+def wake_message(items: Sequence[InboxItem], notices: Sequence[BranchLogRecord]) -> str:
+    """The message that wakes a specialist whose turn ended: what its inbox and the runtime's notices brought since."""
+    lines = [_WAKE_ITEM.format(kind=item.kind.value, pointer=item.pointer, summary=item.summary) for item in items]
+    lines += [_entry(record) for record in notices]
+    return _WAKE.format(items="\n".join(lines))
+
+
+def nudge_message() -> str:
+    """The message to a specialist whose turn ended with nothing of its own running and nothing new arrived."""
+    return _NUDGE
+
+
 def prompt_versions() -> dict[str, str]:
     """``{prompt name: the first hex digits of the sha256 of its text}``, for the session's manifest fingerprint."""
     role = _ROLE.format(workload="{workload}", fake_gains=_fake_gains())
@@ -207,4 +242,13 @@ def _entry(record: BranchLogRecord) -> str:
     return _ENTRY.format(entry_id=record.entry_id, kind=entry.kind.value, tests=tests, content=content)
 
 
-__all__ = ["ENTRY_CHARS", "RECENT_ENTRIES", "VERSION_HEX", "launch_prompt", "prompt_versions", "role_prompt"]
+__all__ = [
+    "ENTRY_CHARS",
+    "RECENT_ENTRIES",
+    "VERSION_HEX",
+    "launch_prompt",
+    "nudge_message",
+    "prompt_versions",
+    "role_prompt",
+    "wake_message",
+]
