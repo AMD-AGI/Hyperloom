@@ -161,7 +161,9 @@ def test_the_prompt_shows_and_explains_the_gpu_hours_and_llm_dollars_used() -> N
     assert "a test taken back before its result is not in it" in prompt
     assert "the baseline measured on the root commit included" in prompt
     assert "the measurements the PRELUDE run that built the root commit made on its own" in prompt
-    assert "the rule gate's fix critic is not in it" in prompt
+    assert (
+        "scheduler_llm_usd is what your own calls, the patch resolver's and the rule gate's fix critic's cost" in prompt
+    )
     assert "max_llm_usd is the specialist_llm_usd plus scheduler_llm_usd" in prompt
     assert "its wall time times the cards one test uses, which nothing limits and which gpu_hours_used leaves out" in (
         prompt

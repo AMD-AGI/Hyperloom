@@ -316,8 +316,9 @@ class LearningRecord:
 @dataclass(frozen=True)
 class LlmUsage:
     """What one LLM launch or call used: ``branch`` is the branch whose specialist spent it, empty for the scheduler's
-    own judge or resolver; ``tokens`` are its tokens by how they are billed; ``cost_usd`` is what they cost, ``None``
-    for a model the price sheet does not list; ``launch`` names the CLI session it came from, to trace it back."""
+    own judge, resolver or fix critic; ``tokens`` are its tokens by how they are billed; ``cost_usd`` is what they
+    cost, ``None`` for a model the price sheet does not list; ``launch`` names the CLI session it came from, to trace
+    it back."""
 
     branch: str
     source: UsageSource
