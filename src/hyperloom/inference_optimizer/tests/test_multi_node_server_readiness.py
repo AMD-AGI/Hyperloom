@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.common.env import EnvValueError
 from hyperloom.inference_optimizer.multi_node._internal import external_state
 from hyperloom.orchestrator.actions.executors import _multi_node_server_readiness as readiness
 
@@ -172,7 +173,23 @@ def test_the_terminal_state_fast_fail_can_be_switched_off(monkeypatch: pytest.Mo
     monkeypatch.setenv("HYPERLOOM_MN_SERVER_LOG_DIR", str(tmp_path))
     (tmp_path / "mn_infera_server_10.0.0.1_r0.log").write_text("x: error: boom\n", encoding="utf-8")
 
-    readiness._reject_terminal_worker_state(["10.0.0.1"], elapsed=600, timeout_s=3600)
+    readiness._reject_terminal_worker_state(["10.0.0.1"], readiness._worker_gate_rules(), elapsed=600, timeout_s=3600)
+
+
+def test_the_worker_gate_rejects_a_malformed_knob_before_it_dials_a_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fast-fail windows are parsed before the client opens, so a typo cannot surface mid-poll or go unread."""
+    monkeypatch.setenv("HYPERLOOM_MN_WORKER_WEDGE_GRACE_S", "7m")
+    monkeypatch.setenv("HYPERLOOM_MN_WORKER_WEDGE_FASTFAIL", "0")
+    _with_state(monkeypatch, {"prefill_pods": [{"podIP": "10.0.0.1"}]})
+    _clock_advances_only_on_sleep(monkeypatch)
+    client = _serve(monkeypatch, {"10.0.0.1": [_Reply(503)]})
+
+    with pytest.raises(EnvValueError):
+        asyncio.run(readiness._wait_for_workers_ready_async(timeout_s=3600, poll_every_s=60))
+
+    assert client.requested == []
 
 
 def test_serving_probe_rules_only_wait_for_model_registration_on_infera(monkeypatch: pytest.MonkeyPatch) -> None:

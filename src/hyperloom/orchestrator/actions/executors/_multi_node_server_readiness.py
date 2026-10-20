@@ -57,9 +57,29 @@ def _worker_targets(state: Mapping[str, Any]) -> list[_WorkerTarget]:
     return targets
 
 
-def _worker_health_port() -> int:
-    """The port each worker serves its own /health on."""
-    return int(os.environ.get("HYPERLOOM_MN_WORKER_PORT", "30000") or 30000)
+@dataclass(frozen=True)
+class _WorkerGateRules:
+    """What the worker gate dials, and when a pending worker's own log may end the wait instead of its /health."""
+
+    health_port: int
+    fast_fail: bool
+    crash_grace_s: int
+    wedge_grace_s: int
+
+
+def _worker_gate_rules() -> _WorkerGateRules:
+    """Resolve the worker gate's port and fast-fail windows from the environment.
+
+    Read once before the gate opens its client, so a malformed value fails the round before any worker is dialled
+    rather than mid-poll or -- when the fast-fail is switched off -- not at all.
+    """
+    return _WorkerGateRules(
+        health_port=env_int("HYPERLOOM_MN_WORKER_PORT", 30000),
+        fast_fail=env_flag("HYPERLOOM_MN_WORKER_WEDGE_FASTFAIL", default=True),
+        # An argparse rejection or a fatal exit is terminal, so bail within seconds of the launch.
+        crash_grace_s=env_int("HYPERLOOM_MN_WORKER_CRASH_GRACE_S", 45),
+        wedge_grace_s=env_int("HYPERLOOM_MN_WORKER_WEDGE_GRACE_S", 420),
+    )
 
 
 async def _workers_passing_health(
@@ -67,9 +87,9 @@ async def _workers_passing_health(
     targets: list[_WorkerTarget],
     ready: set[str],
     elapsed: int,
+    port: int,
 ) -> set[str]:
     """The worker IPs passing their own /health after one more sweep over the ones still pending."""
-    port = _worker_health_port()
     ready = set(ready)
     for target in targets:
         if target.ip in ready:
@@ -119,17 +139,22 @@ def _reject_wedged_workers(shared_dir: str, pending_ips: list[str], *, elapsed: 
         )
 
 
-def _reject_terminal_worker_state(pending_ips: list[str], *, elapsed: int, timeout_s: int) -> None:
+def _reject_terminal_worker_state(
+    pending_ips: list[str],
+    rules: _WorkerGateRules,
+    *,
+    elapsed: int,
+    timeout_s: int,
+) -> None:
     """Fail the wait early on a worker state /health can never recover from, rather than burning the whole gate."""
-    if not env_flag("HYPERLOOM_MN_WORKER_WEDGE_FASTFAIL", default=True):
+    if not rules.fast_fail:
         return
     shared_dir = shared_server_log_dir()
     if not shared_dir:
         return
-    # An argparse rejection or a fatal exit is terminal, so bail within seconds of the launch.
-    if elapsed > int(os.environ.get("HYPERLOOM_MN_WORKER_CRASH_GRACE_S", "45") or 45):
+    if elapsed > rules.crash_grace_s:
         _reject_crashed_worker(shared_dir, pending_ips, elapsed=elapsed, timeout_s=timeout_s)
-    if elapsed > int(os.environ.get("HYPERLOOM_MN_WORKER_WEDGE_GRACE_S", "420") or 420):
+    if elapsed > rules.wedge_grace_s:
         _reject_wedged_workers(shared_dir, pending_ips, elapsed=elapsed, timeout_s=timeout_s)
 
 
@@ -144,13 +169,14 @@ async def _wait_for_workers_ready_async(timeout_s: int, poll_every_s: int = 10) 
     targets = _worker_targets(_read_state() or {})
     if not targets:
         return
+    rules = _worker_gate_rules()
     started = _t.monotonic()
     ready: set[str] = set()
-    log.info("waiting for %d worker(s) /health on port %d before frontend probe", len(targets), _worker_health_port())
+    log.info("waiting for %d worker(s) /health on port %d before frontend probe", len(targets), rules.health_port)
     async with _httpx.AsyncClient(timeout=10.0) as client:
         while True:
             elapsed = int(_t.monotonic() - started)
-            ready = await _workers_passing_health(client, targets, ready, elapsed)
+            ready = await _workers_passing_health(client, targets, ready, elapsed, rules.health_port)
             pending = [target.ip for target in targets if target.ip not in ready]
             if not pending:
                 log.info(
@@ -166,7 +192,7 @@ async def _wait_for_workers_ready_async(timeout_s: int, poll_every_s: int = 10) 
                     + " (a PD leg is still initializing, e.g. prefill "
                     "mooncake transfer engine)"
                 )
-            _reject_terminal_worker_state(pending, elapsed=elapsed, timeout_s=timeout_s)
+            _reject_terminal_worker_state(pending, rules, elapsed=elapsed, timeout_s=timeout_s)
             await asyncio.sleep(poll_every_s)
 
 
