@@ -1814,21 +1814,16 @@ class FrameworkPhase(ProposalBench):
 
         # Classify this phase's candidate outcomes so the report / robustness can tell "discovered nothing"
         # (empty_discovery) apart from "tested candidates but none kept" (tested_no_keep).
-        summary = summarize_candidate_outcomes(
-            state.framework_agent_phase_progress,
-        )
-        outcome_class = str(summary.get("outcome_class") or "empty_discovery")
+        summary = summarize_candidate_outcomes(state.framework_agent_phase_progress)
+        outcome_class = summary["outcome_class"]
 
         # Consecutive empty-discovery tracking → advisory ("framework phase ineffective").
-        prev_empty = int(state.framework_consecutive_empty_discoveries or 0)
-        if outcome_class == "empty_discovery":
-            consecutive_empty = prev_empty + 1
-        else:
-            consecutive_empty = 0
+        empty = outcome_class == "empty_discovery"
+        consecutive_empty = state.framework_consecutive_empty_discoveries + 1 if empty else 0
         state.framework_consecutive_empty_discoveries = consecutive_empty
 
         advisory = ""
-        if outcome_class == "empty_discovery" and consecutive_empty >= 2:
+        if empty and consecutive_empty >= 2:
             advisory = (
                 f"framework phase ineffective: {consecutive_empty} consecutive macro-cycles discovered zero candidates"
             )
@@ -1844,14 +1839,14 @@ class FrameworkPhase(ProposalBench):
             reason=reason,
             evidence={
                 "event": "framework_agent_phase_done",
-                "failure_count": int(failure_count),
-                "empty_count": int(state.framework_agent_empty_discoveries or 0),
-                "retry_limit": int(DISCOVER_FAILURE_RETRY_LIMIT),
-                "batches_discovered": len(state.framework_agent_batches or []),
+                "failure_count": failure_count,
+                "empty_count": state.framework_agent_empty_discoveries,
+                "retry_limit": DISCOVER_FAILURE_RETRY_LIMIT,
+                "batches_discovered": len(state.framework_agent_batches),
                 "outcome_class": outcome_class,
-                "candidate_outcomes": summary.get("by_status") or {},
-                "keeps": int(summary.get("keeps") or 0),
-                "tested": int(summary.get("tested") or 0),
+                "candidate_outcomes": summary["by_status"],
+                "keeps": summary["keeps"],
+                "tested": summary["tested"],
                 "consecutive_empty_discoveries": consecutive_empty,
                 "advisory": advisory,
             },
