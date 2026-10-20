@@ -76,11 +76,7 @@ _ATOM_CAPS_NONE = _AtomTracelensCaps(False, False, False)
 
 @cache
 def _atom_tracelens_caps() -> _AtomTracelensCaps:
-    """Probe the installed atom for ``--mark-trace`` and annotation envs.
-
-    Fail-soft: import / help / parse errors return all-false so an older ATOM
-    argparse never sees ``--mark-trace``. Cached after the first call.
-    """
+    """Probe the installed atom for ``--mark-trace`` and annotation envs."""
     try:
         proc = subprocess.run(
             [_resolve_probe_python("atom"), "-c", _ATOM_CAPS_PROBE],
@@ -112,14 +108,7 @@ _PROFILER_FLAG_RE = re.compile(r"--profiler-config\.(\w+)[=\s]+(\S+)")
 
 
 def _profiler_flag_value(server_args: str, name: str) -> str | None:
-    """The value vLLM would resolve for ``--profiler-config.<name>``, or None.
-
-    Returns the LAST occurrence, because repeated flags are how this layer overrides
-    earlier ones and vLLM's argparse resolves them last-wins. Accepts both
-    ``--flag value`` and ``--flag=value``. Regex rather than tokenization: this runs
-    after JSON-valued flags have been compacted, and one unbalanced quote must not
-    take the whole guard down with it.
-    """
+    """The value vLLM would resolve for ``--profiler-config.<name>``, or None."""
     value: str | None = None
     for match in _PROFILER_FLAG_RE.finditer(server_args or ""):
         if match.group(1) == name:
@@ -128,20 +117,7 @@ def _profiler_flag_value(server_args: str, name: str) -> str | None:
 
 
 def _profiler_bound_holds(name: str, value: str | None, *, cap: int) -> bool:
-    """Whether the value already present keeps this flag's guarantee.
-
-    Name-only matching is not enough for the two flags that decide whether the
-    capture is bounded at all: vLLM reads ``max_iterations`` of 0 (or absent) as "no
-    limit", and a frontend profiler left on tracks no iterations and captures the
-    entire ``start_profile``..``stop_profile`` range. A guard that accepted those
-    would report success while the run stayed unbounded, which is worse than not
-    guarding -- the warning would send the next investigation the wrong way. The
-    summary table is the same kind of flag: only an explicit false keeps vLLM from
-    building it after the trace is written.
-
-    Every other flag only decides what the trace contains or where it lands, so its
-    presence is the whole contract.
-    """
+    """Whether the value already present keeps this flag's guarantee."""
     if value is None:
         return False
     if name == "max_iterations":
@@ -234,30 +210,17 @@ class _ProfileWindow(NamedTuple):
 
 
 def _profile_range_ratio(envs: Mapping[str, Any]) -> float:
-    """The request-length spread the steady-state floor is computed against.
-
-    A non-finite ratio would make the floor uncomputable, so it falls back to
-    the default the same way an unreadable one does.
-    """
+    """The request-length spread the steady-state floor is computed against."""
     return to_float(envs.get("RANDOM_RANGE_RATIO"), 1.0)
 
 
 def _steady_state_floor(*, osl_val: int, conc_val: int, range_ratio: float) -> int:
-    """Captured decode steps the splitter needs to isolate a steady-state window.
-
-    Mirrors TraceLens ``find_steady_state_window``: a capture shorter than this is
-    reported back as ``trace_split_no_steady_state``.
-    """
+    """Captured decode steps the splitter needs to isolate a steady-state window."""
     return math.ceil(max(osl_val, 1) * (1.0 + range_ratio) / (2.0 * max(conc_val, 1)))
 
 
 def _fit_profile_osl(*, osl_val: int, conc_val: int, range_ratio: float, cap: int) -> int:
-    """Resolve the profile-scoped OSL, lowering it until its steady state fits ``cap``.
-
-    ``PROFILE_OSL`` (via ``--profile-osl``) is honored as-is and only warned about;
-    otherwise the profile serves ``min(served OSL, _PROFILE_DEFAULT_OSL)`` and is
-    lowered further rather than losing its steady-state window.
-    """
+    """Resolve the profile-scoped OSL, lowering it until its steady state fits ``cap``."""
     pinned = optional_positive_int(os.environ.get("PROFILE_OSL"))
     osl_val = pinned if pinned is not None else min(osl_val, _PROFILE_DEFAULT_OSL)
     steady_floor = _steady_state_floor(osl_val=osl_val, conc_val=conc_val, range_ratio=range_ratio)
@@ -288,11 +251,7 @@ def _fit_profile_osl(*, osl_val: int, conc_val: int, range_ratio: float, cap: in
 
 
 def _profile_prompt_count(*, osl_val: int, conc_val: int, captured_iters: int) -> int:
-    """Prompts the engine needs to reach ``captured_iters`` decode steps.
-
-    N prompts run roughly ``N * OSL / CONC`` iterations, so this inverts that and
-    keeps a 2x buffer; running out of prompts ends the capture short of its window.
-    """
+    """Prompts the engine needs to reach ``captured_iters`` decode steps."""
     safe_conc = max(conc_val, 1)
     safe_osl = max(osl_val, 1)
     iters_to_prompts = max(1, (captured_iters * safe_conc + safe_osl - 1) // safe_osl)
@@ -323,21 +282,7 @@ def _bound_vllm_profiler_capture(
     config: _ProfileConfig,
     knobs: _ProfileKnobs,
 ) -> _ProfileConfig:
-    """Write the capture window into the flags vLLM's own profiler reads.
-
-    ``profiler`` and ``torch_profiler_dir`` are normally set by Magpie's launcher
-    script, not by this layer -- but that script appends its own flags *before*
-    EXTRA_VLLM_ARGS in the real ``vllm serve`` invocation, so the argv preflight
-    probe (which only sees EXTRA_VLLM_ARGS) checks capture_torch_profiler/
-    delay_iterations/max_iterations against a ProfilerConfig that never saw
-    ``profiler=torch`` or a trace dir. vLLM's validator requires both whenever
-    those bounds are present, so this layer's profiler bounds would be treated as
-    invalid and dropped instead of launched. Asserting ``profiler=torch`` keeps the
-    probed fragment self-consistent. No ``torch_profiler_dir`` is appended: on the
-    real ``vllm serve`` line Magpie's launcher emits ``<workspace>/torch_trace``
-    *before* ``EXTRA_VLLM_ARGS``, and vLLM's last-wins merge would let a second one
-    here override Magpie and send traces to the task root.
-    """
+    """Write the capture window into the flags vLLM's own profiler reads."""
     existing_vllm_args = str(envs.get("EXTRA_VLLM_ARGS", ""))
     profiler_flags = [
         ("delay_iterations", f"--profiler-config.delay_iterations {knobs.delay_iters}"),
@@ -390,11 +335,7 @@ def _profile_request_body(envs: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _publish_shape_tool_path(envs: dict[str, str], body: dict[str, Any], *, shape_discovery: bool) -> None:
-    """Point an unpatched SGLang at the kernel-shape tool and record the body it takes.
-
-    Shapes reach this server through PYTHONPATH, not through a request-body flag
-    or a CUDA-graph arg -- an unpatched SGLang rejects both.
-    """
+    """Point an unpatched SGLang at the kernel-shape tool and record the body it takes."""
     body.pop("shape_discovery", None)
     body.setdefault("detailed_annotations", True)
     from ._server_patcher import kernel_shape_tool_dir
@@ -421,12 +362,7 @@ def _publish_patched_shape_discovery(
     shape_discovery: bool,
     tracelens_patch_ok: bool,
 ) -> None:
-    """Record the capture options only a patched SGLang build accepts.
-
-    The gate is the degraded reason rather than ``tracelens_patch_ok``, because a
-    patch can be baked into the image without ever being attempted here; only a
-    patch that was attempted and failed clears the annotations.
-    """
+    """Record the capture options only a patched SGLang build accepts."""
     degraded = envs.get("HYPERLOOM_PROFILE_DEGRADED_REASON") == _TRACELENS_PATCH_UNAVAILABLE
     body["shape_discovery"] = shape_discovery and not degraded
     body["detailed_annotations"] = False if degraded else body.get("detailed_annotations", True)
@@ -460,13 +396,7 @@ def _request_sglang_profile_annotations(envs: dict[str, str], knobs: _ProfileKno
 
 
 def _shape_profile_trace(envs: dict[str, str], config: _ProfileConfig, knobs: _ProfileKnobs) -> _ProfileConfig:
-    """Shape the trace a profile run captures, through the mechanism its framework offers.
-
-    ATOM drives its own iteration count, so the request count is pinned to the
-    concurrency and the caps come from TraceLens; the serving frameworks take a
-    capture window instead, written into the flags or the request body their
-    profiler reads.
-    """
+    """Shape the trace a profile run captures, through the mechanism its framework offers."""
     if knobs.target is _ProfileTarget.ATOM_HTTP:
         # ATOM has no delay/max-iteration window; extra prompts only grow
         # the HTTP-bracketed trace. Force NUM_PROMPTS=CONC.

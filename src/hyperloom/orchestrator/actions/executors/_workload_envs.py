@@ -1110,11 +1110,7 @@ class _WorkloadShape(NamedTuple):
 
 
 def _apply_runner_type(bench: dict[str, Any], gpu_type: str) -> None:
-    """Name the benchmark script the resolved GPU type calls for.
-
-    A bench with no framework has no script to name, so the stale one goes
-    rather than being left pointing at another runner.
-    """
+    """Name the benchmark script the resolved GPU type calls for."""
     if gpu_type:
         bench["runner_type"] = str(gpu_type)
         framework = str(bench.get("framework") or "").lower()
@@ -1132,11 +1128,7 @@ def _resolve_tensor_parallel(
     rocr_yaml: Any,
     rocr_devices: Any,
 ) -> int:
-    """Settle how many GPUs this run is told to use, and say so in the envs.
-
-    The environment wins over the yaml, and a visible-device list narrower than
-    either caps both -- a run cannot be more parallel than the devices it can see.
-    """
+    """Settle how many GPUs this run is told to use, and say so in the envs."""
     resolved_tp = 0
     if tp_from_env:
         resolved_tp = int(tp_from_env)
@@ -1172,12 +1164,7 @@ class _TracelensPatch(NamedTuple):
 
 
 def _patch_sglang_for_graph_capture() -> None:
-    """Apply the SGLang graph-capture patch a sitecustomize profile still needs.
-
-    Shapes come from kernel_shape_tool, but the per-batch-size capture trace still
-    needs sglang_gc_patch or it IndexErrors. Only profiling captures traces, so
-    this patch is applied only here.
-    """
+    """Apply the SGLang graph-capture patch a sitecustomize profile still needs."""
     if ensure_sglang_patched_for_tracelens():
         return
     log.warning(
@@ -1206,14 +1193,7 @@ def _record_tracelens_patch_status(envs: dict[str, str], framework: str) -> bool
 
 
 def _settle_tracelens_patch(envs: dict[str, str], framework: str) -> _TracelensPatch:
-    """Settle how this profile is instrumented, and record that in the envs.
-
-    The status is written on every path, not only the failing one: "patched fine"
-    and "never tried because the image already carries it" call for different
-    reactions when a trace later turns up without annotations. TraceLens profiler
-    flags exist only in patched vLLM / SGLang builds, and atom's profiler is
-    HTTP-driven via atom_mi*x.sh, so atom is never patched from here.
-    """
+    """Settle how this profile is instrumented, and record that in the envs."""
     from ._server_patcher import resolve_sglang_shape_mode
 
     sitecustomize = "sglang" in framework and resolve_sglang_shape_mode() == "sitecustomize"
@@ -1230,16 +1210,7 @@ def _settle_tracelens_patch(envs: dict[str, str], framework: str) -> _TracelensP
 
 
 def _shape_discovery_enabled(bench: dict[str, Any]) -> bool:
-    """Whether this profile may ask the server to record kernel shapes.
-
-    Shape discovery balloons an eager + with_stack trace, so
-    HYPERLOOM_PROFILE_SHAPE_DISCOVERY turns it off wholesale. Gemma2 crashes
-    CUDA-graph capture with it, so the model gates it too;
-    HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE=1 skips only that second gate.
-
-    Raises:
-        EnvValueError: the FORCE variable spells something that is not a boolean.
-    """
+    """Whether this profile may ask the server to record kernel shapes."""
     forced = env_bool("HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE")
     if not env_flag("HYPERLOOM_PROFILE_SHAPE_DISCOVERY", default=True):
         return False
@@ -1265,13 +1236,7 @@ def _shape_discovery_enabled(bench: dict[str, Any]) -> bool:
 
 
 def _apply_profile_config(envs: dict[str, str], bench: dict[str, Any], shape: _WorkloadShape) -> _ProfileConfig:
-    """Shape a non-scriptable profile run, and report what it capped.
-
-    A profile measures a shape, not a throughput, so the request count, the
-    output length and the profiler flags are all pinned here rather than taken
-    from the benchmark the recipe was written for. Scriptable image frameworks
-    (xDiT diffusion) have no LLM decode steady state, so none of it applies.
-    """
+    """Shape a non-scriptable profile run, and report what it capped."""
     config = _ProfileConfig(osl_val=shape.osl_val, conc_val=shape.conc_val)
     if not shape.is_profile or shape.is_scriptable:
         return config
@@ -1296,14 +1261,7 @@ def _apply_profile_config(envs: dict[str, str], bench: dict[str, Any], shape: _W
 
 
 def _drop_redundant_graph_capture_flag(envs: dict[str, str], framework_env: str) -> None:
-    """Drop SGLang's graph-capture profiling flag from a run that is eager anyway.
-
-    An eager profile cannot capture a CUDA graph, so the profile YAML's
-    ``--enable-profile-cuda-graph`` is dead weight the server still sets up for.
-    The two flags reach the env from different layers -- the YAML template vs the
-    eager fallback folded into ``extra_server_args`` -- and only meet after every
-    merge, so this is the first point that can see the contradiction.
-    """
+    """Drop SGLang's graph-capture profiling flag from a run that is eager anyway."""
     if framework_env != "EXTRA_SGLANG_ARGS":
         return
     tokens = str(envs.get(framework_env, "")).split()
@@ -1324,17 +1282,7 @@ def _publish_quality_reference(
     is_profile: bool,
     establish_quality_ref: bool,
 ) -> None:
-    """Name the image a scriptable workload is graded against, and who may write it.
-
-    Magpie forwards only ``benchmark.envs`` to the wrapper subprocess, so the
-    reference is re-injected at this single scriptable choke point or the shipped
-    empty YAML default silently skips the gate. What it holds is the workload's
-    business -- an xDiT image, an operator's own artifact -- so the default path
-    under ``session_dir()`` is a convention, not a contract. The baseline
-    ESTABLISHES the reference, so a stale prior-session file cannot mislead it;
-    every other variant only COMPARES, so a degraded one can never overwrite it;
-    a profile neither gates nor writes.
-    """
+    """Name the image a scriptable workload is graded against, and who may write it."""
     if not framework_registry.is_scriptable(bench.get("framework")):
         return
     reference = _first_env(_QUALITY_REF_ENVS)
@@ -1360,13 +1308,7 @@ def _publish_xdit_model_resolution(
     *,
     establish_quality_ref: bool,
 ) -> None:
-    """Pin how the xDiT runner resolves its model, and which backend serves the baseline.
-
-    These are read by the xDiT runner and by nothing else, so they are keyed on
-    the framework rather than on scriptability: an operator-supplied ``custom``
-    workload must not have its baseline altered by settings it never declared,
-    least of all an attention backend.
-    """
+    """Pin how the xDiT runner resolves its model, and which backend serves the baseline."""
     if str(bench.get("framework") or "").strip().lower() != "xdit":
         return
     # The runner resolves models through MODEL_REGISTRY keys: "name" is
@@ -1387,17 +1329,7 @@ def _publish_xdit_model_resolution(
 
 
 def _pin_sparse_kv_block_size(envs: dict[str, str], workload: _Workload) -> None:
-    """Pin the KV-cache block size a sparse-attention model can actually allocate.
-
-    Models like MiniMax-M3 (MSA) place the main K/V and the indexer side-cache in
-    one KV-cache group whose sparse backends only accept the model's
-    ``sparse_attention_config.sparse_block_size``; vLLM's default ``--block-size
-    16`` has no common block size with it, so KV-cache init aborts and baseline,
-    roofline and every explore variant crash at startup. Pinning it here makes it
-    ride EXTRA_VLLM_ARGS on every path, including roofline, which seeds from the
-    current-best delta. vLLM-only: sglang rejects ``--block-size``. An unreadable
-    config (an uncached hub id) injects nothing.
-    """
+    """Pin the KV-cache block size a sparse-attention model can actually allocate."""
     if "vllm" not in str(workload.bench.get("framework") or "").lower():
         return
     block_size = _sparse_kv_block_size(str(workload.model_path or workload.bench.get("model") or ""))
@@ -1412,14 +1344,7 @@ def _pin_sparse_kv_block_size(envs: dict[str, str], workload: _Workload) -> None
 
 
 def _pin_client_model_access(envs: dict[str, str], workload: _Workload) -> None:
-    """Tell the benchmark client how to load this model.
-
-    The bench scripts always launch the SERVER with ``--trust-remote-code``, so a
-    custom-tokenizer model's CLIENT has to load the same remote code or
-    transformers raises mid-warmup -- and that is not enough when transformers
-    cannot map the ``model_type`` at all, so the client is also told which loader
-    to use. Both are setdefaults, so an operator opt-out always wins.
-    """
+    """Tell the benchmark client how to load this model."""
     for trust_key in (
         "MAGPIE_TRUST_REMOTE_CODE",  # Magpie sglang remote-direct client
         "BENCH_TRUST_REMOTE_CODE",  # GEAK bench_e2e.sh inferencex client
@@ -1432,15 +1357,7 @@ def _pin_client_model_access(envs: dict[str, str], workload: _Workload) -> None:
 
 
 def _pin_fp8_per_token_fast_path(envs: dict[str, str], workload: _Workload) -> None:
-    """Route a per-channel, per-token FP8 checkpoint to aiter's fused GEMM.
-
-    Without this env a dense FP8 checkpoint with per-channel weight and per-token
-    (dynamic) activation scales takes the slow unfused
-    ``_apply_fallback_scaled_mm`` in sglang's ``apply_fp8_linear`` instead of
-    aiter's CK ``gemm_a8w8_bpreshuffle``. Scoped to that exact quant scheme on
-    gfx942, so per-tensor and block-scale FP8 are never touched; setdefault, so
-    an operator-set value wins.
-    """
+    """Route a per-channel, per-token FP8 checkpoint to aiter's fused GEMM."""
     from hyperloom.inference_optimizer.gpu_types import _resolve_amd_gpu_type
 
     if (
@@ -1460,10 +1377,7 @@ def _apply_framework_envs(
     is_profile: bool,
     establish_quality_ref: bool,
 ) -> str:
-    """Apply the env this framework and this model need, and name the model.
-
-    Returns the model basename the later phases key their own rules on.
-    """
+    """Apply the env this framework and this model need, and name the model."""
     _drop_redundant_graph_capture_flag(envs, framework_env)
     _publish_quality_reference(
         envs,
@@ -1479,14 +1393,7 @@ def _apply_framework_envs(
 
 
 def _tokenized_requests_env() -> str:
-    """Whether the eval harness should send token ids rather than text.
-
-    PD (router-fronted): lm_eval's default token-id prompts are rejected by the
-    sglang_router's /v1/completions (HTTP 422, StringOrArray), collapsing the
-    accuracy eval. Force string prompts so the gate works. Explicit env /
-    extra_envs win; only disaggregated runs are touched (aggregated hits the
-    sglang server directly, which accepts token-id prompts).
-    """
+    """Whether the eval harness should send token ids rather than text."""
     tokenized = os.environ.get("MAGPIE_EVAL_TOKENIZED_REQUESTS", "").strip()
     if not tokenized:
         try:
@@ -1623,11 +1530,7 @@ def _write_benchmark_config(document: dict[str, Any], materialized: Path) -> Pat
 
 
 def _refuse_framework_script_mismatch(bench: dict[str, Any]) -> None:
-    """Refuse to boot an entrypoint that belongs to another framework.
-
-    Only trips when the script carries a DIFFERENT known framework's prefix, so
-    custom and non-prefixed scripts are not falsely rejected.
-    """
+    """Refuse to boot an entrypoint that belongs to another framework."""
     script = str(bench.get("benchmark_script") or "").lower()
     framework = str(bench.get("framework") or "").lower()
     known = framework_registry.names()
@@ -1650,10 +1553,7 @@ def _pin_inferencex_checkout(bench: dict[str, Any], inferencex_path: str | None)
 
 
 def _adopt_recipe_envs(bench: dict[str, Any], agentx_mode: bool | None) -> dict[str, Any]:
-    """Adopt the recipe's env block, dropping any accuracy-eval opt-out it carries.
-
-    ``RUN_EVAL`` survives only for AgentX, where it names Magpie's replay grading.
-    """
+    """Adopt the recipe's env block, dropping any accuracy-eval opt-out it carries."""
     keep_run_eval = agentx_enabled() if agentx_mode is None else agentx_mode
     envs = {key: value for key, value in (bench.get("envs") or {}).items() if keep_run_eval or key != "RUN_EVAL"}
     bench["envs"] = envs
@@ -1661,11 +1561,7 @@ def _adopt_recipe_envs(bench: dict[str, Any], agentx_mode: bool | None) -> dict[
 
 
 def _settle_benchmark_identity(bench: dict[str, Any], identity: _LaunchIdentity) -> None:
-    """Settle what this run launches: its model, GPU, entrypoint and checkouts.
-
-    The process env wins over the YAML defaults, and an explicit
-    ``benchmark_script`` re-pins after the GPU type has named the generic one.
-    """
+    """Settle what this run launches: its model, GPU, entrypoint and checkouts."""
     if identity.model_path:
         bench["model"] = str(identity.model_path)
     precision = os.environ.get("PRECISION", "").strip()
@@ -1734,23 +1630,14 @@ def _pin_visible_devices(envs: dict[str, Any]) -> None:
 
 
 def _is_profile_run(envs: Mapping[str, Any], bench: Mapping[str, Any]) -> bool:
-    """Whether this materialization renders a profiling run.
-
-    Read from the YAML -- ``benchmark.envs.PROFILE`` or
-    ``profiler.torch_profiler.enabled`` -- never from the process env.
-    """
+    """Whether this materialization renders a profiling run."""
     if str(envs.get("PROFILE", "")).strip() == "1":
         return True
     return bench.get("profiler", {}).get("torch_profiler", {}).get("enabled") is True
 
 
 def _resolve_workload_shape(envs: dict[str, Any], bench: dict[str, Any]) -> _WorkloadShape:
-    """Settle the request shape this run serves and the devices it may use.
-
-    The last-resort defaults are the CLI workload defaults, so the recipe and the
-    workload spec published beside it cannot disagree about what "unset" means;
-    normally the CLI has already projected the resolved values into these envs.
-    """
+    """Settle the request shape this run serves and the devices it may use."""
     _pin_workload_env_values(envs)
     _pin_visible_devices(envs)
     default_isl, default_osl, default_conc = cli_workload_defaults()
@@ -1776,11 +1663,7 @@ def _prompt_batch_factor(isl_val: int, osl_val: int) -> int:
 
 
 def _pin_request_counts(envs: dict[str, Any], shape: _WorkloadShape, profile: _ProfileConfig) -> None:
-    """Size the request stream: a profile to reach its window, a benchmark to the load.
-
-    NUM_PROMPTS / NUM_WARMUPS are serving-request concepts; a scriptable
-    framework drives its own iteration count, so they are left untouched there.
-    """
+    """Size the request stream: a profile to reach its window, a benchmark to the load."""
     if shape.is_scriptable:
         return
     if profile.profile_num_prompts is not None:
@@ -1796,11 +1679,7 @@ def _seed_reference_server_args(
     ref_args: str,
     controls: Mapping[str, Any],
 ) -> None:
-    """Seed the framework argument env from the reference recipe.
-
-    Reference flags go leftmost, so the last-wins merges above them can override
-    what the recipe asked for.
-    """
+    """Seed the framework argument env from the reference recipe."""
     from hyperloom.inference_optimizer.grid_server_args import compose_server_args
 
     reference_env = server_args_env_name(bench.get("framework"))
@@ -1814,12 +1693,7 @@ def _seed_reference_server_args(
 
 
 def _apply_reference_launch(envs: dict[str, Any], bench: dict[str, Any]) -> _ReferenceLaunch:
-    """Seed this launch from the session's accepted reference recipe.
-
-    The recipe is read from SharedState here rather than passed in, so it seeds a
-    lowest-priority base -- below the YAML base and ``extra_server_args`` -- for
-    every caller.
-    """
+    """Seed this launch from the session's accepted reference recipe."""
     ref_args, reference_envs, controls = resolve_reference_launch()
     for name in controls.get("unset_envs", []):
         envs.pop(name, None)
@@ -1835,11 +1709,7 @@ def _apply_reference_launch(envs: dict[str, Any], bench: dict[str, Any]) -> _Ref
 
 
 def _merge_caller_server_args(envs: dict[str, Any], bench: dict[str, Any], overrides: _ArgOverrides) -> None:
-    """Merge the caller's and the operator's server args into the framework env.
-
-    A merge rather than an overwrite, so the profile path's graph-capture flags
-    are not dropped on the way through.
-    """
+    """Merge the caller's and the operator's server args into the framework env."""
     server_args = str(overrides.extra_server_args or "").strip()
     operator_server_args = os.environ.get("INFERENCE_OPTIMIZER_SERVER_ARGS", "").strip()
     if operator_server_args and not overrides.replacing:
@@ -1865,11 +1735,7 @@ def _merge_caller_envs(
     overrides: _ArgOverrides,
     recipe_overwritten: frozenset[str],
 ) -> dict[str, str]:
-    """Copy the operator's and the caller's extra envs into the benchmark envs.
-
-    Magpie forwards only ``benchmark.envs``, so ``--extra-env`` lands there for
-    every framework: vLLM Ray workers see MTP pins only this way.
-    """
+    """Copy the operator's and the caller's extra envs into the benchmark envs."""
     from hyperloom.common.agentx_workload import is_agentx_client_script
 
     combined: dict[str, Any] = dict(_operator_extra_env())
@@ -1894,11 +1760,7 @@ def _merge_caller_envs(
 
 
 def _compose_server_args(envs: dict[str, Any], bench: dict[str, Any], overrides: _ArgOverrides) -> _ComposedArgs:
-    """Compose the launch from every source of arguments and envs that feeds it.
-
-    The order is the priority order: the reference recipe seeds the base, the
-    caller's args merge over it, and ``extra_envs`` overrides both.
-    """
+    """Compose the launch from every source of arguments and envs that feeds it."""
     reference = _apply_reference_launch(envs, bench)
     recipe_overwritten = launcher_overwritten_envs(bench)
     _merge_caller_server_args(envs, bench, overrides)
@@ -1952,16 +1814,7 @@ def _apply_caller_removals(envs: dict[str, Any], composed: _ComposedArgs) -> Non
 
 
 def _restore_vllm_profiler_bounds(envs: dict[str, Any], composed: _ComposedArgs, profile: _ProfileConfig) -> None:
-    """Put the profile's iteration bounds back after a later merge dropped them.
-
-    Three steps can drop them: a candidate carrying ``args_mode="replace"``
-    (which writeback sets as soon as a KEEP needs ``remove_args``) overwrites the
-    whole flag string, ``extra_envs`` can override it outright, and
-    ``remove_args`` strips flags by name. vLLM reads a missing ``max_iterations``
-    as "profile until stop_profile", and the worker then accumulates every
-    profiler event in host RAM at ~60 MiB/s until the cgroup OOM-killer takes it
-    out mid-roofline, so the bounds win over all three.
-    """
+    """Put the profile's iteration bounds back after a later merge dropped them."""
     framework_env = composed.framework_env
     profile_args = str(envs.get(framework_env, "")).strip()
     restored = [
@@ -1999,11 +1852,7 @@ def _apply_atom_tracelens_knobs(envs: dict[str, Any], caps: _AtomTracelensCaps) 
 
 
 def _restate_profile_capture(envs: dict[str, Any], composed: _ComposedArgs, profile: _ProfileConfig) -> None:
-    """Give the profile's capture knobs the last word over every later merge.
-
-    They run after extra_envs / replace_args / remove_args so they survive the
-    same last-wins path, and before ``seal_server_argv``, which is the last write.
-    """
+    """Give the profile's capture knobs the last word over every later merge."""
     if profile.pending_vllm_profiler_flags and composed.framework_env == "EXTRA_VLLM_ARGS":
         _restore_vllm_profiler_bounds(envs, composed, profile)
     if profile.atom_caps is not None:

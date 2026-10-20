@@ -18,16 +18,7 @@ from ._server_argv import add_server_arg_unless_pinned
 
 
 def _pin_mimo_launch(envs: dict[str, str], bench: dict[str, Any]) -> None:
-    """Keep MiMo-V2.x off the attention backend and the arch name that abort its boot.
-
-    Its DEFAULT aiter attention backend SIGABRTs during CUDA-graph capture on
-    gfx942, so triton is pinned instead; sglang accepts lowercase ``triton``,
-    vLLM only knows ``TRITON_ATTN``. vLLM also registers this checkpoint under
-    MiMoV2FlashForCausalLM while the HF config declares MiMoV2ForCausalLM, which
-    the pod-local build rejects at boot, so the arch is remapped via
-    ``--hf-overrides``; the JSON is kept space-free so it survives Magpie's
-    unquoted splice.
-    """
+    """Keep MiMo-V2.x off the attention backend and the arch name that abort its boot."""
     is_vllm = "vllm" in str(bench.get("framework") or "").lower()
     attention_backend = "TRITON_ATTN" if is_vllm else "triton"
     add_server_arg_unless_pinned(
