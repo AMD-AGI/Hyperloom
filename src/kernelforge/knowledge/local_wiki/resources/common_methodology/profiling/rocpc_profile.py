@@ -141,7 +141,7 @@ def _torch_import_under_rocprofv3(driver_python: str) -> tuple[bool, str]:
         )
     except subprocess.TimeoutExpired:
         return False, "rocprofv3 timed out while importing torch; this image cannot be profiled safely"
-    except Exception as exc:  # noqa: BLE001
+    except (OSError, ValueError) as exc:
         return False, f"rocprofv3 torch-import preflight failed: {exc}"
     output = f"{p.stdout}{p.stderr}"
     if p.returncode == 0:

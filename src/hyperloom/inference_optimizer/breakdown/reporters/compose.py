@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -28,6 +29,8 @@ from ._renderers import (
     optimizations as _r_optimizations,
     critic as _r_critic,
 )
+
+log = logging.getLogger(__name__)
 
 
 # Final report layout ``(group_title, [section_id, ...])``. ``telemetry`` is dropped.
@@ -113,6 +116,7 @@ def render_session_report(
             exec_summary_llm = parsed["executive_summary"]
             narratives = parsed["section_narratives"]
         except Exception as exc:  # noqa: BLE001
+            log.warning("LLM narration failed: %s", exc)
             llm_raw = f"<llm_error: {type(exc).__name__}: {exc}>"
 
     used_llm = llm_client is not None and not str(llm_raw).startswith("<llm_error")

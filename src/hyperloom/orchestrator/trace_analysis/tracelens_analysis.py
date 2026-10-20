@@ -239,9 +239,8 @@ def _graph_coverage_from_raw_trace(trace_path: str | Path | None) -> dict[str, A
     Reuses the tested ``_bypass_trace_reader.analyze_trace`` graph-launch
     detection so the TraceLens route can tell a cuda/HIP-graph under-recorded
     capture (profiler activity-buffer overflow → only ~1 of N replays recorded →
-    inflated idle%) apart from a genuinely idle/launch-bound workload. Best
-    effort: any failure returns ``{}`` so the caller falls back to the plain
-    idle gate (never worse than today).
+    inflated idle%) apart from a genuinely idle/launch-bound workload. An
+    unreadable trace returns ``{}`` so the caller falls back to the plain idle gate.
 
     ``graph_coverage`` is derived from the launch/kernel correlation scan and is
     independent of the returned aggregation lists, so we pass ``emit_launches=
@@ -258,7 +257,7 @@ def _graph_coverage_from_raw_trace(trace_path: str | Path | None) -> dict[str, A
             return {}
         cov = analyze.get("graph_coverage") if isinstance(analyze, dict) else None
         return cov if isinstance(cov, dict) else {}
-    except Exception:  # noqa: BLE001 - guard is advisory; never block on it
+    except (OSError, zlib.error):
         return {}
 
 
@@ -4094,6 +4093,7 @@ def write_reports(
                                     _est["ideal_ms"] / (_actual_us / 1e3) * 100.0, 2
                                 )
                 except Exception as _exc:  # noqa: BLE001 — analytic ceiling is best-effort
+                    log.warning("diffusion analytic ceiling failed: %s", _exc)
                     _diff_report["analytic_ceiling_error"] = f"{type(_exc).__name__}: {_exc}"
             out = run_dir / "diffusion_roofline.json"
             atomic_write_json(out, _diff_report, fmt=JsonFormat(trailing_newline=True))
@@ -4107,6 +4107,7 @@ def write_reports(
         except FileNotFoundError as exc:
             print(f"[diffusion_roofline] skipped: {exc}")
         except Exception as exc:  # noqa: BLE001 - best-effort sidecar
+            log.warning("diffusion roofline sidecar failed: %s", exc)
             print(f"[diffusion_roofline] skipped: {type(exc).__name__}: {exc}")
 
     artifact_paths = {

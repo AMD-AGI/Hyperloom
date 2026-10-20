@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.agents.framework.sources.pr_monitor import PRMonitorError
 from hyperloom.common.bringup import BootObservation, Excerpt, LadderStage, TerminalFrame
 from hyperloom.common.failure_signature import FailureSignature
 from hyperloom.orchestrator.bringup import observation_summary
@@ -206,7 +207,7 @@ def test_build_params_feeds_ranked_candidate_refs_into_mandate(monkeypatch, tmp_
 
 
 def test_build_params_degrades_gracefully_when_discovery_raises(monkeypatch, tmp_path):
-    _stub_enumerate(monkeypatch, RuntimeError("network down"))
+    _stub_enumerate(monkeypatch, PRMonitorError("network down"))
     fake = _enqueue_self(tmp_path)
     params = fake.enablement_params.build_enablement_specialist_params(_MISSING_ARCH_LOG)
     assert params is not None

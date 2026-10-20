@@ -2273,7 +2273,7 @@ class IntegratePatchExecutor:
                 "enablement": True,
                 "reason": f"attempt-runtime provision aborted: {exc}",
             }
-        except Exception as exc:  # noqa: BLE001 — preflight is best-effort advisory
+        except OSError as exc:
             log.warning("integrate_patch: disk preflight raised (%r); continuing", exc)
 
         adapter = get_adapter(action.framework)
@@ -2288,7 +2288,7 @@ class IntegratePatchExecutor:
 
         try:
             result = await asyncio.to_thread(_provision_and_probe)
-        except Exception as exc:
+        except (OSError, subprocess.SubprocessError) as exc:
             log.exception("integrate_patch: attempt-runtime provision raised")
             self._gc_attempt_dir(attempt_dir)
             return {
@@ -2335,7 +2335,7 @@ class IntegratePatchExecutor:
         try:
             if attempt_dir.exists():
                 shutil.rmtree(attempt_dir, ignore_errors=True)
-        except Exception:
+        except OSError:
             log.debug("integrate_patch: attempt-dir GC failed for %s", attempt_dir, exc_info=True)
 
     async def _stage_localize_source(self, attempt: IntegrateAttempt, params: dict[str, Any]) -> None:
@@ -2974,7 +2974,7 @@ class IntegratePatchExecutor:
                 "reason": str(exc),
                 "workspace": str(output_root),
             }
-        except Exception as exc:  # noqa: BLE001
+        except (OSError, subprocess.SubprocessError) as exc:
             return {
                 "status": "reverted",
                 "error_class": "bench_exception",
@@ -3531,7 +3531,7 @@ class IntegratePatchExecutor:
                 },
             )
             return dict(snap) if snap else {}
-        except Exception:
+        except (OSError, ValueError, TypeError):
             log.exception("integrate_patch: localization snapshot failed")
             return {}
 
@@ -4005,7 +4005,7 @@ class IntegratePatchExecutor:
                 unset_envs=switch_names,
                 variant_suffix="-parity",
             )
-        except Exception as exc:  # noqa: BLE001 — a failed probe must not read as a pass
+        except (OSError, subprocess.SubprocessError) as exc:
             return {
                 "ran": True,
                 "ok": False,
@@ -4353,7 +4353,7 @@ class IntegratePatchExecutor:
                 pr_url,
                 float(tps_delta_pct),
             )
-        except Exception as exc:  # noqa: BLE001 — KB write is best-effort
+        except (OSError, ValueError, TypeError) as exc:
             log.warning(
                 "integrate_patch: framework KB writeback failed: %r",
                 exc,

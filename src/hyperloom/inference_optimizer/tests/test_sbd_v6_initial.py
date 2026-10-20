@@ -776,6 +776,7 @@ def test_preflight_records_install_steps_in_execution_order(tmp_path, monkeypatc
     assert [step["step_id"] for step in event["ext"]["steps"]] == [
         "load_dotenv",
         "load_kernel_agent_env",
+        "validate_server_args",
         "normalize_legacy_deepseek_env",
         "validate_credentials",
         "prepare_kb_environment",
@@ -1155,3 +1156,31 @@ def test_framework_review_does_not_parse_macro_cycle_from_prompt():
     )
 
     assert reviews[0]["macro_cycle"] is None
+
+
+def test_preflight_failure_session_dir_error_reaches_the_caller(monkeypatch, tmp_path):
+    import hyperloom.inference_optimizer.cli as optimizer_cli
+
+    def new_session_dir(*_a, **_k):
+        raise OSError("no space left")
+
+    monkeypatch.setattr(optimizer_cli, "_mark_pending_install_event_failed", lambda args, exc: {})
+    monkeypatch.setattr(optimizer_cli, "_new_preflight_failure_session_dir", new_session_dir)
+
+    with pytest.raises(OSError, match="no space left"):
+        optimizer_cli._persist_preflight_failure_artifacts(argparse.Namespace(), RuntimeError("preflight"))
+
+
+def test_preflight_failure_breakdown_error_reaches_the_caller(monkeypatch, tmp_path):
+    import hyperloom.inference_optimizer.cli as optimizer_cli
+
+    def write_breakdown_json(*_a, **_k):
+        raise RuntimeError("breakdown writer bug")
+
+    monkeypatch.setattr(optimizer_cli, "_mark_pending_install_event_failed", lambda args, exc: {})
+    monkeypatch.setattr(optimizer_cli, "_new_preflight_failure_session_dir", lambda *_a, **_k: tmp_path)
+    monkeypatch.setattr(optimizer_cli, "_persist_install_event", lambda *_a, **_k: None)
+    monkeypatch.setattr("hyperloom.inference_optimizer.breakdown.write_breakdown_json", write_breakdown_json)
+
+    with pytest.raises(RuntimeError, match="breakdown writer bug"):
+        optimizer_cli._persist_preflight_failure_artifacts(argparse.Namespace(), RuntimeError("preflight"))

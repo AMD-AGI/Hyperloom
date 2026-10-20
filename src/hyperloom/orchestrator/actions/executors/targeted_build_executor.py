@@ -19,6 +19,7 @@ from ...enablement.runtime.build_actions import BuildResult, TargetedBuildAction
 from ...enablement.runtime.stack_actions import FrameworkRuntime
 from ...enablement.runtime.targeted_build import (
     _resolve_budget_sec,
+    BuildHandle,
     classify_build_exit,
     ensure_build_dead,
     spawn_build,
@@ -59,48 +60,11 @@ class TargetedBuildExecutor:
                 if shared_state is not None:
                     shared_state.pending_targeted_build = handle.to_sentinel(task.task_id)
                     shared_state.save(session_dir)
-                deadline = asyncio.get_running_loop().time() + budget_sec
-                while True:
-                    if scope is not None and scope.cancelled:
-                        raise CancelledError(scope.reason)
-                    remaining = deadline - asyncio.get_running_loop().time()
-                    if remaining <= 0:
-                        raise asyncio.TimeoutError
-                    try:
-                        rc = await asyncio.to_thread(handle.proc.wait, timeout=min(remaining, STOP_GATE_POLL_SECONDS))
-                    except subprocess.TimeoutExpired:
-                        continue
-                    if scope is not None and scope.cancelled:
-                        raise CancelledError(scope.reason)
-                    result = classify_build_exit(handle, rc)
-                    break
+                result = await self._await_build_exit(handle, scope, budget_sec)
             except (asyncio.TimeoutError, CancelledError) as exc:
-                cancelled = isinstance(exc, CancelledError)
-                result = BuildResult(
-                    ok=False,
-                    attempt_root=handle.attempt_root,
-                    runtime=FrameworkRuntime(),
-                    build_log_path=handle.build_log_path,
-                    failure_class="cancelled" if cancelled else "timeout",
-                    failure_summary=str(exc) if cancelled else "targeted build exceeded wall-clock budget",
-                    error="cancelled" if cancelled else "timeout",
-                )
+                result = self._interrupted_build_result(handle, exc)
             finally:
-                cleanup_result = (
-                    SubAgentResult(
-                        task_id=task.task_id,
-                        state="cancelled"
-                        if result.failure_class == "cancelled"
-                        else "succeeded"
-                        if result.ok
-                        else "failed",
-                        result=result.to_state(),
-                        error=result.failure_summary or result.error or None,
-                        error_class=result.failure_class,
-                    )
-                    if result is not None
-                    else None
-                )
+                cleanup_result = self._cleanup_carrier(result, task.task_id)
                 try:
                     confirmed_dead = ensure_build_dead(handle)
                 except (OSError, subprocess.SubprocessError) as exc:
@@ -137,6 +101,57 @@ class TargetedBuildExecutor:
                 f" summary={result.failure_summary or result.error!r}"
             )
         return result.to_state()
+
+    @staticmethod
+    async def _await_build_exit(handle: BuildHandle, scope: Any, budget_sec: float) -> BuildResult:
+        """Wait for the build to exit, raising once its wall-clock budget is spent or the round is cancelled."""
+        deadline = asyncio.get_running_loop().time() + budget_sec
+        while True:
+            if scope is not None and scope.cancelled:
+                raise CancelledError(scope.reason)
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError
+            try:
+                rc = await asyncio.to_thread(handle.proc.wait, timeout=min(remaining, STOP_GATE_POLL_SECONDS))
+            except subprocess.TimeoutExpired:
+                continue
+            if scope is not None and scope.cancelled:
+                raise CancelledError(scope.reason)
+            return classify_build_exit(handle, rc)
+
+    @staticmethod
+    def _interrupted_build_result(handle: BuildHandle, exc: BaseException) -> BuildResult:
+        """The result for a build the budget or a cancellation ended before it could exit on its own."""
+        cancelled = isinstance(exc, CancelledError)
+        return BuildResult(
+            ok=False,
+            attempt_root=handle.attempt_root,
+            runtime=FrameworkRuntime(),
+            build_log_path=handle.build_log_path,
+            failure_class="cancelled" if cancelled else "timeout",
+            failure_summary=str(exc) if cancelled else "targeted build exceeded wall-clock budget",
+            error="cancelled" if cancelled else "timeout",
+        )
+
+    @staticmethod
+    def _cleanup_carrier(result: BuildResult | None, task_id: Any) -> SubAgentResult | None:
+        """The row an unconfirmed-cleanup failure carries out, so the build's own outcome is not lost with it."""
+        if result is None:
+            return None
+        if result.failure_class == "cancelled":
+            state = "cancelled"
+        elif result.ok:
+            state = "succeeded"
+        else:
+            state = "failed"
+        return SubAgentResult(
+            task_id=task_id,
+            state=state,
+            result=result.to_state(),
+            error=result.failure_summary or result.error or None,
+            error_class=result.failure_class,
+        )
 
     @staticmethod
     def _record_result(

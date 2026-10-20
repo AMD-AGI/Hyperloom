@@ -447,7 +447,7 @@ def write_session_decision_trace(session_dir: Path | str) -> list[str]:
     if path.exists():
         try:
             state = json.loads(path.read_text(encoding="utf-8"))
-        except Exception as exc:  # noqa: BLE001
+        except (OSError, ValueError) as exc:
             warnings.append(f"decision_trace: failed to parse state.json: {type(exc).__name__}: {exc}")
             state = {}
     if not isinstance(state, dict):

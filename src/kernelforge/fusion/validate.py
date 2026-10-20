@@ -783,6 +783,7 @@ def serving_smoke_verdict(
             return _vllm_decode_verdict(live, load, timeout_s, metrics)
         return _sglang_decode_verdict(live, env, load, timeout_s)
     except Exception as e:  # noqa: BLE001 — a harness error is a soft-fail, never a crash.
+        log.warning("serving smoke harness error: %s", e)
         return SmokeVerdict(
             False,
             f"serving smoke harness error: {type(e).__name__}: {e}",

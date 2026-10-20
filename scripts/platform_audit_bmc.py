@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import base64
 import getpass
+import http.client
 import json
 import os
 import re
@@ -340,7 +341,7 @@ def rf_get(endpoint: RedfishEndpoint, path: str, timeout: int = 30) -> tuple[dic
             return json.loads(r.read().decode()), ""
     except urllib.error.HTTPError as exc:
         return None, f"HTTP {exc.code}"
-    except Exception as exc:  # noqa: BLE001 - reported, never swallowed
+    except (OSError, ValueError, http.client.HTTPException) as exc:
         # urlopen wraps a verification failure in URLError, so the useful error is one level down; without unwrapping,
         # the operator sees a raw OpenSSL string and no indication of which flag fixes it.
         cause = getattr(exc, "reason", exc)

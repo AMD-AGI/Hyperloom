@@ -17,6 +17,11 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TextIO
 
+from kernelforge.loop.agent_relay import (
+    AgentAvailabilitySnapshot,
+    AgentRelayState,
+    migrate_run_state_relay_fields,
+)
 from kernelforge.loop.search_policy import (
     OBJECTIVE_IMMEDIATE_CANONICAL_GAIN,
     SEARCH_MODE_EXPLOIT,
@@ -189,6 +194,8 @@ class RunState:
     orchestration_error_streak: int = 0
     orchestration_circuit_state: str = ORCHESTRATION_CIRCUIT_CLOSED
     intervention_count: int = 0
+    agent_relay: AgentRelayState = field(default_factory=AgentRelayState)
+    agent_availability_snapshot: AgentAvailabilitySnapshot = field(default_factory=AgentAvailabilitySnapshot)
     phase: str = PHASE_EXPLORE
     search_mode: str = SEARCH_MODE_EXPLOIT
     search_reason_codes: list[str] = field(default_factory=list)
@@ -284,6 +291,15 @@ class RunState:
             nested(entry, RoundCost, f"round_costs.recent[{index}]") for index, entry in enumerate(round_costs.recent)
         ]
         payload["round_costs"] = round_costs
+        payload["agent_relay"] = nested(
+            payload["agent_relay"],
+            AgentRelayState,
+            "agent_relay",
+        )
+        payload["agent_relay"].validate()
+        payload["agent_availability_snapshot"] = AgentAvailabilitySnapshot.from_dict(
+            payload["agent_availability_snapshot"]
+        )
         state = cls(**payload)
         _validate_round_costs(state.round_costs)
         if state.search_mode not in SEARCH_MODES:
@@ -634,6 +650,17 @@ class WorkspaceLock:
         self.release()
 
 
+def read_run_state(state_path: Path) -> RunState:
+    """Read one ``run_state.json`` checkpoint, or a fresh state when absent."""
+    if not state_path.exists():
+        return RunState()
+    try:
+        payload = json.loads(state_path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"invalid run state checkpoint: {state_path}") from error
+    return RunState.from_dict(migrate_run_state_relay_fields(payload))
+
+
 class LoopStateStore:
     """Best-effort file store for ``run_state.json`` + ``events.jsonl``."""
 
@@ -651,7 +678,7 @@ class LoopStateStore:
         self._recent_results: collections.deque[dict] = collections.deque(maxlen=_RECENT_RESULT_CACHE)
         try:
             self.root.mkdir(parents=True, exist_ok=True)
-        except Exception as e:  # noqa: BLE001 - best-effort
+        except OSError as e:
             self._mark_degraded("create root", e)
         self._prime_recent()
 
@@ -680,13 +707,7 @@ class LoopStateStore:
 
     def load(self) -> RunState:
         """Load the current persisted state, or a fresh state when absent."""
-        if not self.state_path.exists():
-            return RunState()
-        try:
-            payload = json.loads(self.state_path.read_text())
-        except (OSError, json.JSONDecodeError) as error:
-            raise ValueError(f"invalid run state checkpoint: {self.state_path}") from error
-        return RunState.from_dict(payload)
+        return read_run_state(self.state_path)
 
     def save(self, state: RunState) -> None:
         """Atomically overwrite ``run_state.json``."""
@@ -695,7 +716,7 @@ class LoopStateStore:
                 self.state_path,
                 json.dumps(state.to_dict(), indent=2, sort_keys=True),
             )
-        except Exception as e:  # noqa: BLE001 - best-effort
+        except (OSError, TypeError, ValueError) as e:
             self._mark_degraded(f"save {self.state_path}", e)
 
     def append_event(self, event: dict) -> None:
@@ -711,7 +732,7 @@ class LoopStateStore:
                 f.write(json.dumps(event, sort_keys=True) + "\n")
                 f.flush()
                 os.fsync(f.fileno())
-        except Exception as e:  # noqa: BLE001 - best-effort
+        except (OSError, TypeError, ValueError) as e:
             self._mark_degraded(f"append {self.events_path}", e)
 
     def read_events(self) -> list[dict]:
@@ -726,7 +747,7 @@ class LoopStateStore:
                     continue
                 try:
                     event = json.loads(line)
-                except Exception as e:  # noqa: BLE001 - skip a bad line
+                except ValueError as e:  # skip a bad line
                     log.debug("run_state: skipping malformed event line: %s", e)
                     continue
                 event_type = event.get("type") if isinstance(event, dict) else None
@@ -745,7 +766,7 @@ class LoopStateStore:
                         "run_state: skipping invalid event record: %r",
                         event,
                     )
-        except Exception as e:  # noqa: BLE001 - best-effort
+        except (OSError, ValueError) as e:
             self._mark_degraded(f"read {self.events_path}", e)
         return out
 
