@@ -162,6 +162,9 @@ access to the plan's directory, so its log outlives the copy. Like the rest of
 starts it hides that folder from git with a `forge_experiments/.gitignore` holding
 `*`, so nothing written there is committed or rejected by the workspace guard as a
 new file, whatever the workspace itself ignores.
+`kernelforge export-runs` turns the plan's `Summary:` line and the whole reasoning
+log into the Experiences of a run; see
+{doc}`the CLI reference </kernelforge/reference/cli>`.
 
 After a KEEP, the previous Analysis bundle remains available and is marked
 stale. The loop refreshes it only after the canonical mean-case score has

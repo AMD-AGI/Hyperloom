@@ -2,7 +2,7 @@
 myst:
     html_meta:
         "description": "Write Experiences from any producer log through a declarative mapping with Hyperloom's hyperloom_kb collect engine, including custom schemas."
-        "keywords": "Hyperloom, Experience KB, collect, mapping, schema, declaration, session breakdown, hyperloom-kb-collect"
+        "keywords": "Hyperloom, Experience KB, collect, mapping, schema, declaration, session breakdown, hyperloom-kb-collect, KernelForge, kernelforge-v1"
 ---
 
 # Experience collection
@@ -212,3 +212,75 @@ Maps Hyperloom `session_breakdown.json` (SBD V6) to the packaged
 AgentX sessions are skipped until their Experience identity is supported, and a
 session whose `metadata.grading.objective` is not `output_throughput` is
 skipped because every Experience records `e2e_throughput@v1`.
+
+## Packaged mapping: `kernelforge-v1`
+
+Maps the document `kernelforge export-runs` writes from KernelForge's
+`forge-loop` runs to the packaged `kernelforge-run-v1` declaration: one
+Experience per candidate kernel a run archived, the kernel one iteration
+measured and KernelForge's decision to keep or revert it. Each lane of a
+fan-out round is measured as its own candidate, built from its own plan, so a
+run yields one or more Experiences. Collecting a run takes two steps:
+
+```bash
+kernelforge export-runs <LOG_ROOT>... -o runs.json
+hyperloom-kb-collect --mapping kernelforge-v1 --document runs.json --dry-run
+```
+
+Every Experience records the `kernel_time_ms@v1` objective, lower is better:
+the kernel's time on the task's benchmark in milliseconds, the median over
+three independent runs of the task's benchmark driver, each run's time being the
+driver's median over all the timing samples it reports, every benchmark case
+pooled. KernelForge keeps a candidate on its mean case speedup, not on this
+time, and labels the time diagnostic and not monotonic, so a kept candidate can
+occasionally be slower in milliseconds than the best kernel before it.
+
+It reads:
+
+- identity from the run's `campaign_config.json`: `operator`, the
+  `operator_name` it records; `kernel`, the name KernelForge files its own KB
+  records under, which is that operator normalized (`_softmax_kernel` gives
+  `softmax`); `framework`, unless recorded as `unknown`; `backend`; and `gpu`.
+  The declaration also has `backend_version` and `dtype`, which `forge-loop`
+  does not record yet, so its Experiences leave them absent;
+- `baseline.current_best_median_ms` from the candidate's `meta.json`
+  `best_wall_ms_before`, the time of the best kernel KernelForge had kept when
+  the iteration began, and `outcome.candidate_median_ms` from its `wall_ms`,
+  the candidate's own time, both the median the objective describes, beside
+  KernelForge's decision label in `outcome.decision`;
+- `baseline.source_ms` from the pristine baseline the run's `run_state.json`
+  records, which for a run given `--baseline-json` is that file's time rather
+  than that of the kernel its search started from;
+- `rationale.plan` from the whole `Summary:` line the candidate's plan opens
+  with, or from the plan's first three sentences when it has none;
+- `rationale.reasoning` from the whole reasoning log the Implementer kept
+  beside that plan (see the
+  [autonomous loop](../kernelforge/how-to/autonomous-loop.md)). A single
+  session that kept none gives the first three sentences of the rationale its
+  `meta.json` records, and a lane that kept none gives no reasoning. A
+  reasoning log longer than the 32 KB a text field holds makes collection skip
+  the candidate;
+- the plan, the measured kernel, and the lesson as files
+  (`rationale.plan_file`, `change.source_code`, `reflection.lesson_file`);
+- `provenance.extra` from the logs, which never reaches a prompt: `meta`, the
+  candidate's whole `meta.json` verbatim, among it the commit KernelForge kept
+  the candidate as, the mean case speedup it decided on, the per-case times,
+  and every benchmark measurement; `llm_backend` and `llm_model`, the
+  Implementer the run's `forge-loop.log` names; `kb_record`, the record
+  KernelForge's own experience KB filed a kept candidate under; and
+  `candidate_origin`, `session` or `lane`.
+
+An Experience carries metadata instead of raw logs: it has no `raw_logs`, and
+the three files above are the only ones it links, so they are the only ones that
+go with it if it is ever pushed to a global KB. No `forge-loop.log`,
+`events.jsonl`, or other archive file does; `meta.json` goes only as the
+metadata in `provenance.extra.meta`. A `forge-loop.log` is only read, by the
+run whose workspace path ends most like the kernel path it announces; one that
+fits two runs equally well stops the export.
+
+A unit is skipped when its logs could not be read as a run, or when it has no
+reasoning, which is always the case for a merge of two archived candidates
+because no agent made it, and for a lane of a run made before KernelForge asked
+for the reasoning log. KernelForge writes naive local times, which collection
+reads as UTC; that is right for a run made in a container, which normally runs
+in UTC.

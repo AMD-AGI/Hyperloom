@@ -1,0 +1,55 @@
+format: hyperloom-kb.collect.v2
+description: >-
+  KernelForge forge-loop runs, one Experience per candidate kernel a run archived, so each lane of a fan-out round
+  gets its own, each holding the time it was measured against, the agent's reasoning and plan, the kernel it
+  measured, and what KernelForge measured and decided; from the document kernelforge export-runs writes from a run's
+  forge_experiments directory and its forge-loop.log
+declaration: kernelforge-run-v1
+producer:
+  name: kernelforge
+  version: "10"
+
+units:
+  - each: $doc.runs
+    as: run
+
+unit_id: {text: $run.unit_id}
+
+require:
+  - reason: >-
+      The logs could not be read as a run: export-runs needs a readable campaign_config.json, a run_state.json naming
+      its campaign_id, and a readable meta.json for each archived candidate. read_error in the exported document says
+      what it found.
+    check: {absent: $run.read_error}
+  - reason: >-
+      No reasoning, which every Experience requires: the logs hold no reasoning log for this candidate and no
+      rationale in its meta.json. A merge never has one, since no agent made it, and neither does a lane of a run made
+      before KernelForge asked for the reasoning log. For any other candidate, provide logs that record the agent's
+      reasoning.
+    check: {present: $run.reasoning}
+
+experience:
+  run_id: {token: $run.run_id}
+  seq: {integer: $run.seq}
+  created_at: {text: $run.started_at}
+  completed_at: {text: $run.completed_at}
+  identity: $run.identity
+  objective: kernel_time_ms@v1
+  baseline:
+    current_best_median_ms: {number: $run.current_best_median_ms}
+    source_ms: {number: $run.source_ms}
+  rationale:
+    reasoning: {text: $run.reasoning}
+    plan: {text: $run.plan}
+    plan_file: $run.plan_file
+  change:
+    source_code: $run.source_code
+  outcome:
+    decision: {text: $run.decision}
+    candidate_median_ms: {number: $run.candidate_median_ms}
+  reflection:
+    lesson: {text: $run.lesson}
+    lesson_file: $run.lesson_file
+  provenance:
+    source_ref: {text: $run.unit_id}
+    extra: $run.provenance

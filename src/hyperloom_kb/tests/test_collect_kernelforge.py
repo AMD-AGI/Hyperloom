@@ -1,0 +1,170 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""The packaged ``kernelforge-v1`` mapping over the document ``kernelforge export-runs`` writes."""
+
+from __future__ import annotations
+
+import hashlib
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from hyperloom_kb.collect import collect, load_mapping
+from hyperloom_kb.schema import CATEGORIES, TEXT_MAX_BYTES, FieldKind, FieldRole
+
+MAPPING = "kernelforge-v1"
+CAMPAIGN = "5f1c0a9e2b7d4c38a6e0f1b2c3d4e5f6"
+REASONING = "Summary: Two passes over each row cost a second read.\n\n## Evidence\nFusing them halves the traffic."
+
+
+def _file(path: Path, content: str) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
+def _ref(path: Path) -> dict[str, Any]:
+    data = path.read_bytes()
+    return {"name": path.name, "sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)}
+
+
+@pytest.fixture
+def files(tmp_path: Path) -> dict[str, Path]:
+    orchestration = tmp_path / "orchestration" / "iter_001"
+    return {
+        "plan": _file(orchestration / "optimization_plan.md", "Summary: Fuse the passes.\n\n# Fuse\nOne sweep.\n"),
+        "kernel": _file(tmp_path / "candidates" / "iter_001" / "softmax_kernel.py", "BLOCK = 128\n"),
+        "lesson": _file(tmp_path / "lessons" / "iter_001.md", "One sweep saved a global read.\n"),
+    }
+
+
+def _session_unit(files: dict[str, Path], **fields: Any) -> dict[str, Any]:
+    """A single-session iteration unit, shaped as the normalizer writes it."""
+
+    unit = {
+        "unit_id": "forge_loop_triton_softmax/iteration-1",
+        "run_id": CAMPAIGN,
+        "seq": 1,
+        "identity": {"operator": "_softmax_kernel", "kernel": "softmax", "backend": "triton", "gpu": "mi300x"},
+        "provenance": {
+            "llm_backend": "claude",
+            "llm_model": "Claude-Opus-5",
+            "candidate_origin": "session",
+            "meta": {
+                "commit_hash": "abc1234",
+                "wall_ms": 0.044,
+                "mean_case_speedup": 1.18,
+                "bench": {"measurements": [{"median_ms": 0.044, "all_times_ms": [0.043, 0.044, 0.045]}]},
+                "vgpr": None,
+            },
+        },
+        "started_at": "2026-10-15T10:00:00",
+        "completed_at": "2026-10-15T10:04:30",
+        "current_best_median_ms": 0.052,
+        "decision": "KEEP",
+        "candidate_median_ms": 0.044,
+        "plan_file": str(files["plan"]),
+        "plan": "Small rows are bound by launch latency. This plan fuses the max and sum passes.",
+        "source_ms": 0.052,
+        "source_code": str(files["kernel"]),
+        "lesson_file": str(files["lesson"]),
+        "lesson": "One sweep saved a global read.",
+        "reasoning": f"{REASONING}\n",
+    }
+    unit.update(fields)
+    return unit
+
+
+def test_the_mapping_produces_the_packaged_kernelforge_declaration() -> None:
+    mapping = load_mapping(MAPPING)
+    declaration = mapping.declaration
+    assert declaration.schema_ref.startswith("schema:sha256:")
+    assert (mapping.producer.name, mapping.producer.version) == ("kernelforge", "10")
+    [objective] = declaration.objectives
+    assert {key: objective.to_dict()[key] for key in ("id", "unit", "direction")} == {
+        "id": "kernel_time_ms@v1",
+        "unit": "ms",
+        "direction": "lower_is_better",
+    }
+    measured = [declaration.role_field(category, FieldRole.MEASUREMENT) for category in ("baseline", "outcome")]
+    assert [field.name for field in measured if field is not None] == ["current_best_median_ms", "candidate_median_ms"]
+    assert [(field.name, field.kind.value, field.required) for field in declaration.identity] == [
+        ("operator", "string", False),
+        ("kernel", "string", False),
+        ("framework", "string", False),
+        ("backend", "string", False),
+        ("backend_version", "version", False),
+        ("gpu", "string", False),
+        ("dtype", "string", False),
+    ]
+    linked = [
+        (category, field.name)
+        for category in CATEGORIES
+        for field in declaration.fields(category)
+        if field.kind is FieldKind.FILE
+    ]
+    assert linked == [("rationale", "plan_file"), ("change", "source_code"), ("reflection", "lesson_file")]
+
+
+def test_a_session_unit_projects_a_complete_experience(files: dict[str, Path]) -> None:
+    unit = _session_unit(files)
+
+    report = collect(MAPPING, {"runs": [unit]}, dry_run=True).to_dict()
+
+    assert report["skipped"] == [] and report["counts"]["collected"] == 1
+    experience = report["collected"][0]["experience"]
+    assert {key: experience[key] for key in ("run_id", "seq", "created_at", "completed_at", "objective")} == {
+        "run_id": CAMPAIGN,
+        "seq": 1,
+        "created_at": "2026-10-15T10:00:00Z",
+        "completed_at": "2026-10-15T10:04:30Z",
+        "objective": "kernel_time_ms@v1",
+    }
+    assert experience["identity"] == {
+        "operator": "_softmax_kernel",
+        "kernel": "softmax",
+        "backend": "triton",
+        "gpu": "mi300x",
+    }
+    assert experience["baseline"] == {"current_best_median_ms": 0.052, "source_ms": 0.052}
+    assert experience["rationale"] == {
+        "reasoning": REASONING,
+        "plan": "Small rows are bound by launch latency. This plan fuses the max and sum passes.",
+        "plan_file": _ref(files["plan"]),
+    }
+    assert experience["change"] == {"source_code": _ref(files["kernel"])}
+    assert experience["outcome"] == {"decision": "KEEP", "candidate_median_ms": 0.044}
+    assert experience["reflection"] == {
+        "lesson": "One sweep saved a global read.",
+        "lesson_file": _ref(files["lesson"]),
+    }
+    assert experience["provenance"]["source_ref"] == "forge_loop_triton_softmax/iteration-1"
+    assert experience["provenance"]["extra"] == unit["provenance"]
+    assert "raw_logs" not in experience
+
+
+@pytest.mark.parametrize(
+    ("fields", "reason"),
+    [
+        ({"read_error": "run_state.json names no campaign_id"}, "The logs could not be read as a run"),
+        ({"reasoning": None}, "No reasoning, which every Experience requires"),
+    ],
+)
+def test_units_the_mapping_requires_more_of_are_skipped_with_its_reason(
+    files: dict[str, Path], fields: dict[str, Any], reason: str
+) -> None:
+    report = collect(MAPPING, {"runs": [_session_unit(files, **fields)]}, dry_run=True).to_dict()
+
+    assert report["collected"] == []
+    assert report["skipped"][0]["reason"].startswith(reason)
+
+
+def test_a_reasoning_log_longer_than_a_text_field_holds_skips_the_candidate(files: dict[str, Path]) -> None:
+    unit = _session_unit(files, reasoning="x" * (TEXT_MAX_BYTES + 1))
+
+    report = collect(MAPPING, {"runs": [unit]}, dry_run=True).to_dict()
+
+    assert report["collected"] == []
+    assert report["skipped"][0]["reason"].startswith("schema validation failed: rationale.reasoning holds")
