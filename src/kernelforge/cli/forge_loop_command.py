@@ -332,12 +332,12 @@ class _RunReporter:
         return result
 
     def write_result_json(self, result: dict) -> None:
-        """Persist the result dict to --result-json (best-effort; never raises)."""
+        """Persist the result dict to --result-json; a failed write is reported, not raised."""
         if not self.run.request.artifacts.result_json:
             return
         try:
             atomic_write_json(self.run.request.artifacts.result_json, result)
-        except Exception as e:  # noqa: BLE001 - a snapshot write must never break the loop
+        except (OSError, TypeError, ValueError) as e:
             print(f"  [forge-loop] result-json snapshot skipped ({e})", flush=True)
 
     def attempt_remote_publication(
@@ -481,7 +481,7 @@ class _RunReporter:
                 # on every resumed segment.
                 if self.run.caller_experiment_id:
                     self.run.tracker.set_checkpoint(self.run.caller_experiment_id, checkpoint)
-            except Exception as e:  # noqa: BLE001 - never break the loop
+            except (OSError, ValueError, TypeError) as e:
                 print(f"  [checkpoint] skipped ({e})", flush=True)
         self.write_result_json(self.build_result(kb_experience=None))
 
@@ -1012,14 +1012,14 @@ def _record_experiment_accounting(tracker, *, experiment_id, llm_usage: dict, kb
     try:
         if llm_usage.get("calls"):
             tracker.set_llm_usage(experiment_id, llm_usage)
-    except Exception as exc:  # noqa: BLE001 - usage accounting must not fail the run
+    except (OSError, ValueError, TypeError) as exc:
         click.echo(
             f"Warning: failed to record LLM usage for experiment {experiment_id}: {exc}",
             err=True,
         )
     try:
         tracker.set_kb_experience(experiment_id, kb_experience)
-    except Exception as exc:  # noqa: BLE001 - KB accounting must not fail the run
+    except (OSError, ValueError, TypeError) as exc:
         click.echo(
             f"Warning: failed to record KB experience for experiment {experiment_id}: {exc}",
             err=True,

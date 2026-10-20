@@ -621,7 +621,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                         )
                         try:
                             state.save(self.session_dir)
-                        except Exception:
+                        except OSError:
                             log.exception("stalled-domain force: source-patch prune save failed")
                         log.error(
                             "stalled-domain force: pruned %s after deterministic failure: %s",
@@ -640,7 +640,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             await self._coord.router.handle_intent("orchestration", intent)
             try:
                 state.save(self.session_dir)
-            except Exception:
+            except OSError:
                 log.exception("stalled-domain force: state save failed")
             log.info(
                 "stalled-domain force: dispatched domain=%s anchor=%s gap=%s round=%d (spec_thr=%d keep_thr=%d)",
@@ -928,7 +928,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         # Persist so a resume picks up the bookkeeping without re-running the specialist.
         try:
             self.shared_state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.exception(
                 "specialist bookkeeping: SharedState.save failed for task=%s",
                 task.task_id,
