@@ -661,7 +661,7 @@ function-lines src/hyperloom/orchestrator/kernel/forge_handoff.py::build_serving
 function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::_persist_forge_gemm_csv_durably 95
 function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::_run_forge_fusion 144
 function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::_run_forge_gemm_tuning 103
-function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::_run_integrate_rebaseline_with_lock_retry 111
+function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::_run_integrate_rebaseline_with_lock_retry 106
 function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::integrate_handler 128
 function-lines src/hyperloom/orchestrator/knowledge/recipe_journal.py::RecipeJournalCollaborator._build_recipe_attrs_from_state 102
 function-lines src/hyperloom/orchestrator/knowledge/recipe_journal.py::RecipeJournalCollaborator._record_fact_per_variant 114
