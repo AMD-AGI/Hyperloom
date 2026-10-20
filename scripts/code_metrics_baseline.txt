@@ -252,7 +252,6 @@ cognitive-complexity src/kernelforge/rewrite_by_flydsl/applyback.py::_validate_w
 cognitive-complexity src/kernelforge/rewrite_by_flydsl/applyback.py::generate_applyback_patch 33
 cognitive-complexity src/kernelforge/rewrite_by_flydsl/flydsl_rewrite_driver_preparation.py::prepare_rewrite_driver 37
 cognitive-complexity src/kernelforge/rewrite_by_flydsl/ingest.py::discover_source_entry 31
-cognitive-complexity src/kernelforge/rewrite_by_flydsl/kb.py::try_flydsl_kb_warmstart 71
 cognitive-complexity src/kernelforge/rewrite_by_flydsl/port_loop.py::check_flydsl_port 35
 cognitive-complexity src/kernelforge/rewrite_by_flydsl/port_loop.py::run_port_loop 52
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_framework_switch_manifest.py::parse_manifest 27
@@ -902,7 +901,6 @@ function-lines src/kernelforge/orchestrator/specialists.py::SpecialistAgent.run 
 function-lines src/kernelforge/rewrite_by_flydsl/applyback.py::_publish_patch 115
 function-lines src/kernelforge/rewrite_by_flydsl/applyback.py::generate_applyback_patch 209
 function-lines src/kernelforge/rewrite_by_flydsl/flydsl_rewrite_driver_preparation.py::prepare_rewrite_driver 231
-function-lines src/kernelforge/rewrite_by_flydsl/kb.py::try_flydsl_kb_warmstart 169
 function-lines src/kernelforge/rewrite_by_flydsl/kb.py::write_flydsl_kb_solution 85
 function-lines src/kernelforge/rewrite_by_flydsl/optimize.py::run_optimize 126
 function-lines src/kernelforge/rewrite_by_flydsl/port_loop.py::run_port_loop 166
@@ -980,4 +978,3 @@ nested-blocks src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py::m
 nested-blocks src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py::write_reports 8
 nested-blocks src/kernelforge/fusion/discover.py::_salvage_objects 6
 nested-blocks src/kernelforge/gemm_tune/model_analyzer.py::_extract_quant_info 6
-nested-blocks src/kernelforge/rewrite_by_flydsl/kb.py::try_flydsl_kb_warmstart 7
