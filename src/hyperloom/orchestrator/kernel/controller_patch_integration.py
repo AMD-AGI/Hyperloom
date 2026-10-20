@@ -463,7 +463,8 @@ async def integrate_controller_patches(
         try:
             await record_keep(_keep_result(publication, validation, keep_commit))
             shared_state.save(Path(session_dir))
-        except OSError as error:  # KEEP is already committed to Git
+        except Exception as error:  # noqa: BLE001 - KEEP is already committed to Git; record_keep runs the whole writeback
+            log.warning("KEEP %s committed but recording it failed: %s", publication.operator_id, error)
             record_reason = f"Git KEEP committed; SharedState recording failed: {error}"
         else:
             record_reason = ""

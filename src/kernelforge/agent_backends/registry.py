@@ -126,7 +126,7 @@ def discover_agent_providers(*, force: bool = False) -> None:
                 if provider.name != entry_name:
                     raise ValueError(f"entry-point name {entry_name!r} does not match provider name {provider.name!r}")
                 register_agent_provider(provider)
-            except (ImportError, OSError, AttributeError, TypeError, ValueError) as exc:
+            except Exception as exc:  # noqa: BLE001 - isolate broken third-party plugins
                 _plugin_errors[entry.name] = f"{type(exc).__name__}: {exc}"
                 log.warning(
                     "failed to load Agent provider entry point %s: %s",

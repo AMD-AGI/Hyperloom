@@ -2249,8 +2249,9 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         return summary, kernel_roofline, reusable_ids
 
     def _append_roofline_snapshot_history(self, payload: dict[str, Any]) -> None:
-        """Append a compact roofline snapshot of ``last_trace_analyze`` for report-side comparison; best-effort,
-        failures never block the canonical write above.
+        """Append a compact roofline snapshot of ``last_trace_analyze`` for report-side comparison.
+
+        Runs after the canonical write above, so a failure here cannot undo it.
         """
         latest = self.last_trace_analyze
         snapshot_id = latest["roofline_snapshot_id"]
