@@ -1244,13 +1244,6 @@ class IntentRouter(CoordinatorCollaborator):
         # A late extension can arrive after the cumulative task TTL expired but before the worker/reaper acted on it.
         remaining_sec = max(1, int(extra_sec), int(new_ttl - running_sec))
         lanes = await self.locks.heartbeat_by_task(task_id, ttl_sec=remaining_sec)
-        gpu_error = ""
-        try:
-            gpus = await self.gpu_specialist_pool.extend(task_id, remaining_sec)
-        except Exception as exc:
-            log.exception("extend_lease: GPU lease refresh failed for task=%s", task_id)
-            gpus = 0
-            gpu_error = repr(exc)[:200]
         # Move the live subprocess's kill instant too, within the room its dispatch left before the phase end.
         wall_budget_error = ""
         granted_sec = 0.0
@@ -1259,22 +1252,20 @@ class IntentRouter(CoordinatorCollaborator):
         except Exception as exc:
             log.exception("extend_lease: wall-budget extension failed for task=%s", task_id)
             wall_budget_error = repr(exc)[:200]
-        # A swallowed GPU or wall-budget failure would leave the lane extended while the GPU reaper or subprocess
-        # wall-clock cap can still interrupt the work — report the partial extension as degraded.
+        # A swallowed wall-budget failure leaves the lane extended while the subprocess wall-clock cap can still
+        # interrupt the work — report the partial extension as degraded.
         await self.bus.record_observation(
             "coordinator",
             "observation",
             {
-                "kind": "extend_lease_degraded" if gpu_error or wall_budget_error else "extend_lease",
+                "kind": "extend_lease_degraded" if wall_budget_error else "extend_lease",
                 "task_id": task_id,
                 "source": source,
                 "extra_sec": extra_sec,
                 "lease_ttl_sec": new_ttl,
                 "lease_expires_in_sec": remaining_sec,
                 "lanes": lanes,
-                "gpu_rows": gpus,
                 "wall_budget_extension_sec": granted_sec,
-                **({"gpu_refresh_error": gpu_error} if gpu_error else {}),
                 **({"wall_budget_extension_error": wall_budget_error} if wall_budget_error else {}),
                 "reason": str(intent.payload.get("reason") or "")[:200],
             },

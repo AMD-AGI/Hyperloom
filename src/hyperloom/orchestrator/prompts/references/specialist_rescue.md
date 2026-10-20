@@ -29,7 +29,7 @@ queued behind the lane or GPUs it holds.
   `residual_questions`. `to` also takes a list
   (`to=['specialist:<a>', 'specialist:<b>']`) to redirect several at once.
 - `extend_lease{task_id, extra_sec, reason}` — grows the lease TTL and the
-  expiry of the lanes and GPUs the task holds, in bounded steps, and moves a
+  expiry of the lanes the task holds, in bounded steps, and moves a
   running specialist's wall-clock kill deadline out by `extra_sec`, never
   past the phase end. The observation's `wall_budget_extension_sec` is how
   far the deadline has moved in total; `0` means the phase has no room left.
