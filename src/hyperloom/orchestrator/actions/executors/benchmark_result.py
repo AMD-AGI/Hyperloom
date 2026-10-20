@@ -807,6 +807,15 @@ def is_valid_measurement(result: dict[str, Any] | None) -> bool:
     return completed is not None and completed > 0
 
 
+def round_succeeded(measurement: dict[str, Any]) -> bool:
+    """Whether a round ran to the verdict its kind accepts.
+
+    A native AgentX round that Magpie marks diagnostic (a profile) is never a valid measurement: the trace it leaves is
+    what it is run for, so Magpie's own ``round_succeeded`` decides it. Any other round succeeds when it is valid.
+    """
+    return measurement.get("round_succeeded", measurement.get("valid_measurement")) is True
+
+
 def served_complete_protocol(result: dict[str, Any]) -> bool:
     """Return whether the run served every request its protocol asked for.
 
@@ -868,6 +877,7 @@ __all__ = [
     "harvest_leaked_artifacts",
     "double_run_requested",
     "is_valid_measurement",
+    "round_succeeded",
     "served_complete_protocol",
     "_materialize_rescue_into_workspace",
 ]

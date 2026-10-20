@@ -60,6 +60,7 @@ from ._subprocess_kill import (
 from .benchmark_result import (
     extract_benchmark_measurement,
     harvest_leaked_artifacts,
+    round_succeeded,
     select_run_workspace,
     served_complete_protocol,
     snapshot_workspaces,
@@ -482,8 +483,8 @@ async def _settled_measurement(
             subprocess_started_unix=subprocess_started_unix,
         )
         attempts += 1
-        if measurement.get("valid_measurement") or time.monotonic() >= deadline:
-            if attempts > 1 and measurement.get("valid_measurement"):
+        if round_succeeded(measurement) or time.monotonic() >= deadline:
+            if attempts > 1 and round_succeeded(measurement):
                 log.info(
                     "grid_runner: benchmark_report became valid after %d read(s); "
                     "the report was still being written when the subprocess was reaped",
@@ -1699,7 +1700,7 @@ async def run_grid(
                 warnings.append("run_grid_warmup_discarded_first")
                 warnings.append(f"warmup_round_tput:{float(warmup_tput):.1f}")
 
-            if not measurement.get("valid_measurement"):
+            if not round_succeeded(measurement):
                 if lifecycle_boot_only and rc == 0:
                     results.append(
                         VariantResult(
