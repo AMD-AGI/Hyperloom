@@ -33,7 +33,7 @@ from kernelforge.tests.test_rewrite_by_flydsl_kb import (
     _spec,
     _use_in_memory_kb_store,
 )
-from kernelforge.conftest import kb_store_run_config as _remote_config_with_token
+from kernelforge.tests.conftest import kb_store_run_config as _remote_config_with_token
 
 VLLM_VERSION = framework_version("vllm")
 SOFTMAX_IDENTITY = f"kernel:flydsl:softmax:vllm:{VLLM_VERSION}:flydsl:mi355x"

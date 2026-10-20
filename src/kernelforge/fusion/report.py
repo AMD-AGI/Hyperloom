@@ -12,7 +12,7 @@ from typing import Any, Optional
 
 from . import __version__
 from .models import CompilePassOutcome, Diagnosis, FusionArtifacts, Recipe, ValidationResult
-from kernelforge.durable_io import atomic_write_text
+from kernelforge.tools.durable_io import atomic_write_text
 
 # v2 widens the ``verdict`` enum and adds the ``error`` block.
 FUSION_MANIFEST_SCHEMA_VERSION = 2

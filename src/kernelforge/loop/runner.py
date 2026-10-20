@@ -32,8 +32,8 @@ from kernelforge.llm.process_reaping import processes_under
 from kernelforge.llm.workspace_policy import is_protected_path
 from kernelforge.llm.git import git, git_bytes
 from kernelforge.config import Config
-from kernelforge.loop.canonical_correctness import accept_candidate
-from kernelforge.loop.validation import run_validation_pipeline
+from kernelforge.evaluation.correctness.canonical import accept_candidate
+from kernelforge.evaluation.correctness.pipeline import run_validation_pipeline
 from kernelforge.loop.experience import ExperienceLedger
 from kernelforge.loop.lessons import (
     SUMMARY_MIN_SECONDS,
@@ -118,20 +118,20 @@ from kernelforge.loop.prompt_view import (
     render_long_horizon_header,
 )
 from kernelforge.loop.reporting import BestResultPublisher, KeepBundle, KeepIdentity, KeepScore
-from kernelforge.mcp_server.tools.bench import (
+from kernelforge.evaluation.benchmark.runner import (
     CaseCoverageError,
     calculate_mean_case_speedup,
     calculate_measurement_case_speedups,
     BenchRun,
     measure_wallclock,
 )
-from kernelforge.mcp_server.tools._subprocess import communicate_process_group
+from kernelforge.tools.process_group import communicate_process_group
 from kernelforge.loop.new_path_allowlist import (
     matches_commit_new_paths,
     normalize_commit_new_paths,
 )
-from kernelforge.durable_io import atomic_write_text
-from kernelforge.loop.scoring import (
+from kernelforge.tools.durable_io import atomic_write_text
+from kernelforge.evaluation.scoring import (
     DEFAULT_SNR_THRESHOLD_DB,
     KEEP_MEASUREMENT_COUNT,
     SIGMA_REMEASURE_BATCH,
@@ -145,7 +145,7 @@ from kernelforge.loop.scoring import (
     rescaled_sigma,
     runs_task_suite_acceptance,
 )
-from kernelforge.loop.baseline_reference import (
+from kernelforge.evaluation.benchmark.baseline import (
     BASELINE_DRIFT_TOLERANCE,
     BASELINE_DRIFT_TOLERANCE_ENV,
     check_baseline_against_reference,
@@ -163,7 +163,7 @@ from kernelforge.loop.merge_candidates import (
     merge_plan,
     select_merge_pair,
 )
-from kernelforge.mcp_server.tools.registers import check_registers
+from kernelforge.evaluation.profiling.registers import check_registers
 from kernelforge.tracker import CampaignSegment, ExperimentTracker, Experiment, ExperimentSubject
 
 log = logging.getLogger(__name__)
@@ -4656,7 +4656,7 @@ class IterationLoop(AnalysisRuntimeMixin):
             )
         finally:
             try:
-                from kernelforge.loop.aiter_cache import (
+                from kernelforge.tools.aiter_cache import (
                     cleanup_current_owned_aiter_locks,
                 )
 

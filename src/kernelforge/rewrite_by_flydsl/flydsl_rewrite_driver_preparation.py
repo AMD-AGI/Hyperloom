@@ -28,7 +28,7 @@ from kernelforge.resources import resource_path
 from kernelforge.rewrite_by_flydsl import driver_contract, protocol
 from kernelforge.rewrite_by_flydsl.budget import DEFAULT_REWRITE_BUDGET
 from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
-from kernelforge.durable_io import atomic_write_bytes
+from kernelforge.tools.durable_io import atomic_write_bytes
 from kernelforge.tracker import UsageAccumulator
 
 

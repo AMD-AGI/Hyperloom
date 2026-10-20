@@ -13,7 +13,7 @@ import kernelforge.kernel_backends as _kernel_backends_pkg
 from kernelforge.config import Config
 from kernelforge.kernel_backends.base import build_single_kernel_backend_prompt
 from kernelforge.kernel_backends.constants import KERNEL_BACKENDS
-from kernelforge.loop.scoring import canonical_gate_prompt, runs_task_suite_acceptance
+from kernelforge.evaluation.scoring import canonical_gate_prompt, runs_task_suite_acceptance
 
 
 _GPU = "gfx950"
@@ -115,18 +115,18 @@ def forge_loop_prompts(monkeypatch):
 # object gained `eager_kernels`/`eager_matches_trace` and the rule that reads them;
 # the remaining steps are the same text renumbered 6-8.
 _SHA256_FORGE_LOOP: dict[str, str] = {
-    "aiter": "1c933e6bdb8f3000ee9bfbb2a83c4931c9a164cd26ec7776e6e2ff33d682f1b5",
+    "aiter": "290f5b86300a62c682789551515fd000dfe395ad2abbea5a68a5e683588fec90",
     "assembly": "67ce0c680f6b603d7c656feb1f1cc1f5eaf1bf4f6afc5d9f368b0361dd4b1492",
-    "ck": "8425aa52e7a9d7681bf75d471617b3a1aa2ce0cf10766f8530ef3025001e0d60",
-    "flydsl": "e9ae6e3f09150964bdff2c74177a923dffd05b96591f8f99cafb11717beeeeca",
+    "ck": "d5a880ff37bdd3a1d04d33227aa1e2a7840f7cdee9559043ce14cf40e1ca6ebd",
+    "flydsl": "659dadd861489506bd75bbc4ec9e511f050f6ee03711238fd4c8def1064e1519",
     # The group-axis rule moved fusion alone: harness contract step 4 now forbids
     # substituting gqa_groups / num_attention_heads for n_local_groups on DSv4 wo_a
     # paths, and reminds authors that H and G are often unequal.
-    "fusion": "5e0e61ccc6c483411dbb10e6381187ca16373bf9d1156873f9f1abc099f7bf5f",
-    "gluon": "45a2cfcd349304581f1ea1cb1d489b7ff326fe7276ac35834840b17d5a6e8c06",
-    "hip": "b423e67f7e17cb20c6edd8166df665f5dfeed31a9bb7abe22dba10a33e6d0f25",
-    "hipblaslt": "b6318a771e02c382658b3a8ddb844343d3528b1b91ca1d8c60febf84afdfc1ae",
-    "triton": "e73f10c4a2bc4fbe59da1e619605401b8f4c602bf0b4480d956584162473c650",
+    "fusion": "8bfdcc271d511faf99a3ee273817ce420c9175611944120a82de50f7e9cc22d6",
+    "gluon": "8a8a0feea8cf0d0ed9030b2557bd056a80be2abc3d9e180ec2cf7819eaea91f3",
+    "hip": "5559572e047b3c4b872cc7027acb81b2920b6815845706d0b73bdef08b1ac502",
+    "hipblaslt": "90fb6e81023fd66295411408f4993453d76330f5a27e5ea58873c38edad99be3",
+    "triton": "aebb854b4e134020cd853ef5c20e38195f2defb5444c27f98bd61c60fddaa056",
 }
 
 
