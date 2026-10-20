@@ -75,6 +75,11 @@ def _best(current: Any, candidate: Any) -> float | None:
     return max(values) if values else None
 
 
+def _measured_speedup(value: Any) -> Any:
+    """``value`` when it is a speedup a run measured; an unmeasured attempt carries ``0.0``."""
+    return value if isinstance(value, (int, float)) and value > 0 else None
+
+
 def _attempts(breakdown: dict[str, Any]) -> list[dict[str, Any]]:
     """Every candidate either route produced, across every visit."""
     return [row for ext in _visits(breakdown) for row in dict_rows(ext.get("attempts"))]
@@ -197,7 +202,7 @@ def _fold_attempts(rows: dict[str, dict[str, Any]], ext: dict[str, Any]) -> None
         row["selected_for_optimization"] = True
         summary = row.get(lane) or {"attempts": 0, "best_speedup": None, "decision": ""}
         summary["attempts"] = int(summary["attempts"]) + 1
-        summary["best_speedup"] = _best(summary["best_speedup"], entry.get("speedup"))
+        summary["best_speedup"] = _best(summary["best_speedup"], _measured_speedup(entry.get("speedup")))
         decision = str(as_dict(entry.get("e2e")).get("decision") or "") or str(entry.get("micro_decision") or "")
         if decision:
             summary["decision"] = decision

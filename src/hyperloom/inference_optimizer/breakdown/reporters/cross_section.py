@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from hyperloom.common.coerce import to_float, to_int
+from hyperloom.common.perf_metric import INTVTY_OBJECTIVES
 
 from ..variant_funnel import VARIANT_COUNTS, variants_from_timeline
 from .base import (
@@ -17,6 +18,7 @@ from .base import (
     outcome_of,
     session_of,
     stop_reason_of,
+    stop_target_text,
     task_config_of,
     timeline_of,
     validation_of,
@@ -31,8 +33,10 @@ class GlobalFacts:
 
     headline: str  # 1-line "baseline X → final Y = +Z%"
     stop_reason: str
-    elapsed_minutes: float | None
-    objective: dict[str, Any]
+    elapsed_minutes: float | None  # session total across legs; this leg's when the total is absent
+    elapsed_is_total: bool
+    graded_on: str  # the axis the verdict was taken on; "" when none was recorded
+    stop_target: str  # "gain_pct>=500"; "" when none was recorded
     workload_summary: str  # "DeepSeek-R1 vllm fp8 tp=8 conc=64 isl=osl=1024"
     gain_attribution_lines: list[str]  # "explore: 5.00% of total (=100% share of 5.00%)"
     capabilities_not_attempted: list[str]
@@ -254,6 +258,19 @@ def _capabilities_split(
     return sorted(kept), sorted(not_attempted)
 
 
+def _graded_axis_headline(outcome: dict[str, Any], gain: float) -> str:
+    """The headline on the interactivity axis the gain was measured on; ``""`` when it is not one."""
+    axis = as_dict(outcome.get("final")).get("graded_on")
+    if axis not in INTVTY_OBJECTIVES:
+        return ""
+    before = to_float(as_dict(as_dict(outcome.get("baseline")).get("perf")).get(axis))
+    after = to_float(as_dict(as_dict(outcome.get("final")).get("perf")).get(axis))
+    if not (before and after):
+        return ""
+    sign = "+" if gain > 0 else ""
+    return f"{axis} {before:.2f} → {after:.2f} = {sign}{gain:.2f}% validated gain"
+
+
 def _headline(breakdown: dict[str, Any]) -> str:
     """Build the one-line baseline→final throughput headline."""
     from ... import framework_registry
@@ -263,6 +280,8 @@ def _headline(breakdown: dict[str, Any]) -> str:
     b = to_float(as_dict(outcome.get("baseline")).get("output_throughput"))
     f = to_float(as_dict(outcome.get("final")).get("output_throughput"))
     g = to_float(as_dict(outcome.get("final")).get("gain_pct"))
+    if g is not None and (axis_line := _graded_axis_headline(outcome, g)):
+        return axis_line
     if b and f and g is not None:
         sign = "+" if g > 0 else ""
         return (
@@ -273,6 +292,12 @@ def _headline(breakdown: dict[str, Any]) -> str:
     if b and not f:
         return f"baseline {framework_registry.format_primary_metric(fw, b, precision=2)} (no validated final)"
     return "no validated throughput recorded"
+
+
+def _graded_on(breakdown: dict[str, Any]) -> str:
+    """The axis the final verdict was graded on, from the outcome or else the grading metadata."""
+    graded = as_dict(outcome_of(breakdown).get("final")).get("graded_on")
+    return str(graded or as_dict(as_dict(as_dict(breakdown).get("metadata")).get("grading")).get("objective") or "")
 
 
 def build_global_facts(
@@ -297,11 +322,14 @@ def build_global_facts(
     session = session_of(breakdown)
     attribution_lines, attribution_method = _gain_attribution_lines(breakdown)
     kept, not_attempted = _capabilities_split(breakdown)
+    total = to_float(session.get("total_elapsed_minutes"))
     return GlobalFacts(
         headline=_headline(breakdown),
         stop_reason=stop_reason_of(breakdown),
-        elapsed_minutes=to_float(session.get("elapsed_minutes")),
-        objective=as_dict(workload.get("objective")),
+        elapsed_minutes=total if total is not None else to_float(session.get("elapsed_minutes")),
+        elapsed_is_total=total is not None,
+        graded_on=_graded_on(breakdown),
+        stop_target=stop_target_text(workload.get("objective")),
         workload_summary=_workload_summary(workload),
         gain_attribution_lines=attribution_lines,
         capabilities_not_attempted=not_attempted,
