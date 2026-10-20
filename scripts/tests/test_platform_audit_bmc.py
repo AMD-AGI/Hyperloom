@@ -5,9 +5,11 @@
 
 from __future__ import annotations
 
+import http.client
 import importlib.util
 import subprocess
 import sys
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -352,3 +354,50 @@ def test_run_lets_an_unexpected_error_propagate(bmc, monkeypatch):
 
     with pytest.raises(ValueError, match="embedded null byte"):
         bmc.run(["ipmitool", "-V"])
+
+
+class _Response:
+    def __init__(self, body: bytes) -> None:
+        self._body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self) -> bytes:
+        return self._body
+
+
+def _endpoint(bmc):
+    return bmc.RedfishEndpoint("bmc.example", "", "", bmc.tls_context(None, False))
+
+
+@pytest.mark.parametrize(
+    ("raised", "body", "expected"),
+    [
+        (urllib.error.URLError("connection refused"), b"", "<urlopen error connection refused>"),
+        (TimeoutError("timed out"), b"", "timed out"),
+        (http.client.RemoteDisconnected("closed"), b"", "closed"),
+        (None, b"not json", "Expecting value: line 1 column 1 (char 0)"),
+        (None, b"\xff", "'utf-8' codec can't decode byte 0xff in position 0: invalid start byte"),
+    ],
+)
+def test_rf_get_reports_expected_transport_and_decode_failures(monkeypatch, bmc, raised, body, expected):
+    def _urlopen(*_a, **_k):
+        if raised is not None:
+            raise raised
+        return _Response(body)
+
+    monkeypatch.setattr(bmc.urllib.request, "urlopen", _urlopen)
+    assert bmc.rf_get(_endpoint(bmc), "/redfish/v1") == (None, expected)
+
+
+def test_rf_get_does_not_hide_an_unexpected_error(monkeypatch, bmc):
+    def _urlopen(*_a, **_k):
+        raise KeyError("ctx")
+
+    monkeypatch.setattr(bmc.urllib.request, "urlopen", _urlopen)
+    with pytest.raises(KeyError, match="ctx"):
+        bmc.rf_get(_endpoint(bmc), "/redfish/v1")

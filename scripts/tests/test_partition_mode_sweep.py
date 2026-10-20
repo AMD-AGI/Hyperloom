@@ -842,3 +842,33 @@ class TestExitCodeContract:
         monkeypatch.setattr(pms, "read_device_gib", lambda gpu_id: (_ for _ in ()).throw(KeyError("vram")))
         assert _sweep(node) == 4
         assert node.sets == []
+
+
+class TestRestoreEntryModeRead:
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            pms.SweepError("no state"),
+            OSError("amd-smi not executable"),
+            UnicodeDecodeError("utf-8", b"\xff", 0, 1, "bad"),
+        ],
+    )
+    def test_an_expected_read_failure_still_attempts_the_restore(self, monkeypatch, failure):
+        sets = []
+
+        def _read(_gpu_id):
+            raise failure
+
+        monkeypatch.setattr(pms, "read_mode", _read)
+        monkeypatch.setattr(pms, "set_mode", lambda gpu_id, mode, *, sudo: sets.append((gpu_id, mode)))
+
+        assert pms._restore_entry_mode(0, "SPX", sudo=False) is False
+        assert sets == [(0, "SPX")]
+
+    def test_an_unexpected_read_error_surfaces(self, monkeypatch):
+        def _read(_gpu_id):
+            raise KeyError("partition")
+
+        monkeypatch.setattr(pms, "read_mode", _read)
+        with pytest.raises(KeyError, match="partition"):
+            pms._restore_entry_mode(0, "SPX", sudo=False)
