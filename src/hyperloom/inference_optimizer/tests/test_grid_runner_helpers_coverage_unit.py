@@ -66,7 +66,7 @@ def test_ungrounded_env_file_reason_drops_missing_config_path(tmp_path) -> None:
     # A proposal may point a config env at an artifact no stage authored; the server would read it
     # unconditionally and die at config load, so the variant must be dropped with a reason.
     v = _variant("gemm", envs={"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": str(tmp_path / "nope.csv")})
-    reason = gr.ungrounded_env_file_reason(v)
+    reason = gr.ungrounded_env_file_reason(v.extra_envs)
     assert reason and "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE" in reason
     assert str(tmp_path / "nope.csv") in reason
 
@@ -75,7 +75,7 @@ def test_ungrounded_env_file_reason_passes_authored_file(tmp_path) -> None:
     csv = tmp_path / "tuned.csv"
     csv.write_text("gfx,M,N,K,splitK\ngfx950,64,5120,5120,2\n", encoding="utf-8")
     v = _variant("gemm", envs={"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": str(csv)})
-    assert gr.ungrounded_env_file_reason(v) is None
+    assert gr.ungrounded_env_file_reason(v.extra_envs) is None
 
 
 def test_ungrounded_env_file_reason_accepts_colon_joined_existing_files(tmp_path) -> None:
@@ -86,7 +86,7 @@ def test_ungrounded_env_file_reason_accepts_colon_joined_existing_files(tmp_path
     b = tmp_path / "t2.csv"
     b.write_text("gfx,M,N,K\ngfx950,4,5,6\n", encoding="utf-8")
     v = _variant("gemm", envs={"AITER_CONFIG_GEMM_BF16": f"{a}:{b}"})
-    assert gr.ungrounded_env_file_reason(v) is None
+    assert gr.ungrounded_env_file_reason(v.extra_envs) is None
 
 
 def test_ungrounded_env_file_reason_drops_colon_joined_missing_element(tmp_path) -> None:
@@ -94,7 +94,7 @@ def test_ungrounded_env_file_reason_drops_colon_joined_missing_element(tmp_path)
     a.write_text("gfx,M,N,K\ngfx950,1,2,3\n", encoding="utf-8")
     missing = str(tmp_path / "never_authored.csv")
     v = _variant("gemm", envs={"AITER_CONFIG_GEMM_BF16": f"{a}:{missing}"})
-    reason = gr.ungrounded_env_file_reason(v)
+    reason = gr.ungrounded_env_file_reason(v.extra_envs)
     assert reason and missing in reason and str(a) not in reason.split("element(s)")[1].split(" do not exist")[0]
 
 
@@ -105,8 +105,15 @@ def test_ungrounded_env_file_reason_treats_an_unreadable_path_as_missing(monkeyp
 
     monkeypatch.setattr(gr.Path, "is_file", raise_eacces)
     v = _variant("gemm", envs={"AITER_CONFIG_GEMM_BF16": "/root/private/tuned.csv"})
-    reason = gr.ungrounded_env_file_reason(v)
+    reason = gr.ungrounded_env_file_reason(v.extra_envs)
     assert reason and "/root/private/tuned.csv" in reason
+
+
+def test_run_grid_fast_fail_drops_a_variant_whose_config_file_is_missing(tmp_path, monkeypatch) -> None:
+    # The backstop of the admission check: run_grid's fast-fail drops it before boot, whatever the framework.
+    monkeypatch.setenv("FRAMEWORK", "sglang")
+    v = _variant("gemm", envs={"AITER_CONFIG_GEMM_BF16": str(tmp_path / "never_written.csv")})
+    assert "AITER_CONFIG_GEMM_BF16" in (gr.unsupported_capability_reason(v) or "")
 
 
 def test_ungrounded_env_file_reason_noop_without_config_envs(tmp_path) -> None:
@@ -119,7 +126,7 @@ def test_ungrounded_env_file_reason_noop_without_config_envs(tmp_path) -> None:
             "AITER_CONFIG_GEMM_A8W8": "",
         },
     )
-    assert gr.ungrounded_env_file_reason(v) is None
+    assert gr.ungrounded_env_file_reason(v.extra_envs) is None
 
 
 # -- unsupported_capability_reason (env-flag build probe) -----------------
