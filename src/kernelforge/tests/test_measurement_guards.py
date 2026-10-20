@@ -1511,6 +1511,11 @@ def test_a_larger_sample_can_raise_the_bar_as_well_as_lower_it():
 # ── a scoring anchor measured outside the loop ───────────────────────────────
 
 
+def _attach_state(loop, workspace):
+    loop.state_store = LoopStateStore(str(workspace))
+    loop.run_state = RunState()
+
+
 def _port_bench(case_times: dict[str, float]):
     """Stand in for the loop's own first bench of the kernel it starts from."""
 
@@ -1526,7 +1531,8 @@ def _port_bench(case_times: dict[str, float]):
 
 def test_the_loop_anchors_on_its_own_first_bench_by_default(tmp_path, monkeypatch):
     """No caller anchor: the kernel the run starts from is the 1.0x it divides by."""
-    loop, _workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times={})
+    loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times={})
+    _attach_state(loop, workspace)
     loop.ic.baseline_wall_ms = None
     monkeypatch.setattr(runner_module, "measure_wallclock", _port_bench({"a": 5.0, "b": 50.0}))
 
@@ -1539,7 +1545,8 @@ def test_the_loop_anchors_on_its_own_first_bench_by_default(tmp_path, monkeypatc
 def test_an_injected_anchor_keeps_the_denominator_the_caller_supplied(tmp_path, monkeypatch):
     """A rewrite anchors the loop on the source its port replaced, not on the port."""
     source_case_ms = {"a": 10.0, "b": 100.0}
-    loop, _workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=source_case_ms)
+    loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=source_case_ms)
+    _attach_state(loop, workspace)
     loop.ic.baseline_wall_ms = None
     monkeypatch.setattr(runner_module, "measure_wallclock", _port_bench({"a": 5.0, "b": 50.0}))
 
@@ -1554,7 +1561,8 @@ def test_an_injected_anchor_keeps_the_denominator_the_caller_supplied(tmp_path, 
 
 def test_an_injected_anchor_starts_the_keep_bar_at_the_search_start(tmp_path, monkeypatch):
     """Starting the bar at 1.0x would KEEP a candidate that loses to the kernel the run began with."""
-    loop, _workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times={"a": 10.0, "b": 100.0})
+    loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times={"a": 10.0, "b": 100.0})
+    _attach_state(loop, workspace)
     loop.ic.baseline_wall_ms = None
     monkeypatch.setattr(runner_module, "measure_wallclock", _port_bench({"a": 5.0, "b": 50.0}))
     monkeypatch.setattr(loop, "_seed_and_hydrate_run_state", lambda: None)
@@ -1606,7 +1614,8 @@ def test_a_missing_anchor_file_is_refused(tmp_path):
 
 def test_the_keep_bar_is_read_off_the_incumbent_not_assumed(tmp_path, monkeypatch):
     """The incumbent scores 2.0x against a caller's anchor, so 2.0x is the bar -- not 1.0x."""
-    loop, _workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times={"a": 10.0, "b": 100.0})
+    loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times={"a": 10.0, "b": 100.0})
+    _attach_state(loop, workspace)
     loop.ic.baseline_wall_ms = None
     monkeypatch.setattr(runner_module, "measure_wallclock", _port_bench({"a": 5.0, "b": 50.0}))
 
@@ -1618,9 +1627,9 @@ def test_the_keep_bar_is_read_off_the_incumbent_not_assumed(tmp_path, monkeypatc
 def test_a_resume_restores_the_bar_a_caller_anchor_put_it_at(tmp_path, monkeypatch):
     """A resume cannot re-bench the kernel the campaign started from, so an assumed 1.0x bar would admit a regression."""
     source_case_ms = {"a": 10.0, "b": 100.0}
-    loop, _workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=source_case_ms)
+    loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=source_case_ms)
+    _attach_state(loop, workspace)
     loop.ic.baseline_wall_ms = None
-    loop.run_state = RunState()
     monkeypatch.setattr(runner_module, "measure_wallclock", _port_bench({"a": 5.0, "b": 50.0}))
 
     asyncio.run(loop._measure_baseline())

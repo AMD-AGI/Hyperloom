@@ -436,6 +436,20 @@ def test_token_and_conversation_pair_into_one_generation(tmp_path, monkeypatch):
     assert g.ended is True
 
 
+def test_record_llm_call_propagates_buffer_failure(tmp_path, monkeypatch):
+    _enable_env(monkeypatch)
+    _install_fake_sdk(monkeypatch, _FakeClient())
+    em = lfe.LangfuseEmitter(tmp_path)
+
+    def buffer_fails(*_args, **_kwargs):
+        raise RuntimeError("buffer bug")
+
+    monkeypatch.setattr(em, "_buffer", buffer_fails)
+
+    with pytest.raises(RuntimeError):
+        em.record_llm_call(_llm_row())
+
+
 def test_failed_call_emits_immediately_with_error_level(tmp_path, monkeypatch):
     """A failure has no response half, so it must not wait for a pair."""
     _enable_env(monkeypatch)
