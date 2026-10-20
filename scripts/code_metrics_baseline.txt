@@ -885,7 +885,7 @@ module-lines src/hyperloom/orchestrator/knowledge/remote_recipe/values.py 1284
 module-lines src/hyperloom/orchestrator/loop/coordinator.py 1423
 module-lines src/hyperloom/orchestrator/loop/dispatcher.py 1503
 module-lines src/hyperloom/orchestrator/loop/intent_router.py 1423
-module-lines src/hyperloom/orchestrator/loop/writeback.py 4123
+module-lines src/hyperloom/orchestrator/loop/writeback.py 3975
 module-lines src/hyperloom/orchestrator/phases/framework.py 3139
 module-lines src/hyperloom/orchestrator/phases/kernel.py 4227
 module-lines src/hyperloom/orchestrator/phases/machine_state.py 2128
