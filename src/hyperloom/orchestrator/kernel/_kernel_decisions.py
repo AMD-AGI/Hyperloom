@@ -572,6 +572,16 @@ def pending_kernel_integration_records(state) -> list[dict[str, Any]]:
     return fit
 
 
+def _borrowable_patch_path(state, payload: dict[str, Any], kernel_id: str) -> str:
+    """Return the just-optimized patch a payload without a path of its own may borrow."""
+    if str(payload.get("integration_id") or ""):
+        return ""
+    last_opt = state.last_kernel_opt or {}
+    if str(last_opt.get("kernel_id") or "") != kernel_id:
+        return ""
+    return str(last_opt.get("best_artifact_path") or last_opt.get("patch_path") or "")
+
+
 def _resolve_kernel_patch_identity(
     state,
     payload: dict[str, Any] | None,
@@ -580,19 +590,10 @@ def _resolve_kernel_patch_identity(
     payload = payload or {}
     kernel_id = str(payload.get("kernel_id") or "")
     patch_path = str(payload.get("patch_path") or payload.get("best_artifact_path") or "")
-    # The last_kernel_opt back-fill is a single-patch convenience: it lends the one just-optimized patch to a result
+    # The back-fill is a single-patch convenience: it lends the one just-optimized patch to a result
     # that omitted its own path.
-    if (
-        not patch_path
-        and kernel_id
-        and not str(payload.get("integration_id") or "")
-        and str((state.last_kernel_opt or {}).get("kernel_id") or "") == kernel_id
-    ):
-        patch_path = str(
-            (state.last_kernel_opt or {}).get("best_artifact_path")
-            or (state.last_kernel_opt or {}).get("patch_path")
-            or ""
-        )
+    if not patch_path and kernel_id:
+        patch_path = _borrowable_patch_path(state, payload, kernel_id)
     target_file = str(payload.get("target_file") or payload.get("source_file") or "")
     extra_args = str(payload.get("extra_server_args") or "").strip()
     return kernel_id, patch_path, target_file, extra_args
