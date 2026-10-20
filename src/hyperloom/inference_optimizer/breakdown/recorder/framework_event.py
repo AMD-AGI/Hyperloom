@@ -287,9 +287,6 @@ class FrameworkEventRecorder:
             {
                 "policy": {
                     "keep_threshold_pct": _float_or_none(fields.get("keep_threshold_pct")),
-                    "variant_timeout_sec": _int_or_none(fields.get("variant_timeout_sec")),
-                    "overtime_kill_ratio": _float_or_none(fields.get("overtime_kill_ratio")),
-                    "force_exit_budget_pct": _float_or_none(fields.get("force_exit_budget_pct")),
                     ARM_CONFIG: {
                         "keep_gain_threshold_pct": _float_or_none(config.get("keep_gain_threshold_pct")),
                         "empty_streak_threshold": _int_or_none(config.get("empty_streak_threshold")),
@@ -373,7 +370,7 @@ class FrameworkEventRecorder:
         if "proposals_total" in fields:
             row["proposals_total"] = _int_or_none(fields.get("proposals_total"))
         if "empty" in fields:
-            row["empty"] = bool(fields.get("empty"))
+            row["empty"] = None if fields.get("empty") is None else bool(fields.get("empty"))
         for name in ("confidence_avg", "confidence"):
             if name in fields:
                 row[name] = _float_or_none(fields.get(name))
@@ -441,7 +438,6 @@ class FrameworkEventRecorder:
         effective_verdict: str = "",
         held_to_rule: str = "",
         reviewer: str = REVIEWER_CRITIC,
-        iteration: Any = None,
         reason: str = "",
         confidence: Any = None,
         failure_reason_code: str = "",
@@ -472,7 +468,6 @@ class FrameworkEventRecorder:
             "effective_verdict": str(effective_verdict or "") or authored,
             "held_to_rule": str(held_to_rule or ""),
             "reviewer": str(reviewer or ""),
-            "iteration": _int_or_none(iteration),
             "reason": str(reason or ""),
             "confidence": _float_or_none(confidence),
             "failure_reason_code": str(failure_reason_code or ""),

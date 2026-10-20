@@ -45,6 +45,27 @@ require a downstream migration before V7 readers consume them. Within V7,
 `perf.output_tput_per_gpu` also carries its value on the `baseline` event and
 on stack validation rows.
 
+V7 also removes keys that no producer ever populated. Each carries the
+disposition `removed in V7, never populated`:
+
+- `framework_agent` `policy.force_exit_budget_pct`, `policy.variant_timeout_sec`
+  and `policy.overtime_kill_ratio`
+- `kernel_agent` `trace_analyze_runs[].trace_validate_ref`
+- `critic_review.iteration` on framework proposals
+- `kernel_agent` `geak.product.cfg_hash` and `geak.product.final_overlay_digest`
+- `kernel_agent` `entry.budget_remaining_sec`
+
+The `event_id` and `ordinal` row-scope declarations are removed from the schema
+types: they were already stripped before export and never appeared on the wire.
+`conc_sweep` `points[].budget_remaining_sec` is unchanged.
+
+Two figures are null instead of a fabricated default when they were not
+measured or not provided. `outcome.validation.attributed_gain_pct` and
+`unattributed_gain_pct` are null when no adoption could be measured, rather than
+`0.0`, and `empty` on `framework_agent` runs is null when the producer did not
+report it, rather than `false`. `kernel_agent` `entry.snapshot_staleness` is the
+string `"absent"` or `"fresh"`.
+
 Re-exporting a session directory created before V7 reads its old `baseline`
 event, so `outcome.baseline.output_throughput` is null while `outcome.final` and
 the gain keep their values, and `metadata.workflow.contract_digest` keeps the

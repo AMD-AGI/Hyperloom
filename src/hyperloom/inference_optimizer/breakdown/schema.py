@@ -279,13 +279,15 @@ class V6OutcomeValidation(TypedDict, total=False):
     #: produced -- a revalidation moves the cumulative figure without
     #: re-promoting the recipe, so ``current_best`` can be a later measurement.
     perf: V6GradedAxes
-    attributed_gain_pct: float
+    #: ``None`` when no adoption could be measured.
+    attributed_gain_pct: float | None
     #: ``attributed_gain_pct`` without adoptions kept for a non-gain reason;
     #: ``None`` on a ledger recorded before the field existed.
     attributed_gain_pct_excluding_fixes: float | None
     #: Per ``keep_reason``: ``count``, ``total_gain_pct``, ``unmeasured``.
     by_keep_reason: dict[str, Any]
-    unattributed_gain_pct: float
+    #: ``None`` when nothing was measured or no chain total exists.
+    unattributed_gain_pct: float | None
     chain_total_gain_pct: float | None
     validated_total_gain_pct: float | None
     reconciliation_gap_pct: float | None
@@ -1429,8 +1431,8 @@ class V6StackExt(TypedDict, total=False):
     objective: str
     adoptions: dict[str, Any]
     validations: dict[str, Any]
-    attributed_gain_pct: float
-    attributed_gain_pct_excluding_fixes: float
+    attributed_gain_pct: float | None
+    attributed_gain_pct_excluding_fixes: float | None
     chain_total_gain_pct: float | None
     unattributed_gain_pct: float | None
     validated_total_gain_pct: float | None
@@ -1474,7 +1476,6 @@ class V6CriticReview(TypedDict, total=False):
     effective_verdict: str
     held_to_rule: str
     reviewer: str
-    iteration: int | None
     reason: str
     confidence: float | None
     failure_reason_code: str
@@ -1590,9 +1591,6 @@ class V6FrameworkPolicy(TypedDict, total=False):
     one the session ended on and not the one this entry acted under."""
 
     keep_threshold_pct: float | None
-    variant_timeout_sec: int | None
-    overtime_kill_ratio: float | None
-    force_exit_budget_pct: float | None
     config: V6FrameworkPolicyConfigArm
     source: V6FrameworkPolicySourceArm
 
@@ -1640,7 +1638,7 @@ class V6FrameworkRun(TypedDict, total=False):
     notes: list[str]
     parallelism: int | None
     proposals_total: int | None
-    empty: bool
+    empty: bool | None
     confidence: float | None
     confidence_avg: float | None
     ensemble_scores: dict[str, Any]
@@ -1688,7 +1686,6 @@ class V6FrameworkCriticReview(TypedDict, total=False):
     effective_verdict: str
     held_to_rule: str
     reviewer: str
-    iteration: int | None
     reason: str
     confidence: float | None
     failure_reason_code: str
@@ -1970,11 +1967,11 @@ class V6KernelEntry(TypedDict, total=False):
     route_reason: str
     resumed: bool
     stack_depth_in: int | None
-    budget_remaining_sec: float | None
     roofline_snapshot_id: int | None
     roofline_snapshot_ts: str | None
     roofline_baseline_gain_at_snapshot: float | None
-    snapshot_staleness: float | None
+    #: ``"absent"`` when the entry inherited no analysis snapshot, ``"fresh"`` otherwise.
+    snapshot_staleness: str | None
 
 
 class V6KernelReprofile(TypedDict, total=False):
@@ -1988,13 +1985,6 @@ class V6KernelReprofile(TypedDict, total=False):
     snapshot_landed: bool
     snapshot_id_before: int | None
     snapshot_id_after: int | None
-
-
-class V6RowScope(TypedDict, total=False):
-    """Recording-side bookkeeping every V6 row fragment carries."""
-
-    event_id: str
-    ordinal: int
 
 
 class V6KernelAnalysisArtifacts(TypedDict, total=False):
@@ -2025,7 +2015,7 @@ class V6KernelAnalysisDetail(TypedDict, total=False):
     artifacts: V6KernelAnalysisArtifacts
 
 
-class V6KernelTraceAnalyzeRun(V6KernelAnalysisDetail, V6RowScope, total=False):
+class V6KernelTraceAnalyzeRun(V6KernelAnalysisDetail, total=False):
     """One analysis the KERNEL phase requested for itself."""
 
     run_id: str
@@ -2042,7 +2032,6 @@ class V6KernelTraceAnalyzeRun(V6KernelAnalysisDetail, V6RowScope, total=False):
     steady_state_trace: str | None
     analysis_md_path: str | None
     reusable_native_kernel_ids: list[str]
-    trace_validate_ref: str | None
 
 
 class V6KernelRewriteE2E(TypedDict, total=False):
@@ -2074,7 +2063,7 @@ class V6KernelRebenchEngagement(TypedDict, total=False):
     observed_overlay_digest: str | None
 
 
-class V6KernelRebenchAttempt(V6RowScope, total=False):
+class V6KernelRebenchAttempt(TypedDict, total=False):
     """One end-to-end re-measurement of a candidate."""
 
     attempt_id: str
@@ -2178,7 +2167,7 @@ class V6KernelGeakDelegation(TypedDict, total=False):
     stages_reached: list[str]
 
 
-class V6KernelGeakDiscoveryRun(V6RowScope, total=False):
+class V6KernelGeakDiscoveryRun(TypedDict, total=False):
     """One hot-kernel discovery run GEAK performed for itself."""
 
     source: str | None
@@ -2201,7 +2190,7 @@ class V6KernelGeakBackendResult(TypedDict, total=False):
     error_class: str | None
 
 
-class V6KernelGeakAttempt(V6RowScope, total=False):
+class V6KernelGeakAttempt(TypedDict, total=False):
     """One kernel GEAK considered, replayed from its conclusion file.
 
     GEAK's ``kernel_journey.json`` names every kernel it considered, which
@@ -2224,7 +2213,7 @@ class V6KernelGeakAttempt(V6RowScope, total=False):
     e2e: V6KernelRewriteE2E | None
 
 
-class V6KernelGeakAuthoredKernel(V6RowScope, total=False):
+class V6KernelGeakAuthoredKernel(TypedDict, total=False):
     """One kernel GEAK authored and accepted.
 
     GEAK routes an acceptance to its kernel queue or its head queue purely by
@@ -2242,7 +2231,7 @@ class V6KernelGeakAuthoredKernel(V6RowScope, total=False):
     aliases: list[str]
 
 
-class V6KernelGeakEnvSelection(V6RowScope, total=False):
+class V6KernelGeakEnvSelection(TypedDict, total=False):
     """One environment / flag selection GEAK accepted."""
 
     selection: str
@@ -2284,9 +2273,7 @@ class V6KernelGeakProduct(TypedDict, total=False):
     accepted_flags: str | list[str] | None
     accepted_envs: dict[str, Any]
     accepted_config: dict[str, Any]
-    cfg_hash: str | None
     final_overlay: str | None
-    final_overlay_digest: str | None
     final_launch_script: str | None
     bench_script: str | None
     final_patch: str | None
@@ -2691,7 +2678,6 @@ __all__ = [
     "V6RooflineKernelTable",
     "V6RooflineProgress",
     "V6RooflineTrajectoryPoint",
-    "V6RowScope",
     "V6StackAdoption",
     "V6StackExt",
     "V6StackValidation",

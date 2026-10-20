@@ -8,7 +8,7 @@ cognitive-complexity src/hyperloom/agents/quantization/driver/assessment.py::cla
 cognitive-complexity src/hyperloom/common/unified_diff.py::parse_unified_diff 36
 cognitive-complexity src/hyperloom/inference_optimizer/baseline_comparison/inferencex_client.py::fetch_agentic_interactivity 31
 cognitive-complexity src/hyperloom/inference_optimizer/baseline_comparison/research_hints.py::gap_analysis 50
-cognitive-complexity src/hyperloom/inference_optimizer/breakdown/collectors/v6.py::_validation_from_timeline 35
+cognitive-complexity src/hyperloom/inference_optimizer/breakdown/collectors/v6.py::_validation_from_timeline 33
 cognitive-complexity src/hyperloom/inference_optimizer/breakdown/collectors/v6.py::collect_v6_metadata 32
 cognitive-complexity src/hyperloom/inference_optimizer/breakdown/critic_reviews.py::normalize_framework_reviews 37
 cognitive-complexity src/hyperloom/inference_optimizer/breakdown/recorder/framework_event.py::FrameworkEventRecorder.record_attempt 68
@@ -450,12 +450,11 @@ function-args src/hyperloom/inference_optimizer/breakdown/recorder/baseline_even
 function-args src/hyperloom/inference_optimizer/breakdown/recorder/baseline_event.py::make_baseline_recorder 10
 function-args src/hyperloom/inference_optimizer/breakdown/recorder/enablement_event.py::record_revalidation_outcome 7
 function-args src/hyperloom/inference_optimizer/breakdown/recorder/enablement_event.py::record_trigger 10
-function-args src/hyperloom/inference_optimizer/breakdown/recorder/framework_event.py::FrameworkEventRecorder.record_proposal_review 12
-function-args src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py::KernelEventRecorder.begin 6
+function-args src/hyperloom/inference_optimizer/breakdown/recorder/framework_event.py::FrameworkEventRecorder.record_proposal_review 11
 function-args src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py::KernelEventRecorder.finish 7
 function-args src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py::KernelEventRecorder.record_fusion_run 14
 function-args src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py::KernelEventRecorder.record_geak_delegation 15
-function-args src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py::KernelEventRecorder.record_geak_product 9
+function-args src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py::KernelEventRecorder.record_geak_product 7
 function-args src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py::KernelEventRecorder.record_gemm_tuning_run 15
 function-args src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py::KernelEventRecorder.record_reprofile 9
 function-args src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py::_rebench_row 14
@@ -950,7 +949,7 @@ function-lines src/kernelforge/rewrite_by_flydsl/kb.py::write_flydsl_kb_solution
 function-lines src/kernelforge/rewrite_by_flydsl/optimize.py::run_optimize 126
 function-lines src/kernelforge/rewrite_by_flydsl/port_loop.py::run_port_loop 166
 function-lines src/kernelforge/rewrite_by_flydsl/runner.py::run_rewrite 303
-module-lines src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py 2168
+module-lines src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py 2161
 module-lines src/hyperloom/inference_optimizer/breakdown/schema.py 2681
 module-lines src/hyperloom/inference_optimizer/cli/__init__.py 2569
 module-lines src/hyperloom/inference_optimizer/cli/model_gate.py 1815

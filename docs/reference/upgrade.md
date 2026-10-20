@@ -266,7 +266,12 @@ now `output_throughput`; archived V6 documents keep the old key.
 Re-exporting a session directory created before V7 emits a null
 `outcome.baseline.output_throughput` and the `contract_digest` recorded at
 session creation, and the default output overwrites the archived
-`<session_dir>/session_breakdown.json`.
+`<session_dir>/session_breakdown.json`. V7 also drops keys that were never
+populated (`policy.force_exit_budget_pct`, `policy.variant_timeout_sec`,
+`policy.overtime_kill_ratio`, `trace_validate_ref`, `critic_review.iteration`,
+`geak.product.cfg_hash`, `geak.product.final_overlay_digest`,
+`entry.budget_remaining_sec`), and reports `attributed_gain_pct`,
+`unattributed_gain_pct` and run `empty` as null when unmeasured or not provided.
 
 V6 was the preceding cutover, for the timeline: each action records its own event as it
 runs, so an event's `start_time` is when the work started rather than when its
