@@ -283,10 +283,7 @@ class ClosePhase(CoordinatorCollaborator):
         """Snapshot the roofline, baseline and unsettled GEAK candidate state into the close section."""
         self._record_close_roofline_progress()
         self._record_close_baseline_progress()
-        try:
-            _close_out.record_geak_candidate(self.session_dir, self.shared_state.geak_pending)
-        except Exception:
-            log.debug("CLOSE: geak candidate record failed", exc_info=True)
+        _close_out.record_geak_candidate(self.session_dir, self.shared_state.geak_pending)
 
     def _close_stack_ledger(self) -> None:
         """Settle the stack ledger's timeline event.
