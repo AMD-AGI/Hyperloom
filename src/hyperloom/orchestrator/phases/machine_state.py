@@ -1091,7 +1091,6 @@ def _base_workflow_predicate_inputs(
             "enablement_enabled": bool(flags.enablement_enabled),
         },
         "enablement_in_flight": bool(enablement_in_flight),
-        "phase_budget_pct": state.phase_budget_pct,
     }
 
 

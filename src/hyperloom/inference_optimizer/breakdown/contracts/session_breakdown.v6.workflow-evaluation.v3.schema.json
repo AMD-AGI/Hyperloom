@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://hyperloom.amd.com/schema/session_breakdown.v6.workflow-evaluation.v2.json",
-  "title": "Hyperloom SBD V6 workflow-evaluation v2 profile",
+  "$id": "https://hyperloom.amd.com/schema/session_breakdown.v6.workflow-evaluation.v3.json",
+  "title": "Hyperloom SBD V6 workflow-evaluation v3 profile",
   "type": "object",
   "required": [
     "schema_version",
@@ -33,10 +33,10 @@
           ],
           "properties": {
             "workflow_contract_version": {
-              "const": "hyperloom.workflow_evaluation.v2"
+              "const": "hyperloom.workflow_evaluation.v3"
             },
             "contract_digest": {
-              "const": "f086f6eb6e8af8af59367ff87b62bb6842f563a5d70606224b7c7bc411a11c70"
+              "const": "346a6a472a13b105a7284721522cd1e145557fe75185f162b4130e0a280ead66"
             },
             "run_flags": {
               "type": "object",
@@ -1012,8 +1012,7 @@
         "sweep_result",
         "macro_cycle",
         "run_flags",
-        "enablement_in_flight",
-        "phase_budget_pct"
+        "enablement_in_flight"
       ],
       "properties": {
         "baseline": {
@@ -1096,42 +1095,6 @@
         },
         "enablement_in_flight": {
           "type": "boolean"
-        },
-        "phase_budget_pct": {
-          "type": "object",
-          "properties": {
-            "PRELUDE": {
-              "type": "number",
-              "minimum": 0,
-              "maximum": 1
-            },
-            "ENABLEMENT": {
-              "type": "number",
-              "minimum": 0,
-              "maximum": 1
-            },
-            "FRAMEWORK_AGENT": {
-              "type": "number",
-              "minimum": 0,
-              "maximum": 1
-            },
-            "KERNEL_AGENT": {
-              "type": "number",
-              "minimum": 0,
-              "maximum": 1
-            },
-            "SWEEP": {
-              "type": "number",
-              "minimum": 0,
-              "maximum": 1
-            },
-            "CLOSE": {
-              "type": "number",
-              "minimum": 0,
-              "maximum": 1
-            }
-          },
-          "additionalProperties": false
         }
       },
       "additionalProperties": false,
