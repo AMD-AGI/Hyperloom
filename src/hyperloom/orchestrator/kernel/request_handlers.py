@@ -2752,7 +2752,6 @@ async def _capture_vllm_tunableop_shapes(
             {
                 "config_path": config_path,
                 "timeout_sec": timeout_sec,
-                "disable_run_eval": True,
                 "baseline_double_run": False,
             }
         )

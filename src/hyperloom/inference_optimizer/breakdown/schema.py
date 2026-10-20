@@ -332,9 +332,11 @@ class V6OutcomeVariants(TypedDict, total=False):
     #: Distinct changes among the runs, by arm and fingerprint: a change benched
     #: again on a later stack is one change and two runs.
     distinct: int
+    #: Runs adopted into the stack.
     kept: int
+    #: Runs measured and not adopted.
     reverted: int
-    #: Runs that produced no measurement: the server failed or the run overran.
+    #: Runs that reached the bench and produced no measurement.
     failed: int
     #: ``kept`` per bench run; ``None`` when nothing was benched.
     keep_rate_pct: float | None
@@ -1897,6 +1899,9 @@ class V6FrameworkAttempt(TypedDict, total=False):
     stage: str
     decision: str
     adopted: bool | None
+    #: Whether the attempt reached the bench, whatever came of it; absent on a
+    #: row recorded before the field existed.
+    benched: bool | None
     attribution_eligible: bool | None
     validation_basis: str
     fingerprint: str

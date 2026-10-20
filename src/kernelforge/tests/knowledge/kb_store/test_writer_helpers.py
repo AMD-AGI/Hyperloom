@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from kernelforge.knowledge.kb_store.identity import source_resolution
 from kernelforge.knowledge.kb_store import writer as sink
 
@@ -9,23 +11,26 @@ from kernelforge.knowledge.kb_store import writer as sink
 # --------------------------------------------------------------------------- # resolve_operation
 # --------------------------------------------------------------------------- #
 def test_resolve_operation_prefers_compute_kernel(monkeypatch):
-    import kernelforge.mcp_server.tools.pmc as pmc
-
-    monkeypatch.setattr(pmc, "derive_kernel_names", lambda _src: ["launch_wrapper", "my_gemm"])
+    monkeypatch.setattr(source_resolution, "derive_kernel_names", lambda _src: ["launch_wrapper", "my_gemm"])
     assert source_resolution.resolve_operation("src", "/p/f.py") == "my_gemm"
 
 
 def test_resolve_operation_uses_first_when_all_launchers(monkeypatch):
-    import kernelforge.mcp_server.tools.pmc as pmc
-
-    monkeypatch.setattr(pmc, "derive_kernel_names", lambda _src: ["launch_a", "main"])
+    monkeypatch.setattr(source_resolution, "derive_kernel_names", lambda _src: ["launch_a", "main"])
     assert source_resolution.resolve_operation("src", "/p/f.py") == "launch_a"
 
 
-def test_resolve_operation_falls_back_to_target_then_stem(monkeypatch):
-    import kernelforge.mcp_server.tools.pmc as pmc
+def test_resolve_operation_propagates_a_name_derivation_defect(monkeypatch):
+    def _boom(_src):
+        raise RuntimeError("derivation defect")
 
-    monkeypatch.setattr(pmc, "derive_kernel_names", lambda _src: [])
+    monkeypatch.setattr(source_resolution, "derive_kernel_names", _boom)
+    with pytest.raises(RuntimeError, match="^derivation defect$"):
+        source_resolution.resolve_operation("src", "/p/f.py", target_functions=["op_x"])
+
+
+def test_resolve_operation_falls_back_to_target_then_stem(monkeypatch):
+    monkeypatch.setattr(source_resolution, "derive_kernel_names", lambda _src: [])
     assert source_resolution.resolve_operation("", "/p/f.py", target_functions=["", " op_x "]) == "op_x"
     assert source_resolution.resolve_operation("", "/p/my_file.py", target_functions=[]) == "my_file"
 
@@ -33,25 +38,13 @@ def test_resolve_operation_falls_back_to_target_then_stem(monkeypatch):
 def test_resolve_operation_fallback_is_order_independent(monkeypatch):
     # A producer and consumer may hand the same target-function set in different orders; the resolved op (and thus the
     # slug) must not depend on that order.
-    import kernelforge.mcp_server.tools.pmc as pmc
-
-    monkeypatch.setattr(pmc, "derive_kernel_names", lambda _src: [])
+    monkeypatch.setattr(source_resolution, "derive_kernel_names", lambda _src: [])
     a = source_resolution.resolve_operation("", "/p/f.py", target_functions=["gemm_kernel", "epilogue_kernel"])
     b = source_resolution.resolve_operation("", "/p/f.py", target_functions=["epilogue_kernel", "gemm_kernel"])
     assert a == b
     # launchers/wrappers are de-prioritized even when they sort first
     c = source_resolution.resolve_operation("", "/p/f.py", target_functions=["launch_gemm", "gemm_kernel"])
     assert c == "gemm_kernel"
-
-
-def test_resolve_operation_survives_derive_exception(monkeypatch):
-    import kernelforge.mcp_server.tools.pmc as pmc
-
-    def boom(_src):
-        raise RuntimeError("derive failed")
-
-    monkeypatch.setattr(pmc, "derive_kernel_names", boom)
-    assert source_resolution.resolve_operation("", "/p/stem.py") == "stem"
 
 
 # --------------------------------------------------------------------------- # detect_backend_language
