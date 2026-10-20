@@ -4,8 +4,10 @@
 """Sandbox contract: what any ``SandboxProvider`` must do, through the socket only.
 
 Nothing here looks at processes, directories or any other implementation
-detail, so the suite can be pointed at a different implementation by
-overriding the ``harness`` fixture.
+detail, so the suite can be pointed at a different implementation by adding
+a parameter to the ``harness`` fixture. A test marked ``claw_policy`` checks
+what only the Claw sandbox service (and the local provider, which reproduces
+it) enforces; an implementation that cannot, such as the E2B stand-in, skips it.
 """
 
 from __future__ import annotations
@@ -44,12 +46,17 @@ def _create(h, template: str, role: str, **kw):
     )
 
 
-def test_info_carries_caller_and_platform_metadata(harness) -> None:
+def test_info_carries_caller_metadata(harness) -> None:
     sb = _create(harness, harness.sealed_template, "measurement", metadata={"hyperloom.request-id": "r1"})
     info = sb.info()
     assert info.sandbox_id == sb.sandbox_id
     assert info.template == harness.sealed_template
     assert info.metadata["hyperloom.request-id"] == "r1"
+
+
+@pytest.mark.claw_policy
+def test_info_carries_platform_metadata(harness) -> None:
+    info = _create(harness, harness.sealed_template, "measurement").info()
     assert info.metadata[NODE_NAME_KEY]
     assert SAME_NODE_KEY not in info.metadata
 
@@ -61,6 +68,7 @@ def test_sealed_runner_answers_through_in_and_out(harness) -> None:
     assert "status.json" in sb.list_dir("/out")
 
 
+@pytest.mark.claw_policy
 def test_sealed_policy_refuses_commands_and_other_paths(harness) -> None:
     sb = _create(harness, harness.sealed_template, "measurement")
     with pytest.raises(SandboxDenied):
@@ -82,6 +90,7 @@ def test_sealed_template_refuses_caller_environment(harness) -> None:
         _create(harness, harness.sealed_template, "measurement", envs={"X": "1"})
 
 
+@pytest.mark.claw_policy
 def test_signing_identity_is_per_sandbox_and_platform_only(harness) -> None:
     a = _create(harness, harness.sealed_template, "measurement")
     b = _create(harness, harness.sealed_template, "measurement")
@@ -94,6 +103,7 @@ def test_signing_identity_is_per_sandbox_and_platform_only(harness) -> None:
     assert SIGNING_PUBLIC_KEY not in dev.info().metadata
 
 
+@pytest.mark.claw_policy
 def test_platform_metadata_keys_cannot_be_forged(harness) -> None:
     for key in (NODE_NAME_KEY, SAME_NODE_KEY, SIGNING_PUBLIC_KEY):
         with pytest.raises(SandboxDenied):
@@ -207,6 +217,7 @@ def test_idempotency_key_returns_the_same_sandbox(harness) -> None:
     assert other.sandbox_id != one.sandbox_id
 
 
+@pytest.mark.claw_policy
 def test_avoiding_this_node_still_creates_and_marks_same_node(harness) -> None:
     node = (
         harness.provider.create(harness.dev_template, role="dev", timeout_sec=60, metadata={})

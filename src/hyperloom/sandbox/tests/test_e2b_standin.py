@@ -17,6 +17,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import urlparse
@@ -213,16 +214,12 @@ def test_a_slow_create_outlasts_wait_sec_and_the_same_key_finds_it_later(e2b_env
 
 def test_killing_a_sandbox_ends_everything_in_it_even_a_detached_child(standin: StandIn) -> None:
     sandbox = _provider(standin).create("dev", role="dev", timeout_sec=60, metadata={})
-    sandbox.run("setsid sleep 7401.5 >/dev/null 2>&1 < /dev/null &")
-    deadline = time.monotonic() + 5
-    while not [p for p in _processes_matching("sleep\x007401.5") if p] and time.monotonic() < deadline:
-        time.sleep(0.05)
-    assert _processes_matching("sleep\x007401.5")
+    seconds = f"7401.{uuid.uuid4().int % 10**9:09d}"
+    marker = f"sleep\x00{seconds}"
+    sandbox.run(f"setsid sleep {seconds} >/dev/null 2>&1 < /dev/null &")
+    assert _wait_until(lambda: bool(_processes_matching(marker)), 5)
     sandbox.kill()
-    deadline = time.monotonic() + 5
-    while _processes_matching("sleep\x007401.5") and time.monotonic() < deadline:
-        time.sleep(0.05)
-    assert _processes_matching("sleep\x007401.5") == []
+    assert _wait_until(lambda: not _processes_matching(marker), 5)
 
 
 def test_the_router_answers_for_a_sandbox_that_does_not_exist_like_e2b(standin: StandIn) -> None:

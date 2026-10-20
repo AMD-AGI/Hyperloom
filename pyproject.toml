@@ -355,6 +355,7 @@ testpaths = [
 pythonpath = ["src", ".", "scripts"]
 markers = [
     "targeted_build_e2e: end-to-end tests that run a real AITER compile on a ROCm host; skip with '-m \"not targeted_build_e2e\"' in CI.",
+    "claw_policy: a sandbox contract test of the Claw sandbox service's own policy (sealed paths, signing identity, platform metadata, avoid-nodes); it runs against the local provider and a real Claw service, not against the E2B stand-in.",
 ]
 
 [tool.coverage.run]
