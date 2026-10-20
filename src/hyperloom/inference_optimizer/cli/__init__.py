@@ -119,7 +119,7 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
 )
 from hyperloom.inference_optimizer.breakdown.stop_reasons import SUPERVISOR_RESTART_REASON
 
-from ..session.lock import SessionAlreadyRunning, SessionLock
+from ..session.lock import SessionAlreadyRunning, SessionLock, SessionLockPathError
 from ..session.paths import (
     ENV_USER_DATA_PATH,
     asset_system_prompts_dir,
@@ -1617,19 +1617,15 @@ def _persist_preflight_failure_artifacts(
 ) -> Path | None:
     """Best-effort materialize the failed install event and final SBD."""
     _mark_pending_install_event_failed(args, exc)
-    try:
-        session_dir = _new_preflight_failure_session_dir(
-            args,
-            failed_attempt=bool(str(getattr(args, "resume_from", "") or "").strip()),
-        )
-    except Exception:
-        log.warning("failed to create a session for SBD V6 preflight failure", exc_info=True)
-        return None
+    session_dir = _new_preflight_failure_session_dir(
+        args,
+        failed_attempt=bool(str(getattr(args, "resume_from", "") or "").strip()),
+    )
 
     session_lock = SessionLock(session_dir)
     try:
         session_lock.acquire()
-    except Exception:
+    except (SessionAlreadyRunning, SessionLockPathError, OSError):
         session_lock.release()
         log.warning("failed to lock SBD V6 preflight failure session", exc_info=True)
         return None

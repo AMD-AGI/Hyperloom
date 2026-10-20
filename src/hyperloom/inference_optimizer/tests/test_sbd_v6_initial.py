@@ -1156,3 +1156,62 @@ def test_framework_review_does_not_parse_macro_cycle_from_prompt():
     )
 
     assert reviews[0]["macro_cycle"] is None
+
+
+class _FailingLock:
+    """Stands in for ``SessionLock`` and raises ``failure`` on acquire."""
+
+    failure: BaseException
+
+    def __init__(self, _session_dir):
+        pass
+
+    def acquire(self):
+        raise type(self).failure
+
+    def release(self):
+        pass
+
+
+def _preflight_failure_persist(monkeypatch, tmp_path, *, lock_failure=None, session_dir_failure=None):
+    import hyperloom.inference_optimizer.cli as optimizer_cli
+
+    monkeypatch.setattr(optimizer_cli, "_mark_pending_install_event_failed", lambda args, exc: {})
+
+    def new_session_dir(*_a, **_k):
+        if session_dir_failure is not None:
+            raise session_dir_failure
+        return tmp_path
+
+    monkeypatch.setattr(optimizer_cli, "_new_preflight_failure_session_dir", new_session_dir)
+    if lock_failure is not None:
+        _FailingLock.failure = lock_failure
+        monkeypatch.setattr(optimizer_cli, "SessionLock", _FailingLock)
+    return optimizer_cli._persist_preflight_failure_artifacts(argparse.Namespace(), RuntimeError("preflight"))
+
+
+def test_preflight_failure_session_dir_error_reaches_the_caller(monkeypatch, tmp_path):
+    with pytest.raises(OSError, match="no space left"):
+        _preflight_failure_persist(monkeypatch, tmp_path, session_dir_failure=OSError("no space left"))
+
+
+def _lock_failures():
+    from hyperloom.inference_optimizer.session.lock import SessionAlreadyRunning, SessionLockPathError
+
+    return [
+        SessionAlreadyRunning(Path("/s"), {"pid": 1}),
+        SessionLockPathError(Path("/s/.lock"), "symlink"),
+        OSError("read-only file system"),
+    ]
+
+
+@pytest.mark.parametrize("index", range(3), ids=["already_running", "unsafe_path", "os_error"])
+def test_unlockable_preflight_failure_session_is_skipped(monkeypatch, tmp_path, index):
+    result = _preflight_failure_persist(monkeypatch, tmp_path, lock_failure=_lock_failures()[index])
+
+    assert result is None
+
+
+def test_unexpected_lock_failure_reaches_the_caller(monkeypatch, tmp_path):
+    with pytest.raises(ValueError, match="lock broke"):
+        _preflight_failure_persist(monkeypatch, tmp_path, lock_failure=ValueError("lock broke"))
