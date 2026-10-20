@@ -124,7 +124,7 @@ def _head_commit(repo: Path) -> str:
     """Return the repository's HEAD, or an empty string when it cannot be read."""
     try:
         return _git_output(repo, "rev-parse", "HEAD").lower()
-    except Exception:  # noqa: BLE001 - an unreadable HEAD reads as "no commit landed"
+    except (OSError, subprocess.SubprocessError):  # an unreadable HEAD reads as "no commit landed"
         return ""
 
 
@@ -132,7 +132,7 @@ def _tracked_at_head(repo: Path, relative: str) -> bool:
     """Whether HEAD carries ``relative``, i.e. whether it has a version to restore."""
     try:
         _git_output(repo, "cat-file", "-e", f"HEAD:{relative}")
-    except Exception:  # noqa: BLE001 - anything but a hit means "no version at HEAD"
+    except (OSError, subprocess.SubprocessError):  # a failed lookup means "no version at HEAD"
         return False
     return True
 

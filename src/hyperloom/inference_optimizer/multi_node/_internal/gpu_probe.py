@@ -7,10 +7,13 @@ from __future__ import annotations
 
 import logging
 import shutil
+import subprocess
 import tempfile
 import time
 from pathlib import Path
 from typing import Any
+
+import httpx
 
 from ...gpu_types import _AMD_GPU_TYPES, _GFX_TO_RUNNER, _PRODUCT_TAGS
 from . import ray_dashboard, ssh_client, ssh_known_hosts
@@ -49,11 +52,7 @@ def remote_autodetect_gpu_type(*, timeout_s: int = 60) -> str | None:
     """Detect the inference GPU type from the handed-over cluster."""
     if not external_service_url():
         return None
-    try:
-        state = build_external_state_from_env()
-    except Exception as exc:  # noqa: BLE001 - best-effort probe
-        log.warning("remote GPU probe: could not build external state: %s", exc)
-        return None
+    state = build_external_state_from_env()
     backend = str(state.get("backend") or "").lower()
     try:
         if backend == "rayjob":
@@ -61,7 +60,7 @@ def remote_autodetect_gpu_type(*, timeout_s: int = 60) -> str | None:
         if backend == "infera":
             return _probe_via_infera_ssh(state, timeout_s=timeout_s)
         log.warning("remote GPU probe: unsupported backend %r", backend)
-    except Exception as exc:  # noqa: BLE001 - best-effort probe
+    except (httpx.HTTPError, OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
         log.warning("remote GPU probe (%s) failed: %s", backend, exc)
     return None
 
