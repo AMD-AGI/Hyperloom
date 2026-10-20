@@ -108,7 +108,7 @@ from ._inferencex_patcher import (
 )
 from ._git import _git_head_sha
 from ._agentx_prefix_cache import refuse_cacheless_agentx_baseline
-from ._magpie_patcher import ensure_client_tokenizer_hook, ensure_eval_concurrency_compat
+from ._magpie_patcher import client_tokenizer_hook_installed, ensure_eval_concurrency_compat
 from ._patch_snapshot import (
     _create_patch_snapshot,
     _patch_touched_paths_from_text,
@@ -3976,7 +3976,7 @@ class BaselineExecutor(BenchmarkRunExecutor):
         tok_mode = _client_tokenizer_mode(self._model_from_config(config_path))
         if tok_mode:
             try:
-                hook_ok = ensure_client_tokenizer_hook(
+                hook_ok = client_tokenizer_hook_installed(
                     inferencex_dir=ix_root or None,
                     script_name=self._client_script_from_config(config_path),
                 )
