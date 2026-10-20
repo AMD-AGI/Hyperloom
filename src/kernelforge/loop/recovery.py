@@ -225,12 +225,8 @@ def publish_warm_start_recovery(
         if manifest is None:
             raise
         errors.append(f"derived-best-view: {error}")
-    # The manifest publish() just wrote withholds the improvement badge when the aggregate wall times contradict the
-    # score.
     improvement = warm_start_improvement_flags(
-        pristine_ms=score.baseline_wall_ms,
-        best_ms=score.best_wall_ms,
-        mean_case_speedup=score.mean_case_speedup,
+        pristine_ms=score.baseline_wall_ms, best_ms=score.best_wall_ms, mean_case_speedup=score.mean_case_speedup
     )
     scores = {
         "baseline_ms": score.baseline_wall_ms,
