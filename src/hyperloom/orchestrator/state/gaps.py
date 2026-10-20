@@ -162,27 +162,6 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
             state.upsert_gap(entry)
         for entry in self._extract_gaps_from_attempts(workload_id):
             state.upsert_gap(entry)
-
-        plane = self.knowledge_plane
-        if plane is not None and hasattr(plane, "recipe_kb_traverse_issues"):
-            try:
-                traverse = getattr(plane, "recipe_kb_traverse_issues")
-                rows = traverse(
-                    model_class=getattr(state, "model_class", "") or "",
-                    gpu_type=getattr(state, "gpu_type", "") or "",
-                )
-                if isinstance(rows, list):
-                    for entry in rows:
-                        if isinstance(entry, dict):
-                            entry = dict(entry)
-                            entry.setdefault("source", "recipe_kb")
-                            state.upsert_gap(entry)
-            except Exception:
-                log.warning(
-                    "gaps refresh: recipe_kb_traverse_issues failed (reason=%s)",
-                    reason,
-                    exc_info=True,
-                )
         log.debug(
             "gaps refresh (reason=%s): %d gaps after merge",
             reason,

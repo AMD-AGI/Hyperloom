@@ -440,8 +440,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # reported axes the summary renders.
     baseline_perf: dict[str, Any] = field(default_factory=dict)
     baseline_accuracy: float = 0.0
-    # ``--no-eval``: no accuracy eval anywhere.
-    eval_disabled: bool = False
     # Standalone baseline-arm roofline ceiling computed right after baseline lands; backs up snapshot ceiling so the
     # frontend has data even when the roofline (profile + trace_analyze) step fails.
     baseline_roofline_ceiling: dict[str, Any] = field(default_factory=dict)
