@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 import logging as _logging
+import sqlite3
 from dataclasses import dataclass
 from typing import Any
 
@@ -299,7 +300,7 @@ class MachinePhase(CoordinatorCollaborator):
                     },
                 )
             )
-        except Exception:
+        except sqlite3.Error:
             log.exception("Coordinator: phase_transition event bus write failed")
 
     async def _fire_phase_entry(self, move: Transition) -> None:

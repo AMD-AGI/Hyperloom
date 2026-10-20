@@ -227,7 +227,7 @@ def _pdeathsig_preexec() -> None:
         # PR_SET_PDEATHSIG is option 1
         libc = ctypes.CDLL("libc.so.6", use_errno=True)
         libc.prctl(1, signal.SIGTERM)
-    except Exception:  # noqa: BLE001 — best-effort hardening only
+    except (OSError, AttributeError):
         pass
 
 
@@ -453,8 +453,8 @@ def _serving_actor_body() -> Any:
             """Reap the serving process when Ray tears the actor down."""
             try:
                 self._mgr.stop()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception:
+                log.debug("ServingActor: stop during Ray teardown failed", exc_info=True)
 
     return ServingActor
 
@@ -633,12 +633,9 @@ class ServingLease:
                 exc,
             )
             self._actor = None
-            try:
-                from ._ray_backend import mark_ray_backend_unhealthy
+            from ._ray_backend import mark_ray_backend_unhealthy
 
-                mark_ray_backend_unhealthy()
-            except Exception:  # noqa: BLE001 - failure recovery must not raise
-                pass
+            mark_ray_backend_unhealthy()
             return 1, "", f"ray_actor_error: {exc}"[:2000]
         except _task_err as exc:
             # Worker crash / unexpected error: surface as a benchmark failure so the caller's existing rc!=0 handling

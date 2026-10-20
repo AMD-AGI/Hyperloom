@@ -303,6 +303,7 @@ def make_supervisor_fn(
         except Exception as exc:  # noqa: BLE001 - supervisor is best-effort
             backend_name = selected_backend.name if selected_backend is not None else runtime.provider
             reply = ""
+            log.warning("supervisor %s call failed: %s", backend_name, exc)
             print(
                 f"  [supervisor] {backend_name} call failed ({exc}) — skipping",
                 file=sys.stderr,

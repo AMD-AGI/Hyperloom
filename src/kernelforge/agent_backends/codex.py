@@ -653,6 +653,7 @@ class CodexBackend:
                 outcome["result"] = turn.run()
             except Exception as exc:  # noqa: BLE001 - SDK turn runs in a worker thread
                 outcome["error"] = exc
+                log.warning("Codex startup probe turn failed: %s", exc)
             finally:
                 completed.set()
 

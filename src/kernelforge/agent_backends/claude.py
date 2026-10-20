@@ -227,8 +227,8 @@ def _record_progress(sink: list[str] | None, message: Any) -> None:
         overflow = len(sink) - _PROGRESS_MAX_ENTRIES
         if overflow > 0:
             del sink[:overflow]
-    except Exception:  # noqa: BLE001 — never let telemetry break the session
-        pass
+    except Exception:  # never let telemetry break the session
+        log.debug("agent progress recording failed", exc_info=True)
 
 
 def _prepare_claude_environment() -> None:
