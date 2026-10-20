@@ -19,6 +19,7 @@ from hyperloom.common.env_safety import redact_secret_values
 
 from hyperloom.common.coerce import first_str, to_list, to_mapping, to_str_list
 from ..state.failure_evidence import UNMEASURED_OUTCOMES, classify_failure_attribution
+from ..state.task_registry import params_of, task_id_of
 
 log = _logging.getLogger(__name__)
 
@@ -50,7 +51,7 @@ def _record_run(coord: Any, task: Any, *, role: str, status: str, **fields: Any)
         ROLE_CONFIG,
     )
 
-    task_id = task if isinstance(task, str) else first_str(getattr(task, "task_id", ""))
+    task_id = task if isinstance(task, str) else task_id_of(task)
     if not task_id:
         return
     fields.setdefault("dispatched_at" if status == "dispatched" else "completed_at", now_iso("seconds"))
@@ -333,7 +334,7 @@ def _record_source_attempt(
     # Deferred: the executor that writes this key imports the phase layer back.
     from ..actions.executors.integrate_patch import RESULT_BENCHED
 
-    task_id = first_str(getattr(attempt.task, "task_id", ""))
+    task_id = task_id_of(attempt.task)
     if not task_id:
         return
     base = result.get("base_tput") if result.get("base_tput") is not None else params.get("base_tput")
@@ -412,8 +413,8 @@ def _record_discovered(coord: Any, task: Any, *, raw: Any, candidates: list[dict
         STEP_PROPOSED,
     )
 
-    run_id = first_str(getattr(task, "task_id", ""))
-    discovery_params = to_mapping(getattr(task, "params", None))
+    run_id = task_id_of(task)
+    discovery_params = params_of(task)
     domain = first_str(discovery_params.get("domain"))
     kept = {coord._framework_candidate_key(cand): cand for cand in candidates}
     for cand_id, cand in kept.items():

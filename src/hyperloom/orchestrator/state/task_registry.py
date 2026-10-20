@@ -11,6 +11,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from hyperloom.common.coerce import to_mapping
 from hyperloom.common.timeutil import now_iso
 from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
@@ -676,6 +677,16 @@ class TaskRegistry:
         return cancelled
 
 
+def task_id_of(task: Any) -> str:
+    """The row id of ``task``; empty when a lookup handed back no row rather than a :class:`Task`."""
+    return str(getattr(task, "task_id", "") or "")
+
+
+def params_of(task: Any) -> dict[str, Any]:
+    """The dispatch params of ``task``; empty when a lookup handed back no row rather than a :class:`Task`."""
+    return to_mapping(getattr(task, "params", None))
+
+
 __all__ = [
     "IllegalTransition",
     "TASK_STATES",
@@ -686,4 +697,6 @@ __all__ = [
     "TaskSpec",
     "TerminalTaskReuse",
     "create_in_cursor",
+    "params_of",
+    "task_id_of",
 ]
