@@ -1075,7 +1075,6 @@ class _WatchedRound:
         return min(sec for sec in (STOP_GATE_POLL_SECONDS, hard, session, silence_remaining) if sec is not None)
 
 
-
 @dataclass
 class _RoundActivity:
     """Where a watched round's log scan stopped, when its server reported ready, and when output last arrived."""
