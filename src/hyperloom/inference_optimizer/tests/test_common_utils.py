@@ -1436,6 +1436,23 @@ def test_gpu_type_autodetect_rocm_and_torch_fallback(monkeypatch: pytest.MonkeyP
     assert gpu_types._autodetect_gpu_type() is None
 
 
+def test_gpu_type_autodetect_is_none_when_torch_cannot_load_its_library(monkeypatch: pytest.MonkeyPatch) -> None:
+    from hyperloom.inference_optimizer import gpu_types
+
+    def _rocm_missing(*_args, **_kwargs):
+        raise FileNotFoundError("rocm-smi")
+
+    def _loader_failure(fullname, path=None, target=None):
+        if fullname == "torch":
+            raise OSError("libamdhip64.so.6: cannot open shared object file")
+
+    monkeypatch.setattr(subprocess, "run", _rocm_missing)
+    monkeypatch.delitem(sys.modules, "torch", raising=False)
+    monkeypatch.setattr(sys, "meta_path", [SimpleNamespace(find_spec=_loader_failure), *sys.meta_path])
+
+    assert gpu_types._autodetect_gpu_type() is None
+
+
 # Tests for breakdown.reporters
 
 

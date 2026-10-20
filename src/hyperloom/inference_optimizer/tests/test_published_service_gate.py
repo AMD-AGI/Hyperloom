@@ -11,6 +11,7 @@ import socket
 import time
 import types
 
+import httpx
 import pytest
 
 from hyperloom.common.env import EnvValueError
@@ -50,7 +51,15 @@ def _install_fake_httpx(monkeypatch: pytest.MonkeyPatch, script: list[object]) -
     """Route the function's ``import httpx`` to a client running ``script``."""
     module = types.ModuleType("httpx")
     module.AsyncClient = lambda *a, **k: _FakeClient(script)  # type: ignore[attr-defined]
+    module.HTTPError = httpx.HTTPError  # type: ignore[attr-defined]
     monkeypatch.setitem(__import__("sys").modules, "httpx", module)
+
+
+def _transport_error(cause: OSError) -> httpx.ConnectError:
+    """What httpx raises for an OS-level connect failure: the OS error rides ``__cause__``."""
+    wrapped = httpx.ConnectError(str(cause))
+    wrapped.__cause__ = cause
+    return wrapped
 
 
 def _fast_clock(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -78,7 +87,7 @@ def test_gate_waits_out_the_post_restart_connection_refused_window(monkeypatch: 
     monkeypatch.setattr(life, "_read_state", lambda: _rewritten_state())
     _fast_clock(monkeypatch)
     # Two refusals (the readiness window) then two consecutive 200s.
-    refused = ConnectionRefusedError(111, "Connection refused")
+    refused = _transport_error(ConnectionRefusedError(111, "Connection refused"))
     _install_fake_httpx(monkeypatch, [refused, refused, 200, 200])
 
     asyncio.run(life._wait_for_published_service_ready_async(timeout_s=600, poll_every_s=5))
@@ -88,7 +97,7 @@ def test_gate_skips_when_the_published_name_never_resolves(monkeypatch: pytest.M
     """Outside-cluster: the ClusterIP name is unusable, so the gate is a no-op."""
     monkeypatch.setattr(life, "_read_state", lambda: _rewritten_state())
     _fast_clock(monkeypatch)
-    _install_fake_httpx(monkeypatch, [socket.gaierror(-2, "Name or service not known")])
+    _install_fake_httpx(monkeypatch, [_transport_error(socket.gaierror(-2, "Name or service not known"))])
 
     asyncio.run(life._wait_for_published_service_ready_async(timeout_s=600, poll_every_s=5))
 
@@ -98,7 +107,7 @@ def test_gate_survives_a_transient_dns_flap_within_the_window(monkeypatch: pytes
     monkeypatch.setattr(life, "_read_state", lambda: _rewritten_state())
     _fast_clock(monkeypatch)
     # DNS blips once, then the published endpoint answers: gate must hold + pass.
-    _install_fake_httpx(monkeypatch, [socket.gaierror(-2, "Name or service not known"), 200, 200])
+    _install_fake_httpx(monkeypatch, [_transport_error(socket.gaierror(-2, "Name or service not known")), 200, 200])
 
     asyncio.run(life._wait_for_published_service_ready_async(timeout_s=600, poll_every_s=5))
 
@@ -109,7 +118,7 @@ def test_gate_warns_not_infos_when_it_skips_on_an_unresolvable_name(
     """Skipping the gate is a WARNING, not a silent INFO: a later completed=0 must be traceable back to this skip (the #1060 'surface it' discipline)."""
     monkeypatch.setattr(life, "_read_state", lambda: _rewritten_state())
     _fast_clock(monkeypatch)
-    _install_fake_httpx(monkeypatch, [socket.gaierror(-2, "Name or service not known")])
+    _install_fake_httpx(monkeypatch, [_transport_error(socket.gaierror(-2, "Name or service not known"))])
 
     with caplog.at_level(logging.WARNING, logger=life.log.name):
         asyncio.run(life._wait_for_published_service_ready_async(timeout_s=600, poll_every_s=5))
@@ -125,7 +134,7 @@ def test_dns_skip_after_is_env_overridable(monkeypatch: pytest.MonkeyPatch) -> N
     # One gaierror then 200s: skip_after=1 skips on the first failure (returns before the 200s); if the knob were
     # ignored (default 6) it would pass on 200s -- either way it returns, but this asserts the env path does not
     # raise/hang.
-    _install_fake_httpx(monkeypatch, [socket.gaierror(-2, "Name or service not known")])
+    _install_fake_httpx(monkeypatch, [_transport_error(socket.gaierror(-2, "Name or service not known"))])
 
     asyncio.run(life._wait_for_published_service_ready_async(timeout_s=600, poll_every_s=5))
 
@@ -160,10 +169,20 @@ def test_gate_fails_when_a_resolvable_endpoint_never_serves(monkeypatch: pytest.
     """A published endpoint that resolves but never answers is a real failure."""
     monkeypatch.setattr(life, "_read_state", lambda: _rewritten_state())
     _fast_clock(monkeypatch)
-    _install_fake_httpx(monkeypatch, [ConnectionRefusedError(111, "Connection refused")])
+    _install_fake_httpx(monkeypatch, [_transport_error(ConnectionRefusedError(111, "Connection refused"))])
 
     with pytest.raises(life.ServerRestartFailed):
         asyncio.run(life._wait_for_published_service_ready_async(timeout_s=30, poll_every_s=5))
+
+
+def test_gate_lets_a_non_transport_failure_propagate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only httpx transport errors are polled through; anything else is a bug."""
+    monkeypatch.setattr(life, "_read_state", lambda: _rewritten_state())
+    _fast_clock(monkeypatch)
+    _install_fake_httpx(monkeypatch, [RuntimeError("client bug"), 200, 200])
+
+    with pytest.raises(RuntimeError, match="client bug"):
+        asyncio.run(life._wait_for_published_service_ready_async(timeout_s=600, poll_every_s=5))
 
 
 def test_gate_is_a_noop_for_infera(monkeypatch: pytest.MonkeyPatch) -> None:

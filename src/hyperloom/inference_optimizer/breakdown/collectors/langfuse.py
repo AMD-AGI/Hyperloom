@@ -49,7 +49,7 @@ def collect_langfuse(
     # Tier 1: the persisted post-flush receipt (final counts).
     try:
         receipt = lfe.read_receipt(session_dir)
-    except Exception as exc:  # noqa: BLE001
+    except ValueError as exc:
         warnings.append(f"langfuse: read_receipt failed: {type(exc).__name__}: {exc}")
         receipt = None
     if receipt is not None:
