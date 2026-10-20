@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .candidates import failed_tuner_records, is_candidate, per_tuner_candidates
+from .candidates import _tuner_env, failed_tuner_records, is_candidate, per_tuner_candidates
 from .tuners.base import TuneContext, TuneResult
 
 
@@ -93,75 +93,37 @@ def build_report(
 ) -> TuneReport:
     """Build a TuneReport from individual tuner results, recording the context they were tuned in."""
     finished_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-
-    tuners_run = [r.to_dict() for r in results]
-    tuners_skipped_list = [{"tuner": name, "skip_reason": reason} for name, reason in skipped]
-
-    # Determine overall status and recommended_env
-    recommended_env: dict[str, str] = {}
-    artifacts: dict[str, str] = {}
-    has_candidate = False
-
-    for r in results:
-        # An explicitly forced candidate (r.candidate) is promoted regardless of micro status: the aiter dense tuner's
-        # split-K cap yields a valid deployable artifact whose benefit is e2e-only, so it reports
-        # status="no_improvement" with a best_micro of at most 1.0 -- null when no shape had a baseline -- yet the CSV
-        # delivers several % e2e.
-        if is_candidate(r):
-            has_candidate = True
-            if r.env_var and r.env_value:
-                recommended_env[r.env_var] = r.env_value
-            if r.env_vars:
-                recommended_env.update(r.env_vars)
-            if r.artifact_path:
-                artifacts[r.tuner_name] = r.artifact_path
-
-    # Overall decision
-    failed_results = [r for r in results if r.status == "failed"]
+    # An explicitly forced candidate (r.candidate) is promoted regardless of micro status: the aiter dense tuner's
+    # split-K cap yields a valid deployable artifact whose benefit is e2e-only, so it reports
+    # status="no_improvement" with a best_micro of at most 1.0 -- null when no shape had a baseline -- yet the CSV
+    # delivers several % e2e.
+    winners = [r for r in results if is_candidate(r)]
     failed_tuners = failed_tuner_records(results)
-    # Per-tuner projection: each deployable tuner as its own landable candidate, so a caller can KEEP one and REVERT
-    # another instead of all-or-nothing.
-    candidates = [c.to_dict() for c in per_tuner_candidates(results)]
-    all_failed = bool(results) and len(failed_results) == len(results)
-    all_skipped = len(results) == 0
 
-    # Strict status (A2b): distinguish a genuine "compared, no shape improved" (no_improvement) from "tuner ran but
-    # produced nothing parseable" (empty_output) so an empty/unparsed run is never silently reported as a real
-    # no-improvement result.
-    non_failed_statuses = [r.status for r in results if r.status != "failed"]
-    all_empty_non_failed = bool(non_failed_statuses) and all(s == "empty_output" for s in non_failed_statuses)
-
-    if all_skipped:
-        status = "skipped"
+    if not results:
         micro_decision = "skipped"
-    elif has_candidate:
-        status = "ok"
+    elif winners:
         micro_decision = "candidate"
-    elif all_failed:
-        status = "failed"
+    elif len(failed_tuners) == len(results):
         micro_decision = "failed"
-    elif failed_results:
+    elif failed_tuners:
         # Some tuners crashed while others merely found nothing.
-        status = "ok"
         micro_decision = "partial_failure"
-    elif all_empty_non_failed:
-        # Every tuner that did not fail produced no parseable output.
-        status = "ok"
+    elif all(r.status == "empty_output" for r in results):
+        # Strict status (A2b): "tuner ran but produced nothing parseable" is never silently reported as a genuine
+        # "compared, no shape improved" result.
         micro_decision = "empty_output"
     elif any(r.status == "partial_output" for r in results):
         # Some shapes were lost.
-        status = "ok"
         micro_decision = "partial_output"
     else:
-        # At least one tuner genuinely compared shapes without a win (possibly alongside failures/empties) ->
-        # no_improvement.
-        status = "ok"
+        # At least one tuner genuinely compared shapes without a win.
         micro_decision = "no_improvement"
 
     return TuneReport(
-        status=status,
+        status=micro_decision if micro_decision in ("skipped", "failed") else "ok",
         micro_decision=micro_decision,
-        requires_e2e_validation=has_candidate,
+        requires_e2e_validation=bool(winners),
         model_path=ctx.profile.model_path,
         framework=ctx.framework,
         precision=ctx.precision,
@@ -170,12 +132,14 @@ def build_report(
         tp=ctx.tp,
         conc=ctx.conc,
         tokens=ctx.tokens,
-        tuners_run=tuners_run,
-        tuners_skipped=tuners_skipped_list,
+        tuners_run=[r.to_dict() for r in results],
+        tuners_skipped=[{"tuner": name, "skip_reason": reason} for name, reason in skipped],
         failed_tuners=failed_tuners,
-        recommended_env=recommended_env,
-        artifacts=artifacts,
-        candidates=candidates,
+        recommended_env={name: value for r in winners for name, value in _tuner_env(r).items()},
+        artifacts={r.tuner_name: r.artifact_path for r in winners if r.artifact_path},
+        # Per-tuner projection: each deployable tuner as its own landable candidate, so a caller can KEEP one and
+        # REVERT another instead of all-or-nothing.
+        candidates=[c.to_dict() for c in per_tuner_candidates(results)],
         total_elapsed_s=total_elapsed_s,
         started_at=started_at,
         finished_at=finished_at,
