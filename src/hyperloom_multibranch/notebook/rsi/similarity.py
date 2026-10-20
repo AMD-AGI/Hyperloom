@@ -16,18 +16,20 @@ import math
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
+from hyperloom.inference_optimizer.recipe_snapshot_constants import F_LABEL_MODEL, canonical_labels
 from hyperloom_multibranch.contracts.notebook.records import SessionProfile
 from hyperloom_multibranch.notebook.knowledge.experience import experience_identity
 
 #: The weight of a condition that changes little on its own: a framework release, expert parallelism.
 MINOR_WEIGHT = 0.5
+MODEL = "model"
 LABEL_WEIGHTS = {
     "gpu": 3.0,
     "framework": 2.0,
     "architecture": 2.0,
     "model_type": 1.0,
     "precision": 1.0,
-    "model": 1.0,
+    MODEL: 1.0,
     "framework_version": MINOR_WEIGHT,
 }
 SIZE_WEIGHTS = {"tp": 1.0, "conc": 1.0, "isl": 1.0, "osl": 1.0, "ep": MINOR_WEIGHT}
@@ -79,6 +81,17 @@ def _cosine(left: Mapping[str, float], right: Mapping[str, float]) -> float:
     return dot / norm if norm else 0.0
 
 
+def model_name(model: str) -> str:
+    """``model`` as the Recipe KB names it, so a local path, a hub id and the bare name of one model are one name."""
+
+    labels = canonical_labels(model=model, hardware="", framework_name="", framework_version="", precision="")
+    return labels[F_LABEL_MODEL]
+
+
+def _label(key: str, value: str) -> str:
+    return model_name(value) if key == MODEL else value.lower()
+
+
 def workload_kind(task: TaskConditions) -> str:
     """``agentx`` for an AgentX trace replay, ``inferencex`` for a fixed-length InferenceX workload."""
 
@@ -94,7 +107,7 @@ def task_similarity(first: TaskConditions, second: TaskConditions) -> float:
     for key, weight in LABEL_WEIGHTS.items():
         if key in first.labels and key in second.labels:
             total += weight
-            matched += weight * (first.labels[key].lower() == second.labels[key].lower())
+            matched += weight * (_label(key, first.labels[key]) == _label(key, second.labels[key]))
     for key, weight in SIZE_WEIGHTS.items():
         if key in first.sizes and key in second.sizes:
             total += weight
@@ -118,11 +131,13 @@ __all__ = [
     "INFERENCEX",
     "LABEL_WEIGHTS",
     "MIN_SIMILARITY",
+    "MODEL",
     "PROFILE_WEIGHT",
     "SIZE_WEIGHTS",
     "WORKLOAD",
     "TaskConditions",
     "effective_sessions",
+    "model_name",
     "task_conditions",
     "task_similarity",
     "workload_kind",

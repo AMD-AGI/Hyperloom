@@ -56,6 +56,22 @@ def test_sessions_measured_in_the_same_environment_give_the_prior_and_one_host_i
     assert (prior.samples, prior.sessions, prior.lower_bound_pct) == (6, ("hosted-a", "hosted-b"), 0.3)
 
 
+def test_a_session_archived_under_the_model_s_path_gives_the_prior_for_the_model_s_name() -> None:
+    by_path = dataclasses.replace(
+        _measured("by-path", 0.4, "hosted"),
+        task=dataclasses.replace(TASK, labels={**TASK.labels, "model": "/shared/models/DeepSeek-R1"}),
+    )
+
+    prior = dispersion_prior([by_path], DispersionTask("DeepSeek-R1", 8, GPU))
+
+    assert (prior.dispersion_pct, prior.source, prior.sessions) == (
+        pytest.approx(0.4),
+        PriorSource.ARCHIVE,
+        ("by-path",),
+    )
+    assert matching([by_path], model="Qwen3-8B", tp=8, gpu=GPU) == []
+
+
 def test_one_host_alone_only_raises_the_global_statistics() -> None:
     history = [_measured("one-host", 0.5, "local")]
 

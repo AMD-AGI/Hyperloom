@@ -28,7 +28,7 @@ from enum import Enum
 
 from hyperloom_multibranch.notebook.rsi.archive import SINGLE_HOST, SearchTree
 from hyperloom_multibranch.notebook.rsi.shadow import ShadowNoise
-from hyperloom_multibranch.notebook.rsi.similarity import AGENTX, INFERENCEX, workload_kind
+from hyperloom_multibranch.notebook.rsi.similarity import AGENTX, INFERENCEX, MODEL, model_name, workload_kind
 
 GLOBAL_MEDIAN_PCT = 0.38
 GLOBAL_P90_PCT = 3.30
@@ -73,13 +73,18 @@ def _same(left: str | None, right: str) -> bool:
     return left is not None and left.lower() == right.lower()
 
 
+def _same_model(left: str | None, right: str) -> bool:
+    return left is not None and model_name(left) == model_name(right)
+
+
 def matching(history: Sequence[SearchTree], *, model: str, tp: int, gpu: str, agentx: bool = False) -> list[SearchTree]:
-    """The archived sessions that ran ``model`` with ``tp`` on ``gpu``, replaying traces when ``agentx``."""
+    """The archived sessions that ran ``model`` with ``tp`` on ``gpu``, replaying traces when ``agentx``; a model's
+    path, hub id and bare name are one model."""
 
     return [
         tree
         for tree in history
-        if _same(tree.task.labels.get("model"), model)
+        if _same_model(tree.task.labels.get(MODEL), model)
         and _same(tree.task.labels.get("gpu"), gpu)
         and tree.task.sizes.get("tp") == float(tp)
         and workload_kind(tree.task) == (AGENTX if agentx else INFERENCEX)

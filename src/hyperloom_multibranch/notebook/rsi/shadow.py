@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.jsonio import read_jsonl
+from hyperloom_multibranch.notebook.rsi.similarity import MODEL, model_name
 
 ITEM = "item"
 
@@ -75,7 +76,7 @@ def read_shadow(path: Path) -> tuple[ShadowItem, ...]:
 
 def _labelled_like(labels: Mapping[str, Any], *, model: str, tp: int, gpu: str) -> bool:
     return (
-        str(labels.get("model", "")).lower() == model.lower()
+        model_name(str(labels.get(MODEL, ""))) == model_name(model)
         and str(labels.get("gpu", "")).lower() == gpu.lower()
         and labels.get("tp") == tp
     )

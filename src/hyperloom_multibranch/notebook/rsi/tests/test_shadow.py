@@ -56,6 +56,12 @@ def test_with_labels_only_the_tests_labelled_like_the_session_count(report: Path
     assert shadow_noise(read_shadow(report), labels=LABELS, model=MODEL, tp=4, gpu=GPU).test_ids == ()
 
 
+def test_a_test_labelled_by_the_model_s_hub_id_counts_for_a_session_run_from_its_path(report: Path) -> None:
+    noise = shadow_noise(read_shadow(report), labels=LABELS, model="/shared/models/Qwen3-8B", tp=1, gpu=GPU)
+
+    assert noise.test_ids == ("t2",)
+
+
 def test_without_a_matching_hosted_session_the_shadow_runs_give_the_hosted_prior(report: Path) -> None:
     noise = shadow_noise(read_shadow(report))
     archived = tree("hosted-a", noise=MeasurementNoise(1.4, None, 3, HOSTED))

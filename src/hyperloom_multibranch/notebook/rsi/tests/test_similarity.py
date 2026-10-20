@@ -34,6 +34,17 @@ def test_similarity_weighs_matching_conditions_and_fades_with_size() -> None:
     assert task_similarity(TaskConditions(sizes={"tp": 0.0}), TaskConditions(sizes={"tp": 0.0})) == 1.0
 
 
+def test_one_model_under_a_local_path_a_hub_id_or_a_bare_name_is_one_model() -> None:
+    def named(model: str) -> TaskConditions:
+        return dataclasses.replace(TASK, labels={**TASK.labels, "model": model})
+
+    local, bare, other = named("/shared/models/DeepSeek-R1"), named("deepseek-r1"), named("/shared/models/Qwen3-8B")
+
+    assert task_similarity(TASK, local) == pytest.approx(1.0)
+    assert task_similarity(local, bare) == pytest.approx(1.0)
+    assert task_similarity(TASK, other) < 1.0
+
+
 def test_a_profile_gives_the_labels_and_sizes_of_its_conditions() -> None:
     conditions = task_conditions(profile(), {"gemm": 60.0})
 
