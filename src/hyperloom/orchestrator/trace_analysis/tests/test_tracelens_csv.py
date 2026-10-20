@@ -3822,11 +3822,15 @@ def test_analysis_mode_serving_frameworks_return_inference():
     assert tlr.tracelens_analysis_mode("atom") == "inference"
 
 
-def test_analysis_mode_unknown_framework_stays_default():
-    """Frameworks outside the canonical set fall back to ``default``."""
-    assert tlr.tracelens_analysis_mode("trtllm") == "default"
-    assert tlr.tracelens_analysis_mode("") == "default"
+def test_analysis_mode_scriptable_framework_stays_default():
+    """Scriptable frameworks (except xDiT) fall back to ``default``."""
     assert tlr.tracelens_analysis_mode("custom") == "default"
+
+
+def test_analysis_mode_unknown_framework_returns_inference():
+    """Unknown frameworks fall back to the default spec (sglang), which is not scriptable."""
+    assert tlr.tracelens_analysis_mode("trtllm") == "inference"
+    assert tlr.tracelens_analysis_mode("") == "inference"
 
 
 # The wrapper that merely *launches* the kernel — must never be the source.
