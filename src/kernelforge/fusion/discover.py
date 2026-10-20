@@ -856,12 +856,16 @@ runs back-to-back on the decode path.
 
 
 def _salvage_objects(text: str) -> list[dict[str, Any]]:
-    """Recover every complete top-level ``{...}`` object from (possibly truncated) text, ignoring braces inside strings."""
+    """Recover every complete top-level ``{...}`` object from (possibly truncated) text, ignoring braces inside strings.
+
+    The object a cut left half-written comes last, once repaired, unless it repeats one already recovered.
+    """
     out: list[dict[str, Any]] = []
     depth = 0
     start = -1
     in_str = False
     esc = False
+    commas: list[int] = []
     for i, ch in enumerate(text):
         if in_str:
             if esc:
@@ -876,15 +880,20 @@ def _salvage_objects(text: str) -> list[dict[str, Any]]:
         elif ch == "{":
             if depth == 0:
                 start = i
+                commas = []
             depth += 1
-        elif ch == "}":
-            if depth > 0:
-                depth -= 1
-                if depth == 0 and start >= 0:
-                    with contextlib.suppress(json.JSONDecodeError, ValueError):
-                        obj = json.loads(text[start : i + 1])
-                        if isinstance(obj, dict):
-                            out.append(obj)
+        elif ch == "}" and depth > 0:
+            depth -= 1
+            if depth == 0:
+                with contextlib.suppress(json.JSONDecodeError, ValueError):
+                    obj = json.loads(text[start : i + 1])
+                    if isinstance(obj, dict):
+                        out.append(obj)
+        elif ch == "," and depth == 1:
+            commas.append(i - start)
+    repaired = _repair_truncated_object(text[start:], depth, in_str, commas) if depth else None
+    if repaired is not None and repaired not in out:
+        out.append(repaired)
     return out
 
 
@@ -916,9 +925,6 @@ def _extract_json_array(text: str) -> list[dict[str, Any]]:
     # Fallback: salvage complete objects from a truncated/unclosed array, then the object the cut left half-written --
     # with three quarters of responses arriving truncated, that last object is often the only one there is.
     salvaged = _salvage_objects(text)
-    repaired = _repair_truncated_object(text)
-    if repaired is not None and repaired not in salvaged:
-        salvaged.append(repaired)
     if not salvaged:
         log.warning(
             "discovery: no JSON proposals parsed from %d chars of model text; "
@@ -932,50 +938,20 @@ def _extract_json_array(text: str) -> list[dict[str, Any]]:
 _REPAIRED_REQUIRED_ANY = ("op_chain", "fusion_math")
 
 
-def _repair_truncated_object(text: str) -> dict[str, Any] | None:
-    """Recover the proposal that a cut-off response left half-written."""
-    depth = 0
-    start = -1
-    in_str = False
-    esc = False
-    boundaries: list[int] = []
-    for i, ch in enumerate(text):
-        if in_str:
-            if esc:
-                esc = False
-            elif ch == "\\":
-                esc = True
-            elif ch == '"':
-                in_str = False
-            continue
-        if ch == '"':
-            in_str = True
-        elif ch == "{":
-            if depth == 0:
-                start = i
-                boundaries = []
-            depth += 1
-        elif ch == "}":
-            if depth > 0:
-                depth -= 1
-                if depth == 0:
-                    start = -1
-                    boundaries = []
-        elif ch == "," and depth == 1:
-            boundaries.append(i)
-    if depth <= 0 or start < 0:
-        return None
+def _repair_truncated_object(fragment: str, depth: int, in_str: bool, commas: list[int]) -> dict[str, Any] | None:
+    """Recover the proposal that a cut-off response left half-written.
 
-    attempts = [text[start:] + ('"' if in_str else "") + "}" * depth]
-    attempts.extend(text[start:mark] + "}" for mark in reversed(boundaries))
+    ``fragment`` runs from the object's opening brace to the cut, with ``depth`` braces and maybe a string still
+    open; ``commas`` are the offsets of its top-level separators, where a field before the cut ends complete.
+    """
+    attempts = [fragment + ('"' if in_str else "") + "}" * depth]
+    attempts.extend(fragment[:mark] + "}" for mark in reversed(commas))
     for attempt in attempts:
         try:
             obj = json.loads(attempt)
         except (json.JSONDecodeError, ValueError):
             continue
-        if not isinstance(obj, dict) or not obj:
-            continue
-        if not str(obj.get("name") or "").strip():
+        if not isinstance(obj, dict) or not str(obj.get("name") or "").strip():
             continue
         if any(str(obj.get(key) or "").strip() for key in _REPAIRED_REQUIRED_ANY):
             return obj
