@@ -13,8 +13,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import zstandard
 
-zstandard = pytest.importorskip("zstandard")
 
 from hyperloom.common import llm_config
 from hyperloom.common.deadline import Deadline

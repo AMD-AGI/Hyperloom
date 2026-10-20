@@ -119,6 +119,8 @@ test = [
     # framework-agent patch-authoring / isolation paths.
     "libcst>=1.0",
     "patch-ng>=1.18",
+    # The dsh specialist tests write and read the harness's zstd session logs.
+    "zstandard>=0.22",
 ]
 # Coverage job deps: ``pip install -e ".[test,ci]"``.
 ci = [
