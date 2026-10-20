@@ -342,14 +342,11 @@ class Coordinator:
             gpu_ids=resolve_whole_machine_devices(),
         )
         # Sync research_lane capacity into lane_capacity so acquire_many honours the cap.
-        try:
-            from ..bus.storage.schema import set_lane_capacity as _set_lane_capacity
+        from ..bus.storage.schema import set_lane_capacity as _set_lane_capacity
 
-            cap = int(self.shared_state.research_lane_capacity or 0)
-            if cap >= 0:
-                _set_lane_capacity(self.db.raw, "research_lane", cap)
-        except Exception:
-            log.exception("failed to sync research_lane_capacity to leases DB")
+        cap = int(self.shared_state.research_lane_capacity or 0)
+        if cap >= 0:
+            _set_lane_capacity(self.db.raw, "research_lane", cap)
         # gpu_research_lane stays capacity-1 (strictly serial GPU specialists);
         # the GPU pool partitions physical cards within that one lease.
         # `strict_paths` defers to the env flag.

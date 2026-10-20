@@ -285,10 +285,9 @@ class _RewriteKb:
                 Path(spec.flydsl_kernel).unlink(missing_ok=True)
             else:
                 Path(spec.flydsl_kernel).write_bytes(kb_seed)
-            return RewriteKbReadResult(
-                read_reason="read_error",
-                read_error=sanitize_read_error(error, secrets=kb_store_secrets(self.target.config)),
-            )
+            read_error = sanitize_read_error(error, secrets=kb_store_secrets(self.target.config))
+            log.warning("rewrite KB read failed, cold start: %s", read_error)
+            return RewriteKbReadResult(read_reason="read_error", read_error=read_error)
 
     def publish_port(self, port, measurement: FlydslMeasurement, port_commit: str) -> dict:
         """Record the ported kernel in the KB.
@@ -410,6 +409,7 @@ class _Rewrite:
         try:
             spec = ingest.build_spec(subject, flydsl_kernel=str(candidate_kernel), workspace=self.workspace)
         except Exception as e:  # noqa: BLE001 - any ingest error must still be scorable
+            log.warning("rewrite ingest failed: %s", e)
             raise _SetupFailed(f"ingest error: {type(e).__name__}: {e}", INGEST_FAILED)
         driver_contract.export_driver_environment(spec)
         _progress(
