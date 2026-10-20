@@ -89,6 +89,10 @@ _REUSE = "reuse"  # healthy port + our pid/meta present -> attach a client round
 _BOOT = "boot"  # port not up -> this round boots the server
 _FOREIGN = "foreign"  # healthy port but no pid/meta -> not ours; refuse
 
+# A round that only boots the server and leaves it up: --phase on the command line, or MAGPIE_RUN_PHASE in
+# benchmark.envs, which is where run_grid puts it.
+_PHASE_SERVER = "server"
+
 
 def _server_reusable(base_url: str, pid_dir: str | None, framework: str, port: int) -> str:
     """Classify whether a persistent lifecycle server can be reused."""
@@ -192,7 +196,7 @@ def run_benchmark(
         start = time.time()
         return r.finalize(start, dataclasses.replace(r, base_url=remote_base_url).run_client())
 
-    if phase == "server":
+    if phase == _PHASE_SERVER:
         if not pid_dir:
             r.report_failure(time.time(), "phase=server requires pid_dir")
             return 2
@@ -204,18 +208,7 @@ def run_benchmark(
     # YAML-driven lifecycle: run_grid injects benchmark.server_lifecycle (cleanup/pid_dir/port) and drives
     # warmup(cleanup=false)+measure(cleanup= true) as two identical calls, delegating phase choice to us.
     if phase == "all" and bool(sl.get("enabled")):
-        sl_cleanup = bool(sl.get("cleanup", True))
-        sl_pid_dir = str(sl.get("pid_dir") or workspace)
-        verdict = _server_reusable(r.base_url, sl_pid_dir, framework, port)
-        if verdict == _REUSE:
-            # A persistent server from a prior round is up AND ours: reuse it.
-            return _run_client_phase(r, pid_dir=sl_pid_dir, cleanup=sl_cleanup, start=time.time())
-        if verdict == _FOREIGN:
-            # Healthy port but no pid/meta: a server we did not launch holds it.
-            r.report_failure(time.time(), f"port {port} in use by a non-bypass server (no lifecycle pid/meta)")
-            return 1
-        # verdict == _BOOT: no server yet.
-        return _run_lifecycle_all(r, pid_dir=sl_pid_dir, cleanup=sl_cleanup)
+        return _run_lifecycle_round(r, sl)
 
     # phase == "all": start server, run client, always teardown.
     start = time.time()
@@ -415,6 +408,23 @@ def _run_client_phase(r: _Round, *, pid_dir: str | None, cleanup: bool, start: f
 
             teardown_lifecycle_server(pid_dir=pid_dir, framework=r.framework, port=r.port)
     return r.finalize(start, rc)
+
+
+def _run_lifecycle_round(r: _Round, sl: dict[str, Any]) -> int:
+    """Run one YAML-driven lifecycle round: boot only when the round asks for it, else reuse or boot and measure."""
+    pid_dir = str(sl.get("pid_dir") or r.workspace)
+    verdict = _server_reusable(r.base_url, pid_dir, r.framework, r.port)
+    if verdict == _FOREIGN:
+        # Healthy port but no pid/meta: a server we did not launch holds it.
+        r.report_failure(time.time(), f"port {r.port} in use by a non-bypass server (no lifecycle pid/meta)")
+        return 1
+    if str(r.bench_envs.get("MAGPIE_RUN_PHASE") or "").strip().lower() == _PHASE_SERVER:
+        return 0 if verdict == _REUSE else _run_server_phase(r, pid_dir=pid_dir)
+    cleanup = bool(sl.get("cleanup", True))
+    if verdict == _REUSE:
+        # A persistent server from a prior round is up AND ours: reuse it.
+        return _run_client_phase(r, pid_dir=pid_dir, cleanup=cleanup, start=time.time())
+    return _run_lifecycle_all(r, pid_dir=pid_dir, cleanup=cleanup)
 
 
 def _run_lifecycle_all(r: _Round, *, pid_dir: str, cleanup: bool) -> int:

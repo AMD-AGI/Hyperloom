@@ -28,15 +28,15 @@ from kernelforge.knowledge.kb_store.identity.run import LoopKernel
 from kernelforge.knowledge.kb_store.identity.implementation import (
     canonical_owner_framework,
 )
-from kernelforge.durable_io import atomic_write_text, fsync_directory
-from kernelforge.loop.scoring import (
+from kernelforge.tools.durable_io import atomic_write_text, fsync_directory
+from kernelforge.evaluation.scoring import (
     DEFAULT_SNR_THRESHOLD_DB,
     KEEP_MEASUREMENT_COUNT,
     aggregate_regression_detail,
     keep_score,
     passes_keep_threshold,
 )
-from kernelforge.mcp_server.tools.bench import (
+from kernelforge.evaluation.benchmark.runner import (
     CaseCoverageError,
     aggregate_benchmark_measurements,
     calculate_measurement_case_speedups,
@@ -437,7 +437,7 @@ def _git_discard_worktree(
 
 def _bench_once(driver: str, bench_repeat: int = 1) -> dict | None:
     """Run the driver's full benchmark suite once."""
-    from kernelforge.mcp_server.tools.bench import BenchRun, bench_wallclock
+    from kernelforge.evaluation.benchmark.runner import BenchRun, bench_wallclock
 
     try:
         res = asyncio.run(bench_wallclock(BenchRun(driver, driver_args=[], repeat=bench_repeat)))
@@ -451,7 +451,7 @@ def _bench_once(driver: str, bench_repeat: int = 1) -> dict | None:
 
 def _correctness_once(driver: str, snr_threshold: float) -> bool:
     """Run the driver's complete SNR parity probe once."""
-    from kernelforge.mcp_server.tools.test import test_correctness
+    from kernelforge.evaluation.correctness.driver import test_correctness
 
     try:
         res = asyncio.run(

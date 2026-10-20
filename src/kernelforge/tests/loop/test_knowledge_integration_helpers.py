@@ -179,7 +179,7 @@ def test_git_discard_removes_symlink_without_touching_target(tmp_path):
 # --------------------------------------------------------------------------- # _bench_once / _correctness_once
 # --------------------------------------------------------------------------- #
 def test_bench_once_returns_complete_suite(monkeypatch):
-    import kernelforge.mcp_server.tools.bench as bench
+    import kernelforge.evaluation.benchmark.runner as bench
 
     async def fake(run):
         assert run.driver_args == []
@@ -198,7 +198,7 @@ def test_bench_once_returns_complete_suite(monkeypatch):
 
 
 def test_bench_once_rejects_scalar_only_result(monkeypatch):
-    import kernelforge.mcp_server.tools.bench as bench
+    import kernelforge.evaluation.benchmark.runner as bench
 
     async def fake(run):
         return {"success": True, "median_ms": 7.5}
@@ -208,7 +208,7 @@ def test_bench_once_rejects_scalar_only_result(monkeypatch):
 
 
 def test_bench_once_none_on_exception(monkeypatch):
-    import kernelforge.mcp_server.tools.bench as bench
+    import kernelforge.evaluation.benchmark.runner as bench
 
     async def boom(**_k):
         raise RuntimeError("bench failed")
@@ -218,7 +218,7 @@ def test_bench_once_none_on_exception(monkeypatch):
 
 
 def test_correctness_once_true(monkeypatch):
-    import kernelforge.mcp_server.tools.test as test_mod
+    import kernelforge.evaluation.correctness.driver as test_mod
 
     async def fake(driver_script, driver_args, snr_threshold):
         assert driver_args == []
@@ -229,7 +229,7 @@ def test_correctness_once_true(monkeypatch):
 
 
 def test_correctness_once_false_on_exception(monkeypatch):
-    import kernelforge.mcp_server.tools.test as test_mod
+    import kernelforge.evaluation.correctness.driver as test_mod
 
     async def boom(**_k):
         raise RuntimeError("correctness failed")

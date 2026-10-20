@@ -14,7 +14,7 @@ The acceptance benchmark answers one expensive question (the whole suite, scored
 For "hold the source fixed, vary one dispatch constant, time one shape" use the **sweep primitive**:
 expose the constant as `FORGE_SWEEP_<NAME>` with today's value as the default, echo
 `sweep_const: <NAME> <value>` on every read, and call
-`python3 -m kernelforge.mcp_server.tools.bench --driver <driver command> --case <CASE_ID> --set <NAME>=<value>`.
+`python3 -m kernelforge.evaluation.benchmark.runner --driver <driver command> --case <CASE_ID> --set <NAME>=<value>`.
 One sweep point is then one command instead of an edit plus a gate cycle, cheap enough to call
 dozens of times inside one iteration. **The knobs last one turn: before you end it, replace each
 read with the literal it selected, so the kernel you submit carries the winning literal, not the
@@ -25,7 +25,7 @@ behind in the shipped file.
 
 ## The primitive
 
-    python3 -m kernelforge.mcp_server.tools.bench \
+    python3 -m kernelforge.evaluation.benchmark.runner \
         --driver <driver command> --case <CASE_ID> \
         --set BLOCK_H=32 --set NUM_WARPS=4
 
