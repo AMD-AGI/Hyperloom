@@ -8,16 +8,27 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 from pathlib import Path
 
 from hyperloom.measure import fsafe
 from hyperloom.measure.farm import Farm
 from hyperloom.measure.manifest import RESERVED_NAMES, ManifestFile
 
-__all__ = ["FARM_INVENTORY_FILE", "OutputRejected", "farm_inventory", "inventory", "write_farm_inventory"]
+__all__ = [
+    "FARM_INVENTORY_FILE",
+    "OutputRejected",
+    "drop_agentx_runtime",
+    "farm_inventory",
+    "inventory",
+    "write_farm_inventory",
+]
 
 
 _UNSAFE = "unsafe_output"
+#: Where Magpie installs the replay client of an AgentX round, inside the round's workspace: a Python environment
+#: with links and the wheels it downloaded. It is the tool's installation, not a result of the test.
+AGENTX_RUNTIME_DIR = ".agentx-runtime"
 
 
 class OutputRejected(Exception):
@@ -26,6 +37,21 @@ class OutputRejected(Exception):
     def __init__(self, error_class: str, message: str) -> None:
         super().__init__(message)
         self.error_class = error_class
+
+
+def drop_agentx_runtime(files_dir: Path) -> None:
+    """Remove the replay client's installation from every AgentX workspace below ``files_dir``.
+
+    A link in its place, or an output directory that is itself a link, is left for :func:`inventory` to refuse.
+    """
+    if files_dir.is_symlink():
+        return
+    for current, directories, _ in os.walk(files_dir):
+        if AGENTX_RUNTIME_DIR in directories:
+            directories.remove(AGENTX_RUNTIME_DIR)
+            installation = Path(current, AGENTX_RUNTIME_DIR)
+            if not installation.is_symlink():
+                shutil.rmtree(installation)
 
 
 def inventory(files_dir: Path, *, max_total_bytes: int) -> tuple[ManifestFile, ...]:

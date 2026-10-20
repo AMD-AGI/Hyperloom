@@ -7,7 +7,7 @@ import hashlib
 
 import pytest
 
-from hyperloom.measure.runner.inventory import OutputRejected, inventory
+from hyperloom.measure.runner.inventory import OutputRejected, drop_agentx_runtime, inventory
 
 
 def test_every_file_is_listed_with_its_size_and_hash(tmp_path):
@@ -114,3 +114,32 @@ def test_the_file_is_written_into_the_output_and_listed_by_the_inventory(tmp_pat
 
     listed = inventory(tmp_path / "files", max_total_bytes=10_000)
     assert [f.path for f in listed] == [FARM_INVENTORY_FILE]
+
+
+def test_the_installation_is_removed_below_the_output_and_nowhere_else(tmp_path):
+    outside = tmp_path / "outside"
+    (outside / ".agentx-runtime").mkdir(parents=True)
+    (outside / ".agentx-runtime" / "x").write_text("x")
+    (tmp_path / "out" / "w" / ".agentx-runtime").mkdir(parents=True)
+    (tmp_path / "out" / "w" / ".agentx-runtime" / "x").write_text("x")
+    (tmp_path / "out" / "w" / "report.json").write_text("{}")
+    (tmp_path / "out" / "link").symlink_to(outside)
+
+    drop_agentx_runtime(tmp_path / "out")
+
+    assert not (tmp_path / "out" / "w" / ".agentx-runtime").exists()
+    assert (tmp_path / "out" / "w" / "report.json").is_file()
+    assert (outside / ".agentx-runtime" / "x").is_file()
+
+
+def test_an_output_directory_that_is_a_link_is_not_walked(tmp_path):
+    outside = tmp_path / "outside"
+    (outside / ".agentx-runtime").mkdir(parents=True)
+    (tmp_path / "out").symlink_to(outside)
+
+    drop_agentx_runtime(tmp_path / "out")
+
+    assert (outside / ".agentx-runtime").is_dir()
+    with pytest.raises(OutputRejected) as caught:
+        inventory(tmp_path / "out", max_total_bytes=100)
+    assert caught.value.error_class == "unsafe_output"

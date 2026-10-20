@@ -26,7 +26,7 @@ from hyperloom.measure.manifest import encode_manifest, RESULT_SCHEMA
 from hyperloom.measure.runner import hardware
 from hyperloom.measure.attachments import AttachmentError, place_attachments
 from hyperloom.measure.farm import Farm, FarmError, build_farm, server_environment, server_python, verify_farm
-from hyperloom.measure.runner.inventory import OutputRejected, inventory, write_farm_inventory
+from hyperloom.measure.runner.inventory import OutputRejected, drop_agentx_runtime, inventory, write_farm_inventory
 from hyperloom.measure.runner.platform_env import align_platform_env, take_topology
 from hyperloom.measure.runner.rewrite import Placement, rewrite_config
 from hyperloom.measure.runner.rounds import write_rounds
@@ -313,6 +313,7 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
     outcome, timed_out = _execute(call)
     progress.phase("collecting")
     harvest_leaked_artifacts(ctx.files, subprocess_started_unix=started, leak_root=ctx.work)
+    drop_agentx_runtime(ctx.files)
     _check_node(before, hardware.ecc_counts(visible), visible, facts)
     write_farm_inventory(ctx.files, farm)
     write_rounds(ctx.files, outcome)
