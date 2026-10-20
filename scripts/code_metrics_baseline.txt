@@ -168,7 +168,6 @@ cognitive-complexity src/hyperloom/orchestrator/state/shared_state.py::SharedSta
 cognitive-complexity src/hyperloom/orchestrator/state/shared_state.py::SharedState._build_hot_kernel_summaries 36
 cognitive-complexity src/hyperloom/orchestrator/state/shared_state.py::SharedState.profile_workload_context 43
 cognitive-complexity src/hyperloom/orchestrator/state/shared_state.py::SharedState.record_trace_analyze 45
-cognitive-complexity src/hyperloom/orchestrator/trace_analysis/_task_group_contract.py::_moe_dimensions 34
 cognitive-complexity src/hyperloom/orchestrator/trace_analysis/bypass_trace_analysis.py::_discover_capture_shards 44
 cognitive-complexity src/hyperloom/orchestrator/trace_analysis/bypass_trace_analysis.py::main 72
 cognitive-complexity src/hyperloom/orchestrator/trace_analysis/trace_selfcert.py::StepPass.scan 59
