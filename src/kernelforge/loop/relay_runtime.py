@@ -49,11 +49,14 @@ class RelayRuntimeMixin:
 
     def _session_start_bundle(self) -> SearchActorBundle | None:
         """The actor recovery initializes with: the persisted active profile when it can run, else the start one."""
-        actors = self._search_actors
-        if actors is None:
+        if self._search_actors is None:
             return None
-        active = self.run_state.agent_relay.active_profile_id or actors.start_profile_id
-        return actors.bundle(active if actors.has_bundle(active) else actors.start_profile_id)
+        return self._runnable_bundle(self._search_actors)
+
+    def _runnable_bundle(self, search_actors: SearchActorPool) -> SearchActorBundle:
+        """The active profile's actor when this session built one, else the session's start actor."""
+        active = self.run_state.agent_relay.active_profile_id or search_actors.start_profile_id
+        return search_actors.bundle(active if search_actors.has_bundle(active) else search_actors.start_profile_id)
 
     def _record_agent_availability(self) -> None:
         """Persist the process-start snapshot after the session index advances."""
@@ -150,6 +153,9 @@ class RelayRuntimeMixin:
             relay.active_profile_id = search_actors.start_profile_id
             self.state_store.save(self.run_state)
         self._recheck_profiles(iteration, search_actors)
+        if self._lane_queue:
+            self._defer_intervention(search_actors)
+            return self._runnable_bundle(search_actors)
         intervention, event_type = self._select_boundary_intervention(search_actors)
         if intervention is None:
             return search_actors.bundle(relay.active_profile_id)
@@ -170,6 +176,15 @@ class RelayRuntimeMixin:
             return search_actors.bundle(relay.active_profile_id)
         self._switch_search_actor(iteration, intervention)
         return search_actors.bundle(relay.active_profile_id)
+
+    def _defer_intervention(self, search_actors: SearchActorPool) -> None:
+        """Measure the candidates a round already bought before any intervention changes the next plan."""
+        relay = self.run_state.agent_relay
+        if relay_blockage_reached(relay, threshold=search_actors.blockage_threshold):
+            print(
+                f"  [relay] blockage reached on {relay.active_profile_id}; measuring "
+                f"{len(self._lane_queue)} queued lane candidate(s) before intervening"
+            )
 
     def _recheck_profiles(self, iteration: int, search_actors: SearchActorPool) -> None:
         """Re-run the startup check of every profile whose API retries ran out, before anything is selected."""
@@ -199,11 +214,11 @@ class RelayRuntimeMixin:
             raise RuntimeError("cannot switch Agent profile while pending KEEP exists")
         if self._working_tree_diff().strip():
             raise RuntimeError("cannot switch Agent profile with a tracked candidate diff")
+        if self._lane_queue:
+            raise RuntimeError("cannot switch Agent profile with queued lane candidates")
         relay = self.run_state.agent_relay
         apply_profile_switch(relay, intervention=intervention, iteration=iteration)
         self.run_state.last_critic = CriticRuling()
-        self._lane_queue = []
-        self._persist_lane_queue()
         self._last_lane_plans = []
         self.state_store.save(self.run_state)
         self.state_store.append_event(

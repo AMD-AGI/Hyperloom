@@ -305,7 +305,10 @@ run, checked against the startup check:
    different model.
 3. Otherwise, run the supervisor below on the active profile.
 
-A switch replaces the complete search actor (orchestration, specialists, Plan
+Every intervention acts on the next plan, so the candidates a `--lanes` round
+already produced are measured first: while the lane queue holds candidates, the
+intervention waits, and a KEEP among them ends the blockage without one. A
+switch replaces the complete search actor (orchestration, specialists, Plan
 Critic and Implementer) at the next clean iteration boundary and forces the next
 round to diversify. With both `claude` and `codex` available, the search
 therefore alternates between them at every blockage until a KEEP.
