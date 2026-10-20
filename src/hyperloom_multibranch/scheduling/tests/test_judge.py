@@ -379,11 +379,25 @@ def test_a_reply_in_the_mb1_format_still_parses(reply: dict[str, object], decisi
     assert parse_decision(_reply(reply)) == decision
 
 
+def test_a_reply_that_only_stops_the_session_is_a_decision() -> None:
+    assert parse_decision(_reply({"stop_session": {"reason": "converged"}})) == JudgeDecision(session_stop="converged")
+
+
+def test_an_open_object_outranks_a_stop_only_object() -> None:
+    reply = _reply({"open": 1, "stop_session": None}) + _reply({"stop_session": {"reason": "converged"}})
+
+    assert parse_decision(reply) == JudgeDecision(open_count=1)
+
+
 @pytest.mark.parametrize(
     "reply",
     [
         "no json at all",
         _reply({"branches": []}),
+        _reply({"stop_session": None}),
+        _reply({"branches": [], "stop_session": None}),
+        _reply({"stop_session": {"reason": ""}}),
+        _reply({"stop_session": "yes"}),
         _reply({"open": "two"}),
         _reply({"open": True}),
         _reply({"open": 1, "branches": [{"branch": "b01", "k": 1.5}]}),

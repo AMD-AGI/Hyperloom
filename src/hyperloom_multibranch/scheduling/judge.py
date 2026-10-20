@@ -361,12 +361,26 @@ def _session_stop(payload: Mapping[str, object]) -> str:
     return _str_field(request, _KEY_REASON)
 
 
+def _stop_only(reply: str) -> JudgeDecision | None:
+    payload = extract_last_json_with_key(reply, _KEY_STOP_SESSION)
+    if payload is None or payload[_KEY_STOP_SESSION] is None:
+        return None
+    try:
+        return JudgeDecision(session_stop=_session_stop(payload))
+    except _MalformedReply:
+        return None
+
+
 def parse_decision(reply: str) -> JudgeDecision | None:
-    """The decision in ``reply``'s last JSON object carrying ``"open"``; ``None`` when there is none or it is malformed."""
+    """The decision in ``reply``'s last JSON object carrying ``"open"``; ``None`` when it is malformed.
+
+    A reply with no such object decides only when its last object carrying ``"stop_session"`` asks to stop the
+    session: that decision opens nothing and gives no order. Any other reply holds no decision.
+    """
 
     payload = extract_last_json_with_key(reply, _KEY_OPEN)
     if payload is None:
-        return None
+        return _stop_only(reply)
     try:
         return JudgeDecision(
             open_count=_int_field(payload, _KEY_OPEN),
