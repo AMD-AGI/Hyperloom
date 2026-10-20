@@ -3829,7 +3829,6 @@ def test_analysis_mode_unknown_framework_stays_default():
     assert tlr.tracelens_analysis_mode("custom") == "default"
 
 
-
 # The wrapper that merely *launches* the kernel — must never be the source.
 
 
