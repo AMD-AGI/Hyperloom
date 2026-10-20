@@ -718,6 +718,21 @@ class _WatchdogStop(NamedTuple):
     error: str | None = None
 
 
+#: The returncodes the two liveness watchdogs reap a measured round with.
+_WATCHDOG_RETURNCODES: frozenset[int] = frozenset({SERVER_DEAD_RETURNCODE, DETOKENIZER_STALL_RETURNCODE})
+
+
+class _ReapedRound(NamedTuple):
+    """A reaped round's slot once the artifacts it leaked have been salvaged into it.
+
+    ``server.log`` is one of those artifacts, so the cause of death is only on disk
+    after the salvage: read it earlier and a dead server reports no reason at all.
+    """
+
+    server_log: Path
+    artifacts: list[Any]
+
+
 class _GridRecipe(NamedTuple):
     """The base Magpie recipe and targets every variant's YAML is derived from."""
 
@@ -1348,11 +1363,35 @@ async def _run_measured_round(run: _GridRun, at: _VariantSlot, rounds: _VariantR
     return _MeasuredRound(proc, started_unix, workspaces_before, round_survivors)
 
 
-def _abort_on_watchdog(run: _GridRun, at: _VariantSlot, round_: _MeasuredRound, stop: _WatchdogStop) -> NoReturn:
+def _salvage_reaped_round(at: _VariantSlot, round_: _MeasuredRound) -> _ReapedRound:
+    """Salvage a reaped round's leaked artifacts into the workspace it produced."""
+    destination = select_run_workspace(at.path, known_before=round_.workspaces_before) or at.path
+    artifacts = harvest_leaked_artifacts(destination, subprocess_started_unix=round_.started_unix)
+    return _ReapedRound(at.path / "server.log", artifacts)
+
+
+def _watchdog_stop(returncode: Any, reaped: _ReapedRound) -> _WatchdogStop:
+    """What the liveness watchdog behind ``returncode`` says killed the round it reaped."""
+    if returncode == SERVER_DEAD_RETURNCODE:
+        return _WatchdogStop(
+            "server_init_dead",
+            "server_init_dead (engine/worker bootstrap failed; parent hung)",
+            server_log_death_excerpt(str(reaped.server_log))
+            or "server engine/worker init failed; parent process hung and was reaped by the liveness watchdog",
+        )
+    return _WatchdogStop(
+        "detokenizer_stall",
+        "detokenizer_stall (server ready but log went silent)",
+        "server reported ready but emitted no log output (hung engine / detokenizer stall); "
+        "reaped by the detokenizer-stall watchdog",
+        "detokenizer_stall: server ready but log went silent",
+    )
+
+
+def _abort_on_watchdog(run: _GridRun, at: _VariantSlot, round_: _MeasuredRound, reaped: _ReapedRound) -> NoReturn:
     """End the variant on a measured round a liveness watchdog reaped."""
     runtime_sec = round(max(0.0, time.time() - round_.started_unix), 2)
-    destination = select_run_workspace(at.path, known_before=round_.workspaces_before) or at.path
-    harvested = harvest_leaked_artifacts(destination, subprocess_started_unix=round_.started_unix)
+    stop = _watchdog_stop(round_.proc.returncode, reaped)
     log.warning(
         "grid_runner: variant %s aborted: %s after %.1fs",
         _variant_tag(run, at),
@@ -1364,8 +1403,8 @@ def _abort_on_watchdog(run: _GridRun, at: _VariantSlot, round_: _MeasuredRound, 
         _VariantFailure(stop.error_class, stop.recorded, stop.error),
         returncode=round_.proc.returncode,
         runtime_sec=runtime_sec,
-        server_log_path=_existing_log_path(at.path / "server.log"),
-        nonfatal_warnings=[f"harvested_leaked_artifact:{src}" for src, _ in harvested],
+        server_log_path=_existing_log_path(reaped.server_log),
+        nonfatal_warnings=[f"harvested_leaked_artifact:{src}" for src, _ in reaped.artifacts],
     )
 
 
@@ -1385,31 +1424,8 @@ def _refuse_reaped_round(run: _GridRun, at: _VariantSlot, round_: _MeasuredRound
             returncode=returncode,
             runtime_sec=round(max(0.0, time.time() - round_.started_unix), 2),
         )
-    if returncode == SERVER_DEAD_RETURNCODE:
-        _abort_on_watchdog(
-            run,
-            at,
-            round_,
-            _WatchdogStop(
-                "server_init_dead",
-                "server_init_dead (engine/worker bootstrap failed; parent hung)",
-                server_log_death_excerpt(str(at.path / "server.log"))
-                or "server engine/worker init failed; parent process hung and was reaped by the liveness watchdog",
-            ),
-        )
-    if returncode == DETOKENIZER_STALL_RETURNCODE:
-        _abort_on_watchdog(
-            run,
-            at,
-            round_,
-            _WatchdogStop(
-                "detokenizer_stall",
-                "detokenizer_stall (server ready but log went silent)",
-                "server reported ready but emitted no log output (hung engine / detokenizer stall); "
-                "reaped by the detokenizer-stall watchdog",
-                "detokenizer_stall: server ready but log went silent",
-            ),
-        )
+    if returncode in _WATCHDOG_RETURNCODES:
+        _abort_on_watchdog(run, at, round_, _salvage_reaped_round(at, round_))
     stopped = stopped_by_the_run(returncode)
     if stopped is not None:
         attempt = _RoundAttempt(at, returncode, round_.started_unix, at.path / "server.log", round_.server_survivors)
