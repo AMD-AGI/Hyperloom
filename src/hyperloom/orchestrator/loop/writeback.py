@@ -3103,13 +3103,13 @@ class WritebackCollaborator(GeakRevalidation, GeakHarnessReplay, LaunchIdentity)
         outcome: _PromoteOutcome,
     ) -> None:
         """Promote only after recovery is confirmed; clear only its completed marker."""
-        changed = self._record_authored_levers(result)
         stack_len_before = len(self.shared_state.optimization_stack or [])
         status = str(result.get("status") or "")
         measurement = result.get("bench_result") or result
         new_tput = measurement.get("output_throughput", result.get("output_throughput"))
         kept_flag = status == "kept" and isinstance(new_tput, (int, float)) and float(new_tput) > 0
         completed_pending = self._confirmed_integrate_completion(result, task, kept_flag=kept_flag)
+        changed = self._record_authored_levers(result)
         task_params = (getattr(task, "params", None) or {}) if task is not None else {}
         enablement_landing = bool(
             result.get("enablement") or task_params.get("enablement") or task_params.get("enablement_landing")
