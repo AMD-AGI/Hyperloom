@@ -123,11 +123,9 @@ class AnalysisEvidenceMixin:
         workspace = Path(self.ic.workspace_dir).resolve()
         canonical_commit = self._canonical_commit()
         cumulative_diff = self._analysis_cumulative_diff(
-            evidence_commit=self.run_state.analysis.evidence_commit,
-            canonical_commit=canonical_commit,
+            evidence_commit=self.run_state.analysis.evidence_commit, canonical_commit=canonical_commit
         )
         source_map_path = Path(self.ic.kernel_file).resolve()
-
         scored_case_ids = [
             case_id for case_id in sorted(self._baseline_case_times) if case_id not in self._unscored_cases
         ]
@@ -149,24 +147,20 @@ class AnalysisEvidenceMixin:
 
                 backend = self.ic.kernel_backend.strip() or self.ic.backend
                 root = Path(local_knowledge_root)
-                language = resolve_language_dirs(backend, root)
                 include_aiter = backend == "aiter" or any(
                     "aiter" in Path(source).parts for source in self._target_source_files()
                 )
+                # Ablation must reach this inlined context or it only measures half the knowledge cost.
                 knowledge_index = build_forge_knowledge(
                     root,
-                    language=language,
+                    language=resolve_language_dirs(backend, root),
                     include_aiter=include_aiter,
-                    # The orchestration context is inlined into every specialist
-                    # and analysis prompt, so the ablation has to reach it too or
-                    # it only measures half the knowledge block's cost.
                     defer_all=bool(getattr(self.config, "defer_knowledge_maps", False)),
                 )
             except OSError:
                 log.debug("failed to build orchestration knowledge index", exc_info=True)
 
-        return self._with_evidence_standing(
-            OrchestrationContext(
+        context = OrchestrationContext(
                 analysis_commit=canonical_commit,
                 workspace=str(workspace),
                 gpu_target=self.config.gpu_target,
@@ -176,8 +170,6 @@ class AnalysisEvidenceMixin:
                 ),
                 program_context=(self.ic.program_md or f"Optimize the kernel at {self.ic.kernel_file}."),
                 source_map_path=str(source_map_path),
-                # The declared source set, verbatim and in campaign order, so the planner is told what it may edit
-                # instead of inferring it from the one path in program_context.
                 editable_sources=tuple(self._target_source_files()),
                 cases=cases,
                 knowledge_index=knowledge_index,
@@ -189,7 +181,20 @@ class AnalysisEvidenceMixin:
                 search_objective=self.run_state.search_objective,
                 search_mode_residence_remaining=(self.run_state.search_mode_residence_remaining),
                 evidence_refs=evidence_refs,
-            )
+        )
+        state = self.run_state.analysis
+        commit = context.analysis_commit
+        standing = self._analysis_cumulative_diff(evidence_commit=state.evidence_commit, canonical_commit=commit)
+        return replace(
+            context,
+            canonical_commit=commit,
+            evidence_commit=state.evidence_commit,
+            evidence_stale=bool(state.evidence_commit and state.evidence_commit != commit),
+            evidence_status=state.evidence_status,
+            evidence_mean_case_speedup=state.evidence_mean_case_speedup,
+            current_mean_case_speedup=self.best_mean_case_speedup,
+            cumulative_diff_path=standing.path,
+            cumulative_diff_error=standing.error,
         )
 
     def _orchestration_evidence_refs(
@@ -249,23 +254,6 @@ class AnalysisEvidenceMixin:
                     )
                 )
         return tuple(refs)
-
-    def _with_evidence_standing(self, context):
-        """``context`` with where its Analysis evidence stands against its commit: freshness, scores and diff."""
-        state = self.run_state.analysis
-        commit = context.analysis_commit
-        cumulative_diff = self._analysis_cumulative_diff(evidence_commit=state.evidence_commit, canonical_commit=commit)
-        return replace(
-            context,
-            canonical_commit=commit,
-            evidence_commit=state.evidence_commit,
-            evidence_stale=bool(state.evidence_commit and state.evidence_commit != commit),
-            evidence_status=state.evidence_status,
-            evidence_mean_case_speedup=state.evidence_mean_case_speedup,
-            current_mean_case_speedup=self.best_mean_case_speedup,
-            cumulative_diff_path=cumulative_diff.path,
-            cumulative_diff_error=cumulative_diff.error,
-        )
 
     @staticmethod
     def _looks_like_git_commit(value: str) -> bool:

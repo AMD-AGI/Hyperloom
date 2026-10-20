@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 
 from kernelforge.loop.analysis_evidence import AnalysisEvidenceMixin
 from kernelforge.loop.analysis_refresh_policy import (
@@ -86,12 +87,12 @@ class AnalysisRuntimeMixin(AnalysisEvidenceMixin):
         upgrade_exhausted = bool(getattr(outcome, "upgrade_exhausted", False))
         if not getattr(analysis_service, "profiling_enabled", True):
             evidence_status, attempt_status = available_tier or "static", "success"
-        elif manifest_status == "PARTIAL" and not upgrade_exhausted:
-            evidence_status, attempt_status = "partial", "partial"
-        elif manifest_status == "PARTIAL":
-            evidence_status, attempt_status = "partial_exhausted", "success"
-        else:
+        elif manifest_status != "PARTIAL":
             evidence_status, attempt_status = available_tier or "ready", "success"
+        else:
+            evidence_status, attempt_status = (
+                ("partial_exhausted", "success") if upgrade_exhausted else ("partial", "partial")
+            )
         analysis_state = self.run_state.analysis
         if published:
             self._last_published_analysis_commit = context.analysis_commit
@@ -106,8 +107,7 @@ class AnalysisRuntimeMixin(AnalysisEvidenceMixin):
             "refresh_reasons": list(decision.reasons),
             "mean_case_speedup_at_collection": (self.best_mean_case_speedup or 1.0),
         }
-        if outcome is not None:
-            event_payload.update(outcome.to_dict())
+        event_payload.update(outcome.to_dict() if outcome is not None else {})
         self._record_analysis_result(planning_iteration, **event_payload)
         print(f"  [analysis] ready: {self._analysis_bundle.root}")
 
@@ -232,5 +232,18 @@ class AnalysisRuntimeMixin(AnalysisEvidenceMixin):
         else:
             context = stale_context
             context = analysis_service.apply_checkpoint(context)
-        self._active_analysis_context = self._with_evidence_standing(context)
+        state = self.run_state.analysis
+        commit = context.analysis_commit
+        standing = self._analysis_cumulative_diff(evidence_commit=state.evidence_commit, canonical_commit=commit)
+        self._active_analysis_context = replace(
+            context,
+            canonical_commit=commit,
+            evidence_commit=state.evidence_commit,
+            evidence_stale=bool(state.evidence_commit and state.evidence_commit != commit),
+            evidence_status=state.evidence_status,
+            evidence_mean_case_speedup=state.evidence_mean_case_speedup,
+            current_mean_case_speedup=self.best_mean_case_speedup,
+            cumulative_diff_path=standing.path,
+            cumulative_diff_error=standing.error,
+        )
         return self._active_analysis_context

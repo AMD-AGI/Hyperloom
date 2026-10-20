@@ -556,6 +556,297 @@ class PreparationBudget:
     deadline_unix: float = 0.0
 
 
+_EXTERNAL_DRIVER_PREFIX = (
+    "## Transactional external driver staging\n"
+    "The driver and every helper it imports MUST be written under the "
+    "isolated staging directory "
+    "`{driver_access_dir}`. The kernel workspace is source evidence only; "
+    "changes are published to the caller's artifact directory only after "
+    "deterministic validation succeeds. Existing task metadata and invocation "
+    "specifications are read-only.\n\n"
+)
+
+
+class _PrepareDrive:
+    """Owns one preparation attempt loop: scaffold, audit, deadlines and retry state."""
+
+    def _stage(self, task: PreparationTask, budget: PreparationBudget) -> None:
+        """Resolve paths and stage an external driver; set staging_failure on error."""
+        deadline_unix = budget.deadline_unix
+        self.deadline_sec = _preparation_wall(budget.wall_sec, deadline_unix)
+        workspace = Path(task.workspace_dir).resolve()
+        driver_input_path = Path(os.path.abspath(os.path.expanduser(str(_abs(workspace, task.driver)))))
+        driver_path = driver_input_path.resolve(strict=False)
+        driver_external = not _driver_is_inside(workspace, driver_input_path, driver_path)
+        audit_dirs = _preparation_audit_dir(self.config)
+        audit_dir = audit_dirs.audit_dir
+        audit_dir_str = str(audit_dir) if audit_dir is not None else ""
+        external_transaction: ExternalArtifactTransaction | None = None
+        agent_workspace = workspace
+        if driver_external:
+            external_transaction, stage_error = _stage_external_driver(
+                workspace,
+                driver_input_path=driver_input_path,
+                driver_path=driver_path,
+                audit_dirs=audit_dirs,
+                read_only_paths=[
+                    Path(path) for path in [*(task.read_only_files or []), task.invocation_spec_file] if path
+                ],
+            )
+            if external_transaction is None:
+                self.staging_failure = PrepareResult(
+                    ok=False, attempts=0, rolled_back=True, message=stage_error, audit_dir=audit_dir_str
+                )
+                return
+            driver_path = external_transaction.staged_driver_path
+            agent_workspace = external_transaction.stage_root
+        self._workspace = workspace
+        self._driver_path = driver_path
+        self._agent_workspace = agent_workspace
+        self._driver_external = driver_external
+        self._external_transaction = external_transaction
+        self._audit_dir = audit_dir
+        self._audit_dir_str = audit_dir_str
+        self._deadline_unix = deadline_unix
+
+    def _bind(self, task: PreparationTask, preflight: PreflightResult | None) -> None:
+        """Protect sources, place harnesses and open the preparation scaffold."""
+        workspace, driver_path = self._workspace, self._driver_path
+        agent_workspace, driver_external = self._agent_workspace, self._driver_external
+        nproc_per_node = task.nproc_per_node
+        driver_access_dir = driver_path.parent.resolve()
+        harness_path = driver_access_dir / "graph_harness.py"
+        dist_harness_path = driver_access_dir / "dist_harness.py"
+        self.audit = _PrepareAudit(self._audit_dir, driver_path)
+        if preflight is not None:
+            self.audit.json("initial_preflight.json", asdict(preflight))
+        protected = {_abs(workspace, path) for path in (task.kernel, *task.source_files) if path}
+        guard = _SourceGuard(workspace, protected)
+        self.driver_rel = os.path.relpath(driver_path, agent_workspace)
+        self.evidence = _build_evidence(task, workspace=workspace, driver=str(driver_path), preflight=preflight)
+        self.ref_dir = _materialize_reference(workspace)
+        reference_prefix = (_EXTERNAL_DRIVER_PREFIX.format(driver_access_dir=driver_access_dir) if driver_external else "")
+        spec_path, canonical_spec = _materialize_invocation_spec(task.invocation_spec_file, driver_path.parent)
+        if task.invocation_spec_file and spec_path is None:
+            log.warning(
+                "could not materialize the invocation specification %s beside the "
+                "driver; preparation continues without its case table, without a "
+                "durable runtime input for the driver, and without the check that the "
+                "spec is committed with it",
+                task.invocation_spec_file,
+            )
+        self.invocation_note = _invocation_spec_note(spec_path, agent_workspace)
+        self.nproc_per_node = nproc_per_node
+        self.contract = DriverContract(
+            snr_threshold=task.snr_threshold,
+            require_graph=True,
+            require_profile=True,
+            require_ranks=nproc_per_node,
+            expected_case_ids=list(task.expected_case_ids or []),
+        )
+        self.backend_protected_files = [
+            *(path.as_posix() for path in protected),
+            *(task.read_only_files or []),
+            *([spec_path.as_posix()] if spec_path is not None else []),
+            *([dist_harness_path.as_posix()] if nproc_per_node > 1 else []),
+        ]
+        canonical_harness, reference_prefix = _place_graph_harness(
+            harness_path, ref_dir=self.ref_dir, driver_external=driver_external, reference_prefix=reference_prefix
+        )
+        self.provided_harness = canonical_harness is not None
+        canonical_dist_harness = _place_dist_harness(dist_harness_path, nproc_per_node)
+        reference_note = reference_prefix + _reference_note(self.ref_dir, agent_workspace)
+        self.layout = _PreparationLayout(
+            workspace=workspace,
+            agent_workspace=agent_workspace,
+            guard=guard,
+            driver_external=driver_external,
+            external_transaction=self._external_transaction,
+            driver_path=driver_path,
+            harness_path=harness_path,
+            dist_harness_path=dist_harness_path,
+            spec_path=spec_path,
+            audit_dir_str=self._audit_dir_str,
+        )
+        self.scaffold = _PrepareScaffold(
+            self.layout,
+            reference=_ReferenceBundle(self.ref_dir, reference_prefix, reference_note),
+            canonical=_CanonicalFiles(
+                harness=canonical_harness if self.provided_harness else None,
+                dist_harness=canonical_dist_harness,
+                spec=canonical_spec,
+            ),
+        )
+        self.preflight_deadline_unix = _preflight_deadline(self.deadline_sec, self._deadline_unix)
+        self.last_pf = preflight
+
+    async def run(self) -> PrepareResult:
+        """Author until the driver conforms, then roll back on failure."""
+        self._loop_start = time.monotonic()
+        layout = self.layout
+        try:
+            while self.attempts < PREPARE_MAX_ATTEMPTS and not self.stop:
+                budget = _attempt_budget(self.attempts, deadline_sec=self.deadline_sec, start=self._loop_start)
+                if not budget.may_start:
+                    self.starved_retry_sec = budget.starved_retry_sec
+                    break
+                finished = await self._one_attempt(budget.timeout_sec)
+                if finished is not None:
+                    return finished
+        except ScaffoldRetirementError as exc:
+            self.scaffold_error = str(exc)
+        finally:
+            _safe_rmtree(self.ref_dir)
+            self.external_rollback_error = _close_external_transaction(
+                layout.external_transaction, layout.guard
+            )
+        layout.guard.rollback()
+        return PrepareResult(
+            ok=False,
+            attempts=self.attempts,
+            wrote_files=[],
+            created_files=[],
+            rolled_back=not self.external_rollback_error and not layout.guard.unrestored,
+            final_preflight=self.last_pf,
+            message=_prepare_failure_message(
+                layout.guard,
+                _PrepareFailure(
+                    scaffold_error=self.scaffold_error,
+                    attempts=self.attempts,
+                    starved_retry_sec=self.starved_retry_sec,
+                    edited_any_attempt=self.edited_any_attempt,
+                    external_rollback_error=self.external_rollback_error,
+                ),
+            ),
+            audit_dir=layout.audit_dir_str,
+        )
+
+    async def _one_attempt(self, attempt_timeout: float) -> PrepareResult | None:
+        """Author one driver revision and preflight it."""
+        self.attempts += 1
+        layout = self.layout
+        self.scaffold.open()
+        prompt = _build_prompt(
+            PromptBrief(
+                self.evidence,
+                self.driver_rel,
+                self.invocation_note,
+                _distributed_contract_note(self.nproc_per_node),
+            ),
+            self.scaffold.reference_note,
+            RetryNote(self.prior_failure, self.prior_failure_heading),
+        )
+        self._attempt_dir = f"attempt_{self.attempts:02d}"
+        self.audit.text(f"{self._attempt_dir}/prompt.md", prompt)
+        self.audit.text(f"{self._attempt_dir}/system_prompt.md", _SYSTEM_PROMPT)
+        self.audit.driver(f"{self._attempt_dir}/driver_before.py")
+        self._digest_before = self.audit.driver_digest()
+        self._progress_log = []
+        self._agent_started = time.monotonic()
+        self._attempt_timeout = attempt_timeout
+        try:
+            agent_output = await _run_prepare_agent(
+                config=self.config,
+                turn=_AuthoringTurn(
+                    workspace=layout.agent_workspace,
+                    prompt=prompt,
+                    timeout_sec=attempt_timeout,
+                    target_files=[layout.driver_path.as_posix(), layout.harness_path.as_posix()],
+                    protected_files=self.backend_protected_files,
+                    additional_dirs=([str(layout.workspace)] if layout.driver_external else None),
+                    allow_shell=not layout.driver_external,
+                ),
+                usage=self.usage,
+                progress_log=self._progress_log,
+            )
+        except asyncio.TimeoutError:
+            return await self._after_timeout()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("task preparation agent attempt %d failed: %s", self.attempts, exc)
+            self.audit.driver(f"{self._attempt_dir}/driver_at_exception.py")
+            driver_edited = self.audit.driver_edited(self._digest_before)
+            self.edited_any_attempt = self.edited_any_attempt or driver_edited
+            self.audit.json(f"{self._attempt_dir}/agent_event.json", {"status": "error", "exception_type": type(exc).__name__, "exception": str(exc), "elapsed_s": round(time.monotonic() - self._agent_started, 3), "budget_s": round(self._attempt_timeout, 3), "driver_edited": driver_edited})
+            self.audit.text(f"{self._attempt_dir}/agent_progress.txt", "\n".join(self._progress_log))
+            self.prior_failure = f"Agent invocation error: {type(exc).__name__}: {exc}"
+            self.prior_failure_heading = RETRY_HEADING_DEFAULT
+            self.scaffold.reset()
+            return None
+        self.audit.text(f"{self._attempt_dir}/agent_output.txt", str(agent_output or ""))
+        self.audit.text(f"{self._attempt_dir}/agent_progress.txt", "\n".join(self._progress_log))
+        self.audit.driver(f"{self._attempt_dir}/driver_after.py")
+        driver_edited = self.audit.driver_edited(self._digest_before)
+        self.edited_any_attempt = self.edited_any_attempt or driver_edited
+        self.audit.json(
+            f"{self._attempt_dir}/agent_event.json",
+            {
+                "status": "completed",
+                "elapsed_s": round(time.monotonic() - self._agent_started, 3),
+                "budget_s": round(attempt_timeout, 3),
+                "driver_edited": driver_edited,
+            },
+        )
+        self.scaffold.reset()
+        self.last_pf = await _preflight_async(
+            layout.driver_path.as_posix(), self.contract, PREFLIGHT_WARMUP, PREFLIGHT_ITERS,
+            deadline_unix=self.preflight_deadline_unix,
+        )
+        self.audit.driver(f"{self._attempt_dir}/driver_at_preflight.py")
+        self.audit.json(f"{self._attempt_dir}/preflight.json", asdict(self.last_pf))
+        if self.last_pf.ok:
+            return _finish_prepared_task(self.last_pf, self.attempts, layout, provided_harness=self.provided_harness)
+        self.prior_failure_heading = RETRY_HEADING_DEFAULT if driver_edited else RETRY_HEADING_NO_EDIT
+        self.prior_failure = _preflight_retry_prompt(self.last_pf, driver_rel=self.driver_rel, driver_edited=driver_edited)
+        return None
+
+    async def _after_timeout(self) -> PrepareResult | None:
+        """Salvage-preflight after an authoring timeout and decide whether to retry."""
+        audit, layout, attempt_dir = self.audit, self.layout, self._attempt_dir
+        audit.driver(f"{attempt_dir}/driver_at_timeout.py")
+        elapsed_s = round(time.monotonic() - self._agent_started, 3)
+        driver_edited = audit.driver_edited(self._digest_before)
+        self.edited_any_attempt = self.edited_any_attempt or driver_edited
+        audit.json(
+            f"{attempt_dir}/agent_event.json",
+            {
+                "status": "timeout",
+                "elapsed_s": elapsed_s,
+                "budget_s": round(self._attempt_timeout, 3),
+                "driver_edited": driver_edited,
+            },
+        )
+        audit.text(f"{attempt_dir}/agent_progress.txt", "\n".join(self._progress_log))
+        self.scaffold.reset()
+        self.last_pf = await _preflight_async(
+            layout.driver_path.as_posix(),
+            self.contract,
+            PREFLIGHT_WARMUP,
+            PREFLIGHT_ITERS,
+            deadline_unix=self.preflight_deadline_unix,
+        )
+        audit.driver(f"{attempt_dir}/driver_after_timeout_preflight.py")
+        audit.json(f"{attempt_dir}/preflight.json", asdict(self.last_pf))
+        if self.last_pf.ok:
+            return _finish_prepared_task(
+                self.last_pf, self.attempts, layout, provided_harness=self.provided_harness
+            )
+        self.prior_failure_heading = RETRY_HEADING_DEFAULT if driver_edited else RETRY_HEADING_NO_EDIT
+        self.prior_failure = _timeout_retry_prompt(
+            self.last_pf,
+            driver_rel=self.driver_rel,
+            driver_edited=driver_edited,
+            elapsed_s=elapsed_s,
+            progress_log=self._progress_log,
+        )
+        retry, starved = _retry_after_timeout(
+            self.attempts, deadline_sec=self.deadline_sec, start=self._loop_start
+        )
+        if not retry:
+            self.starved_retry_sec = starved
+            self.stop = True
+        return None
+
+
 async def prepare_task(
     *,
     config: Config,
@@ -565,338 +856,29 @@ async def prepare_task(
     usage=None,
 ) -> PrepareResult:
     """Author/repair the driver so the task conforms; roll back on failure."""
-
-    kernel, driver, source_files = task.kernel, task.driver, task.source_files
-    invocation_spec_file, nproc_per_node = task.invocation_spec_file, task.nproc_per_node
-    deadline_unix = budget.deadline_unix
-    deadline_sec = _preparation_wall(budget.wall_sec, deadline_unix)
-    workspace = Path(task.workspace_dir).resolve()
-    driver_input_path = Path(os.path.abspath(os.path.expanduser(str(_abs(workspace, driver)))))
-    driver_path = driver_input_path.resolve(strict=False)
-    driver_external = not _driver_is_inside(workspace, driver_input_path, driver_path)
-
-    audit_dirs = _preparation_audit_dir(config)
-    audit_dir = audit_dirs.audit_dir
-    audit_dir_str = str(audit_dir) if audit_dir is not None else ""
-
-    external_transaction: ExternalArtifactTransaction | None = None
-    agent_workspace = workspace
-    if driver_external:
-        external_transaction, stage_error = _stage_external_driver(
-            workspace,
-            driver_input_path=driver_input_path,
-            driver_path=driver_path,
-            audit_dirs=audit_dirs,
-            read_only_paths=[Path(path) for path in [*(task.read_only_files or []), invocation_spec_file] if path],
-        )
-        if external_transaction is None:
-            return PrepareResult(
-                ok=False,
-                attempts=0,
-                rolled_back=True,
-                message=stage_error,
-                audit_dir=audit_dir_str,
-            )
-        driver_path = external_transaction.staged_driver_path
-        agent_workspace = external_transaction.stage_root
-
-    driver_access_dir = driver_path.parent.resolve()
-    # Beside the driver in both cases, which is where the prompt says it is and
-    # where the driver imports it from. Identical to the workspace root for a
-    # driver that sits there; different only for one kept in a subdirectory,
-    # where placing it at the root left the agent to find nothing and write its
-    # own -- tripping the guard that protects harness files from being rewritten.
-    harness_path = driver_access_dir / "graph_harness.py"
-    # Unlike graph_harness, this one is not optional and is not retired when the
-    # driver appears not to use it: a multi-rank driver that does not import it
-    # is rejected by preflight, so its absence could only turn that verdict into
-    # an ImportError.
-    dist_harness_path = driver_access_dir / "dist_harness.py"
-
-    audit = _PrepareAudit(audit_dir, driver_path)
-
-    if preflight is not None:
-        audit.json("initial_preflight.json", asdict(preflight))
-
-    # (1) Protect ONLY the source under optimization: kernel + declared source files.
-    protected = {_abs(workspace, kernel)}
-    for s in source_files:
-        if s:
-            protected.add(_abs(workspace, s))
-    guard = _SourceGuard(workspace, protected)
-
-    driver_rel = os.path.relpath(driver_path, agent_workspace)
-    evidence = _build_evidence(task, workspace=workspace, driver=str(driver_path), preflight=preflight)
-
-    # Give the agent REAL reference files to Read (copied into the workspace so they are inside its cwd).
-    ref_dir = _materialize_reference(workspace)
-    # Kept apart from the bundle's own file list so an attempt whose re-materialization failed can drop that list and
-    # keep these (see ``_open_scaffold``).
-    reference_prefix = ""
-    if driver_external:
-        reference_prefix = (
-            "## Transactional external driver staging\n"
-            f"The driver and every helper it imports MUST be written under the "
-            f"isolated staging directory "
-            f"`{driver_access_dir}`. The kernel workspace is source evidence only; "
-            "changes are published to the caller's artifact directory only after "
-            "deterministic validation succeeds. Existing task metadata and invocation "
-            "specifications are read-only.\n\n"
-        )
-    # The spec lives beside the driver, NOT in the reference bundle: the driver may read it at runtime, so it has to
-    # outlive preparation and be committed alongside the driver it feeds.
-    spec_path, canonical_spec = _materialize_invocation_spec(
-        invocation_spec_file,
-        driver_path.parent,
-    )
-    if invocation_spec_file and spec_path is None:
-        # Not a default: an explicitly supplied spec that cannot be used costs the prompt's case table, the driver's
-        # durable runtime input and the committed-alongside check all at once, and the caller asked for it.
-        log.warning(
-            "could not materialize the invocation specification %s beside the "
-            "driver; preparation continues without its case table, without a "
-            "durable runtime input for the driver, and without the check that the "
-            "spec is committed with it",
-            invocation_spec_file,
-        )
-    invocation_note = _invocation_spec_note(spec_path, agent_workspace)
-    contract = DriverContract(
-        snr_threshold=task.snr_threshold,
-        # A produced driver must actually time under a CUDA/HIP graph, not eagerly (nor silently fall back to eager).
-        require_graph=True,
-        require_profile=True,
-        require_ranks=nproc_per_node,
-        expected_case_ids=list(task.expected_case_ids or []),
-    )
-    backend_protected_files = [
-        *(path.as_posix() for path in protected),
-        *(task.read_only_files or []),
-        *([spec_path.as_posix()] if spec_path is not None else []),
-        # Protected rather than merely discouraged: the distributed guarantees
-        # are only guarantees while this file is the one KernelForge shipped.
-        *([dist_harness_path.as_posix()] if nproc_per_node > 1 else []),
-    ]
-
-    canonical_harness, reference_prefix = _place_graph_harness(
-        harness_path,
-        ref_dir=ref_dir,
-        driver_external=driver_external,
-        reference_prefix=reference_prefix,
-    )
-    provided_harness = canonical_harness is not None
-    canonical_dist_harness = _place_dist_harness(dist_harness_path, nproc_per_node)
-    reference_note = reference_prefix + _reference_note(ref_dir, agent_workspace)
-
-    layout = _PreparationLayout(
-        workspace=workspace,
-        agent_workspace=agent_workspace,
-        guard=guard,
-        driver_external=driver_external,
-        external_transaction=external_transaction,
-        driver_path=driver_path,
-        harness_path=harness_path,
-        dist_harness_path=dist_harness_path,
-        spec_path=spec_path,
-        audit_dir_str=audit_dir_str,
-    )
-    scaffold = _PrepareScaffold(
-        layout,
-        reference=_ReferenceBundle(ref_dir, reference_prefix, reference_note),
-        canonical=_CanonicalFiles(
-            harness=canonical_harness if provided_harness else None,
-            dist_harness=canonical_dist_harness,
-            spec=canonical_spec,
-        ),
-    )
-
-    start = time.monotonic()
-    preflight_deadline_unix = _preflight_deadline(deadline_sec, deadline_unix)
-    attempts = 0
-    prior_failure = ""
-    prior_failure_heading = RETRY_HEADING_DEFAULT
-    last_pf = preflight
-    external_rollback_error = ""
-    # An attempt that leaves the driver byte-identical is a distinct failure from one that edited it badly, and the
-    # two need different guidance.
-    edited_any_attempt = False
-    starved_retry_sec = 0.0
-    scaffold_error = ""
-    try:
-        while attempts < PREPARE_MAX_ATTEMPTS:
-            budget = _attempt_budget(attempts, deadline_sec=deadline_sec, start=start)
-            if not budget.may_start:
-                starved_retry_sec = budget.starved_retry_sec
-                break
-            attempt_timeout = budget.timeout_sec
-            attempts += 1
-            # Each attempt authors against the reference bundle; the preceding attempt's verdict retired it (see
-            # ``_PrepareScaffold.reset``).
-            scaffold.open()
-            prompt = _build_prompt(
-                PromptBrief(evidence, driver_rel, invocation_note, _distributed_contract_note(nproc_per_node)),
-                scaffold.reference_note,
-                RetryNote(prior_failure, prior_failure_heading),
-            )
-            attempt_dir = f"attempt_{attempts:02d}"
-            audit.text(f"{attempt_dir}/prompt.md", prompt)
-            audit.text(f"{attempt_dir}/system_prompt.md", _SYSTEM_PROMPT)
-            audit.driver(f"{attempt_dir}/driver_before.py")
-            digest_before = audit.driver_digest()
-            progress_log: list[str] = []
-            agent_started = time.monotonic()
-
-            try:
-                agent_output = await _run_prepare_agent(
-                    config=config,
-                    turn=_AuthoringTurn(
-                        workspace=agent_workspace,
-                        prompt=prompt,
-                        timeout_sec=attempt_timeout,
-                        target_files=[
-                            driver_path.as_posix(),
-                            harness_path.as_posix(),
-                        ],
-                        protected_files=backend_protected_files,
-                        additional_dirs=([str(workspace)] if driver_external else None),
-                        allow_shell=not driver_external,
-                    ),
-                    usage=usage,
-                    progress_log=progress_log,
-                )
-            except asyncio.TimeoutError:
-                audit.driver(f"{attempt_dir}/driver_at_timeout.py")
-                elapsed_s = round(time.monotonic() - agent_started, 3)
-                driver_edited = audit.driver_edited(digest_before)
-                edited_any_attempt = edited_any_attempt or driver_edited
-                audit.json(
-                    f"{attempt_dir}/agent_event.json",
-                    {
-                        "status": "timeout",
-                        "elapsed_s": elapsed_s,
-                        "budget_s": round(attempt_timeout, 3),
-                        "driver_edited": driver_edited,
-                    },
-                )
-                audit.text(
-                    f"{attempt_dir}/agent_progress.txt",
-                    "\n".join(progress_log),
-                )
-                scaffold.reset()
-                # The Agent may have completed a valid driver before getting stuck on self-verification.
-                last_pf = await _preflight_async(
-                    driver_path.as_posix(),
-                    contract,
-                    PREFLIGHT_WARMUP,
-                    PREFLIGHT_ITERS,
-                    deadline_unix=preflight_deadline_unix,
-                )
-                audit.driver(f"{attempt_dir}/driver_after_timeout_preflight.py")
-                audit.json(f"{attempt_dir}/preflight.json", asdict(last_pf))
-                if last_pf.ok:
-                    return _finish_prepared_task(last_pf, attempts, layout, provided_harness=provided_harness)
-                prior_failure_heading = RETRY_HEADING_DEFAULT if driver_edited else RETRY_HEADING_NO_EDIT
-                prior_failure = _timeout_retry_prompt(
-                    last_pf,
-                    driver_rel=driver_rel,
-                    driver_edited=driver_edited,
-                    elapsed_s=elapsed_s,
-                    progress_log=progress_log,
-                )
-                retry, starved = _retry_after_timeout(attempts, deadline_sec=deadline_sec, start=start)
-                if retry:
-                    continue
-                starved_retry_sec = starved
-                break
-            except Exception as exc:  # noqa: BLE001
-                log.warning("task preparation agent attempt %d failed: %s", attempts, exc)
-                audit.driver(f"{attempt_dir}/driver_at_exception.py")
-                driver_edited = audit.driver_edited(digest_before)
-                edited_any_attempt = edited_any_attempt or driver_edited
-                audit.json(
-                    f"{attempt_dir}/agent_event.json",
-                    {
-                        "status": "error",
-                        "exception_type": type(exc).__name__,
-                        "exception": str(exc),
-                        "elapsed_s": round(time.monotonic() - agent_started, 3),
-                        "budget_s": round(attempt_timeout, 3),
-                        "driver_edited": driver_edited,
-                    },
-                )
-                audit.text(
-                    f"{attempt_dir}/agent_progress.txt",
-                    "\n".join(progress_log),
-                )
-                prior_failure = f"Agent invocation error: {type(exc).__name__}: {exc}"
-                prior_failure_heading = RETRY_HEADING_DEFAULT
-                scaffold.reset()
-                continue
-            else:
-                audit.text(f"{attempt_dir}/agent_output.txt", str(agent_output or ""))
-                audit.text(
-                    f"{attempt_dir}/agent_progress.txt",
-                    "\n".join(progress_log),
-                )
-                audit.driver(f"{attempt_dir}/driver_after.py")
-                driver_edited = audit.driver_edited(digest_before)
-                edited_any_attempt = edited_any_attempt or driver_edited
-                audit.json(
-                    f"{attempt_dir}/agent_event.json",
-                    {
-                        "status": "completed",
-                        "elapsed_s": round(time.monotonic() - agent_started, 3),
-                        "budget_s": round(attempt_timeout, 3),
-                        "driver_edited": driver_edited,
-                    },
-                )
-
-            # (1) Source protection: whatever the agent did, restore source (and the provided harness) to pristine
-            # before we judge the driver.
-            scaffold.reset()
-
-            last_pf = await _preflight_async(
-                driver_path.as_posix(),
-                contract,
-                PREFLIGHT_WARMUP,
-                PREFLIGHT_ITERS,
-                deadline_unix=preflight_deadline_unix,
-            )
-            audit.driver(f"{attempt_dir}/driver_at_preflight.py")
-            audit.json(f"{attempt_dir}/preflight.json", asdict(last_pf))
-            if last_pf.ok:
-                return _finish_prepared_task(last_pf, attempts, layout, provided_harness=provided_harness)
-            prior_failure_heading = RETRY_HEADING_DEFAULT if driver_edited else RETRY_HEADING_NO_EDIT
-            prior_failure = _preflight_retry_prompt(last_pf, driver_rel=driver_rel, driver_edited=driver_edited)
-    except ScaffoldRetirementError as exc:
-        scaffold_error = str(exc)
-    finally:
-        # Never leave reference or external staging bundles behind.
-        _safe_rmtree(ref_dir)
-        if external_transaction is not None:
-            external_rollback_error = _close_external_transaction(external_transaction, guard)
-
-    # (3) Failure: roll the workspace back to its exact pre-prep state (tracked files reset to HEAD, caller's
-    # uncommitted mods re-applied, prep-created untracked removed, protected source restored).
-    guard.rollback()
-    return PrepareResult(
-        ok=False,
-        attempts=attempts,
-        wrote_files=[],
-        created_files=[],
-        rolled_back=not external_rollback_error and not guard.unrestored,
-        final_preflight=last_pf,
-        message=_prepare_failure_message(
-            guard,
-            _PrepareFailure(
-                scaffold_error=scaffold_error,
-                attempts=attempts,
-                starved_retry_sec=starved_retry_sec,
-                edited_any_attempt=edited_any_attempt,
-                external_rollback_error=external_rollback_error,
-            ),
-        ),
-        audit_dir=audit_dir_str,
-    )
+    self = object.__new__(_PrepareDrive)
+    self.config = config
+    self.usage = usage
+    self.attempts = 0
+    self.prior_failure = ""
+    self.prior_failure_heading = RETRY_HEADING_DEFAULT
+    self.edited_any_attempt = False
+    self.starved_retry_sec = 0.0
+    self.scaffold_error = ""
+    self.external_rollback_error = ""
+    self.stop = False
+    self.staging_failure = None
+    self._loop_start = 0.0
+    self._attempt_dir = ""
+    self._digest_before = None
+    self._agent_started = 0.0
+    self._attempt_timeout = 0.0
+    self._progress_log = []
+    self._stage(task, budget)
+    if self.staging_failure is not None:
+        return self.staging_failure
+    self._bind(task, preflight)
+    return await self.run()
 
 
 def prepare_task_sync(**kwargs) -> PrepareResult:
@@ -1394,6 +1376,8 @@ def _preflight_retry_prompt(pf: PreflightResult, *, driver_rel: str, driver_edit
 
 def _close_external_transaction(external_transaction, guard: "_SourceGuard") -> str:
     """Roll back and close the staging transaction; return what it could not clean up."""
+    if external_transaction is None:
+        return ""
     error = ""
     if not external_transaction.published:
         try:
