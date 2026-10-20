@@ -288,6 +288,41 @@ def test_a_plugin_does_not_outrank_a_provider_whose_credential_is_absent(
     assert registry.select_default_agent_provider().name == "firstparty"
 
 
+def test_a_provider_whose_check_raises_is_skipped(only_registered_providers) -> None:
+    """A raising provider predicate counts as "no" instead of breaking the selection."""
+
+    def _broken(_model):
+        raise RuntimeError("model table unreadable")
+
+    register_agent_provider(
+        AgentProvider(
+            name="brokencli",
+            factory=lambda runtime: _FakeBackend(name=runtime.provider),
+            default_model="broken-model",
+            owns_model=_broken,
+        )
+    )
+    _register_owning_fake("goodcli", owns_prefix="good")
+
+    assert registry.select_default_agent_provider("good-1").name == "goodcli"
+
+
+def test_entry_point_discovery_failure_is_recorded(monkeypatch) -> None:
+    """Unreadable package metadata disables plugins instead of raising."""
+
+    class _EntryPoints:
+        @staticmethod
+        def select(*, group):
+            raise OSError("metadata unreadable")
+
+    monkeypatch.setattr(registry.metadata, "entry_points", _EntryPoints)
+    monkeypatch.setattr(registry, "_plugins_loaded", False)
+    monkeypatch.setattr(registry, "_plugin_errors", {})
+    registry.discover_agent_providers(force=True)
+
+    assert registry._plugin_errors == {"<discovery>": "OSError: metadata unreadable"}
+
+
 def test_select_unknown_model_uses_registration_order(
     only_registered_providers,
 ) -> None:
