@@ -23,8 +23,8 @@ pytest.importorskip("flydsl.compiler")
 
 from kernelforge.assembly.prepare import AssemblyTask, prepare_assembly
 from kernelforge.config import Config
-from kernelforge.loop.validation import run_validation_pipeline
-from kernelforge.mcp_server.tools.bench import BenchRun, bench_wallclock
+from kernelforge.evaluation.benchmark.runner import BenchRun, bench_wallclock
+from kernelforge.evaluation.correctness.pipeline import run_validation_pipeline
 
 
 def test_flydsl_capture_wrong_result_and_clean_export(tmp_path, monkeypatch):

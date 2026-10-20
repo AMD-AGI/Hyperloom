@@ -36,7 +36,7 @@ from ._gpu_power import (
     read_measured_gpu_power,
     read_measured_gpu_power_by_gpu,
 )
-from ._subprocess_kill import _scan_logs_increment
+from ._subprocess_kill import _LogCursor
 from ._launch_evidence import build_launch_evidence, persist_launch_evidence
 from ._workload_envs import GEAK_METRIC_OUTPUT
 
@@ -131,7 +131,7 @@ def _run_sampled(
     recorder = build_gpu_power_recorder(str(out_dir / "server.log"), dict(env))
     if recorder is None:
         return run()
-    driver = ServerLogPhaseDriver(recorder, lambda: _replay_server_logs(out_dir), scan=_scan_logs_increment)
+    driver = ServerLogPhaseDriver(recorder, lambda: _replay_server_logs(out_dir), cursor=_LogCursor())
     driver.start()
     try:
         return run()

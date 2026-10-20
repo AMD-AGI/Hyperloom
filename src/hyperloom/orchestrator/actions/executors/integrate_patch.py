@@ -2754,7 +2754,7 @@ class IntegratePatchExecutor:
             shared_state.pending_integrate = attempt.pending
             try:
                 shared_state.save(self.session_dir)
-            except Exception:
+            except OSError:
                 log.exception("integrate_patch: failed to persist pending_integrate sentinel")
 
         # Normally already recorded before the setup commands; a root that

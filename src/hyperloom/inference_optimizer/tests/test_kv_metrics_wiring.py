@@ -451,12 +451,11 @@ def test_residual_is_held_per_path(tmp_path):
     (bench / "server.log").write_text("Phase profiling (prof", encoding="utf-8")
     (bench / "benchmark_stderr.log").write_text("iling) started\n", encoding="utf-8")
 
-    offsets: dict[str, int] = {}
-    residuals: dict[str, str] = {}
-    scan = sk._scan_logs_increment(str(tmp_path / "server.log"), offsets, residuals)
+    cursor = sk._LogCursor()
+    scan = cursor.advance(str(tmp_path / "server.log"))
 
     assert scan.saw_measured_begin is False
-    assert len(residuals) >= 2
+    assert len(cursor.residuals) >= 2
 
 
 def test_truncation_drops_the_carried_tail(tmp_path):
@@ -506,7 +505,7 @@ def test_phase_transitions_reach_the_recorder(tmp_path, monkeypatch):
             sk._LogScan(False, False, True, True, False, False, False),
         ]
     )
-    monkeypatch.setattr(sk, "_scan_logs_increment", lambda *_a, **_k: next(scans, sk._LogScan(*([False] * 7))))
+    monkeypatch.setattr(sk._LogCursor, "advance", lambda *_a, **_k: next(scans, sk._LogScan(*([False] * 7))))
     monkeypatch.setattr(sk, "stamp_server_ready", lambda *_a, **_k: None)
     log_path = tmp_path / "server.log"
     log_path.write_text("x\n", encoding="utf-8")

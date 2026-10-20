@@ -103,8 +103,8 @@ def _maybe_selfheal_tracelens_root(root: Path, *, log: Any = None) -> None:
     """Rebuild the pod-local TraceLens checkout if it vanished mid-run.
 
     Only the installer-managed default path is healed; an explicit
-    ``TRACELENS_ROOT`` override must fail fast when missing. Best-effort: any
-    failure is swallowed so the caller's validation produces the error.
+    ``TRACELENS_ROOT`` override must fail fast when missing. A heal that cannot
+    load or fails is logged and the caller's validation reports the error.
     """
     from hyperloom.inference_optimizer.session import paths
 
@@ -127,7 +127,8 @@ def _maybe_selfheal_tracelens_root(root: Path, *, log: Any = None) -> None:
         heal_log = getattr(log, "warning", None) or (lambda *_a, **_k: None)
         heal_log("trace_analyze: TraceLens root %s missing; attempting self-heal", root)
         _tla._ensure_tracelens_checkout(root, log_path=Path(os.devnull))
-    except Exception as exc:  # noqa: BLE001  # heal is best-effort; validation reports the real error
+    except (ImportError, OSError, subprocess.TimeoutExpired) as exc:
+        # tracelens_analysis imports TraceLens at top level, so a vanished checkout fails the import.
         _log = getattr(log, "warning", None)
         if _log:
             _log("trace_analyze: TraceLens self-heal failed: %s", exc)

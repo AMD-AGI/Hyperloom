@@ -8,7 +8,7 @@ import os
 import time
 from pathlib import Path
 from typing import Any
-from kernelforge.durable_io import atomic_write_text
+from kernelforge.tools.durable_io import atomic_write_text
 
 
 MAX_ANALYSIS_SESSION_ATTEMPTS = 2

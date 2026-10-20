@@ -56,7 +56,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         breakdown = json.loads(args.input.read_text())
-    except Exception as exc:  # noqa: BLE001
+    except (OSError, ValueError) as exc:
         log.error("failed to parse %s: %s", args.input, exc)
         return 2
 

@@ -745,3 +745,32 @@ def test_session_paths_helpers_under_target_analysis(tmp_path):
     assert target_analysis_dir(sd) == sd / "target_analysis"
     assert target_baseline_json(sd) == sd / "target_analysis" / "target_baseline.json"
     assert target_analysis_report_md(sd) == (sd / "target_analysis" / "target_analysis_report.md")
+
+
+def _measured_point():
+    from hyperloom.inference_optimizer.baseline_comparison.types import BaselinePoint
+
+    return BaselinePoint(
+        tput_per_gpu=100.0,
+        output_tput_per_gpu=50.0,
+        conc=8,
+        decode_tp=8,
+        mean_ttft_ms=1.0,
+        mean_tpot_ms=10.0,
+        mean_e2el_ms=2.0,
+    )
+
+
+def test_competitor_target_write_failure_surfaces(tmp_path, monkeypatch):
+    from hyperloom.inference_optimizer.baseline_comparison import research_hints, target_analyzer
+    from hyperloom.inference_optimizer.baseline_comparison.types import BaselineQuery
+
+    def _boom(*_a, **_k):
+        raise TypeError("target is not serialisable")
+
+    monkeypatch.setattr(research_hints, "write_competitor_target", _boom)
+
+    with pytest.raises(TypeError, match="target is not serialisable"):
+        target_analyzer._write_measured_competitor_target(
+            tmp_path, BaselineQuery(model="m", gpu="mi355x"), [_measured_point()], "https://example.test"
+        )

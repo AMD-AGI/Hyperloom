@@ -324,6 +324,32 @@ async def test_roofline_executor_emits_lifecycle_end(tmp_path):
     assert ev["seq"] > start["seq"]
 
 
+def _raising_save(error: BaseException):
+    def _save(_session_dir):
+        raise error
+
+    return _save
+
+
+def test_roofline_lifecycle_keeps_the_event_when_the_state_write_fails(tmp_path, monkeypatch):
+    (tmp_path / "state.json").write_text("{}", encoding="utf-8")
+    state = SharedState()
+    monkeypatch.setattr(state, "save", _raising_save(OSError("disk full")))
+
+    RooflineExecutor(shared_state=state)._record_lifecycle(tmp_path, status="START")
+
+    assert [(e["step"], e["status"]) for e in state.lifecycle] == [("roofline", "START")]
+
+
+def test_roofline_lifecycle_lets_a_state_serialization_bug_propagate(tmp_path, monkeypatch):
+    (tmp_path / "state.json").write_text("{}", encoding="utf-8")
+    state = SharedState()
+    monkeypatch.setattr(state, "save", _raising_save(TypeError("not JSON serializable")))
+
+    with pytest.raises(TypeError, match="not JSON serializable"):
+        RooflineExecutor(shared_state=state)._record_lifecycle(tmp_path, status="START")
+
+
 @pytest.mark.asyncio
 async def test_handle_request_cache_hit_emits_lone_end(session_dir, monkeypatch):
     c = Coordinator(session_dir, backends=_silent_backends())
