@@ -677,7 +677,7 @@ def main() -> int:
                 int(os.environ.get("HYPERLOOM_MN_GPU_SAMPLE_INTERVAL_S", "5") or "5"),
             )
             summary["gpu_metrics_csv"] = _samp_csv
-        except Exception as exc:  # noqa: BLE001 - sampler is optional telemetry
+        except (OSError, ValueError) as exc:  # sampler is optional telemetry
             _log(f"GPU sampler start failed: {exc}")
 
     # Only the leader serves a local HTTP endpoint; workers have none.

@@ -175,10 +175,11 @@ _MOE_SCHEME_CONTEXT_MARKERS = (
 )
 
 
-# Fast-exit arg errors (vLLM/sglang exits in <30s on bad CLI args) should not consume the slow-baseline retry budget.
+# Time limit for heuristic CLI-error matching; explicit configuration validation is independent of runtime.
 FAST_EXIT_THRESHOLD_SEC = 30.0
 # The error class of a subprocess that exited nonzero for no recognised cause.
 _SUBPROCESS_NONZERO = "subprocess_nonzero"
+_ARG_ERROR_CLASS = "fast_exit_arg_error"
 _ARG_ERROR_PATTERNS = (
     "unrecognized arguments",
     "invalid choice",
@@ -693,30 +694,20 @@ def _classify_subprocess_error(
     stderr_tail: str,
     returncode: int | None = None,
 ) -> str:
-    """Return 'fast_exit_arg_error' when the subprocess died fast on an arg
-    validation error, else 'subprocess_nonzero'.
-
-    Args:
-        elapsed_sec: Subprocess wall-clock runtime in seconds.
-        stderr_tail: Tail of the subprocess stderr used for marker matching.
-        returncode: The subprocess returncode, read for the sentinels that
-            name their own cause.
-
-    Returns:
-        The named class for a recognised sentinel, ``"fast_exit_arg_error"``
-        for a fast exit caused by argument validation, else
-        ``"subprocess_nonzero"``.
-    """
+    """Recognize KV-cache OOM, configuration validation, and fast argument failures."""
     tail = (stderr_tail or "").lower()
     # KV-cache OOM can surface long after weight load; match before the fast-exit elapsed gate below.
     if any(m in tail for m in _KV_CACHE_OOM_MARKERS):
         return "kv_cache_oom"
+    # Config validation can follow slow framework imports; elapsed time does not change its cause.
+    if re.search(r"\bvalidation errors? for cacheconfig\b", tail):
+        return _ARG_ERROR_CLASS
     if elapsed_sec >= FAST_EXIT_THRESHOLD_SEC:
         return _SUBPROCESS_NONZERO
     if any(p.lower() in tail for p in _ARG_ERROR_PATTERNS):
-        return "fast_exit_arg_error"
+        return _ARG_ERROR_CLASS
     if "valueerror:" in tail and any(p in tail for p in _ARG_ERROR_CONTEXT_PATTERNS):
-        return "fast_exit_arg_error"
+        return _ARG_ERROR_CLASS
     return _SUBPROCESS_NONZERO
 
 

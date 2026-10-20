@@ -54,7 +54,7 @@ class TargetAnalysisExecutor:
 
             sd = _sd()
             return sd if sd.exists() else None
-        except Exception:  # noqa: BLE001
+        except (OSError, RuntimeError):
             return None
 
     def _resolve_session_dir_for_cleanup(self, ctx: RunnerContext) -> Path | None:
@@ -62,12 +62,9 @@ class TargetAnalysisExecutor:
         resolved = self._resolve_session_dir(ctx)
         if resolved is not None:
             return resolved
-        try:
-            from hyperloom.inference_optimizer.session.paths import session_dir as _sd
+        from hyperloom.inference_optimizer.session.paths import session_dir as _sd
 
-            return _sd()
-        except Exception:  # noqa: BLE001
-            return None
+        return _sd()
 
     async def __call__(self, ctx: RunnerContext) -> dict[str, Any]:
         """Run the external-baseline comparison and persist report artefacts."""
