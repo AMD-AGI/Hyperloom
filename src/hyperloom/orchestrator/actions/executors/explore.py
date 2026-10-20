@@ -11,7 +11,6 @@ import logging
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from enum import Enum, auto
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -195,13 +194,6 @@ def _keep_uses_effective_args(
     )
 
 
-class _RoundStep(Enum):
-    """Whether the round moves on to the next variant or ends here."""
-
-    NEXT_VARIANT = auto()
-    END_OF_ROUND = auto()
-
-
 class _RoundRefusal(Exception):
     """The round has nothing it can measure; ``result`` is what the action publishes instead."""
 
@@ -252,13 +244,6 @@ class _RoundSetup(NamedTuple):
     workload: _Workload
     launch: _Launch
     baseline: _RoundBaseline
-
-
-class _GradingAnchor(NamedTuple):
-    """The axis a round grades on and the figure it opens graded against."""
-
-    on_intvty: bool
-    perf: Any
 
 
 class _ServerReuse(NamedTuple):
@@ -360,13 +345,6 @@ class _KeepComposition(NamedTuple):
     persist_effective: bool
 
 
-class _RoundGrid(NamedTuple):
-    """The variants a round was asked to measure, and the rewrite levers among them."""
-
-    variants: list[GridVariant]
-    lever_payload: list[dict[str, Any]]
-
-
 @dataclass
 class _VariantStack:
     """The configuration each variant launches on top of, as the round has built it.
@@ -393,7 +371,6 @@ class _RoundLedger:
 
     skipped: list[dict[str, Any]] = field(default_factory=list)
     winners: list[dict[str, Any]] = field(default_factory=list)
-    losers: list[dict[str, Any]] = field(default_factory=list)
     tested: dict[str, dict[str, Any]] = field(default_factory=dict)
     rejected: list[dict[str, Any]] = field(default_factory=list)
     name_index: dict[str, Any] = field(default_factory=dict)
@@ -510,22 +487,19 @@ def _round_budget(params: Mapping[str, Any], extra: Mapping[str, Any], *, reuse_
     )
 
 
-def _round_grading_anchor(shared_state: Any) -> _GradingAnchor:
-    """The figure every variant of this round is graded against.
+def _round_grading_anchor_perf(shared_state: Any) -> Any:
+    """The figure every variant of this round is graded against, on the interactivity axis.
 
     Variants stack within a round, so a KEEP advances it; the session anchor
     would grade every variant against the round's opening state.
     """
-    grade_on_intvty, _ = resolved_grading(shared_state)
-    if not grade_on_intvty:
-        return _GradingAnchor(False, None)
     running_base_perf, anchor_reason = resolve_grading_anchor_perf(shared_state)
     if running_base_perf is None:
         # AgentX grading needs both axes on the round anchor. Without them every
         # variant fails closed below; output figures are diagnostic only and must
         # not become throughput KEEPs.
         log.info("explore: AgentX grading unavailable for this round (%s)", anchor_reason)
-    return _GradingAnchor(True, running_base_perf)
+    return running_base_perf
 
 
 def _measured_axes(r: Any, shared_state: Any) -> dict[str, Any]:
@@ -784,7 +758,6 @@ class _ExploreRound:
     ledger: _RoundLedger
     budget: _RoundBudget
     reuse: _ServerReuse
-    serving_lease: Any
     keep_threshold_pct: float
     grade_on_intvty: bool
     on_the_synthetic_benchmark: bool
@@ -797,6 +770,7 @@ class _ExploreRound:
     opening_stack: dict[str, Any] = field(init=False)
     launched_fps: set[str] = field(default_factory=set)
     judged_without_measuring: int = 0
+    serving_lease: Any = None
 
     def __post_init__(self) -> None:
         self.opening_stack = self.launched_stack()
@@ -992,15 +966,6 @@ class _ExploreRound:
                 port=self.reuse.port,
             )
 
-    def release_serving_lease(self) -> None:
-        """Release the round's Ray serving lease/actor exactly once.
-
-        A per-variant ``ray.kill`` here churned raylet workers badly enough to
-        destabilise the single-node cluster.
-        """
-        if self.serving_lease is not None:
-            self.serving_lease.close()
-
     def record_warmup_failure(self, run: _VariantRun, w: Any) -> None:
         """Record a variant whose warmup round failed, so the round skips its decision round."""
         log.warning(
@@ -1030,20 +995,6 @@ class _ExploreRound:
                 "workspace": w.workspace if w is not None else None,
             }
         )
-        self.ledger.losers.append(
-            {
-                "fingerprint": run.fingerprint,
-                "name": run.gv.name,
-                "extra_server_args": run.gv.extra_server_args,
-                "extra_envs": dict(run.gv.extra_envs),
-                **run.control_fields,
-                "provenance": run.provenance,
-                "gain_pct": None,
-                "tput": None,
-                "reason": "warmup_failed",
-                "workspace": getattr(w, "workspace", None) if w is not None else None,
-            }
-        )
 
     def record_measurement(self, run: _VariantRun, r: Any, verdict: _VariantVerdict) -> None:
         """Record what this round measured and decided about one variant."""
@@ -1069,19 +1020,6 @@ class _ExploreRound:
                 "provenance": run.provenance,
                 "error_class": r.error_class or "",
                 "server_log_path": r.server_log_path,
-            }
-        )
-        self.ledger.losers.append(
-            {
-                "fingerprint": run.fingerprint,
-                "name": run.gv.name,
-                "extra_server_args": run.gv.extra_server_args,
-                "extra_envs": dict(run.gv.extra_envs),
-                **run.control_fields,
-                "provenance": run.provenance,
-                "gain_pct": verdict.gain,
-                "tput": verdict.tput,
-                "reason": verdict.reason or "not_keep",
                 "workspace": r.workspace,
             }
         )
@@ -1173,6 +1111,217 @@ class _ExploreRound:
         answered_otherwise = bool(self.runnable) and self.judged_without_measuring == len(self.runnable)
         return measured or bool(self.ledger.winners) or answered_otherwise
 
+    async def measure_its_grid(self) -> None:
+        """Measure every variant the round can still afford, in the order the grid gives them.
+
+        One Ray serving lease (actor) spans the whole round; a per-variant
+        ``ray.kill`` churned raylet workers badly enough to destabilise the
+        single-node cluster.
+        """
+        if not self.runnable:
+            return
+        self.serving_lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(self.workload.config_path))
+        try:
+            for idx, gv in enumerate(self.runnable):
+                if self.launched_already(gv) or self.restates_the_stack(gv) or self.already_measured(gv):
+                    continue
+                needed_sec = self.variant_cost_sec()
+                stop = variant_budget_stop(self.budget.session_deadline_sec, self.budget.phase_deadline, needed_sec)
+                if stop is not None:
+                    self.stop_before_variant(stop, idx=idx, needed_sec=needed_sec)
+                    break
+                refusal = self.context_copy_refusal(gv)
+                if refusal:
+                    log.warning("explore: refusing variant %s (%s)", gv.name, refusal)
+                    self.ledger.skipped.append({"name": gv.name, "reason": CONTEXT_COPY_REFUSAL, "detail": refusal})
+                    continue
+                self.record_launch(gv)
+                run = self._stage_variant(idx, gv)
+                try:
+                    await self._measure_variant(run)
+                finally:
+                    self.teardown_variant_server(run.slot)
+                if self.budget.stop is not None:
+                    break
+        finally:
+            if self.serving_lease is not None:
+                self.serving_lease.close()
+
+    def _stage_variant(self, idx: int, gv: GridVariant) -> _VariantRun:
+        """Compose the variant as it will actually launch, on the stack as it stands now."""
+        stack = self.stack
+        if stack.args_mode == "replace":
+            remove_args = to_str_list(getattr(gv, "remove_args", []))
+        else:
+            remove_args = list(dict.fromkeys(stack.remove_args + to_str_list(getattr(gv, "remove_args", []))))
+        unset_envs = list(dict.fromkeys(stack.unset_envs + to_str_list(getattr(gv, "unset_envs", []))))
+        extra_envs = dict(stack.extra_envs)
+        for key in gv.unset_envs:
+            extra_envs.pop(key, None)
+        extra_envs.update(gv.extra_envs)
+        run_gv = _carry_variant_metadata(
+            gv,
+            GridVariant(
+                name=gv.name,
+                extra_server_args=gv.extra_server_args,
+                extra_envs=extra_envs,
+                note=gv.note,
+                remove_args=list(gv.remove_args),
+                unset_envs=unset_envs,
+                args_mode=str(getattr(gv, "args_mode", "append") or "append"),
+            ),
+        )
+        # The decision round skips eval when a warmup preceded it: it is timed
+        # against a throughput-only anchor, and ``parse_eval_results`` falls back
+        # to the score the warmup took. Without a warmup there is nothing to fall
+        # back to, so the decision round keeps its own eval.
+        slot = self.workload.output_root / f"v{idx:02d}_{_safe(gv.name)}"
+        slot.mkdir(parents=True, exist_ok=True)
+        return _VariantRun(
+            idx=idx,
+            gv=gv,
+            fingerprint=getattr(gv, "canonical_fp", ""),
+            provenance=getattr(gv, "provenance", "llm_direct"),
+            scope=str(getattr(gv, "scope", "") or ""),
+            control_fields=_variant_control_fields(gv),
+            slot=slot,
+            remove_args=remove_args,
+            unset_envs=unset_envs,
+            extra_envs=extra_envs,
+            launched_gv=run_gv,
+            decision_gv=_variant_with_eval_off(run_gv) if self.budget.use_warm_decision else run_gv,
+            lifecycle=self.reuse.lifecycle_params(slot),
+        )
+
+    async def _launch_round(self, launch: _RoundLaunch) -> list[Any]:
+        """Run one benchmark round of one variant, on the stack as it stands now."""
+        workload = self.workload
+        stack = self.stack
+        return await run_grid(
+            base_yaml_path=workload.config_path,
+            base_extra_args=stack.extra_args,
+            grid=[launch.variant],
+            output_root=launch.slot,
+            model_path=workload.model_path,
+            gpu_type=workload.gpu_type,
+            benchmark_script=workload.benchmark_script,
+            result_dir=workload.result_dir,
+            server_lifecycle=launch.lifecycle,
+            base_args_mode=stack.args_mode,
+            base_extra_envs=dict(stack.extra_envs),
+            base_remove_args=list(stack.remove_args),
+            base_unset_envs=list(stack.unset_envs),
+            server_already_ready=launch.server_ready,
+            ready_server_log=launch.ready_server_log,
+            serving_lease=self.serving_lease,
+            session_deadline_sec=self.budget.session_deadline_sec,
+            variant_expected_sec=launch.expected_sec,
+        )
+
+    async def _warm_the_server(self, run: _VariantRun) -> Any:
+        """Run the warmup round that leaves the server hot for the decision round."""
+        warmup_slot = run.slot / "warmup_round"
+        warmup_slot.mkdir(parents=True, exist_ok=True)
+        warmup_results = await self._launch_round(
+            _RoundLaunch(
+                variant=run.launched_gv,
+                slot=warmup_slot,
+                lifecycle=run.lifecycle,
+                expected_sec=self.budget.warmup_expected_sec,
+                server_ready=False,
+                ready_server_log=None,
+            ),
+        )
+        return warmup_results[0] if warmup_results else None
+
+    async def _measure_variant(self, run: _VariantRun) -> None:
+        """Measure one variant and record what the round decided about it.
+
+        A run that stopped the round leaves it on the budget, which is what ends
+        the grid loop; the variant and the ones after it stay out of the ledger.
+        """
+        warm = self.budget.use_warm_decision
+        ready_server_log = None
+        if warm:
+            w = await self._warm_the_server(run)
+            if self.stopped_by_the_run(w, variant=run.gv, idx=run.idx, round_label="warmup"):
+                return
+            if w is None or getattr(w, "status", "") != "succeeded":
+                self.record_warmup_failure(run, w)
+                return
+            ready_server_log = w.server_log_path
+        results = await self._launch_round(
+            _RoundLaunch(
+                variant=run.decision_gv,
+                slot=run.slot,
+                lifecycle=run.lifecycle,
+                expected_sec=self.budget.decision_expected_sec,
+                server_ready=warm,
+                ready_server_log=ready_server_log,
+            ),
+        )
+        if not results:
+            # run_grid returns one result per grid entry.
+            log.warning("explore: variant %s produced no result", run.gv.name)
+            return
+        r = results[0]
+        if self.stopped_by_the_run(r, variant=run.gv, idx=run.idx, round_label="decision"):
+            return
+        verdict = self._judge_variant(run, r)
+        self.record_measurement(run, r, verdict)
+        if verdict.outcome == "KEEP":
+            self.adopt(run, r, verdict)
+        else:
+            self.reject(run, r, verdict)
+
+    def _judge_variant(self, run: _VariantRun, r: Any) -> _VariantVerdict:
+        """Rule on one variant: the graded axes first, then the accuracy gate.
+
+        A variant KEEPs when it clears both. The axes and the threshold floor
+        belong to ``resolve_graded_comparison``, which every lane shares.
+        """
+        measured = _measured_axes(r, self.shared_state)
+        graded = resolve_graded_comparison(
+            self.shared_state,
+            measured,
+            keep_threshold_pct=self.keep_threshold_pct,
+            anchor_perf=self.stack.perf,
+            anchor_tput=self.stack.tput,
+        )
+        decision = _graded_decision(graded, r, run.gv.name)
+        # Each gate's verdict as it rules, in the order it ruled. Read off the
+        # outcome afterwards, "REVERT" cannot say which gate ended the arc, and a
+        # gate that never ran is indistinguishable from one that ruled against
+        # the variant. Without a measurement nothing rules at all, which is why
+        # no row is appended then.
+        gates: list[dict[str, Any]] = []
+        if r.status == "succeeded":
+            gates.append(_graded_gate_row(graded, decision.reason, self.keep_threshold_pct))
+        accuracy = _AccuracyVerdict(True, None, None, False)
+        outcome, reason = decision.outcome, decision.reason
+        if outcome == TS_FAILED and not reason:
+            accuracy = _accuracy_verdict(
+                run.slot,
+                framework=self.launch.framework,
+                benchmark_mode=str(getattr(self.shared_state, "benchmark_mode", "") or ""),
+                reference=self.baseline.accuracy,
+            )
+            if accuracy.gated:
+                gates.append(_accuracy_gate_row(accuracy))
+            outcome = "KEEP" if accuracy.passed else "REVERT"
+            reason = "" if accuracy.passed else _accuracy_refusal(accuracy.value)
+        return _VariantVerdict(
+            graded=graded,
+            measured=measured,
+            outcome=outcome,
+            reason=reason,
+            gain=decision.gain,
+            graded_gain=decision.graded_gain,
+            gates=gates,
+            accuracy=accuracy,
+            tput=r.output_throughput,
+        )
+
     def budget_error(self, status: str) -> dict[str, Any]:
         """Why a round that measured nothing measured nothing, when the run stopped it.
 
@@ -1213,7 +1362,7 @@ class _ExploreRound:
                 "round_id": self.round_id,
                 "base_tput": self.baseline.tput,
                 "base_extra_args": self.baseline.extra_args,
-                "tested": [w["fingerprint"] for w in ledger.winners] + [lr["fingerprint"] for lr in ledger.losers],
+                "tested": [w["fingerprint"] for w in ledger.winners] + [lr["fingerprint"] for lr in ledger.rejected],
                 "round_winners": [w["fingerprint"] for w in ledger.winners],
                 "killed_overtime": killed_overtime_fps,
                 "skipped_dup": ledger.skipped,
@@ -1245,7 +1394,7 @@ class ExploreExecutor:
             explore_round = self._open_round(ctx)
         except _RoundRefusal as refusal:
             return refusal.result
-        await self._measure_the_grid(explore_round)
+        await explore_round.measure_its_grid()
         return self._round_result(explore_round, task_id=str(ctx.task.task_id))
 
     def _open_round(self, ctx) -> _ExploreRound:
@@ -1257,11 +1406,12 @@ class ExploreExecutor:
         _refresh_anchor_params(params, ss)
         baseline = _round_baseline(params, ss)
         setup = _RoundSetup(params, ss, workload, _launch_defaults(workload.config_path, baseline.args_mode), baseline)
-        grid = self._proposed_grid(setup)
+        lever_payload = framework_lever_grid(ss)
         ledger = _RoundLedger()
         observed = ObservedLaunch(*observed_launch_from_state(ss))
-        runnable = self._runnable_variants(setup, grid.variants, ledger, observed)
-        anchor = _round_grading_anchor(ss)
+        runnable = self._runnable_variants(setup, self._proposed_grid(setup, lever_payload), ledger, observed)
+        grade_on_intvty, _ = resolved_grading(ss)
+        anchor_perf = _round_grading_anchor_perf(ss) if grade_on_intvty else None
         reuse = _ServerReuse.of(resolve_lifecycle_params(workload.config_path))
         # Seeded by the Coordinator from the durable cursor: this executor holds no
         # history of its own, so it cannot count the rounds before this one.
@@ -1273,7 +1423,7 @@ class ExploreExecutor:
             baseline=baseline,
             shared_state=ss,
             runnable=runnable,
-            lever_payload=grid.lever_payload,
+            lever_payload=lever_payload,
             stack=_VariantStack(
                 extra_args=baseline.extra_args,
                 extra_envs=dict(baseline.extra_envs),
@@ -1281,17 +1431,13 @@ class ExploreExecutor:
                 unset_envs=list(dict.fromkeys(baseline.unset_envs)),
                 args_mode=baseline.args_mode,
                 tput=baseline.tput,
-                perf=anchor.perf,
+                perf=anchor_perf,
             ),
             ledger=ledger,
             budget=_round_budget(params, extra, reuse_eligible=reuse.eligible),
             reuse=reuse,
-            # One Ray serving lease (actor) spans the WHOLE round; every variant reuses it.
-            serving_lease=maybe_serving_lease(num_gpus=_num_gpus_for_config(workload.config_path))
-            if runnable
-            else None,
             keep_threshold_pct=float(params.get("keep_threshold_pct", self.keep_threshold_pct)),
-            grade_on_intvty=anchor.on_intvty,
+            grade_on_intvty=grade_on_intvty,
             on_the_synthetic_benchmark=not agentx_active(benchmark_mode=getattr(ss, "benchmark_mode", "")),
             is_revalidation=is_stack_revalidation(params),
             workload_signature=workload_signature(),
@@ -1338,13 +1484,12 @@ class ExploreExecutor:
             raise _RoundRefusal("framework_script_mismatch", str(exc)) from exc
         return _Workload(config_path, output_root, model_path, gpu_type, benchmark_script, result_dir)
 
-    def _proposed_grid(self, setup: _RoundSetup) -> _RoundGrid:
+    def _proposed_grid(self, setup: _RoundSetup, lever_payload: list[dict[str, Any]]) -> list[GridVariant]:
         """The variants this round was asked to measure, before any filter sees them."""
         grid_payload = setup.params.get("grid") or []
         if not isinstance(grid_payload, list):
             grid_payload = []
         # Framework-rewrite levers first.
-        lever_payload = framework_lever_grid(setup.shared_state)
         grid_payload = _seed_lever_variants(grid_payload, lever_payload)
         if not grid_payload:
             grid_payload = _seed_grid_payload(
@@ -1371,7 +1516,7 @@ class ExploreExecutor:
                 "explore: params.grid contains no valid variants",
                 workspace=setup.workload.output_root.as_posix(),
             )
-        return _RoundGrid(grid, lever_payload)
+        return grid
 
     def _runnable_variants(
         self, setup: _RoundSetup, grid: list[GridVariant], ledger: _RoundLedger, observed: ObservedLaunch
@@ -1470,217 +1615,6 @@ class ExploreExecutor:
             priority_tags=_MN_PARAMS_PRIORITY + _MN_BACKENDS_PRIORITY,
         )
 
-    async def _measure_the_grid(self, explore_round: _ExploreRound) -> None:
-        """Measure every variant the round can still afford, in the order the grid gives them."""
-        try:
-            for idx, gv in enumerate(explore_round.runnable):
-                if (
-                    explore_round.launched_already(gv)
-                    or explore_round.restates_the_stack(gv)
-                    or explore_round.already_measured(gv)
-                ):
-                    continue
-                needed_sec = explore_round.variant_cost_sec()
-                stop = variant_budget_stop(
-                    explore_round.budget.session_deadline_sec, explore_round.budget.phase_deadline, needed_sec
-                )
-                if stop is not None:
-                    explore_round.stop_before_variant(stop, idx=idx, needed_sec=needed_sec)
-                    break
-                refusal = explore_round.context_copy_refusal(gv)
-                if refusal:
-                    log.warning("explore: refusing variant %s (%s)", gv.name, refusal)
-                    explore_round.ledger.skipped.append(
-                        {"name": gv.name, "reason": CONTEXT_COPY_REFUSAL, "detail": refusal}
-                    )
-                    continue
-                explore_round.record_launch(gv)
-                run = self._stage_variant(explore_round, idx, gv)
-                try:
-                    if await self._measure_variant(explore_round, run) is _RoundStep.END_OF_ROUND:
-                        break
-                finally:
-                    explore_round.teardown_variant_server(run.slot)
-        finally:
-            explore_round.release_serving_lease()
-
-    @staticmethod
-    def _stage_variant(explore_round: _ExploreRound, idx: int, gv: GridVariant) -> _VariantRun:
-        """Compose the variant as it will actually launch, on the stack as it stands now."""
-        stack = explore_round.stack
-        if stack.args_mode == "replace":
-            remove_args = to_str_list(getattr(gv, "remove_args", []))
-        else:
-            remove_args = list(dict.fromkeys(stack.remove_args + to_str_list(getattr(gv, "remove_args", []))))
-        unset_envs = list(dict.fromkeys(stack.unset_envs + to_str_list(getattr(gv, "unset_envs", []))))
-        extra_envs = dict(stack.extra_envs)
-        for key in gv.unset_envs:
-            extra_envs.pop(key, None)
-        extra_envs.update(gv.extra_envs)
-        run_gv = _carry_variant_metadata(
-            gv,
-            GridVariant(
-                name=gv.name,
-                extra_server_args=gv.extra_server_args,
-                extra_envs=extra_envs,
-                note=gv.note,
-                remove_args=list(gv.remove_args),
-                unset_envs=unset_envs,
-                args_mode=str(getattr(gv, "args_mode", "append") or "append"),
-            ),
-        )
-        # The decision round skips eval when a warmup preceded it: it is timed
-        # against a throughput-only anchor, and ``parse_eval_results`` falls back
-        # to the score the warmup took. Without a warmup there is nothing to fall
-        # back to, so the decision round keeps its own eval.
-        slot = explore_round.workload.output_root / f"v{idx:02d}_{_safe(gv.name)}"
-        slot.mkdir(parents=True, exist_ok=True)
-        return _VariantRun(
-            idx=idx,
-            gv=gv,
-            fingerprint=getattr(gv, "canonical_fp", ""),
-            provenance=getattr(gv, "provenance", "llm_direct"),
-            scope=str(getattr(gv, "scope", "") or ""),
-            control_fields=_variant_control_fields(gv),
-            slot=slot,
-            remove_args=remove_args,
-            unset_envs=unset_envs,
-            extra_envs=extra_envs,
-            launched_gv=run_gv,
-            decision_gv=_variant_with_eval_off(run_gv) if explore_round.budget.use_warm_decision else run_gv,
-            lifecycle=explore_round.reuse.lifecycle_params(slot),
-        )
-
-    @staticmethod
-    async def _launch_round(explore_round: _ExploreRound, launch: _RoundLaunch) -> list[Any]:
-        """Run one benchmark round of one variant, on the stack as it stands now."""
-        workload = explore_round.workload
-        stack = explore_round.stack
-        return await run_grid(
-            base_yaml_path=workload.config_path,
-            base_extra_args=stack.extra_args,
-            grid=[launch.variant],
-            output_root=launch.slot,
-            model_path=workload.model_path,
-            gpu_type=workload.gpu_type,
-            benchmark_script=workload.benchmark_script,
-            result_dir=workload.result_dir,
-            server_lifecycle=launch.lifecycle,
-            base_args_mode=stack.args_mode,
-            base_extra_envs=dict(stack.extra_envs),
-            base_remove_args=list(stack.remove_args),
-            base_unset_envs=list(stack.unset_envs),
-            server_already_ready=launch.server_ready,
-            ready_server_log=launch.ready_server_log,
-            serving_lease=explore_round.serving_lease,
-            session_deadline_sec=explore_round.budget.session_deadline_sec,
-            variant_expected_sec=launch.expected_sec,
-        )
-
-    async def _warm_the_server(self, explore_round: _ExploreRound, run: _VariantRun) -> Any:
-        """Run the warmup round that leaves the server hot for the decision round."""
-        warmup_slot = run.slot / "warmup_round"
-        warmup_slot.mkdir(parents=True, exist_ok=True)
-        warmup_results = await self._launch_round(
-            explore_round,
-            _RoundLaunch(
-                variant=run.launched_gv,
-                slot=warmup_slot,
-                lifecycle=run.lifecycle,
-                expected_sec=explore_round.budget.warmup_expected_sec,
-                server_ready=False,
-                ready_server_log=None,
-            ),
-        )
-        return warmup_results[0] if warmup_results else None
-
-    async def _measure_variant(self, explore_round: _ExploreRound, run: _VariantRun) -> _RoundStep:
-        """Measure one variant and record what the round decided about it."""
-        warm = explore_round.budget.use_warm_decision
-        ready_server_log = None
-        if warm:
-            w = await self._warm_the_server(explore_round, run)
-            if explore_round.stopped_by_the_run(w, variant=run.gv, idx=run.idx, round_label="warmup"):
-                return _RoundStep.END_OF_ROUND
-            if w is None or getattr(w, "status", "") != "succeeded":
-                explore_round.record_warmup_failure(run, w)
-                return _RoundStep.NEXT_VARIANT
-            ready_server_log = w.server_log_path
-        results = await self._launch_round(
-            explore_round,
-            _RoundLaunch(
-                variant=run.decision_gv,
-                slot=run.slot,
-                lifecycle=run.lifecycle,
-                expected_sec=explore_round.budget.decision_expected_sec,
-                server_ready=warm,
-                ready_server_log=ready_server_log,
-            ),
-        )
-        if not results:
-            # run_grid returns one result per grid entry.
-            log.warning("explore: variant %s produced no result", run.gv.name)
-            return _RoundStep.NEXT_VARIANT
-        r = results[0]
-        if explore_round.stopped_by_the_run(r, variant=run.gv, idx=run.idx, round_label="decision"):
-            return _RoundStep.END_OF_ROUND
-        verdict = self._judge_variant(explore_round, run, r)
-        explore_round.record_measurement(run, r, verdict)
-        if verdict.outcome == "KEEP":
-            explore_round.adopt(run, r, verdict)
-        else:
-            explore_round.reject(run, r, verdict)
-        return _RoundStep.NEXT_VARIANT
-
-    @staticmethod
-    def _judge_variant(explore_round: _ExploreRound, run: _VariantRun, r: Any) -> _VariantVerdict:
-        """Rule on one variant: the graded axes first, then the accuracy gate.
-
-        A variant KEEPs when it clears both. The axes and the threshold floor
-        belong to ``resolve_graded_comparison``, which every lane shares.
-        """
-        measured = _measured_axes(r, explore_round.shared_state)
-        graded = resolve_graded_comparison(
-            explore_round.shared_state,
-            measured,
-            keep_threshold_pct=explore_round.keep_threshold_pct,
-            anchor_perf=explore_round.stack.perf,
-            anchor_tput=explore_round.stack.tput,
-        )
-        decision = _graded_decision(graded, r, run.gv.name)
-        # Each gate's verdict as it rules, in the order it ruled. Read off the
-        # outcome afterwards, "REVERT" cannot say which gate ended the arc, and a
-        # gate that never ran is indistinguishable from one that ruled against
-        # the variant. Without a measurement nothing rules at all, which is why
-        # no row is appended then.
-        gates: list[dict[str, Any]] = []
-        if r.status == "succeeded":
-            gates.append(_graded_gate_row(graded, decision.reason, explore_round.keep_threshold_pct))
-        accuracy = _AccuracyVerdict(True, None, None, False)
-        outcome, reason = decision.outcome, decision.reason
-        if outcome == TS_FAILED and not reason:
-            accuracy = _accuracy_verdict(
-                run.slot,
-                framework=explore_round.launch.framework,
-                benchmark_mode=str(getattr(explore_round.shared_state, "benchmark_mode", "") or ""),
-                reference=explore_round.baseline.accuracy,
-            )
-            if accuracy.gated:
-                gates.append(_accuracy_gate_row(accuracy))
-            outcome = "KEEP" if accuracy.passed else "REVERT"
-            reason = "" if accuracy.passed else _accuracy_refusal(accuracy.value)
-        return _VariantVerdict(
-            graded=graded,
-            measured=measured,
-            outcome=outcome,
-            reason=reason,
-            gain=decision.gain,
-            graded_gain=decision.graded_gain,
-            gates=gates,
-            accuracy=accuracy,
-            tput=r.output_throughput,
-        )
-
     def _round_result(self, explore_round: _ExploreRound, *, task_id: str) -> dict[str, Any]:
         """The action result: what the round measured, kept and refused."""
         ledger = explore_round.ledger
@@ -1712,7 +1646,7 @@ class ExploreExecutor:
             "best_variant": best_winner,
             "best_gain_pct": best_gain_pct,
             "winners": ledger.winners,
-            "losers": ledger.losers,
+            "losers": ledger.rejected,
             "skipped_dup": ledger.skipped,
             # flat per-variant outcomes.
             "per_variant_outcomes": per_variant_outcomes,
