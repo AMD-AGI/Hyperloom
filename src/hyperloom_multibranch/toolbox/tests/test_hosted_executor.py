@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import subprocess
 from dataclasses import dataclass, field
@@ -14,10 +15,13 @@ from pathlib import Path
 import pytest
 
 from hyperloom.contracts.measurement import FailureClass, SandboxFacts, TestResult, Validity
+from hyperloom.measure import sandboxes
+from hyperloom.measure.hosted import HostedMeasurementBackend
 from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT
 from hyperloom.measure.points import AcceptedMeasurement
 from hyperloom.measure.socket import TestCall, TestOutcome
 from hyperloom.measure.tests.hosted_fixtures import Rig, make_rig, point_yaml
+from hyperloom.sandbox.socket import IDEMPOTENCY_KEY, CreateOptions, SandboxGone, SandboxQuotaExceeded
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.toolbox.attempts import MeasurementRefused, TestJob
 from hyperloom_multibranch.toolbox.hosted_executor import (
@@ -84,9 +88,11 @@ def rig(tmp_path: Path):
         r.provider.close()
 
 
-def _toolbox(tmp_path: Path, r: Rig, *modes: str, policy: QueuePolicy = POLICY) -> tuple[ToolboxRig, ScriptedBackend]:
+def _toolbox(
+    tmp_path: Path, r: Rig, *modes: str, policy: QueuePolicy = POLICY, backend: object | None = None
+) -> tuple[ToolboxRig, ScriptedBackend]:
     point = point_yaml(tmp_path, "planned.yaml")
-    scripted = ScriptedBackend(r.backend, point, list(modes))
+    scripted = ScriptedBackend(r.backend if backend is None else backend, point, list(modes))
     executor = HostedExecutor(scripted, tmp_path / "session")  # type: ignore[arg-type]
     return build(
         tmp_path, executor=executor, planner=PointPlanner(point), policy=policy, workload_kind=WorkloadKind.AGENTX
@@ -182,6 +188,69 @@ async def test_an_infrastructure_failure_retries_in_a_new_sandbox(tmp_path: Path
     assert second.sandbox.same_node, "one node: the node to avoid carried the retry and says so"
     assert tb.toolbox.quarantined == {"node-a"}
     assert result.output_dir == f"tests/{request_id}/attempt-2"
+
+
+class _RefusingProvider:
+    """The local provider behind a service that refuses its first creates the way Agent Sandbox does, then serves."""
+
+    name = "refusing"
+
+    def __init__(self, inner: object, *refusals: Exception) -> None:
+        self._inner = inner
+        self.refusals = list(refusals)
+        self.keys: list[str] = []
+
+    def create(self, template, *, role, timeout_sec, metadata, options=CreateOptions()):  # type: ignore[no-untyped-def]
+        self.keys.append(metadata[IDEMPOTENCY_KEY])
+        if self.refusals:
+            raise self.refusals.pop(0)
+        return self._inner.create(  # type: ignore[attr-defined]
+            template, role=role, timeout_sec=timeout_sec, metadata=metadata, options=options
+        )
+
+    def connect(self, sandbox_id, *, role):  # type: ignore[no-untyped-def]
+        return self._inner.connect(sandbox_id, role=role)  # type: ignore[attr-defined]
+
+    def find(self, metadata, *, role):  # type: ignore[no-untyped-def]
+        return self._inner.find(metadata, role=role)  # type: ignore[attr-defined]
+
+
+@contextlib.contextmanager
+def _behind(r: Rig, *refusals: Exception):  # type: ignore[no-untyped-def]
+    """A backend over the rig's provider whose service refuses the first creates with ``refusals``."""
+    refusing = _RefusingProvider(r.provider, *refusals)
+    backend = HostedMeasurementBackend(refusing, r.config)
+    backend.start()
+    try:
+        yield refusing, backend
+    finally:
+        backend.close()
+
+
+async def test_a_full_quota_is_waited_out_and_is_neither_an_infra_retry_nor_a_node_failure(
+    tmp_path: Path, rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sandboxes, "_QUOTA_RETRY_SEC", 0.05)
+    r = rig()
+    with _behind(r, *[SandboxQuotaExceeded("grant_quota_exceeded")] * 3) as (refusing, backend):
+        tb, scripted = _toolbox(tmp_path, r, OK, backend=backend)
+        _, result = await _run(tb)
+    assert len(refusing.keys) == 4 and len(set(refusing.keys)) == 1, "the same create, asked again after each refusal"
+    assert result.validity is Validity.SUCCEEDED and result.failure_class is None
+    assert scripted.calls == 1 and len(result.attempts) == 1, "no infrastructure retry was spent on the quota"
+    assert tb.toolbox.quarantined == frozenset()
+
+
+async def test_a_spent_idempotency_key_is_replaced_and_the_test_is_not_failed(tmp_path: Path, rig) -> None:
+    r = rig()
+    with _behind(r, SandboxGone("idempotency_key_spent")) as (refusing, backend):
+        tb, scripted = _toolbox(tmp_path, r, OK, backend=backend)
+        request_id, result = await _run(tb)
+    first, second = refusing.keys
+    assert second == f"{first}:r1", "the create was repeated with the attempt's next key"
+    assert result.validity is Validity.SUCCEEDED and scripted.calls == 1 and len(result.attempts) == 1
+    assert tb.toolbox.quarantined == frozenset()
+    assert _journal_attempts(r, request_id) == {1: result.sandbox.sandbox_id}
 
 
 async def test_infrastructure_failures_end_as_measurement_failed_after_the_retries(tmp_path: Path, rig) -> None:

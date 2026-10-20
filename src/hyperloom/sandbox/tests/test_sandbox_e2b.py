@@ -25,7 +25,13 @@ import pytest
 
 from hyperloom.sandbox import CreateOptions, OutputSinks, RunSettings
 from hyperloom.sandbox.e2b import E2BSandboxProvider, RetryPolicy, _LineSink
-from hyperloom.sandbox.socket import IDEMPOTENCY_KEY, SandboxDenied, SandboxGone, SandboxUnavailable
+from hyperloom.sandbox.socket import (
+    IDEMPOTENCY_KEY,
+    SandboxDenied,
+    SandboxGone,
+    SandboxQuotaExceeded,
+    SandboxUnavailable,
+)
 
 KEY_DEV = "e2b_dev_key_0123456789abcdef"
 KEY_MEASUREMENT = "e2b_measurement_key_0123456789"
@@ -179,8 +185,9 @@ def test_a_refused_create_is_one_of_the_socket_failures_and_not_replayed(
     service: _Service, provider: E2BSandboxProvider, status: int, expected: type[Exception]
 ) -> None:
     service.reply("POST", "/v2/sandboxes", (status, {"code": status, "message": "pending_timeout"}))
-    with pytest.raises(expected):
+    with pytest.raises(expected) as refused:
         _create(provider)
+    assert type(refused.value) is expected, "none of these is a quota refusal"
     assert len(service.calls("POST", "/v2/sandboxes")) == 1
 
 
@@ -197,6 +204,58 @@ def test_a_503_on_create_is_final_even_with_an_idempotency_key(service: _Service
     service.reply("POST", "/v2/sandboxes", (503, {"code": 503, "message": "no_capacity"}))
     with pytest.raises(SandboxUnavailable, match="no_capacity"):
         _create(provider, metadata={IDEMPOTENCY_KEY: "k-1"})
+    assert len(service.calls("POST", "/v2/sandboxes")) == 1
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"code": 410, "message": "idempotency_key_spent: its sandbox sbx-old has ended"},
+        {"code": 410, "reason": "idempotency_key_spent", "sandboxID": "sbx-old"},
+    ],
+)
+def test_a_create_with_a_spent_idempotency_key_is_gone_and_not_replayed(
+    service: _Service, provider: E2BSandboxProvider, body: dict[str, Any]
+) -> None:
+    service.reply("POST", "/v2/sandboxes", (410, body))
+    with pytest.raises(SandboxGone):
+        _create(provider, metadata={IDEMPOTENCY_KEY: "k-1"})
+    assert len(service.calls("POST", "/v2/sandboxes")) == 1
+
+
+def test_a_410_from_a_call_on_a_sandbox_is_gone(service: _Service, provider: E2BSandboxProvider) -> None:
+    service.reply("POST", "/v2/sandboxes", (201, SANDBOX))
+    sb = _create(provider)
+    service.reply("GET", "/sandboxes/sbx-1", (410, {"code": 410, "message": "gone"}))
+    with pytest.raises(SandboxGone):
+        sb.info()
+
+
+def test_a_429_over_the_grant_quota_is_back_pressure_and_not_replayed(
+    service: _Service, provider: E2BSandboxProvider
+) -> None:
+    service.reply("POST", "/v2/sandboxes", (429, {"code": 429, "message": "grant_quota_exceeded: 4 of 4 running"}))
+    with pytest.raises(SandboxQuotaExceeded) as refused:
+        _create(provider, metadata={IDEMPOTENCY_KEY: "k-1"})
+    assert isinstance(refused.value, SandboxUnavailable), "a caller that knows only the socket sees unavailable"
+    assert len(service.calls("POST", "/v2/sandboxes")) == 1
+
+
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        (429, {"code": 429, "message": "slow down"}),
+        (503, {"code": 503, "message": "pending_timeout"}),
+        (503, {"code": 503, "message": "no_capacity"}),
+    ],
+)
+def test_a_rate_limit_or_no_capacity_is_not_quota_back_pressure(
+    service: _Service, provider: E2BSandboxProvider, status: int, body: Any
+) -> None:
+    service.reply("POST", "/v2/sandboxes", (status, body))
+    with pytest.raises(SandboxUnavailable) as refused:
+        _create(provider, metadata={IDEMPOTENCY_KEY: "k-1"})
+    assert type(refused.value) is SandboxUnavailable
     assert len(service.calls("POST", "/v2/sandboxes")) == 1
 
 

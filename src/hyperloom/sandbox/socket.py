@@ -32,6 +32,7 @@ __all__ = [
     "SandboxGone",
     "SandboxInfo",
     "SandboxProvider",
+    "SandboxQuotaExceeded",
     "SandboxUnavailable",
 ]
 
@@ -55,11 +56,23 @@ class SandboxError(Exception):
 
 
 class SandboxUnavailable(SandboxError):
-    """Creation timed out, capacity or quota is short, or a command timed out."""
+    """Creation timed out, capacity is short, or a command timed out."""
+
+
+class SandboxQuotaExceeded(SandboxUnavailable):
+    """A create is over the session's quota (the grant's concurrent sandboxes or GPUs).
+
+    This is back-pressure, not a failure of any node: it clears when a running sandbox ends, so a caller waits for that
+    and creates again, and neither counts it against a node nor spends a retry on it.
+    """
 
 
 class SandboxGone(SandboxError):
-    """The sandbox does not exist, is not visible to this role, or has ended."""
+    """The sandbox does not exist, is not visible to this role, or has ended.
+
+    A create that carries an idempotency key whose sandbox has ended raises it too: the key is spent, and a new key
+    makes a new sandbox.
+    """
 
 
 class SandboxDenied(SandboxError):

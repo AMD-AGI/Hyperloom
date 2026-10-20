@@ -20,13 +20,22 @@ import time
 import uuid
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 import pytest
 
+from hyperloom.measure.sandboxes import AttemptTag, PoolLimits, SandboxPool
 from hyperloom.sandbox import CreateOptions
 from hyperloom.sandbox.e2b import E2BSandboxProvider, RetryPolicy
-from hyperloom.sandbox.socket import IDEMPOTENCY_KEY, SandboxDenied, SandboxError, SandboxGone, SandboxUnavailable
+from hyperloom.sandbox.socket import (
+    IDEMPOTENCY_KEY,
+    SandboxDenied,
+    SandboxError,
+    SandboxGone,
+    SandboxQuotaExceeded,
+    SandboxUnavailable,
+)
 from hyperloom.sandbox.tests.e2b_standin import ENVD_ENV, StandIn, StandInTemplate, unavailable_reason
 from hyperloom.sandbox.tests.e2b_standin.envd_host import RunningSandbox, SandboxPlan
 from hyperloom.sandbox.tests.e2b_standin.service import ServiceError
@@ -189,7 +198,7 @@ def test_a_role_over_its_cap_is_refused_and_injected_failures_are_retried(e2b_en
     with StandIn(e2b_envd, tmp_path, [StandInTemplate("dev", "dev")], max_sandboxes={"dev": 1}) as capped:
         provider = _provider(capped)
         one = provider.create("dev", role="dev", timeout_sec=60, metadata={})
-        with pytest.raises(SandboxUnavailable, match="already has 1"):
+        with pytest.raises(SandboxQuotaExceeded, match="already has 1"):
             provider.create("dev", role="dev", timeout_sec=60, metadata={})
         capped.plane.fail_next("kill", 503, times=2)
         one.kill()
@@ -198,6 +207,62 @@ def test_a_role_over_its_cap_is_refused_and_injected_failures_are_retried(e2b_en
         capped.plane.fail_next("create", 500, times=2)
         again = provider.create("dev", role="dev", timeout_sec=60, metadata={IDEMPOTENCY_KEY: "retry-1"})
         assert again.info().sandbox_id == again.sandbox_id
+
+
+def test_a_key_whose_sandbox_has_ended_is_spent(standin: StandIn) -> None:
+    provider = _provider(standin)
+    meta = {IDEMPOTENCY_KEY: "spent-1"}
+    first = provider.create("dev", role="dev", timeout_sec=60, metadata=meta)
+    first.kill()
+    with pytest.raises(SandboxGone, match=first.sandbox_id):
+        provider.create("dev", role="dev", timeout_sec=60, metadata=meta)
+    provider.create("dev", role="dev", timeout_sec=60, metadata={IDEMPOTENCY_KEY: "spent-1:r1"}).kill()
+
+
+class _CountingQuota:
+    """The E2B provider, counting the creates the service refused for the quota."""
+
+    name = "counting"
+
+    def __init__(self, inner: E2BSandboxProvider) -> None:
+        self._inner = inner
+        self.refused = 0
+
+    def create(self, *args: Any, **kwargs: Any) -> Any:
+        try:
+            return self._inner.create(*args, **kwargs)
+        except SandboxQuotaExceeded:
+            self.refused += 1
+            raise
+
+    def connect(self, *args: Any, **kwargs: Any) -> Any:
+        return self._inner.connect(*args, **kwargs)
+
+    def find(self, *args: Any, **kwargs: Any) -> Any:
+        return self._inner.find(*args, **kwargs)
+
+
+def test_the_pool_waits_out_the_quota_and_replaces_a_spent_key_against_the_service(
+    e2b_envd: Path, tmp_path: Path
+) -> None:
+    templates = [StandInTemplate("runner", "measurement")]
+    with StandIn(e2b_envd, tmp_path, templates, max_sandboxes={"measurement": 1}) as capped:
+        provider = _CountingQuota(_provider(capped))
+        pool = SandboxPool(provider, {1: "runner"}, run_id="run-1", limits=PoolLimits(max_parallel_tests=2))  # type: ignore[arg-type]
+        tag = AttemptTag("req-1", 1)
+        first = pool.acquire(1, tag, timeout_sec=60)
+        made: list[Any] = []
+        waiter = threading.Thread(target=lambda: made.append(pool.acquire(1, AttemptTag("req-2", 1), timeout_sec=60)))
+        waiter.start()
+        assert _wait_until(lambda: provider.refused == 1), "the service refused the second create for the quota"
+        assert waiter.is_alive() and made == []
+        pool.release(first)
+        waiter.join(20)
+        assert len(made) == 1 and provider.refused == 1, "it woke when the sandbox ended and asked once more"
+        pool.release(made[0])
+        again = pool.acquire(1, tag, timeout_sec=60)  # attempt 1 of req-1 again: its sandbox ended, its key is spent
+        assert again.metadata[IDEMPOTENCY_KEY] == "run-1:req-1:1:r1"
+        pool.release(again)
 
 
 def test_a_slow_create_outlasts_wait_sec_and_the_same_key_finds_it_later(e2b_envd: Path, tmp_path: Path) -> None:

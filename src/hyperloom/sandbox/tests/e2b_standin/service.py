@@ -5,9 +5,10 @@
 
 It answers what the E2B SDK asks of the control plane, with the behaviour the design gives the Claw sandbox service
 that a stand-in can honestly reproduce: a key is one role and sees only the sandboxes it made; a role may use only
-its own templates; a sealed template takes no caller environment; a ``claw.io/idempotency-key`` makes a repeated create return
-the live sandbox; the number of live sandboxes of a role is capped (429); a sandbox ends at its timeout. It does not
-enforce the sealed path policy, sign anything or write platform metadata: those belong to the real service.
+its own templates; a sealed template takes no caller environment; a ``claw.io/idempotency-key`` makes a repeated create
+return the live sandbox, and refuses it with 410 once that sandbox has ended; the number of live sandboxes of a role is
+capped (429 ``grant_quota_exceeded``); a sandbox ends at its timeout. It does not enforce the sealed path policy, sign
+anything or write platform metadata: those belong to the real service.
 """
 
 from __future__ import annotations
@@ -108,6 +109,7 @@ class ControlPlane:
         self._lock = threading.RLock()
         self._boxes: dict[Role, dict[str, Box]] = {role: {} for role in keys}
         self._by_key: dict[tuple[Role, str], Box] = {}
+        self._spent: dict[tuple[Role, str], str] = {}  # the idempotency keys whose sandbox ended -> its id
         self._failures: list[tuple[str, int, str]] = []
         self._closed = False
         self.create_delay_sec = 0.0
@@ -171,8 +173,9 @@ class ControlPlane:
         """Create a sandbox, or return the live one this role's idempotency key already made.
 
         Raises:
-            ServiceError: 403 for a template the role may not use or environment a sealed template refuses, 429 over the
-                role's cap, 500 when envd does not start, or the injected failure.
+            ServiceError: 403 for a template the role may not use or environment a sealed template refuses, 410 for an
+                idempotency key whose sandbox has ended, 429 over the role's cap, 500 when envd does not start, or the
+                injected failure.
         """
         self._maybe_fail("create")
         template = self._templates.get(str(body.get("templateID")))
@@ -207,9 +210,11 @@ class ControlPlane:
             earlier = self._by_key.get(key) if key else None
             if earlier is not None:
                 return earlier, True
+            if key is not None and key in self._spent:
+                raise ServiceError(410, f"idempotency_key_spent: its sandbox {self._spent[key]} has ended")
             cap = self._max.get(role)
             if cap is not None and len(self._boxes[role]) >= cap:
-                raise ServiceError(429, f"role {role!r} already has {cap} sandboxes")
+                raise ServiceError(429, f"grant_quota_exceeded: role {role!r} already has {cap} sandboxes")
             box = Box(f"sbx{secrets.token_hex(6)}", template, metadata, timeout, secrets.token_hex(16))
             self._boxes[role][box.sandbox_id] = box
             if key:
@@ -298,6 +303,8 @@ class ControlPlane:
             owned = self._boxes[box.template.role].pop(box.sandbox_id, None) is box
             for key in [k for k, b in self._by_key.items() if b is box]:
                 del self._by_key[key]
+                if box.error is None:  # a sandbox that never started leaves its key free
+                    self._spent[key] = box.sandbox_id
         if owned and box.running is not None:
             self._host.stop(box.running)
 

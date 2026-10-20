@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
+from hyperloom.measure import sandboxes
 from hyperloom.measure.sandboxes import (
     AttemptTag,
     NoRunnerTemplate,
@@ -20,7 +22,14 @@ from hyperloom.measure.sandboxes import (
     sandbox_priority,
 )
 from hyperloom.sandbox.local import LocalSandboxProvider, LocalTemplate
-from hyperloom.sandbox.socket import CreateOptions, SandboxGone, SandboxInfo, SandboxUnavailable
+from hyperloom.sandbox.socket import (
+    IDEMPOTENCY_KEY,
+    CreateOptions,
+    SandboxGone,
+    SandboxInfo,
+    SandboxQuotaExceeded,
+    SandboxUnavailable,
+)
 
 
 class _Sandbox:
@@ -39,7 +48,11 @@ class _Sandbox:
 
 
 class _Provider:
-    """Counts how many sandboxes exist at once; creation can be made to fail."""
+    """Counts how many sandboxes exist at once; creation can be made to fail.
+
+    ``quota`` caps the live sandboxes as the session grant does, and ``spent`` holds the idempotency keys whose sandbox
+    has ended.
+    """
 
     name = "fake"
 
@@ -48,6 +61,9 @@ class _Provider:
         self.calls: list[dict] = []
         self.peak = 0
         self.failures: list[Exception] = []
+        self.quota: int | None = None
+        self.on_refuse: Callable[[], None] | None = None  # runs inside a create that is refused for the quota
+        self.spent: set[str] = set()
         self._lock = threading.Lock()
         self._count = 0
 
@@ -64,6 +80,12 @@ class _Provider:
         )
         if self.failures:
             raise self.failures[0]
+        if metadata.get(IDEMPOTENCY_KEY) in self.spent:
+            raise SandboxGone("idempotency_key_spent")
+        if self.quota is not None and len(self.live) >= self.quota:
+            if self.on_refuse is not None:
+                self.on_refuse()
+            raise SandboxQuotaExceeded("grant_quota_exceeded")
         with self._lock:
             self._count += 1
             sandbox = _Sandbox(self, f"sbx-{self._count}", dict(metadata))
@@ -122,6 +144,110 @@ def test_a_failed_create_gives_the_slot_back() -> None:
     assert pool.active == 0
     provider.failures = []
     assert _acquire(pool).sandbox_id == "sbx-1"
+
+
+def test_no_capacity_is_not_quota_back_pressure_and_is_raised_at_once() -> None:
+    provider = _Provider()
+    pool = _pool(provider)
+    provider.failures = [SandboxUnavailable("503 no_capacity")]
+    with pytest.raises(SandboxUnavailable) as refused:
+        _acquire(pool)
+    assert type(refused.value) is SandboxUnavailable
+    assert len(provider.calls) == 1 and pool.active == 0
+
+
+def test_a_create_over_the_quota_waits_for_a_sandbox_to_end_and_asks_again() -> None:
+    provider = _Provider()
+    provider.quota = 1
+    pool = _pool(provider, max_parallel_tests=2)
+    first = _acquire(pool, "first")
+    made: list = []
+    waiter = threading.Thread(target=lambda: made.append(_acquire(pool, "second")))
+    waiter.start()
+    deadline = time.monotonic() + 5
+    while len(provider.calls) < 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    time.sleep(0.2)
+    assert waiter.is_alive() and made == [], "refused for the quota, the second test waits and is not failed"
+    pool.release(first)
+    waiter.join(5)
+    assert [r.sandbox_id for r in made] == ["sbx-2"]
+    assert len(provider.calls) == 3, "one refusal, then one create when the first sandbox ended; no polling"
+    assert pool.active == 1
+
+
+def test_a_full_quota_is_asked_again_after_the_retry_interval(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sandboxes, "_QUOTA_RETRY_SEC", 0.05)
+    provider = _Provider()
+    provider.quota = 0  # filled by sandboxes the pool does not hold: nothing of its own ends to wake it
+    pool = _pool(provider)
+    threading.Timer(0.3, lambda: setattr(provider, "quota", None)).start()
+    assert _acquire(pool).sandbox_id == "sbx-1"
+    assert len(provider.calls) > 2 and pool.active == 1
+
+
+def test_waiting_for_the_quota_ends_when_the_run_stops() -> None:
+    provider = _Provider()
+    provider.quota = 0
+    pool = _pool(provider)
+    stop = threading.Event()
+    threading.Timer(0.3, stop.set).start()
+    with pytest.raises(PoolClosed):
+        _acquire(pool, stop=stop)
+    assert pool.active == 0
+
+
+def test_a_sandbox_that_ends_while_the_create_is_refused_is_not_missed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sandboxes, "_QUOTA_RETRY_SEC", 60.0)
+    provider = _Provider()
+    provider.quota = 1
+    pool = _pool(provider, max_parallel_tests=2)
+    first = _acquire(pool, "first")
+    provider.on_refuse = lambda: pool.release(first)  # it ends after the service looked and before the pool waits
+    made: list = []
+    waiter = threading.Thread(target=lambda: made.append(_acquire(pool, "second")), daemon=True)
+    waiter.start()
+    waiter.join(5)
+    assert not waiter.is_alive(), "the pool asked again at once instead of sleeping the whole retry interval"
+    assert [r.sandbox_id for r in made] == ["sbx-2"]
+
+
+def test_a_stop_wins_over_a_sandbox_that_ended_while_the_quota_was_full(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sandboxes, "_QUOTA_RETRY_SEC", 60.0)
+    provider = _Provider()
+    provider.quota = 1
+    pool = _pool(provider, max_parallel_tests=2)
+    first = _acquire(pool, "first")
+    stop = threading.Event()
+
+    def end_and_stop() -> None:
+        pool.release(first)
+        stop.set()
+
+    provider.on_refuse = end_and_stop
+    with pytest.raises(PoolClosed):
+        _acquire(pool, "second", stop=stop)
+    assert len(provider.calls) == 2 and pool.active == 0
+
+
+def test_a_spent_idempotency_key_is_replaced_by_the_next_key_of_the_attempt() -> None:
+    provider = _Provider()
+    provider.spent = {"run-1:req-1:1", "run-1:req-1:1:r1"}
+    pool = _pool(provider)
+    runner = _acquire(pool)
+    keys = [call["metadata"][IDEMPOTENCY_KEY] for call in provider.calls]
+    assert keys == ["run-1:req-1:1", "run-1:req-1:1:r1", "run-1:req-1:1:r2"]
+    assert runner.metadata[IDEMPOTENCY_KEY] == "run-1:req-1:1:r2"
+    assert provider.calls[-1]["metadata"]["hyperloom.request-id"] == "req-1", "only the key changes"
+
+
+def test_a_create_that_finds_every_key_spent_is_gone_and_gives_the_slot_back() -> None:
+    provider = _Provider()
+    provider.failures = [SandboxGone("idempotency_key_spent")]
+    pool = _pool(provider, max_parallel_tests=1)
+    with pytest.raises(SandboxGone):
+        _acquire(pool)
+    assert len(provider.calls) == sandboxes._MAX_SPENT_KEYS + 1 and pool.active == 0
 
 
 def test_a_slot_freed_twice_is_freed_once() -> None:

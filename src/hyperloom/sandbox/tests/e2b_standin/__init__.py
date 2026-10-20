@@ -39,7 +39,8 @@ class StandIn:
         envd: The envd binary.
         workdir: An empty directory for sandbox roots and logs.
         templates: The templates that exist.
-        max_sandboxes: Per role, how many sandboxes may be live at once (a create over it gets 429).
+        max_sandboxes: Per role, how many sandboxes may be live at once (a create over it gets 429
+            ``grant_quota_exceeded``).
         page_size: The most sandboxes one page of a listing holds.
 
     Use it as a context manager; leaving it kills every sandbox it started.

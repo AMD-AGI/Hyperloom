@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
@@ -30,6 +31,7 @@ from hyperloom.sandbox.socket import (
     SandboxError,
     SandboxGone,
     SandboxProvider,
+    SandboxQuotaExceeded,
 )
 
 log = logging.getLogger(__name__)
@@ -54,6 +56,11 @@ REQUEST_ID_KEY = "hyperloom.request-id"
 PURPOSE_KEY = "hyperloom.purpose"
 BRANCH_ID_KEY = "hyperloom.branch-id"
 _SLOT_POLL_SEC = 0.5
+#: How long a create refused for the quota waits for one of this pool's sandboxes to end before it asks again: the
+#: sandboxes that fill the quota may be another role's or another process's, and those end without telling the pool.
+_QUOTA_RETRY_SEC = 10.0
+#: How many more keys an attempt tries when the service says the one it holds is spent.
+_MAX_SPENT_KEYS = 8
 _PRIORITY_TIERS = {0: 0, 1: 0, 2: 1, 3: 1, 4: 2}
 _DEFAULT_PRIORITY = 2
 
@@ -144,6 +151,7 @@ class SandboxPool:
         self._held: set[str] = set()
         self._claims = 0
         self._closed = False
+        self._ended = 0  # how many held sandboxes have ended: a create waiting for quota wakes on a change
 
     @property
     def active(self) -> int:
@@ -179,7 +187,10 @@ class SandboxPool:
         Raises:
             NoRunnerTemplate: No template serves ``gpu_count`` (checked before any slot is taken).
             PoolClosed: The pool was closed or ``stop`` was set while waiting.
-            SandboxUnavailable, SandboxDenied: As the provider raised them; the slot is given back.
+            SandboxUnavailable, SandboxDenied: As the provider raised them; the slot is given back. A quota that is
+                full (``SandboxQuotaExceeded``) is not raised: the create waits for a sandbox to end and is repeated,
+                until the test is stopped (``PoolClosed``).
+            SandboxGone: Every key the attempt tried was spent (the sandbox of each had ended).
         """
         template = self.template_for(gpu_count)
         lifetime = int(timeout_sec + self._slack)
@@ -188,13 +199,7 @@ class SandboxPool:
         metadata = self._metadata(tag.request_id, tag.attempt, tag.avoid_nodes, tag.meta or {})
         self._take_slot(stop)
         try:
-            sandbox = self._provider.create(
-                template,
-                role=MEASUREMENT_ROLE,
-                timeout_sec=lifetime,
-                metadata=metadata,
-                options=CreateOptions(wait_sec=self._request_timeout),
-            )
+            sandbox = self._create(template, lifetime, metadata, stop)
         except BaseException:
             self._give_slot()
             raise
@@ -270,6 +275,52 @@ class SandboxPool:
                 metadata[key] = str(value)
         return metadata
 
+    def _create(self, template: str, lifetime: int, metadata: dict[str, str], stop: threading.Event | None) -> Sandbox:
+        """Create the sandbox, replacing a spent idempotency key and waiting out a full quota.
+
+        An attempt number comes back when its sandbox ended before the attempt was journalled (a restart, a sheet that
+        could not be sent), and the service refuses a create with the key of a sandbox that ended (``SandboxGone``): the
+        create is repeated with the attempt's next key, ``<key>:r1``, ``<key>:r2`` and so on, the same sequence every
+        time, so a replay still finds a sandbox that is running. A full quota (``SandboxQuotaExceeded``) says nothing
+        about a node and is no failure of the test: the create waits for a sandbox to end and is repeated.
+        """
+        base = metadata[IDEMPOTENCY_KEY]
+        spent = 0
+        while True:
+            keyed = {**metadata, IDEMPOTENCY_KEY: f"{base}:r{spent}"} if spent else metadata
+            with self._cond:
+                ended = self._ended  # taken before the create, so a sandbox that ends during it is not missed
+            try:
+                return self._provider.create(
+                    template,
+                    role=MEASUREMENT_ROLE,
+                    timeout_sec=lifetime,
+                    metadata=keyed,
+                    options=CreateOptions(wait_sec=self._request_timeout),
+                )
+            except SandboxGone:
+                spent += 1
+                if spent > _MAX_SPENT_KEYS:
+                    raise
+            except SandboxQuotaExceeded:
+                self._await_room(stop, ended)
+
+    def _await_room(self, stop: threading.Event | None, ended: int) -> None:
+        """Wait until more than ``ended`` sandboxes of this pool have ended or ``_QUOTA_RETRY_SEC`` passes.
+
+        Raises:
+            PoolClosed: The pool is closed or ``stop`` is set; this wins over a sandbox that ended.
+        """
+        deadline = time.monotonic() + _QUOTA_RETRY_SEC
+        with self._cond:
+            while True:
+                if self._closed or (stop is not None and stop.is_set()):
+                    raise PoolClosed("the sandbox pool is closed or the run is stopping")
+                left = deadline - time.monotonic()
+                if self._ended != ended or left <= 0:
+                    return
+                self._cond.wait(min(left, _SLOT_POLL_SEC))
+
     def _take_slot(self, stop: threading.Event | None, reattaching: str | None = None) -> None:
         """Wait until fewer than ``max_parallel_tests`` sandboxes are running, then take one of the slots.
 
@@ -324,6 +375,7 @@ class SandboxPool:
             if sandbox_id in self._held:
                 self._held.discard(sandbox_id)
                 self._claims = max(0, self._claims - 1)
+                self._ended += 1
             self._cond.notify_all()
 
     @staticmethod

@@ -17,6 +17,7 @@ from hyperloom.sandbox.socket import (
     SandboxGone,
     SandboxInfo,
     SandboxProvider,
+    SandboxQuotaExceeded,
     SandboxUnavailable,
 )
 
@@ -32,5 +33,6 @@ __all__ = [
     "SandboxGone",
     "SandboxInfo",
     "SandboxProvider",
+    "SandboxQuotaExceeded",
     "SandboxUnavailable",
 ]

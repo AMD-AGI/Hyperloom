@@ -10,8 +10,13 @@ to the SDK per call and never appears in a log line, an error message or ``repr`
 Control-plane calls (everything except commands and files) are retried with exponential backoff while the failure is
 transient: a network error, a 5xx, a rate limit or a request timeout. A create is retried only when it carries an
 idempotency key, because only then does a replay return the same sandbox instead of a second one. Every SDK failure
-is classified into the three socket exceptions; one the socket has no word for (a bad argument, say) propagates as it
-is.
+is classified into the socket exceptions; one the socket has no word for (a bad argument, say) propagates as it is.
+
+Two refusals of a create carry a meaning of their own. A 410 means the idempotency key's sandbox has ended, so the key is
+spent (``SandboxGone``). A 429 whose error message names ``grant_quota_exceeded`` means the session's quota is full
+(``SandboxQuotaExceeded``, a ``SandboxUnavailable``). The SDK keeps only the ``message`` of a 429 body, so the service
+must put that reason code in ``message``, as it does for the 503 reasons ``pending_timeout`` and ``no_capacity``; a 503
+stays a plain ``SandboxUnavailable``.
 """
 
 from __future__ import annotations
@@ -39,6 +44,7 @@ from hyperloom.sandbox.socket import (
     SandboxDenied,
     SandboxGone,
     SandboxInfo,
+    SandboxQuotaExceeded,
     SandboxUnavailable,
 )
 
@@ -68,6 +74,9 @@ _SDK_ERRORS = (
 #: How the data plane words a refusal when it has no status code of its own (a Connect-RPC ``permission_denied``).
 _REFUSAL_PREFIXES = ("Code.PERMISSION_DENIED", "permission_denied")
 
+#: The reason a 429 carries when a create is over the session grant's quota (and not a plain rate limit).
+_QUOTA_REASON = "grant_quota_exceeded"
+
 #: Statuses that mean the request was not processed and may succeed if repeated; a 503 means the service has no room
 #: and is not retried on create. A 501 or 505 will not change on a retry.
 _SERVER_RETRY_STATUSES = frozenset({408, 500, 502, 504})
@@ -96,6 +105,7 @@ class RetryPolicy:
 class _Failure(enum.Enum):
     GONE = "gone"
     UNAVAILABLE = "unavailable"
+    OVER_QUOTA = "over quota"
     DENIED = "denied"
     UNREACHABLE = "unreachable"
     NO_FILE = "no file"
@@ -120,6 +130,7 @@ _UNAVAILABLE = (
 _ERROR_OF = {
     _Failure.GONE: SandboxGone,
     _Failure.UNAVAILABLE: SandboxUnavailable,
+    _Failure.OVER_QUOTA: SandboxQuotaExceeded,
     _Failure.DENIED: SandboxDenied,
 }
 
@@ -141,6 +152,8 @@ def _classify(exc: Exception) -> _Failure | None:
         return _Failure.GONE
     if isinstance(exc, e2b.SandboxUnreachableException):
         return _Failure.UNREACHABLE
+    if isinstance(exc, e2b.RateLimitException) and _QUOTA_REASON in str(exc):
+        return _Failure.OVER_QUOTA
     if isinstance(exc, _UNAVAILABLE):
         return _Failure.UNAVAILABLE
     if isinstance(exc, e2b.AuthenticationException) or str(exc).startswith(_REFUSAL_PREFIXES):
@@ -148,7 +161,7 @@ def _classify(exc: Exception) -> _Failure | None:
     status = _status(exc)
     if status is None:
         return None
-    if status == 404:
+    if status in (404, 410):  # 410: a create with an idempotency key whose sandbox has ended
         return _Failure.GONE
     if status in (408, 429) or status >= 500:
         return _Failure.UNAVAILABLE
@@ -314,7 +327,10 @@ class E2BSandboxProvider:
         Raises:
             ValueError: When ``timeout_sec`` is not positive.
             SandboxDenied: No key for ``role``, or the service refused the key, template, environment or metadata.
-            SandboxUnavailable: No capacity or quota, or the sandbox was not running within ``wait_sec``.
+            SandboxGone: The idempotency key's sandbox has ended (410); the key is spent, a new key makes a new one.
+            SandboxQuotaExceeded: The session's quota is full (429 ``grant_quota_exceeded``); it clears when a running
+                sandbox ends.
+            SandboxUnavailable: No capacity (503), or the sandbox was not running within ``wait_sec``.
         """
         if timeout_sec <= 0:
             raise ValueError("timeout_sec must be positive")
