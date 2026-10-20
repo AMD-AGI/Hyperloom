@@ -311,7 +311,13 @@ def _resolved_dir(path: Path) -> Path | None:
 
 
 def _git_apply_check(root: Path, patch_text: str, timeout_sec: float = 30.0) -> tuple[bool | None, str]:
-    """Whether ``patch_text`` applies cleanly in ``root``, with git's complaint; ``None`` when git cannot run."""
+    """Whether ``patch_text`` applies cleanly in ``root``, with git's complaint.
+
+    ``None`` means git reached no verdict about the patch. Either it never ran,
+    or it failed on the repository itself (``_GIT_FATAL_RC``) before reading the
+    patch -- a worktree whose parent checkout is gone, a tree another uid owns.
+    Both are evidence about the machine, and the caller records neither as stale.
+    """
     try:
         proc = subprocess.run(
             ["git", "-C", str(root), "apply", "--check", "-"],
@@ -322,7 +328,9 @@ def _git_apply_check(root: Path, patch_text: str, timeout_sec: float = 30.0) -> 
             check=False,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        return None, repr(exc)
+        return None, f"git unavailable: {exc!r}"
+    if proc.returncode == _GIT_FATAL_RC:
+        return None, (proc.stderr or "").strip()
     return proc.returncode == 0, (proc.stderr or "").strip()
 
 
@@ -632,6 +640,8 @@ GROUND_PATH_ESCAPE = "path_escape"  # patch path escapes the tree
 GROUND_MISSING_TARGET = "missing_target"  # modify/delete target absent from base
 GROUND_AMBIGUOUS_ROOT = "ambiguous_root"  # patch targets match more than one disjoint tree
 GROUND_UNCHECKED = "unchecked"  # no base available / git unavailable
+#: git's exit code for a fatal error about the repository rather than the input.
+_GIT_FATAL_RC = 128
 
 
 @dataclass(frozen=True)
@@ -712,7 +722,10 @@ def ground_patch_text(
         return PatchGroundingResult(GROUND_MISSING_TARGET, detail)
     applies, detail = _git_apply_check(resolution.root, patch_text, git_timeout_sec)
     if applies is None:
-        return PatchGroundingResult(GROUND_UNCHECKED, f"git unavailable: {detail}")
+        # No verdict about the patch: git could not run, or failed on the
+        # repository itself. Calling that stale would label every patch in the
+        # set broken on evidence about the machine.
+        return PatchGroundingResult(GROUND_UNCHECKED, detail[:240])
     if applies:
         return PatchGroundingResult(GROUND_APPLIES)
     return PatchGroundingResult(GROUND_STALE, detail[:240])
