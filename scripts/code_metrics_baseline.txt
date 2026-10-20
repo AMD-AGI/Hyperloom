@@ -166,7 +166,7 @@ cognitive-complexity src/hyperloom/orchestrator/specialists/dispatch.py::Special
 cognitive-complexity src/hyperloom/orchestrator/specialists/dispatch.py::SpecialistDispatchCollaborator.maybe_force_stalled_domain_specialist 39
 cognitive-complexity src/hyperloom/orchestrator/specialists/dispatch.py::SpecialistDispatchCollaborator.warm_specialist_params 102
 cognitive-complexity src/hyperloom/orchestrator/specialists/patch_safety.py::resolve_patch_apply_root 40
-cognitive-complexity src/hyperloom/orchestrator/specialists/runner.py::SpecialistRunner._finalize 49
+cognitive-complexity src/hyperloom/orchestrator/specialists/runner.py::SpecialistRunner._finalize 41
 cognitive-complexity src/hyperloom/orchestrator/specialists/subprocess_.py::SpecialistSubprocessDispatcher._reap_loop 47
 cognitive-complexity src/hyperloom/orchestrator/specialists/subprocess_.py::SpecialistSubprocessDispatcher.run 97
 cognitive-complexity src/hyperloom/orchestrator/specialists/subprocess_.py::_codex_mcp_config 99
@@ -306,7 +306,7 @@ cyclomatic-complexity src/hyperloom/orchestrator/phases/prelude.py::PreludePhase
 cyclomatic-complexity src/hyperloom/orchestrator/phases/prelude.py::PreludePhase.maybe_enqueue_warm_replay 48
 cyclomatic-complexity src/hyperloom/orchestrator/specialists/dispatch.py::SpecialistDispatchCollaborator.warm_specialist_params 41
 cyclomatic-complexity src/hyperloom/orchestrator/specialists/patch_safety.py::resolve_patch_apply_root 21
-cyclomatic-complexity src/hyperloom/orchestrator/specialists/runner.py::SpecialistRunner._finalize 25
+cyclomatic-complexity src/hyperloom/orchestrator/specialists/runner.py::SpecialistRunner._finalize 22
 cyclomatic-complexity src/hyperloom/orchestrator/specialists/subprocess_.py::SpecialistSubprocessDispatcher.run 39
 cyclomatic-complexity src/hyperloom/orchestrator/specialists/subprocess_.py::_codex_mcp_config 28
 cyclomatic-complexity src/hyperloom/orchestrator/trace_analysis/_bypass_trace_reader.py::_finalize 35
@@ -566,7 +566,7 @@ function-lines src/hyperloom/orchestrator/actions/executors/_geak_sweep.py::swee
 function-lines src/hyperloom/orchestrator/actions/executors/_gpu_pin.py::resolve_gpu_pin 105
 function-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py::_build_variant_yaml 135
 function-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py::_run_magpie 93
-function-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py::run_grid 1040
+function-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py::run_grid 1038
 function-lines src/hyperloom/orchestrator/actions/executors/_kernel_agent_tool.py::materialize_unified_patch_snapshot 94
 function-lines src/hyperloom/orchestrator/actions/executors/_kv_metrics.py::_read_aiperf_aggregate_json 101
 function-lines src/hyperloom/orchestrator/actions/executors/_kv_metrics.py::sample_from_families 100
@@ -751,12 +751,12 @@ function-lines src/hyperloom/orchestrator/roles/critic_agent.py::CriticAgentBack
 function-lines src/hyperloom/orchestrator/specialists/dispatch.py::SpecialistDispatchCollaborator.build_specialist_round_entry 94
 function-lines src/hyperloom/orchestrator/specialists/dispatch.py::SpecialistDispatchCollaborator.maybe_auto_retry_specialist 134
 function-lines src/hyperloom/orchestrator/specialists/dispatch.py::SpecialistDispatchCollaborator.maybe_force_stalled_domain_specialist 114
-function-lines src/hyperloom/orchestrator/specialists/dispatch.py::SpecialistDispatchCollaborator.record_specialist_result 130
+function-lines src/hyperloom/orchestrator/specialists/dispatch.py::SpecialistDispatchCollaborator.record_specialist_result 128
 function-lines src/hyperloom/orchestrator/specialists/dispatch.py::SpecialistDispatchCollaborator.warm_specialist_params 179
 function-lines src/hyperloom/orchestrator/specialists/patch_safety.py::resolve_patch_apply_root 104
 function-lines src/hyperloom/orchestrator/specialists/patch_safety.py::vet_patches 107
 function-lines src/hyperloom/orchestrator/specialists/rebench.py::run_specialist_rebench 86
-function-lines src/hyperloom/orchestrator/specialists/runner.py::SpecialistRunner._finalize 183
+function-lines src/hyperloom/orchestrator/specialists/runner.py::SpecialistRunner._finalize 163
 function-lines src/hyperloom/orchestrator/specialists/runner.py::SpecialistRunner._prepare 192
 function-lines src/hyperloom/orchestrator/specialists/runner.py::SpecialistRunner._run_via_subprocess 173
 function-lines src/hyperloom/orchestrator/specialists/subprocess_.py::SpecialistSubprocessDispatcher._build_codex_launch 97
@@ -931,7 +931,7 @@ module-lines src/hyperloom/orchestrator/knowledge/recipe_kb_t0.py 1318
 module-lines src/hyperloom/orchestrator/knowledge/remote_recipe/values.py 1284
 module-lines src/hyperloom/orchestrator/loop/coordinator.py 1423
 module-lines src/hyperloom/orchestrator/loop/dispatcher.py 1503
-module-lines src/hyperloom/orchestrator/loop/intent_router.py 1438
+module-lines src/hyperloom/orchestrator/loop/intent_router.py 1423
 module-lines src/hyperloom/orchestrator/loop/writeback.py 4748
 module-lines src/hyperloom/orchestrator/phases/framework.py 3139
 module-lines src/hyperloom/orchestrator/phases/kernel.py 4227
@@ -940,7 +940,7 @@ module-lines src/hyperloom/orchestrator/phases/prelude.py 2640
 module-lines src/hyperloom/orchestrator/policy/gate.py 1588
 module-lines src/hyperloom/orchestrator/prompts/prompt_builder.py 1205
 module-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py 2571
-module-lines src/hyperloom/orchestrator/specialists/runner.py 1520
+module-lines src/hyperloom/orchestrator/specialists/runner.py 1505
 module-lines src/hyperloom/orchestrator/specialists/subprocess_.py 1747
 module-lines src/hyperloom/orchestrator/state/shared_state.py 2639
 module-lines src/hyperloom/orchestrator/trace_analysis/_bypass_report.py 1231
