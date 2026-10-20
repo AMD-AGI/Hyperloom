@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import subprocess
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
@@ -32,6 +33,8 @@ from .controller_publication import (
     load_controller_publication,
 )
 from .patch_conflict_merge import LandingContext, PatchMergeOutcome, apply_patch_resolving_conflicts
+
+log = logging.getLogger(__name__)
 
 _CONTROLLER_SOURCE = "kernel_rewrite_controller"
 _CONTROLLER_BACKEND = "forge"
@@ -456,7 +459,8 @@ class _ControllerIntegration:
         repo = publication.repo_root
         try:
             validation = await self._session.validate(publication)
-        except Exception as error:  # noqa: BLE001 - translated into a skipped_invalid result
+        except Exception as error:  # noqa: BLE001 - translated into a reverted_e2e_failed result
+            log.warning("E2E validation raised for %s: %s", publication.operator_id, error)
             reason = f"E2E validation raised: {error}" + _revert_note(repo, publication.patch_path)
             return _ValidationOutcome({}, _refusal(publication, "reverted_e2e_failed", reason, head_before))
         if _e2e_kept(validation):
@@ -485,7 +489,8 @@ class _ControllerIntegration:
         try:
             await self._session.record_keep(_keep_result(publication, validation, keep_commit))
             self._session.shared_state.save(Path(self._session.session_dir))
-        except Exception as error:  # noqa: BLE001 - KEEP is already committed to Git
+        except Exception as error:  # noqa: BLE001 - KEEP is already committed to Git; record_keep runs the whole writeback
+            log.warning("KEEP %s committed but recording it failed: %s", publication.operator_id, error)
             return f"Git KEEP committed; SharedState recording failed: {error}"
         return ""
 

@@ -111,6 +111,7 @@ def discover_agent_providers(*, force: bool = False) -> None:
             entries = list(metadata.entry_points().select(group=PROVIDER_ENTRY_POINT_GROUP))
         except Exception as exc:  # noqa: BLE001 - plugin discovery is optional
             _plugin_errors["<discovery>"] = f"{type(exc).__name__}: {exc}"
+            log.warning("agent provider entry-point discovery failed: %s", exc)
             return
 
         for entry in entries:
@@ -125,7 +126,7 @@ def discover_agent_providers(*, force: bool = False) -> None:
                 if provider.name != entry_name:
                     raise ValueError(f"entry-point name {entry_name!r} does not match provider name {provider.name!r}")
                 register_agent_provider(provider)
-            except Exception as exc:  # noqa: BLE001 - isolate broken plugins
+            except Exception as exc:  # noqa: BLE001 - isolate broken third-party plugins
                 _plugin_errors[entry.name] = f"{type(exc).__name__}: {exc}"
                 log.warning(
                     "failed to load Agent provider entry point %s: %s",
@@ -182,6 +183,7 @@ def select_default_agent_provider(preferred_model: str = "") -> AgentProvider:
             return bool(predicate())
         except Exception as exc:  # noqa: BLE001 - one provider must not decide the whole selection
             failures.append(f"{provider.name}: {type(exc).__name__}: {exc}")
+            log.warning("agent provider %s check failed: %s", provider.name, exc)
             return False
 
     providers = list(_providers.values())
