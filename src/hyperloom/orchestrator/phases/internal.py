@@ -246,7 +246,7 @@ class InternalTasksPhase(CoordinatorCollaborator):
             try:
                 state.static_recon_runs = int(state.static_recon_runs or 0) + 1
                 self.shared_state.save(self.session_dir)
-            except Exception:
+            except OSError:
                 log.exception("static-recon: bookkeeping save failed")
             log.info(
                 "static-recon dispatched: task_id=%s reason=%s",
@@ -300,7 +300,8 @@ class InternalTasksPhase(CoordinatorCollaborator):
                 self.session_dir,
                 state,
             )
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
+            log.exception("Coordinator: trajectory review digest failed")
             digest = ""
         direction, _pct = self._coord.conversation.dominant_roofline_direction()
         from hyperloom.inference_optimizer.roofline_snapshot import BOTTLENECK_DOMAIN_HINTS
@@ -361,6 +362,6 @@ class InternalTasksPhase(CoordinatorCollaborator):
         if seeded:
             try:
                 self.shared_state.save(self.session_dir)
-            except Exception:
+            except OSError:
                 log.exception("static-recon: SharedState.save after seeding failed")
         log.info("static-recon consumed: bridge_candidates_seeded=%d", seeded)

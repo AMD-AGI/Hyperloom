@@ -1146,7 +1146,7 @@ class FrameworkPhase(ProposalBench):
                     state.framework_agent_specialist_candidate_map = {}
                 state.framework_agent_specialist_candidate_map[spec_tid] = cand_id
                 state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.debug("FRAMEWORK %s: specialist->candidate map write failed", label, exc_info=True)
         return spec_tid
 
@@ -1326,7 +1326,7 @@ class FrameworkPhase(ProposalBench):
             )
             try:
                 state.save(self.session_dir)
-            except Exception:
+            except OSError:
                 log.debug("authored_lane: save after cap stamp failed", exc_info=True)
             return
 
@@ -1350,7 +1350,7 @@ class FrameworkPhase(ProposalBench):
         state.apply_fail_retry_pending = pending
         try:
             state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.debug("authored_lane: save after retry-pending failed", exc_info=True)
 
     async def _enqueue_author_specialist(self, retry: AuthoringRetry) -> str:
@@ -1509,7 +1509,7 @@ class FrameworkPhase(ProposalBench):
             )
         try:
             state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.debug("drain_apply_fail: save failed", exc_info=True)
 
     @staticmethod
@@ -2050,7 +2050,7 @@ class FrameworkPhase(ProposalBench):
         )
         try:
             self.shared_state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.exception(
                 "save after framework_agent candidate submit failed for candidate=%s",
                 cand_id,
@@ -2150,7 +2150,7 @@ class FrameworkPhase(ProposalBench):
         )
         try:
             state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.exception(
                 "FRAMEWORK: save after progress stamp failed candidate=%s status=%s",
                 cand_id,
@@ -2315,7 +2315,7 @@ class FrameworkPhase(ProposalBench):
         )
         try:
             self.shared_state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.exception(
                 "save after re-author dispatch failed candidate=%s",
                 cand_id,
@@ -3128,7 +3128,7 @@ class FrameworkPhase(ProposalBench):
         )
         try:
             self.shared_state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.exception("save after integrate-review autosubmit failed for task=%s", sid)
         return pending
 

@@ -129,6 +129,16 @@ def test_aiter_preflight_defect_propagates(tmp_path, monkeypatch):
     assert list(tmp_path.iterdir()) == []
 
 
+def test_demand_report_loader_defect_propagates(monkeypatch):
+    def _boom(_path):
+        raise RuntimeError("loader defect")
+
+    monkeypatch.setattr("kernelforge.gemm_tune.evidence.load_demand", _boom)
+
+    with pytest.raises(RuntimeError, match="^loader defect$"):
+        cli_mod._load_demand_report("demand.json")
+
+
 def test_aiter_preflight_returns_hard_problems(tmp_path, monkeypatch):
     _stub_preflight(monkeypatch, soft=["note"], hard=["MISALIGNED"])
 

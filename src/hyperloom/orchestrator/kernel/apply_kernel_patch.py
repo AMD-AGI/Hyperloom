@@ -1632,7 +1632,7 @@ def _revert_on_patched_pods(manifest: dict[str, Any]) -> _RestoreTally:
                 backup_map=backup_map,
                 records_by_host=records_by_host,
             )
-        except Exception as exc:  # noqa: BLE001
+        except (OSError, subprocess.SubprocessError) as exc:
             mn_revert = {"status": "failed", "error": str(exc)}
     if not mn_revert:
         return _nothing_restored()
@@ -2257,7 +2257,7 @@ def _fan_whole_file_out_to_pods(
                 )
             )
         )
-    except Exception as exc:
+    except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
         # Pod fan-out failed: revert sandbox copy.
         backup_path = deployment.manifest["source_backup"]["backup_path"]
         try:
@@ -2590,7 +2590,7 @@ def _fan_snapshot_out_to_pods(
             # Persist after every file so a later dispatch failure can
             # revert all already-patched files on every pod.
             deployment.record(_MANIFEST_MULTINODE, fanout.block("partial", plan.target, pod_backup_dir))
-    except Exception as exc:
+    except (OSError, subprocess.SubprocessError, RuntimeError, ValueError) as exc:
         revert = revert_kernel_patch(deployment.manifest_path)
         raise _PatchRefused(
             {

@@ -7,6 +7,7 @@ import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -1194,3 +1195,77 @@ def test_kb_store_rewrite_keeps_the_measurement_a_consumer_recorded(tmp_path):
     assert knowledge[record_store.MEASURED_SPEEDUP_KEY] == 1.2
     assert knowledge["version"] == "second"
     assert store.candidates(canonical_id, limit=1)[0].measured_speedup == 1.2
+
+
+_EXPECTED_STORE_FAILURES = [
+    record_store.KBStoreError("link down"),
+    record_store.RewriteRecordError("unusable canonical id"),
+    OSError("disk gone"),
+]
+
+
+def _raiser(failure: Exception):
+    def fail(*_args, **_kwargs):
+        raise failure
+
+    return fail
+
+
+def _failing_read_target(tmp_path, monkeypatch):
+    store = _use_in_memory_kb_store(monkeypatch)
+    spec, driver = _spec(tmp_path)
+    monkeypatch.setattr(store, "get_top_sessions", _raiser(record_store.KBStoreError("link down")))
+    return spec, kb.RewriteKbTarget(spec, str(driver), _remote_config(tmp_path))
+
+
+def test_a_failing_store_read_propagates_from_the_read_plan(tmp_path, monkeypatch):
+    spec, target = _failing_read_target(tmp_path, monkeypatch)
+
+    with pytest.raises(record_store.KBStoreError, match="^link down$"):
+        kb._read_top_candidates(spec, target.config, top_k=3)
+
+
+def test_a_failing_store_read_cold_starts_through_the_rewrite_reader(tmp_path, monkeypatch):
+    from kernelforge.rewrite_by_flydsl import runner
+
+    spec, target = _failing_read_target(tmp_path, monkeypatch)
+    seed = Path(spec.flydsl_kernel).read_bytes()
+
+    read = runner._RewriteKb(target, True).read(source_case_ms={_CASE: 10.0}, search_stop_unix=0.0)
+
+    assert (read.applied, read.read_reason, read.read_error) == (False, "read_error", "KBStoreError: link down")
+    assert Path(spec.flydsl_kernel).read_bytes() == seed
+
+
+def _artifact_read(_tmp_path, _monkeypatch, failure: Exception) -> bytes:
+    plan = kb._ReadPlan(SimpleNamespace(read_bytes=_raiser(failure)), [], "hit")
+    candidate = {"canonical_id": SOFTMAX_IDENTITY, "session_id": "s1", "attrs": {"flydsl_kernel": "kernel.py"}}
+    return kb._candidate_content(plan, candidate)
+
+
+def _publication(tmp_path, monkeypatch, failure: Exception) -> dict:
+    store = _use_in_memory_kb_store(monkeypatch)
+    spec, driver = _spec(tmp_path)
+    monkeypatch.setattr(store, "put_knowledge", _raiser(failure))
+    target = kb.RewriteKbTarget(spec, str(driver), _remote_config(tmp_path))
+    return kb.write_flydsl_kb_solution(target, FlydslMeasurement(10.0, 5.0, 2))
+
+
+@pytest.mark.parametrize("site", [_artifact_read, _publication], ids=lambda site: site.__name__)
+def test_an_unexpected_store_error_propagates(tmp_path, monkeypatch, site):
+    with pytest.raises(TypeError, match="^store contract drifted$"):
+        site(tmp_path, monkeypatch, TypeError("store contract drifted"))
+
+
+@pytest.mark.parametrize("failure", _EXPECTED_STORE_FAILURES, ids=lambda failure: type(failure).__name__)
+def test_an_unreadable_artifact_is_a_miss(tmp_path, monkeypatch, failure):
+    assert _artifact_read(tmp_path, monkeypatch, failure) == b""
+
+
+@pytest.mark.parametrize(
+    "failure", [*_EXPECTED_STORE_FAILURES, ValueError("bad identity")], ids=lambda failure: type(failure).__name__
+)
+def test_a_refused_publication_is_reported_not_raised(tmp_path, monkeypatch, failure):
+    written = _publication(tmp_path, monkeypatch, failure)
+
+    assert written == {"written": False, "reason": f"{type(failure).__name__}: {failure}"}
