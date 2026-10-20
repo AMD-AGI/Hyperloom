@@ -8,6 +8,8 @@ The registered per-op probe is the only GPU-touching call; substituting it in
 
 from __future__ import annotations
 
+import pytest
+
 import kernelforge.gemm_tune.aiter_splitk_validate as mod
 from kernelforge.gemm_tune.aiter_splitk_validate import (
     make_support_fn,
@@ -29,6 +31,28 @@ def test_none_when_control_fails(monkeypatch):
 
     _probe(monkeypatch, boom)
     assert max_supported_splitk((64, 5120, 5120)) is None
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [ImportError("no module named aiter"), OSError("libamdhip64.so.6: cannot open shared object file")],
+    ids=lambda failure: type(failure).__name__,
+)
+def test_none_when_control_cannot_load_aiter(monkeypatch, failure):
+    def unloadable(m, n, k, sk, device="cuda"):
+        raise failure
+
+    _probe(monkeypatch, unloadable)
+    assert max_supported_splitk((64, 5120, 5120)) is None
+
+
+def test_control_propagates_unexpected_errors(monkeypatch):
+    def buggy(m, n, k, sk, device="cuda"):
+        raise TypeError("probe signature drifted")
+
+    _probe(monkeypatch, buggy)
+    with pytest.raises(TypeError, match="^probe signature drifted$"):
+        max_supported_splitk((64, 5120, 5120))
 
 
 def test_none_when_control_unsupported(monkeypatch):

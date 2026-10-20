@@ -953,14 +953,13 @@ def test_finalize_reports_error_when_authority_read_fails(tmp_path: Path) -> Non
     coord = _make_coordinator(tmp_path)
     before = _seed_recipe_with_lesson(coord)
     _fail_authoritative_read(coord)
-    out = coord.recipe_journal.finalize_recipe_and_journal()
-    assert out == {
-        "status": "error",
-        "reason": "RuntimeError",
-        "backend": "local",
-        "result_type": _close_out.RESULT_TRANSPORT_FAILED,
-        "error_class": "RuntimeError",
-    }
+    out = coord.recipe_journal.ensure_recipe_finalized(source="close")
+    assert (out["status"], out["reason"], out["result_type"], out["error_class"]) == (
+        "error",
+        "RuntimeError",
+        _close_out.RESULT_TRANSPORT_FAILED,
+        "RuntimeError",
+    )
     assert coord.recipe_kb.get_recipe(canonical_id=_expected_cid()) == before
 
 
@@ -971,14 +970,13 @@ def test_finalize_reports_error_when_put_recipe_fails(tmp_path: Path) -> None:
         raise OSError("disk full")
 
     coord.recipe_kb.put_recipe = _boom
-    out = coord.recipe_journal.finalize_recipe_and_journal()
-    assert out == {
-        "status": "error",
-        "reason": "OSError",
-        "backend": "local",
-        "result_type": _close_out.RESULT_TRANSPORT_FAILED,
-        "error_class": "OSError",
-    }
+    out = coord.recipe_journal.ensure_recipe_finalized(source="close")
+    assert (out["status"], out["reason"], out["result_type"], out["error_class"]) == (
+        "error",
+        "OSError",
+        _close_out.RESULT_TRANSPORT_FAILED,
+        "OSError",
+    )
 
 
 def _fact_write_for_three_kept_variants(coord) -> None:
@@ -1017,7 +1015,9 @@ def _fact_write_for_three_kept_variants(coord) -> None:
     ],
     ids=["write-os-error", "read-store-error", "read-value-error"],
 )
-def test_fact_write_hook_records_every_variant_when_the_recipe_store_fails(tmp_path: Path, method, failure) -> None:
+def test_fact_write_hook_records_every_variant_when_the_recipe_store_fails(
+    tmp_path: Path, caplog, method, failure
+) -> None:
     """A cross-session KB failure must not cost the session its later variants' rows."""
     coord = _make_coordinator(tmp_path)
 
@@ -1030,6 +1030,10 @@ def test_fact_write_hook_records_every_variant_when_the_recipe_store_fails(tmp_p
 
     assert [row["variant_name"] for row in coord.shared_state.attempts] == ["v0", "v1", "v2"]
     assert [entry.variant_name for entry in coord.recipe_journal.ensure_journal().entries] == ["v0", "v1", "v2"]
+    warnings = [record.getMessage() for record in caplog.records if record.levelname == "WARNING"]
+    assert warnings == [
+        f"recipe KB write for task t-ledger variant v{i} failed: {type(failure).__name__}: {failure}" for i in range(3)
+    ]
 
 
 def test_fact_write_hook_lets_an_unexpected_recipe_store_error_propagate(tmp_path: Path) -> None:

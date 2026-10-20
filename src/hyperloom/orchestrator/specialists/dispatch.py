@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import csv
 import logging as _logging
 import os
 from datetime import datetime, timezone
@@ -148,7 +149,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 tree = resolve_framework_tree(str(getattr(state, "framework", "") or ""))
                 if tree:
                     params["session_framework_tree"] = tree
-            except Exception as exc:  # noqa: BLE001
+            except (KeyError, OSError) as exc:
                 log.debug(
                     "specialist warmup: framework_source_roots lookup failed: %r",
                     exc,
@@ -188,15 +189,9 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 params["target_gap_notes"] = _gap_notes
 
         if "research_hints" not in params:
-            try:
-                from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
+            from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
 
-                _hints_block = _research_hints.summarise_for_prompt(
-                    self.session_dir,
-                )
-            except Exception:
-                log.exception("Coordinator: specialist research hints failed")
-                _hints_block = ""
+            _hints_block = _research_hints.summarise_for_prompt(self.session_dir)
             if _hints_block:
                 params["research_hints"] = _hints_block
 
@@ -253,7 +248,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             if analysis_path:
                 try:
                     executive_summary = extract_workload_summary(analysis_path)
-                except Exception as exc:  # noqa: BLE001
+                except (ValueError, csv.Error) as exc:
                     log.warning(
                         "specialist warmup: extract_workload_summary(%s) failed: %r",
                         analysis_path,
@@ -621,7 +616,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                         )
                         try:
                             state.save(self.session_dir)
-                        except Exception:
+                        except OSError:
                             log.exception("stalled-domain force: source-patch prune save failed")
                         log.error(
                             "stalled-domain force: pruned %s after deterministic failure: %s",
@@ -640,7 +635,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             await self._coord.router.handle_intent("orchestration", intent)
             try:
                 state.save(self.session_dir)
-            except Exception:
+            except OSError:
                 log.exception("stalled-domain force: state save failed")
             log.info(
                 "stalled-domain force: dispatched domain=%s anchor=%s gap=%s round=%d (spec_thr=%d keep_thr=%d)",
@@ -928,7 +923,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         # Persist so a resume picks up the bookkeeping without re-running the specialist.
         try:
             self.shared_state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.exception(
                 "specialist bookkeeping: SharedState.save failed for task=%s",
                 task.task_id,

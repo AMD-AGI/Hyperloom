@@ -167,7 +167,7 @@ def test_a_transition_still_happens_when_recording_cannot(tmp_path, monkeypatch)
     state = _state(tmp_path)
 
     def _boom(_entry):
-        raise RuntimeError("spool is gone")
+        raise OSError("spool is gone")
 
     monkeypatch.setattr(phase_event, "record_entry", _boom)
     machine_state.record_phase_transition(state, to_phase="PRELUDE", reason="session_start")

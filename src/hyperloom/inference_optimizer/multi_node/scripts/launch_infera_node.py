@@ -606,7 +606,7 @@ def main() -> int:
         try:
             _start_gpu_sampler(sampler_csv, sampler_pid_file)
             summary["gpu_metrics_csv"] = str(sampler_csv)
-        except Exception as exc:  # noqa: BLE001 - sampler is optional telemetry
+        except (OSError, ValueError) as exc:  # sampler is optional telemetry
             _log(f"GPU sampler start failed: {exc}")
     print(json.dumps(summary, indent=2))
     return 0

@@ -103,8 +103,8 @@ def _maybe_selfheal_tracelens_root(root: Path, *, log: Any = None) -> None:
     """Rebuild the pod-local TraceLens checkout if it vanished mid-run.
 
     Only the installer-managed default path is healed; an explicit
-    ``TRACELENS_ROOT`` override must fail fast when missing. Best-effort: any
-    failure is swallowed so the caller's validation produces the error.
+    ``TRACELENS_ROOT`` override must fail fast when missing. A heal that cannot
+    load or fails is logged and the caller's validation reports the error.
     """
     from hyperloom.inference_optimizer.session import paths
 
@@ -127,7 +127,8 @@ def _maybe_selfheal_tracelens_root(root: Path, *, log: Any = None) -> None:
         heal_log = getattr(log, "warning", None) or (lambda *_a, **_k: None)
         heal_log("trace_analyze: TraceLens root %s missing; attempting self-heal", root)
         _tla._ensure_tracelens_checkout(root, log_path=Path(os.devnull))
-    except Exception as exc:  # noqa: BLE001  # heal is best-effort; validation reports the real error
+    except (ImportError, OSError, subprocess.TimeoutExpired) as exc:
+        # tracelens_analysis imports TraceLens at top level, so a vanished checkout fails the import.
         _log = getattr(log, "warning", None)
         if _log:
             _log("trace_analyze: TraceLens self-heal failed: %s", exc)
@@ -215,11 +216,11 @@ def _load_materialized_workload_metadata(config_path: str) -> dict[str, Any]:
     path = Path(config_path)
     if not path.exists():
         return {}
-    try:
-        import yaml  # type: ignore[import-untyped]
+    import yaml  # type: ignore[import-untyped]
 
+    try:
         cfg = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except Exception as exc:  # noqa: BLE001
+    except (OSError, ValueError, yaml.YAMLError) as exc:
         log.warning("failed to read materialized workload config %s: %s", path, exc)
         return {}
     bench = cfg.get("benchmark") if isinstance(cfg.get("benchmark"), dict) else {}
@@ -344,7 +345,7 @@ def _enrich_candidates_artifact(
         return
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception as exc:  # noqa: BLE001
+    except (OSError, ValueError) as exc:
         log.warning("failed to read candidates artifact %s: %s", path, exc)
         return
     if not isinstance(data, dict):
@@ -791,11 +792,11 @@ async def trace_analyze_handler(
         # session's hot kernels is in scope. Nothing downstream can recover it,
         # so it is recorded here even though the rest of the discovery run is
         # already on the roofline event.
-        try:
-            from hyperloom.inference_optimizer.breakdown.recorder import tool_versions
+        from hyperloom.inference_optimizer.breakdown.recorder import recorder_warnings, tool_versions
 
+        try:
             tool_versions.record_tool_version(session_dir, tool=_disc_tool)
-        except Exception as exc:  # noqa: BLE001
+        except recorder_warnings.RECORDING_ERRORS as exc:
             trace_recording_skipped(
                 "versions",
                 reason="caller raised before the recorder",

@@ -825,7 +825,7 @@ def _restore_entry_mode(gpu_id: int, entry_mode: str, *, sudo: bool) -> bool:
     try:
         if read_mode(gpu_id) == entry_mode:
             return False
-    except Exception as exc:  # noqa: BLE001 - operator script barrier
+    except (SweepError, OSError, ValueError) as exc:
         print(f"note: could not read GPU {gpu_id}'s mode ({exc}); attempting the restore anyway")
     try:
         print(f"\nrestoring {entry_mode} on GPU {gpu_id}")

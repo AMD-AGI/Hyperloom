@@ -7,6 +7,8 @@ from __future__ import annotations
 import csv
 from pathlib import Path
 
+import pytest
+
 from kernelforge.gemm_tune.tuners._aiter_dense_common import _cap_splitk_to_serve_safe
 
 _HDR = ["gfx", "cu_num", "M", "N", "K", "libtype", "kernelId", "splitK", "us", "kernelName", "tflops", "bw", "errRatio"]
@@ -184,6 +186,20 @@ def test_support_fn_none_falls_back_to_static_cap(tmp_path):
     n, has = _cap_splitk_to_serve_safe(art, prof, 2, forwarding_libtypes=_CK_FORWARDS, support_fn=lambda m, n, k: None)
     assert n == 1
     assert _read(art)[1][_HDR.index("splitK")] == "2"  # fell back to static cap=2
+
+
+@pytest.mark.parametrize("defect", [TypeError, ValueError, IndexError])
+def test_support_fn_defect_surfaces_instead_of_the_static_cap(tmp_path, defect):
+    art = tmp_path / "a.csv"
+    prof = tmp_path / "p.csv"
+    _write(art, [_row(64, 5120, 5120, 9, 3, 20.0, "B3")])
+    _write(prof, [_row(64, 5120, 5120, 9, 3, 20.0, "B3"), _row(64, 5120, 5120, 8, 2, 20.6, "B2")])
+
+    def broken(m, n, k):
+        raise defect("trial defect")
+
+    with pytest.raises(defect, match="^trial defect$"):
+        _cap_splitk_to_serve_safe(art, prof, 2, forwarding_libtypes=_CK_FORWARDS, support_fn=broken)
 
 
 def test_schema_without_errratio_does_not_crash(tmp_path):

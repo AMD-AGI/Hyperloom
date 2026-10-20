@@ -409,25 +409,21 @@ def write_session_decision_trace(session_dir: Path | str) -> list[str]:
 
     The single entry point for callers that only know the session directory, so
     none of them has to know the trace needs ``state.json`` or that the file
-    must land before any Langfuse flush reads it. Never raises: the trace
-    describes a session that has already finished, and losing it must not take
-    the close-out with it. Returns the warnings raised while reading the inputs,
-    for the caller to log; empty on a clean write.
+    must land before any Langfuse flush reads it. Returns the warnings raised
+    while reading the inputs, for the caller to log; empty on a clean write.
+    A failure to build the trace propagates to the caller.
     """
     warnings: list[str] = []
-    try:
-        sd = Path(session_dir).resolve()
-        state: dict[str, Any] = {}
-        path = sd / "state.json"
-        if path.exists():
-            try:
-                state = json.loads(path.read_text(encoding="utf-8"))
-            except Exception as exc:  # noqa: BLE001
-                warnings.append(f"decision_trace: failed to parse state.json: {type(exc).__name__}: {exc}")
-                state = {}
-        if not isinstance(state, dict):
+    sd = Path(session_dir).resolve()
+    state: dict[str, Any] = {}
+    path = sd / "state.json"
+    if path.exists():
+        try:
+            state = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            warnings.append(f"decision_trace: failed to parse state.json: {type(exc).__name__}: {exc}")
             state = {}
-        write_decision_trace(sd, state, warnings)
-    except Exception as exc:  # noqa: BLE001
-        warnings.append(f"decision_trace: write failed: {type(exc).__name__}: {exc}")
+    if not isinstance(state, dict):
+        state = {}
+    write_decision_trace(sd, state, warnings)
     return warnings
