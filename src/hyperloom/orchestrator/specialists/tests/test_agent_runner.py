@@ -485,6 +485,40 @@ async def test_a_failing_heartbeat_sink_does_not_stop_the_session(tmp_path: Path
     await stop_and_collect(runner, handle)
 
 
+ECHO_LINES = "import sys\nfor line in sys.stdin:\n    print('got ' + line.strip(), flush=True)\n"
+
+
+async def until_logged(log: Path, text: str, timeout: float = 20.0) -> None:
+    end = real_time.time() + timeout
+    while text not in (log.read_text() if log.exists() else ""):
+        assert real_time.time() < end, f"{text!r} never reached {log}"
+        await real_asyncio.sleep(0.02)
+
+
+async def test_a_session_launched_with_stdin_open_reads_each_message_until_its_stdin_is_closed(tmp_path: Path) -> None:
+    ws = tmp_path / "w"
+    runner = make_runner(tmp_path / "session")
+    handle = await runner.launch(make_spec(ws, code=ECHO_LINES, stdin_open=True))
+    await until_logged(ws / "process.log", "got do the task")
+    await runner.send(handle, b"the next message\n")
+    await until_logged(ws / "process.log", "got the next message")
+    assert (await runner.poll(handle)).state == "running"
+    await runner.close_stdin(handle)
+    status = await wait_finished(runner, handle)
+    assert (status.state, status.returncode) == ("exited", 0)
+    await runner.collect(handle)
+
+
+async def test_send_to_a_session_launched_without_stdin_open_is_refused(tmp_path: Path) -> None:
+    runner = make_runner(tmp_path / "session")
+    handle = await runner.launch(make_spec(tmp_path / "w"))
+    try:
+        with pytest.raises(AgentConfigError, match="stdin is not open"):
+            await runner.send(handle, b"more\n")
+    finally:
+        await stop_and_collect(runner, handle)
+
+
 async def test_a_done_file_left_by_an_earlier_session_is_refused_at_launch(tmp_path: Path) -> None:
     ws = tmp_path / "w"
     ws.mkdir()

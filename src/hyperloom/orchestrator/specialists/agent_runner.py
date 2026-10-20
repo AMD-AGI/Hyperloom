@@ -9,7 +9,8 @@ not cut by the 4 hour cap that only applies to an unbounded run. Heartbeat rules
 environment allowlist and tree teardown are the existing ones. How a session that
 ended or was lost is restarted and resumed from the branch log is the specialist
 runtime's decision (multi-branch design 4.4); this module only launches, polls,
-cancels and collects.
+cancels and collects, and, for a session launched with its stdin open, sends it
+further messages.
 
 Tokens reach the CLI only through environment variables: the MCP configuration
 written to disk names the variable, never its value.
@@ -18,6 +19,7 @@ written to disk names the variable, never its value.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -68,6 +70,7 @@ __all__ = [
     "AgentStatus",
     "Beat",
     "HeartbeatSink",
+    "InteractiveAgentRunner",
     "Liveness",
     "LocalAgentRunner",
     "McpEndpoint",
@@ -143,6 +146,9 @@ class AgentLaunchSpec:
     """``claude`` or ``codex``; empty infers it from ``argv[0]``."""
     heartbeat_sink: HeartbeatSink | None = None
     """Called once at launch with the session's ``beat`` function."""
+    stdin_open: bool = False
+    """Keep the CLI's stdin open after prompt.md, so :meth:`LocalAgentRunner.send` reaches the same session later; the
+    CLI ends once :meth:`LocalAgentRunner.close_stdin` closes it."""
 
 
 @dataclass(frozen=True)
@@ -172,6 +178,14 @@ class AgentRunner(Protocol):
     def cancel(self, handle: AgentHandle) -> Awaitable[None]: ...
 
     def collect(self, handle: AgentHandle) -> Awaitable[None]: ...
+
+
+class InteractiveAgentRunner(AgentRunner, Protocol):
+    """A runner that keeps a session's stdin open when its spec asks, so one CLI takes message after message."""
+
+    def send(self, handle: AgentHandle, data: bytes) -> Awaitable[None]: ...
+
+    def close_stdin(self, handle: AgentHandle) -> Awaitable[None]: ...
 
 
 def _infer_backend(spec: AgentLaunchSpec) -> str:
@@ -323,6 +337,13 @@ class _Session:
     collected: bool = False
 
 
+def _close_stdin(session: _Session) -> None:
+    stdin = session.proc.stdin if session.spec.stdin_open else None
+    if stdin is not None and not stdin.closed:
+        with contextlib.suppress(OSError):  # a CLI that already ended leaves a broken pipe to flush
+            stdin.close()
+
+
 @dataclass(frozen=True)
 class RunnerHost:
     """The clocks, the process launcher and the kernel file trees a runner reads; every field is a test seam."""
@@ -459,6 +480,23 @@ class LocalAgentRunner:
         if session.proc.poll() is None:
             await asyncio.to_thread(self._dispatcher._kill, session.proc)
 
+    async def send(self, handle: AgentHandle, data: bytes) -> None:
+        """Write ``data`` to the stdin of a session launched with ``stdin_open``; an ended CLI raises ``OSError``."""
+        session: _Session = handle.session
+        stdin = session.proc.stdin if session.spec.stdin_open else None
+        if stdin is None or stdin.closed:
+            raise AgentConfigError(f"task {session.spec.task_id}: stdin is not open")
+
+        def write() -> None:
+            stdin.write(data)
+            stdin.flush()
+
+        await asyncio.to_thread(write)
+
+    async def close_stdin(self, handle: AgentHandle) -> None:
+        """Close a ``stdin_open`` session's stdin: its CLI ends once it has read what was sent."""
+        _close_stdin(handle.session)
+
     async def collect(self, handle: AgentHandle) -> None:
         session: _Session = handle.session
         if session.collected:
@@ -510,13 +548,16 @@ class LocalAgentRunner:
     def _spawn(self, spec: AgentLaunchSpec, argv: list[str], env: dict[str, str]) -> Any:
         process_log = spec.workspace / PROCESS_LOG
         prompt = spec.workspace / "prompt.md"
-        stdin = prompt.open("rb") if prompt.exists() else None
+        if spec.stdin_open:
+            stdin: Any = subprocess.PIPE
+        else:
+            stdin = prompt.open("rb") if prompt.exists() else subprocess.DEVNULL
         fd = os.open(process_log, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, PRIVATE_FILE_MODE)
         try:
             with os.fdopen(fd, "wb") as out:
-                return self._popen(
+                proc = self._popen(
                     argv,
-                    stdin=stdin if stdin is not None else subprocess.DEVNULL,
+                    stdin=stdin,
                     stdout=out,
                     stderr=subprocess.STDOUT,
                     env=env,
@@ -524,8 +565,12 @@ class LocalAgentRunner:
                     start_new_session=True,
                 )
         finally:
-            if stdin is not None:
+            if hasattr(stdin, "close"):
                 stdin.close()
+        if spec.stdin_open and prompt.exists():
+            proc.stdin.write(prompt.read_bytes())
+            proc.stdin.flush()
+        return proc
 
     async def _supervise(self, session: _Session) -> None:
         spec = session.spec
@@ -551,6 +596,7 @@ class LocalAgentRunner:
     def _on_supervision_done(self, session: _Session, _task: asyncio.Task[None]) -> None:
         """Runs however the supervisor ended, even if it was cancelled before its first step."""
         self._ensure_dead(session)
+        _close_stdin(session)
         session.finished_mono = self._monotonic()
         if session.sampler_task is not None:
             session.sampler_task.cancel()
