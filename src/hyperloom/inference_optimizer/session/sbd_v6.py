@@ -214,7 +214,7 @@ def record_write_warning(
             make_parents=True,
             fmt=JsonLineFormat(ensure_ascii=False, sort_keys=True),
         )
-    except Exception:  # noqa: BLE001 — warning persistence cannot change runtime behavior
+    except (OSError, ValueError):  # warning persistence cannot change runtime behavior
         return False
     return True
 

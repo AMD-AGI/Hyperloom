@@ -113,7 +113,7 @@ def test_the_ceiling_never_reaches_the_keep_decision():
     Matched on the identifiers rather than the word, because ``scoring`` uses
     "ceiling" in its own unrelated sense for the variance-share cap.
     """
-    from kernelforge.loop import scoring
+    from kernelforge.evaluation import scoring
 
     forbidden = ("kernelforge.roofline_ceiling", "ceiling_report", "_render_ceiling_advisory")
     decision_sites = (
