@@ -18,9 +18,16 @@ import yaml
 
 from hyperloom.common.benchmark_config import is_magpie_agentx
 from hyperloom.common.unified_diff import touched_paths
+from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
 
 
 _ENCODING = "utf-8"
+
+
+class ServerArgvInvalidError(ValueError):
+    """Composed server args that cannot become an argv without corrupting a value."""
+
+    error_class = ARGV_INVALID
 
 
 @dataclass
@@ -61,10 +68,35 @@ def recipe_option_names(config_path: Path) -> set[str]:
     }
 
 
+def _server_argv(server_args: str) -> list[str]:
+    """Split server args the way Hyperloom writes them: a JSON value is one token that keeps its quotes.
+
+    Raises:
+        ServerArgvInvalidError: When a token boundary is ambiguous or a JSON-looking value does not parse.
+    """
+    from hyperloom.inference_optimizer.grid_server_args import tokenize_server_args_preserving_json
+
+    split = tokenize_server_args_preserving_json(server_args)
+    if split is None:
+        raise ServerArgvInvalidError(f"{ARGV_INVALID}: server args do not split into argv tokens: {server_args}")
+    for token in split[1]:
+        value = token.partition("=")[2] if token.startswith("-") else token
+        if value.startswith(("{", "[")):
+            try:
+                json.loads(value)
+            except ValueError as exc:
+                raise ServerArgvInvalidError(f"{ARGV_INVALID}: server arg value is not valid JSON: {value}") from exc
+    return split[1]
+
+
 def apply_launch_changes(
     benchmark: dict[str, Any], changes: LaunchChanges, *, recipe_options: AbstractSet[str] = frozenset()
 ) -> None:
-    """Compose a candidate; Magpie validates protected args and environment."""
+    """Compose a candidate; Magpie validates protected args and environment.
+
+    Raises:
+        ServerArgvInvalidError: When the composed args cannot become an argv intact.
+    """
     from hyperloom.inference_optimizer.grid_server_args import compose_server_args, dedupe_extra_server_args
 
     agentx = benchmark["agentx"]
@@ -74,7 +106,7 @@ def apply_launch_changes(
     launch = agentx.setdefault("launch_overrides", {"version": 1})
     appended_options = {token.partition("=")[0] for token in launch.get("append_args", []) if token.startswith("--")}
     inherited = shlex.join(launch.get("append_args", []))
-    launch["append_args"] = shlex.split(
+    launch["append_args"] = _server_argv(
         dedupe_extra_server_args(
             compose_server_args(
                 inherited_args=inherited,

@@ -123,6 +123,7 @@ from .benchmark_result import (
     snapshot_workspaces,
 )
 from .benchmark_backend import build_benchmark_command
+from .magpie_agentx import ServerArgvInvalidError
 
 
 log = logging.getLogger(__name__)
@@ -2314,11 +2315,10 @@ class BenchmarkRunExecutor:
                 agentx_mode=agentx_active(live_shared_state),
                 grading=getattr(live_shared_state, "grading", None),
             )
-        except FrameworkScriptMismatchError as exc:
-            # Cross-framework script override: return a structured failure.
+        except (FrameworkScriptMismatchError, ServerArgvInvalidError) as exc:
             return {
                 "status": "failed",
-                "error_class": "framework_script_mismatch",
+                "error_class": getattr(exc, "error_class", "framework_script_mismatch"),
                 "error": str(exc),
                 "output_dir": str(output_dir),
             }
