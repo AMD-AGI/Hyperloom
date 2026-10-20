@@ -22,8 +22,8 @@ was requested within the observation period.
 each, beside other scores given as :class:`Baseline` rows (such as the island bandit of :mod:`rsi.bandit`), and beside
 the scores the sessions logged when their logs are given. It recommends a variation, or a baseline that may be advice,
 only when it beats the current policy's rank correlation by :data:`MIN_IMPROVEMENT` over at least
-:data:`MIN_SESSIONS` sessions and :data:`MIN_ROUNDS` rounds; otherwise it says why not. The advice is for the
-scheduler's owner; nothing here changes a parameter.
+:data:`MIN_SESSIONS` sessions and :data:`MIN_ROUNDS` rounds whose scores and later gains both differ; otherwise it
+says why not. The advice is for the scheduler's owner; nothing here changes a parameter.
 """
 
 from __future__ import annotations
@@ -111,7 +111,8 @@ class Baseline:
 @dataclass(frozen=True)
 class CalibrationSettings:
     """How the sessions are replayed (every ``round_seconds``, gains over ``horizon_seconds`` or until each branch
-    stopped) and the evidence advice needs (``min_sessions`` sessions and ``min_rounds`` rounds)."""
+    stopped) and the evidence advice needs (``min_sessions`` sessions and ``min_rounds`` rounds whose scores and later
+    gains both differ)."""
 
     round_seconds: float = ROUND_SECONDS
     horizon_seconds: float | None = None
@@ -121,12 +122,17 @@ class CalibrationSettings:
 
 @dataclass(frozen=True)
 class PolicyCalibration:
-    """How one policy ranked the branches: over how many rounds of how many sessions, and how well."""
+    """How one policy ranked the branches: over how many rounds of how many sessions, and how well.
+
+    ``rounds`` had two or more branches open; ``compared_rounds`` of them had scores and later gains that both differ,
+    the only rounds a rank correlation is drawn from.
+    """
 
     label: str
     rank_correlation: float | None
     top_hit_rate: float | None
     rounds: int
+    compared_rounds: int
     sessions: int
 
 
@@ -144,10 +150,17 @@ class CalibrationReport:
 
         horizon = "until each branch stopped" if self.horizon_seconds is None else f"{self.horizon_seconds:.0f} s"
         rows = [
-            (row.label, number(row.rank_correlation), number(row.top_hit_rate), row.rounds, row.sessions)
+            (
+                row.label,
+                number(row.rank_correlation),
+                number(row.top_hit_rate),
+                row.rounds,
+                row.compared_rounds,
+                row.sessions,
+            )
             for row in self.rows
         ]
-        lines = table(("policy", "rank correlation", "top hit rate", "rounds", "sessions"), rows)
+        lines = table(("policy", "rank correlation", "top hit rate", "rounds", "compared", "sessions"), rows)
         return "\n".join(
             [f"Frontier calibration, against the gains that followed {horizon}:", "", *lines, "", self.note]
         )
@@ -284,6 +297,7 @@ def _summary(label: str, rounds: Mapping[str, Sequence[_Round]]) -> PolicyCalibr
         statistics.fmean(correlations) if correlations else None,
         sum(hits) / len(hits) if hits else None,
         len(every),
+        len(correlations),
         sum(1 for found in rounds.values() if found),
     )
 
@@ -292,10 +306,11 @@ def _advice(
     rows: Sequence[PolicyCalibration], eligible: frozenset[str], min_sessions: int, min_rounds: int
 ) -> tuple[PolicyCalibration | None, str]:
     current = rows[0]
-    if current.sessions < min_sessions or current.rounds < min_rounds:
+    if current.sessions < min_sessions or current.compared_rounds < min_rounds:
         return None, (
-            f"Too little evidence for advice: {current.sessions} sessions and {current.rounds} rounds with two or more "
-            f"branches open; {min_sessions} and {min_rounds} needed."
+            f"Too little evidence for advice: {current.sessions} sessions and {current.compared_rounds} rounds whose "
+            f"scores and later gains both differ, of {current.rounds} with two or more branches open; "
+            f"{min_sessions} and {min_rounds} needed."
         )
     if current.rank_correlation is None:
         return None, "No round had branches whose scores and later gains both differed; nothing to compare."
