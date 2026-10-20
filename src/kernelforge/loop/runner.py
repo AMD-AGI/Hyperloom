@@ -4098,7 +4098,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
     def _emit_validation_stages(self, report) -> None:
         """Print each correctness-suite stage the pipeline just ran."""
         for result in report.results:
-            status = "PASS" if result.passed else _VALIDATE_FAIL_STATUS.get(result.outcome, "FAIL")
+            status = "PASS" if result.passed else _VALIDATE_FAIL_STATUS.get(str(result.outcome or ""), "FAIL")
             snr_str = f" SNR={result.snr_db:.1f}dB" if result.snr_db is not None else ""
             print(f"  [validate] Stage {result.stage} {result.stage_name}: {status}{snr_str}")
 
@@ -4124,8 +4124,9 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         bench_result: dict,
         sigma_resolution: SigmaResolution,
         measurement_scores: list[float],
-    ) -> str:
-        """Print the KEEP-bar line and any bench-failure tail; return that tail."""
+        bench_error_output: str,
+    ) -> None:
+        """Print the KEEP-bar line and any pre-scoring bench-failure tail."""
         selected_raw_mean_ms = bench_result.get("median_ms")
         mean_case_speedup = bench_result.get("mean_case_speedup")
         score_text = f"{mean_case_speedup:.6f}x" if mean_case_speedup is not None else "n/a"
@@ -4146,12 +4147,8 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             f"raw mean={selected_raw_mean_ms} ms  "
             f"({bench_result.get('message', '')})"
         )
-        bench_error_output = (
-            "" if bench_result.get("success") else "BENCH FAILED: " + _bench_failure_detail(bench_result)
-        )
         if bench_error_output:
             print(f"  [bench] {bench_error_output}")
-        return bench_error_output
 
     async def _decide_iteration_keep(
         self,
@@ -4159,16 +4156,21 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         iter_start: float,
         report,
         bench_result: dict,
-        sigma_resolution: SigmaResolution,
     ) -> IterationResult:
-        """Registers, KEEP threshold, optional canonical suite, and the IterationResult."""
+        """Score the bench, check registers, apply the KEEP bar, and build the IterationResult."""
+        bench_error_output = (
+            "" if bench_result.get("success") else "BENCH FAILED: " + _bench_failure_detail(bench_result)
+        )
+        self._apply_mean_case_speedup_metric(bench_result)
         measurement_scores = list(bench_result.get("measurement_mean_case_speedups") or [])
+        sigma_resolution = await self._resolve_keep_sigma(bench_result, measurement_scores)
+        self._emit_bench_scores(bench_result, sigma_resolution, measurement_scores, bench_error_output)
         selected_raw_mean_ms = bench_result.get("median_ms")
         mean_case_speedup = bench_result.get("mean_case_speedup")
         snr_db = report.results[-1].snr_db if report.results else None
-        bench_error_output = self._emit_bench_scores(bench_result, sigma_resolution, measurement_scores)
         sigma = sigma_resolution.sigma
 
+        vgpr = None
         reg_result = await check_registers(build_dir=self.ic.build_dir)
         vgpr = reg_result.get("vgpr") if reg_result.get("success") else None
         if vgpr:
@@ -4285,16 +4287,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         bench_result = await self._iteration_bench_result(benchmark_measurement)
         self._observe_measurement(measurement_started)
         self.last_case_bandwidth = dict(bench_result.get("case_bandwidth") or {})
-        self._apply_mean_case_speedup_metric(bench_result)
-        measurement_scores = list(bench_result.get("measurement_mean_case_speedups") or [])
-        sigma_resolution = await self._resolve_keep_sigma(bench_result, measurement_scores)
-        return await self._decide_iteration_keep(
-            iteration,
-            iter_start,
-            report,
-            bench_result,
-            sigma_resolution,
-        )
+        return await self._decide_iteration_keep(iteration, iter_start, report, bench_result)
 
     def _update_search_policy(self, iteration: int) -> SearchPolicyDecision:
         """Derive and persist the search mode before planning an iteration."""
