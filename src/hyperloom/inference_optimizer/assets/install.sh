@@ -175,8 +175,9 @@ EOF
 
 MAGPIE_REPO="${MAGPIE_REPO:-https://github.com/AMD-AGI/Magpie.git}"
 # Pin Magpie to a release commit/tag instead of the default branch. Operators can
-# re-pin with MAGPIE_REF=<tag|sha>. Must stay at or above e6833b8183c6c41adf6038252337550876ca0433
-# (Magpie v0.2.0), which copies benchmark scripts via ``_copy_benchmark_script_atomic``.
+# re-pin with MAGPIE_REF=<tag|sha>. Must stay at or above 1eb3df69de9cb26cb5c8109e43371dd1abb9bbed
+# (Magpie PR #114), whose vLLM benchmark scripts carry the client ``--tokenizer-mode`` hook and which
+# copies benchmark scripts via ``_copy_benchmark_script_atomic``.
 # ``ensure_magpie()`` checks the installed revision unless the operator supplies a source tree.
 # tree on disk is NOT upgraded to this ref — only fresh installs and explicit reinstalls are.
 MAGPIE_REF="${MAGPIE_REF:-6a1ee26f9053363d3750b43e3d5afb5d1c4ce84e}"

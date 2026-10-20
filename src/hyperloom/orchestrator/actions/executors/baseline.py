@@ -108,7 +108,7 @@ from ._inferencex_patcher import (
 )
 from ._git import _git_head_sha
 from ._agentx_prefix_cache import refuse_cacheless_agentx_baseline
-from ._magpie_patcher import ensure_client_tokenizer_hook, ensure_eval_concurrency_compat
+from ._magpie_patcher import client_tokenizer_hook_installed, ensure_eval_concurrency_compat
 from ._patch_snapshot import (
     _create_patch_snapshot,
     _patch_touched_paths_from_text,
@@ -3966,19 +3966,13 @@ class BaselineExecutor(BenchmarkRunExecutor):
         # Required custom tokenizers must reach the throughput client as well as eval.
         tok_mode = _client_tokenizer_mode(self._model_from_config(config_path))
         if tok_mode:
-            try:
-                hook_ok = ensure_client_tokenizer_hook(
-                    inferencex_dir=ix_root or None,
-                    script_name=self._client_script_from_config(config_path),
-                )
-            except OSError as exc:
-                log.error("baseline_executor: client tokenizer hook raised for %s: %s", ix_root, exc)
-                hook_ok = False
-            if not hook_ok:
+            script_name = self._client_script_from_config(config_path)
+            if not script_name or not client_tokenizer_hook_installed(script_name, inferencex_dir=ix_root or None):
                 msg = (
-                    f"the benchmark client cannot be told to load the {tok_mode!r} tokenizer: "
-                    f"the hook could not be installed in InferenceX's benchmark scripts "
-                    f"(inferencex={ix_root or '<unset>'}). This model's client resolves the "
+                    f"the benchmark client script {script_name or '<unresolved>'!r} cannot be told to load the "
+                    f"{tok_mode!r} tokenizer: it has no --tokenizer-mode hook "
+                    f"(inferencex={ix_root or '<unset>'}). Use a Magpie revision at or above "
+                    "1eb3df69de9cb26cb5c8109e43371dd1abb9bbed. This model's client resolves the "
                     "checkpoint through HF AutoConfig, which cannot map its model_type, so it "
                     "would die before issuing a request and the round would be graded a boot "
                     "failure with the server up."
