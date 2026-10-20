@@ -348,7 +348,7 @@ def _build_parser() -> argparse.ArgumentParser:
     opt.add_argument("--extra-env", action="append", default=[], help=argparse.SUPPRESS)
     opt.add_argument(
         "--tp",
-        type=int,
+        type=_positive_int_arg,
         default=None,
         help="Tensor parallel size. Pass `--tp N` directly from the prompt's "
         f"Environment block. Default: {DEFAULT_TP}.",
@@ -367,8 +367,8 @@ def _build_parser() -> argparse.ArgumentParser:
         type=_positive_int_arg,
         default=None,
         help="Explicit server-facing MAX_MODEL_LEN. Resolution: "
-        "--max-model-len > auto(ISL+OSL+headroom, "
-        "clamped to native context). Explicit values are preserved and "
+        "--max-model-len > $MAX_MODEL_LEN > auto(ISL+OSL+headroom, "
+        "clamped to native context). Explicit values must fit the known native context and are "
         "exported into the materialized Magpie YAML.",
     )
     opt.add_argument(

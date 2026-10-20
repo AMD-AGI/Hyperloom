@@ -7,6 +7,7 @@ import argparse
 import base64
 import hashlib
 import json
+import logging
 import py_compile
 import shutil
 import socket
@@ -23,6 +24,8 @@ from patch_path_safety import (
     invalidate_aiter_jit_build,
     restore_aiter_jit_build,
 )
+
+log = logging.getLogger(__name__)
 
 
 def _pod_backup_stem(kernel_id: str, target: Path, host: str) -> str:
@@ -86,6 +89,7 @@ def _do_apply(a: argparse.Namespace) -> int:
             }
         )
     except Exception as exc:  # noqa: BLE001
+        log.warning("apply failed on %s: %s", host, exc)
         shutil.copy2(backup_path, target)
         restore_aiter_jit_build(jit_backup)
         return _emit({"status": "failed", "host": host, "error": str(exc)})
@@ -157,6 +161,7 @@ def _do_revert(a: argparse.Namespace) -> int:
                 raise ValueError("conflicting JIT backup records")
             jit_restore = restore_aiter_jit_build(first)
     except Exception as exc:  # noqa: BLE001
+        log.warning("revert failed on %s: %s", host, exc)
         return _emit(
             {
                 "status": "failed",

@@ -61,7 +61,7 @@ def collect_langfuse(
         section = lfe.get_emitter(session_dir).receipt()
         section["receipt_source"] = "live_emitter"
         return section
-    except Exception as exc:  # noqa: BLE001
+    except (OSError, ValueError) as exc:
         warnings.append(f"langfuse: live receipt failed: {type(exc).__name__}: {exc}")
 
     # Tier 3 fallback: config-only view straight from env + manifest, so the
