@@ -501,65 +501,42 @@ def build_verdict(
     a boolean cannot distinguish a trace that just missed a gate from one that missed it by an order of
     magnitude, and the two call for different responses -- but choosing the response is not this function's job.
     """
-    kernel_count = health.kernel_count
-    attributed_pct = health.attributed_pct
-    graph_under_recorded = health.graph_under_recorded
     blocking: list[str] = []
-    bypass_ok = True
-
+    warnings: list[str] = []
     # Checked before the file's own health, because it decides which file the question is even about.
-    if production_pick and (production_pick.get("kernel_count") or 0) <= 0:
+    if production_pick and production_pick["kernel_count"] <= 0:
         blocking.append(
-            f"the live resolver selects {production_pick.get('role') or 'another file'} "
-            f"'{Path(production_pick['path']).name}' from this directory, which carries "
-            f"{production_pick.get('event_total')} events and no GPU kernels, so both "
-            f"consumers see an empty trace; the source beside it recorded {kernel_count} kernels"
+            f"the live resolver selects {production_pick['role']} '{Path(production_pick['path']).name}' from this "
+            f"directory, which carries {production_pick['event_total']} events and no GPU kernels, so both "
+            f"consumers see an empty trace; the source beside it recorded {health.kernel_count} kernels"
         )
-        bypass_ok = False
-
+    elif production_pick:
+        # The resolver opens a different file, but one with GPU work in it, so the measurements here describe a
+        # different object than production would see.
+        warnings.append(
+            f"the live resolver would select {production_pick['role']} rather than the source trace; the measurements "
+            f"in this certificate describe the source ({Path(production_pick['certified_path']).name})"
+        )
     if not health.parse_ok:
         blocking.append("trace did not parse cleanly")
-        bypass_ok = False
-    if kernel_count <= 0:
+    if health.kernel_count <= 0:
         blocking.append("source recorded zero GPU kernels")
-        bypass_ok = False
     if health.capture_fragment:
         blocking.append("selected file is a CUDA-graph capture sidecar")
-        bypass_ok = False
-
-    warnings: list[str] = []
-    tracelens_ok = bypass_ok
-    if bypass_ok:
-        if not attributed_pct:
-            blocking.append("correlation chain resolves no kernel to an op")
-            tracelens_ok = False
-
-    # Only worth saying when the divergence did not already block above: the resolver opens a different file, but one
-    # with GPU work in it, so the measurements here describe a different object than production would see.
-    if production_pick and (production_pick.get("kernel_count") or 0) > 0:
-        warnings.append(
-            f"the live resolver would select "
-            f"{production_pick.get('role') or 'a different file'} rather than the source trace; "
-            f"the measurements in this certificate describe the source "
-            f"({Path(production_pick['certified_path']).name})"
-        )
-
-    usable = []
-    if bypass_ok:
-        usable.append("bypass")
-    if tracelens_ok:
-        usable.append("tracelens")
+    bypass_ok = not blocking
+    if bypass_ok and not health.attributed_pct:
+        blocking.append("correlation chain resolves no kernel to an op")
+    tracelens_ok = not blocking
 
     # Taken from the reader rather than recomputed from the raw ratio, because the ratio alone cannot tell an
     # under-recorded graph capture from a trace that never used graphs.
-    valid = graph_under_recorded is False
-    if tracelens_ok and graph_under_recorded:
+    valid = health.graph_under_recorded is False
+    if tracelens_ok and health.graph_under_recorded:
         warnings.append(
             "graph launches are under-recorded, so a decode conclusion drawn from this "
             "trace would be wrong even though the analysis runs clean"
         )
-
-    silently_wrong = "tracelens" in usable and not valid
+    silently_wrong = tracelens_ok and not valid
     # A restatement of the answers above on one ordered scale, so a fleet-wide query can rank outcomes without
     # re-deriving the precedence. ``silently_wrong`` outranks a plain warning: an analysis that runs clean and
     # concludes wrongly is worse than one that announces its own doubt.
@@ -572,17 +549,16 @@ def build_verdict(
     else:
         severity = "ok"
     return {
-        "usable_by": usable,
+        "usable_by": [consumer for consumer, ok in (("bypass", bypass_ok), ("tracelens", tracelens_ok)) if ok],
         "decode_conclusions_valid": valid,
         "silently_wrong": silently_wrong,
         "severity": severity,
         "blocking_reasons": blocking,
         "warnings": warnings,
         "thresholds_effective": thresholds,
-        # The continuous quantities the categorical answers were derived from. Reported, never compared here.
         "measures": {
-            "kernel_count": kernel_count,
-            "attributed_pct": attributed_pct,
+            "kernel_count": health.kernel_count,
+            "attributed_pct": health.attributed_pct,
             "graph_launch_coverage": coverage.graph_launch_coverage,
             "graph_launch_coverage_max": thresholds.get("graph_launch_coverage_max"),
             "op_meta_coverage": coverage.op_meta_coverage,

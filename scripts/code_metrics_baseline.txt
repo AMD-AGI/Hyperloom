@@ -746,7 +746,6 @@ function-lines src/hyperloom/orchestrator/state/shared_state.py::resolve_graded_
 function-lines src/hyperloom/orchestrator/trace_analysis/_analysis_md.py::render_report 104
 function-lines src/hyperloom/orchestrator/trace_analysis/_nccl_summary_candidates.py::extract_collective_candidates 97
 function-lines src/hyperloom/orchestrator/trace_analysis/bypass_trace_analysis.py::main 476
-function-lines src/hyperloom/orchestrator/trace_analysis/trace_selfcert.py::build_verdict 101
 function-lines src/hyperloom/orchestrator/trace_analysis/trace_selfcert.py::certify_trace_dir 185
 function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py::_check_chunk_quality 88
 function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py::_enrich_kernel_contract 91
