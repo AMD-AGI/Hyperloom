@@ -18,6 +18,7 @@ from hyperloom_multibranch.contracts.notebook.peers import (
     IntentLayer,
     Judgement,
     SandboxFacts,
+    TestKind,
     TestRequest,
     TestResult,
     Validity,
@@ -124,6 +125,13 @@ class TestRecord:
             and self.result.validity is not Validity.MEASUREMENT_FAILED
             and self.conclusion is not Conclusion.UNVERIFIED
         )
+
+    @property
+    def judged(self) -> bool:
+        """A test the gate judged after measuring it: what a branch's stall count counts, and the judge's grace
+        for a user branch."""
+
+        return self.request.kind is TestKind.TEST and self.measured and self.judged_at is not None
 
 
 @dataclass(frozen=True)

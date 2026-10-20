@@ -44,6 +44,7 @@ from hyperloom_multibranch.contracts.notebook.records import (
     LlmUsage,
     MergeAttempt,
     QuarantineEvent,
+    TestRecord,
     ToolResultPointer,
     Withdrawal,
 )
@@ -70,6 +71,30 @@ async def _tested(open_as: Open, request_id: str, branch: str = "s1", parent: st
     toolbox = open_as(Role.TOOLBOX)
     await toolbox.write_request(request(request_id, intent(branch, parent)))
     await toolbox.write_result(result(request_id))
+
+
+@pytest.mark.parametrize(
+    ("kind", "validity", "conclusion", "judged_at", "judged"),
+    [
+        (TestKind.TEST, Validity.SUCCEEDED, Conclusion.RECORDED_ONLY, 30.0, True),
+        (TestKind.TEST, Validity.CANDIDATE_FAILED, Conclusion.RECORDED_ONLY, 30.0, True),
+        (TestKind.TEST, Validity.SUCCEEDED, None, None, False),
+        (TestKind.PROFILE, Validity.SUCCEEDED, Conclusion.RECORDED_ONLY, 30.0, False),
+        (TestKind.TEST, Validity.MEASUREMENT_FAILED, Conclusion.RECORDED_ONLY, 30.0, False),
+        (TestKind.TEST, Validity.SUCCEEDED, Conclusion.UNVERIFIED, 30.0, False),
+    ],
+)
+def test_a_record_is_judged_once_the_gate_judged_a_test_it_measured(
+    kind: TestKind, validity: Validity, conclusion: Conclusion | None, judged_at: float | None, judged: bool
+) -> None:
+    record = TestRecord(
+        request("r1", intent("s1", "c0"), kind=kind),
+        result=result("r1", validity=validity),
+        conclusion=conclusion,
+        judged_at=judged_at,
+    )
+
+    assert record.judged is judged
 
 
 def test_the_local_notebook_implements_every_interface_method() -> None:

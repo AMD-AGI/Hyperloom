@@ -218,8 +218,7 @@ def judged_since_commit(records: Sequence[TestRecord], view: LineageView, branch
         1
         for record in records
         if record.request.branch == branch
-        and record.request.kind is TestKind.TEST
-        and record.measured
+        and record.judged
         and record.judged_at is not None
         and since < record.judged_at <= until
     )
