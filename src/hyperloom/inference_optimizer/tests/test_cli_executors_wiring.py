@@ -101,6 +101,37 @@ def test_build_specialist_executor_subprocess_kp_missing_methods(monkeypatch, tm
     assert callable(executor)
 
 
+@pytest.mark.parametrize("error_class", ["", "shared_tree_violation"])
+async def test_a_discarded_specialist_result_settles_as_a_failure(monkeypatch, tmp_path, error_class):
+    """A result the runner discarded reaches the coordinator as a failed task carrying its class."""
+    import shutil
+
+    from hyperloom.orchestrator.specialists.runner import SpecialistRunner, SpecialistRunResult
+
+    monkeypatch.setattr(shutil, "which", lambda _n: "/usr/bin/claude")
+
+    async def _run(_self, _ctx):
+        return SpecialistRunResult(
+            task_id="t",
+            domain="serving_specialist",
+            gap_canonical_id="gap",
+            status=error_class or "succeeded",
+            specialist_done={"proposal_set": []},
+            error=error_class,
+            error_class=error_class,
+        )
+
+    monkeypatch.setattr(SpecialistRunner, "run", _run)
+    executor = _build_specialist_executor(_spec_args(), session_dir=tmp_path, knowledge_plane=None)
+
+    envelope = await executor(SimpleNamespace())
+
+    if error_class:
+        assert envelope["status"] == "failed" and envelope["error_class"] == error_class
+    else:
+        assert "status" not in envelope and "error_class" not in envelope
+
+
 class _FakeSub:
     """Minimal stand-in for Coordinator.sub recording registered executors."""
 

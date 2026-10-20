@@ -179,15 +179,16 @@ async def test_worktree_of_a_pip_installed_framework_is_its_snapshot_not_another
 def test_an_integrate_in_flight_holds_the_snapshot(tmp_path: Path):
     from hyperloom.orchestrator.state.shared_state import SharedState
 
+    from hyperloom.orchestrator.specialists.tree_snapshot import integrate_in_flight
+
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    runner = SpecialistRunner(subprocess_config=SpecialistSubprocessConfig(), session_dir=session_dir)
-    assert runner._integrate_in_flight() is False
+    assert integrate_in_flight(session_dir) is False
 
     state = SharedState.load_or_init(session_dir)
     state.pending_integrate = {"task_id": "t-integrate", "patches": []}
     state.save(session_dir)
-    assert runner._integrate_in_flight() is True
+    assert integrate_in_flight(session_dir) is True
 
 
 def test_setup_worktree_creates_branch_off_base(

@@ -167,6 +167,7 @@ def _build_specialist_executor(
             "error": run_result.error,
             "notes": list(run_result.notes or []),
             "allocated_gpu_ids": list((run_result.specialist_done or {}).get("allocated_gpu_ids") or []),
+            **({"status": "failed", "error_class": run_result.error_class} if run_result.error_class else {}),
         }
 
     return _executor

@@ -21,7 +21,7 @@ from hyperloom.orchestrator.specialists.subprocess_ import (
     SpecialistSubprocessDispatcher,
     _setup_worktree,
 )
-from hyperloom.orchestrator.specialists.tree_snapshot import snapshot_tree
+from hyperloom.orchestrator.specialists.tree_snapshot import baseline_snapshot, refresh_snapshots, snapshot_tree
 
 
 class _CP:
@@ -290,7 +290,7 @@ def _installed_package(tmp_path: Path) -> Path:
 def test_harvest_off_an_installed_package_snapshot_applies_to_the_package(tmp_path: Path) -> None:
     """The worktree of a pip-installed framework holds the package itself, so its diff lands where the server imports."""
     package = _installed_package(tmp_path)
-    repo, err = snapshot_tree(package, tmp_path / "session" / "tree_snapshots" / "vllm.git", refresh=True)
+    repo, err = snapshot_tree(tmp_path / "session", package)
     assert err == "" and repo is not None
     wt, err = _setup_worktree(repo, tmp_path / "ws" / "worktree", "specialist-t1")
     assert err == "" and wt is not None
@@ -313,29 +313,49 @@ def test_harvest_off_an_installed_package_snapshot_applies_to_the_package(tmp_pa
     assert (package / "model_executor" / "models" / "qwen3.py").read_text(encoding="utf-8") == "BLOCK = 64\n"
 
 
-def test_snapshot_refresh_follows_the_package_and_a_held_snapshot_does_not(tmp_path: Path) -> None:
-    """A KEEP lands in the package between dispatches; an integrate still deciding on a candidate must not."""
+def test_snapshot_follows_the_package_at_dispatch_and_after_a_settled_integrate(tmp_path: Path) -> None:
+    """A KEEP lands in the package between dispatches or while a specialist runs; the snapshot carries it either way."""
     package = _installed_package(tmp_path)
-    repo = tmp_path / "session" / "tree_snapshots" / "vllm.git"
-    snapshot_tree(package, repo, refresh=True)
+    session = tmp_path / "session"
+    repo, _ = snapshot_tree(session, package)
     first = ss.head_commit(repo)
 
     (package / "envs.py").write_text("VLLM_USE_X = 2\n", encoding="utf-8")
-    held, err = snapshot_tree(package, repo, refresh=False)
-    assert err == "" and held == repo
-    assert ss.head_commit(repo) == first
+    moved, err = snapshot_tree(session, package)
+    assert err == "" and moved == repo
+    second = ss.head_commit(repo)
+    assert second != first
 
-    snapshot_tree(package, repo, refresh=True)
-    assert ss.head_commit(repo) != first
+    (package / "envs.py").write_text("VLLM_USE_X = 3\n", encoding="utf-8")
+    assert refresh_snapshots(session) == []
+    assert ss.head_commit(repo) != second
     wt, _ = _setup_worktree(repo, tmp_path / "ws" / "worktree", "specialist-t2")
-    assert wt is not None and (wt / "envs.py").read_text(encoding="utf-8") == "VLLM_USE_X = 2\n"
+    assert wt is not None and (wt / "envs.py").read_text(encoding="utf-8") == "VLLM_USE_X = 3\n"
 
 
 def test_snapshot_is_not_invented_while_the_package_is_mid_integrate(tmp_path: Path) -> None:
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
     package = _installed_package(tmp_path)
-    repo, err = snapshot_tree(package, tmp_path / "session" / "tree_snapshots" / "vllm.git", refresh=False)
+    session = tmp_path / "session"
+    state = SharedState.load_or_init(session)
+    state.pending_integrate = {"task_id": "t-integrate", "patches": []}
+    state.save(session)
+
+    repo, err = baseline_snapshot(session, package)
     assert repo is None
     assert "being integrated into" in err
+
+    state.pending_integrate = {}
+    state.save(session)
+    taken, _ = baseline_snapshot(session, package)
+    state.pending_integrate = {"task_id": "t-integrate-2", "patches": []}
+    state.save(session)
+    (package / "envs.py").write_text("VLLM_USE_X = 3\n", encoding="utf-8")
+    held, err = baseline_snapshot(session, package)
+    assert err == "" and held == taken
+    wt, _ = _setup_worktree(held, tmp_path / "ws" / "worktree", "specialist-t3")
+    assert wt is not None and (wt / "envs.py").read_text(encoding="utf-8") == "VLLM_USE_X = 0\n"
 
 
 def test_collect_patches_does_not_rediscover_an_obsolete_harvest(tmp_path: Path) -> None:

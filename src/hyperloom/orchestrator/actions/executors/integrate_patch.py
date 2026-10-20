@@ -40,6 +40,7 @@ from hyperloom.inference_optimizer.framework_paths import (
     resolve_kernel_search_roots,
     resolve_session_framework_root,
 )
+from ...specialists.tree_snapshot import refresh_snapshots
 from ...specialists.patch_safety import (
     is_unified_diff,
     patch_escapes_tree,
@@ -2443,6 +2444,8 @@ class IntegratePatchExecutor:
                 "error_class": "integrate_restore_incomplete",
                 "recovery_errors": summary["failed"],
             }
+        if not applied_only:
+            refresh_snapshots(self.session_dir)
         if not accepted and not applied_only:
             result["patches_reverted"] = [str(patch) for patch in attempt.applied]
             if attempt.applied_artifacts:

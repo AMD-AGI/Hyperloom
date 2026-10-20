@@ -29,7 +29,7 @@ from hyperloom.common.deadline import Deadline, seconds_until
 from hyperloom.common.env_safety import BENCHMARK_SECRET_ENV_NAMES, redact_secret_values
 from hyperloom.common.timeutil import now_iso
 
-from hyperloom.inference_optimizer.session.session_paths import fs_safe_id, runs_dir, specialist_intel_path
+from hyperloom.inference_optimizer.session.session_paths import runs_dir, specialist_intel_path
 from ..state.experience_citations import normalize_citations, shown_ids
 from hyperloom.inference_optimizer.trace.conversation_trace import ConversationRecord, append_conversation
 from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, LLMCallSite, append_llm_call, new_call_id
@@ -61,7 +61,7 @@ from .subprocess_ import (
 )
 from . import patch_safety as _patch_safety
 from .profile import MODE_PATCH, SpecialistProfile, resolve_specialist_profile
-from .tree_snapshot import snapshot_tree
+from .tree_snapshot import baseline_snapshot, restore_shared_tree
 from hyperloom.inference_optimizer.framework_paths import (
     FrameworkTree,
     framework_apply_tree,
@@ -399,7 +399,7 @@ class SpecialistRunResult:
     task_id: str
     domain: str
     gap_canonical_id: str
-    status: str  # "succeeded" / "partial" / "stale" / "empty_synthesised"
+    status: str  # "succeeded" / "partial" / "stale" / "empty_synthesised" / "shared_tree_violation"
     specialist_done: dict[str, Any]
     turns_used: int = 0
     workspace: str = ""
@@ -407,6 +407,7 @@ class SpecialistRunResult:
     transcript_path: str = ""
     done_path: str = ""
     notes: list[str] = field(default_factory=list)
+    error_class: str = ""  # set when the result was discarded, so the task settles as a failure
 
 
 class SpecialistFailureType(str, enum.Enum):
@@ -422,6 +423,7 @@ class SpecialistFailureType(str, enum.Enum):
     STALE_HEARTBEAT = "stale_heartbeat"  # heartbeat went silent (hang)
     CRASH = "crash"  # nonzero exit / backend error
     NO_OUTPUT = "no_output"  # ran clean but emitted no done / empty
+    SHARED_TREE_VIOLATION = "shared_tree_violation"  # wrote the shared framework tree
     CONFIG = "config"  # unknown domain / no workspace
     UNKNOWN = "unknown"
 
@@ -450,6 +452,8 @@ def classify_specialist_failure(
     err = (error or "").strip().lower()
     if status == "succeeded":
         return SpecialistFailureType.NONE, False
+    if status == SpecialistFailureType.SHARED_TREE_VIOLATION.value:
+        return SpecialistFailureType.SHARED_TREE_VIOLATION, False
     if status == "partial":
         # Salvaged work: classify the failure but never retry over it.
         if "timeout" in err:
@@ -553,7 +557,18 @@ class SpecialistRunner:
         if prep.early_return is not None:
             return prep.early_return
 
-        return await self._run_via_subprocess(ctx, prep)
+        try:
+            result = await self._run_via_subprocess(ctx, prep)
+        finally:
+            guard = (self.session_dir, prep.worktree_base, ctx.extra.get("shared_state"), ctx.task.task_id)
+            restore = await restore_shared_tree(*guard)
+        if restore.clean:
+            return result
+        violation = SpecialistFailureType.SHARED_TREE_VIOLATION.value
+        error = f"{violation}: {restore.reason}"
+        done = build_empty_specialist_done(gap_canonical_id=prep.gap, domain=result.domain, reason=error)
+        self._write_specialist_done(prep.workspace, done)
+        return replace(result, status=violation, specialist_done=done, error=error, error_class=violation)
 
     # Setup phase (shared)
     async def _prepare(
@@ -1239,11 +1254,8 @@ class SpecialistRunner:
         if source is None:
             return None, None, ""
         base = source.root
+        snapshot, err = baseline_snapshot(self.session_dir, source.root)
         if not source.checkout:
-            if self.session_dir is None:
-                return None, source, f"{source.tree} has no checkout and no session dir to snapshot it into"
-            repo = self.session_dir / "tree_snapshots" / f"{fs_safe_id(str(source.tree))}.git"
-            snapshot, err = snapshot_tree(source.tree, repo, refresh=not self._integrate_in_flight())
             if snapshot is None:
                 return None, source, err
             base = snapshot
@@ -1253,21 +1265,6 @@ class SpecialistRunner:
         if wt is None:
             return None, source, err
         return wt, source, ""
-
-    def _integrate_in_flight(self) -> bool:
-        """Whether an integrate has mutated the framework tree without deciding on it yet."""
-        from ..state.shared_state import SharedState
-
-        if self.session_dir is None:
-            return False
-        try:
-            return bool(SharedState.load_or_init(self.session_dir).pending_integrate)
-        except (OSError, ValueError):
-            # An unreadable state cannot vouch for the tree.
-            log.warning(
-                "specialist worktree: cannot read pending_integrate; not refreshing the snapshot", exc_info=True
-            )
-            return True
 
     # Workspace file protocol
     def _resolve_workspace(self, ctx: RunnerContext) -> Path | None:

@@ -2287,7 +2287,7 @@ def _section_iron_rules(inp: SpecialistPromptInputs) -> list[str]:
         gpu_rule = [
             f"1. You EXCLUSIVELY own GPU card(s) [{cards}] for this task. On",
             "   those cards do whatever you want: edit code, build, start/stop",
-            "   your own servers, profile, autotune, install tuned artifacts,",
+            "   your own servers, profile, autotune, stage tuned artifacts,",
             "   and run real benchmark loops. The ONE thing you must NOT do:",
             "   touch the production serving process or its cards — co-residing",
             "   on them would corrupt both your measurement and production.",
@@ -2311,9 +2311,11 @@ def _section_iron_rules(inp: SpecialistPromptInputs) -> list[str]:
             "   - Tuned non-diff artifacts (e.g. an autotuned config JSON): write",
             "     under the worktree and list in ``artifacts_written`` as",
             "     ``{source, target, kind, description}``.",
-            "   **NEVER** ``git apply`` / ``git commit`` against the shared source",
-            "   trees in Section 7 directly — ``integrate_patch`` is the single",
-            "   integration point, whichever tree the patch names.",
+            "   **NEVER write the shared source trees in Section 7, by any means** — no Edit / Write, ``cp`` /",
+            "   ``mv`` / ``rm``, ``patch`` / ``git apply`` / ``git commit``, ``sed -i``, ``pip install`` or build",
+            "   into them; ``integrate_patch`` is the single integration point, whichever tree the patch names.",
+            "   The tree this session is optimising is checked after your run: a write to it is reverted and your",
+            "   WHOLE result is discarded, however good.",
         ]
     else:
         integration_rule = [
