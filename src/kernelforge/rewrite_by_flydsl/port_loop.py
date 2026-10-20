@@ -99,13 +99,11 @@ def check_flydsl_port(spec: RewriteSpec) -> str:
             "port MUST NOT call the original kernel as its implementation (that "
             "defeats the rewrite). Compute the result in FlyDSL only."
         )
-
-    # Dynamic imports evade the static import scan above.
-    return _dynamic_import_violation(spec, tree, forbidden)
+    return _dynamic_import_violation(tree, spec.flydsl_kernel_name, forbidden)
 
 
-def _dynamic_import_violation(spec: RewriteSpec, tree: ast.AST, forbidden: frozenset[str]) -> str:
-    """Reject a dynamic import of a forbidden module, or one whose target is not a literal."""
+def _dynamic_import_violation(tree: ast.AST, kernel_name: str, forbidden: frozenset[str]) -> str:
+    """Reject a dynamic import, which evades the static import scan. Returns \"\" if there is none."""
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -115,19 +113,17 @@ def _dynamic_import_violation(spec: RewriteSpec, tree: ast.AST, forbidden: froze
         if not (is_dunder_import or is_import_module):
             continue
         arg = node.args[0] if node.args else None
-        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-            target = arg.value.split(".")[0]
-            if target in forbidden:
-                return (
-                    f"{spec.flydsl_kernel_name} dynamically imports `{arg.value}` — the "
-                    "port MUST NOT pull in the source language / source module by any "
-                    "means. Compute the result in FlyDSL only."
-                )
-        else:
+        if not (isinstance(arg, ast.Constant) and isinstance(arg.value, str)):
             return (
-                f"{spec.flydsl_kernel_name} uses a dynamic import with a non-literal "
+                f"{kernel_name} uses a dynamic import with a non-literal "
                 "target — a FlyDSL port must import FlyDSL statically and not hide what "
                 "it loads. Remove the dynamic import."
+            )
+        if arg.value.split(".")[0] in forbidden:
+            return (
+                f"{kernel_name} dynamically imports `{arg.value}` — the "
+                "port MUST NOT pull in the source language / source module by any "
+                "means. Compute the result in FlyDSL only."
             )
     return ""
 
