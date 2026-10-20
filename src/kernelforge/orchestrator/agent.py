@@ -126,7 +126,8 @@ def _resolve_implementer_backend(config: Config, agent_backend: str | None, usag
             # not to the one being switched to; carrying it across the switch
             # is how a Claude model id reaches the OpenAI-protocol gateway.
             model=resolve_agent_model(agent_backend),
-            settings=config.agent_runtime_settings(),
+            # The executable and provider options, like the model, belong to the resolved provider.
+            settings=replace(config.agent_runtime_settings(), executable="", options={}),
         )
     requested_backend = runtime.provider
     precheck_cwd = (
