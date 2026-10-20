@@ -1555,6 +1555,24 @@ def _profile_shapes_are_fresh(state: Any) -> bool:
     return bool(state.profile_trace_matches_workload())
 
 
+def _trace_shape_artifacts(last_trace: dict[str, Any]) -> list[str]:
+    """The shapes-JSON paths the latest TraceLens analysis points at, best first.
+
+    The fields TraceLens exposes come first; the ``shapes.json`` it leaves beside
+    the candidates file is the fallback, because nothing announces that one.
+    """
+    named = [str(last_trace.get(key) or "").strip() for key in ("shapes_json", "shapes_path")]
+    artifact_paths = last_trace.get("artifact_paths")
+    if isinstance(artifact_paths, dict):
+        keys = ("shapes_json", "shapes", "gemm_shapes_json")
+        named += [str(artifact_paths.get(key) or "").strip() for key in keys]
+    candidates = [raw for raw in named if raw]
+    cand_file = Path(str(last_trace.get("candidates_path") or ""))
+    if cand_file.name and cand_file.is_file():
+        candidates.append(str(cand_file.parent / "shapes.json"))
+    return candidates
+
+
 def _resolve_forge_shapes(
     state,
     session_dir: Path,
@@ -1589,26 +1607,7 @@ def _resolve_forge_shapes(
     if not isinstance(last_trace, dict):
         return ""
 
-    candidates: list[str] = []
-
-    # Prefer explicit artifact fields when TraceLens exposes them.
-    for key in ("shapes_json", "shapes_path"):
-        raw = str(last_trace.get(key) or "").strip()
-        if raw:
-            candidates.append(raw)
-    artifact_paths = last_trace.get("artifact_paths")
-    if isinstance(artifact_paths, dict):
-        for key in ("shapes_json", "shapes", "gemm_shapes_json"):
-            raw = str(artifact_paths.get(key) or "").strip()
-            if raw:
-                candidates.append(raw)
-    # Fallback: check beside candidates_path.
-    candidates_path_str = last_trace.get("candidates_path") or ""
-    if candidates_path_str:
-        cand_file = Path(candidates_path_str)
-        if cand_file.is_file():
-            shapes_file = cand_file.parent / "shapes.json"
-            candidates.append(str(shapes_file))
+    candidates = _trace_shape_artifacts(last_trace)
 
     # Extract the GEMM shapes observed by the latest TraceLens analysis. Older
     # traces can describe a backend that is no longer active.
@@ -3906,6 +3905,18 @@ def _integrate_extra_envs(ctx: Any) -> dict[str, str] | None:
     return None
 
 
+def _lock_cleanup_allows_retry(cleanup: dict[str, Any]) -> bool:
+    """Whether an AITER lock sweep left the round safe to retry.
+
+    A live compiler may legitimately own the observed lock, and when liveness is
+    unknown a fresh skipped lock is not safe to remove either. Only a sweep that
+    deleted something, or that confirmed the lock had already gone, clears a retry.
+    """
+    if cleanup.get("skipped_live") or cleanup.get("errors"):
+        return False
+    return bool(cleanup.get("deleted")) or (cleanup.get("scanned", 0) == 0 and not cleanup.get("skipped_fresh"))
+
+
 async def _run_integrate_rebaseline_with_lock_retry(
     executor: Any,
     ctx: Any,
@@ -3983,12 +3994,7 @@ async def _run_integrate_rebaseline_with_lock_retry(
         "retry_attempted": False,
     }
 
-    # A live compiler may legitimately own the observed lock. When liveness is
-    # unknown, a fresh skipped lock is also not safe to remove. Retry only after
-    # at least one deletion or after confirming the lock disappeared.
-    cleanup_safe = not cleanup.get("skipped_live") and not cleanup.get("errors")
-    lock_removed = bool(cleanup.get("deleted")) or (cleanup.get("scanned", 0) == 0 and not cleanup.get("skipped_fresh"))
-    if not (cleanup_safe and lock_removed):
+    if not _lock_cleanup_allows_retry(cleanup):
         return result
 
     log.warning(
