@@ -115,14 +115,22 @@ class HistoryDigest:
     note: str = ""
 
     def render(self, max_chars: int = MAX_CHARS) -> str:
-        """The digest as prompt text of at most ``max_chars``; a line that does not fit is left out, never cut."""
+        """The digest as prompt text of at most ``max_chars``; a line that does not fit is left out, never cut, and
+        a heading is left out with the last of its lines."""
 
         kept: list[str] = []
         used = 0
-        for line in _lines(self):
-            if used + len(line) + 1 <= max_chars:
-                kept.append(line)
-                used += len(line) + 1
+        for heading, lines in _sections(self):
+            room = max_chars - used - (len(heading) + 1 if heading else 0)
+            fitting = []
+            for line in lines:
+                if len(line) + 1 <= room:
+                    fitting.append(line)
+                    room -= len(line) + 1
+            if fitting:
+                section = [heading, *fitting] if heading else fitting
+                kept.extend(section)
+                used += sum(len(line) + 1 for line in section)
         return "\n".join(kept)
 
 
@@ -332,7 +340,7 @@ def _branch_lines(branches: BranchHistory | None) -> list[str]:
         if branches.median_first_commit_test is not None
         else " none committed."
     )
-    lines = [
+    return [
         f"Branches, from {_count(branches.sessions, 'multi-branch session')}: {branches.mean_opened:.1f} opened "
         f"on average; {_share(branches.committed_share)} of them committed at least once;{first}",
         *(
@@ -340,9 +348,12 @@ def _branch_lines(branches: BranchHistory | None) -> list[str]:
             for n, (later, of) in branches.late_commits.items()
         ),
     ]
-    if branches.stop_reasons:
-        lines.append(f"Stopped for: {', '.join(f'{reason} ({count})' for reason, count in branches.stop_reasons)}.")
-    return lines
+
+
+def _stop_lines(branches: BranchHistory | None) -> list[str]:
+    if branches is None or not branches.stop_reasons:
+        return []
+    return [f"Stopped for: {', '.join(f'{reason} ({count})' for reason, count in branches.stop_reasons)}."]
 
 
 def _direction_line(direction: DirectionHistory) -> str:
@@ -354,23 +365,33 @@ def _direction_line(direction: DirectionHistory) -> str:
     )
 
 
-def _lines(digest: HistoryDigest) -> list[str]:
+def _sections(digest: HistoryDigest) -> list[tuple[str, list[str]]]:
+    """The digest's lines, each under its heading or none; the verbatim stop reasons come last, after the directions,
+    so a tight budget leaves them out first."""
+
     if digest.note:
-        return [f"History: {digest.note}"]
+        return [("", [f"History: {digest.note}"])]
     if not digest.enough:
         return [
-            f"History: too thin to go by ({_count(digest.sessions, 'similar session')}, worth "
-            f"{digest.effective_sessions:.1f}; {MIN_SESSIONS} needed)."
+            (
+                "",
+                [
+                    f"History: too thin to go by ({_count(digest.sessions, 'similar session')}, worth "
+                    f"{digest.effective_sessions:.1f}; {MIN_SESSIONS} needed)."
+                ],
+            )
         ]
     head = (
         f"History: {_count(digest.sessions, 'similar session')} (worth {digest.effective_sessions:.1f}, similarity "
         f"up to {digest.top_similarities[0]:.2f}): {digest.multi_branch} multi-branch, {digest.backfilled} "
         "backfilled single-lineage."
     )
-    directions = (
-        ["Directions tried, most commits first:", *map(_direction_line, digest.directions)] if digest.directions else []
-    )
-    return [head, *_outcome_lines(digest), *_branch_lines(digest.branches), *directions]
+    plain = [head, *_outcome_lines(digest), *_branch_lines(digest.branches)]
+    return [
+        *(("", [line]) for line in plain),
+        ("Directions tried, most commits first:", [_direction_line(direction) for direction in digest.directions]),
+        *(("", [line]) for line in _stop_lines(digest.branches)),
+    ]
 
 
 __all__ = [

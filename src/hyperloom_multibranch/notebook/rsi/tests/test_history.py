@@ -41,6 +41,18 @@ WIDE = _multi(
 )
 NARROW = _multi("narrow", branch("s1", [(3600.0, 2.0)], test_times=(0.0, 1200.0, 2400.0, 3600.0), directions=(GEMM,)))
 OLD_FLOW = tree("old-flow", branch("s1", [(7200.0, 4.0)], test_times=(0.0, 3600.0)), task=TASK)
+# The judge's own words for a stop, as long as a real session's: each is a reason of its own.
+LONG_STOP = (
+    "judge: 4 tests, no commits, measured trend expects 0% gain while consuming the most GPU time; replace it with a "
+    "fresh specialist from the integration head while headroom and explore time remain"
+)
+WORDY = _multi(
+    "wordy",
+    branch("s1", [(1800.0, 2.0)], test_times=(0.0, 1800.0), directions=(GEMM,)),
+    branch("s2", [], test_times=(0.0, 600.0), stop_reason=f"{LONG_STOP}, first", directions=(SPLIT_KV,)),
+    branch("s3", [], test_times=(0.0, 600.0), stop_reason=f"{LONG_STOP}, second"),
+)
+DIRECTIONS_HEADING = "Directions tried, most commits first:"
 
 
 def test_too_little_similar_history_says_so_instead_of_drawing_from_it() -> None:
@@ -87,6 +99,29 @@ def test_the_text_keeps_whole_lines_within_its_budget() -> None:
     assert "- moe gemm / tuned kernel [kernel]: 2 sessions, 12 tests, 4 commits, best +3.0%" in full
     assert len(short) <= 300 and set(short.splitlines()) <= set(full.splitlines())
     assert len(short.splitlines()) < len(full.splitlines())
+
+
+def test_a_heading_is_left_out_when_none_of_its_lines_fit() -> None:
+    digest = history_digest([WORDY, NARROW], TASK)
+    full = digest.render(max_chars=100_000)
+    assert DIRECTIONS_HEADING in full.splitlines()
+
+    for budget in range(len(full) + 1):
+        lines = digest.render(max_chars=budget).splitlines()
+        if DIRECTIONS_HEADING in lines:
+            under = lines[lines.index(DIRECTIONS_HEADING) + 1 :]
+            assert under and under[0].startswith("- "), budget
+
+
+def test_the_directions_go_in_before_the_reasons_branches_were_stopped_for() -> None:
+    digest = history_digest([WORDY, NARROW], TASK)
+    full = digest.render(max_chars=100_000)
+    assert "Stopped for:" in full
+
+    for budget in range(len(full) + 1):
+        text = digest.render(max_chars=budget)
+        if "Stopped for:" in text:
+            assert "- moe gemm / tuned kernel [kernel]" in text and "- attention / split kv [config]" in text, budget
 
 
 def test_a_running_session_is_digested_from_its_own_snapshot(snapshot: NotebookSnapshot) -> None:
