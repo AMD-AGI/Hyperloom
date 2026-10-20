@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 import fcntl
@@ -349,8 +348,8 @@ def _is_inside(child: Path, parent: Path) -> bool:
 def load_sandbox(environ: dict[str, str] | None = None) -> ProbeSandbox:
     """Read the sandbox this server was started for and validate its isolation."""
     env = os.environ if environ is None else environ
-    scratch_raw = _env_text(env, SCRATCH_ENV)
-    workspace_raw = _env_text(env, WORKSPACE_ENV)
+    scratch_raw = str(env.get(SCRATCH_ENV) or "").strip()
+    workspace_raw = str(env.get(WORKSPACE_ENV) or "").strip()
     if not scratch_raw or not workspace_raw:
         raise ProbeSandboxError(f"{SCRATCH_ENV} and {WORKSPACE_ENV} must both be set")
     scratch_root = Path(scratch_raw).expanduser().resolve()
@@ -359,7 +358,8 @@ def load_sandbox(environ: dict[str, str] | None = None) -> ProbeSandbox:
         raise ProbeSandboxError(f"probe scratch root {scratch_root} overlaps the canonical tree {workspace}")
     if not scratch_root.is_dir():
         raise ProbeSandboxError(f"probe scratch root is not a directory: {scratch_root}")
-    ledger_path = _env_path(env, LEDGER_ENV) or scratch_root / "probe_ledger.jsonl"
+    ledger_raw = str(env.get(LEDGER_ENV) or "").strip()
+    ledger_path = Path(ledger_raw).expanduser().resolve() if ledger_raw else scratch_root / "probe_ledger.jsonl"
     if not _is_inside(ledger_path, scratch_root):
         raise ProbeSandboxError(f"probe ledger {ledger_path} lies outside the scratch root {scratch_root}")
     try:
@@ -369,44 +369,29 @@ def load_sandbox(environ: dict[str, str] | None = None) -> ProbeSandbox:
         raise ProbeSandboxError(f"probe budget is not numeric: {error}") from error
     if max_probes <= 0 or budget_sec <= 0:
         raise ProbeSandboxError(f"{MAX_PROBES_ENV} and {BUDGET_SEC_ENV} must both be greater than zero")
-    session_deadline = _session_deadline(env)
+    budget_raw = str(env.get(ROUND_BUDGET_ENV) or "").strip()
+    device_raw = str(env.get(DEVICE_LOCK_ENV) or "").strip()
+    deadline_raw = str(env.get(SESSION_DEADLINE_ENV) or "").strip()
+    # An absent deadline is fail-open on purpose -- the configured probe budget still bounds every probe, and a
+    # session run outside a round has no deadline to declare.
+    session_deadline: float | None = None
+    if deadline_raw:
+        try:
+            session_deadline = float(deadline_raw)
+        except ValueError as error:
+            raise ProbeSandboxError(f"{SESSION_DEADLINE_ENV} is not a Unix timestamp: {error}") from error
+        if not math.isfinite(session_deadline) or session_deadline <= 0:
+            raise ProbeSandboxError(f"{SESSION_DEADLINE_ENV} is not a Unix timestamp: {deadline_raw!r}")
     return ProbeSandbox(
         scratch_root=scratch_root,
         workspace=workspace,
         ledger_path=ledger_path,
         max_probes=max_probes,
         budget_sec=budget_sec,
-        budget_path=_env_path(env, ROUND_BUDGET_ENV),
-        device_lock=_env_path(env, DEVICE_LOCK_ENV),
+        budget_path=(Path(budget_raw).expanduser().resolve() if budget_raw else None),
+        device_lock=(Path(device_raw).expanduser().resolve() if device_raw else None),
         session_deadline=session_deadline,
     )
-
-
-def _env_text(env: Mapping[str, str], name: str) -> str:
-    """One variable of ``env``, stripped; empty when it is unset."""
-    return str(env.get(name) or "").strip()
-
-
-def _env_path(env: Mapping[str, str], name: str) -> Path | None:
-    """The path one variable of ``env`` names, resolved; None when it names none."""
-    raw = _env_text(env, name)
-    return Path(raw).expanduser().resolve() if raw else None
-
-
-def _session_deadline(env: Mapping[str, str]) -> float | None:
-    """When the specialist session is killed, as ``env`` declares it."""
-    deadline_raw = _env_text(env, SESSION_DEADLINE_ENV)
-    # An absent deadline is fail-open on purpose -- the configured probe budget still bounds every probe, and a
-    # session run outside a round has no deadline to declare.
-    if not deadline_raw:
-        return None
-    try:
-        session_deadline = float(deadline_raw)
-    except ValueError as error:
-        raise ProbeSandboxError(f"{SESSION_DEADLINE_ENV} is not a Unix timestamp: {error}") from error
-    if not math.isfinite(session_deadline) or session_deadline <= 0:
-        raise ProbeSandboxError(f"{SESSION_DEADLINE_ENV} is not a Unix timestamp: {deadline_raw!r}")
-    return session_deadline
 
 
 def _append_line(path: Path, record: dict[str, Any]) -> None:
@@ -482,91 +467,6 @@ async def probe_variant(
     budget: ProbeBudget,
 ) -> dict[str, Any]:
     """Run one bounded probe and record it, whatever the outcome."""
-    request = _probe_request(arguments)
-
-    # What the round's other specialists have spent since the last call.
-    budget.refresh()
-    session_remaining = sandbox.session_remaining_sec()
-    configured_remaining = sandbox.budget_sec - budget.seconds_used
-    budget_remaining = probe_budget_sec(
-        configured_remaining=configured_remaining,
-        session_remaining=session_remaining,
-    )
-    base = {
-        # This ledger's own numbering: ``budget.attempts`` is the round's and skips what a sibling specialist spent.
-        "probe_index": budget.own_attempts + 1,
-        "label": request.label,
-        "case_id": request.case_id,
-        "constants": request.constants,
-    }
-
-    if budget.shared_error:
-        return _record(sandbox, budget, _unmeasured(base, UNAVAILABLE, f"{budget.shared_error}; nothing was measured"))
-    if budget.attempts >= sandbox.max_probes or configured_remaining <= 0:
-        return _record(sandbox, budget, _unmeasured(base, BUDGET_EXHAUSTED, _round_spent_detail(sandbox, budget)))
-    # Gated on whether there is time to PRODUCE the analysis, not on a reserve of the probe's own: a session killed
-    # mid-probe returns nothing at all, and the round treats that as infrastructure failure rather than as a thin
-    # answer.
-    if _no_time_to_probe(session_remaining=session_remaining, budget_remaining=budget_remaining):
-        return _record(sandbox, budget, _unmeasured(base, BUDGET_EXHAUSTED, _session_spent_detail(session_remaining)))
-
-    primitive, unusable = probe_primitive_status()
-    if primitive is None:
-        return _record(sandbox, budget, _unmeasured(base, UNAVAILABLE, f"{unusable}; nothing was measured"))
-
-    driver = _driver_path(arguments, sandbox.workspace)
-    if not _is_inside(driver, sandbox.workspace) or not driver.is_file():
-        return _record(sandbox, budget, _refused_driver(base, driver, sandbox.workspace))
-    base["driver_script"] = str(driver)
-
-    if sandbox.device_lock is None or not sandbox.device_lock.is_file():
-        return _record(sandbox, budget, _unmeasured(base, UNAVAILABLE, _missing_sentinel_detail(sandbox.device_lock)))
-
-    started = monotonic_clock()
-    # The wait is bounded by the probe's own budget, and what it costs is charged to the budget: a specialist that
-    # blocked here until the device came free would spend its session doing nothing.
-    handle = await acquire_device_lock(sandbox.device_lock, timeout_sec=budget_remaining)
-    waited = monotonic_clock() - started
-    if handle is None:
-        detail = (
-            f"the device was still held after {waited:.0f}s, which is this probe's whole budget; nothing was measured"
-        )
-        return _record(sandbox, budget, _unmeasured(base, DEVICE_BUSY, detail, waited))
-
-    # The gate again, on what the wait left.
-    budget_remaining -= waited
-    session_remaining -= waited
-    if _no_time_to_probe(session_remaining=session_remaining, budget_remaining=budget_remaining):
-        release_device_lock(handle)
-        detail = _waited_out_detail(waited, session_remaining=session_remaining, budget_remaining=budget_remaining)
-        return _record(sandbox, budget, _unmeasured(base, BUDGET_EXHAUSTED, detail, waited))
-
-    timeout_sec = probe_timeout_sec(
-        budget_remaining=budget_remaining,
-        session_remaining=session_remaining,
-        requested=arguments.get("timeout_sec"),
-    )
-    try:
-        call = await _call_primitive(primitive, request, driver, timeout_sec)
-        if call.failure:
-            return _record(sandbox, budget, _unmeasured(base, FAILED, call.failure, monotonic_clock() - started))
-    finally:
-        release_device_lock(handle)
-    return _record(sandbox, budget, _measurement_record(base, call.result, started))
-
-
-@dataclass(frozen=True)
-class _ProbeRequest:
-    """What one probe call asks to measure."""
-
-    label: str
-    case_id: str
-    constants: dict[str, Any]
-    prefix_constants: bool
-
-
-def _probe_request(arguments: dict[str, Any]) -> _ProbeRequest:
-    """Validate the label, case and constants one probe call names."""
     label = str(arguments.get("label") or "").strip()
     case_id = str(arguments.get("case_id") or "").strip()
     if not label or not case_id:
@@ -579,112 +479,211 @@ def _probe_request(arguments: dict[str, Any]) -> _ProbeRequest:
     prefix_constants = arguments.get("prefix_constants", True)
     if not isinstance(prefix_constants, bool):
         raise InvalidParamsError("prefix_constants must be a boolean")
-    return _ProbeRequest(label=label, case_id=case_id, constants=constants, prefix_constants=prefix_constants)
 
-
-def _unmeasured(base: dict[str, Any], status: str, detail: str, duration_sec: float = 0.0) -> dict[str, Any]:
-    """The record of an attempt that measured nothing."""
-    return {**base, "status": status, "detail": detail, "duration_sec": duration_sec}
-
-
-def _no_time_to_probe(*, session_remaining: float, budget_remaining: float) -> bool:
-    """Whether a probe would eat into the time reserved for the analysis, or has no budget left to run on."""
-    return session_remaining - ANALYSIS_RESERVE_SEC <= 0 or budget_remaining <= 0
-
-
-def _round_spent_detail(sandbox: ProbeSandbox, budget: ProbeBudget) -> str:
-    """Which of the round's two budgets is spent, as the agent is told it."""
-    exhausted = (
-        f"probe count budget of {sandbox.max_probes} is spent"
-        if budget.attempts >= sandbox.max_probes
-        else f"wall-clock budget of {sandbox.budget_sec:.0f}s is spent"
+    # What the round's other specialists have spent since the last call.
+    budget.refresh()
+    session_remaining = sandbox.session_remaining_sec()
+    configured_remaining = sandbox.budget_sec - budget.seconds_used
+    budget_remaining = probe_budget_sec(
+        configured_remaining=configured_remaining,
+        session_remaining=session_remaining,
     )
-    return f"{exhausted} for this round; this question stays unmeasured and must be reported as such"
+    base = {
+        # This ledger's own numbering: ``budget.attempts`` is the round's and skips what a sibling specialist spent.
+        "probe_index": budget.own_attempts + 1,
+        "label": label,
+        "case_id": case_id,
+        "constants": constants,
+    }
 
+    if budget.shared_error:
+        return _record(
+            sandbox,
+            budget,
+            {
+                **base,
+                "status": UNAVAILABLE,
+                "detail": f"{budget.shared_error}; nothing was measured",
+                "duration_sec": 0.0,
+            },
+        )
 
-def _session_spent_detail(session_remaining: float) -> str:
-    """Why no probe may run on what is left of the session."""
-    return (
-        f"only {max(0.0, session_remaining):.0f}s of your session is "
-        f"left and {ANALYSIS_RESERVE_SEC:.0f}s of it is reserved for "
-        "writing the analysis; no further probe can run, so stop "
-        "probing and report the remaining questions as unmeasured"
-    )
+    if budget.attempts >= sandbox.max_probes or configured_remaining <= 0:
+        exhausted = (
+            f"probe count budget of {sandbox.max_probes} is spent"
+            if budget.attempts >= sandbox.max_probes
+            else f"wall-clock budget of {sandbox.budget_sec:.0f}s is spent"
+        )
+        return _record(
+            sandbox,
+            budget,
+            {
+                **base,
+                "status": BUDGET_EXHAUSTED,
+                "detail": (f"{exhausted} for this round; this question stays unmeasured and must be reported as such"),
+                "duration_sec": 0.0,
+            },
+        )
 
+    # Gated on whether there is time to PRODUCE the analysis, not on a reserve of the probe's own: a session killed
+    # mid-probe returns nothing at all, and the round treats that as infrastructure failure rather than as a thin
+    # answer.
+    if session_remaining - ANALYSIS_RESERVE_SEC <= 0 or budget_remaining <= 0:
+        return _record(
+            sandbox,
+            budget,
+            {
+                **base,
+                "status": BUDGET_EXHAUSTED,
+                "detail": (
+                    f"only {max(0.0, session_remaining):.0f}s of your session is "
+                    f"left and {ANALYSIS_RESERVE_SEC:.0f}s of it is reserved for "
+                    "writing the analysis; no further probe can run, so stop "
+                    "probing and report the remaining questions as unmeasured"
+                ),
+                "duration_sec": 0.0,
+            },
+        )
 
-def _driver_path(arguments: dict[str, Any], workspace: Path) -> Path:
-    """The driver one probe call names, resolved against the canonical workspace."""
+    primitive, unusable = probe_primitive_status()
+    if primitive is None:
+        return _record(
+            sandbox,
+            budget,
+            {
+                **base,
+                "status": UNAVAILABLE,
+                "detail": f"{unusable}; nothing was measured",
+                "duration_sec": 0.0,
+            },
+        )
+
     driver_raw = str(arguments.get("driver_script") or "").strip()
     if not driver_raw:
         raise InvalidParamsError("driver_script must be a non-empty string")
     driver = Path(driver_raw)
     if not driver.is_absolute():
-        driver = workspace / driver
-    return driver.expanduser().resolve()
-
-
-def _refused_driver(base: dict[str, Any], driver: Path, workspace: Path) -> dict[str, Any]:
-    """The record of a probe whose driver is not a file inside the canonical workspace."""
-    return {
-        **base,
-        "status": REFUSED,
-        "driver_script": str(driver),
-        "detail": f"{driver} is not a file inside the canonical workspace {workspace}; nothing was measured",
-        "duration_sec": 0.0,
-    }
-
-
-def _missing_sentinel_detail(device_lock: Path | None) -> str:
-    """Why a probe with no device sentinel to lock measures nothing."""
-    missing = (
-        f"{DEVICE_LOCK_ENV} names no device sentinel"
-        if device_lock is None
-        else f"the device sentinel {device_lock} does not exist"
-    )
-    return f"{missing}, so this probe would time the GPU while something else uses it; nothing was measured"
-
-
-def _waited_out_detail(waited: float, *, session_remaining: float, budget_remaining: float) -> str:
-    """Why a probe whose wait for the device left too little time measures nothing."""
-    return (
-        f"{waited:.0f}s went on waiting for the device, which "
-        f"leaves {max(0.0, session_remaining):.0f}s of your session "
-        f"and {max(0.0, budget_remaining):.0f}s of this round's "
-        "budget; nothing was measured, so report this question as "
-        "unmeasured"
-    )
-
-
-@dataclass(frozen=True)
-class _PrimitiveCall:
-    """What awaiting the primitive gave: its result, or why it gave none."""
-
-    result: Any = None
-    failure: str = ""
-
-
-async def _call_primitive(primitive: Any, request: _ProbeRequest, driver: Path, timeout_sec: int) -> _PrimitiveCall:
-    """Await the primitive on one case, abandoning it a grace period past the probe's ceiling."""
-    try:
-        result = await asyncio.wait_for(
-            primitive(
-                driver_script=str(driver),
-                case_id=request.case_id,
-                constants=dict(request.constants),
-                timeout_sec=timeout_sec,
-                prefix_constants=request.prefix_constants,
-            ),
-            timeout=timeout_sec + PROBE_TOOL_GRACE_SEC,
+        driver = sandbox.workspace / driver
+    driver = driver.expanduser().resolve()
+    if not _is_inside(driver, sandbox.workspace) or not driver.is_file():
+        return _record(
+            sandbox,
+            budget,
+            {
+                **base,
+                "status": REFUSED,
+                "driver_script": str(driver),
+                "detail": (
+                    f"{driver} is not a file inside the canonical workspace {sandbox.workspace}; nothing was measured"
+                ),
+                "duration_sec": 0.0,
+            },
         )
-    except asyncio.TimeoutError:
-        return _PrimitiveCall(failure=f"probe exceeded its {timeout_sec}s ceiling")
-    except Exception as error:  # noqa: BLE001 - a broken probe is a reported probe
-        return _PrimitiveCall(failure=f"{type(error).__name__}: {error}")
-    return _PrimitiveCall(result=result)
+    base["driver_script"] = str(driver)
 
+    if sandbox.device_lock is None or not sandbox.device_lock.is_file():
+        missing = (
+            f"{DEVICE_LOCK_ENV} names no device sentinel"
+            if sandbox.device_lock is None
+            else f"the device sentinel {sandbox.device_lock} does not exist"
+        )
+        return _record(
+            sandbox,
+            budget,
+            {
+                **base,
+                "status": UNAVAILABLE,
+                "detail": (
+                    f"{missing}, so this probe would time the GPU while something else uses it; nothing was measured"
+                ),
+                "duration_sec": 0.0,
+            },
+        )
 
-def _measurement_record(base: dict[str, Any], result: Any, started: float) -> dict[str, Any]:
-    """The record of a probe the primitive ran, failed when its result carries no timing."""
+    started = monotonic_clock()
+    # The wait is bounded by the probe's own budget, and what it costs is charged to the budget: a specialist that
+    # blocked here until the device came free would spend its session doing nothing.
+    handle = await acquire_device_lock(sandbox.device_lock, timeout_sec=budget_remaining)
+    waited = monotonic_clock() - started
+    if handle is None:
+        return _record(
+            sandbox,
+            budget,
+            {
+                **base,
+                "status": DEVICE_BUSY,
+                "detail": (
+                    f"the device was still held after {waited:.0f}s, which is "
+                    "this probe's whole budget; nothing was measured"
+                ),
+                "duration_sec": waited,
+            },
+        )
+
+    # The gate again, on what the wait left.
+    budget_remaining -= waited
+    session_remaining -= waited
+    if session_remaining - ANALYSIS_RESERVE_SEC <= 0 or budget_remaining <= 0:
+        release_device_lock(handle)
+        return _record(
+            sandbox,
+            budget,
+            {
+                **base,
+                "status": BUDGET_EXHAUSTED,
+                "detail": (
+                    f"{waited:.0f}s went on waiting for the device, which "
+                    f"leaves {max(0.0, session_remaining):.0f}s of your session "
+                    f"and {max(0.0, budget_remaining):.0f}s of this round's "
+                    "budget; nothing was measured, so report this question as "
+                    "unmeasured"
+                ),
+                "duration_sec": waited,
+            },
+        )
+
+    timeout_sec = probe_timeout_sec(
+        budget_remaining=budget_remaining,
+        session_remaining=session_remaining,
+        requested=arguments.get("timeout_sec"),
+    )
+    try:
+        try:
+            result = await asyncio.wait_for(
+                primitive(
+                    driver_script=str(driver),
+                    case_id=case_id,
+                    constants=dict(constants),
+                    timeout_sec=timeout_sec,
+                    prefix_constants=prefix_constants,
+                ),
+                timeout=timeout_sec + PROBE_TOOL_GRACE_SEC,
+            )
+        except asyncio.TimeoutError:
+            return _record(
+                sandbox,
+                budget,
+                {
+                    **base,
+                    "status": FAILED,
+                    "detail": f"probe exceeded its {timeout_sec}s ceiling",
+                    "duration_sec": monotonic_clock() - started,
+                },
+            )
+        except Exception as error:  # noqa: BLE001 - a broken probe is a reported probe
+            return _record(
+                sandbox,
+                budget,
+                {
+                    **base,
+                    "status": FAILED,
+                    "detail": f"{type(error).__name__}: {error}",
+                    "duration_sec": monotonic_clock() - started,
+                },
+            )
+    finally:
+        release_device_lock(handle)
+
     payload = result if isinstance(result, dict) else {}
     # The primitive omits every timing field on failure rather than reporting a zero, so a result carrying no
     # ``case_ms`` is a failure whatever else it says.
@@ -707,7 +706,7 @@ def _measurement_record(base: dict[str, Any], result: Any, started: float) -> di
         consumption = payload.get("override_consumption")
         if isinstance(consumption, dict) and consumption:
             record["override_consumption"] = consumption
-    return record
+    return _record(sandbox, budget, record)
 
 
 def _record(

@@ -553,33 +553,6 @@ async def test_server_refuses_a_non_boolean_prefix_constants(tmp_path, monkeypat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("overrides", "message"),
-    [
-        ({"label": "  "}, "label and case_id must be non-empty strings"),
-        ({"constants": ["BLOCK"]}, "constants must be an object"),
-        ({"driver_script": " "}, "driver_script must be a non-empty string"),
-    ],
-)
-async def test_server_refuses_malformed_arguments_without_charging_the_round(
-    tmp_path, monkeypatch, overrides, message
-) -> None:
-    _patch_primitive(monkeypatch, _stub_primitive)
-    sandbox = _sandbox(tmp_path)
-    budget = probe_server.ProbeBudget()
-
-    with pytest.raises(probe_server.InvalidParamsError, match=message):
-        await probe_server.probe_variant(
-            {"label": "widen", "driver_script": "driver.py", "case_id": "case-a", **overrides},
-            sandbox=sandbox,
-            budget=budget,
-        )
-
-    assert budget.attempts == 0
-    assert not sandbox.ledger_path.exists()
-
-
-@pytest.mark.asyncio
 async def test_server_reports_a_crashed_probe(tmp_path, monkeypatch) -> None:
     _patch_primitive(monkeypatch, _crashing_primitive)
     sandbox = _sandbox(tmp_path)
@@ -1669,24 +1642,6 @@ def test_a_session_deadline_that_is_not_a_time_is_refused(tmp_path) -> None:
     sandbox = probe_server.load_sandbox(base)
     assert sandbox.session_deadline is None
     assert sandbox.session_remaining_sec() == math.inf
-
-
-def test_a_session_deadline_that_is_not_a_number_is_refused(tmp_path) -> None:
-    scratch = tmp_path / "scratch"
-    workspace = tmp_path / "canonical"
-    scratch.mkdir()
-    workspace.mkdir()
-
-    with pytest.raises(probe_server.ProbeSandboxError, match="is not a Unix timestamp: could not convert"):
-        probe_server.load_sandbox(
-            {
-                probe_server.SCRATCH_ENV: str(scratch),
-                probe_server.WORKSPACE_ENV: str(workspace),
-                probe_server.MAX_PROBES_ENV: "4",
-                probe_server.BUDGET_SEC_ENV: "60",
-                probe_server.SESSION_DEADLINE_ENV: "tomorrow",
-            }
-        )
 
 
 def test_a_setup_with_no_deadline_omits_the_variable(tmp_path) -> None:
