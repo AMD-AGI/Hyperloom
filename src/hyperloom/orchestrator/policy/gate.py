@@ -1271,6 +1271,27 @@ class PolicyGate:
         relative_posix = relative.as_posix()
         return frozenset({relative_posix}) if relative_posix and relative_posix != "." else frozenset()
 
+    def _warm_replay_patch_key(self, raw_patch: Any, raw_targets: list[str]) -> str:
+        """Return the realpath of a warm-replay patch, which must lie inside the session KB download root."""
+        if not isinstance(raw_patch, str) or not raw_patch.strip():
+            raise PolicyDenied(
+                f"replay_warm_recipe resolved_patch_targets={raw_targets!r} has no patch_path",
+                rule="warm_replay_patch_missing",
+            )
+        kb_root = self._remote_recipe_files_root()
+        if kb_root is None or not resolved_within(raw_patch, str(kb_root)):
+            raise PolicyDenied(
+                f"replay_warm_recipe patch_path={raw_patch!r} is outside the session KB download root={kb_root!s}",
+                rule="warm_replay_patch_outside_kb_download",
+            )
+        try:
+            return str(Path(raw_patch).resolve())
+        except (OSError, RuntimeError) as exc:
+            raise PolicyDenied(
+                f"replay_warm_recipe patch_path={raw_patch!r} cannot be resolved",
+                rule="warm_replay_patch_outside_kb_download",
+            ) from exc
+
     def _validate_warm_replay_targets(
         self,
         params: dict[str, Any],
@@ -1292,7 +1313,6 @@ class PolicyGate:
                 rule="warm_replay_plan_invalid",
             )
 
-        kb_root = self._remote_recipe_files_root()
         admitted: set[str] = set()
         patch_coverage: dict[str, tuple[frozenset[str], set[str]]] = {}
         for index, entry in enumerate(plan):
@@ -1301,7 +1321,7 @@ class PolicyGate:
                     f"replay_warm_recipe warm_kernel_plan[{index}] must be an object",
                     rule="warm_replay_plan_invalid",
                 )
-            raw_targets = entry.get("resolved_patch_targets") or []
+            raw_targets = entry.get("resolved_patch_targets")
             if not raw_targets:
                 continue
             if not isinstance(raw_targets, list) or not all(
@@ -1313,35 +1333,10 @@ class PolicyGate:
                     rule="warm_replay_plan_invalid",
                 )
 
-            raw_patch = entry.get("patch_path")
-            if not isinstance(raw_patch, str) or not raw_patch.strip():
-                raise PolicyDenied(
-                    f"replay_warm_recipe resolved_patch_targets={raw_targets!r} has no patch_path",
-                    rule="warm_replay_patch_missing",
-                )
-            if kb_root is None or not resolved_within(raw_patch, str(kb_root)):
-                raise PolicyDenied(
-                    f"replay_warm_recipe patch_path={raw_patch!r} is outside the session KB download root={kb_root!s}",
-                    rule="warm_replay_patch_outside_kb_download",
-                )
-
-            declared_targets = self._patch_declared_targets(Path(raw_patch))
-            try:
-                patch_key = str(Path(raw_patch).resolve())
-            except (OSError, RuntimeError) as exc:
-                raise PolicyDenied(
-                    f"replay_warm_recipe patch_path={raw_patch!r} cannot be resolved",
-                    rule="warm_replay_patch_outside_kb_download",
-                ) from exc
-            known_targets, covered_targets = patch_coverage.setdefault(
-                patch_key,
-                (declared_targets, set()),
-            )
-            if known_targets != declared_targets:
-                raise PolicyDenied(
-                    f"replay_warm_recipe patch_path={raw_patch!r} changed during validation",
-                    rule="warm_replay_patch_target_mismatch",
-                )
+            patch_key = self._warm_replay_patch_key(entry.get("patch_path"), raw_targets)
+            if patch_key not in patch_coverage:
+                patch_coverage[patch_key] = (self._patch_declared_targets(Path(patch_key)), set())
+            declared_targets, covered_targets = patch_coverage[patch_key]
             for raw_target in raw_targets:
                 active_root = resolve_session_framework_root()
                 if not active_root or not resolved_within(raw_target, active_root):
@@ -1350,7 +1345,7 @@ class PolicyGate:
                         rule="warm_replay_target_outside_framework_roots",
                     )
                 target_candidates = self._framework_relative_candidates(raw_target)
-                if not declared_targets or declared_targets.isdisjoint(target_candidates):
+                if declared_targets.isdisjoint(target_candidates):
                     raise PolicyDenied(
                         f"replay_warm_recipe target_file={raw_target!r} does not "
                         f"match patch targets={sorted(declared_targets)!r}",
