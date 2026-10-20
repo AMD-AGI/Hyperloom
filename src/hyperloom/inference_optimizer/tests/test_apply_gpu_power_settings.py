@@ -648,6 +648,26 @@ class TestRestoreGuard:
 
 
 class TestSessionWiring:
+    @pytest.mark.parametrize("apply", [True, False])
+    def test_a_resume_stops_its_own_left_over_servers_before_it_applies(self, monkeypatch, tmp_path, apply):
+        """After a SIGKILL the session's server outlives it; the apply must not take it for another tenant's model."""
+        from hyperloom.inference_optimizer import cli
+        from hyperloom.orchestrator.actions.executors import _server_lifecycle
+
+        steps: list[str] = []
+        monkeypatch.setattr(cli, "_restore_partition_shape_from_state", lambda args, state: None)
+        monkeypatch.setattr(_server_lifecycle, "reap_orphaned_servers", lambda d: steps.append(f"reap {d}") or [4242])
+
+        def _resume(args, state):
+            steps.append("apply")
+            raise SystemExit(9)
+
+        monkeypatch.setattr(cli, "resume_gpu_power_settings", _resume)
+        lock = SimpleNamespace(session_dir=tmp_path, release=lambda: None)
+        with pytest.raises(SystemExit):
+            cli._restore_platform_state(SimpleNamespace(apply_gpu_power_settings=apply), SimpleNamespace(), lock)
+        assert steps == ([f"reap {tmp_path}", "apply"] if apply else ["apply"])
+
     def test_a_launch_without_root_is_refused_before_any_record_exists(self, monkeypatch):
         """amd-smi set needs root; records an unprivileged attempt left would make a later root launch refuse."""
         monkeypatch.setattr(os, "geteuid", lambda: 1000)

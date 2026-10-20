@@ -1692,6 +1692,20 @@ class _SessionStart:
     manifest: dict[str, Any]
 
 
+def _reap_own_servers_before_applying(args: argparse.Namespace, session_dir: Path) -> None:
+    """Stop the servers a SIGKILLed previous leg left up, before an apply checks the cards for other tenants' models.
+
+    The Coordinator reaps them at boot, but that is after the apply, which would take the session's own server for
+    someone else's and refuse. Scoped to this session's pidfiles and gated on a serving cmdline, as there.
+    """
+    if not getattr(args, "apply_gpu_power_settings", False):
+        return
+    from hyperloom.orchestrator.actions.executors._server_lifecycle import reap_orphaned_servers
+
+    if reaped := reap_orphaned_servers(session_dir):
+        print(f"Stopped the serving process(es) the previous leg left running: {', '.join(map(str, reaped))}")
+
+
 def _restore_platform_state(args: argparse.Namespace, state: SharedState, session_lock: SessionLock) -> None:
     """Re-assert the partition shape, the power settings and the topology this session was measured under.
 
@@ -1701,6 +1715,7 @@ def _restore_platform_state(args: argparse.Namespace, state: SharedState, sessio
     # The partition shape is part of the measurement contract, so it resumes on the same restore / apply / persist
     # path as the paths above.
     _restore_partition_shape_from_state(args, state)
+    _reap_own_servers_before_applying(args, session_lock.session_dir)
     # The power settings resume on the same assert / record path: an omitted flag re-asserts the archived value.
     gpu_power, _gpu_power_error = resume_gpu_power_settings(args, state)
     if _gpu_power_error:
