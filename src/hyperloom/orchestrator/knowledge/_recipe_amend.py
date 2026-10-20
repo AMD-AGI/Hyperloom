@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from types import MappingProxyType
 from typing import Any, Mapping
 
-from hyperloom.common.coerce import to_float
+from hyperloom.common.coerce import recorded_float
 
 #: Recipe fields an amend carries forward when the caller does not override
 #: them, each with the empty value ``put_recipe`` falls back to.
@@ -80,7 +80,7 @@ def improved_best_config(state: Any, attrs: Mapping[str, Any], live: Mapping[str
     validated_gain = float(state.cumulative_gain_validated or 0.0)
     current_args = str(state.current_best.get("extra_server_args") or "").strip()
     has_validated_win = bool((state.optimization_stack or []) or validated_gain > 0.0 or current_args)
-    if not has_validated_win or my_throughput <= to_float(live.get("best_throughput"), 0.0):
+    if not has_validated_win or my_throughput <= recorded_float(live.get("best_throughput")):
         return {}
     return {
         "best_config": attrs["best_config"],

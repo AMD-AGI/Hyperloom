@@ -14,7 +14,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Collection, Iterable, Mapping, NamedTuple, Sequence
 
-from hyperloom.common.coerce import to_float
+from hyperloom.common.coerce import recorded_float
 from hyperloom.inference_optimizer.session.optimization_journal import OUTCOME_KEEP, OUTCOME_REVERT
 
 from .workload_tags import workload_shape_tags
@@ -175,7 +175,7 @@ def _last_rebenched_throughput(integration: Mapping[str, Any]) -> float:
     """Throughput from the most recent integrate attempt that re-benched end to end."""
     for attempt in reversed(list(integration.get("attempts") or [])):
         if isinstance(attempt, dict) and attempt.get("new_tput") is not None:
-            return to_float(attempt.get("new_tput"), 0.0)
+            return recorded_float(attempt.get("new_tput"))
     return 0.0
 
 
@@ -188,7 +188,7 @@ def _e2e_verdict(integration: Any) -> _E2eVerdict:
     if not isinstance(integration, dict):
         return _E2eVerdict(gain_pct=0.0, throughput=0.0, decision="", integrated=False)
     return _E2eVerdict(
-        gain_pct=to_float(integration.get("best_gain_pct"), 0.0),
+        gain_pct=recorded_float(integration.get("best_gain_pct")),
         throughput=_last_rebenched_throughput(integration),
         decision=str(integration.get("last_decision") or "").upper(),
         integrated=True,
@@ -205,7 +205,7 @@ def _kernel_optimization_row(entry: Mapping[str, Any], ledger_id: str, index: _I
         "kernel_id": kernel_id,
         "source_file": str(entry.get("last_source_file") or ""),
         "artifact_path": str(entry.get("last_artifact_path") or ""),
-        "micro_speedup": to_float(entry.get("last_micro_speedup"), 0.0),
+        "micro_speedup": recorded_float(entry.get("last_micro_speedup")),
         "decision": OUTCOME_KEEP,
         "e2e_gain_pct": e2e.gain_pct,
         "e2e_tput": e2e.throughput,

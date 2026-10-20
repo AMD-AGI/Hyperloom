@@ -23,6 +23,19 @@ def to_float(value: Any, default: _T | None = None) -> float | _T | None:
     return result if math.isfinite(result) else default
 
 
+def recorded_float(value: Any, default: float = 0.0) -> float:
+    """Coerce a recorded measurement to ``float``, keeping ``inf`` / ``nan`` as they were recorded.
+
+    Unlike :func:`to_float`, a non-finite figure survives the coercion. It says
+    the benchmark behind it is broken, and *default* would render that as a
+    measurement somebody took.
+    """
+    try:
+        return float(value or default)
+    except (TypeError, ValueError):
+        return default
+
+
 def to_int(value: Any, default: _T | None = None) -> int | _T | None:
     """Coerce *value* to ``int``, rejecting ``bool``, ``None``, and non-finite floats."""
     if value is None or isinstance(value, bool):
@@ -96,6 +109,7 @@ def to_str_list(value: Any) -> list[str]:
 
 __all__ = [
     "to_float",
+    "recorded_float",
     "to_int",
     "first_float",
     "first_int",

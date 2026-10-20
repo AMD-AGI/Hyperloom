@@ -24,7 +24,7 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
     derive_journal_outcome,
     summarize_change,
 )
-from hyperloom.orchestrator.knowledge.recipe_kb import recipe_canonical_id
+from hyperloom.orchestrator.knowledge.recipe_kb import LocalRecipeStoreError, recipe_canonical_id
 from hyperloom.orchestrator.lever import LEVER_CONFIG, lever_kind_for_task
 
 from ..collaborator import CoordinatorCollaborator
@@ -556,47 +556,50 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         if fact.variant_name is not None:
             provenance_base["source_variant_name"] = fact.variant_name
 
-        if fact.is_keep and fact.gain_pct is not None and fact.gain_pct > 0:
-            statement = self._build_statement(
-                change=fact.change,
-                kind="lesson",
-            )
-            impact = self._build_measured_impact(
-                gain_pct=fact.gain_pct,
-                throughput_after=fact.throughput_after,
-                stack_depth=len(self.shared_state.optimization_stack or []),
-                measured_at=now_iso,
-            )
-            live = self.read_local_recipe_row()
-            recipe_overrides = self.kb_best_config_overrides_for_keep(
-                live=live,
-                best_config_candidate=fact.best_config_candidate,
-                throughput_after=fact.throughput_after,
-            )
-            self.kb_amend_recipe(
-                append_lesson={
-                    "statement": statement,
-                    "measured_impact": impact,
-                },
-                recipe_overrides=recipe_overrides or None,
-                provenance_details=provenance_base,
-            )
-            return
+        try:
+            if fact.is_keep and fact.gain_pct is not None and fact.gain_pct > 0:
+                statement = self._build_statement(
+                    change=fact.change,
+                    kind="lesson",
+                )
+                impact = self._build_measured_impact(
+                    gain_pct=fact.gain_pct,
+                    throughput_after=fact.throughput_after,
+                    stack_depth=len(self.shared_state.optimization_stack or []),
+                    measured_at=now_iso,
+                )
+                live = self.read_local_recipe_row()
+                recipe_overrides = self.kb_best_config_overrides_for_keep(
+                    live=live,
+                    best_config_candidate=fact.best_config_candidate,
+                    throughput_after=fact.throughput_after,
+                )
+                self.kb_amend_recipe(
+                    append_lesson={
+                        "statement": statement,
+                        "measured_impact": impact,
+                    },
+                    recipe_overrides=recipe_overrides or None,
+                    provenance_details=provenance_base,
+                )
+                return
 
-        severity = self._pitfall_severity_for(fact.pitfall_severity_dict)
-        if severity is not None:
-            description = self._build_statement(
-                change=fact.change,
-                severity=severity,
-                kind="pitfall",
-            )
-            self.kb_amend_recipe(
-                append_pitfall={
-                    "description": description,
-                    "severity": severity,
-                },
-                provenance_details=provenance_base,
-            )
+            severity = self._pitfall_severity_for(fact.pitfall_severity_dict)
+            if severity is not None:
+                description = self._build_statement(
+                    change=fact.change,
+                    severity=severity,
+                    kind="pitfall",
+                )
+                self.kb_amend_recipe(
+                    append_pitfall={
+                        "description": description,
+                        "severity": severity,
+                    },
+                    provenance_details=provenance_base,
+                )
+        except (LocalRecipeStoreError, OSError, ValueError) as error:
+            log.warning("recipe KB write for task %s failed: %s", fact.task.task_id, error)
 
     def _record_fact_per_task(
         self,
@@ -1130,7 +1133,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         """
         state = self.shared_state
         attrs = recipe_attrs_from_state(state, self.session_dir.name)
-        live = self._authoritative_recipe_row(self.workload_canonical_id())
+        live = self.recipe_kb.get_authoritative_recipe(canonical_id=self.workload_canonical_id()) or {}
         my_sessions = list(attrs["sessions"] or [])
         my_kernels = list(attrs.get("kernel_optimizations") or [])
         # KEEP'd kernel optimizations ride the extras channel.
@@ -1226,18 +1229,6 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             scheme=("agentx" if agentx_active(benchmark_mode=state.benchmark_mode) else "inference"),
         )
 
-    def _authoritative_recipe_row(self, canonical_id: str) -> dict[str, Any]:
-        """The store's exact authority row for a canonical id, empty when the read fails.
-
-        A store that refuses the read still gets this session's write: losing
-        the rest of the row is better than losing what this session proved.
-        """
-        try:
-            return self.recipe_kb.get_authoritative_recipe(canonical_id=canonical_id) or {}
-        except Exception as exc:  # noqa: BLE001 - the recipe store may be remote
-            log.info("recipe authority read failed for cid=%s (%s); proceeding without it", canonical_id, exc)
-            return {}
-
     def read_local_recipe_row(self) -> dict[str, Any]:
         """Load the selected store's exact authority row for writes, cached for the current tick."""
         if self.recipe_kb is None:
@@ -1246,7 +1237,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         cache = self._local_recipe_cache
         if isinstance(cache, tuple) and len(cache) == 2 and cache[0] == tick:
             return cache[1]
-        row = self._authoritative_recipe_row(self.workload_canonical_id())
+        row = self.recipe_kb.get_authoritative_recipe(canonical_id=self.workload_canonical_id()) or {}
         self._local_recipe_cache = (tick, row)
         return row
 
@@ -1340,15 +1331,16 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
     ) -> None:
         """Read-modify-write the local recipe row: append the fact, merge the overrides, write it back.
 
-        Best effort. A lesson or pitfall is appended without dedup, and a field
-        the caller did not override keeps the value the live row carries.
+        Read or write failures propagate. A lesson or pitfall is appended
+        without dedup, and a field the caller did not override keeps the value
+        the live row carries.
         """
         if not self._amends_local_recipe():
             return
         state = self.shared_state
         canonical_id = self.workload_canonical_id()
         identity = _framework_identity(state)
-        live = self._authoritative_recipe_row(canonical_id)
+        live = self.recipe_kb.get_authoritative_recipe(canonical_id=canonical_id) or {}
         overrides = dict(recipe_overrides or {})
         put_kwargs: dict[str, Any] = {
             "canonical_id": canonical_id,
@@ -1363,14 +1355,8 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             "provenance": amend_provenance(provenance_details),
             **amended_recipe_fields(live, overrides),
         }
-        try:
-            self.recipe_kb.put_recipe(**put_kwargs)
-            self._local_recipe_cache = None
-        except Exception:
-            log.exception(
-                "kb_amend_recipe: put_recipe failed for cid=%s",
-                canonical_id,
-            )
+        self.recipe_kb.put_recipe(**put_kwargs)
+        self._local_recipe_cache = None
 
 
 __all__ = ["RecipeJournalCollaborator"]
