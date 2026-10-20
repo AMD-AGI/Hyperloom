@@ -350,20 +350,6 @@ def test_close_never_raises_on_an_unwritable_path(tmp_path):
     assert payload["schema_version"] == 1
 
 
-def test_sampling_failure_does_not_propagate():
-    class _Boom:
-        url = "http://x/metrics"
-        available = None
-
-        def sample(self):
-            raise RuntimeError("scrape exploded")
-
-    rec = KvMetricsRecorder(poller=_Boom(), min_interval_sec=0.0)
-    rec.tick(0.0)
-
-    assert rec.rows() == []
-
-
 # --------------------------------------------------------------------------
 # loop integration
 # --------------------------------------------------------------------------
@@ -1478,16 +1464,58 @@ def test_a_round_without_an_aiperf_export_reports_no_timeline(tmp_path):
     assert not (tmp_path / "agentx_timeline.jsonl").exists()
 
 
-def test_progress_failures_never_reach_the_round():
-    """Collection is observational; a broken endpoint costs nothing."""
+class _RaisingPoller(_StubPoller):
+    def sample(self):
+        raise RuntimeError("sample bug")
 
-    class _Exploding:
-        def poll(self):
-            raise RuntimeError("progress API on fire")
 
-    rec = KvMetricsRecorder(poller=_StubPoller([_sample()]), progress=_Exploding(), min_interval_sec=0)
-    rec.tick(1.0)
-    payload = rec.summary()
+class _RaisingProgress:
+    def poll(self):
+        raise RuntimeError("poll bug")
 
-    assert payload["phase_source"] == "log_markers"
-    assert payload["sample_count"] == 1
+
+def test_a_failing_poller_sample_propagates_from_the_scrape():
+    rec = KvMetricsRecorder(poller=_RaisingPoller([]), min_interval_sec=0.0)
+
+    with pytest.raises(RuntimeError, match="sample bug"):
+        rec.tick(0.0)
+
+    assert rec.rows() == []
+
+
+def test_a_failing_progress_poll_propagates_before_the_engine_is_scraped():
+    poller = _StubPoller([_sample()])
+    rec = KvMetricsRecorder(poller=poller, min_interval_sec=0.0, progress=_RaisingProgress())
+
+    with pytest.raises(RuntimeError, match="poll bug"):
+        rec.tick(0.0)
+
+    assert poller.calls == 0
+    assert rec.rows() == []
+
+
+def test_a_failing_aiperf_read_propagates_from_the_summary(tmp_path, monkeypatch):
+    from hyperloom.orchestrator.actions.executors import _kv_metrics as kv
+
+    def _boom(_path):
+        raise RuntimeError("aiperf read bug")
+
+    monkeypatch.setattr(kv, "_server_metrics_exports", lambda _workspace: [tmp_path / "export.json"])
+    monkeypatch.setattr(kv, "read_aiperf_server_metrics", _boom)
+    rec = KvMetricsRecorder(poller=_StubPoller([]), min_interval_sec=0.0, workspace=tmp_path)
+
+    with pytest.raises(RuntimeError, match="aiperf read bug"):
+        rec.summary()
+
+
+def test_a_failing_timeline_build_propagates_from_the_summary(tmp_path, monkeypatch):
+    from hyperloom.orchestrator.actions.executors import _agentx_timeline as timeline
+
+    def _boom(_workspace):
+        raise RuntimeError("timeline bug")
+
+    monkeypatch.setattr(timeline, "find_profile_export", _boom)
+    rec = KvMetricsRecorder(poller=_StubPoller([]), min_interval_sec=0.0, workspace=tmp_path)
+
+    with pytest.raises(RuntimeError, match="timeline bug"):
+        rec.summary()

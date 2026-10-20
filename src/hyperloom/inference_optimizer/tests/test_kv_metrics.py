@@ -347,6 +347,29 @@ def test_poller_availability_is_tristate_and_gives_up(monkeypatch):
     assert poller.fetch() is None
 
 
+def test_a_truncated_response_is_a_missed_scrape_for_both_pollers(monkeypatch, tmp_path):
+    """An engine killed mid-response must cost the round one sample, not the artifact."""
+    import http.client
+
+    from hyperloom.orchestrator.actions.executors import _kv_metrics
+    from hyperloom.orchestrator.actions.executors._kv_metrics import AiperfProgressPoller
+
+    class _Truncated:
+        def open(self, *_args, **_kwargs):
+            raise http.client.IncompleteRead(b"partial", 100)
+
+    monkeypatch.setattr(_kv_metrics, "_OPENER", _Truncated())
+
+    kv_poller = KvMetricsPoller(port=1)
+    assert kv_poller.fetch() is None
+    assert kv_poller._failures == 1
+
+    progress_poller = AiperfProgressPoller(tmp_path)
+    progress_poller.url = "http://127.0.0.1:1"
+    assert progress_poller.poll() is None
+    assert progress_poller._failures == 1
+
+
 def test_poller_sample_returns_none_when_endpoint_has_no_kv(monkeypatch):
     poller = KvMetricsPoller(port=1)
     monkeypatch.setattr(poller, "fetch", lambda: "python_gc_objects_collected_total 12.0\n")

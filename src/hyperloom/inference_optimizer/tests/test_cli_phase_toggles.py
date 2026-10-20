@@ -61,13 +61,3 @@ def test_removed_budget_spellings_are_rejected(flag):
 
 # --------------------------------------------------------------------------- # The eval toggle, which is orthogonal
 # and unchanged. --------------------------------------------------------------------------- #
-def test_no_eval_default_false():
-    assert _parse_optimize([]).no_eval is False
-
-
-def test_no_eval_flag_sets_true():
-    assert _parse_optimize(["--no-eval"]).no_eval is True
-
-
-def test_shared_state_eval_disabled_defaults_false():
-    assert SharedState(session_id="t").eval_disabled is False

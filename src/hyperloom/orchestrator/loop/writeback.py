@@ -44,6 +44,7 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
 from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
 from ..actions.executors.explore import STACK_REVALIDATE_SOURCE, is_stack_revalidation
 from hyperloom.inference_optimizer.grid_server_args import strip_benchmark_harness_flags
+from hyperloom.inference_optimizer.inferencex_checkout import has_benchmark_lib
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 from ..actions.executors._agentx_prefix_cache import PREFIX_CACHE_OFF_ERROR_CLASS
 from ..actions.executors._subprocess_kill import AGENTX_PREFLIGHT_ERROR_CLASS
@@ -328,7 +329,6 @@ _BASELINE_FINGERPRINT_KEYS: tuple[str, ...] = (
     "model_path",
     "gpu_type",
     "config_path",
-    "disable_run_eval",
 )
 
 
@@ -1885,8 +1885,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     acc = result.get("accuracy")
                     floor = float(getattr(self.shared_state.enablement, "accuracy_floor", 0.0) or 0.0)
                     generation = int(getattr(self.shared_state.enablement, "revalidation_generation", 0) or 0)
-                    eval_off = bool(self.shared_state.eval_disabled)
-                    if accuracy_meets_floor(acc, floor) or eval_off:
+                    if accuracy_meets_floor(acc, floor):
                         self.shared_state.enablement.succeeded = True
                         self.shared_state.enablement.validation_pending = False
                         self.shared_state.enablement.revalidation_task_id = ""
@@ -3615,15 +3614,14 @@ class WritebackCollaborator(CoordinatorCollaborator):
         }
         active_inferencex = str(state.active_inferencex_path or "").strip()
         if active_inferencex:
-            if Path(active_inferencex).is_dir():
+            if has_benchmark_lib(active_inferencex):
                 os.environ["INFERENCEX_PATH"] = active_inferencex
+            elif Path(active_inferencex).is_dir():
+                # Not an InferenceX tree: dropped, so the checkout this launch resolved stays the one every round uses.
+                report["warnings"].append({"kind": "active_inferencex_checkout_invalid", "path": active_inferencex})
+                state.active_inferencex_path = ""
             else:
-                report["warnings"].append(
-                    {
-                        "kind": "active_inferencex_checkout_missing",
-                        "path": active_inferencex,
-                    }
-                )
+                report["warnings"].append({"kind": "active_inferencex_checkout_missing", "path": active_inferencex})
                 state.set_stop_reason("active_inferencex_checkout_missing")
         # Loading the state file is the one boundary the persisted
         # ``optimization_stack`` crosses, so bind its rows to their members here:

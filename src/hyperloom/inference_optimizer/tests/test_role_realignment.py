@@ -114,7 +114,7 @@ def test_critic_phase_orientation_is_delivered_not_inlined():
     """Critic phase awareness lives in the per-phase injector, not in critic.md."""
     from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
     from hyperloom.orchestrator.phases import machine_state as _ps
-    from hyperloom.orchestrator.roles.critic_agent import _PHASE_ORIENTATION
+    from hyperloom.orchestrator.roles._review_constraints import _PHASE_ORIENTATION
 
     body = (asset_system_prompts_dir() / "critic.md").read_text(encoding="utf-8")
     assert "Phase-specific rules" in body
@@ -954,6 +954,34 @@ async def test_send_message_to_specialist_prefers_worktree_inbox(coordinator_wit
         assert not (workspace / "inbox.json").exists()
         entries = _json.loads(worktree_inbox.read_text(encoding="utf-8"))
         assert entries[0]["body"]["body_md"] == "steer toward decode"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_send_message_with_a_list_recipient_is_denied_not_crashed(coordinator_with_mocks):
+    """A ``to`` array is refused by the gate instead of faulting the phase event.
+
+    Before the check the raw list reached the events INSERT as ``to_agent``
+    and sqlite3.ProgrammingError escaped handle_intent, marking the running
+    phase event failed.
+    """
+    c = coordinator_with_mocks
+    try:
+        await c.router.handle_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.SEND_MESSAGE,
+                payload={
+                    "to": ["critic", "kernel_agent"],
+                    "topic": "observation",
+                    "body_md": "addressing several agents at once",
+                },
+            ),
+        )
+        denials = c.bus.inbox_context_sync("orchestration")
+        kinds = [m.payload.get("kind") for m in denials if m.payload.get("kind") == "policy_denied"]
+        assert kinds, "expected a policy_denied observation for the malformed recipient"
     finally:
         await c.stop()
 
