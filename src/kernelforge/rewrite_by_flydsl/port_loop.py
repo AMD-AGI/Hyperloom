@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from kernelforge.config import Config
-from kernelforge.loop.validation import run_validation_pipeline
+from kernelforge.evaluation.correctness.pipeline import run_validation_pipeline
 from kernelforge.rewrite_by_flydsl.prompts import build_port_program_md
 from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
 from kernelforge.tracker import UsageAccumulator
@@ -187,7 +187,7 @@ async def run_port_loop(
             return reason + "; protected snapshot restore callback unavailable"
         try:
             restore()
-        except Exception as error:  # noqa: BLE001 - report without validating
+        except (RuntimeError, OSError) as error:
             return reason + "; protected snapshot restore failed: " + f"{type(error).__name__}: {error}"
         return reason
 

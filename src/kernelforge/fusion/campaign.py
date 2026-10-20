@@ -28,7 +28,7 @@ from kernelforge.fusion.validate import (
     launch_regression_reason,
 )
 from kernelforge.llm.git import git
-from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
 
 log = logging.getLogger("forge_fusion")
 

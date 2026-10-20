@@ -19,6 +19,7 @@ from .errors import (
     KBValidationError,
     RuntimeAdapterError,
     ScopeError,
+    SlugifyError,
 )
 from .importance_mapping import (
     cap_importance,
@@ -216,7 +217,7 @@ class KBWriter:
         topic = ctx.topic or verdict.get("topic") or _topic_from_reasoning(verdict)
         try:
             slug = slugify_safe(topic) if topic else None
-        except Exception as exc:  # noqa: BLE001
+        except (SlugifyError, UnicodeEncodeError) as exc:
             return WriteResult("skipped", {"reason": "slug_failed", "error": str(exc)})
         if not slug:
             return WriteResult("skipped", {"reason": "no_topic"})
@@ -293,7 +294,7 @@ class KBWriter:
             topic = d.get("action") or d.get("lesson") or category
             try:
                 slug = slug_for_kind(kind, topic, d)
-            except Exception as exc:  # noqa: BLE001
+            except (SlugifyError, UnicodeEncodeError) as exc:
                 rejected.append({"draft": d, "reason": f"slug_failed: {exc}"})
                 continue
             importance = cap_importance(importance_for_kb_draft(confidence=d.get("confidence")))

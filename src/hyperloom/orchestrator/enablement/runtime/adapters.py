@@ -52,7 +52,7 @@ def verify_torch_is_rocm(python_path: str, *, run: RunFn = _default_run) -> bool
     argv = [python_path, "-c", "import torch,sys; sys.exit(0 if getattr(torch.version,'hip',None) else 1)"]
     try:
         cp = run(argv, dict(os.environ), None)
-    except Exception:  # noqa: BLE001 — probe failure == not verified
+    except (OSError, subprocess.SubprocessError):
         return False
     return getattr(cp, "returncode", 1) == 0
 
@@ -73,7 +73,7 @@ def verify_vllm_rocm(python_path: str, *, run: RunFn = _default_run) -> bool:
     argv = [python_path, "-c", probe]
     try:
         cp = run(argv, dict(os.environ), None)
-    except Exception:  # noqa: BLE001
+    except (OSError, subprocess.SubprocessError):
         return False
     return getattr(cp, "returncode", 1) == 0
 
@@ -364,7 +364,7 @@ class VllmRocmAdapter(_VenvProvisionMixin):
             attempt_dir.mkdir(parents=True, exist_ok=True)
             bin_dir, python_path = self._create_venv(attempt_dir)
             constraints = self._write_rocm_constraints(python_path, attempt_dir)
-        except Exception as exc:  # noqa: BLE001
+        except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
             return ProvisionResult(ok=False, log_path=log_path, error=f"venv setup failed: {exc!r}")
 
         if action.acquisition_method != "wheel":
@@ -434,7 +434,7 @@ class SglangAdapter(_VenvProvisionMixin):
             attempt_dir.mkdir(parents=True, exist_ok=True)
             bin_dir, python_path = self._create_venv(attempt_dir)
             constraints = self._write_rocm_constraints(python_path, attempt_dir)
-        except Exception as exc:  # noqa: BLE001
+        except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
             return ProvisionResult(ok=False, log_path=log_path, error=f"venv setup failed: {exc!r}")
 
         pythonpath_prefix = ""

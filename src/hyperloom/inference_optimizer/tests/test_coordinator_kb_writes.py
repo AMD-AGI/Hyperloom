@@ -1017,7 +1017,9 @@ def _fact_write_for_three_kept_variants(coord) -> None:
     ],
     ids=["write-os-error", "read-store-error", "read-value-error"],
 )
-def test_fact_write_hook_records_every_variant_when_the_recipe_store_fails(tmp_path: Path, method, failure) -> None:
+def test_fact_write_hook_records_every_variant_when_the_recipe_store_fails(
+    tmp_path: Path, caplog, method, failure
+) -> None:
     """A cross-session KB failure must not cost the session its later variants' rows."""
     coord = _make_coordinator(tmp_path)
 
@@ -1030,6 +1032,10 @@ def test_fact_write_hook_records_every_variant_when_the_recipe_store_fails(tmp_p
 
     assert [row["variant_name"] for row in coord.shared_state.attempts] == ["v0", "v1", "v2"]
     assert [entry.variant_name for entry in coord.recipe_journal.ensure_journal().entries] == ["v0", "v1", "v2"]
+    warnings = [record.getMessage() for record in caplog.records if record.levelname == "WARNING"]
+    assert warnings == [
+        f"recipe KB write for task t-ledger variant v{i} failed: {type(failure).__name__}: {failure}" for i in range(3)
+    ]
 
 
 def test_fact_write_hook_lets_an_unexpected_recipe_store_error_propagate(tmp_path: Path) -> None:

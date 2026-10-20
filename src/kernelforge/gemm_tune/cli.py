@@ -102,13 +102,9 @@ def _load_demand_report(demand_json: str) -> dict | None:
     """Parse the demand file once, for both selection and the coverage report."""
     if not demand_json:
         return None
-    try:
-        from .evidence import load_demand
+    from .evidence import load_demand
 
-        return load_demand(demand_json)
-    except Exception:
-        log.debug("could not load demand report", exc_info=True)
-        return None
+    return load_demand(demand_json)
 
 
 def _coverage_gaps(
