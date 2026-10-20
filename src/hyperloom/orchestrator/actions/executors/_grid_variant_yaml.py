@@ -11,6 +11,7 @@ from typing import Any
 
 import yaml
 
+from hyperloom.common.agentx_workload import pin_mlperf_round_concurrency
 from hyperloom.common.benchmark_config import is_magpie_agentx
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env_safety import BLOCKED_EXTERNAL_ENV_NAMES
@@ -18,6 +19,7 @@ from hyperloom.inference_optimizer.grid_server_args import (
     SGLANG_MOE_RUNNER_BACKEND_RE,
     compose_server_args,
     moe_runner_requires_aiter,
+    remove_moe_runner_backend_arg,
     server_args_env_name,
     shell_safe_dedupe,
 )
@@ -61,15 +63,13 @@ def _runnable_moe_backend_args(combined: str, *, args_env: str, model_path: str 
         return combined
     if args_env != "EXTRA_SGLANG_ARGS" or not moe_runner_requires_aiter(combined, model_path):
         return combined
-    from ._workload_envs import _remove_moe_runner_backend_arg
-
     log.warning(
         "grid: dropping inherited --moe-runner-backend for variant %s: "
         "this checkpoint's MoE quant scheme is only implemented on the "
         "aiter runner and would crash on the first forward pass.",
         variant.name,
     )
-    return _remove_moe_runner_backend_arg(combined)
+    return remove_moe_runner_backend_arg(combined)
 
 
 def _importable_overlay_dir(variant: GridVariant) -> str:
@@ -156,7 +156,6 @@ def _build_variant_yaml(
     elif extra_args_env in envs or variant.args_mode == "replace" or base_args_mode == "replace":
         envs[extra_args_env] = ""
     base_envs = _apply_variant_env(envs, variant, base_extra_envs, base_unset_envs)
-    from ._workload_envs import pin_mlperf_round_concurrency
     from hyperloom.inference_optimizer.runtime_environment import prepend_launch_path
 
     pin_mlperf_round_concurrency(envs)

@@ -783,6 +783,15 @@ _SGLANG_MOE_RUNNER_BACKEND_FLAG = "--moe-runner-backend"
 # Matches space- or equals-separated form without false-matching a longer flag.
 SGLANG_MOE_RUNNER_BACKEND_RE = re.compile(r"--moe-runner-backend(?:[=\s]|$)")
 
+# Same flag with the value that follows it, so a removal takes the pair and not just the name.
+_SGLANG_MOE_RUNNER_BACKEND_PAIR_RE = re.compile(r"(?:^|\s)--moe-runner-backend(?:(?:[=\s]+)(?!--)\S+)?")
+
+
+def remove_moe_runner_backend_arg(args: str) -> str:
+    """Remove any existing SGLang MoE runner backend flag from an args string."""
+    return " ".join(_SGLANG_MOE_RUNNER_BACKEND_PAIR_RE.sub(" ", str(args or "")).split())
+
+
 # sglang MoE schemes whose ``create_moe_runner`` only builds a runner for the aiter backend (the others fall through
 # to a bare ``pass``, so the first forward pass dies on a missing ``runner``).
 _AITER_ONLY_ONLINE_QUANT_METHODS = frozenset({"quark_int4fp8_moe"})

@@ -46,6 +46,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
 )
 from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
 from hyperloom.inference_optimizer import inferencex_checkout
+from hyperloom.inference_optimizer.grid_server_args import remove_moe_runner_backend_arg
 from hyperloom.inference_optimizer.grid_server_args import with_capture_disabled
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...loop.sub_agent_runner import RunnerContext
@@ -91,7 +92,6 @@ from ._accuracy_gate import (
 from ._workload_envs import (
     VLLM_SOURCE_ROOT_ENVS,
     _client_tokenizer_mode,
-    _remove_moe_runner_backend_arg,
     FrameworkScriptMismatchError,
     agentx_active,
     default_baseline_config,
@@ -2306,7 +2306,7 @@ class BenchmarkRunExecutor:
                 fw,
             )
         if force_drop_moe_runner_backend:
-            effective_extra_server_args = _remove_moe_runner_backend_arg(effective_extra_server_args)
+            effective_extra_server_args = remove_moe_runner_backend_arg(effective_extra_server_args)
         if effective_extra_server_args or "extra_server_args" in params:
             # Keep the task envelope aligned with the materialized runtime so Roofline fingerprints record one-shot
             # eager fallback accurately.

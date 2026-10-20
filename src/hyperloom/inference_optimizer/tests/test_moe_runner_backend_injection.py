@@ -23,10 +23,8 @@ import yaml
 from hyperloom.inference_optimizer import model_config_utils
 from hyperloom.inference_optimizer import gpu_types
 from hyperloom.inference_optimizer.cli import model_gate as cli_model_gate
-from hyperloom.orchestrator.actions.executors._workload_envs import (
-    _remove_moe_runner_backend_arg,
-    materialize_config_with_envs,
-)
+from hyperloom.inference_optimizer.grid_server_args import remove_moe_runner_backend_arg
+from hyperloom.orchestrator.actions.executors._workload_envs import materialize_config_with_envs
 
 _AMD = "mi300x"
 
@@ -334,8 +332,8 @@ def test_materialize_does_not_double_user_backend(tmp_path, moe_model, monkeypat
         ("--moe-runner-backend --foo 1", "--foo 1"),
     ],
 )
-def test_remove_moe_runner_backend_arg(args, expected):
-    assert _remove_moe_runner_backend_arg(args) == expected
+def testremove_moe_runner_backend_arg(args, expected):
+    assert remove_moe_runner_backend_arg(args) == expected
 
 
 # aiter CK fused-MoE shape support (gates the forge fmoe_ck tuner)
