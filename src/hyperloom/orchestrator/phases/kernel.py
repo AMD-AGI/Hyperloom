@@ -61,6 +61,7 @@ from ..kernel.geak_config import (
     _accepted_config_as_variant,
     _accepted_config_controls,
 )
+from ..kernel.geak_runner import drain_killed
 from ..kernel.lane_budget import INSUFFICIENT_BUDGET
 from ..actions.executors._gpu_pin import (
     coerce_tp,
@@ -1663,7 +1664,7 @@ class KernelPhase(CoordinatorCollaborator):
                     out, err = p.communicate(timeout=term_grace)
                 except subprocess.TimeoutExpired:
                     _killpg(signal.SIGKILL)
-                    out, err = p.communicate()
+                    out, err = drain_killed(p)
                 raise subprocess.TimeoutExpired(
                     cmd,
                     kill_timeout,

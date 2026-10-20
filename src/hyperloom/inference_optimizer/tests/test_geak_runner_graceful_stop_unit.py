@@ -6,8 +6,10 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import sys
 import textwrap
+import time
 from pathlib import Path
 
 import pytest
@@ -164,6 +166,40 @@ def test_sigkill_escalation_when_child_ignores_sigterm(tmp_path, monkeypatch):
     assert "no parseable result.json" in out["error"]
     assert out["returncode"] == -1
     assert not (tmp_path / "out" / "result.json").is_file()
+
+
+def test_sigkill_drain_is_bounded_when_an_escaped_descendant_holds_the_pipes(tmp_path, monkeypatch):
+    """A descendant that left the process group keeps stdout open past SIGKILL; the runner must still return."""
+    pid_file = tmp_path / "escaped.pid"
+    runner = _write_fake_runner(
+        tmp_path,
+        f"""
+        import signal, subprocess, sys, time
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        escaped = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"], start_new_session=True)
+        open({str(pid_file)!r}, "w").write(str(escaped.pid))
+        print("partial output", flush=True)
+        time.sleep(120)
+    """,
+    )
+    monkeypatch.setenv("GEAK_E2E_RUNNER", str(runner))
+    monkeypatch.setenv("GEAK_FLUSH_GRACE_S", "1")
+    monkeypatch.setattr(psr, "KILLED_DRAIN_TIMEOUT_S", 1.0)
+
+    started = time.monotonic()
+    try:
+        out = psr.call_geak(_handoff(), tmp_path / "out", timeout_s=2)
+    finally:
+        if pid_file.is_file():
+            try:
+                os.kill(int(pid_file.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+    assert time.monotonic() - started < 30
+    assert out["status"] == "error"
+    assert out["returncode"] == -1
+    assert "partial output" in out["stdout_tail"]
 
 
 if __name__ == "__main__":
