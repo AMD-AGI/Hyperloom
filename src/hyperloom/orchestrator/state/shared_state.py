@@ -2010,7 +2010,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
                 domain_key=domain_key,
                 latest_cycle=latest_cycle,
             )
-        except Exception:  # noqa: BLE001 - saturation telemetry is advisory only
+        except Exception:  # saturation telemetry is advisory only
             log.warning("roofline saturation telemetry failed for this snapshot", exc_info=True)
 
     def _cap_roofline_snapshots(self) -> None:
@@ -2036,7 +2036,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
                 str(history_entry.get("top_bottleneck") or ""),
             )
             self._cap_roofline_snapshots()
-        except Exception:  # noqa: BLE001 - never block record on render concerns
+        except Exception:  # never block record on render concerns
             log.warning("roofline snapshot history was not appended for this record", exc_info=True)
 
     def record_conc_sweep(self, result: dict[str, Any]) -> None:
