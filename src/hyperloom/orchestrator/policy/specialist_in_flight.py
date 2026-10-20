@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A catalogue domain holds at most one queued or running specialist."""
+"""A catalogue domain holds at most one queued or running single-domain specialist."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ SPECIALIST_DOMAIN_IN_FLIGHT = "specialist_domain_in_flight"
 
 
 def specialist_in_flight_denial(action_name: str, params: Mapping[str, Any] | None, tasks: Any) -> PolicyDenied | None:
-    """Refuse a specialist for a domain another queued or running specialist still holds."""
+    """Refuse a single-domain specialist for a domain another queued or running one still holds."""
     domain = held_domain(params or {}) if action_name == SPECIALIST_ACTION_NAME else ""
     if not domain:
         return None

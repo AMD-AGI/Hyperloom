@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A catalogue domain holds at most one queued or running specialist, whatever gap each dispatch names."""
+"""A catalogue domain holds at most one queued or running single-domain specialist, whatever gap each names."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.policy.specialist_in_flight import SPECIALIST_DOMAIN_IN_FLIGHT
 from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
-from hyperloom.orchestrator.specialists.in_flight import in_flight_domains
+from hyperloom.orchestrator.specialists.in_flight import held_domain, in_flight_domains
 
 _SYSTEM = "system_specialist"
 
@@ -90,6 +90,31 @@ async def test_a_tag_only_dispatch_holds_the_domain_its_tag_resolves_to(coord):
     assert await _in_flight_denials(coord) == 1
 
 
+async def test_a_single_tag_domains_dispatch_is_refused_like_a_single_domain_one(coord):
+    await _delegate(coord, domain=_SYSTEM, gap_canonical_id="gap.a")
+    await _delegate(coord, scope="domains", tags=["systems"], gap_canonical_id="gap.b")
+
+    assert len(await coord.tasks.by_state("queued")) == 1
+    assert await _in_flight_denials(coord) == 1
+
+
+async def test_a_queued_cross_domain_specialist_holds_none_of_its_domains(coord):
+    await _delegate(coord, tags=["systems", "compiler"], gap_canonical_id="gap.a")
+    await _delegate(coord, domain=_SYSTEM, gap_canonical_id="gap.b")
+    await _delegate(coord, domain="compiler_specialist", gap_canonical_id="gap.c")
+
+    assert len(await coord.tasks.by_state("queued")) == 3
+    assert await _in_flight_denials(coord) == 0
+
+
+async def test_a_cross_domain_dispatch_is_admitted_while_one_of_its_domains_is_held(coord):
+    await _delegate(coord, domain=_SYSTEM, gap_canonical_id="gap.a")
+    await _delegate(coord, tags=["systems", "compiler"], gap_canonical_id="gap.b")
+
+    assert len(await coord.tasks.by_state("queued")) == 2
+    assert await _in_flight_denials(coord) == 0
+
+
 async def test_freeform_dispatches_hold_no_domain(coord):
     await _delegate(coord, scope="freeform", task_description="trace the decode host gap")
     await _delegate(coord, scope="freeform", task_description="audit the attention backend choice")
@@ -117,3 +142,18 @@ def test_the_first_specialist_of_each_domain_holds_it():
     ]
 
     assert in_flight_domains(tasks) == {_SYSTEM: first}
+
+
+@pytest.mark.parametrize(
+    ("params", "held"),
+    [
+        ({"domain": _SYSTEM}, _SYSTEM),
+        ({"tags": ["systems"]}, _SYSTEM),
+        ({"scope": "domains", "tags": ["systems"]}, _SYSTEM),
+        ({"tags": ["systems", "compiler"]}, ""),
+        ({"scope": "freeform", "domain": _SYSTEM, "task_description": "x"}, ""),
+        ({"domain": "custom_specialist", "scope": "domain"}, ""),
+    ],
+)
+def test_only_a_single_domain_dispatch_holds_a_domain(params, held):
+    assert held_domain(params) == held
