@@ -10,9 +10,11 @@ branch lies behind the integration head, whether a profile of the integration he
 tokens the session has used, and what is known of each running branch's specialist). The judge answers with one JSON
 object, which :func:`parse_decision` reads and :func:`cap_decision` cuts to the caps and to the branches that are
 still live. A failed call or an unreadable reply gives ``None``, and the scheduler keeps the status quo. The judge
-never calls a peer; the scheduler applies its decision. A user branch is in its grace until
-:data:`MB_USER_BRANCH_GRACE_TESTS` of its tests were judged: the judge may neither stop it nor lower its K then, unless
-its specialist gave up or its judging failed.
+never calls a peer; the scheduler applies its decision. The judge may neither stop nor lower the K of a held branch
+(:func:`held_branches`): a user branch until :data:`MB_USER_BRANCH_GRACE_TESTS` of its tests were judged, unless its
+specialist gave up or its judging failed, and a branch with a candidate waiting for its confirm, unless its judging
+failed. The scheduler finds the held branches again as it applies the decision, since a candidate can start waiting
+while the judge answers, and :func:`hold_decision` refuses their orders and names them in the decision.
 """
 
 from __future__ import annotations
@@ -21,14 +23,15 @@ import hashlib
 import json
 from collections import Counter
 from collections.abc import Iterable, Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
+from enum import Enum
 from pathlib import Path
 
 from hyperloom.common.io import append_jsonl
 from hyperloom.common.jsonio import extract_last_json_with_key
 from hyperloom_multibranch.contracts.lifecycle import SpecialistStatus
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
-from hyperloom_multibranch.contracts.notebook.records import BranchProgress, TestRecord
+from hyperloom_multibranch.contracts.notebook.records import BranchProgress, PendingCandidate, TestRecord
 from hyperloom_multibranch.notebook import STALL_TESTS
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.events import MB_BIG_GAIN_BARS, MB_BOTTLENECK_SHIFT_PP, SessionEvent
@@ -128,6 +131,9 @@ A branch of origin user follows a direction the user wrote; such branches open f
 opening batch, and the opening batch fills the slots they leave. While its grace is true, until
 {MB_USER_BRANCH_GRACE_TESTS} of its tests were judged, a stop or a lower K you give it is not applied, unless its
 specialist gave up or its judging failed.
+A branch's pending_candidates are its measured candidates that beat its head by at least the bar while their confirm
+runs, each with its gain_over_head_pct. A branch with a pending candidate cannot be stopped or narrowed until its
+confirm is judged: a stop or a lower K you give it is not applied, unless its judging failed.
 Stop the session only when no branch is expected to gain anything worth the remaining time.
 Answer with exactly ONE JSON object and nothing after it."""
 
@@ -143,6 +149,14 @@ List only the branches whose K should change. Branches not named keep their K an
 
 #: The judge prompt's version in the session's manifest fingerprint, derived from its text as the specialist prompts'.
 JUDGE_PROMPT_VERSION = hashlib.sha256(f"{JUDGE_SYSTEM_PROMPT}\n{_REPLY_FORMAT}".encode()).hexdigest()[:VERSION_HEX]
+
+
+class HoldReason(str, Enum):
+    """Why the judge may neither stop a branch nor lower its K: a user branch in its grace, or a branch with a
+    candidate waiting for its confirm."""
+
+    USER_GRACE = "user_grace"
+    PENDING_CONFIRM = "pending_confirm"
 
 
 @dataclass(frozen=True)
@@ -164,8 +178,8 @@ class JudgeView:
     cost, ``scheduler_llm_usd`` what the judge's, the patch resolver's and the fix critic's recorded calls cost, and
     ``max_llm_usd`` where their sum ends EXPLORE under ``--max-llm-usd``, ``None`` without a limit. ``specialists``
     maps a running specialist branch to what the specialist runtime knows of its specialist; a branch whose
-    specialist's state is not known is not in it. ``user_grace`` are the user branches in their grace, as
-    :func:`user_grace` finds them.
+    specialist's state is not known is not in it. ``held`` maps each branch the judge may neither stop nor lower the
+    K of to why, as :func:`held_branches` finds them when the view is built; it is what the prompt shows.
     """
 
     now: float
@@ -193,28 +207,38 @@ class JudgeView:
     max_llm_usd: float | None
     scheduler_llm_usd: float
     specialists: Mapping[str, SpecialistStatus]
-    user_grace: frozenset[str]
+    held: Mapping[str, HoldReason]
 
 
-def user_grace(
-    roster: Iterable[BranchEntry], records: Iterable[TestRecord], specialists: Mapping[str, SpecialistStatus]
-) -> frozenset[str]:
-    """The live user branches with fewer than :data:`MB_USER_BRANCH_GRACE_TESTS` judged tests whose specialist neither
-    gave up nor was stopped for a failed judging; a test counts when it is :attr:`TestRecord.judged`."""
+def held_branches(
+    roster: Iterable[BranchEntry],
+    progress: Iterable[BranchProgress],
+    records: Iterable[TestRecord],
+    specialists: Mapping[str, SpecialistStatus],
+) -> dict[str, HoldReason]:
+    """The live branches the judge may neither stop nor lower the K of, with why.
+
+    A user branch is in its grace while fewer than :data:`MB_USER_BRANCH_GRACE_TESTS` of its tests are
+    :attr:`TestRecord.judged` and its specialist neither gave up nor was stopped for a failed judging. A branch whose
+    progress row holds a pending candidate is held until its confirm is judged, unless its judging failed: the
+    confirm's verdict does not need the specialist."""
 
     judged = Counter(record.request.branch for record in records if record.judged)
-    return frozenset(
-        entry.branch
-        for entry in roster
-        if entry.origin is BranchOrigin.USER
-        and entry.stop is None
-        and judged[entry.branch] < MB_USER_BRANCH_GRACE_TESTS
-        and not _out_of_service(specialists.get(entry.branch))
-    )
-
-
-def _out_of_service(specialist: SpecialistStatus | None) -> bool:
-    return specialist is not None and (specialist.gave_up or specialist.judge_failed)
+    waiting = {row.branch for row in progress if row.pending}
+    held: dict[str, HoldReason] = {}
+    for entry in roster:
+        state = specialists.get(entry.branch)
+        if entry.stop is not None or (state is not None and state.judge_failed):
+            continue
+        if (
+            entry.origin is BranchOrigin.USER
+            and judged[entry.branch] < MB_USER_BRANCH_GRACE_TESTS
+            and not (state is not None and state.gave_up)
+        ):
+            held[entry.branch] = HoldReason.USER_GRACE
+        elif entry.branch in waiting:
+            held[entry.branch] = HoldReason.PENDING_CONFIRM
+    return held
 
 
 @dataclass(frozen=True)
@@ -230,12 +254,20 @@ class StopOrder:
 
 
 @dataclass(frozen=True)
+class HeldOrder:
+    """A stop or a lower K the judge gave a held branch, refused for ``reason``."""
+
+    branch: str
+    reason: HoldReason
+
+
+@dataclass(frozen=True)
 class JudgeDecision:
     """A non-empty ``session_stop`` is the reason the judge asks for a soft stop of the session.
 
     ``open_k`` is the K of the branches opened now; a K order cannot name them before they exist. ``focus`` is the op
     the judge names for each branch opened now, in the order they open; ``""`` and a branch past its end leave the
-    branch to the default focus.
+    branch to the default focus. ``held`` names the branches whose stop or lower K was refused, once each.
     """
 
     open_count: int = 0
@@ -244,6 +276,7 @@ class JudgeDecision:
     k: tuple[KOrder, ...] = ()
     stop: tuple[StopOrder, ...] = ()
     session_stop: str = ""
+    held: tuple[HeldOrder, ...] = ()
 
 
 class _MalformedReply(ValueError):
@@ -273,6 +306,7 @@ def _progress_row(progress: BranchProgress | None) -> dict[str, object]:
         "judged_since_commit": progress.judged_since_commit,
         "gpu_seconds": progress.gpu_seconds,
         "head_value": dict(progress.head_value),
+        "pending_candidates": [_pending_candidate_row(item) for item in progress.pending],
     }
     if progress.frontier is not None:
         row["expected_gain_pct"] = progress.frontier.expected_gain_pct
@@ -280,6 +314,10 @@ def _progress_row(progress: BranchProgress | None) -> dict[str, object]:
         if progress.frontier.basis is not None:
             row["basis"] = progress.frontier.basis.value
     return row
+
+
+def _pending_candidate_row(candidate: PendingCandidate) -> dict[str, object]:
+    return {"request_id": candidate.request_id, "gain_over_head_pct": round(candidate.gain_over_head_pct, 2)}
 
 
 def _branch_row(entry: BranchEntry, progress: BranchProgress | None, view: JudgeView) -> dict[str, object]:
@@ -301,7 +339,7 @@ def _branch_row(entry: BranchEntry, progress: BranchProgress | None, view: Judge
     if entry.stop is not None:
         row["stopped"] = entry.stop.summary
     if entry.origin is BranchOrigin.USER:
-        row["grace"] = entry.branch in view.user_grace
+        row["grace"] = view.held.get(entry.branch) is HoldReason.USER_GRACE
     specialist = view.specialists.get(entry.branch)
     if specialist is not None:
         row["specialist"] = asdict(specialist)
@@ -438,35 +476,54 @@ def cap_decision(decision: JudgeDecision, view: JudgeView) -> JudgeDecision:
     """``decision`` cut to the caps and to the live branches; applying it twice changes nothing more.
 
     Orders naming an unknown or stopped branch are dropped, the integration branch cannot be stopped, a branch being
-    stopped gets no K order, and a later order for the same branch replaces an earlier one. A user branch in its grace
-    is neither stopped nor given a lower K. The opening call opens at least one branch unless a specialist branch is
-    open already; no call opens more than ``max_branches``. The free slots are not a cut here: they are read before the
-    stops free theirs, and the branches that find no slot are cut as they open.
+    stopped gets no K order, and a later order for the same branch replaces an earlier one. The opening call opens
+    at least one branch unless a specialist branch is open already; no call opens more than ``max_branches``. The
+    free slots are not a cut here: they are read before the stops free theirs, and the branches that find no slot
+    are cut as they open. The held branches are not a cut here either: :func:`hold_decision` cuts them as the
+    decision is applied.
     """
 
     live = {entry.branch: entry for entry in view.roster if entry.stop is None}
-    stops = {
+    asked = {
         order.branch: order
         for order in decision.stop
-        if order.branch in live
-        and live[order.branch].kind is BranchKind.SPECIALIST
-        and order.branch not in view.user_grace
+        if order.branch in live and live[order.branch].kind is BranchKind.SPECIALIST
     }
     ks = {
         order.branch: KOrder(order.branch, view.caps.clamp_k(order.k))
         for order in decision.k
-        if order.branch in live and order.branch not in stops
+        if order.branch in live and order.branch not in asked
     }
-    kept = {branch: order for branch, order in ks.items() if branch not in view.user_grace or order.k >= live[branch].k}
     floor = 1 if view.opening and not specialist_open(view.roster) else 0
     opened = min(max(decision.open_count, floor), view.caps.max_branches)
     return JudgeDecision(
         open_count=opened,
         open_k=view.caps.clamp_k(decision.open_k),
         focus=decision.focus[:opened],
-        k=tuple(kept.values()),
-        stop=tuple(stops.values()),
+        k=tuple(ks.values()),
+        stop=tuple(asked.values()),
         session_stop=decision.session_stop,
+        held=decision.held,
+    )
+
+
+def hold_decision(
+    decision: JudgeDecision, held: Mapping[str, HoldReason], roster: Iterable[BranchEntry]
+) -> JudgeDecision:
+    """``decision`` without the stops and the lower K orders of the ``held`` branches, each named in ``held`` once;
+    ``roster`` gives the K a branch runs at now. Applying it twice changes nothing more."""
+
+    running_k = {entry.branch: entry.k for entry in roster}
+    refused_stops = [order for order in decision.stop if order.branch in held]
+    refused_ks = [order for order in decision.k if order.branch in held and order.k < running_k[order.branch]]
+    named = {item.branch: item for item in decision.held} | {
+        order.branch: HeldOrder(order.branch, held[order.branch]) for order in (*refused_stops, *refused_ks)
+    }
+    return replace(
+        decision,
+        stop=tuple(order for order in decision.stop if order not in refused_stops),
+        k=tuple(order for order in decision.k if order not in refused_ks),
+        held=tuple(named.values()),
     )
 
 
@@ -503,6 +560,8 @@ __all__ = [
     "JUDGE_PROMPT_VERSION",
     "JUDGE_SYSTEM_PROMPT",
     "MB_USER_BRANCH_GRACE_TESTS",
+    "HeldOrder",
+    "HoldReason",
     "Judge",
     "JudgeDecision",
     "JudgeView",
@@ -510,6 +569,7 @@ __all__ = [
     "StopOrder",
     "cap_decision",
     "parse_decision",
+    "held_branches",
+    "hold_decision",
     "render_prompt",
-    "user_grace",
 ]

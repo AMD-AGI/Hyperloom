@@ -52,6 +52,8 @@ from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, W
 from hyperloom_multibranch.contracts.notebook.interfaces import UsageSink
 from hyperloom_multibranch.contracts.notebook.records import (
     LlmUsage,
+    NotebookSnapshot,
+    PendingCandidate,
     QuarantineEvent,
     RegressionCase,
     ToolResultPointer,
@@ -90,7 +92,7 @@ from hyperloom_multibranch.scheduling import branches
 from hyperloom_multibranch.scheduling.events import PROFILE_UNAVAILABLE
 from hyperloom_multibranch.scheduling.explore import EXPLORE_TICK_SECONDS, FORK_NOT_LANDED, OPEN_CUT_REASON
 from hyperloom_multibranch.scheduling.final import INTEGRATION_LABEL, PRIMARY_POINT_ONLY
-from hyperloom_multibranch.scheduling.judge import JUDGE_PROMPT_VERSION
+from hyperloom_multibranch.scheduling.judge import JUDGE_PROMPT_VERSION, HoldReason
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
 from hyperloom_multibranch.scheduling.lifecycle import (
     CUT_SHORT,
@@ -1184,9 +1186,63 @@ async def test_a_user_branch_opens_first_at_the_root_and_the_judge_neither_stops
     decisions = _decisions(stage)
     [opened] = [row for row in decisions if row["kind"] == "open" and row["branch"] == "b01"]
     assert (opened["reason"], opened["detail"]["direction"]) == ("user branch started", USER_DIRECTION)
+    steered = [row for row in decisions if row["kind"] == "judge"][1]
+    assert steered["detail"]["held"] == {"b01": HoldReason.USER_GRACE.value}
     stopped = {row["branch"]: row["reason"] for row in decisions if row["kind"] == "stop"}
     assert stopped["b02"] == f"judge: {STOP_REASON}"
     assert stopped["b01"].startswith("session_end")
+
+
+def _candidate_waits_on_b02(monkeypatch: pytest.MonkeyPatch, waits: Callable[[], bool]) -> None:
+    """Every notebook snapshot shows a candidate of ``b02`` waiting for its confirm while ``waits()`` holds."""
+
+    candidate = PendingCandidate("b02-r1", "b02-r1-confirm", "c-b02", MAIN_POINT, 1060.0, 6.0)
+    taken = LocalNotebook.snapshot
+
+    async def snapshot(self: LocalNotebook) -> NotebookSnapshot:
+        state = await taken(self)
+        if not waits():
+            return state
+        rows = tuple(replace(row, pending=(candidate,)) if row.branch == "b02" else row for row in state.progress)
+        return replace(state, progress=rows)
+
+    monkeypatch.setattr(LocalNotebook, "snapshot", snapshot)
+
+
+async def test_the_judge_cannot_stop_a_branch_whose_candidate_waits_for_its_confirm_but_the_session_end_does(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _candidate_waits_on_b02(monkeypatch, lambda: True)
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error) == (SessionStopReason.TIME_EXHAUSTED, "")
+    _opening, steering, *_ = [_judge_state(prompt) for prompt in _judge_prompts(stage)]
+    shown = {row["branch"]: row["pending_candidates"] for row in steering["branches"]}
+    assert (shown["b01"], shown["b02"]) == ([], [{"request_id": "b02-r1", "gain_over_head_pct": 6.0}])
+    [_, steered] = [row for row in _decisions(stage) if row["kind"] == "judge"]
+    assert (steered["detail"]["stop"], steered["detail"]["held"]) == ({}, {"b02": HoldReason.PENDING_CONFIRM.value})
+    assert steered["detail"]["k"] == {"b01": SETTINGS.caps.max_k_per_branch}
+    [stopped] = [row for row in _decisions(stage) if row["kind"] == "stop" and row["branch"] == "b02"]
+    assert str(stopped["reason"]).startswith(StopCause.SESSION_END.value)
+
+
+async def test_a_candidate_that_starts_waiting_while_the_judge_answers_holds_its_branch_against_that_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    _candidate_waits_on_b02(monkeypatch, lambda: len(stage.judge.calls) >= 2)
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error) == (SessionStopReason.TIME_EXHAUSTED, "")
+    _opening, steering, *_ = [_judge_state(prompt) for prompt in _judge_prompts(stage)]
+    assert {row["branch"]: row["pending_candidates"] for row in steering["branches"]}["b02"] == []
+    [_, steered] = [row for row in _decisions(stage) if row["kind"] == "judge"]
+    assert (steered["detail"]["stop"], steered["detail"]["held"]) == ({}, {"b02": HoldReason.PENDING_CONFIRM.value})
+    [stopped] = [row for row in _decisions(stage) if row["kind"] == "stop" and row["branch"] == "b02"]
+    assert str(stopped["reason"]).startswith(StopCause.SESSION_END.value)
 
 
 async def test_a_failed_opening_judge_call_opens_no_branch_beside_the_user_branches(tmp_path: Path) -> None:

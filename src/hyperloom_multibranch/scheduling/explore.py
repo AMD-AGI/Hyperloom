@@ -51,7 +51,14 @@ from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind
 from hyperloom_multibranch.scheduling.events import SessionEvents, behind_integration_pct
 from hyperloom_multibranch.scheduling.integrator import Integrator
-from hyperloom_multibranch.scheduling.judge import Judge, JudgeDecision, JudgeView, user_grace
+from hyperloom_multibranch.scheduling.judge import (
+    HoldReason,
+    Judge,
+    JudgeDecision,
+    JudgeView,
+    held_branches,
+    hold_decision,
+)
 from hyperloom_multibranch.scheduling.roster import (
     BranchEntry,
     BranchKind,
@@ -298,7 +305,7 @@ class Explorer:
             max_llm_usd=None if window.max_llm_usd == math.inf else window.max_llm_usd,
             scheduler_llm_usd=priced_usd(record.usage for record in snapshot.llm_usage if not record.usage.branch),
             specialists=specialists,
-            user_grace=user_grace(self._roster.entries(), snapshot.records, specialists),
+            held=await self._held(),
         )
         try:
             decision = await self._clock.wait_for(self._judge.decide(view), window.explore_end - now)
@@ -321,11 +328,19 @@ class Explorer:
                     states[entry.branch] = state
         return states
 
+    async def _held(self) -> dict[str, HoldReason]:
+        snapshot = await self._notebook.snapshot()
+        return held_branches(
+            self._roster.entries(), snapshot.progress, snapshot.records, await self._specialist_states()
+        )
+
     async def _apply(self, decision: JudgeDecision, start: BatchStart) -> bool:
         """Apply the stop and K orders, move the queued forks and repairs onto the slots the stops freed, then open the
         branches the judge asked for as ``start`` says into the slots left; True, and nothing moved or opened, when the
-        judge asked to stop the session."""
+        judge asked to stop the session. The held branches are found again here, not taken from the judge's view: a
+        candidate that started waiting for its confirm while the judge answered holds its branch as well."""
 
+        decision = hold_decision(decision, await self._held(), self._roster.entries())
         self._decisions.record(
             Decision(
                 DecisionKind.JUDGE,
@@ -335,6 +350,7 @@ class Explorer:
                     "open_k": decision.open_k,
                     "k": {order.branch: order.k for order in decision.k},
                     "stop": {order.branch: order.reason for order in decision.stop},
+                    "held": {order.branch: order.reason.value for order in decision.held},
                 },
             )
         )

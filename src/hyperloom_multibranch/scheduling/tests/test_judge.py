@@ -16,7 +16,12 @@ from hyperloom_multibranch.contracts.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.lifecycle import SpecialistStatus
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom.contracts.measurement import TestKind, Validity
-from hyperloom_multibranch.contracts.notebook.records import BranchProgress, FrontierScore, TestRecord
+from hyperloom_multibranch.contracts.notebook.records import (
+    BranchProgress,
+    FrontierScore,
+    PendingCandidate,
+    TestRecord,
+)
 from hyperloom_multibranch.contracts.notebook.vocab import FrontierBasis
 from hyperloom_multibranch.notebook import STALL_TESTS
 from hyperloom_multibranch.notebook.tests.factories import intent, request, result
@@ -26,15 +31,18 @@ from hyperloom_multibranch.scheduling.judge import (
     JUDGE_PROMPT_VERSION,
     JUDGE_SYSTEM_PROMPT,
     MB_USER_BRANCH_GRACE_TESTS,
+    HeldOrder,
+    HoldReason,
     Judge,
     JudgeDecision,
     JudgeView,
     KOrder,
     StopOrder,
     cap_decision,
+    held_branches,
+    hold_decision,
     parse_decision,
     render_prompt,
-    user_grace,
 )
 from hyperloom_multibranch.scheduling.forks import PendingBranch
 from hyperloom_multibranch.scheduling.llm import CompletionFailed, CompletionReply
@@ -100,7 +108,8 @@ def _view(
     explore_gpu_hours: float | None = None,
     max_llm_usd: float | None = None,
     specialists: dict[str, SpecialistStatus] | None = None,
-    grace: frozenset[str] = frozenset(),
+    held: dict[str, HoldReason] | None = None,
+    candidates: tuple[PendingCandidate, ...] = (),
 ) -> JudgeView:
     return JudgeView(
         now=NOW,
@@ -120,6 +129,7 @@ def _view(
                 judged_since_commit=5,
                 head_value={METRIC: 110.0},
                 frontier=FrontierScore(3.25, {"trend_pct": 2.5, "observing": 1.0}),
+                pending=candidates,
             ),
         ),
         integration_value={METRIC: 100.0},
@@ -141,7 +151,7 @@ def _view(
         max_llm_usd=max_llm_usd,
         scheduler_llm_usd=0.27183,
         specialists=specialists or {},
-        user_grace=grace,
+        held=held or {},
     )
 
 
@@ -592,22 +602,31 @@ def test_a_user_branch_in_its_grace_is_neither_stopped_nor_lowered_and_one_past_
         k=(KOrder("b01", 1), KOrder("b02", 1)),
         stop=(StopOrder("b01", STOP_REASON),),
     )
-    in_grace = _view(roster=USER_ROSTER, grace=frozenset({"b01", "b02"}))
-    past_grace = _view(roster=USER_ROSTER, grace=frozenset({"b02"}))
+    capped = cap_decision(decision, _view(roster=USER_ROSTER))
 
-    assert cap_decision(decision, in_grace) == JudgeDecision()
-    assert cap_decision(decision, past_grace) == JudgeDecision(stop=(StopOrder("b01", STOP_REASON),))
+    assert hold_decision(capped, dict.fromkeys(("b01", "b02"), HoldReason.USER_GRACE), USER_ROSTER) == JudgeDecision(
+        held=(HeldOrder("b01", HoldReason.USER_GRACE), HeldOrder("b02", HoldReason.USER_GRACE))
+    )
+    assert hold_decision(capped, {"b02": HoldReason.USER_GRACE}, USER_ROSTER) == JudgeDecision(
+        stop=(StopOrder("b01", STOP_REASON),), held=(HeldOrder("b02", HoldReason.USER_GRACE),)
+    )
 
 
 def test_a_user_branch_in_its_grace_takes_a_higher_k_and_the_last_order_for_it_counts() -> None:
-    view = _view(roster=USER_ROSTER, grace=frozenset({"b01"}))
+    view = _view(roster=USER_ROSTER)
+    held = {"b01": HoldReason.USER_GRACE}
 
-    assert cap_decision(JudgeDecision(k=(KOrder("b01", 3),)), view).k == (KOrder("b01", 2),)
-    assert cap_decision(JudgeDecision(k=(KOrder("b01", 2), KOrder("b01", 1))), view).k == ()
+    assert hold_decision(cap_decision(JudgeDecision(k=(KOrder("b01", 3),)), view), held, USER_ROSTER).k == (
+        KOrder("b01", 2),
+    )
+    lowered = cap_decision(JudgeDecision(k=(KOrder("b01", 2), KOrder("b01", 1))), view)
+    assert hold_decision(lowered, held, USER_ROSTER).k == ()
 
 
 def test_the_opening_call_opens_none_by_default_once_user_branches_opened() -> None:
-    view = _view(opening=True, roster=USER_ROSTER, free_slots=2, grace=frozenset({"b01", "b02"}))
+    view = _view(
+        opening=True, roster=USER_ROSTER, free_slots=2, held=dict.fromkeys(("b01", "b02"), HoldReason.USER_GRACE)
+    )
 
     assert cap_decision(JudgeDecision(open_count=0), view).open_count == 0
     assert cap_decision(JudgeDecision(open_count=2), view).open_count == 2
@@ -633,21 +652,73 @@ def test_a_user_branch_keeps_its_grace_until_enough_of_its_tests_were_judged() -
     )
     done = [_judged("b02", n) for n in range(MB_USER_BRANCH_GRACE_TESTS)]
 
-    assert user_grace(roster, [*early, *unjudged, failed, *done], {}) == frozenset({"b01"})
+    assert held_branches(roster, (), [*early, *unjudged, failed, *done], {}) == {"b01": HoldReason.USER_GRACE}
 
 
 @pytest.mark.parametrize("state", [{"gave_up": True}, {"judge_failed": True}])
 def test_a_user_branch_whose_specialist_is_out_of_service_has_no_grace(state: dict[str, bool]) -> None:
     status = replace(SpecialistStatus(running=False, crashes=3, lost=0, gave_up=False, judge_failed=False), **state)
 
-    assert user_grace(USER_ROSTER, [], {"b01": status}) == frozenset({"b02"})
+    assert held_branches(USER_ROSTER, (), [], {"b01": status}) == {"b02": HoldReason.USER_GRACE}
 
 
 def test_a_user_branch_row_shows_its_grace_and_the_prompt_explains_it() -> None:
-    rows = {row["branch"]: row for row in _state(_view(roster=USER_ROSTER, grace=frozenset({"b01"})))["branches"]}
+    view = _view(roster=USER_ROSTER, held={"b01": HoldReason.USER_GRACE})
+    rows = {row["branch"]: row for row in _state(view)["branches"]}
     plain = {row["branch"]: row for row in _state(_view())["branches"]}
 
     assert (rows["b01"]["origin"], rows["b01"]["grace"], rows["b02"]["grace"]) == ("user", True, False)
     assert "grace" not in plain["b01"]
     prose = " ".join(JUDGE_SYSTEM_PROMPT.split())
     assert f"until {MB_USER_BRANCH_GRACE_TESTS} of its tests were judged, a stop or a lower K you give it" in prose
+
+
+CANDIDATE = PendingCandidate("b01-r7", "b01-r7-confirm", "c-b01", METRIC, 116.6, 6.04321)
+
+
+def _waiting(branch: str, *, pending: bool = True) -> BranchProgress:
+    return BranchProgress(
+        branch, True, "c-root", f"c-{branch}", 3, 1, 60.0, {}, pending=(CANDIDATE,) if pending else ()
+    )
+
+
+def test_a_branch_with_a_pending_candidate_is_held_until_its_confirm_is_judged_unless_its_judging_failed() -> None:
+    roster = (*ROSTER, _entry("b04", origin=BranchOrigin.USER))
+    progress = (_waiting("b01"), _waiting("b02", pending=False), _waiting("b03"), _waiting("b04"))
+    failed = SpecialistStatus(running=False, crashes=0, lost=0, gave_up=False, judge_failed=True)
+    gave_up = replace(failed, gave_up=True, judge_failed=False)
+
+    assert held_branches(roster, progress, [], {}) == {
+        "b01": HoldReason.PENDING_CONFIRM,
+        "b04": HoldReason.USER_GRACE,
+    }
+    assert held_branches(roster, progress, [], {"b01": failed, "b04": gave_up}) == {"b04": HoldReason.PENDING_CONFIRM}
+
+
+def test_a_judge_stop_or_lower_k_of_a_branch_with_a_pending_candidate_is_refused_and_named_until_it_clears() -> None:
+    roster = (_entry(INTEGRATION_BRANCH, kind=BranchKind.INTEGRATION), _entry("b01", k=2), _entry("b02", k=2))
+    decision = JudgeDecision(k=(KOrder("b01", 1), KOrder("b02", 1)), stop=(StopOrder("b01", STOP_REASON),))
+    waiting = {"b01": HoldReason.PENDING_CONFIRM}
+    capped = cap_decision(decision, _view(roster=roster))
+
+    held = hold_decision(capped, waiting, roster)
+
+    assert held == JudgeDecision(k=(KOrder("b02", 1),), held=(HeldOrder("b01", HoldReason.PENDING_CONFIRM),))
+    assert hold_decision(held, waiting, roster) == held
+    assert cap_decision(held, _view(roster=roster)) == held
+    assert hold_decision(JudgeDecision(k=(KOrder("b01", 2),)), waiting, roster).k == (KOrder("b01", 2),)
+    assert (
+        hold_decision(capped, {}, roster)
+        == capped
+        == JudgeDecision(k=(KOrder("b02", 1),), stop=(StopOrder("b01", STOP_REASON),))
+    )
+
+
+def test_a_branch_row_shows_its_pending_candidates_and_the_prompt_says_it_cannot_be_stopped_or_narrowed() -> None:
+    rows = {row["branch"]: row for row in _state(_view(candidates=(CANDIDATE,)))["branches"]}
+
+    assert rows["b01"]["pending_candidates"] == [{"request_id": "b01-r7", "gain_over_head_pct": 6.04}]
+    assert _state(_view())["branches"][1]["pending_candidates"] == []
+    assert "pending_candidates" not in rows["b02"]
+    prose = " ".join(JUDGE_SYSTEM_PROMPT.split())
+    assert "A branch with a pending candidate cannot be stopped or narrowed until its confirm is judged" in prose
