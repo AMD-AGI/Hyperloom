@@ -33,7 +33,7 @@ from kernelforge.agent_backends.session_resume import (
     run_session_with_api_resume,
 )
 from kernelforge.config import Config
-from kernelforge.durable_io import atomic_write_text
+from kernelforge.tools.durable_io import atomic_write_text
 from kernelforge.kernel_backends.constants import KERNEL_BACKENDS
 from kernelforge.kernel_rewrite_controller.contracts import HandoffBundle
 from kernelforge.kernel_rewrite_controller.paths import ControllerLayout
