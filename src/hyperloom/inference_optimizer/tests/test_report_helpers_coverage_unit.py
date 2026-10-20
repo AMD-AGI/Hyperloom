@@ -277,3 +277,15 @@ def test_report_says_platform_is_missing_when_the_summary_predates_the_field():
 def test_report_gives_the_reason_the_platform_is_missing_when_it_has_one():
     md = rp_md._format_md(_summary_without_platform(platform={"status": "unavailable", "reason": "no host CPU sysfs"}))
     assert "not recorded — no host CPU sysfs" in md
+
+
+def test_platform_fingerprint_propagates_a_node_scope_failure(monkeypatch):
+    import pytest
+
+    def _boom():
+        raise RuntimeError("node scope unreadable")
+
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._multi_node_env.is_multi_node", _boom)
+
+    with pytest.raises(RuntimeError, match="node scope unreadable"):
+        rp._platform_fingerprint()

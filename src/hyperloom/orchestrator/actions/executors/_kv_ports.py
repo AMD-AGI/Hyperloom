@@ -16,6 +16,8 @@ import urllib.parse
 from pathlib import Path
 from typing import Any, Callable
 
+import yaml
+
 __all__ = [
     "DEFAULT_METRICS_PORT",
     "port_from_server_command",
@@ -112,10 +114,8 @@ def port_from_workspace(workspace: Any) -> int | None:
 def _port_in_round_config(path: Path) -> int | None:
     """``benchmark.envs.PORT`` as one materialized round config records it."""
     try:
-        import yaml
-
         payload = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001 - a config we cannot read is not a reason to fail a round
+    except (OSError, ValueError, yaml.YAMLError):
         return None
     if not isinstance(payload, dict):
         return None

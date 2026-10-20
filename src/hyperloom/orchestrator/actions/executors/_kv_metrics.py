@@ -1498,7 +1498,7 @@ class KvMetricsRecorder:
             from hyperloom.common.io import atomic_write_json
 
             atomic_write_json(Path(self._output_path), payload)
-        except Exception:
+        except (OSError, TypeError, ValueError):
             # Warning, not debug. Not failing the round is the requirement; being quiet about it is not. A round that
             # collected samples and then dropped them on the floor looks identical afterwards to one that never
             # collected any, and nobody goes looking for a file they were never told was missing.

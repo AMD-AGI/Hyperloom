@@ -216,11 +216,11 @@ def _load_materialized_workload_metadata(config_path: str) -> dict[str, Any]:
     path = Path(config_path)
     if not path.exists():
         return {}
-    try:
-        import yaml  # type: ignore[import-untyped]
+    import yaml  # type: ignore[import-untyped]
 
+    try:
         cfg = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except Exception as exc:  # noqa: BLE001
+    except (OSError, ValueError, yaml.YAMLError) as exc:
         log.warning("failed to read materialized workload config %s: %s", path, exc)
         return {}
     bench = cfg.get("benchmark") if isinstance(cfg.get("benchmark"), dict) else {}
@@ -345,7 +345,7 @@ def _enrich_candidates_artifact(
         return
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception as exc:  # noqa: BLE001
+    except (OSError, ValueError) as exc:
         log.warning("failed to read candidates artifact %s: %s", path, exc)
         return
     if not isinstance(data, dict):
@@ -813,11 +813,11 @@ def _record_discovery_tool_version(session_dir: Path, tool: str) -> None:
 
     This run is the only place that build is in scope; nothing downstream can recover it.
     """
-    try:
-        from hyperloom.inference_optimizer.breakdown.recorder import tool_versions
+    from hyperloom.inference_optimizer.breakdown.recorder import recorder_warnings, tool_versions
 
+    try:
         tool_versions.record_tool_version(session_dir, tool=tool)
-    except Exception as exc:  # noqa: BLE001
+    except recorder_warnings.RECORDING_ERRORS as exc:
         trace_recording_skipped(
             "versions",
             reason="caller raised before the recorder",

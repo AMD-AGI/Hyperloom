@@ -10,6 +10,7 @@ import os
 import stat
 import subprocess
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -36,10 +37,49 @@ def _make_exe(path):
     return str(path)
 
 
+def _make_cli(path, version_line):
+    path.write_text(f"#!/bin/sh\necho '{version_line}'\n")
+    path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    return str(path)
+
+
 def test_env_override_generic_agent_cli(tmp_path, monkeypatch):
-    exe = _make_exe(tmp_path / "claude")
+    exe = _make_cli(tmp_path / "claude", "2.1.0 (Claude Code)")
     monkeypatch.setenv("FORGE_AGENT_CLI", exe)
     assert resolve_claude_cli() == exe
+
+
+def test_env_override_naming_another_providers_cli_is_ignored(tmp_path, monkeypatch, caplog):
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    claude = _make_cli(bindir / "claude", "2.1.0 (Claude Code)")
+    monkeypatch.setenv("FORGE_AGENT_CLI", _make_cli(tmp_path / "codex", "codex-cli 0.9.0"))
+    monkeypatch.setenv("PATH", str(bindir))
+
+    assert resolve_claude_cli() == claude
+    assert "ignoring FORGE_AGENT_CLI" in caplog.text
+
+
+def test_bundled_sdk_cli_is_the_last_resort(tmp_path, monkeypatch):
+    bundled = _make_cli(tmp_path / "bundled-claude", "2.1.0 (Claude Code)")
+    monkeypatch.delenv("FORGE_AGENT_CLI", raising=False)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("kernelforge.agent_backends.claude._bundled_claude_cli", lambda: bundled)
+
+    result = resolve_claude_cli()
+
+    # A host may carry Claude Code at one of the fixed system paths, which outrank the bundled copy.
+    assert result == bundled or (result.startswith(("/usr/", "/opt/")) and os.access(result, os.X_OK))
+
+
+def test_bundled_sdk_cli_points_at_the_sdk_package():
+    import claude_agent_sdk
+
+    from kernelforge.agent_backends.claude import _bundled_claude_cli
+
+    found = _bundled_claude_cli()
+    assert found in ("", str(Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude"))
 
 
 def test_explicit_runtime_cli_path(tmp_path, monkeypatch):
