@@ -677,7 +677,8 @@ def test_a_sampler_still_blocked_in_amd_smi_at_close_leaves_every_share_unread()
     recorder._close_window()
     assert recorder.summary()["per_gpu"]["4"]["power_throttle_fraction"] == pytest.approx(0.9)
     recorder._thread = SimpleNamespace(join=lambda timeout=None: None, is_alive=lambda: True)
-    assert recorder.close()["per_gpu"]["4"]["power_throttle_fraction"] is None
+    out = recorder.close()
+    assert out["per_gpu"]["4"]["power_throttle_fraction"] is None
 
 
 def test_a_card_unread_at_one_end_of_a_window_or_whose_counters_went_back_is_left_unread():
