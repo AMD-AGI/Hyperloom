@@ -33,6 +33,7 @@ __all__ = [
     "now_iso_seconds",
     "summarize_hot_kernels",
     "summarize_warnings",
+    "text",
     "text_or_none",
     "worst_status",
 ]
@@ -93,6 +94,11 @@ def bool_or_none(value: Any) -> bool | None:
     different facts, and ``bool(None)`` erases the difference.
     """
     return None if value is None else bool(value)
+
+
+def text(value: Any) -> str:
+    """Coerce to a plain string, treating ``None`` as empty."""
+    return str(value or "")
 
 
 def text_or_none(value: Any) -> str | None:
