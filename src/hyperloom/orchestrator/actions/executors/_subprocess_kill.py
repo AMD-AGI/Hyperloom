@@ -358,8 +358,8 @@ class _StreamCapture:
             return
         try:
             self._on_output()
-        except Exception:  # noqa: BLE001 - liveness reporting never breaks capture
-            pass
+        except Exception as exc:  # noqa: BLE001 - liveness reporting never breaks capture
+            log.warning("_subprocess_kill: liveness callback failed: %s", exc)
 
     def _join(self, chunks: list[str | bytes]) -> str | bytes:
         """Concatenate captured chunks using the appropriate empty separator."""
@@ -400,7 +400,7 @@ class _StreamCapture:
             else:
                 mirror.write(chunk)
             mirror.flush()
-        except Exception:  # noqa: BLE001 - logging must not break subprocess
+        except (OSError, ValueError):
             pass
 
 

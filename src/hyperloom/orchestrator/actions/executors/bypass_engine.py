@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import http.client
 import os
 import time
 import urllib.request
@@ -280,7 +281,7 @@ def wait_for_server_ready(
         try:
             if do_probe(health_url) == 200:
                 return True
-        except Exception:  # noqa: BLE001 - not-ready yet; keep polling
+        except (OSError, http.client.HTTPException, ValueError):
             pass
         # Checked after the probe, so a server that answered and exited in the
         # same breath is still credited with having come up.
@@ -357,5 +358,5 @@ def server_health_ok(base_url: str, *, probe: Callable[[str], int] | None = None
     do_probe = probe or _default_probe
     try:
         return do_probe(health_url) == 200
-    except Exception:  # noqa: BLE001
+    except (OSError, http.client.HTTPException, ValueError):
         return False

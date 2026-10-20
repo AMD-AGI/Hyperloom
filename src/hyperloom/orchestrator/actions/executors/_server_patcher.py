@@ -298,7 +298,7 @@ def _detect_installed_sglang_version() -> str | None:
     """Return the locally-installed SGLang version, or ``None`` if unimportable."""
     try:
         import sglang  # type: ignore[import-not-found]
-    except Exception:  # noqa: BLE001
+    except (ImportError, OSError):
         return None
     return (getattr(sglang, "__version__", "") or "").strip() or None
 
@@ -326,14 +326,9 @@ def resolve_sglang_patch_set() -> str:
 
 def _gc_patch_deferred_to_pods() -> bool:
     """True on a multi-node controller, where the pod fan-out applies the patch."""
-    try:
-        from ._multi_node_env import is_multi_node
-    except Exception:  # noqa: BLE001
-        return False
-    try:
-        return bool(is_multi_node())
-    except Exception:  # noqa: BLE001
-        return False
+    from ._multi_node_env import is_multi_node
+
+    return is_multi_node()
 
 
 def _ensure_sglang_gc_patched(
