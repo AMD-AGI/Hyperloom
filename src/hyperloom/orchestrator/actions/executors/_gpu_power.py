@@ -196,9 +196,8 @@ def _serving_gpus(peak_vram: dict[int, float], watts: dict[int, list[float]]) ->
 def _unread_gpus(in_scope: set[int], peak_vram: dict[int, float], watts: dict[int, list[float]]) -> list[int]:
     """The cards in scope that cannot be ruled out as serving because a reading is missing.
 
-    A card that may be serving but cannot be read would drop out of the total and escape its own limit, so it leaves
-    the whole round unmeasured: a card holding a model with no power reading, or a card in scope whose VRAM was never
-    read (absent from amd-smi, or reported N/A).
+    Such a card would drop out of the total and escape its own limit, so it leaves the whole round
+    unmeasured rather than under-counted.
     """
     return sorted(
         gpu
