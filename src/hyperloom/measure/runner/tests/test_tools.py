@@ -56,6 +56,22 @@ def test_a_tree_without_the_expected_files_is_refused_and_leaves_nothing(upstrea
     assert list((tmp_path / "cache").iterdir()) == []
 
 
+def test_a_tree_that_keeps_its_benchmark_library_below_inferencex_e2e_is_accepted(tmp_path, monkeypatch):
+    repo = tmp_path / "up"
+    (repo / "inferencex-e2e" / "benchmarks").mkdir(parents=True)
+    (repo / "inferencex-e2e" / "benchmarks" / "benchmark_lib.sh").write_text("# lib\n")
+    _git(repo, "init", "-q")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "add", ".")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "one")
+    commit = _git(repo, "rev-parse", "HEAD")
+    monkeypatch.setenv("INFERENCEX_REPO", str(repo))
+
+    tree = ensure_inferencex(commit, tmp_path / "cache")
+
+    assert (tree / "inferencex-e2e" / "benchmarks" / "benchmark_lib.sh").is_file()
+    assert ensure_inferencex(commit, tmp_path / "cache") == tree
+
+
 def test_an_unknown_commit_is_refused(upstream, tmp_path, monkeypatch):
     repo, _ = upstream
     monkeypatch.setenv("INFERENCEX_REPO", str(repo))
