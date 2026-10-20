@@ -87,10 +87,16 @@ def test_the_role_says_an_explore_delta_carries_the_claimed_change():
     assert "an empty delta tests nothing" in role_prompt(WORKLOAD)
 
 
+def test_the_role_says_a_profile_refused_as_existing_is_waited_on():
+    assert "refused as profile_exists names the one already queued, running or measured" in role_prompt(WORKLOAD)
+    assert "wait_test on it rather than profiling again" in role_prompt(WORKLOAD)
+
+
 def test_the_role_waits_for_a_test_only_through_wait_test():
     prompt = role_prompt(WORKLOAD)
 
     assert "Wait for a test with wait_test" in prompt
+    assert "within a minute with the test's progress" in prompt
     assert "Never wait with sleep, a background shell or by reading the test's files" in prompt
 
 

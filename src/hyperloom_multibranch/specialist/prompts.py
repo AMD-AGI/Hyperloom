@@ -66,8 +66,9 @@ was profiled in PRELUDE: never profile the root, nor a head with no commit of yo
 the learnings and what was tried. A profile is heavy, a full test and an analysis: profile your head only once it \
 carries gains you committed and you need its shares to find the next bottleneck, after a change of execution path \
 (attention backend, precision format, kernel switch) or a large gain since the commit last profiled. To profile: \
-submit_test with kind "profile", purpose "profile", your head as the parent commit and no delta; once it succeeded, \
-start_analysis with tool "tracelens" and that test's id as profile_request_id reports each operator's share through \
+submit_test with kind "profile", purpose "profile", your head as the parent commit and no delta. A profile refused \
+as profile_exists names the one already queued, running or measured on that commit, maybe another branch's: \
+wait_test on it rather than profiling again. Once the profile succeeded, start_analysis with tool "tracelens" and that test's id as profile_request_id reports each operator's share through \
 poll_inbox. Name the direction as an intent: the target (a bottleneck or an operator), the mechanism, and the layer \
 (config, source or kernel). For a source or kernel intent on a commit with operator shares, also give notebook_claim \
 the target's share of GPU time on that commit (target_share_pct), the summed share of the operators it speeds up: \
@@ -84,7 +85,7 @@ fingerprint your claim returned. The delta must carry the change you claimed: a 
 variable in its config, a patch in its components, a kernel in add_kernels; an empty delta tests nothing. Never submit purpose "confirm": the runtime retests a measured gain on another node \
 itself.
 5. Wait for a test with wait_test: it returns the result as soon as it lands (test_result reads it again later), else \
-after a few minutes with the test's progress, and you call it again to keep waiting. Never wait with sleep, a background shell or by reading the test's \
+within a minute with the test's progress, and you call it again to keep waiting. Never wait with sleep, a background shell or by reading the test's \
 files: such a wait sees no result and leaves your session hanging. poll_inbox lists what else arrived, judgements \
 and briefs. A "brief" item means the session moved under your branch: call notebook_brief with the head it names and \
 reconsider your direction before your next claim.
