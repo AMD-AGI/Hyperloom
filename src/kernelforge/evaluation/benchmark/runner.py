@@ -543,38 +543,39 @@ def _requested_case_ms(
 
 def _whole_suite_note(flag_exit: int | None, rejected_before: bool, seen: dict[str, float]) -> str:
     """Why the driver timed every case it knows instead of the one it was asked for."""
-    if flag_exit is not None:
-        how = f"rejected {SWEEP_CASE_FLAG} (exit {flag_exit}), so it was re-run without it and"
-    elif rejected_before:
-        how = f"is known to reject {SWEEP_CASE_FLAG}, so it was not asked again and"
-    else:
-        how = f"ignored {SWEEP_CASE_FLAG} and"
+    how = (
+        f"rejected {SWEEP_CASE_FLAG} (exit {flag_exit}), so it was re-run without it and"
+        if flag_exit is not None
+        else (
+            f"is known to reject {SWEEP_CASE_FLAG}, so it was not asked again and"
+            if rejected_before
+            else f"ignored {SWEEP_CASE_FLAG} and"
+        )
+    )
     return f"driver {how} ran its whole suite: {', '.join(sorted(seen))}"
 
 
 def _sweep_caveats(whole_suite: str, consumption: dict[str, str], samples: list[float], spread: bool) -> str:
-    """The bracketed caveats on what an exploratory sweep number does not show."""
-    notes = [whole_suite] if whole_suite else []
+    """The bracketed caveats on what an exploratory sweep number does not show; an empty note does not apply."""
     unread = [name for name, state in consumption.items() if state == "unread"]
-    if unread:
-        notes.append(
-            f"UNCONFIRMED: no '{SWEEP_ECHO}: NAME VALUE' line came back for "
-            f"{', '.join(unread)}, so nothing proves the source read the "
-            "override; this number means something only against a no-override "
-            "reference measured in the same round"
-        )
-    if not spread:
-        notes.append(
-            # Lines came back, but they timed every case the driver ran, so their spread is not this case's and "none
-            # came back" would be a lie about what the driver printed.
-            "the wall_ms lines time the driver's whole suite rather than this "
-            "case, so this point has no measured spread of its own and a small "
-            "difference against it means nothing"
-            if samples
-            else "no per-iteration wall_ms lines came back: this point has no "
-            "measured spread, so a small difference against it means nothing"
-        )
-    return "".join(f" [{note}]" for note in notes)
+    unconfirmed = (
+        f"UNCONFIRMED: no '{SWEEP_ECHO}: NAME VALUE' line came back for "
+        f"{', '.join(unread)}, so nothing proves the source read the "
+        "override; this number means something only against a no-override "
+        "reference measured in the same round"
+    )
+    # Lines came back, but they timed every case the driver ran, so their spread is not this case's and "none came
+    # back" would be a lie about what the driver printed.
+    unspread = (
+        "the wall_ms lines time the driver's whole suite rather than this "
+        "case, so this point has no measured spread of its own and a small "
+        "difference against it means nothing"
+        if samples
+        else "no per-iteration wall_ms lines came back: this point has no "
+        "measured spread, so a small difference against it means nothing"
+    )
+    notes = (whole_suite, unconfirmed if unread else "", "" if spread else unspread)
+    return "".join(f" [{note}]" for note in notes if note)
 
 
 async def sweep_case(
