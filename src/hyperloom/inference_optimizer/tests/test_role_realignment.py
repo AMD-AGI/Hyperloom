@@ -833,6 +833,64 @@ async def test_extend_lease_rejects_non_running_task(coordinator_with_mocks):
 
 
 @pytest.mark.asyncio
+async def test_prune_branch_on_a_catalogue_family_cancels_every_member_action(coordinator_with_mocks):
+    """The ``family=`` tag the prompt renders reaches the queued rows of every action carrying it."""
+    c = coordinator_with_mocks
+    try:
+        members = sorted(name for name, meta in ACTION_CATALOGUE.items() if meta.family == "prep")
+        assert len(members) > 1
+        queued = [await c.tasks.create(kind=kind, params={}, idempotency_key=f"k-prune-{kind}") for kind in members]
+        bystander = await c.tasks.create(kind="explore", params={}, idempotency_key="k-prune-bystander")
+        running = await c.tasks.create(kind=members[0], params={}, idempotency_key="k-prune-running")
+        await c.tasks.transition(running.task_id, "running")
+
+        await c.router.handle_intent(
+            "orchestration",
+            Intent(type=IntentType.PRUNE_BRANCH, payload={"family": "prep", "reason": "answered"}),
+        )
+
+        for task in queued:
+            assert (await c.tasks.get(task.task_id)).state == "cancelled"
+        assert (await c.tasks.get(bystander.task_id)).state == "queued"
+        assert (await c.tasks.get(running.task_id)).state == "running"
+        assert c.shared_state.is_pruned("prep")
+
+        await c.router.handle_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.PROPOSE_ACTION, payload={"action_name": "target_analysis", "predicted_gain_pct": 5.0}
+            ),
+        )
+        obs = await c.bus.tail(topic="observation")
+        assert any(m.payload.get("kind") == "proposal_pruned_advisory" for m in obs)
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_prune_branch_queued_scope_on_an_action_name_drains_only_that_kind(coordinator_with_mocks):
+    """A single action name still works, and ``scope='queued'`` leaves the family usable."""
+    c = coordinator_with_mocks
+    try:
+        target = await c.tasks.create(kind="profile", params={}, idempotency_key="k-drain-profile")
+        sibling = await c.tasks.create(kind="roofline", params={}, idempotency_key="k-drain-roofline")
+
+        await c.router.handle_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.PRUNE_BRANCH,
+                payload={"family": "profile", "reason": "answered", "scope": "queued"},
+            ),
+        )
+
+        assert (await c.tasks.get(target.task_id)).state == "cancelled"
+        assert (await c.tasks.get(sibling.task_id)).state == "queued"
+        assert not c.shared_state.is_pruned("profile")
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
 async def test_send_message_to_specialist_writes_inbox(coordinator_with_mocks):
     """A message addressed to a running specialist lands in its workspace inbox."""
     import json as _json

@@ -521,11 +521,18 @@ class IntentRouter(CoordinatorCollaborator):
                 log.exception("failed to record handle_intent_exception observation")
             return
 
+    def _is_pruned_action(self, action_name: str) -> bool:
+        """Whether ``prune_branch`` retired ``action_name`` itself or its catalogue family."""
+        meta = self.action_registry.get(action_name)
+        return self.shared_state.is_pruned(action_name) or (
+            meta is not None and self.shared_state.is_pruned(meta.family)
+        )
+
     async def _handle_propose_action(self, source: str, intent: Intent) -> None:
         """Gate a proposed action and enqueue it for Critic Review."""
         action_name = intent.payload["action_name"]
         # Pruned families are advisory: proposal still queues with an advisory note.
-        if self.shared_state.is_pruned(action_name):
+        if self._is_pruned_action(action_name):
             await self.bus.record_observation(
                 "coordinator",
                 "observation",
@@ -972,7 +979,7 @@ class IntentRouter(CoordinatorCollaborator):
     async def handle_delegate(self, source: str, intent: Intent) -> None:
         """Validate and enqueue a delegated action as a TaskRegistry task."""
         action_name = intent.payload["action_name"]
-        if self.shared_state.is_pruned(action_name):
+        if self._is_pruned_action(action_name):
             await self.bus.record_observation(
                 "coordinator",
                 "observation",
@@ -1279,10 +1286,13 @@ class IntentRouter(CoordinatorCollaborator):
         drain_only = scope == PRUNE_BRANCH_SCOPE_QUEUED
         if not drain_only and self.shared_state.add_pruned_family(family):
             self.shared_state.save(self.session_dir)
-        if drain_only and family == "baseline":
+        # A catalogue family names its member actions; any other value names a single action kind.
+        kinds = [name for name, meta in self.action_registry.items() if meta.family == family] or [family]
+        cancelled: list[str] = []
+        if drain_only and "baseline" in kinds:
+            kinds.remove("baseline")
             cancelled = await self._coord.writeback.drain_queued_baselines(reason=reason)
-        else:
-            cancelled = await self.tasks.cancel_family([family], reason=reason)
+        cancelled += await self.tasks.cancel_family(kinds, reason=reason)
         await self.bus.append_and_seq(
             Message.new(
                 source,

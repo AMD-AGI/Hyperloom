@@ -42,11 +42,13 @@ takes a whole family.
 ## Move for the queue
 
 - `prune_branch{family, reason, scope='queued'}` — cancels every *queued*
-  task of one family and leaves the family usable. Use it when a backlog
-  outlived its purpose: several turns queued the same measurement before the
-  first one returned, and the answer is now in hand. The default
-  `scope='family'` instead retires the action for the rest of the run, so
-  reach for it only when the family itself is a dead end. Queued baselines
-  are drained automatically once `baseline_tput > 0` (a `baseline_drain`
-  observation reports what was cancelled); this is the manual equivalent for
-  any family.
+  task of one family and leaves the family usable. `family` is either a
+  catalogue family (the `family=` tag in the action list, covering every
+  action that carries it) or a single action name such as `baseline`. Use
+  it when a backlog outlived its purpose: several turns queued the same
+  measurement before the first one returned, and the answer is now in hand.
+  The default `scope='family'` instead retires every action it names for the
+  rest of the run, so reach for it only when the family itself is a dead end.
+  Queued baselines are drained automatically once `baseline_tput > 0` (a
+  `baseline_drain` observation reports what was cancelled); this is the
+  manual equivalent for any family.
