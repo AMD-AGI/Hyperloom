@@ -470,6 +470,26 @@ def _normalized_sources(workspace: Path, kernel: str, source_files: str) -> list
     return normalized
 
 
+def _require_dev_branch(workspace: Path) -> str:
+    """Current non-main branch of a clean forge workspace, or raise."""
+    if _git_value(workspace, "status", "--porcelain=v1", "--untracked-files=no"):
+        raise ValueError("workspace has uncommitted tracked changes")
+    branch = _git_value(workspace, "branch", "--show-current")
+    if not branch or branch in {"main", "master"}:
+        raise ValueError("forge-loop requires a non-main development branch in the workspace")
+    return branch
+
+
+def _program_md_sha256(program_md_file: str | None) -> str:
+    """sha256 of an optional program.md's text, or blank when the campaign has none."""
+    if not program_md_file:
+        return ""
+    source_program = Path(program_md_file).expanduser().resolve()
+    if not source_program.is_file():
+        raise ValueError(f"program context is not a file: {source_program}")
+    return hashlib.sha256(source_program.read_text(errors="replace").encode()).hexdigest()
+
+
 def create_campaign_config(
     workspace_dir: str,
     inputs: CampaignInputs,
@@ -477,52 +497,24 @@ def create_campaign_config(
     base_commit: str | None = None,
 ) -> CampaignConfig:
     """Resolve and normalize all immutable inputs for a fresh campaign."""
-    kernel, driver, program_md_file = inputs.kernel, inputs.driver, inputs.program_md_file
-    target_functions = parse_list(inputs.target_functions) or None
     workspace = Path(workspace_dir).resolve()
-    kernel_path = _relative_file(workspace, kernel, "kernel")
-    driver_path = _driver_reference(workspace, driver)
-
-    normalized_sources = _normalized_sources(workspace, kernel, inputs.source_files)
-
-    dirty = _git_value(
-        workspace,
-        "status",
-        "--porcelain=v1",
-        "--untracked-files=no",
-    )
-    if dirty:
-        raise ValueError("workspace has uncommitted tracked changes")
-
-    branch = _git_value(workspace, "branch", "--show-current")
-    if not branch or branch in {"main", "master"}:
-        raise ValueError("forge-loop requires a non-main development branch in the workspace")
+    kernel_path = _relative_file(workspace, inputs.kernel, "kernel")
+    driver_path = _driver_reference(workspace, inputs.driver)
+    normalized_sources = _normalized_sources(workspace, inputs.kernel, inputs.source_files)
+    branch = _require_dev_branch(workspace)
     resolved_base_commit = (base_commit or "").strip() or _git_value(workspace, "rev-parse", "HEAD")
-    raw_source_paths = _campaign_source_paths(
-        workspace,
-        kernel_path,
-        normalized_sources,
-    )
-    pristine_sources = _read_pristine_sources(
-        workspace,
-        raw_source_paths,
-        base_commit=resolved_base_commit,
-    )
-    resolved_branch = (inputs.git_branch or "").strip() or branch
-    kernel_backend_override = (inputs.kernel_backend or "").strip()
+    raw_source_paths = _campaign_source_paths(workspace, kernel_path, normalized_sources)
+    pristine_sources = _read_pristine_sources(workspace, raw_source_paths, base_commit=resolved_base_commit)
+    backend_override = (inputs.kernel_backend or "").strip()
     resolved_kernel_backend = (
-        resolve_kernel_backend_override(kernel_backend_override)
-        if kernel_backend_override
+        resolve_kernel_backend_override(backend_override)
+        if backend_override
         else infer_kernel_backend([workspace / path for path in normalized_sources])
     )
-    resolved_targets = (
-        list(target_functions)
-        if target_functions
-        else _derive_target_functions(
-            workspace,
-            normalized_sources,
-            source_contents=pristine_sources,
-        )
+    resolved_targets = parse_list(inputs.target_functions) or _derive_target_functions(
+        workspace,
+        normalized_sources,
+        source_contents=pristine_sources,
     )
     kernel_absolute = str((workspace / kernel_path).resolve())
     resolved_framework = infer_source_owner_framework(
@@ -549,35 +541,24 @@ def create_campaign_config(
         kernel_absolute,
         target_functions=resolved_targets,
     )
-    program_md_path = ""
-    program_md_sha256 = ""
-    if program_md_file:
-        source_program = Path(program_md_file).expanduser().resolve()
-        if not source_program.is_file():
-            raise ValueError(f"program context is not a file: {source_program}")
-        program_md_path = "forge_experiments/program.md"
-        program_text = source_program.read_text(errors="replace")
-        program_md_sha256 = hashlib.sha256(program_text.encode()).hexdigest()
-
-    resolved_task_type = (inputs.task_type or "").strip() or ("repository" if len(normalized_sources) > 1 else "")
+    program_md_sha256 = _program_md_sha256(inputs.program_md_file)
     resolved_snr_threshold = float(inputs.snr_threshold)
     if not math.isfinite(resolved_snr_threshold) or resolved_snr_threshold <= 0:
         raise ValueError("SNR threshold must be a positive finite float")
-    canonical_driver = workspace / driver_path
     return CampaignConfig(
         kernel_path=kernel_path,
         driver_path=driver_path,
-        driver_sha256=hashlib.sha256(canonical_driver.read_bytes()).hexdigest(),
+        driver_sha256=hashlib.sha256((workspace / driver_path).read_bytes()).hexdigest(),
         source_files=normalized_sources,
-        program_md_path=program_md_path,
+        program_md_path="forge_experiments/program.md" if inputs.program_md_file else "",
         program_md_sha256=program_md_sha256,
         snr_threshold=resolved_snr_threshold,
         gpu_target=(inputs.gpu_target or "").strip() or detect_gpu_target(),
-        gpu_type=str("mi355x" if inputs.gpu_type is None else inputs.gpu_type).strip().lower(),
+        gpu_type=(inputs.gpu_type if inputs.gpu_type is not None else "mi355x").strip().lower(),
         kernel_backend=resolved_kernel_backend,
-        task_type=resolved_task_type,
+        task_type=(inputs.task_type or "").strip() or ("repository" if len(normalized_sources) > 1 else ""),
         target_functions=resolved_targets,
-        git_branch=resolved_branch,
+        git_branch=(inputs.git_branch or "").strip() or branch,
         base_commit=resolved_base_commit,
         framework=resolved_framework,
         operator_name=resolved_operator,
