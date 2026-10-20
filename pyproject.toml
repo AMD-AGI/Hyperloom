@@ -96,10 +96,11 @@ forge-profiling = [
     "tqdm",
 ]
 # Hosted measurement: Ed25519 signing (cryptography), the E2B sandbox SDK and the S3 result archive. Each is
-# imported lazily, only by the hosted-measurement modules.
+# imported lazily, only by the hosted-measurement modules. ``e2b`` 2.53 is the first SDK whose ``connect`` sends the
+# ``E2b-Sandbox-Id`` header the data-plane router needs and whose errors carry a ``status_code``.
 hosted = [
     "cryptography>=42",
-    "e2b>=2.7",
+    "e2b>=2.53.1,<3",
     "boto3>=1.28",
 ]
 # The measurement runner inside a sealed sandbox: it reads the YAML config and signs its result manifest.
