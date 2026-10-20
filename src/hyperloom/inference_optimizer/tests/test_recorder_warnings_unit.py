@@ -117,3 +117,10 @@ def test_a_projection_bug_in_record_raises(tmp_path):
     rec._write = _boom  # type: ignore[method-assign]
     with pytest.raises(TypeError, match="shape changed"):
         rec.record_singleton("session", {"session_id": "x"})
+
+
+def test_a_write_warning_that_cannot_be_persisted_reports_false(tmp_path):
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("x", encoding="utf-8")
+
+    assert sbd_v6.record_write_warning(blocker, component="timeline.install", exc=OSError("disk full")) is False

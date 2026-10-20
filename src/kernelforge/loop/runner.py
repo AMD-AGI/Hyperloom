@@ -838,7 +838,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                     self.experiment.experiment_id,
                     self.llm_usage,
                 )
-        except Exception:
+        except (OSError, TypeError, ValueError):
             log.debug("failed to checkpoint LLM usage", exc_info=True)
 
     def _git(self, *args: str) -> str:
@@ -1420,7 +1420,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                 path = Path(self.ic.workspace_dir) / path
             try:
                 texts.append(path.read_text())
-            except Exception as e:  # noqa: BLE001 - reported, not swallowed
+            except (OSError, ValueError) as e:  # reported, not swallowed
                 texts.append(None)
                 unreadable.append(str(path))
                 log.warning(
@@ -2519,7 +2519,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                 events=events,
                 candidate_metadata=metadata,
             )
-        except Exception as error:
+        except (OSError, ValueError) as error:
             self.persistence_degraded = True
             self.persistence_errors.append(f"publish optimization history: {error}")
             self.persistence_errors = self.persistence_errors[-10:]
@@ -4662,7 +4662,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                 )
 
                 cleanup_current_owned_aiter_locks()
-            except Exception:
+            except (OSError, ValueError):
                 log.debug("failed to clean AITER locks on loop exit", exc_info=True)
 
     async def _run_impl(
@@ -5727,7 +5727,7 @@ class IterationLoop(AnalysisRuntimeMixin):
             if callable(restore):
                 try:
                     restore()
-                except Exception as error:  # noqa: BLE001
+                except (RuntimeError, OSError) as error:
                     restore_errors.append(f"protected snapshot restore failed: {type(error).__name__}: {error}")
             else:
                 restore_errors.append("protected snapshot restore callback unavailable")
@@ -5738,7 +5738,7 @@ class IterationLoop(AnalysisRuntimeMixin):
             if not restore_errors:
                 try:
                     self._validate_driver_integrity(self.run_state)
-                except Exception as error:  # noqa: BLE001
+                except (ValueError, OSError) as error:
                     restore_errors.append(str(error))
             summary = (
                 "REVERT (protected integrity violation): canonical "

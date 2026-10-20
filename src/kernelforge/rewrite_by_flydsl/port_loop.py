@@ -207,7 +207,7 @@ async def run_port_loop(
             return reason + "; protected snapshot restore callback unavailable"
         try:
             restore()
-        except Exception as error:  # noqa: BLE001 - report without validating
+        except (RuntimeError, OSError) as error:
             return reason + "; protected snapshot restore failed: " + f"{type(error).__name__}: {error}"
         return reason
 

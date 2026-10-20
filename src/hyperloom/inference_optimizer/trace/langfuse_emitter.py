@@ -121,7 +121,7 @@ def _to_ns(dt: Any) -> int | None:
 
         if isinstance(dt, datetime):
             return int(dt.timestamp() * 1_000_000_000)
-    except Exception:  # noqa: BLE001
+    except ValueError:
         return None
     return None
 
@@ -192,7 +192,7 @@ def _otel_attr_value(v: Any) -> Any:
         import json
 
         return json.dumps(v, ensure_ascii=False, default=str)
-    except Exception:  # noqa: BLE001
+    except (TypeError, ValueError):
         return str(v)
 
 
@@ -221,10 +221,7 @@ def _set_trace_attrs(
         clean = _otel_attr_value(v)
         if clean is None:
             continue  # OTEL rejects None
-        try:
-            otel.set_attribute(f"langfuse.trace.metadata.{k}", clean)
-        except Exception:  # noqa: BLE001 — skip unserialisable values
-            continue
+        otel.set_attribute(f"langfuse.trace.metadata.{k}", clean)
 
 
 def _load_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -1082,7 +1079,7 @@ class LangfuseEmitter:
                 _stamp_receipt_hash(receipt),
                 options=WriteOptions(make_parents=True, fsync=True, fsync_dir=True),
             )
-        except Exception:
+        except (OSError, TypeError, ValueError):
             log.debug("langfuse: receipt write failed", exc_info=True)
         record_metadata_langfuse(self.session_dir, receipt)
 
