@@ -21,6 +21,7 @@ from functools import cache
 from enum import Enum
 from typing import Any, Mapping, NamedTuple, Sequence
 
+from hyperloom.common.coerce import optional_positive_int, to_float, to_int
 from hyperloom.common.env import is_truthy
 from hyperloom.inference_optimizer.runtime_environment import prepend_launch_path
 from ._benchmark_interpreter import _resolve_probe_python
@@ -31,6 +32,8 @@ log = logging.getLogger(__name__)
 # an oversized capture serializes too slowly and kills the engine. 128 steps is
 # serialization-safe on a large TP=8 MoE. Tunable via
 # HYPERLOOM_PROFILE_MAX_STEPS_CAP.
+#: Decode steps skipped before capture starts when the pin is unset or unreadable.
+_DEFAULT_PROFILE_DELAY_ITERS = 8
 _DEFAULT_PROFILE_MAX_STEPS = 128
 # AgentX counterpart of the cap above. The 128 is calibrated in decode steps
 # against the synthetic 1024/1024 shape; an agentic step carries a measured ISL
@@ -142,11 +145,8 @@ def _profiler_bound_holds(name: str, value: str | None, *, cap: int) -> bool:
     if value is None:
         return False
     if name == "max_iterations":
-        try:
-            iterations = int(value)
-        except ValueError:
-            return False
-        return 0 < iterations <= cap
+        iterations = optional_positive_int(value)
+        return iterations is not None and iterations <= cap
     if name == "ignore_frontend":
         return is_truthy(value)
     if name == "torch_profiler_dump_cuda_time_total":
@@ -155,26 +155,20 @@ def _profiler_bound_holds(name: str, value: str | None, *, cap: int) -> bool:
 
 
 def _profile_steps_cap(policy_env: Mapping[str, Any]) -> int:
-    raw = str(policy_env.get("HYPERLOOM_PROFILE_MAX_STEPS_CAP") or "").strip()
-    try:
-        cap = int(raw or _DEFAULT_PROFILE_MAX_STEPS)
-    except ValueError:
-        cap = _DEFAULT_PROFILE_MAX_STEPS
-    return cap if cap > 0 else _DEFAULT_PROFILE_MAX_STEPS
+    """The serialization-safe cap on captured decode steps this run may raise to."""
+    return optional_positive_int(policy_env.get("HYPERLOOM_PROFILE_MAX_STEPS_CAP")) or _DEFAULT_PROFILE_MAX_STEPS
 
 
 def _profile_capture_window(
     policy_env: Mapping[str, Any], *, cap: int, delay_iters: int = 0, steady_floor: int | None = None
 ) -> tuple[int, int]:
     """Resolve the synthetic workload's capture steps and delay."""
-    override = str(policy_env.get("HYPERLOOM_PROFILE_MAX_ITERS") or "").strip()
-    if not override.isdigit() or int(override) <= 0:
+    max_iters = optional_positive_int(policy_env.get("HYPERLOOM_PROFILE_MAX_ITERS"))
+    if max_iters is None:
         return delay_iters, cap
-    max_iters = int(override)
-    try:
-        delay_iters = max(0, int(policy_env.get("HYPERLOOM_PROFILE_DELAY_ITERS") or 8))
-    except ValueError:
-        delay_iters = 8
+    # A pinned 0 means "no delay" and must survive, so this is not an ``or`` default.
+    delay = to_int(policy_env.get("HYPERLOOM_PROFILE_DELAY_ITERS"))
+    delay_iters = max(0, _DEFAULT_PROFILE_DELAY_ITERS if delay is None else delay)
     if steady_floor is not None and max_iters < steady_floor:
         log.warning("HYPERLOOM_PROFILE_MAX_ITERS=%d is below the steady-state floor of %d", max_iters, steady_floor)
     elif max_iters > cap:
@@ -240,11 +234,12 @@ class _ProfileWindow(NamedTuple):
 
 
 def _profile_range_ratio(envs: Mapping[str, Any]) -> float:
-    """The request-length spread the steady-state floor is computed against."""
-    try:
-        return float(envs.get("RANDOM_RANGE_RATIO", 1.0))
-    except (TypeError, ValueError):
-        return 1.0
+    """The request-length spread the steady-state floor is computed against.
+
+    A non-finite ratio would make the floor uncomputable, so it falls back to
+    the default the same way an unreadable one does.
+    """
+    return to_float(envs.get("RANDOM_RANGE_RATIO"), 1.0)
 
 
 def _steady_state_floor(*, osl_val: int, conc_val: int, range_ratio: float) -> int:
@@ -263,13 +258,12 @@ def _fit_profile_osl(*, osl_val: int, conc_val: int, range_ratio: float, cap: in
     otherwise the profile serves ``min(served OSL, _PROFILE_DEFAULT_OSL)`` and is
     lowered further rather than losing its steady-state window.
     """
-    raw = os.environ.get("PROFILE_OSL", "").strip()
-    explicit = raw.isdigit() and int(raw) > 0
-    osl_val = int(raw) if explicit else min(osl_val, _PROFILE_DEFAULT_OSL)
+    pinned = optional_positive_int(os.environ.get("PROFILE_OSL"))
+    osl_val = pinned if pinned is not None else min(osl_val, _PROFILE_DEFAULT_OSL)
     steady_floor = _steady_state_floor(osl_val=osl_val, conc_val=conc_val, range_ratio=range_ratio)
     if steady_floor <= cap:
         return osl_val
-    if explicit:
+    if pinned is not None:
         log.warning(
             "PROFILE_OSL=%d needs %d captured steps to reach steady "
             "state, above the profile cap of %d; the trace may lack a "
