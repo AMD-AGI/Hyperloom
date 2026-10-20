@@ -199,14 +199,8 @@ cognitive-complexity src/kernelforge/evaluation/benchmark/runner.py::sweep_case 
 cognitive-complexity src/kernelforge/evaluation/correctness/canonical.py::_run_canonical_suite 31
 cognitive-complexity src/kernelforge/evaluation/correctness/numerical.py::judge_evidence 42
 cognitive-complexity src/kernelforge/fusion/command.py::_run_fusion_autoloop 33
-cognitive-complexity src/kernelforge/fusion/diagnose.py::load_op_bytes_from_kineto_trace 33
-cognitive-complexity src/kernelforge/fusion/discover.py::_repair_truncated_object 39
-cognitive-complexity src/kernelforge/fusion/discover.py::existing_operator_hints_from_knowledge 34
 cognitive-complexity src/kernelforge/fusion/discover.py::ordered_fusion_boundaries_from_trace 38
-cognitive-complexity src/kernelforge/fusion/discover.py::parse_discovered_recipes 89
 cognitive-complexity src/kernelforge/fusion/discover.py::registered_agent_llm_fn 41
-cognitive-complexity src/kernelforge/fusion/locate.py::build_recipes 32
-cognitive-complexity src/kernelforge/fusion/validate.py::validate_recipe 33
 cognitive-complexity src/kernelforge/gemm_tune/cli.py::run 34
 cognitive-complexity src/kernelforge/gemm_tune/tier3/contract.py::validate_output_csv 44
 cognitive-complexity src/kernelforge/gemm_tune/tune_robustness.py::run_isolated 34
@@ -790,14 +784,11 @@ function-lines src/kernelforge/fusion/campaign.py::build_campaign_program_md 149
 function-lines src/kernelforge/fusion/campaign.py::run_recipe_campaign 96
 function-lines src/kernelforge/fusion/compile_pass_claim.py::_run_compile_pass 82
 function-lines src/kernelforge/fusion/discover.py::build_discovery_prompt 85
-function-lines src/kernelforge/fusion/discover.py::parse_discovered_recipes 199
 function-lines src/kernelforge/fusion/discover.py::registered_agent_llm_fn._fn 98
 function-lines src/kernelforge/fusion/harness_authoring.py::_author_baseline_harness 87
 function-lines src/kernelforge/fusion/harness_contract.py::harness_contract 107
-function-lines src/kernelforge/fusion/locate.py::build_recipes 101
 function-lines src/kernelforge/fusion/shadow_repo.py::ensure_git_workspace 87
 function-lines src/kernelforge/fusion/validate.py::serving_smoke_verdict 89
-function-lines src/kernelforge/fusion/validate.py::validate_recipe 158
 function-lines src/kernelforge/gemm_tune/cli.py::run 221
 function-lines src/kernelforge/gemm_tune/model_analyzer.py::analyze_model 96
 function-lines src/kernelforge/gemm_tune/report.py::build_report 96
@@ -922,8 +913,8 @@ module-lines src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py 534
 module-lines src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py 1366
 module-lines src/kernelforge/fusion/author.py 1263
 module-lines src/kernelforge/fusion/command.py 1584
-module-lines src/kernelforge/fusion/discover.py 1539
-module-lines src/kernelforge/fusion/validate.py 1517
+module-lines src/kernelforge/fusion/discover.py 1447
+module-lines src/kernelforge/fusion/validate.py 1513
 module-lines src/kernelforge/gemm_tune/tuners/_aiter_dense_common.py 1399
 module-lines src/kernelforge/loop/insession_gate.py 1218
 module-lines src/kernelforge/loop/knowledge_integration.py 1457
@@ -952,6 +943,5 @@ nested-blocks src/hyperloom/orchestrator/trace_analysis/_bypass_trace_reader.py:
 nested-blocks src/hyperloom/orchestrator/trace_analysis/_bypass_trace_reader.py::stream_events 6
 nested-blocks src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py::main 7
 nested-blocks src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py::write_reports 8
-nested-blocks src/kernelforge/fusion/discover.py::_salvage_objects 6
 nested-blocks src/kernelforge/gemm_tune/model_analyzer.py::_extract_quant_info 6
 nested-blocks src/kernelforge/rewrite_by_flydsl/kb.py::try_flydsl_kb_warmstart 7
