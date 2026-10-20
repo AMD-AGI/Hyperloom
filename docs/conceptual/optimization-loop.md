@@ -308,10 +308,12 @@ refuses, with nothing left changed:
   number, not an amd-smi index: ROCm numbers cards in KFD node order and amd-smi
   in PCI order, and on MI300X/MI355X boards the two differ, so each masked card
   is matched to amd-smi through the KFD node id `amd-smi list` reports, with
-  `HIP_VISIBLE_DEVICES` indexing into what `ROCR_VISIBLE_DEVICES` left. The
-  read-only assertion, the per-GPU budget and the power sampler use the same
-  translation. A mask that is not numeric (GPU UUIDs) or names a card that does
-  not exist is refused;
+  `HIP_VISIBLE_DEVICES` (or `CUDA_VISIBLE_DEVICES`) indexing into what
+  `ROCR_VISIBLE_DEVICES` left; `HSA_VISIBLE_DEVICES` and `GPU_DEVICE_ORDINAL`,
+  which ROCm ignores, are not read. The read-only assertion, the per-GPU budget
+  and the power sampler use the same translation. A mask that is set but empty,
+  is not numeric (GPU UUIDs), repeats a card or names one that does not exist is
+  refused;
 - on a card not in SPX compute-partition mode: a cap is per socket, so it would
   change the sibling partitions, which other sessions may use;
 - when the declared cap is not a whole number of watts, which `amd-smi set`

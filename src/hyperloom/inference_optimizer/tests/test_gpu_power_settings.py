@@ -141,7 +141,13 @@ class TestVisibleCards:
     @pytest.fixture(autouse=True)
     def _mi355x(self, monkeypatch):
         monkeypatch.setattr(gpu_power_settings, "_read_gpu_kfd_nodes", lambda: dict(_MI355X_NODES))
-        for name in ("ROCR_VISIBLE_DEVICES", "HSA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
+        for name in (
+            "ROCR_VISIBLE_DEVICES",
+            "HSA_VISIBLE_DEVICES",
+            "HIP_VISIBLE_DEVICES",
+            "CUDA_VISIBLE_DEVICES",
+            "GPU_DEVICE_ORDINAL",
+        ):
             monkeypatch.delenv(name, raising=False)
 
     @pytest.mark.parametrize(
@@ -153,8 +159,21 @@ class TestVisibleCards:
             ({"ROCR_VISIBLE_DEVICES": "4,5,6,7", "HIP_VISIBLE_DEVICES": "0"}, {7}),
             ({"ROCR_VISIBLE_DEVICES": "0,1,2,3", "HIP_VISIBLE_DEVICES": "0"}, {3}),
             ({"HIP_VISIBLE_DEVICES": "1"}, {0}),
+            ({"CUDA_VISIBLE_DEVICES": "1"}, {0}),
+            ({"HSA_VISIBLE_DEVICES": "1"}, None),
+            ({"GPU_DEVICE_ORDINAL": "1"}, None),
         ],
-        ids=["rocr-0", "rocr-0-3", "rocr-4-7", "hip-within-rocr-4-7", "hip-within-rocr-0-3", "hip-alone"],
+        ids=[
+            "rocr-0",
+            "rocr-0-3",
+            "rocr-4-7",
+            "hip-within-rocr-4-7",
+            "hip-within-rocr-0-3",
+            "hip-alone",
+            "cuda-alone",
+            "hsa-ignored-by-rocm",
+            "gpu-device-ordinal-ignored-by-rocm",
+        ],
     )
     def test_a_mask_names_the_physical_cards(self, env, cards):
         assert visible_gpu_indices(env) == cards
@@ -169,8 +188,10 @@ class TestVisibleCards:
             {"ROCR_VISIBLE_DEVICES": "GPU-745a0e162570d044"},
             {"ROCR_VISIBLE_DEVICES": "8"},
             {"ROCR_VISIBLE_DEVICES": "0,1", "HIP_VISIBLE_DEVICES": "2"},
+            {"ROCR_VISIBLE_DEVICES": "3,3,2"},
+            {"HIP_VISIBLE_DEVICES": "", "CUDA_VISIBLE_DEVICES": "4"},
         ],
-        ids=["uuid", "beyond-the-board", "hip-beyond-rocr"],
+        ids=["uuid", "beyond-the-board", "hip-beyond-rocr", "repeated-card", "set-but-empty"],
     )
     def test_a_mask_whose_cards_cannot_be_named_refuses(self, env):
         with pytest.raises(GpuPowerSettingsError):

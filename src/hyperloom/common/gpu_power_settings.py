@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
 from hyperloom.common.env import env_flag
-from hyperloom.common.visible_devices import HIP_LEVEL_VARS, ROCR_LEVEL_VARS, effective_mask_tokens
+from hyperloom.common.visible_devices import mask_tokens
 
 __all__ = [
     "GPU_POWER_SAMPLING_ENV",
@@ -83,16 +83,27 @@ def normalize_perf_level(value: Any) -> str:
     return text.lower()
 
 
+#: The masks the ROCm runtime honours, ROCr level then HIP level. HSA_VISIBLE_DEVICES and GPU_DEVICE_ORDINAL are left
+#: out: ROCm ignores them, so a card they name is not one the session's servers are limited to.
+_ROCR_MASKS = ("ROCR_VISIBLE_DEVICES",)
+_HIP_MASKS = ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")
+
+
 def _first_mask(source: Mapping[str, str], names: tuple[str, ...]) -> list[int] | None:
     """The visible-device ordinals of the first of *names* that is set; ``None`` when none is."""
     for name in names:
-        raw = str(source.get(name) or "").strip()
-        if not raw:
+        if name not in source:
             continue
-        tokens = effective_mask_tokens(raw)
+        raw = str(source.get(name) or "").strip()
+        tokens = mask_tokens(raw)
+        if not tokens:
+            raise GpuPowerSettingsError(f"{name} is set but empty, so the session sees no cards")
         if not all(token.isdigit() for token in tokens):
             raise GpuPowerSettingsError(f"{name}={raw} is not a list of device numbers, so its cards cannot be named")
-        return [int(token) for token in tokens]
+        ordinals = [int(token) for token in tokens]
+        if len(set(ordinals)) != len(ordinals):
+            raise GpuPowerSettingsError(f"{name}={raw} repeats a card, which the runtime does not expose as written")
+        return ordinals
     return None
 
 
@@ -101,16 +112,16 @@ def visible_gpu_indices(env: Mapping[str, str] | None = None) -> set[int] | None
 
     ROCm numbers GPUs in KFD node order and amd-smi in PCI order, and the two differ on MI300X/MI355X boards, so a mask
     number is never an amd-smi index. ``ROCR_VISIBLE_DEVICES`` picks from the KFD-ordered cards and
-    ``HIP_VISIBLE_DEVICES`` then indexes into what it left; each resulting card is matched to amd-smi through its KFD
-    node id.
+    ``HIP_VISIBLE_DEVICES`` (or ``CUDA_VISIBLE_DEVICES``) then indexes into what it left; each resulting card is matched
+    to amd-smi through its KFD node id.
 
     Raises:
-        GpuPowerSettingsError: a mask is not numeric, names a card that does not exist, or amd-smi cannot say which
-            KFD node each card is.
+        GpuPowerSettingsError: a mask is set but empty, not numeric, repeats a card or names one that does not exist,
+            or amd-smi cannot say which KFD node each card is.
     """
     source = os.environ if env is None else env
-    rocr = _first_mask(source, ROCR_LEVEL_VARS)
-    hip = _first_mask(source, HIP_LEVEL_VARS)
+    rocr = _first_mask(source, _ROCR_MASKS)
+    hip = _first_mask(source, _HIP_MASKS)
     if rocr is None and hip is None:
         return None
     by_node = [gpu for gpu, _ in sorted(_read_gpu_kfd_nodes().items(), key=lambda item: item[1])]

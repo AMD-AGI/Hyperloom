@@ -326,6 +326,13 @@ class TestApplyDeclared:
             apply_declared_gpu_power_settings(DeclaredPowerSettings(power_cap_w=1000.0), nodes=1, owner="s")
         assert smi.calls == [] and list(tmp_path.iterdir()) == []
 
+    def test_a_card_the_partition_reading_does_not_list_is_refused(self, tmp_path, monkeypatch):
+        smi = _install(monkeypatch, tmp_path)
+        monkeypatch.setattr(gpu_power_apply, "read_partition_modes", lambda: {4: "SPX", 5: "SPX", 7: "SPX"})
+        with pytest.raises(GpuPowerSettingsError, match=r"GPU\(s\) 6 are not in SPX"):
+            apply_declared_gpu_power_settings(DeclaredPowerSettings(power_cap_w=1000.0), nodes=1, owner="s")
+        assert smi.calls == []
+
     def test_a_fractional_cap_is_refused_before_anything_is_leased(self, tmp_path, monkeypatch):
         """amd-smi set takes whole watts; finding that out after the lease and records would be too late."""
         with pytest.raises(GpuPowerSettingsError, match="whole number of watts; 1000.5 W"):
