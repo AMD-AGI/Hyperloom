@@ -51,6 +51,9 @@ _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 #: Framework arguments travel in the server arguments; the launcher derives these variables from them.
 _FRAMEWORK_ARGS_ENV = re.compile(r"EXTRA_\w*_ARGS")
 _FLAG = "--"
+_REMOVE_ARGS = "remove_args"
+_UNSET_ENVS = "unset_envs"
+_COMPONENTS = "components"
 #: What a recipe may name as left out of it; an entry is ``<kind>`` or ``<kind>:<detail>``.
 UNEXPRESSED_KINDS = frozenset(
     {
@@ -59,8 +62,8 @@ UNEXPRESSED_KINDS = frozenset(
         "kept_artifacts",
         "active_runtime",
         "environment_closure",
-        "remove_args",
-        "unset_envs",
+        _REMOVE_ARGS,
+        _UNSET_ENVS,
         "args_mode",
     }
 )
@@ -371,7 +374,7 @@ class Recipe:
             "base_image_digest": self.base_image_digest,
             "runtime_snapshot": self.runtime_snapshot,
             "launch": self.launch.to_document(),
-            "components": [component.to_document() for component in self.components],
+            _COMPONENTS: [component.to_document() for component in self.components],
             "kernels": [artifact.to_document() for artifact in self.kernels],
         }
         if self.unexpressed:
@@ -386,7 +389,7 @@ class Recipe:
             base_image_digest=fields.get("base_image_digest"),
             runtime_snapshot=fields.get("runtime_snapshot"),
             launch=LaunchConfig.from_document(fields.get("launch", {})),
-            components=tuple(map(ComponentPatches.from_document, _items(fields.get("components", ()), "components"))),
+            components=tuple(map(ComponentPatches.from_document, _items(fields.get(_COMPONENTS, ()), _COMPONENTS))),
             kernels=tuple(map(KernelArtifact.from_document, _items(fields.get("kernels", ()), "kernels"))),
             unexpressed=_strings(fields.get("unexpressed", ()), "unexpressed"),
         )
@@ -428,14 +431,14 @@ class ConfigDelta:
         return {
             "extra_server_args": self.server_args,
             "args_mode": self.args_mode.value,
-            "remove_args": list(self.remove_args),
+            _REMOVE_ARGS: list(self.remove_args),
             "extra_envs": dict(sorted(self.envs.items())),
-            "unset_envs": list(self.unset_envs),
+            _UNSET_ENVS: list(self.unset_envs),
         }
 
     @classmethod
     def from_document(cls, document: object) -> ConfigDelta:
-        keys = ("extra_server_args", "args_mode", "remove_args", "extra_envs", "unset_envs")
+        keys = ("extra_server_args", "args_mode", _REMOVE_ARGS, "extra_envs", _UNSET_ENVS)
         fields = _known(document, keys, "a config delta")
         try:
             mode = ArgsMode(fields.get("args_mode", ArgsMode.APPEND.value))
@@ -444,9 +447,9 @@ class ConfigDelta:
         return cls(
             server_args=fields.get("extra_server_args", ""),
             args_mode=mode,
-            remove_args=_strings(fields.get("remove_args", ()), "remove_args"),
+            remove_args=_strings(fields.get(_REMOVE_ARGS, ()), _REMOVE_ARGS),
             envs=fields.get("extra_envs", {}),
-            unset_envs=_strings(fields.get("unset_envs", ()), "unset_envs"),
+            unset_envs=_strings(fields.get(_UNSET_ENVS, ()), _UNSET_ENVS),
         )
 
 
@@ -513,17 +516,17 @@ class RecipeDelta:
     def to_document(self) -> dict[str, object]:
         return {
             "config": self.config.to_document(),
-            "components": [change.to_document() for change in self.components],
+            _COMPONENTS: [change.to_document() for change in self.components],
             "add_kernels": [artifact.to_document() for artifact in self.add_kernels],
             "remove_kernels": list(self.remove_kernels),
         }
 
     @classmethod
     def from_document(cls, document: object) -> RecipeDelta:
-        fields = _known(document, ("config", "components", "add_kernels", "remove_kernels"), "a recipe delta")
+        fields = _known(document, ("config", _COMPONENTS, "add_kernels", "remove_kernels"), "a recipe delta")
         return cls(
             config=ConfigDelta.from_document(fields.get("config", {})),
-            components=tuple(map(ComponentChange.from_document, _items(fields.get("components", ()), "components"))),
+            components=tuple(map(ComponentChange.from_document, _items(fields.get(_COMPONENTS, ()), _COMPONENTS))),
             add_kernels=tuple(map(KernelArtifact.from_document, _items(fields.get("add_kernels", ()), "add_kernels"))),
             remove_kernels=_strings(fields.get("remove_kernels", ()), "remove_kernels"),
         )
