@@ -377,25 +377,24 @@ def _config_declares_text_decoder(config: dict, architectures: list[str], model_
     return False
 
 
+def _unsupported_hit(architecture: str, model_type: str, signal: str, verdict: str = _VERDICT_VISION_ONLY) -> dict:
+    """One ``_detect_unsupported_model`` hit: what matched, and whether the text path can still serve the model."""
+    return {"architecture": architecture, "model_type": model_type, "signal": signal, "verdict": verdict}
+
+
 def _detect_unsupported_model(model_path: str) -> dict | None:
     """Best-effort classify a model's text-serving viability."""
     config = _load_model_config_dict(model_path)
     if config is None:
         return None
-    architectures = _config_architectures(config)
-    # Wrapper models may nest the real arch under text_config; merge so the unsupported-arch blocklist still matches.
     nested = config.get("text_config")
-    if isinstance(nested, dict):
-        for a in _config_architectures(nested):
-            if a not in architectures:
-                architectures.append(a)
+    nested = nested if isinstance(nested, dict) else {}
+    # Wrapper models may nest the real arch under text_config; merge so the unsupported-arch blocklist still matches.
+    architectures = list(dict.fromkeys(_config_architectures(config) + _config_architectures(nested)))
+    first_arch = architectures[0] if architectures else ""
     model_type = str(config.get("model_type") or "").strip()
     model_type_l = model_type.lower()
-    nested_model_type = ""
-    nested_model_type_l = ""
-    if isinstance(nested, dict):
-        nested_model_type = str(nested.get("model_type") or "").strip()
-        nested_model_type_l = nested_model_type.lower()
+    nested_model_type = str(nested.get("model_type") or "").strip()
 
     # Registry/config incompatibilities are handled by the model-config gate so they get the precise
     # model_config_incompatible stop reason.
@@ -406,26 +405,11 @@ def _detect_unsupported_model(model_path: str) -> dict | None:
     # marker.
     for arch in architectures:
         if arch in _UNSUPPORTED_ARCHITECTURES:
-            return {
-                "architecture": arch,
-                "model_type": model_type,
-                "signal": f"unsupported architecture '{arch}'",
-                "verdict": _VERDICT_VISION_ONLY,
-            }
+            return _unsupported_hit(arch, model_type, f"unsupported architecture '{arch}'")
     if model_type_l in _UNSUPPORTED_MODEL_TYPES:
-        return {
-            "architecture": architectures[0] if architectures else "",
-            "model_type": model_type,
-            "signal": f"unsupported model_type '{model_type}'",
-            "verdict": _VERDICT_VISION_ONLY,
-        }
-    if nested_model_type_l in _UNSUPPORTED_MODEL_TYPES:
-        return {
-            "architecture": architectures[0] if architectures else "",
-            "model_type": model_type,
-            "signal": f"unsupported text_config.model_type '{nested_model_type}'",
-            "verdict": _VERDICT_VISION_ONLY,
-        }
+        return _unsupported_hit(first_arch, model_type, f"unsupported model_type '{model_type}'")
+    if nested_model_type.lower() in _UNSUPPORTED_MODEL_TYPES:
+        return _unsupported_hit(first_arch, model_type, f"unsupported text_config.model_type '{nested_model_type}'")
 
     # A multimodal config key is only a degrade signal, not a hard block: if a text decoder exists we coerce to the
     # text path with a warning.
@@ -433,12 +417,7 @@ def _detect_unsupported_model(model_path: str) -> dict | None:
     for key in _UNSUPPORTED_CONFIG_KEYS:
         if key in config:
             verdict = _VERDICT_TEXT_COERCIBLE if _has_text_decoder else _VERDICT_VISION_ONLY
-            return {
-                "architecture": architectures[0] if architectures else "",
-                "model_type": model_type,
-                "signal": f"multimodal config key '{key}'",
-                "verdict": verdict,
-            }
+            return _unsupported_hit(first_arch, model_type, f"multimodal config key '{key}'", verdict)
 
     if any(_arch_is_supported_text_generation(a) for a in architectures):
         return None
@@ -447,31 +426,17 @@ def _detect_unsupported_model(model_path: str) -> dict | None:
         return None
 
     if architectures:
-        return {
-            "architecture": architectures[0],
-            "model_type": model_type,
-            "signal": (
-                f"architecture '{architectures[0]}' does not match any "
-                f"supported text-generation pattern "
-                f"({', '.join(_SUPPORTED_ARCH_MARKERS)})"
-            ),
-            "verdict": _VERDICT_VISION_ONLY,
-        }
-
+        return _unsupported_hit(
+            first_arch,
+            model_type,
+            f"architecture '{first_arch}' does not match any supported text-generation pattern "
+            f"({', '.join(_SUPPORTED_ARCH_MARKERS)})",
+        )
     if model_type:
-        return {
-            "architecture": "",
-            "model_type": model_type,
-            "signal": (f"model_type '{model_type}' is not in the supported text-generation allowlist"),
-            "verdict": _VERDICT_VISION_ONLY,
-        }
-
-    return {
-        "architecture": "",
-        "model_type": "",
-        "signal": "config.json has neither architectures nor model_type",
-        "verdict": _VERDICT_VISION_ONLY,
-    }
+        return _unsupported_hit(
+            "", model_type, f"model_type '{model_type}' is not in the supported text-generation allowlist"
+        )
+    return _unsupported_hit("", "", "config.json has neither architectures nor model_type")
 
 
 def _detect_amd_unsupported_quant(model_path: str) -> str | None:
