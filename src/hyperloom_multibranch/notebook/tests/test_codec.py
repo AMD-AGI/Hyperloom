@@ -9,7 +9,7 @@ import pytest
 
 from hyperloom.contracts.recipe import ComponentChange, ConfigDelta, PatchRef, RecipeDelta
 from hyperloom_multibranch.contracts.notebook import peers, records
-from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, Conclusion, LineageKind
+from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, Conclusion, LineageKind, MergeOutcome
 from hyperloom_multibranch.notebook import codec
 
 
@@ -70,6 +70,13 @@ def test_a_field_an_older_row_lacks_takes_its_default() -> None:
     del stored["reason"]
 
     assert codec.decode(records.LineageEvent, stored) == records.LineageEvent(LineageKind.OPEN, "s1", from_commit="c0")
+
+
+def test_a_skipped_merge_written_before_its_outcome_was_recorded_reads_as_a_conflict() -> None:
+    stored = codec.encode(records.MergeAttempt(("c1",), "c0", skipped_reason="patch conflict"))
+    del stored["skipped_outcome"]
+
+    assert codec.decode(records.MergeAttempt, stored).skipped_outcome is MergeOutcome.CONFLICT_SKIPPED
 
 
 def test_claims_and_lineage_views_round_trip() -> None:

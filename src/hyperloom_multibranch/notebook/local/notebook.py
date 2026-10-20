@@ -98,6 +98,7 @@ from hyperloom_multibranch.contracts.notebook.vocab import (
     Conclusion,
     DedupStatus,
     LineageKind,
+    MergeOutcome,
     Role,
     UsageSource,
 )
@@ -126,6 +127,8 @@ _LINEAGE_FIELDS: dict[LineageKind, tuple[str, ...]] = {
     LineageKind.STOP: (),
 }
 _RECIPE_DIGEST = re.compile(re.escape(DIGEST_PREFIX) + "[0-9a-f]{64}")
+#: What a merge attempt without a test may say of itself.
+_SKIPPED_OUTCOMES = (MergeOutcome.CONFLICT_SKIPPED, MergeOutcome.ALREADY_ON_HEAD)
 LEARNING_MIN_CHARS = 20
 LEARNING_MAX_CHARS = 600
 #: Learnings too generic for a later decision to use.
@@ -462,6 +465,9 @@ class LocalNotebook(
                 raise ValueError(f"a merge is tested on the {INTEGRATION_BRANCH} branch; {attempt.request_id} is not")
         elif not attempt.skipped_reason:
             raise ValueError("a merge attempt without a test says why it was skipped")
+        if attempt.skipped_outcome not in _SKIPPED_OUTCOMES:
+            names = " or ".join(outcome.value for outcome in _SKIPPED_OUTCOMES)
+            raise ValueError(f"a merge is skipped as {names}, not {attempt.skipped_outcome.value}")
         tested = f"tested by {attempt.request_id}" if attempt.request_id else f"skipped: {attempt.skipped_reason}"
         summary = f"merge {', '.join(attempt.source_commits)} onto {attempt.integration_head}, {tested}"
         self._append(

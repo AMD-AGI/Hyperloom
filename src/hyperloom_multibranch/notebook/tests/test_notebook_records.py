@@ -626,6 +626,23 @@ async def test_merges_that_did_not_land_say_why_in_the_commit_query(open_as: Ope
         await integrator.record_merge_attempt(MergeAttempt(("c2",), "c0", request_id="r2"))
 
 
+async def test_a_merge_skipped_because_its_change_is_already_on_the_head_is_no_conflict(open_as: Open) -> None:
+    await open_as(Role.SCHEDULER).record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0"))
+    await _tested(open_as, "r1")
+    await open_as(Role.GATE).write_judgement("r1", judgement(3.0, ("r1",)), Conclusion.COMMITTED, "c1")
+    integrator = open_as(Role.INTEGRATOR)
+    skipped = MergeAttempt(
+        ("c1",), "c0", skipped_reason="its change is already on the head", skipped_outcome=MergeOutcome.ALREADY_ON_HEAD
+    )
+    await integrator.record_merge_attempt(skipped)
+
+    (c1,) = await integrator.committed()
+
+    assert (c1.last_merge.outcome, c1.merged_into) == (MergeOutcome.ALREADY_ON_HEAD, None)
+    with pytest.raises(ValueError, match="skipped as"):
+        await integrator.record_merge_attempt(replace(skipped, skipped_outcome=MergeOutcome.MERGED))
+
+
 async def test_a_pending_merge_shows_as_pending(open_as: Open) -> None:
     await open_as(Role.SCHEDULER).record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0"))
     await _tested(open_as, "r1")

@@ -147,7 +147,7 @@ def merge_state(state: NotebookState, attempt: MergeAttempt) -> MergeState:
     """Where a merge attempt stands, from the judgement of its merge test."""
 
     if attempt.request_id is None:
-        return MergeState(MergeOutcome.CONFLICT_SKIPPED, attempt.integration_head)
+        return MergeState(attempt.skipped_outcome, attempt.integration_head)
     write = state.latest_judgement(attempt.request_id)
     if write is None:
         return MergeState(MergeOutcome.PENDING, attempt.integration_head, attempt.request_id)

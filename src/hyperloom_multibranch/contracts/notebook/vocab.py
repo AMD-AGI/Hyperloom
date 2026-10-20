@@ -98,11 +98,13 @@ class CommitOrigin(str, Enum):
 
 
 class MergeOutcome(str, Enum):
-    """Where a merge attempt stands: tested and merged or not, untested because it conflicted, or still testing."""
+    """Where a merge attempt stands: tested and merged or not, untested because it conflicted or because its change is
+    already on the integration head, or still testing."""
 
     MERGED = "merged"
     NOT_STACKABLE = "not_stackable"
     CONFLICT_SKIPPED = "conflict_skipped"
+    ALREADY_ON_HEAD = "already_on_head"
     PENDING = "pending"
 
 

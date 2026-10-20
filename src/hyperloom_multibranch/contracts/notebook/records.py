@@ -162,12 +162,14 @@ class DedupAnswer:
 
 @dataclass(frozen=True)
 class MergeAttempt:
-    """The integrator merging source commits onto the integration head; without a test it was skipped untested."""
+    """The integrator merging source commits onto the integration head; without a test it was skipped untested, as
+    ``skipped_outcome`` says: it conflicted, or its change is already on the head."""
 
     source_commits: tuple[str, ...]
     integration_head: str
     request_id: str | None = None
     skipped_reason: str = ""
+    skipped_outcome: MergeOutcome = MergeOutcome.CONFLICT_SKIPPED
 
 
 @dataclass(frozen=True)
