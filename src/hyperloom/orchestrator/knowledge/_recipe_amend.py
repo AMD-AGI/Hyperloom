@@ -71,11 +71,7 @@ def rows_not_superseded(live_rows: Any, superseding: Any, key: str) -> list[dict
 
 
 def improved_best_config(state: Any, attrs: Mapping[str, Any], live: Mapping[str, Any]) -> dict[str, Any]:
-    """The ``best_config`` override, empty unless this session genuinely beat the live row.
-
-    A session that validated nothing has no standing to overwrite a
-    configuration somebody else measured.
-    """
+    """The ``best_config`` override, empty unless this session genuinely beat the live row."""
     my_throughput = float(attrs.get("best_throughput") or 0.0)
     validated_gain = float(state.cumulative_gain_validated or 0.0)
     current_args = str(state.current_best.get("extra_server_args") or "").strip()
@@ -125,8 +121,8 @@ def amended_recipe_fields(live: Mapping[str, Any], overrides: Mapping[str, Any])
 def amended_recipe_extras(live: Mapping[str, Any], overrides: Mapping[str, Any], state: Any) -> dict[str, Any]:
     """The free-form extras an amend writes back: the prior ones, the caller's, then the model's identity.
 
-    The architecture tags are re-stamped from config.json each time because a
-    row written before the architecture was read carries none.
+    The architecture tags are re-stamped from config.json each time because a row
+    written before the architecture was read carries none.
     """
     extras = {key: value for key, value in live.items() if key not in _RECIPE_OWNED_KEYS}
     extras.update(overrides.get("extras") or {})

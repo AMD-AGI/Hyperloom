@@ -90,8 +90,8 @@ def _model_identity_tags(state: Any) -> dict[str, Any]:
 def _runtime_version_tags(fingerprint_meta: Mapping[str, Any], framework: str) -> dict[str, str]:
     """Runtime versions read off the stack fingerprint the CLI wrote at boot.
 
-    ``framework_version`` names whichever serving framework is active, so a
-    recipe written under one is never matched against the other.
+    ``framework_version`` names whichever serving framework is active, so a recipe
+    written under one is never matched against the other.
     """
     tags: dict[str, str] = {}
     framework_key = framework.lower()
@@ -125,11 +125,7 @@ def _baseline_workload_tags(workload_extra: Mapping[str, Any]) -> dict[str, Any]
 
 
 def workload_kb_tags(state: Any) -> dict[str, Any]:
-    """The workload-shape tags describing the session this recipe came from.
-
-    Shared by the recipe attrs and by every lesson or pitfall write, so the
-    warm-start reader filters on the dimensions the row was written with.
-    """
+    """The workload-shape tags describing the session this recipe came from."""
     tags = _model_identity_tags(state)
     tags.update(workload_shape_tags(state))
     fingerprint_meta = state.stack_fingerprint_meta or {}
@@ -166,11 +162,7 @@ def _last_rebenched_throughput(integration: Mapping[str, Any]) -> float:
 
 
 def _kernel_optimization_row(entry: Mapping[str, Any], ledger_id: str, index: _IntegrateIndex) -> dict[str, Any]:
-    """One KernelOptimization row: a micro KEEP joined to its end-to-end verdict.
-
-    Carrying that verdict lets a warm start skip a kernel that won on the micro
-    bench and lost end to end.
-    """
+    """One KernelOptimization row: a micro KEEP joined to its end-to-end verdict."""
     kernel_id = str(entry.get("current_kernel_id") or entry.get("kernel_id") or ledger_id)
     task_group_key = str(entry.get("task_group_key") or "")
     integration = index.by_task_group.get(task_group_key) if task_group_key else index.by_kernel.get(kernel_id)
@@ -190,12 +182,7 @@ def _kernel_optimization_row(entry: Mapping[str, Any], ledger_id: str, index: _I
 
 
 def kept_kernel_optimizations(state: Any) -> list[dict[str, Any]]:
-    """The KEEP'd kernel optimizations, each joined to its end-to-end integrate verdict.
-
-    A KEEP that never reached integration surfaces with ``integrated`` false
-    rather than being dropped, because not having been tried end to end is not
-    the same as having lost there.
-    """
+    """The KEEP'd kernel optimizations, each joined to its end-to-end integrate verdict."""
     optimizations = state.kernel_opt_task_attempts or {}
     if not isinstance(optimizations, dict):
         return []
@@ -248,11 +235,7 @@ def _gap_attempt_provenance(gap: Mapping[str, Any]) -> AttemptProvenance:
 
 
 def attempt_provenance(state: Any) -> AttemptProvenance:
-    """Trace each proven optimization back to the research hint it came from.
-
-    The first gap to claim a name keeps it, so a name two gaps both attempted
-    reads as belonging to the one that reached it first.
-    """
+    """Trace each proven optimization back to the research hint it came from."""
     kept_by_name: dict[str, str] = {}
     kept_by_gap: dict[str, str] = {}
     reverted: list[dict[str, Any]] = []
@@ -300,8 +283,8 @@ def _best_config(current_best: Mapping[str, Any], optimization_stack: Sequence[A
 def _stack_entry_source(entry: Mapping[str, Any], name: str, provenance: AttemptProvenance) -> str:
     """The research hint a stack layer came from, empty when nothing claims it.
 
-    The layer's gap id is naming-independent and wins; the variant or kernel
-    name answers for layers recorded before gap ids were stamped.
+    The layer's gap id wins; the variant or kernel name answers for layers
+    recorded before gap ids were stamped.
     """
     gap_id = str(entry.get("gap_canonical_id") or "").strip()
     if gap_id:
@@ -369,11 +352,7 @@ def _session_row(
     optimization_stack: Collection[Any],
     final_throughput: float,
 ) -> dict[str, Any]:
-    """This session's row on the recipe: where it started, where it reached and by which actions.
-
-    Self-describing in the arbor shape, so a reader needs neither the recipe's
-    other sessions nor this one's journal to price what it contributed.
-    """
+    """This session's row on the recipe: where it started, where it reached and by which actions."""
     validated_stack_len = int(state.cumulative_gain_validated_stack_len or 0)
     return {
         "session_id": str(state.recipe_kb_session_id or session_name),
@@ -389,8 +368,8 @@ def _session_row(
 def recipe_attrs_from_state(state: Any, session_name: str) -> dict[str, Any]:
     """Materialise the recipe-shaped view of one session's settled state.
 
-    ``framework_version`` is left unset here because it is manifest-derived;
-    the T0 backfill writes it.
+    ``framework_version`` is left unset here because it is manifest-derived; the
+    T0 backfill writes it.
     """
     optimization_stack = state.optimization_stack or []
     # A session that does not sediment its attempts reports no provenance.

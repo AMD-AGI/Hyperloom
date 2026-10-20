@@ -45,16 +45,7 @@ class _ConfigAttemptContext(NamedTuple):
 
 
 def record_config_run(coord: Any, *, task: Any, result_dict: Mapping[str, Any]) -> None:
-    """Record the configuration arm's grid dispatch on the framework event.
-
-    The arm's dispatch is one ``explore`` task, and it earns a run row for the
-    same reason a specialist dispatch does: the event reduces its status over
-    what it dispatched, so an arm whose grid came back with nothing must not
-    read as an arm that was never tried. Recorded at completion, where the
-    outcome is known, with the dispatch time taken off the task row; a grid
-    that measured nothing still lands, which is the case
-    :func:`record_config_attempts` never sees.
-    """
+    """Record the configuration arm's grid dispatch on the framework event."""
     recorder = coord._coord.phase_framework.timeline()
     if recorder is None:
         return
@@ -81,8 +72,7 @@ def record_config_run(coord: Any, *, task: Any, result_dict: Mapping[str, Any]) 
 def _attempt_accuracy(gates: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     """The accuracy block, projected from the gate that ruled.
 
-    This arm gates accuracy rather than reporting it. No gate row means nothing
-    gated the variant, which is not a gate that refused it.
+    No gate row means nothing gated the variant, which is not a gate that refused it.
     """
     ruling = next((gate for gate in gates if str(gate.get("gate") or "") == _ACCURACY_GATE), {})
     return {

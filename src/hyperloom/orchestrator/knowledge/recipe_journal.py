@@ -248,11 +248,7 @@ def _grid_attempt_row(
 
 
 def _variant_verdict(outcome: str, adopted: bool) -> Verdict:
-    """How one explore variant's own outcome settles against the adoption rule.
-
-    An executor KEEP the adoption rule did not lift is a refusal, not a revert:
-    nothing about it failed to measure.
-    """
+    """How one explore variant's own outcome settles against the adoption rule."""
     if outcome == OUTCOME_KEEP:
         return Verdict.ADOPTED if adopted else Verdict.REFUSED
     if outcome in _MEASURED_LOSS_OUTCOMES:
@@ -291,11 +287,7 @@ def _variant_pitfall_signals(variant_outcome: Mapping[str, Any], metrics: Any) -
 
 
 def _variant_change_attrs(variant_attrs: Any, variant_name: str) -> dict[str, Any]:
-    """One variant's attributes as the change summary needs them.
-
-    A variant that names no knob falls back to its own name, else every variant
-    in the grid would summarise to an identical row.
-    """
+    """One variant's attributes as the change summary needs them."""
     attrs = dict(variant_attrs) if isinstance(variant_attrs, dict) else {}
     named_knob = attrs.get("extra_server_args") or attrs.get("extra_envs") or attrs.get("name")
     if not named_knob and variant_name:
@@ -985,9 +977,8 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         """The skip outcome when the working recipe outran its last validation, else ``None``.
 
         ``current_best`` and ``cumulative_gain_validated`` are only one Recipe's
-        figures when nothing was lifted since the last validation. Otherwise
-        every sink below -- journal, local KB, remote KB -- would pair the
-        newer config with the older gain, so none of them runs.
+        figures when nothing was lifted since the last validation; otherwise every
+        sink below would pair the newer config with the older gain.
         """
         state = self.shared_state
         if not state.optimization_stack_has_unvalidated_keeps():
@@ -1065,8 +1056,8 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
     def _publish_remote_recipe(self, source: str) -> dict[str, Any]:
         """Publish the terminal Recipe to the KB Store and audit the attempt.
 
-        Remote mode has one Recipe sink: the KB Store final session writer. T0
-        and runtime amendment are intentionally absent.
+        Remote mode has one Recipe sink: the KB Store final session writer. T0 and
+        runtime amendment are intentionally absent.
         """
         state = self.shared_state
         session_id = str(state.recipe_kb_session_id or state.session_id or self.session_dir.name)
@@ -1129,8 +1120,8 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
     def _final_recipe_overrides(self) -> dict[str, Any]:
         """What this session's close writes over the live Recipe row.
 
-        Read-modify-write under the cid flock, so two finalises of the same
-        session leave one row rather than tearing the lists they both append to.
+        Read-modify-write under the cid flock, so two finalises of the same session
+        leave one row rather than tearing the lists they both append to.
         """
         state = self.shared_state
         attrs = recipe_attrs_from_state(state, self.session_dir.name)
@@ -1299,11 +1290,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         return {}
 
     def _amends_local_recipe(self) -> bool:
-        """Whether this session's Recipe row is a local one an amend may rewrite.
-
-        Remote mode has a single Recipe sink at close, and AgentX sessions do
-        not write recipes at all.
-        """
+        """Whether this session's Recipe row is a local one an amend may rewrite."""
         config = getattr(self.knowledge_plane, "config", None)
         mode = getattr(getattr(config, "mode", None), "value", None)
         if mode == KnowledgeStoreMode.REMOTE.value or self.recipe_kb is None:
