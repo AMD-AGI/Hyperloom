@@ -16,6 +16,12 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from hyperloom.common.gpu_identity import (
+    AMD_GPU_DISPATCH_IDENTITIES,
+    gfx_arch_for_gpu_type,
+    gpu_type_for_device_id,
+    normalise_device_id,
+)
 from hyperloom.common.rocm_smi import gpu_vram_usage, vram_busy
 
 __all__ = ["GpuFacts", "EccCounts", "busy_gpus", "check_hardware", "ecc_counts", "read_gpu_facts"]
@@ -27,10 +33,18 @@ Runner = Callable[[Sequence[str]], str | None]
 
 @dataclass(frozen=True)
 class GpuFacts:
+    """What one GPU says about itself.
+
+    ``model`` is the market name amd-smi prints; it is kept for the record and is not what identifies the card (a node's
+    VBIOS may call an MI355X "AMD Instinct MI355 OAM"). ``device_id`` and ``gfx_arch`` identify it.
+    """
+
     index: int
     model: str | None
     power_cap_w: float | None
     partition_mode: str | None
+    device_id: str | None = None
+    gfx_arch: str | None = None
 
 
 @dataclass(frozen=True)
@@ -83,8 +97,17 @@ def read_gpu_facts(visible: Sequence[int], run: Runner = run_amd_smi) -> list[Gp
             continue
         partition = partitions.get(index) or {}
         mode = "/".join(str(partition[k]) for k in ("accelerator_partition", "memory_partition") if partition.get(k))
+        asic = item.get("asic") if isinstance(item.get("asic"), dict) else {}
+        arch = asic.get("target_graphics_version")
         facts.append(
-            GpuFacts(index, (item.get("asic") or {}).get("market_name"), _watts(item.get("limit")), mode or None)
+            GpuFacts(
+                index,
+                asic.get("market_name"),
+                _watts(item.get("limit")),
+                mode or None,
+                normalise_device_id(asic.get("device_id")),
+                arch.strip().lower() if isinstance(arch, str) and arch.strip() else None,
+            )
         )
     return facts
 
@@ -109,6 +132,23 @@ def busy_gpus() -> list[int] | None:
     return None if usage is None else [index for index, gpu in enumerate(usage) if vram_busy(gpu)]
 
 
+def _wrong_card(gpu: GpuFacts, gpu_type: str) -> bool:
+    """Whether ``gpu`` is a different card from the requested type, judged by what the silicon says before its name.
+
+    The device id names the board when it belongs to one; failing that, a different architecture is a different card;
+    only when neither can say is the market name compared, as a substring.
+    """
+    wanted = gpu_type.replace(" ", "").lower()
+    if wanted in AMD_GPU_DISPATCH_IDENTITIES:
+        board = gpu_type_for_device_id(gpu.device_id)
+        if board is not None:
+            return board != wanted
+        arch = gfx_arch_for_gpu_type(wanted)
+        if gpu.gfx_arch is not None and arch is not None and gpu.gfx_arch != arch:
+            return True
+    return gpu.model is not None and wanted not in gpu.model.replace(" ", "").lower()
+
+
 def check_hardware(
     facts: Sequence[GpuFacts], *, gpu_type: str, gpu_count: int, power_cap_w: float | None, partition_mode: str | None
 ) -> list[str]:
@@ -116,10 +156,10 @@ def check_hardware(
     problems = []
     if len(facts) < gpu_count:
         problems.append(f"{len(facts)} GPUs visible, {gpu_count} needed")
-    wanted = gpu_type.replace(" ", "").lower()
     for gpu in facts:
-        if gpu.model is not None and wanted not in gpu.model.replace(" ", "").lower():
-            problems.append(f"GPU {gpu.index} is {gpu.model}, not {gpu_type}")
+        if _wrong_card(gpu, gpu_type):
+            seen = ", ".join(x for x in (gpu.device_id and f"device id {gpu.device_id}", gpu.gfx_arch) if x)
+            problems.append(f"GPU {gpu.index} is {gpu.model}{f' ({seen})' if seen else ''}, not {gpu_type}")
         if power_cap_w is not None and gpu.power_cap_w is not None and gpu.power_cap_w != power_cap_w:
             problems.append(f"GPU {gpu.index} power cap {gpu.power_cap_w} W, not {power_cap_w} W")
         if partition_mode is not None and gpu.partition_mode is not None and gpu.partition_mode != partition_mode:

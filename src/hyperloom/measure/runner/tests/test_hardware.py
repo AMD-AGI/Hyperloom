@@ -75,3 +75,71 @@ def test_a_value_the_machine_did_not_give_is_not_compared():
     facts = [GpuFacts(0, None, None, None)]
 
     assert check_hardware(facts, gpu_type="mi355x", gpu_count=1, power_cap_w=1400, partition_mode="SPX/NPS1") == []
+
+
+def _card(model, device_id, arch):
+    return GpuFacts(0, model, 1400.0, "SPX/NPS1", device_id, arch)
+
+
+def _wrong_card(facts, gpu_type):
+    return check_hardware([facts], gpu_type=gpu_type, gpu_count=1, power_cap_w=None, partition_mode=None)
+
+
+def test_the_device_id_and_arch_are_read_next_to_the_market_name():
+    static = json.dumps(
+        {
+            "gpu_data": [
+                {
+                    "gpu": 0,
+                    "asic": {
+                        "market_name": "AMD Instinct MI355 OAM",
+                        "device_id": "0x75A3",
+                        "target_graphics_version": "gfx950",
+                    },
+                }
+            ]
+        }
+    )
+
+    facts = read_gpu_facts([0], _runner({"static --json": static}))
+
+    assert facts == [GpuFacts(0, "AMD Instinct MI355 OAM", None, None, "75a3", "gfx950")]
+
+
+def test_a_node_whose_market_name_is_mi355_oam_is_still_an_mi355x():
+    """autopilot-crsuse2-m2m-188 reports 'AMD Instinct MI355 OAM' for device 0x75a3; the old name match refused every test."""
+    oam = _card("AMD Instinct MI355 OAM", "75a3", "gfx950")
+
+    for requested in ("mi355x", "MI355X", "MI355X "):
+        assert _wrong_card(oam, requested) == []
+    assert _wrong_card(_card("AMD Instinct MI355X", "75a3", "gfx950"), "MI355X") == []
+
+
+def test_a_different_card_is_refused_whatever_its_name_says():
+    mi300x = _card("AMD Instinct MI300X", "74a1", "gfx942")
+
+    problems = _wrong_card(mi300x, "MI355X")
+
+    assert problems == ["GPU 0 is AMD Instinct MI300X (device id 74a1, gfx942), not MI355X"]
+    # the device id decides, so a name that happens to contain the requested type does not rescue a different board
+    assert _wrong_card(_card("AMD Instinct MI355X", "74a1", "gfx942"), "MI355X")
+    # and the reverse request is refused too
+    assert _wrong_card(_card("AMD Instinct MI355 OAM", "75a3", "gfx950"), "MI300X")
+    assert _wrong_card(_card("AMD Instinct MI325X", "74a5", "gfx942"), "MI300X")
+
+
+def test_an_unlisted_device_id_is_judged_by_architecture_and_then_by_name():
+    assert _wrong_card(_card("AMD Instinct MI355X", "ffff", "gfx942"), "MI355X")  # another architecture
+    assert _wrong_card(_card("AMD Instinct MI355X", "ffff", "gfx950"), "MI355X") == []
+    assert _wrong_card(
+        _card("AMD Instinct MI300X", "ffff", "gfx950"), "MI355X"
+    )  # same arch, a name that says otherwise
+    # 0x74a2 is an MI308X and, at revision A1, an MI300X: it names no board, so the name decides
+    assert _wrong_card(_card("AMD Instinct MI300X", "74a2", "gfx942"), "MI300X") == []
+    assert _wrong_card(_card("AMD Instinct MI308X", "74a2", "gfx942"), "MI308X") == []
+    assert _wrong_card(_card("AMD Instinct MI308X", "74a2", "gfx942"), "MI300X")
+
+
+def test_a_type_without_a_device_id_table_is_compared_by_name_as_before():
+    assert _wrong_card(_card("AMD Instinct MI400X", "75a3", "gfx950"), "mi400x") == []
+    assert _wrong_card(_card("AMD Instinct MI355X", "75a3", "gfx950"), "mi400x")
