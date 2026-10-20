@@ -25,6 +25,7 @@ note neither, and the key is left out: their warmup replayed the measured prompt
 from __future__ import annotations
 
 import hashlib
+import logging
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -34,6 +35,7 @@ from hyperloom.common.perf_metric import GRADED_TOTAL
 from hyperloom.contracts.recipe import Recipe, RecipeError
 from hyperloom.inference_optimizer.recipe_snapshot_constants import recipe_canonical_id
 from hyperloom.measure.compile import BlobStore
+from hyperloom.orchestrator.knowledge.remote_recipe import KBStoreError
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient
 from hyperloom.orchestrator.knowledge.remote_recipe.models import (
     Artifact,
@@ -51,6 +53,8 @@ from hyperloom.orchestrator.knowledge.remote_recipe.values import (
 from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot, SessionProfile
 from hyperloom_multibranch.notebook.knowledge.lessons import session_lessons
 from hyperloom_multibranch.notebook.knowledge.recipe_kb import overlay_ref, to_recipe_kb_value
+
+log = logging.getLogger(__name__)
 
 KB_METRIC = "optimized_throughput"
 GAIN_METRIC = "validated_e2e_gain"
@@ -203,7 +207,10 @@ def _checked_out(source: Path) -> bytes:
 def publish_final_recipe(
     client: RemoteRecipeClient, snapshot: NotebookSnapshot, final: FinalRecipe
 ) -> RemoteWriteResult:
-    """Write ``final`` when it beats the champion of its partition; the result says what was written or why not."""
+    """Write ``final`` when it beats the champion of its partition; the result says what was written or why not.
+
+    A refusal by the KB Store, such as a read-only token's ``write_forbidden``, is logged as an error and raised.
+    """
 
     profile = snapshot.profile
     if profile is None:
@@ -225,7 +232,11 @@ def publish_final_recipe(
         bundle = KnowledgeBundle(knowledge, stage_files(final.recipe, final.files_root, staging, final.blobs))
         value = float(knowledge[metric])
         selection = KBSelectionProfile(scope, metric, value, objective, {metric: value})
-        return client.write_if_better(canonical_id, profile.session_id, bundle, selection, files_dir=staging)
+        try:
+            return client.write_if_better(canonical_id, profile.session_id, bundle, selection, files_dir=staging)
+        except KBStoreError as exc:
+            log.error("the Recipe KB refused the final recipe of %s on %s: %s", profile.session_id, canonical_id, exc)
+            raise
 
 
 __all__ = [

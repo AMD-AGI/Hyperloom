@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import logging
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -24,6 +26,7 @@ from hyperloom.contracts.recipe import (
     with_unexpressed,
 )
 from hyperloom.measure.compile import LocalBlobStore
+from hyperloom.orchestrator.knowledge.remote_recipe import KBStoreError
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient
 from hyperloom.orchestrator.knowledge.remote_recipe.values import knowledge_to_warm_recipe
 from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot
@@ -114,6 +117,24 @@ def test_a_session_short_of_the_champion_writes_nothing(snapshot: NotebookSnapsh
 
     assert (outcome.status, outcome.reason) == ("skipped", "not_better_than_champion")
     assert (store.uploads, store.knowledge, store.promoted) == ({}, None, None)
+
+
+class _ReadOnlyStore(FakeRecipeStore):
+    def put_dir(self, canonical_id: str, session_id: str, *_: Any, **__: Any) -> dict[str, str]:
+        raise KBStoreError(f"POST /v1/kb/{canonical_id}/sessions/{session_id}/files:grant -> HTTP 403: write_forbidden")
+
+
+def test_a_write_the_kb_store_refuses_is_logged_as_an_error_and_raised(
+    snapshot: NotebookSnapshot, final: FinalRecipe, caplog: pytest.LogCaptureFixture
+) -> None:
+    store = _ReadOnlyStore(champion=_champion(1000.0))
+
+    with caplog.at_level(logging.ERROR), pytest.raises(KBStoreError, match="write_forbidden"):
+        publish_final_recipe(RemoteRecipeClient(store), snapshot, final)
+
+    (logged,) = [record.getMessage() for record in caplog.records if record.levelno == logging.ERROR]
+    assert logged.startswith("the Recipe KB refused the final recipe of sess-1 on inference:") and "403" in logged
+    assert (store.knowledge, store.promoted) == (None, None)
 
 
 def test_a_file_that_differs_from_its_pinned_hash_stops_the_write(
