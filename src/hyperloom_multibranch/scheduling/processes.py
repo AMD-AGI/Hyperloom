@@ -42,8 +42,11 @@ UNREGISTERED_BRANCH = ""
 def adopting_orphans() -> Iterator[None]:
     """Make this process the child subreaper of everything it starts, for the duration (Linux).
 
-    An orphaned descendant is reparented to this process rather than to init. Nothing reaps it here: once killed it
-    stays a zombie until this process exits.
+    An orphaned descendant is reparented to this process rather than to init. Nothing reaps it here: every adopted
+    orphan, killed or exited on its own, stays a zombie until this process exits. A zombie holds only its pid, and
+    ``running`` skips it, so the kills and the leftovers are unaffected. Reaping them is not safe: an in-process
+    caller, such as the AI work socket, starts a child in a session of its own and registers it only after the launch,
+    and until then nothing tells that child from an orphan, so a reap would take the exit status its ``poll`` needs.
     """
 
     _set_child_subreaper(1)
