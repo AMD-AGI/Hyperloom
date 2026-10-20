@@ -23,6 +23,7 @@ from hyperloom.orchestrator.tests._helpers import (
 from hyperloom.orchestrator.actions.executors import _setup_replay as sr_mod
 from hyperloom.orchestrator.actions.executors._accuracy_gate import framework_run_eval_envs
 from hyperloom.orchestrator.actions.executors.integrate_patch import (
+    RESULT_BENCHED,
     IntegratePatchExecutor,
     _PatchBench,
     _apply_patch_no_git,
@@ -1329,6 +1330,17 @@ async def test_a_value_error_inside_the_keep_capture_is_not_read_as_an_unreadabl
 
     with pytest.raises(ValueError, match="a defect in the capture"):
         await _run_enablement_integrate(tmp_path, monkeypatch, booted=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("booted", "status"), [(True, "kept"), (False, "reverted")])
+async def test_a_result_the_gate_returned_says_it_reached_the_bench(
+    tmp_path: Path, monkeypatch, booted: bool, status: str
+):
+    """Whatever the verdict, a result the bench-and-gate stage returned reached the bench."""
+    result, _repo = await _run_enablement_integrate(tmp_path, monkeypatch, booted=booted)
+
+    assert (result["status"], result[RESULT_BENCHED]) == (status, True)
 
 
 @pytest.mark.asyncio

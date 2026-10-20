@@ -1635,9 +1635,6 @@ class FrameworkPhase(ProposalBench):
             # Source patches require the accuracy gate for KEEP.
             "require_accuracy_for_keep": True,
             "accuracy_baseline": float(state.baseline_accuracy or 0.0),
-            # The lane templates from the shipped default config, which materializes RUN_EVAL=true and would override
-            # the session's choice.
-            "disable_run_eval": bool(state.eval_disabled),
         }
         idem = f"framework:{candidate.get('batch_id', '')}:{cand_id}"
         lanes, ttl = self._coord.dispatcher.registry_lanes_ttl("integrate_patch")

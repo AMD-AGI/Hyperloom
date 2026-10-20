@@ -23,6 +23,11 @@ def as_text(*values: Any) -> str:
     return ""
 
 
+def as_flag(value: Any) -> bool:
+    """``value`` as a plain yes/no; a field the payload left out or wrote as null reads as no."""
+    return bool(value)
+
+
 def as_mapping(value: Any) -> dict[str, Any]:
     """``value`` as a mapping of its own; empty when it is absent or carries another type."""
     return dict(value) if isinstance(value, Mapping) else {}

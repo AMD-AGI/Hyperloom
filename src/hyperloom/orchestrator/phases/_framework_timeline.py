@@ -17,7 +17,8 @@ from typing import Any, NamedTuple
 
 from hyperloom.common.env_safety import redact_secret_values
 
-from ._payload import as_entries, as_mapping, as_text, params_of, task_id_of
+from ._payload import as_entries, as_flag, as_mapping, as_text, params_of, task_id_of
+from ..actions.executors.integrate_patch import RESULT_BENCHED
 from ..state.failure_evidence import UNMEASURED_OUTCOMES, classify_failure_attribution
 
 log = _logging.getLogger(__name__)
@@ -279,7 +280,7 @@ def _record_attempt_gates(recorder: Any, task_id: str, result: Mapping[str, Any]
             task_id,
             GateVerdict(
                 gate="accuracy",
-                passed=bool(accuracy_pass),
+                passed=as_flag(accuracy_pass),
                 observed=result.get("accuracy_value"),
                 threshold=result.get("accuracy_reference"),
             ),
@@ -288,7 +289,9 @@ def _record_attempt_gates(recorder: Any, task_id: str, result: Mapping[str, Any]
     if parity.get("ran"):
         recorder.record_attempt_gate(
             task_id,
-            GateVerdict(gate="switch_off_parity", passed=bool(parity.get("ok")), reason=as_text(parity.get("reason"))),
+            GateVerdict(
+                gate="switch_off_parity", passed=as_flag(parity.get("ok")), reason=as_text(parity.get("reason"))
+            ),
         )
 
 
@@ -368,6 +371,10 @@ def _record_source_attempt(
         },
         decision=attempt.status,
         adopted=attempt.adopted,
+        # Only the bench-and-gate stage sets this, so an attempt that stopped
+        # earlier -- a patch that would not apply -- is told apart from one that
+        # ran and lost, which no outcome spelling distinguishes.
+        benched=as_flag(result.get(RESULT_BENCHED)),
         validation_basis=_adoption_basis(accuracy_pass) if attempt.adopted else "",
         attribution_eligible=(attempt.adopted and base is not None and result.get("output_throughput") is not None),
         **measured_against,
