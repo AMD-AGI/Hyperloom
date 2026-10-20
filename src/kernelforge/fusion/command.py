@@ -410,7 +410,7 @@ def _run_author_only(authored: list, run: _FusionRun, ab_hint: str) -> int:
     out, repo_root = run.out, run.repo_root
     harness_path = str(out / "kernel_harness.py")
     author_harness_path = _author_harness_target(repo_root, out)
-    ready, harness_error, harness_fatal = _prepare_author_harness(author_harness_path, harness_path, inherited=False)
+    ready, harness_error, harness_fatal = _prepare_author_harness(author_harness_path)
     if not ready:
         _append_author_rejection(str(out / "author.log"), harness_error)
         log.error("author harness preparation failed: %s", harness_error)
@@ -441,12 +441,7 @@ def _run_author_only(authored: list, run: _FusionRun, ab_hint: str) -> int:
         ),
         dataclasses.replace(run.author, timeout_s=_agent_timeout_sec()),
     )
-    harness_ok, harness_error = _finish_author_harness(
-        author_harness_path,
-        harness_path,
-        inherited=False,
-        author_ok=rc == 0,
-    )
+    harness_ok, harness_error = _finish_author_harness(author_harness_path, harness_path, author_ok=rc == 0)
     if not harness_ok:
         rc = _author_rc_after_harness(rc, harness_ok=harness_ok)
         _append_author_rejection(str(out / "author.log"), harness_error)
