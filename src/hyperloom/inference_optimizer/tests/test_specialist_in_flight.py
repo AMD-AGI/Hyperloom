@@ -13,9 +13,11 @@ import pytest
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.proposals import PendingProposal
 from hyperloom.orchestrator.policy.specialist_in_flight import SPECIALIST_DOMAIN_IN_FLIGHT
 from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.specialists.in_flight import held_domain, in_flight_domains
+from hyperloom.orchestrator.specialists.profile import SCOPE_DOMAIN, resolve_specialist_profile
 
 _SYSTEM = "system_specialist"
 _IDLE_GAP = "gap.system.gpu_idle_85pct"
@@ -41,6 +43,11 @@ async def _delegate(c: Coordinator, **params: Any) -> None:
 
 def _ledger_gap(c: Coordinator, *, domain_hint: str) -> None:
     c.shared_state.upsert_gap({"canonical_id": _IDLE_GAP, "symptom": "GPU 85% idle", "domain_hint": domain_hint})
+
+
+def _approved_specialist(msg_id: str, **params: Any) -> PendingProposal:
+    payload = {"action_name": "specialist", "params": {"mode": "research", **params}}
+    return PendingProposal(msg_id, "orchestration", "specialist", predicted_gain_pct=0.0, payload=payload)
 
 
 async def _queued_domains(c: Coordinator) -> list[str]:
@@ -124,6 +131,27 @@ async def test_a_single_tag_domains_dispatch_is_refused_like_a_single_domain_one
     assert await _in_flight_denials(coord) == 1
 
 
+async def test_a_scope_domain_dispatch_over_two_tags_holds_the_domain_it_is_anchored_on(coord):
+    await _delegate(coord, domain=_SYSTEM, gap_canonical_id="gap.a")
+    await _delegate(coord, scope="domain", tags=["systems", "compiler"], gap_canonical_id="gap.b")
+
+    assert len(await coord.tasks.by_state("queued")) == 1
+    assert await _in_flight_denials(coord) == 1
+
+
+async def test_an_approved_specialist_proposal_is_judged_like_a_delegate_when_it_materializes(coord):
+    _ledger_gap(coord, domain_hint=_SYSTEM)
+    await coord.proposals.materialize_approved_proposal(_approved_specialist("p1", gap_canonical_id=_IDLE_GAP))
+    await coord.proposals.materialize_approved_proposal(
+        _approved_specialist("p2", domain=_SYSTEM, gap_canonical_id="b")
+    )
+
+    assert await _queued_domains(coord) == [_SYSTEM]
+    observed = await coord.bus.tail(topic="observation")
+    skipped = [m.payload["reason"] for m in observed if m.payload.get("kind") == "proposal_materialize_skipped"]
+    assert skipped == [SPECIALIST_DOMAIN_IN_FLIGHT]
+
+
 async def test_a_queued_cross_domain_specialist_holds_none_of_its_domains(coord):
     await _delegate(coord, tags=["systems", "compiler"], gap_canonical_id="gap.a")
     await _delegate(coord, domain=_SYSTEM, gap_canonical_id="gap.b")
@@ -171,15 +199,22 @@ def test_the_first_specialist_of_each_domain_holds_it():
 
 
 @pytest.mark.parametrize(
-    ("params", "held"),
+    "params",
     [
-        ({"domain": _SYSTEM}, _SYSTEM),
-        ({"tags": ["systems"]}, _SYSTEM),
-        ({"scope": "domains", "tags": ["systems"]}, _SYSTEM),
-        ({"tags": ["systems", "compiler"]}, ""),
-        ({"scope": "freeform", "domain": _SYSTEM, "task_description": "x"}, ""),
-        ({"domain": "custom_specialist", "scope": "domain"}, ""),
+        {"domain": _SYSTEM},
+        {"tags": ["systems"]},
+        {"scope": "domains", "tags": ["systems"]},
+        {"scope": "domain", "tags": ["systems", "compiler"]},
+        {"tags": ["systems", "compiler"]},
+        {"domain": _SYSTEM, "tags": ["systems", "compiler"]},
+        {"scope": "freeform", "domain": _SYSTEM, "task_description": "x"},
     ],
 )
-def test_only_a_single_domain_dispatch_holds_a_domain(params, held):
-    assert held_domain(params) == held
+def test_a_dispatch_holds_its_domain_exactly_when_its_profile_scope_is_domain(params):
+    single_domain = resolve_specialist_profile(params).scope == SCOPE_DOMAIN
+
+    assert held_domain(params) == (_SYSTEM if single_domain else "")
+
+
+def test_the_coordinator_owned_custom_specialist_holds_no_domain():
+    assert held_domain({"domain": "custom_specialist", "scope": "domain"}) == ""

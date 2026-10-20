@@ -292,12 +292,12 @@ def dispatch_domain(params: dict) -> "SpecialistDomain | None":
 
 def gap_backfilled_domain(params: Mapping[str, Any], find_gap: Callable[[str], Mapping[str, Any] | None]) -> str:
     """The ``domain`` a dispatch is stored with: its own, else the ``domain_hint`` of the ledger gap it cites."""
-    named = str(params.get("domain") or "")
+    named = str(params.get("domain") or "").strip()
     if named:
         return named
     gap_cid = str(params.get("gap_canonical_id") or "").strip() or str(params.get("gap") or "").strip()
     gap = find_gap(gap_cid) if gap_cid else None
-    return str((gap or {}).get("domain_hint") or "")
+    return str((gap or {}).get("domain_hint") or "").strip()
 
 
 def is_custom_specialist_dispatch(params: dict) -> bool:

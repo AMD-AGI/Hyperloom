@@ -11,8 +11,8 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from .domains import dispatch_domain, is_custom_specialist_dispatch, normalize_dispatch_tags
-from .profile import resolve_specialist_profile
+from .domains import dispatch_domain, is_custom_specialist_dispatch
+from .profile import SCOPE_DOMAIN, resolve_specialist_profile
 
 __all__ = ["held_domain", "in_flight_domains"]
 
@@ -20,17 +20,14 @@ __all__ = ["held_domain", "in_flight_domains"]
 def held_domain(params: Mapping[str, Any]) -> str:
     """The catalogue domain a specialist dispatch holds, or ``""`` when it holds none.
 
-    Only a single-domain dispatch holds one. A cross-domain dispatch (two or more knowledge-domain tags) and a
-    freeform one hold none, and neither does the Coordinator-owned custom specialist, whose per-macro-cycle
-    idempotency key already bounds it.
+    Only a dispatch whose profile scope is ``domain`` holds one. The Coordinator-owned custom specialist holds none
+    either: Orchestration cannot delegate it, and its per-macro-cycle idempotency key already bounds it.
     """
     p = dict(params)
-    if is_custom_specialist_dispatch(p) or len(normalize_dispatch_tags(p)) > 1:
-        return ""
     domain = dispatch_domain(p)
-    if domain is None or resolve_specialist_profile(p, domain=domain).is_freeform:
+    if domain is None or is_custom_specialist_dispatch(p):
         return ""
-    return domain.key
+    return domain.key if resolve_specialist_profile(p, domain=domain).scope == SCOPE_DOMAIN else ""
 
 
 def in_flight_domains(tasks: Iterable[Any]) -> dict[str, Any]:
