@@ -467,28 +467,6 @@ class _RenderMixin:
             rows.extend(proposal_scores.round_rows(round_row, labels))
         return "\n".join(rows)
 
-    def _format_last_kernel_opt(self) -> str:
-        """Render the latest kernel-opt outcome for prompt injection."""
-        if not self.last_kernel_opt:
-            return "(none)"
-        outcome = self.last_kernel_opt
-        kernel_id = str(outcome.get("kernel_id") or "")
-        attempts_entry = self.kernel_opt_attempts.get(kernel_id) or {}
-        history_tag = ""
-        if attempts_entry:
-            history_tag = (
-                f" history=attempts={attempts_entry.get('attempts', 0)}"
-                f"/partial={attempts_entry.get('partial_count', 0)}"
-            )
-            rejected_reason = attempts_entry.get("rejected_reason")
-            if rejected_reason:
-                history_tag += f"/retired={rejected_reason}"
-        return (
-            f"kernel_id={kernel_id or '?'} "
-            f"decision={outcome.get('decision', '?')} "
-            f"speedup={outcome.get('micro_speedup', '?')}{history_tag}"
-        )
-
     def to_prompt_summary(self) -> str:
         """Compact, human-readable snapshot for prompt injection."""
         lines = [
@@ -520,11 +498,9 @@ class _RenderMixin:
             f"analysis_md={self._format_analysis_md_full()}",
             f"params_no_promote_streak={self.params_no_promote_streak}",
             f"explore_search={self._format_search_state(self.explore_search)}",
-            f"last_kernel_opt={self._format_last_kernel_opt()}",
-            # Pending KEEPs the integrate gate will drain, plus per-kernel attempt count.
+            # Pending KEEPs the integrate gate will drain.
             (f"pending_keep_kernels={self.pending_keep_kernel_ids() or '(none)'}"),
             (f"has_keep_pending_integrate={'true' if self.has_keep_pending_integrate else 'false'}"),
-            f"kernel_opt_attempts_count={self.kernel_opt_attempts_count}",
             f"rejected_kernel_patches={self._format_rejected_kernel_patches()}",
             f"rejected_kernel_ids={self.rejected_kernel_ids or '(none)'}",
             f"last_baseline={self._format_attempt(self.last_baseline)}",

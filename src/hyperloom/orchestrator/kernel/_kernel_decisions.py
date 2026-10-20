@@ -48,28 +48,6 @@ def _honest_flag(specific_env: str) -> bool:
     return env_flag(specific_env, default=env_flag(_HONEST_E2E_UMBRELLA_ENV, default=True))
 
 
-def _stable_kernel_task_key(
-    *,
-    task_group_key: str,
-    kernel_id: str,
-    source_file: str,
-) -> str:
-    """Return the persistent task identity; ordinals are fallback-only."""
-    key = str(task_group_key or "").strip()
-    if key:
-        return key
-    return json.dumps(
-        {
-            "version": 1,
-            "kind": "legacy-kernel",
-            "kernel_id": str(kernel_id or ""),
-            "source_file": str(source_file or ""),
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-
-
 def _kernel_integration_id(
     *,
     task_key: str,
@@ -93,107 +71,6 @@ def _kernel_integration_id(
         ).encode("utf-8")
     ).hexdigest()
     return f"kernel-integration:{digest}"
-
-
-def _queue_kernel_keep(
-    state,
-    *,
-    task_key: str,
-    kernel_id: str,
-    entry: dict[str, Any],
-) -> dict[str, Any] | None:
-    """Persist one KEEP patch snapshot without coupling it to an ordinal slot."""
-    if entry.get("vendor_playbook_deploy_blocked"):
-        # A vendor-playbook KEEP has no deployable artifact -- refusing to queue it here means
-        # integrate_handler() only runs for an LLM-initiated request that names the kernel_id directly.
-        return None
-    decision = str(entry.get("last_decision") or "").upper()
-    try:
-        micro_speedup = float(entry.get("last_micro_speedup") or 0.0)
-    except (TypeError, ValueError):
-        micro_speedup = 0.0
-    try:
-        promotion_threshold = float(
-            os.environ.get(
-                "HL_VERIFIED_MICRO_PROMOTE_THRESHOLD",
-                "1.10",
-            )
-            or 1.10
-        )
-    except ValueError:
-        promotion_threshold = 1.10
-    promoted_needs_review = (
-        _honest_flag("HL_PROMOTE_VERIFIED_MICRO_NEEDS_REVIEW")
-        and decision == "NEEDS_REVIEW"
-        and str(entry.get("last_backend") or "").lower() == "geak"
-        and entry.get("last_correctness_passed") is True
-        and micro_speedup >= promotion_threshold
-    )
-    if decision != "KEEP" and not promoted_needs_review:
-        return None
-    artifact_path = str(entry.get("last_artifact_path") or "")
-    artifact_bundle = dict(entry.get("last_artifact_bundle") or {})
-    source_file = str(entry.get("last_source_file") or "")
-    queue = state.pending_kernel_integrations
-    existing_integration_id = next(
-        (
-            candidate_id
-            for candidate_id, candidate in queue.items()
-            if isinstance(candidate, dict)
-            and str(candidate.get("source_file") or "") == source_file
-            and str(candidate.get("artifact_path") or "") == artifact_path
-            and dict(candidate.get("artifact_bundle") or {}) == artifact_bundle
-            and (str(candidate.get("task_key") or "") == task_key or bool(artifact_path or artifact_bundle))
-        ),
-        "",
-    )
-    integration_id = existing_integration_id or _kernel_integration_id(
-        task_key=task_key,
-        source_file=source_file,
-        artifact_path=artifact_path,
-        artifact_bundle=artifact_bundle,
-    )
-    if integration_id not in queue:
-        queue[integration_id] = {
-            "integration_id": integration_id,
-            "task_key": task_key,
-            "task_group_key": str(entry.get("task_group_key") or ""),
-            "identity_route": str(entry.get("identity_route") or ""),
-            "legacy_task_group_keys": list(entry.get("legacy_task_group_keys") or []),
-            "kernel_id": str(kernel_id or entry.get("current_kernel_id") or ""),
-            "source_file": source_file,
-            "artifact_path": artifact_path,
-            "artifact_bundle": artifact_bundle,
-            "snapshot_dir": str(entry.get("last_snapshot_dir") or ""),
-            "deploy_patch_path": str(entry.get("last_deploy_patch_path") or ""),
-            "deploy_repo_root": str(entry.get("last_deploy_repo_root") or ""),
-            "micro_speedup": micro_speedup,
-            "optimization_decision": decision,
-            "trace_gpu_pct": entry.get("last_gpu_pct", 0.0),
-            "created_at": str(entry.get("last_ts") or _now_iso()),
-            "status": "pending",
-            "correctness_source": str(entry.get("last_correctness_source") or ""),
-            "artifact_kind": str((entry.get("last_framework_applyback") or {}).get("artifact_kind") or ""),
-            "integration_validation_status": str(entry.get("last_integration_validation_status") or ""),
-            "framework_applyback": dict(entry.get("last_framework_applyback") or {}),
-        }
-    else:
-        # The patch snapshot is immutable, but trace-local routing metadata must follow the task when ordinals are
-        # reassigned on a later profile.
-        queued = queue[integration_id]
-        if isinstance(queued, dict):
-            queued["task_key"] = task_key
-            queued["kernel_id"] = str(kernel_id or entry.get("current_kernel_id") or "")
-            queued["task_group_key"] = str(entry.get("task_group_key") or queued.get("task_group_key") or "")
-            queued["identity_route"] = str(entry.get("identity_route") or queued.get("identity_route") or "")
-            queued["legacy_task_group_keys"] = list(
-                entry.get("legacy_task_group_keys") or queued.get("legacy_task_group_keys") or []
-            )
-            queued["trace_gpu_pct"] = entry.get(
-                "last_gpu_pct",
-                queued.get("trace_gpu_pct", 0.0),
-            )
-    return queue[integration_id]
 
 
 def enqueue_nominated_patch(
@@ -308,31 +185,17 @@ def _patch_budget_for(state) -> int:
     return patch_budget(os.environ.get("HL_KERNEL_PATCH_BUDGET"), default=DEFAULT_PATCH_BUDGET)
 
 
-def _ensure_kernel_task_state(state) -> None:
-    """Initialise the stable ledger and re-queue the KEEPs recorded in it."""
-    if not isinstance(getattr(state, "kernel_opt_task_attempts", None), dict):
-        state.kernel_opt_task_attempts = {}
-    if not isinstance(getattr(state, "pending_kernel_integrations", None), dict):
-        state.pending_kernel_integrations = {}
-    # The queue's only deletion point.
+def _evict_settled_integrations(state) -> None:
+    """Reap stale terminal records from the integration queue -- the queue's only deletion point."""
     state.pending_kernel_integrations = evict_terminal(
         state.pending_kernel_integrations,
         budget=_patch_budget_for(state),
     )
-    for task_key, stable_entry in state.kernel_opt_task_attempts.items():
-        if not isinstance(stable_entry, dict):
-            continue
-        _queue_kernel_keep(
-            state,
-            task_key=task_key,
-            kernel_id=str(stable_entry.get("current_kernel_id") or stable_entry.get("kernel_id") or ""),
-            entry=stable_entry,
-        )
 
 
 def pending_kernel_integration_records(state) -> list[dict[str, Any]]:
     """Return pending KEEP snapshots, preserving patches across ordinal reuse."""
-    _ensure_kernel_task_state(state)
+    _evict_settled_integrations(state)
     integrated = IntegratedStack.of(state.optimization_stack)
     attempted_entries = [
         entry
@@ -351,10 +214,7 @@ def pending_kernel_integration_records(state) -> list[dict[str, Any]]:
         kernel_id = str(record.get("kernel_id") or "")
         source_file = record_source_path(record)
         artifact_path = str(record.get("artifact_path") or "")
-        stable_entry = state.kernel_opt_task_attempts.get(str(record.get("task_key") or "")) or {}
-        if kernel_id in set(state.rejected_kernel_ids or []) and (
-            not task_group_key or bool(stable_entry.get("rejected_reason") if isinstance(stable_entry, dict) else "")
-        ):
+        if kernel_id in set(state.rejected_kernel_ids or []) and not task_group_key:
             continue
         if integrated.covers(
             kernel_ids=(kernel_id,),
@@ -406,35 +266,19 @@ def pending_kernel_integration_records(state) -> list[dict[str, Any]]:
     return fit
 
 
-def _resolve_kernel_patch_identity(
-    state,
-    payload: dict[str, Any] | None,
-) -> tuple[str, str, str, str]:
+def _resolve_kernel_patch_identity(payload: dict[str, Any] | None) -> tuple[str, str, str, str]:
     """Resolve a kernel patch's identity tuple from a result/intent payload."""
     payload = payload or {}
     kernel_id = str(payload.get("kernel_id") or "")
     patch_path = str(payload.get("patch_path") or payload.get("best_artifact_path") or "")
-    # The last_kernel_opt back-fill is a single-patch convenience: it lends the one just-optimized patch to a result
-    # that omitted its own path.
-    if (
-        not patch_path
-        and kernel_id
-        and not str(payload.get("integration_id") or "")
-        and str((state.last_kernel_opt or {}).get("kernel_id") or "") == kernel_id
-    ):
-        patch_path = str(
-            (state.last_kernel_opt or {}).get("best_artifact_path")
-            or (state.last_kernel_opt or {}).get("patch_path")
-            or ""
-        )
     target_file = str(payload.get("target_file") or payload.get("source_file") or "")
     extra_args = str(payload.get("extra_server_args") or "").strip()
     return kernel_id, patch_path, target_file, extra_args
 
 
-def kernel_patch_key(state, payload: dict[str, Any] | None) -> str:
+def kernel_patch_key(payload: dict[str, Any] | None) -> str:
     """Compute the dedup key for a kernel patch."""
-    kernel_id, patch_path, _target_file, extra_args = _resolve_kernel_patch_identity(state, payload)
+    kernel_id, patch_path, _target_file, extra_args = _resolve_kernel_patch_identity(payload)
     if not kernel_id or not patch_path:
         return ""
     return "|".join([kernel_id, patch_path, extra_args])
@@ -445,37 +289,13 @@ def find_rejected_kernel_patch(
     payload: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
     """Look up a previously-rejected patch matching ``payload``."""
-    key = kernel_patch_key(state, payload)
+    key = kernel_patch_key(payload)
     if not key:
         return None
     for entry in state.rejected_kernel_patches:
         if isinstance(entry, dict) and entry.get("key") == key:
             return entry
     return None
-
-
-def _stamp_integration_validation(
-    state,
-    *,
-    kernel_id: str,
-    task_key: str,
-    integration_status: str,
-    validation_tier: str,
-) -> None:
-    """Settle an artifact's outstanding integration verdict in the ledgers."""
-    entries = []
-    if task_key:
-        entries.append((state.kernel_opt_task_attempts or {}).get(task_key))
-    if kernel_id:
-        entries.append(_entry_by_kernel_id(state, kernel_id))
-    for attempt in entries:
-        if not isinstance(attempt, dict):
-            continue
-        attempt["integration_status"] = "integrated"
-        if integration_status:
-            attempt["last_integration_validation_status"] = integration_status
-        if validation_tier:
-            attempt["validation_tier"] = validation_tier
 
 
 def record_kernel_integrate_result(
@@ -496,19 +316,16 @@ def record_kernel_integrate_result(
     integration_id = str(result.get("integration_id") or "")
     pending_record = (state.pending_kernel_integrations or {}).get(integration_id) if integration_id else None
     if isinstance(pending_record, dict):
-        # A sibling result may omit its own patch path -- resolve it from the bound record rather than from
-        # last_kernel_opt, which would borrow a different sibling's identity and key the ledger wrong.
+        # A sibling result may omit its own patch path -- resolve it from the record it is bound to.
         if not str(result.get("patch_path") or result.get("best_artifact_path") or ""):
             result = {**result, "patch_path": str(pending_record.get("artifact_path") or "")}
         if not str(result.get("target_file") or result.get("source_file") or ""):
             result = {**result, "target_file": record_source_path(pending_record)}
-    key = kernel_patch_key(state, result)
+    key = kernel_patch_key(result)
     if not key:
         return None
-    kernel_id, patch_path, target_file, extra_args = _resolve_kernel_patch_identity(state, result)
-    task_group_key = str(
-        result.get("task_group_key") or (_entry_by_kernel_id(state, kernel_id) or {}).get("task_group_key") or ""
-    )
+    kernel_id, patch_path, target_file, extra_args = _resolve_kernel_patch_identity(result)
+    task_group_key = str(result.get("task_group_key") or "")
     if isinstance(pending_record, dict):
         integration_id = str(pending_record.get("integration_id") or integration_id)
     identity_route = str(
@@ -584,16 +401,6 @@ def record_kernel_integrate_result(
                 pending_record["integration_validation_status"] = integration_status
             if validation_tier:
                 pending_record["validation_tier"] = validation_tier
-        if integration_status or validation_tier:
-            _stamp_integration_validation(
-                state,
-                kernel_id=kernel_id,
-                task_key=str(
-                    (pending_record.get("task_key") if isinstance(pending_record, dict) else "") or task_group_key or ""
-                ),
-                integration_status=integration_status,
-                validation_tier=validation_tier,
-            )
         return entry
 
     # Integration fault: never measured fairly.
@@ -637,17 +444,10 @@ def record_kernel_integrate_result(
         state.rejected_kernel_ids.append(kernel_id)
     entry["rejected"] = rejected
     state.kernel_integrate_attempts[key] = entry
-    task_key = str((pending_record.get("task_key") if isinstance(pending_record, dict) else "") or task_group_key or "")
     if isinstance(pending_record, dict):
         pending_record["status"] = "rejected"
         pending_record["rejected_at"] = _now_iso()
         pending_record["rejected_reason"] = reason
-    if task_key:
-        stable_attempt = (state.kernel_opt_task_attempts or {}).get(task_key)
-        if isinstance(stable_attempt, dict):
-            stable_attempt["integration_status"] = "rejected"
-            stable_attempt["integration_rejected_reason"] = reason
-            stable_attempt["integration_rejected_at"] = _now_iso()
     return entry
 
 
@@ -731,32 +531,6 @@ def pending_keep_kernel_ids(state) -> list[str]:
 def has_keep_pending_integrate(state) -> bool:
     """Whether any KEEP kernel is still awaiting integrate."""
     return bool(next_pending_keep_kernel_id(state))
-
-
-def index_attempts_by_kernel_id(attempts: Any) -> dict[str, dict]:
-    """Re-index a stable-keyed attempt ledger by trace-local ``current_kernel_id``."""
-    latest: dict[str, tuple[str, dict]] = {}
-    for entry in (attempts or {}).values():
-        if not isinstance(entry, dict):
-            continue
-        kernel_id = str(entry.get("current_kernel_id") or "")
-        if not kernel_id:
-            continue
-        ts = str(entry.get("last_ts") or entry.get("ts") or "")
-        if ts >= latest.get(kernel_id, ("", {}))[0]:
-            latest[kernel_id] = (ts, entry)
-    return {kernel_id: entry for kernel_id, (_ts, entry) in latest.items()}
-
-
-def _entry_by_kernel_id(state, kernel_id: str) -> dict | None:
-    """The stable-ledger entry currently holding ``kernel_id``, or ``None``."""
-    return index_attempts_by_kernel_id(state.kernel_opt_task_attempts).get(kernel_id)
-
-
-def kernel_opt_attempts_count(state) -> int:
-    """Number of distinct kernel tasks with recorded kernel_opt attempts."""
-    _ensure_kernel_task_state(state)
-    return len(state.kernel_opt_task_attempts or {})
 
 
 def _attempt_records(state) -> list[dict[str, Any]]:

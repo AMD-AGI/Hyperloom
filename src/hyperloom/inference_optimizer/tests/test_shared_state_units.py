@@ -387,8 +387,9 @@ class TestPolicyDenialAndPruned:
 
 class TestKernelPatchIdentity:
     def test_resolves_explicit_payload(self):
-        s = SharedState()
-        kid, patch, target, args = s._resolve_kernel_patch_identity(
+        from hyperloom.orchestrator.kernel._kernel_decisions import _resolve_kernel_patch_identity
+
+        kid, patch, target, args = _resolve_kernel_patch_identity(
             {
                 "kernel_id": "k1",
                 "patch_path": "/tmp/k1.py",
@@ -403,18 +404,10 @@ class TestKernelPatchIdentity:
             "--foo 1",
         )
 
-    def test_falls_back_to_last_kernel_opt_patch(self):
-        s = SharedState()
-        s.last_kernel_opt = {"kernel_id": "k1", "best_artifact_path": "/srv/best.py"}
-        kid, patch, target, args = s._resolve_kernel_patch_identity(
-            {
-                "kernel_id": "k1",
-            }
-        )
-        assert patch == "/srv/best.py"
-        assert kid == "k1"
-        assert target == ""
-        assert args == ""
+    def test_a_payload_without_a_patch_path_has_no_patch_identity(self):
+        from hyperloom.orchestrator.kernel._kernel_decisions import kernel_patch_key
+
+        assert kernel_patch_key({"kernel_id": "k1"}) == ""
 
     def test_find_rejected_kernel_patch_lookup(self):
         s = SharedState()

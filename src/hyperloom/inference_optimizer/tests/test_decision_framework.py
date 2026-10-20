@@ -48,35 +48,6 @@ def session_dir(tmp_path, monkeypatch) -> Path:
     return make_session_dir()
 
 
-# C — kernel-opt response recorded to SharedState
-@pytest.mark.asyncio
-async def test_trace_analyze_does_not_record_kernel_opt(
-    session_dir,
-    monkeypatch,
-):
-    """Only run_optimization (not trace_analyze) writes to last_kernel_opt."""
-    c = Coordinator(session_dir, backends=_silent_backends())
-    try:
-        from hyperloom.orchestrator.kernel import request_handlers as kernel_request_handlers
-
-        async def fake(payload, *, session_dir):
-            return {"status": "ok", "hot_kernels": [{"kernel_id": "k001"}]}
-
-        monkeypatch.setitem(
-            kernel_request_handlers.KERNEL_REQUEST_HANDLERS,
-            "trace_analyze",
-            fake,
-        )
-        intent = Intent(
-            type=IntentType.REQUEST,
-            payload={"target_agent": "kernel_agent", "kind": "trace_analyze", "params": {"trace_input": "/tmp/t.json"}},
-        )
-        await c.router.handle_intent("orchestration", intent)
-        assert c.shared_state.last_kernel_opt == {}
-    finally:
-        await c.stop()
-
-
 @pytest.mark.asyncio
 async def test_run_gemm_tuning_response_records_to_shared_state(
     session_dir,

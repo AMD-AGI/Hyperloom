@@ -907,82 +907,6 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                     out[k] = v.strip()
         return out
 
-    def _build_kernel_optimizations_from_state(self) -> list[dict[str, Any]]:
-        """Collect KEEP'd kernel optimizations + their E2E verdict by joining kernel_opt_task_attempts (micro) and kernel_integrate_attempts (E2E) on kernel_id; non-integrated KEEPs surface integrated=False. Returns KernelOptimization-shaped dicts.
-
-        Returns:
-            A list of KernelOptimization-shaped dicts for each KEEP'd kernel,
-            joined with its E2E integrate verdict where available.
-        """
-        ss = self.shared_state
-        opt_attempts = ss.kernel_opt_task_attempts or {}
-        integ_attempts = ss.kernel_integrate_attempts or {}
-        if not isinstance(opt_attempts, dict):
-            return []
-
-        # Index integrate results by kernel_id (last write wins; entry carries rolled-up best_gain_pct).
-        integ_by_kid: dict[str, dict[str, Any]] = {}
-        integ_by_task: dict[str, dict[str, Any]] = {}
-        if isinstance(integ_attempts, dict):
-            for entry in integ_attempts.values():
-                if not isinstance(entry, dict):
-                    continue
-                kid = str(entry.get("kernel_id") or "")
-                if kid:
-                    integ_by_kid[kid] = entry
-                task_group_key = str(entry.get("task_group_key") or "")
-                if task_group_key:
-                    integ_by_task[task_group_key] = entry
-
-        out: list[dict[str, Any]] = []
-        for ledger_id, e in opt_attempts.items():
-            if not isinstance(e, dict):
-                continue
-            if str(e.get("last_decision", "")).upper() != "KEEP":
-                continue
-            try:
-                micro = float(e.get("last_micro_speedup") or 0.0)
-            except (TypeError, ValueError):
-                micro = 0.0
-            kid = str(e.get("current_kernel_id") or e.get("kernel_id") or ledger_id)
-            task_group_key = str(e.get("task_group_key") or "")
-            integ = integ_by_task.get(task_group_key) if task_group_key else integ_by_kid.get(kid)
-            e2e_gain = 0.0
-            e2e_tput = 0.0
-            e2e_decision = ""
-            integrated = False
-            if isinstance(integ, dict):
-                integrated = True
-                # Integrate-layer verdict (E2E); lets warm-start skip a micro-win/E2E-loss kernel.
-                e2e_decision = str(integ.get("last_decision") or "").upper()
-                try:
-                    e2e_gain = float(integ.get("best_gain_pct") or 0.0)
-                except (TypeError, ValueError):
-                    e2e_gain = 0.0
-                # Last attempt's E2E re-bench throughput.
-                for att in reversed(list(integ.get("attempts") or [])):
-                    if isinstance(att, dict) and att.get("new_tput") is not None:
-                        try:
-                            e2e_tput = float(att.get("new_tput") or 0.0)
-                        except (TypeError, ValueError):
-                            e2e_tput = 0.0
-                        break
-            out.append(
-                {
-                    "kernel_id": kid,
-                    "source_file": str(e.get("last_source_file") or ""),
-                    "artifact_path": str(e.get("last_artifact_path") or ""),
-                    "micro_speedup": micro,
-                    "decision": "KEEP",
-                    "e2e_gain_pct": e2e_gain,
-                    "e2e_tput": e2e_tput,
-                    "e2e_decision": e2e_decision,
-                    "integrated": integrated,
-                    "ts": str(e.get("last_ts") or ""),
-                }
-            )
-        return out
-
     def _collect_attempt_provenance(
         self,
     ) -> tuple[dict[str, str], dict[str, str], list[dict[str, Any]]]:
@@ -1031,8 +955,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
 
         Returns:
             A recipe-shaped attrs dict (best_config, what_worked, what_failed,
-            kernel_optimizations, workload tags, session row) for KB recipe
-            writes.
+            workload tags, session row) for KB recipe writes.
         """
         ss = self.shared_state
         current_best = ss.current_best
@@ -1093,7 +1016,6 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                 )
         for rev in reverted_rows:
             what_failed.append(rev)
-        kernel_optimizations = self._build_kernel_optimizations_from_state()
         cumulative_validated = float(ss.cumulative_gain_validated or 0.0)
         validated_stack_len = int(ss.cumulative_gain_validated_stack_len or 0)
         # Workload-shape tags for shape-filtered warm-start queries (shared via _collect_workload_tags).
@@ -1104,7 +1026,6 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             "best_throughput": float(current_best.get("tput", 0.0)),
             "what_worked": what_worked,
             "what_failed": what_failed,
-            "kernel_optimizations": kernel_optimizations,
             "last_profiled": str(ss.cumulative_gain_validated_ts or ""),
             "workload": workload_tags,
             "sessions": [
@@ -1467,27 +1388,12 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                 existing_sessions.append(dict(row))
             merged_sessions = existing_sessions + my_sessions
 
-        # KEEP'd kernel optimizations ride the extras channel; merge with prior rows, dedup by kernel_id.
-        kopts_new = list(attrs.get("kernel_optimizations") or [])
-        new_kids = {str((k or {}).get("kernel_id") or "") for k in kopts_new if isinstance(k, dict)}
-        merged_kopts: list[dict[str, Any]] = list(kopts_new)
-        for prior in existing_row.get("kernel_optimizations") or []:
-            if not isinstance(prior, dict):
-                continue
-            if str(prior.get("kernel_id") or "") in new_kids:
-                continue
-            merged_kopts.append(dict(prior))
-
-        extras_payload = dict(workload_tags or {})
-        if merged_kopts:
-            extras_payload["kernel_optimizations"] = merged_kopts
-
         overrides: dict[str, Any] = {
             "what_worked": attrs["what_worked"],
             "what_failed": attrs["what_failed"],
             "last_profiled": attrs["last_profiled"],
             "sessions": merged_sessions,
-            "extras": extras_payload,
+            "extras": dict(workload_tags or {}),
         }
         # Overwrite best_config/best_throughput only on a real improvement: requires has_validated_win AND my_tput > live_tput.
         my_tput = float(attrs.get("best_throughput") or 0.0)

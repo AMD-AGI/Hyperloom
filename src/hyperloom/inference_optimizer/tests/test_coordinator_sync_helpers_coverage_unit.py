@@ -638,29 +638,6 @@ def test_unknown_and_empty_fingerprint_entries_are_not_tagged(coord: Coordinator
     assert tags == {"framework": "vllm", "image_digest": "sha256:abc"}
 
 
-def test_build_kernel_optimizations_from_state(coord: Coordinator) -> None:
-    ss = coord.shared_state
-    ss.kernel_opt_attempts = {
-        "k1": {
-            "last_decision": "KEEP",
-            "last_micro_speedup": 1.3,
-            "last_source_file": "a.py",
-            "last_artifact_path": "a.so",
-        },
-        "k2": {"last_decision": "REVERT", "last_micro_speedup": 1.1},
-    }
-    ss.kernel_integrate_attempts = {
-        "i1": {"kernel_id": "k1", "last_decision": "KEEP", "best_gain_pct": 5.0, "attempts": [{"new_tput": 210.0}]},
-    }
-    out = coord.recipe_journal._build_kernel_optimizations_from_state()
-    assert len(out) == 1  # only the KEEP'd k1
-    row = out[0]
-    assert row["kernel_id"] == "k1"
-    assert row["integrated"] is True
-    assert row["e2e_gain_pct"] == 5.0
-    assert row["e2e_tput"] == 210.0
-
-
 # -- phase denial gate -----------------------------------------------------
 def test_the_coordinator_revalidation_baseline_is_not_phase_denied(coord: Coordinator) -> None:
     """The revalidation pump prices its own action and never runs the phase gate."""

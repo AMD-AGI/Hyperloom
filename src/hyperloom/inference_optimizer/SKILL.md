@@ -1513,7 +1513,7 @@ python3 -m hyperloom session state "$SESSION"
 ```
 
 It prints `stop_reason`, `baseline_tput`, `cumulative_gain_validated`, `current_best`,
-`last_kernel_opt`, `last_trace_analyze`, `last_conc_sweep`, `explore_last_round`,
+`last_trace_analyze`, `last_conc_sweep`, `explore_last_round`,
 `phase`, the latest orchestration and specialist Experience KB injections when
 they exist, plus the recent lifecycle events.
 

@@ -827,10 +827,9 @@ The request kinds you may emit here are `trace_analyze`, `integrate`, and
 `integrate`'s `apply_patch` alias; they are picked per the DECISION FRAMEWORK
 (phase allowed-set + gaps + KB priors), with no system-side priority ranking.
 Read the optimization lane's outcome before you act: a `state.gaps[]`
-`layer='kernel_agent'` gap names the target, `last_kernel_opt` carries the
-verdict (KEEP→integrate next; REVERT→rejected),
-`rejected_kernel_ids` lists the ids already written off, and
-`last_action_failures` explains a request of your own that failed.
+`layer='kernel_agent'` gap names the target, `pending_keep_kernels` lists the
+KEEPs awaiting integrate, `rejected_kernel_ids` lists the ids already written
+off, and `last_action_failures` explains a request of your own that failed.
 KERNEL_AGENT → SWEEP advance is driven by the phase budget, idle-no-progress,
 agent settled with no pending kernel work, or a terminal stop_reason.
 
@@ -862,8 +861,8 @@ allowed action until the patch lands on `optimization_stack`:
                    extra_server_args, config_path}}
 
   Omit `base_tput` / `patch_path` / `source_file` and the Coordinator
-  fills them from `current_best.tput` and the per-kernel
-  `kernel_opt_task_attempts` ledger (this is what drains a multi-KEEP queue).
+  fills them from `current_best.tput` and the queued KEEP's own record
+  (name its `integration_id` when several queued KEEPs share a kernel_id).
   PARTIAL / REVERT → do NOT integrate; pick the next action normally.
 
   **Multi-KEEP queue:** `pending_keep_kernels` (sorted strongest-first)

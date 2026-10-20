@@ -4051,48 +4051,23 @@ def _candidates_factory(tmp_path):
     return _make
 
 
-def test_resolve_integrate_payload_falls_back_to_kernel_opt_attempts_ledger(
-    session_dir,
-):
-    """``_resolve_integrate_payload`` looks up patch_path / source_file from the per-kernel ``kernel_opt_attempts`` ledger so any queued KEEP can integrate."""
+def test_an_integrate_naming_only_a_kernel_id_resolves_any_queued_keep(session_dir):
+    """A bare ``{kernel_id}`` integrate reaches the queued KEEP's patch and source, not just the strongest one's."""
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir)
-    # Two KEEPs landed but last_kernel_opt only holds the strongest (k009).
-    state.last_kernel_opt = {
-        "kernel_id": "k009",
-        "decision": "KEEP",
-        "best_artifact_path": "/tmp/k009.py",
-        "source_file": "/p/rmsnorm.py",
-    }
-    state.kernel_opt_attempts = {
-        "k009": {
-            "last_decision": "KEEP",
-            "last_micro_speedup": 4.13,
-            "last_artifact_path": "/tmp/k009.py",
-            "last_source_file": "/p/rmsnorm.py",
-        },
-        "k001": {
-            "last_decision": "KEEP",
-            "last_micro_speedup": 2.0,
-            "last_artifact_path": "/tmp/k001.py",
-            "last_source_file": "/p/moe_op.py",
-        },
-    }
+    seed_kernel_keep(state, "k009", micro=4.13, source_file="/p/rmsnorm.py", artifact="/tmp/k009.py")
+    seed_kernel_keep(state, "k001", micro=2.0, source_file="/p/moe_op.py", artifact="/tmp/k001.py")
     state.save(session_dir)
 
-    # integrate(k001) carries only the kernel_id (the second queued KEEP, not last_kernel_opt).
-    resolved, missing = krh._resolve_integrate_payload(
-        {"kernel_id": "k001", "base_tput": 4500.0},
-        session_dir=session_dir,
+    payload = krh._fill_integrate_defaults_from_state(
+        {"kernel_id": "k001", "base_tput": 4500.0}, session_dir=session_dir
     )
+    resolved, missing = krh._resolve_integrate_payload(payload, session_dir=session_dir)
+
     assert missing is None, missing
-    assert resolved.get("patch_path") == "/tmp/k001.py", (
-        "patch_path must fall back to kernel_opt_attempts[k001].last_artifact_path"
-    )
-    assert resolved.get("source_file") == "/p/moe_op.py", (
-        "source_file must fall back to kernel_opt_attempts[k001].last_source_file"
-    )
+    assert resolved.get("patch_path") == "/tmp/k001.py"
+    assert resolved.get("source_file") == "/p/moe_op.py"
 
 
 def _gz_trace(path: Path, payload_bytes: int) -> Path:

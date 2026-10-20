@@ -20,8 +20,6 @@ from hyperloom.orchestrator.lever import (
     LEVER_UPSTREAM_PR,
 )
 from hyperloom.inference_optimizer.breakdown.stop_reasons import is_valid_stop_reason
-from ..kernel.patch_landing import IntegratedStack
-from ..state.kernel_decision_settings import resolve_kernel_opt_max_failures
 from ..state.shared_state import (
     ESCALATE_HINT_SKIP_TO_CLOSE,
     ESCALATE_HINT_SKIP_TO_KERNEL,
@@ -647,29 +645,6 @@ def _controller_phase_terminal(state: Any) -> bool:
     return result_cycle == current_cycle and status in CONTROLLER_TERMINAL_STATUSES
 
 
-# Ledger subfields that change when a kernel attempt actually advances.
-_KERNEL_ATTEMPT_PROGRESS_FIELDS: tuple[str, ...] = (
-    "current_kernel_id",
-    "failure_count",
-    "integration_status",
-    "last_decision",
-    "last_source_file",
-    "last_status",
-    "rejected_reason",
-    "task_group_key",
-)
-
-# ``last_kernel_opt`` subfields that identify WHICH result is the latest one; a new result always changes at least one
-# of them.
-_LAST_KERNEL_OPT_PROGRESS_FIELDS: tuple[str, ...] = (
-    "best_artifact_path",
-    "decision",
-    "kernel_id",
-    "task_group_key",
-    "ts",
-)
-
-
 def compute_kernel_progress_fingerprint(
     state: Any,
     *,
@@ -679,27 +654,15 @@ def compute_kernel_progress_fingerprint(
     import hashlib
     import json
 
-    attempts: list[list[str]] = []
-    ledger = state.kernel_opt_task_attempts
-    if isinstance(ledger, dict):
-        for ledger_id, attempt in ledger.items():
-            if not isinstance(attempt, dict):
-                continue
-            attempts.append(
-                [str(ledger_id)] + [str(attempt.get(field, "")) for field in _KERNEL_ATTEMPT_PROGRESS_FIELDS]
-            )
-    attempts.sort()
-
-    last_opt = state.last_kernel_opt
-    last_opt = last_opt if isinstance(last_opt, dict) else {}
     stack = state.optimization_stack
     pending = state.pending_kernel_integrations
     controller = state.kernel_rewrite_controller_result
     controller = controller if isinstance(controller, dict) else {}
     payload = {
-        "attempts": attempts,
         "inflight": sorted(str(task_id) for task_id in (inflight_task_ids or ())),
-        "last_kernel_opt": [str(last_opt.get(field, "")) for field in _LAST_KERNEL_OPT_PROGRESS_FIELDS],
+        "integrate_verdicts": sorted(
+            f"{key}:{entry['attempt_count']}" for key, entry in state.kernel_integrate_attempts.items()
+        ),
         "pending_integrations": sorted(str(key) for key in pending) if isinstance(pending, dict) else [],
         "rejected": sorted(str(kid) for kid in (state.rejected_kernel_ids or [])),
         "stack_len": len(stack) if isinstance(stack, list) else 0,
@@ -714,46 +677,6 @@ def compute_kernel_progress_fingerprint(
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:32]
 
 
-class _SettledKernelWork(NamedTuple):
-    """What the session has already settled, against which a kernel attempt is judged."""
-
-    rejected_ids: set[str]
-    integrated: IntegratedStack
-
-
-def _attempt_failure_count(attempt: dict[str, Any]) -> int:
-    """The failure count an attempt reports, 0 when it reports none that reads as a number."""
-    try:
-        return int(attempt.get("failure_count") or 0)
-    except (TypeError, ValueError):
-        return 0
-
-
-def _attempt_can_still_gain(attempt: dict[str, Any], ledger_id: Any, settled: _SettledKernelWork) -> bool:
-    """Whether one kernel attempt still has a move left that could raise validated gain."""
-    kernel_id = str(attempt.get("current_kernel_id") or attempt.get("kernel_id") or ledger_id)
-    task_group_key = str(attempt.get("task_group_key") or "")
-    if settled.integrated.covers(
-        kernel_ids=(kernel_id,),
-        task_group_key=task_group_key,
-        source_file=str(attempt.get("last_source_file") or ""),
-    ):
-        return False
-    if str(attempt.get("integration_status") or "").strip().lower() in {"integrated", "rejected"}:
-        return False
-    rejected_reason = str(attempt.get("rejected_reason") or "").strip()
-    if kernel_id in settled.rejected_ids and (not task_group_key or rejected_reason):
-        return False
-    decision = str(attempt.get("last_decision") or "").strip().upper()
-    if decision == "KEEP":
-        return True
-    if decision == "REVERT" or rejected_reason:
-        return False
-    if str(attempt.get("last_status") or "").strip().lower() == "failed":
-        return 0 < _attempt_failure_count(attempt) < resolve_kernel_opt_max_failures()
-    return decision in ("", "PARTIAL", "NEEDS_REVIEW")
-
-
 def kernel_work_pending(state: Any) -> bool:
     """Return True while KERNEL has work that can still affect validated gain."""
     if state.has_keep_pending_integrate:
@@ -762,21 +685,7 @@ def kernel_work_pending(state: Any) -> bool:
     if _controller_phase_terminal(state) or _geak_phase_terminal(state):
         return False
 
-    if state.untried_hot_reusable_kernels():
-        return True
-
-    attempts = state.kernel_opt_task_attempts or {}
-    if not isinstance(attempts, dict):
-        return False
-    settled = _SettledKernelWork(
-        rejected_ids={str(kernel_id) for kernel_id in (state.rejected_kernel_ids or [])},
-        integrated=IntegratedStack.of(state.optimization_stack),
-    )
-    return any(
-        _attempt_can_still_gain(attempt, ledger_id, settled)
-        for ledger_id, attempt in attempts.items()
-        if isinstance(attempt, dict)
-    )
+    return bool(state.untried_hot_reusable_kernels())
 
 
 def measured_seconds(state: Any, field: str) -> float | None:

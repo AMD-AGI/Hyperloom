@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any, NamedTuple, NoReturn
 from hyperloom.common.perf_metric import GradedComparison, VERDICT_KEEP, VERDICT_REVERT
 from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
-from ..kernel._kernel_decisions import _entry_by_kernel_id
 from ..kernel.patch_lifecycle import (
     CLEANUP_ACTION_NONE,
     CLEANUP_ACTION_REVERT,
@@ -303,18 +302,12 @@ class KernelStackPhase(CoordinatorCollaborator):
         pending_task_key = str(pending.get("task_key") or "")
         if not pending_task_key and kid not in state.rejected_kernel_ids:
             state.rejected_kernel_ids.append(kid)
-        attempt = _entry_by_kernel_id(state, kid)
-        if isinstance(attempt, dict):
-            attempt["rejected_reason"] = "integrate_dispatch_exception"
-        stable_attempt = (state.kernel_opt_task_attempts or {}).get(pending_task_key)
-        if isinstance(stable_attempt, dict):
-            stable_attempt["rejected_reason"] = "integrate_dispatch_exception"
         queued = (state.pending_kernel_integrations or {}).get(str(pending.get("integration_id") or ""))
         if isinstance(queued, dict):
             queued["status"] = "dispatch_failed"
 
     async def drain_pending_keep_integrates(self) -> None:
-        """Drain pending KEEP integrates inherited from KERNEL so sweep measures full current_best. Cap 10; a dispatch failure sets ``rejected_reason=integrate_dispatch_exception`` on the per-kernel and per-task_key attempt ledgers and flips the queued record to ``dispatch_failed``; only records with no ``task_key`` are also appended to ``rejected_kernel_ids``."""
+        """Drain pending KEEP integrates inherited from KERNEL so sweep measures full current_best. Cap 10; a dispatch failure flips the queued record to ``dispatch_failed``, and only records with no ``task_key`` are also appended to ``rejected_kernel_ids``."""
         from ..kernel.request_handlers import integrate_handler
 
         state = self.shared_state
