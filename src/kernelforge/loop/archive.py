@@ -398,7 +398,7 @@ class CandidateArchive:
             os.rename(temp_dir, d)
             temp_dir = None
             fsync_directory(self.root)
-        except Exception as e:  # noqa: BLE001
+        except (OSError, TypeError, ValueError) as e:
             self._mark_degraded(f"record iteration {rec.iteration}", e)
             return None
         finally:

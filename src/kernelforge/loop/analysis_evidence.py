@@ -243,7 +243,7 @@ class AnalysisEvidenceMixin:
                     # it only measures half the knowledge block's cost.
                     defer_all=bool(getattr(self.config, "defer_knowledge_maps", False)),
                 )
-            except Exception:
+            except OSError:
                 log.debug("failed to build orchestration knowledge index", exc_info=True)
 
         return OrchestrationContext(
