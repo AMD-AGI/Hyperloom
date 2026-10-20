@@ -34,6 +34,7 @@ from ._conc_sweep_run import (
 )
 from ..actions.executors._grid_runner import GridVariant, VariantResult, variant_conc
 from ..actions.executors._subprocess_kill import session_deadline_to_remaining_sec
+from ..actions.executors.benchmark_backend import resolve_backend
 from ..actions.stop_attribution import ORCHESTRATOR_CANCELLED_CLASS, StoppedByTheRun
 
 
@@ -211,7 +212,7 @@ class _BootLadder:
                 variant,
                 _RungServer(
                     serving_lease=self.server.lease,
-                    base_extra_envs={"MAGPIE_RUN_PHASE": "server"},
+                    base_extra_envs=dict(resolve_backend().boot_phase_envs),
                     server_lifecycle=self.server.lifecycle(cleanup=False),
                     server_already_ready=False,
                     warmup_before_measure=False,

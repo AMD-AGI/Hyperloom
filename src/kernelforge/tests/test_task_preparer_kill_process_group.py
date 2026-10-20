@@ -67,7 +67,7 @@ def test_killpg_processlookup_falls_back_to_proc_kill(monkeypatch):
 
 def test_killpg_generic_exception_falls_back_to_proc_kill(monkeypatch):
     def broken(pgid, sig):
-        raise RuntimeError("unexpected")
+        raise OSError("unexpected")
 
     monkeypatch.setattr(os, "killpg", broken)
     proc, killed = _proc(999)
