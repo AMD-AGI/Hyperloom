@@ -168,8 +168,6 @@ cognitive-complexity src/hyperloom/orchestrator/state/shared_state.py::SharedSta
 cognitive-complexity src/hyperloom/orchestrator/state/shared_state.py::SharedState._build_hot_kernel_summaries 36
 cognitive-complexity src/hyperloom/orchestrator/state/shared_state.py::SharedState.profile_workload_context 43
 cognitive-complexity src/hyperloom/orchestrator/state/shared_state.py::SharedState.record_trace_analyze 45
-cognitive-complexity src/hyperloom/orchestrator/trace_analysis/_bypass_report.py::_render_bypass_extra_sections 62
-cognitive-complexity src/hyperloom/orchestrator/trace_analysis/_bypass_report.py::build_candidates 66
 cognitive-complexity src/hyperloom/orchestrator/trace_analysis/_task_group_contract.py::_moe_dimensions 34
 cognitive-complexity src/hyperloom/orchestrator/trace_analysis/bypass_trace_analysis.py::_discover_capture_shards 44
 cognitive-complexity src/hyperloom/orchestrator/trace_analysis/bypass_trace_analysis.py::main 72
@@ -748,12 +746,8 @@ function-lines src/hyperloom/orchestrator/state/shared_state.py::SharedState._bu
 function-lines src/hyperloom/orchestrator/state/shared_state.py::SharedState.record_trace_analyze 110
 function-lines src/hyperloom/orchestrator/state/shared_state.py::resolve_graded_comparison 99
 function-lines src/hyperloom/orchestrator/trace_analysis/_analysis_md.py::render_report 104
-function-lines src/hyperloom/orchestrator/trace_analysis/_bypass_report.py::_build_task_groups 96
-function-lines src/hyperloom/orchestrator/trace_analysis/_bypass_report.py::_render_bypass_extra_sections 199
-function-lines src/hyperloom/orchestrator/trace_analysis/_bypass_report.py::build_candidates 182
-function-lines src/hyperloom/orchestrator/trace_analysis/_bypass_report.py::render_analysis_md 106
 function-lines src/hyperloom/orchestrator/trace_analysis/_nccl_summary_candidates.py::extract_collective_candidates 97
-function-lines src/hyperloom/orchestrator/trace_analysis/bypass_trace_analysis.py::main 477
+function-lines src/hyperloom/orchestrator/trace_analysis/bypass_trace_analysis.py::main 476
 function-lines src/hyperloom/orchestrator/trace_analysis/trace_selfcert.py::build_verdict 101
 function-lines src/hyperloom/orchestrator/trace_analysis/trace_selfcert.py::certify_trace_dir 185
 function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py::_check_chunk_quality 88
@@ -920,7 +914,6 @@ module-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py 257
 module-lines src/hyperloom/orchestrator/specialists/runner.py 1505
 module-lines src/hyperloom/orchestrator/specialists/subprocess_.py 1747
 module-lines src/hyperloom/orchestrator/state/shared_state.py 2620
-module-lines src/hyperloom/orchestrator/trace_analysis/_bypass_report.py 1231
 module-lines src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py 5347
 module-lines src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py 1366
 module-lines src/kernelforge/fusion/author.py 1322
