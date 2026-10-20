@@ -1059,7 +1059,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
                     text,
                     encoding="utf-8",
                 )
-        except Exception:
+        except (OSError, ValueError):
             # Never leave a stale launcher or export a subset of the retained
             # configuration. The complete settings remain in durable state.
             try:
@@ -1077,23 +1077,20 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
 
     def _backfill_scriptable_latency(self) -> None:
         """Derive ``current_best.e2el_mean_ms`` from ``tput`` for scriptable runs."""
-        try:
-            from hyperloom.inference_optimizer import framework_registry
+        from hyperloom.inference_optimizer import framework_registry
 
-            fw = str(getattr(self, "framework", "") or "")
-            if not framework_registry.is_scriptable(fw):
-                return
-            cb = self.current_best
-            if cb.get("e2el_mean_ms") is not None:
-                return
-            tput = cb.get("tput")
-            if not isinstance(tput, (int, float)) or tput <= 0:
-                return
-            e2el = framework_registry.primary_metric_value(fw, float(tput))
-            if e2el is not None and e2el > 0:
-                cb["e2el_mean_ms"] = round(float(e2el), 4)
-        except Exception:  # noqa: BLE001 — derived backfill, never blocks save
-            pass
+        fw = str(getattr(self, "framework", "") or "")
+        if not framework_registry.is_scriptable(fw):
+            return
+        cb = self.current_best
+        if cb.get("e2el_mean_ms") is not None:
+            return
+        tput = cb.get("tput")
+        if not isinstance(tput, (int, float)) or tput <= 0:
+            return
+        e2el = framework_registry.primary_metric_value(fw, float(tput))
+        if e2el is not None and e2el > 0:
+            cb["e2el_mean_ms"] = round(float(e2el), 4)
 
     def _session_status_fields(self) -> dict[str, Any]:
         """Report the session's own scalar status: phase, stop reason, validated gain and workload identity."""
@@ -1116,19 +1113,14 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
 
     def _explore_runtime_telemetry(self) -> dict[str, Any]:
         """Report session and FRAMEWORK_AGENT elapsed seconds, and the share of the session spent exploring."""
-        telemetry: dict[str, Any] = {}
-        try:
-            from ..phases.machine_state import PHASE_FRAMEWORK_AGENT, phase_cumulative_seconds
+        from ..phases.machine_state import PHASE_FRAMEWORK_AGENT, phase_cumulative_seconds
 
-            session_elapsed_s = max(0.0, self.elapsed_minutes() * 60.0)
-            telemetry["session_elapsed_s"] = int(round(session_elapsed_s))
-            explore_elapsed_s = phase_cumulative_seconds(self, phase=PHASE_FRAMEWORK_AGENT)
-            telemetry["explore_elapsed_s"] = int(round(explore_elapsed_s))
-            telemetry["explore_ratio"] = (
-                round(explore_elapsed_s / session_elapsed_s, 4) if session_elapsed_s > 0.0 else 0.0
-            )
-        except Exception:
-            log.debug("explore runtime telemetry derivation failed", exc_info=True)
+        telemetry: dict[str, Any] = {}
+        session_elapsed_s = max(0.0, self.elapsed_minutes() * 60.0)
+        telemetry["session_elapsed_s"] = int(round(session_elapsed_s))
+        explore_elapsed_s = phase_cumulative_seconds(self, phase=PHASE_FRAMEWORK_AGENT)
+        telemetry["explore_elapsed_s"] = int(round(explore_elapsed_s))
+        telemetry["explore_ratio"] = round(explore_elapsed_s / session_elapsed_s, 4) if session_elapsed_s > 0.0 else 0.0
         return telemetry
 
     def _langfuse_status_summary(self) -> dict[str, Any]:
@@ -1787,32 +1779,29 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         self, framework: str, achieved_tput: float, kernel_roofline_path: Any
     ) -> tuple[float, float]:
         """Resolve the (measured e2e latency, ideal latency floor) ms pair."""
-        try:
-            from hyperloom.inference_optimizer import framework_registry
+        from hyperloom.inference_optimizer import framework_registry
 
-            if not framework_registry.is_scriptable(framework):
-                return 0.0, 0.0
-            # img/s -> per-image e2e latency (ms); the achieved metric.
-            e2e_mean_ms = float(framework_registry.primary_metric_value(framework, achieved_tput) or 0.0)
-            # Ideal per-image latency floor from the diffusion roofline sidecar.
-            roofline_ideal_ms = 0.0
-            sidecar = self._locate_diffusion_roofline_sidecar(kernel_roofline_path)
-            if sidecar is not None:
-                try:
-                    data = json.loads(sidecar.read_text(encoding="utf-8"))
-                    data = data if isinstance(data, dict) else {}
-                    # Priority: full-pipeline analytic ceiling (ms) > trace-summed per-kernel ideal (us).
-                    approach_a = data.get("analytic_ceiling")
-                    totals = data.get("totals")
-                    if isinstance(approach_a, dict) and float(approach_a.get("ideal_ms") or 0.0) > 0:
-                        roofline_ideal_ms = float(approach_a["ideal_ms"])
-                    elif isinstance(totals, dict) and float(totals.get("sigma_ideal_roofline_us") or 0.0) > 0:
-                        roofline_ideal_ms = float(totals["sigma_ideal_roofline_us"]) / 1000.0
-                except (OSError, ValueError, TypeError, json.JSONDecodeError):
-                    roofline_ideal_ms = 0.0
-            return e2e_mean_ms, roofline_ideal_ms
-        except Exception:  # noqa: BLE001 — best-effort enrichment, never blocks
+        if not framework_registry.is_scriptable(framework):
             return 0.0, 0.0
+        # img/s -> per-image e2e latency (ms); the achieved metric.
+        e2e_mean_ms = float(framework_registry.primary_metric_value(framework, achieved_tput) or 0.0)
+        # Ideal per-image latency floor from the diffusion roofline sidecar.
+        roofline_ideal_ms = 0.0
+        sidecar = self._locate_diffusion_roofline_sidecar(kernel_roofline_path)
+        if sidecar is not None:
+            try:
+                data = json.loads(sidecar.read_text(encoding="utf-8"))
+                data = data if isinstance(data, dict) else {}
+                # Priority: full-pipeline analytic ceiling (ms) > trace-summed per-kernel ideal (us).
+                approach_a = data.get("analytic_ceiling")
+                totals = data.get("totals")
+                if isinstance(approach_a, dict) and float(approach_a.get("ideal_ms") or 0.0) > 0:
+                    roofline_ideal_ms = float(approach_a["ideal_ms"])
+                elif isinstance(totals, dict) and float(totals.get("sigma_ideal_roofline_us") or 0.0) > 0:
+                    roofline_ideal_ms = float(totals["sigma_ideal_roofline_us"]) / 1000.0
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                roofline_ideal_ms = 0.0
+        return e2e_mean_ms, roofline_ideal_ms
 
     def _roofline_throughput_unit(self) -> str:
         """Return the throughput unit for roofline snapshots of this workload."""
@@ -1823,18 +1812,15 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
 
     def record_baseline_roofline_ceiling(self) -> dict[str, Any]:
         """Compute a standalone baseline-arm roofline ceiling and cache it."""
-        try:
-            from hyperloom.inference_optimizer.roofline_ceiling import (
-                RooflineBreakdown,
-                compute_roofline_breakdown_from_state,
-            )
-            from hyperloom.inference_optimizer.roofline_snapshot import (
-                RooflineReading,
-                attach_perfmodel_breakdown,
-                build_roofline_snapshot,
-            )
-        except Exception:  # noqa: BLE001 — import guard, best-effort
-            return {}
+        from hyperloom.inference_optimizer.roofline_ceiling import (
+            RooflineBreakdown,
+            compute_roofline_breakdown_from_state,
+        )
+        from hyperloom.inference_optimizer.roofline_snapshot import (
+            RooflineReading,
+            attach_perfmodel_breakdown,
+            build_roofline_snapshot,
+        )
 
         achieved = self._resolve_baseline_achieved_tput()
         breakdown = RooflineBreakdown(0.0, 0.0, 0.0, "unknown")
@@ -1983,35 +1969,32 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
 
     def _record_bottleneck_saturation(self, history_entry: dict[str, Any]) -> None:
         """Record which direction has saturated, and how the top bottleneck moved since the previous macro cycle."""
-        try:
-            from hyperloom.inference_optimizer.roofline_snapshot import direction_saturation
+        from hyperloom.inference_optimizer.roofline_snapshot import direction_saturation
 
-            sat = direction_saturation(history_entry)
-            direction = str(sat.get("direction") or "")
-            hint = sat.get("domain_hint") if isinstance(sat.get("domain_hint"), dict) else {}
-            domain_key = str(hint.get("domain") or direction or "unknown")
-            latest_cycle = int(history_entry.get("macro_cycle") or 0)
-            previous = self._previous_cycle_snapshot(latest_cycle)
-            prev_sat = direction_saturation(previous) if previous else {}
-            if not isinstance(self.saturated_directions, dict):
-                self.saturated_directions = {}
-            self.saturated_directions[domain_key] = {
-                **sat,
-                "domain": domain_key,
-                "tag": str(hint.get("tag") or ""),
-                "macro_cycle": latest_cycle,
-                "snapshot_id": self.last_trace_analyze["roofline_snapshot_id"],
-                "top_bottleneck": history_entry.get("top_bottleneck"),
-            }
-            self.bottleneck_shift = _bottleneck_shift(
-                sat,
-                prev_sat,
-                previous_snapshot=previous,
-                domain_key=domain_key,
-                latest_cycle=latest_cycle,
-            )
-        except Exception:  # saturation telemetry is advisory only
-            log.warning("roofline saturation telemetry failed for this snapshot", exc_info=True)
+        sat = direction_saturation(history_entry)
+        direction = str(sat.get("direction") or "")
+        hint = sat.get("domain_hint") if isinstance(sat.get("domain_hint"), dict) else {}
+        domain_key = str(hint.get("domain") or direction or "unknown")
+        latest_cycle = int(history_entry.get("macro_cycle") or 0)
+        previous = self._previous_cycle_snapshot(latest_cycle)
+        prev_sat = direction_saturation(previous) if previous else {}
+        if not isinstance(self.saturated_directions, dict):
+            self.saturated_directions = {}
+        self.saturated_directions[domain_key] = {
+            **sat,
+            "domain": domain_key,
+            "tag": str(hint.get("tag") or ""),
+            "macro_cycle": latest_cycle,
+            "snapshot_id": self.last_trace_analyze["roofline_snapshot_id"],
+            "top_bottleneck": history_entry.get("top_bottleneck"),
+        }
+        self.bottleneck_shift = _bottleneck_shift(
+            sat,
+            prev_sat,
+            previous_snapshot=previous,
+            domain_key=domain_key,
+            latest_cycle=latest_cycle,
+        )
 
     def _cap_roofline_snapshots(self) -> None:
         """Trim the snapshot history to its cap, always keeping snapshot #1 as the report's baseline anchor."""
@@ -2022,22 +2005,20 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         self.roofline_snapshots = [base, *tail]
 
     def _append_roofline_snapshot_history(self, payload: dict[str, Any]) -> None:
-        """Append a compact roofline snapshot of ``last_trace_analyze`` for report-side comparison; best-effort,
-        failures never block the canonical write above.
+        """Append a compact roofline snapshot of ``last_trace_analyze`` for report-side comparison.
+
+        Runs after the canonical write above, so a failure here cannot undo it.
         """
-        try:
-            history_entry = self._build_roofline_snapshot(self._resolve_snapshot_arm(payload))
-            if not isinstance(self.roofline_snapshots, list):
-                self.roofline_snapshots = []
-            self.roofline_snapshots.append(history_entry)
-            self._record_bottleneck_saturation(history_entry)
-            # R3: retire the pending switch once the top bottleneck has drifted.
-            self.maybe_clear_bottleneck_switch_on_drift(
-                str(history_entry.get("top_bottleneck") or ""),
-            )
-            self._cap_roofline_snapshots()
-        except Exception:  # never block record on render concerns
-            log.warning("roofline snapshot history was not appended for this record", exc_info=True)
+        history_entry = self._build_roofline_snapshot(self._resolve_snapshot_arm(payload))
+        if not isinstance(self.roofline_snapshots, list):
+            self.roofline_snapshots = []
+        self.roofline_snapshots.append(history_entry)
+        self._record_bottleneck_saturation(history_entry)
+        # R3: retire the pending switch once the top bottleneck has drifted.
+        self.maybe_clear_bottleneck_switch_on_drift(
+            str(history_entry.get("top_bottleneck") or ""),
+        )
+        self._cap_roofline_snapshots()
 
     def record_conc_sweep(self, result: dict[str, Any]) -> None:
         """Record the concurrency sweep's completion into ``last_conc_sweep``."""

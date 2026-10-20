@@ -2196,6 +2196,38 @@ def test_a_resume_without_a_pending_keep_replays_each_event_exactly_once(tmp_pat
     assert planned.cumulative.iterations == 3
 
 
+def test_resume_replay_advances_the_relay_streak_only_for_the_active_profiles_search(tmp_path, monkeypatch):
+    loop, workspace = _make_loop(tmp_path, monkeypatch, resume=True)
+    store = LoopStateStore(str(workspace))
+    state = RunState(campaign_id="campaign", iteration=0, next_iteration=1, baseline_wall_ms=1.0)
+    state.agent_relay.active_profile_id = "claude"
+    store.save(state)
+    for iteration, decision, producer in (
+        (1, "REVERT_PERF", "claude"),
+        (2, "REVERT_PERF", None),
+        (3, "API_ERROR", "claude"),
+        (4, "BUILD_FAILED", "claude"),
+    ):
+        store.append_event(
+            make_event(
+                "iteration_result",
+                iteration,
+                decision=decision,
+                plan=f"attempt {iteration}",
+                wall_ms=1.1,
+                best_after_ms=1.0,
+                agent_profile_id=producer,
+            )
+        )
+    loop.state_store = store
+    loop.run_state = state
+
+    planned, _, _, _ = loop._plan_resume_recovery(state, None)
+
+    assert planned.next_iteration == 5
+    assert planned.agent_relay.active_no_improvement_streak == 2
+
+
 def test_keep_expires_active_supervisor_ruling(tmp_path, monkeypatch):
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     loop.state_store = LoopStateStore(str(workspace))
