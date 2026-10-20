@@ -468,36 +468,25 @@ def existing_operator_hints_from_knowledge(
                 "kernels": list(fallback_kernel_names or []),
             }
         )
-    if not evidence_sources:
-        return []
-
     boundary_terms = [_semantic_terms(source) for source in evidence_sources]
-    boundary_terms = [terms for terms in boundary_terms if terms]
-    if not boundary_terms:
+    if not any(boundary_terms):
         return []
 
     best: dict[str, tuple[float, dict[str, Any]]] = {}
     for path, entries in _knowledge_entries(root):
         for entry in entries:
-            op_terms: set[str] = entry["operator_terms"]
-            paragraph_tokens: set[str] = entry["paragraph_tokens"]
-            score = float("-inf")
-            for terms in boundary_terms:
-                evidence_overlap = len(terms & paragraph_tokens)
-                operator_overlap = len(op_terms & terms)
-                candidate_score = operator_overlap * 100.0 + evidence_overlap * 10.0 - entry["paragraph_length"] / 500.0
-                if entry["is_declared"]:
-                    candidate_score += 500.0
-                score = max(score, candidate_score)
+            overlap = max(
+                len(entry["operator_terms"] & terms) * 100.0 + len(terms & entry["paragraph_tokens"]) * 10.0
+                for terms in boundary_terms
+            )
+            score = overlap - entry["paragraph_length"] / 500.0
+            if entry["is_declared"]:
+                score += 500.0
             if score < 20.0:
                 continue
-            try:
-                relative_path = path.relative_to(root).as_posix()
-            except ValueError:
-                relative_path = str(path)
             row = {
                 "operator": entry["operator"],
-                "path": relative_path,
+                "path": path.relative_to(root).as_posix(),
                 "evidence": entry["evidence"],
                 "score": round(score, 1),
             }
