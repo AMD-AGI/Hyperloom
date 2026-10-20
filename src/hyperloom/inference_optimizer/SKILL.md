@@ -440,7 +440,9 @@ ledger, and judges each entry — already present, not applicable, or worth a
 bench and by which route. The pump takes that batch in the order given; it
 does not re-rank or re-audit. When discovery comes back empty its full retry
 budget, the local-exploration arm authors against profile evidence instead;
-with that off too, the source arm reports itself dry.
+with that off too, the source arm reports itself dry. An authoring round that
+comes back empty, or whose specialist never runs, counts against the source
+arm's no-KEEP streak like a reverted patch.
 
 Every diff lands through `integrate_patch`, with `patch_source` naming where
 it came from. KEEP commits to the live tree so the next candidate stacks on

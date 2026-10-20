@@ -2535,13 +2535,14 @@ class FrameworkPhase(ProposalBench):
         cand_id = str(params.get("framework_agent_candidate_id") or "")
         if not cand_id:
             return
+        status = "dispatch_failed"
         recorded = self._stamp_framework_progress(
             ProgressStamp(
                 candidate_id=cand_id,
                 batch_id=str(params.get("framework_batch_id") or ""),
-                status="dispatch_failed",
+                status=status,
                 rationale=run_error[:500],
-                provenance="dispatch_failed",
+                provenance=status,
                 gain_pct=0.0,
                 extra={
                     "specialist_task_id": str(getattr(task, "task_id", "") or ""),
@@ -2551,6 +2552,7 @@ class FrameworkPhase(ProposalBench):
         )
         if not recorded:
             return
+        self._record_undelivered_authoring_attempt(task=task, candidate_id=cand_id, status=status)
         log.warning(
             "FRAMEWORK: authoring specialist never delivered candidate=%s: %s",
             cand_id,
@@ -2605,7 +2607,6 @@ class FrameworkPhase(ProposalBench):
         if not cand_id:
             return
         batch_id = str(params.get("framework_batch_id") or "")
-        # Map the cached audit verdict to a terminal status.
         audit = params.get("framework_audit") if isinstance(params.get("framework_audit"), dict) else {}
         sem = str((audit or {}).get("semantic_status") or "").strip().lower()
         if sem in ("already_equivalent", "already_superset"):
@@ -2631,11 +2632,33 @@ class FrameworkPhase(ProposalBench):
         )
         if not recorded:
             return
+        self._record_undelivered_authoring_attempt(task=task, candidate_id=cand_id, status=status)
         log.info(
             "FRAMEWORK: authoring specialist empty deliverable candidate=%s batch=%s status=%s",
             cand_id,
             batch_id,
             status,
+        )
+
+    def _record_undelivered_authoring_attempt(self, *, task: "Task", candidate_id: str, status: str) -> None:
+        """Charge an authoring round that delivered nothing to its PR lead's lever, else to the source lever.
+
+        Called only on a newly stamped terminal row, so a replay records nothing twice.
+        """
+        lever = LEVER_UPSTREAM_PR if patch_lever_kind(task.params) == LEVER_UPSTREAM_PR else LEVER_SOURCE_PATCH
+        record_attempt_row(
+            self.shared_state,
+            AttemptRow(
+                lever_kind=lever,
+                outcome=status,
+                adopted=False,
+                gain_pct=None,
+                before_tput=None,
+                after_tput=None,
+                task_id=task.task_id,
+                candidate_id=candidate_id,
+                specialist_task_id=task.task_id,
+            ),
         )
 
     async def _candidate_discovery_inflight(self) -> bool:

@@ -801,8 +801,8 @@ def _lever_attempts(state: Any, *levers: str) -> list[dict[str, Any]]:
 def _trailing_no_keep(attempts: list[dict[str, Any]]) -> int:
     """Count trailing attempts that did not adopt.
 
-    Only resolved attempts reach the ledger — a specialist that never ran and a
-    candidate its lane will retry leave nothing here to plateau on.
+    Only resolved attempts reach the ledger: a candidate its lane will retry
+    leaves nothing here to plateau on.
     """
     streak = 0
     for row in reversed(attempts):
@@ -868,7 +868,9 @@ def _patch_lever_dry(state: Any, overrides: dict[str, Any]) -> tuple[bool, dict[
 
     Source patches and upstream PRs share a supply — the discovery and authoring
     ladder — so they are judged together: a trailing run of resolved candidates
-    without an adoption, or a pump that has declared the supply exhausted.
+    without an adoption, or a pump that has declared the supply exhausted. An
+    authoring round that came back empty or never ran resolves its candidate
+    too, so a lane that cannot run dries up like one that finds nothing.
     """
     streak_floor = int(
         overrides.get("framework_no_keep_streak", DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK),
