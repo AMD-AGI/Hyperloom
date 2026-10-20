@@ -985,7 +985,8 @@ class FrameworkPhase(ProposalBench):
         Up to ``research_lane_capacity`` candidates are in flight at once; landing
         still serialises on ``workspace_mutation``. The discovery → local-explore →
         phase-done fallback runs only once no candidate is left and none is in
-        flight. Idempotent; a discover failure flips ``framework_agent_phase_done``
+        flight; the local-explore rung is skipped once the source lever reads
+        dry. Idempotent; a discover failure flips ``framework_agent_phase_done``
         so the phase advances rather than wedging.
         """
         state = self.shared_state
@@ -1012,7 +1013,8 @@ class FrameworkPhase(ProposalBench):
         if await self._maybe_enqueue_candidate_discovery(reason="candidate_pool_empty"):
             state.save(self.session_dir)
             return
-        if self._framework_local_explore_arm_enabled():
+        _, dryness = _phase_state.per_lever_dryness(state)
+        if self._framework_local_explore_arm_enabled() and not dryness["source_arm_plateaued"]:
             gap, keywords = self._compose_framework_local_explore_gap()
             title = (
                 f"local source exploration ({gap})"

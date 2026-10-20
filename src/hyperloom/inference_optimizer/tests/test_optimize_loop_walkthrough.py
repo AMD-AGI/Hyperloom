@@ -15,6 +15,7 @@ from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.orchestrator.phases import machine_state as ps
 from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.state.task_registry import TASK_STATES
 
 from ._geak_helpers import stop_geak_before_launch
 
@@ -93,9 +94,8 @@ async def test_a_baseline_carries_the_run_into_the_optimisation_phase_with_work(
         state = coord.shared_state
         assert state.phase == ps.PHASE_FRAMEWORK_AGENT
         assert state.phase_budget_pct[ps.PHASE_FRAMEWORK_AGENT] > 0.0
-        queued = await coord.tasks.queued()
-        running = await coord.tasks.running()
-        kinds = {str((t.params or {}).get("task_kind") or "") for t in (*queued, *running)}
+        tasks = [task for task_state in TASK_STATES for task in await coord.tasks.by_state(task_state)]
+        kinds = {str((t.params or {}).get("task_kind") or "") for t in tasks}
         assert kinds & {"candidate_discovery", "framework_local_explore"}
     finally:
         await coord.stop()
