@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -16,6 +17,8 @@ from hyperloom.common.timeutil import now_iso
 
 from .errors import RuntimeAdapterError
 
+
+log = logging.getLogger(__name__)
 
 DEFAULT_DEAD_LETTER_DIR = "/var/lib/critic-kb-dlq"
 
@@ -118,6 +121,7 @@ class DeadLetter:
                     dispatcher(endpoint, payload)
                     summary.succeeded += 1
                 except Exception as exc:  # noqa: BLE001
+                    log.warning("dead-letter replay failed for %s:%d: %s", path, lineno, exc)
                     summary.failed += 1
                     summary.failed_details.append(
                         {
