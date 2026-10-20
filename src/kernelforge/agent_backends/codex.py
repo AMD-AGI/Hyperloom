@@ -39,6 +39,8 @@ from kernelforge.agent_backends.workspace_guard import WorkspaceGuard
 
 log = logging.getLogger(__name__)
 
+_ignored_agent_clis: set[str] = set()
+
 _TOML_BARE_KEY_RE = re.compile(r"[A-Za-z0-9_-]+")
 
 
@@ -380,9 +382,10 @@ class CodexBackend:
         # shadow the environment.
         if isinstance(gateway, Mapping):
             gateway = LlmGateway.from_mapping(gateway) if gateway else None
-        self._configured_codex_bin = (
-            codex_bin or self.runtime.executable or os.environ.get("FORGE_AGENT_CLI", "").strip()
-        )
+        explicit_bin = codex_bin or self.runtime.executable
+        self._configured_codex_bin = explicit_bin or os.environ.get("FORGE_AGENT_CLI", "").strip()
+        # Only an explicit pin must be a Codex runtime; the variable may name another provider's CLI.
+        self._codex_bin_from_env = bool(self._configured_codex_bin) and not explicit_bin
         self.codex_bin = str(Path(self._configured_codex_bin).expanduser()) if self._configured_codex_bin else ""
         self.gateway = gateway
         self.bypass_sandbox = self.runtime.sandbox_mode == "bypass" if bypass_sandbox is None else bypass_sandbox
@@ -423,34 +426,50 @@ class CodexBackend:
             return self.gateway
         return _resolve_gateway()
 
+    def _require_executable_runtime(self) -> None:
+        if not Path(self.codex_bin).is_file() or not os.access(self.codex_bin, os.X_OK):
+            raise CodexUnavailableError(f"Codex SDK runtime is not executable: {self.codex_bin}")
+
+    def _require_codex_version(self) -> None:
+        try:
+            version = subprocess.run(
+                [self.codex_bin, "--version"],
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise CodexUnavailableError(f"Codex SDK runtime version check failed: {exc}") from exc
+        version_text = b"\n".join([version.stdout, version.stderr]).decode(errors="replace").strip()
+        if version.returncode != 0 or not re.search(
+            r"\bcodex(?:-cli)?\b",
+            version_text,
+            re.IGNORECASE,
+        ):
+            raise CodexUnavailableError(
+                f"configured SDK runtime does not appear to be Codex: "
+                f"{self.codex_bin}; --version returned {version_text!r}"
+            )
+
     def preflight(self) -> None:
         """Validate SDK runtime and gateway prerequisites without spending tokens."""
         if self._preflight_done:
             return
         sdk = _load_codex_sdk()
-        if self.codex_bin and (not Path(self.codex_bin).is_file() or not os.access(self.codex_bin, os.X_OK)):
-            raise CodexUnavailableError(f"Codex SDK runtime is not executable: {self.codex_bin}")
-        _provider_overrides(self._effective_gateway())
-        if self.codex_bin:
+        if self.codex_bin and self._codex_bin_from_env:
             try:
-                version = subprocess.run(
-                    [self.codex_bin, "--version"],
-                    capture_output=True,
-                    timeout=10,
-                    check=False,
-                )
-            except (OSError, subprocess.TimeoutExpired) as exc:
-                raise CodexUnavailableError(f"Codex SDK runtime version check failed: {exc}") from exc
-            version_text = b"\n".join([version.stdout, version.stderr]).decode(errors="replace").strip()
-            if version.returncode != 0 or not re.search(
-                r"\bcodex(?:-cli)?\b",
-                version_text,
-                re.IGNORECASE,
-            ):
-                raise CodexUnavailableError(
-                    f"configured SDK runtime does not appear to be Codex: "
-                    f"{self.codex_bin}; --version returned {version_text!r}"
-                )
+                self._require_executable_runtime()
+                self._require_codex_version()
+            except CodexUnavailableError as exc:
+                if self.codex_bin not in _ignored_agent_clis:
+                    _ignored_agent_clis.add(self.codex_bin)
+                    log.warning("ignoring FORGE_AGENT_CLI for the Codex backend; using the SDK runtime: %s", exc)
+                self.codex_bin = ""
+        if self.codex_bin:
+            self._require_executable_runtime()
+        _provider_overrides(self._effective_gateway())
+        if self.codex_bin and not self._codex_bin_from_env:
+            self._require_codex_version()
         client = None
         try:
             client = sdk.Codex(

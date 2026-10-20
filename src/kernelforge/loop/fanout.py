@@ -49,6 +49,7 @@ class LaneResult:
     plan: str
     diff: str = ""
     error: str = ""
+    agent_profile_id: str = ""
     # What this lane's teardown found, carried structured rather than folded
     # into ``error``. The two say different things to different readers: the
     # error is why THIS lane produced nothing, which costs the round one
