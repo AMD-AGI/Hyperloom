@@ -9,7 +9,7 @@ import pytest
 
 from kernelforge.resources import resource_path
 
-from kernelforge.conftest import PACKAGE_ROOT
+from kernelforge.tests.conftest import PACKAGE_ROOT
 
 RUNNER = PACKAGE_ROOT / "loop" / "runner.py"
 

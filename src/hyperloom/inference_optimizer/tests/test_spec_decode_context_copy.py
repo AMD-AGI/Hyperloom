@@ -47,7 +47,7 @@ def test_eval_marker_in_magpies_nested_stderr_opens_the_eval_phase(tmp_path):
     nested.mkdir()
     (nested / "benchmark_stderr.log").write_text("+ run_eval\nHYPERLOOM_EVAL_START\n", encoding="utf-8")
 
-    scan = sk._scan_logs_increment(str(primary), offsets, {}, {})
+    scan = sk._LogCursor(offsets).advance(str(primary))
     assert scan.saw_eval_start
 
 
@@ -57,7 +57,7 @@ def test_a_previous_runs_nested_stderr_is_not_activity(tmp_path):
     nested.mkdir()
     (nested / "benchmark_stderr.log").write_text("HYPERLOOM_EVAL_START\n", encoding="utf-8")
     offsets = sk._stale_scan_log_sizes(str(tmp_path / "server.log"))
-    scan = sk._scan_logs_increment(str(tmp_path / "server.log"), offsets, {}, {})
+    scan = sk._LogCursor(offsets).advance(str(tmp_path / "server.log"))
     assert not scan.saw_eval_start
 
 

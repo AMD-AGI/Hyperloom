@@ -567,13 +567,16 @@ class RayDouble:
     """A ``ray`` module stand-in that runs actor methods in real threads."""
 
     class exceptions:
-        class RayActorError(Exception):
+        class RayError(Exception):
             pass
 
-        class RayTaskError(Exception):
+        class RayActorError(RayError):
             pass
 
-        class GetTimeoutError(Exception):
+        class RayTaskError(RayError):
+            pass
+
+        class GetTimeoutError(RayError):
             pass
 
     def __init__(self) -> None:

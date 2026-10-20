@@ -19,7 +19,8 @@ def _rocm_profiler_wheel_roots() -> list[str]:
     pip-packaged ROCm; there ROCM_PATH points at the separate `_rocm_sdk_devel`."""
     try:
         spec = importlib.util.find_spec("_rocm_profiler")
-    except Exception:  # noqa: BLE001
+    except ValueError:
+        # A sys.modules entry without a usable __spec__ names no wheel root.
         return []
     return list(getattr(spec, "submodule_search_locations", None) or [])
 
@@ -46,7 +47,7 @@ def _python_can_run_rocpc(python: str, libexec: str) -> bool:
             timeout=60,
         )
         return p.returncode == 0
-    except Exception:  # noqa: BLE001
+    except (OSError, subprocess.TimeoutExpired):
         return False
 
 
@@ -63,7 +64,7 @@ def _rocm_profiler_runtime_root() -> str | None:
     for pkg in ("_rocm_sdk_devel", "_rocm_sdk_core"):
         try:
             spec = importlib.util.find_spec(pkg)
-        except Exception:  # noqa: BLE001
+        except ValueError:
             continue
         for root in list(getattr(spec, "submodule_search_locations", None) or []):
             if os.path.isdir(os.path.join(root, "lib", "rocprofiler-sdk")):
@@ -140,7 +141,7 @@ def _torch_import_under_rocprofv3(driver_python: str) -> tuple[bool, str]:
         )
     except subprocess.TimeoutExpired:
         return False, "rocprofv3 timed out while importing torch; this image cannot be profiled safely"
-    except Exception as exc:  # noqa: BLE001
+    except (OSError, ValueError) as exc:
         return False, f"rocprofv3 torch-import preflight failed: {exc}"
     output = f"{p.stdout}{p.stderr}"
     if p.returncode == 0:
@@ -226,7 +227,7 @@ def _run(rocpc_python: str, libexec: str, native: list[str], cwd=None, timeout=1
         _kill_tree(proc.pid)
         try:
             out, err = proc.communicate(timeout=30)
-        except Exception:
+        except subprocess.TimeoutExpired:
             out, err = "", ""
         tail = f"\n{out}{err}".rstrip()
         return 124, f"TIMEOUT after {timeout}s{tail}"

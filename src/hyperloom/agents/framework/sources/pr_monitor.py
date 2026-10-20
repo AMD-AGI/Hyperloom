@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import urllib.error
 import urllib.parse
@@ -72,7 +73,7 @@ def _http_get(url: str, *, timeout_sec: float) -> tuple[int, bytes, str]:
     except urllib.error.HTTPError as exc:
         try:
             err_body = exc.read().decode("utf-8", errors="replace")[:512]
-        except Exception:  # noqa: BLE001 - read can raise OSError on closed body
+        except (OSError, http.client.HTTPException):  # the error body may be unreadable or truncated
             err_body = ""
         raise PRMonitorError(f"pr_monitor HTTP {exc.code} at {url}: {err_body}") from exc
     except urllib.error.URLError as exc:

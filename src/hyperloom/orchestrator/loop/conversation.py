@@ -907,19 +907,16 @@ class ConversationCollaborator(CoordinatorCollaborator):
         return _research_hints.full_gap_summary(gap)
 
     def _current_primary_gap(self) -> str | None:
-        """Resolve latency/throughput; None when advisory is off or unavailable. Fail-soft."""
+        """Resolve latency/throughput; None when advisory is off or no competitor target is set."""
         state = self.shared_state
         if not bool(state.target_advisory_enabled):
             return None
-        try:
-            from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
+        from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
 
-            target = _research_hints.load_competitor_target(self.session_dir)
-            if not target:
-                return None
-            gap = _research_hints.gap_for_state(target, state)
-        except Exception:  # noqa: BLE001 — defensive
+        target = _research_hints.load_competitor_target(self.session_dir)
+        if not target:
             return None
+        gap = _research_hints.gap_for_state(target, state)
         if not isinstance(gap, dict):
             return None
         return str(gap.get("primary_gap") or "").strip() or None
@@ -995,7 +992,10 @@ class ConversationCollaborator(CoordinatorCollaborator):
         return "\n".join(lines)
 
     def _priors_match_advisory_block(self) -> str:
-        """Flag recently proposed variants aligning with proven priors / dominant external gap (advisory ordering, fail-soft)."""
+        """Flag recently proposed variants aligning with proven priors / dominant external gap (advisory ordering).
+
+        A failure is logged and the prompt goes out without this block.
+        """
         try:
             from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
 
@@ -1009,7 +1009,8 @@ class ConversationCollaborator(CoordinatorCollaborator):
                 hints,
                 primary_gap=primary_gap,
             )
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
+            log.exception("Coordinator: priors-match advisory failed")
             return ""
 
     def _discarded_escalate_hint_advisory_block(self) -> str:

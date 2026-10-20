@@ -55,7 +55,7 @@ def _attach_recipe_audit_hook(kb: Any, session_dir: Path | None) -> None:
                 **event,
             }
             append_jsonl(audit_path, row, make_parents=True, fmt=JsonLineFormat(sort_keys=True))
-        except Exception:
+        except (OSError, TypeError, ValueError):
             log.debug("recipe_snapshot audit append failed", exc_info=True)
         # The same hook feeds the warm_start event, which claims only the reads
         # served while T0's own lookup is open. Kept separate from the append

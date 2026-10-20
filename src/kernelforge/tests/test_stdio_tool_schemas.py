@@ -9,14 +9,15 @@ from typing import Any
 
 import pytest
 
-from kernelforge.mcp_server import pr_stdio_server, probe_stdio_server
+from kernelforge.knowledge.pr_knowledge import mcp_server as pr_server
+from kernelforge.orchestrator import specialist_probe_server
 
 
 @pytest.mark.parametrize(
     "schema",
     [
         pytest.param(tool["inputSchema"], id=tool["name"])
-        for server in (pr_stdio_server, probe_stdio_server)
+        for server in (pr_server, specialist_probe_server)
         for tool in server.TOOL_DEFINITIONS
     ],
 )

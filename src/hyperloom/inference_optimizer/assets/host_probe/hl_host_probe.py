@@ -347,7 +347,7 @@ class HostProbe:
                 # allocation but is all there is.
                 try:
                     generation = -int(value.data_ptr())
-                except Exception:  # noqa: BLE001 - meta/fake tensors have no storage
+                except RuntimeError:  # sparse tensors have no storage
                     generation = -1
             return base + (generation, int(getattr(value, "_version", -1) or -1))
         if isinstance(value, (tuple, list)) and depth < _MAX_CONTAINER_DEPTH:

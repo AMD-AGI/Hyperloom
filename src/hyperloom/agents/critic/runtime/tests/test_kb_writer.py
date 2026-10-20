@@ -534,3 +534,21 @@ def test_breaker_reflects_per_request_failures_in_bundle(tmp_path):
     )
     assert bundle.kb_read_skipped_reason == "kb_unreachable"
     assert bundle.kb_priors_by_proposal["mmm"] == []
+
+
+def test_a_topic_that_cannot_be_slugged_is_skipped_or_rejected(writer, packet_context):
+    w, _, _, _ = writer
+    topic = "\ud800 lone surrogate topic"
+    error = "'utf-8' codec can't encode character '\\ud800' in position 0: surrogates not allowed"
+    ctx = WriteContext(session_id="s")
+
+    verdict = {"verdict": "reject", "topic": topic, "reasoning": "r", "packet_evidence": ["e"]}
+    skipped = w.write_verdict(verdict=verdict, packet_context=packet_context, ctx=ctx)
+    draft = {"category": "kernel_optimization", "action": topic}
+    rejected = w.write_kb_drafts(kb_drafts=[draft], packet_context=packet_context, ctx=ctx)
+
+    assert skipped.to_dict() == {"status": "skipped", "detail": {"reason": "slug_failed", "error": error}}
+    assert rejected.to_dict() == {
+        "status": "skipped",
+        "detail": {"reason": "all_rejected", "rejected": [{"draft": draft, "reason": f"slug_failed: {error}"}]},
+    }

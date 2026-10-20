@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
 
 # Max times the Stop hook will BLOCK a stop for an unrestored protected-harness change before it gives up, allows the
 # stop, and hands off to the outer loop's force-REVERT.

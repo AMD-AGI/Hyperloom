@@ -16,7 +16,7 @@ from kernelforge.llm.git import git
 from kernelforge.kernel_backends.constants import resolve_language_dirs
 from kernelforge.orchestrator.contracts import EvidenceRef
 from kernelforge.orchestrator.supervisor import latest_supervisor_ruling_path
-from kernelforge.durable_io import atomic_write_text
+from kernelforge.tools.durable_io import atomic_write_text
 
 
 log = logging.getLogger(__name__)
@@ -243,7 +243,7 @@ class AnalysisEvidenceMixin:
                     # it only measures half the knowledge block's cost.
                     defer_all=bool(getattr(self.config, "defer_knowledge_maps", False)),
                 )
-            except Exception:
+            except OSError:
                 log.debug("failed to build orchestration knowledge index", exc_info=True)
 
         return OrchestrationContext(
