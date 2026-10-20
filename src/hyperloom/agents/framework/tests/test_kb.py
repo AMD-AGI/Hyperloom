@@ -222,11 +222,11 @@ class TestMigrationCannotStopTheRun:
 
         assert kb.migrate_legacy_partition_once() is None
 
-    def test_unexpected_failure_still_does_not_escape(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Not just OSError: nothing this helper can hit is worth the session."""
+    def test_non_io_failure_surfaces_from_the_helper(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self._break_copy(monkeypatch, ValueError("something nobody predicted"))
 
-        assert kb.migrate_legacy_partition_once() is None
+        with pytest.raises(ValueError, match="something nobody predicted"):
+            kb.migrate_legacy_partition_once()
 
     def test_start_up_still_completes(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The whole start-up sequence, not just the helper, survives it."""
