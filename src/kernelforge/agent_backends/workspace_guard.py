@@ -107,6 +107,14 @@ class WorkspaceGuard:
         """Whether this turn inherits, instead of rejecting, a dirty worktree."""
         return self.spec.read_only_resume or self.allow_dirty_baseline
 
+    def _require_read_only_tools(self) -> None:
+        """Refuse a read-only resume whose spec or tool policy would still let the agent write."""
+        policy = self.spec.tool_policy
+        if self.spec.writable or policy is None or policy.write or policy.shell:
+            raise WorkspaceSafetyError(
+                "a read-only resume requires writable=False and a tool policy with write=False and shell=False"
+            )
+
     def _resolve_path(self, value: str) -> Path:
         """Resolve a spec path against the session working directory."""
         path = Path(value).expanduser()
@@ -178,6 +186,8 @@ class WorkspaceGuard:
             self.driver_path = self._resolve_path(self.spec.driver_script)
 
         unstaged, staged, untracked = self._current_changes()
+        if self.spec.read_only_resume:
+            self._require_read_only_tools()
         # The caller owns whether untracked state is expected: the loop writes its own experiment ledger into the
         # workspace it hands the implementer, so every iteration would otherwise be refused for the caller's files.
         refused_untracked = [] if self.spec.allow_untracked else untracked
