@@ -632,6 +632,13 @@ class NotebookSnapshot:
         return priced_usd(record.usage for record in self.llm_usage)
 
     @property
+    def llm_unpriced_tokens(self) -> TokenCounts:
+        """The tokens of every LLM launch and call whose model the price sheet does not list, which ``llm_usd`` leaves
+        out, the scheduler's own included."""
+
+        return sum((record.usage.tokens for record in self.llm_usage if record.usage.cost_usd is None), TokenCounts())
+
+    @property
     def environment_changes(self) -> tuple[EnvironmentChange, ...]:
         """Where a node's measurement environment moved between its results, in the order they were written.
 

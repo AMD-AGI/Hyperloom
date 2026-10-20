@@ -11,17 +11,21 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom_multibranch.contracts.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, ClaimKey, Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import (
     BranchNode,
     Claim,
+    LlmUsage,
+    LlmUsageRecord,
     NotebookSnapshot,
     QuarantineEvent,
     TestRecord,
 )
-from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, LineageKind, QuarantineAction
+from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, LineageKind, QuarantineAction, UsageSource
 from hyperloom_multibranch.contracts.toolbox import QueueState
 from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.notebook.codec import encode
 from hyperloom_multibranch.notebook.dashboard import build_dashboard, render_html, write_dashboard
 from hyperloom_multibranch.notebook.rsi.frontier import FrontierPolicy, score_progress
 from hyperloom_multibranch.notebook.tests.factories import request, result
@@ -68,7 +72,7 @@ def test_the_dashboard_holds_branches_in_flight_work_lineage_and_infrastructure(
         (1.25, 1),
         (0.5, 2),
     ]
-    assert dashboard["spend"] == {"gpu_hours": 1.0, "llm_usd": 2.0}
+    assert dashboard["spend"] == {"gpu_hours": 1.0, "llm_usd": 2.0, "llm_unpriced_tokens": encode(TokenCounts())}
     (waiting,) = dashboard["in_flight"]["tests"]
     assert (waiting["request_id"], waiting["waiting_s"]) == ("r9", pytest.approx(30.0))
     assert [(claim["branch"], claim["expires_in_s"]) for claim in dashboard["in_flight"]["claims"]] == [("s1", 45.0)]
@@ -94,8 +98,20 @@ def test_the_page_is_self_contained_and_escapes_every_value(busy: NotebookSnapsh
     assert HOSTILE not in page and "&lt;script&gt;" in page
     assert not any(marker in page for marker in ("http://", "https://", "<link", "<script", " src="))
     assert "<td>+4.00%</td>" in page and "Toolbox queue" not in page
-    assert "spent 1.00 GPU hours and $2.00 of LLM calls" in page
+    assert "spent 1.00 GPU hours and $2.00 of LLM calls;" in page
     assert "<td>stopped</td>" in page and "<td>node-3</td>" in page
+
+
+def test_the_tokens_of_unpriced_llm_calls_show_beside_the_dollars_they_are_not_in(snapshot: NotebookSnapshot) -> None:
+    tokens = TokenCounts(input=1_000, output=500, cache_read=20_000)
+    unpriced = LlmUsageRecord("u1", snapshot.taken_at, LlmUsage("s1", UsageSource.SPECIALIST, None, tokens))
+    spent = dataclasses.replace(snapshot, llm_usage=(*snapshot.llm_usage, unpriced, unpriced))
+
+    dashboard = build_dashboard(spent, metric=METRIC)
+
+    assert (dashboard["spend"]["llm_usd"], dashboard["spend"]["llm_unpriced_tokens"]) == (2.0, encode(tokens + tokens))
+    page = render_html(dashboard)
+    assert "and $2.00 of LLM calls, plus unpriced calls of 2,000 input, 1,000 output, 40,000 cache read tokens;" in page
 
 
 def test_the_dashboard_shows_who_covers_each_direction_and_every_hypothesis(busy: NotebookSnapshot) -> None:

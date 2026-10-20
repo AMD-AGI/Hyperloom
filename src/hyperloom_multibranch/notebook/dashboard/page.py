@@ -43,6 +43,11 @@ def _pct(value: float | None) -> str:
     return "" if value is None else f"{value:+.2f}%"
 
 
+def _unpriced(tokens: Mapping[str, int]) -> str:
+    counts = ", ".join(f"{count:,} {kind.replace('_', ' ')}" for kind, count in tokens.items() if count)
+    return f", plus unpriced calls of {counts} tokens" if counts else ""
+
+
 def _table(title: str, headers: Sequence[str], rows: Sequence[Sequence[Any]]) -> str:
     if not rows:
         return f'<section><h2>{escape(title)}</h2><p class="empty">none</p></section>'
@@ -202,7 +207,10 @@ def render_html(dashboard: Mapping[str, Any]) -> str:
         if session.get(key)
     )
     spend = dashboard["spend"]
-    spent = f"spent {_text(spend['gpu_hours'])} GPU hours and ${_text(spend['llm_usd'])} of LLM calls"
+    spent = (
+        f"spent {_text(spend['gpu_hours'])} GPU hours and ${_text(spend['llm_usd'])} of LLM calls"
+        f"{_unpriced(spend['llm_unpriced_tokens'])}"
+    )
     body = "".join(
         (
             f"<h1>{escape(title)}</h1>",

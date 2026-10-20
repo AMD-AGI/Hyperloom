@@ -5,13 +5,16 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 
 from hyperloom.contracts.recipe import LaunchConfig, Recipe
 from hyperloom.orchestrator.knowledge.remote_recipe.models import RemoteWriteResult
+from hyperloom_multibranch.contracts.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
-from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot
+from hyperloom_multibranch.contracts.notebook.records import LlmUsage, LlmUsageRecord, NotebookSnapshot
+from hyperloom_multibranch.contracts.notebook.vocab import UsageSource
 from hyperloom_multibranch.notebook.knowledge.breakdown import (
     EXPORTER_VERSION,
     FILENAME,
@@ -22,6 +25,7 @@ from hyperloom_multibranch.notebook.knowledge.breakdown import (
 from hyperloom_multibranch.notebook.knowledge.recipe_writeback import FinalRecipe
 
 FINAL_RECIPE = Recipe("rocm/vllm@sha256:" + "a" * 64, LaunchConfig(server_args="--tensor-parallel-size 8"))
+NO_TOKENS = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "cache_write_1h": 0}
 
 
 def test_the_breakdown_lays_out_the_session_tree_tests_and_measurement(snapshot: NotebookSnapshot) -> None:
@@ -39,7 +43,7 @@ def test_the_breakdown_lays_out_the_session_tree_tests_and_measurement(snapshot:
         "s1": 1.25,
         "s2": 0.5,
     }
-    assert breakdown["spend"] == {"gpu_hours": 1.0, "llm_usd": 2.0}
+    assert breakdown["spend"] == {"gpu_hours": 1.0, "llm_usd": 2.0, "llm_unpriced_tokens": NO_TOKENS}
     assert breakdown["environment_changes"] == []
     assert [row["request"]["request_id"] for row in breakdown["tests"]] == ["r1", "r2", "r3", "r5", "r4", "m1"]
     assert [(row["node"], row["tests"], row["gpu_seconds"]) for row in breakdown["measurement_sandboxes"]] == [
@@ -48,6 +52,22 @@ def test_the_breakdown_lays_out_the_session_tree_tests_and_measurement(snapshot:
     ]
     assert breakdown["close"]["kb_write_back"]["status"] == "written"
     assert build_breakdown(snapshot)["close"] == {"final": None, "selection": {}, "kb_write_back": None}
+
+
+def test_the_spend_counts_the_tokens_of_unpriced_llm_calls_beside_the_dollars(snapshot: NotebookSnapshot) -> None:
+    tokens = TokenCounts(input=1_000, output=500, cache_read=20_000, cache_write_1h=300)
+    unpriced = LlmUsageRecord("u1", snapshot.taken_at, LlmUsage("", UsageSource.JUDGE, None, tokens))
+
+    spend = build_breakdown(dataclasses.replace(snapshot, llm_usage=(*snapshot.llm_usage, unpriced)))["spend"]
+
+    assert spend["llm_usd"] == 2.0
+    assert spend["llm_unpriced_tokens"] == {
+        **NO_TOKENS,
+        "input": 1_000,
+        "output": 500,
+        "cache_read": 20_000,
+        "cache_write_1h": 300,
+    }
 
 
 def test_the_close_section_names_the_commit_final_selection_chose_and_how(snapshot: NotebookSnapshot) -> None:

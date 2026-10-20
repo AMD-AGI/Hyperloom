@@ -519,6 +519,7 @@ async def test_a_specialist_records_its_own_llm_spend_and_the_scheduler_its_judg
         UsageSource.JUDGE,
     ]
     assert (rows["s1"].llm_usd, rows[INTEGRATION_BRANCH].llm_usd, snapshot.llm_usd) == (1.75, 0.0, 2.0)
+    assert snapshot.llm_unpriced_tokens == tokens + tokens
     assert snapshot.gpu_hours == pytest.approx(600.0 / 3600.0)
 
 

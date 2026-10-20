@@ -5,7 +5,8 @@
 
 * ``branches``: each branch's progress, its head's gain over the baseline, and its frontier score when the progress
   rows carry one (pass :class:`FrontierScoring`'s rows to show them);
-* ``spend``: the session's GPU hours and LLM dollars so far, its specialists', judge's and resolver's together;
+* ``spend``: the session's GPU hours and LLM dollars so far, its specialists', judge's and resolver's together, and the
+  tokens of the LLM calls whose model the price sheet does not list, which the dollars leave out;
 * ``in_flight``: tests requested and neither measured nor withdrawn yet, and the claims held now;
 * ``directions``: every direction an intent named, the states it was tried on, its best gain, the running branches
   whose head carries one of its commits and the branches holding a claim on it;
@@ -34,7 +35,7 @@ from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, LineageK
 from hyperloom_multibranch.contracts.toolbox import QueueState
 from hyperloom_multibranch.notebook.codec import encode
 from hyperloom_multibranch.notebook.dashboard.page import render_html
-from hyperloom_multibranch.notebook.knowledge.breakdown import measurement_usage
+from hyperloom_multibranch.notebook.knowledge.breakdown import measurement_usage, session_spend
 from hyperloom_multibranch.notebook.rsi.analysis import direction_occupancy, hypothesis_ledger
 
 SCHEMA_VERSION = "multibranch-dashboard-1"
@@ -174,7 +175,7 @@ def build_dashboard(
         "session": encode(profile),
         "baseline": encode(baseline),
         "branches": _branches(snapshot, rows, metric),
-        "spend": {"gpu_hours": snapshot.gpu_hours, "llm_usd": snapshot.llm_usd},
+        "spend": session_spend(snapshot),
         "in_flight": _in_flight(snapshot),
         "directions": _directions(snapshot),
         "hypotheses": _hypotheses(snapshot),

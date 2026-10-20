@@ -75,6 +75,16 @@ def measurement_usage(records: Iterable[TestRecord]) -> tuple[MeasurementUsage, 
     return tuple(usage[key] for key in sorted(usage))
 
 
+def session_spend(snapshot: NotebookSnapshot) -> dict[str, object]:
+    """GPU hours and LLM dollars so far, and the tokens of the LLM calls the dollars leave out for want of a price."""
+
+    return {
+        "gpu_hours": snapshot.gpu_hours,
+        "llm_usd": snapshot.llm_usd,
+        "llm_unpriced_tokens": encode(snapshot.llm_unpriced_tokens),
+    }
+
+
 def _final(final: FinalRecipe | None) -> dict[str, object] | None:
     if final is None:
         return None
@@ -114,7 +124,7 @@ def build_breakdown(
         "baseline": encode(snapshot.baseline),
         "lineage": encode(snapshot.lineage),
         "branches": encode(snapshot.progress),
-        "spend": {"gpu_hours": snapshot.gpu_hours, "llm_usd": snapshot.llm_usd},
+        "spend": session_spend(snapshot),
         "committed": encode(snapshot.committed),
         "tests": encode(snapshot.records),
         "measurement_sandboxes": encode(measurement_usage(snapshot.records)),
@@ -138,5 +148,6 @@ __all__ = [
     "MeasurementUsage",
     "build_breakdown",
     "measurement_usage",
+    "session_spend",
     "write_breakdown",
 ]
