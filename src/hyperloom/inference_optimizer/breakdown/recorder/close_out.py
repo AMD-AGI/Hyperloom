@@ -265,13 +265,15 @@ def record_final_recipe(session_dir: Path | str | None, recipe: FinalRecipe) -> 
 
 
 def record_geak_candidate(session_dir: Path | str | None, pending: Mapping[str, Any] | None) -> None:
-    """Record the GEAK candidate still unsettled when the session winds down.
+    """Record the GEAK candidate still unsettled when the session wind-down starts.
 
     A settled candidate clears its slot, so a non-empty ``pending`` is one
-    awaiting a rebench or dropped without one; an empty slot writes nothing.
+    awaiting a rebench or dropped without one. An empty slot is written as
+    ``None``, which replaces what an earlier close of a resumed session left.
     """
     slot = dict(pending or {})
     if not slot:
+        _write(session_dir, {"geak_candidate": None})
         return
     status = str(slot.get("status") or "")
     _write(

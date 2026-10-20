@@ -774,6 +774,30 @@ async def test_close_sequencer_records_the_unsettled_geak_candidate_the_final_re
 
 
 @pytest.mark.asyncio
+async def test_a_resumed_close_replaces_the_candidate_the_first_close_recorded(coord, tmp_path, monkeypatch):
+    from hyperloom.inference_optimizer.breakdown.reporters._renderers.final import render
+
+    monkeypatch.setenv("HYPERLOOM_SESSION_PACKAGE_DEST", str(tmp_path / "session-packages"))
+    coord.shared_state.phase_history = [_close_phase_history_row()]
+    coord.shared_state.stop_reason = "sweep_done"
+    transition = Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={})
+
+    coord.shared_state.geak_pending = {"status": "rebench_cancelled", "self_reported_gain_pct": 12.5}
+    await coord.phase_close.on_enter_close(transition)
+    first = collect_v6_close([], recorded=assemble_parts(tmp_path, warnings=[])["close"])
+    assert first["geak_candidate"]["status"] == "rebench_cancelled"
+
+    coord.shared_state.geak_pending = {}
+    await coord.phase_close.on_enter_close(transition)
+    second = collect_v6_close([], recorded=assemble_parts(tmp_path, warnings=[])["close"])
+
+    assert "geak_candidate" not in second
+    section = render({"outcome": {"final": {}, "baseline": {}, "validation": {}}, "close": second, "timeline": []})
+    assert not any("GEAK candidate" in fact for fact in section.key_facts)
+    assert section.warnings == []
+
+
+@pytest.mark.asyncio
 async def test_close_sequencer_records_no_geak_candidate_when_none_is_pending(coord, tmp_path, monkeypatch):
     monkeypatch.setenv("HYPERLOOM_SESSION_PACKAGE_DEST", str(tmp_path / "session-packages"))
     coord.shared_state.phase_history = [_close_phase_history_row()]

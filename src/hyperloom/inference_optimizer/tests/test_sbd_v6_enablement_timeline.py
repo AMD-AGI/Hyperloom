@@ -265,6 +265,120 @@ def test_a_keep_awaiting_revalidation_is_counted_apart_from_a_landed_fix(_bound_
     assert attempts["rows"][0]["validation_pending"] is True
 
 
+def _pending_keep(attempt: int) -> None:
+    enablement_event.record_dispatch(
+        enablement_event.AuthoringDispatch(task_id=f"spec-{attempt}", attempt=attempt, failure_kind="accuracy_gap")
+    )
+    enablement_event.record_round(
+        enablement_event.AuthoringRound(
+            task_id=f"spec-{attempt}",
+            attempt=attempt,
+            result=_kept(),
+            stall_streak=0,
+            succeeded=False,
+            validation_pending=True,
+        )
+    )
+
+
+def _counts(session_dir) -> dict[str, Any]:
+    return {key: value for key, value in _ext(session_dir)["attempts"].items() if key != "rows"}
+
+
+def test_a_keep_whose_revalidation_promoted_has_landed(_bound_session):
+    _boot_trigger()
+    _pending_keep(1)
+    enablement_event.record_revalidation(generation=1, task_id="base-1")
+    enablement_event.record_revalidation_outcome(generation=1, promoted=True, accuracy=0.9, accuracy_floor=0.8)
+    enablement_event.finish(
+        enablement_event.LaneTerminal(outcome=enablement_event.OUTCOME_SUCCEEDED, reason="revalidation promoted")
+    )
+
+    assert _counts(_bound_session) == {
+        "count": 1,
+        "settled": 1,
+        "landed": 1,
+        "validation_pending": 0,
+        "advanced": 0,
+    }
+
+
+def test_a_keep_rejected_below_the_floor_is_neither_landed_nor_pending(_bound_session):
+    _boot_trigger()
+    _pending_keep(1)
+    enablement_event.record_revalidation(generation=1, task_id="base-1")
+    enablement_event.record_revalidation_outcome(
+        generation=1, promoted=False, accuracy=0.1, accuracy_floor=0.8, reason="accuracy below floor"
+    )
+
+    assert _counts(_bound_session) == {
+        "count": 1,
+        "settled": 1,
+        "landed": 0,
+        "validation_pending": 0,
+        "advanced": 0,
+    }
+
+
+def test_revalidations_settle_their_keeps_in_order(_bound_session):
+    _boot_trigger()
+    _pending_keep(1)
+    enablement_event.record_revalidation(generation=1, task_id="base-1")
+    enablement_event.record_revalidation_outcome(generation=1, promoted=False, reason="accuracy below floor")
+    _pending_keep(2)
+    enablement_event.record_revalidation(generation=2, task_id="base-2")
+    enablement_event.record_revalidation_outcome(generation=2, promoted=True, accuracy=0.9)
+    _pending_keep(3)
+    enablement_event.record_revalidation(generation=3, task_id="base-3")
+
+    assert _counts(_bound_session) == {
+        "count": 3,
+        "settled": 3,
+        "landed": 1,
+        "validation_pending": 1,
+        "advanced": 0,
+    }
+
+
+def test_a_window_the_run_stopped_does_not_hide_the_one_that_promoted(_bound_session):
+    _boot_trigger()
+    _pending_keep(1)
+    enablement_event.record_revalidation(generation=1, task_id="base-1")
+    enablement_event.record_revalidation_outcome(generation=1, promoted=False, reason="stopped by the run")
+    enablement_event.record_revalidation(generation=2, task_id="base-2")
+    enablement_event.record_revalidation_outcome(generation=2, promoted=True, accuracy=0.9)
+
+    assert _counts(_bound_session) == {
+        "count": 1,
+        "settled": 1,
+        "landed": 1,
+        "validation_pending": 0,
+        "advanced": 0,
+    }
+
+
+def test_the_report_tells_landed_pending_and_rejected_keeps_apart(_bound_session):
+    from hyperloom.inference_optimizer.breakdown.reporters._renderers.enablement import render
+
+    _boot_trigger()
+    _pending_keep(1)
+    enablement_event.record_revalidation(generation=1, task_id="base-1")
+    enablement_event.record_revalidation_outcome(generation=1, promoted=False, reason="accuracy below floor")
+    _pending_keep(2)
+    enablement_event.record_revalidation(generation=2, task_id="base-2")
+    enablement_event.record_revalidation_outcome(generation=2, promoted=True, accuracy=0.9)
+    _pending_keep(3)
+
+    section = render({"timeline": [{"type": "enablement", "status": "", "ext": _ext(_bound_session)}]})
+
+    assert section.key_facts == [
+        "Enablement ran 3 authoring round(s) (mode=all, origin=boot).",
+        "1 round(s) landed a fix.",
+        "1 round(s) kept a fix that is awaiting revalidation.",
+        "1 revalidation(s) closed without promoting the kept fix.",
+    ]
+
+
 def test_the_gap_a_round_revealed_is_not_the_gap_it_faced(_bound_session):
     _boot_trigger(evidence="gap 1: ImportError fused_moe")
     enablement_event.record_dispatch(

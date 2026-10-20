@@ -1859,3 +1859,38 @@ def test_the_standing_e2e_gain_is_the_one_the_standing_decision_measured(last_ga
         "patch_path": None,
         "target_file": None,
     }
+
+
+def test_a_geak_candidate_accepted_without_a_rebench_verdict_carries_no_measured_gain(tmp_path):
+    recorder = _geak_recorder()
+    recorder.record_geak_attempts(
+        {
+            "kernels": [
+                {
+                    "kernel_id": "k001",
+                    "dispatch": {"dispatched": True},
+                    "e2e": {"decision": "KEEP", "integrated": True, "validated": True, "e2e_gain_pct": 40.799},
+                }
+            ]
+        }
+    )
+    recorder.record_geak_claim({}, specs=[{"short_name": "k001", "kernel_id": "k001", "e2e_delta_pct": 40.799}])
+    recorder.finish(tput_after=900.0)
+
+    ext = _kernel_events(tmp_path)[0]["ext"]
+    row = ext["attempts"][0]
+    assert (row["settled_by"], row["outcome"], row["gain_pct"]) == ("integrate", "adopted", None)
+    assert row["e2e"]["e2e_gain_pct"] is None
+    assert row["e2e"]["self_reported_e2e_gain_pct"] == 40.799
+    assert ext["outcome"]["delivered"] == [
+        {
+            "route": ROUTE_GEAK,
+            "source_kind": SOURCE_GEAK_AUTHORED_KERNEL,
+            "ref": "k001",
+            "kernel_id": "k001",
+            "gain_pct": None,
+            "settled_by": "integrate",
+        }
+    ]
+    assert ext["outcome"]["verdict"] == "no_improvement"
+    assert ext["outcome"]["reason"] == "nothing measured a gain on the candidates kept"
