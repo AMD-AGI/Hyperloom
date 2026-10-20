@@ -588,3 +588,15 @@ def test_a_timed_out_session_is_stopped_before_its_edits_are_rolled_back(tmp_pat
 
     assert first.closed
     assert backend._harness_for(_spec(repo, kernel)) is not first
+
+
+def test_the_relay_never_adds_the_harness_on_its_own(tmp_path):
+    """Relay members are the providers auto selection could pick; the harness is reached only by naming it."""
+    from kernelforge.cli.relay import resolve_relay_policy
+    from kernelforge.config import Config
+
+    claude_first = resolve_relay_policy(Config(workspace=str(tmp_path), agent_backend="claude"))
+    harness_first = resolve_relay_policy(Config(workspace=str(tmp_path), agent_backend="deepseek"))
+
+    assert [member.provider for member in claude_first.profiles] == ["claude", "codex"]
+    assert [member.provider for member in harness_first.profiles] == ["deepseek", "claude", "codex"]
