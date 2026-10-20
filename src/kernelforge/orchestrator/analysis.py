@@ -62,6 +62,7 @@ _REQUIRED_BUNDLE_FILES = (
     "progress.json",
     "commands.jsonl",
 )
+_INCREMENTAL_DIFF_FILE = "incremental_diff.patch"
 
 log = logging.getLogger(__name__)
 _WRITE_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
@@ -959,7 +960,7 @@ class AnalysisAgentService:
         self, analysis_root: Path, work_root: Path, incremental: IncrementalAnalysisInput | None
     ) -> IncrementalAnalysisInput | None:
         """Stage the diff an incremental session reads; None once its parent bundle is no longer published."""
-        incremental_diff_path = work_root / "incremental_diff.patch"
+        incremental_diff_path = work_root / _INCREMENTAL_DIFF_FILE
         if incremental is not None:
             parent_commit_root = (analysis_root / incremental.parent_commit).resolve()
             parent_root = self._published_generation_root(parent_commit_root)
@@ -982,7 +983,7 @@ class AnalysisAgentService:
         retry_published_bundle: bool,
     ) -> None:
         """Write the session's request, or check that a resumed session's durable one still answers the same inputs."""
-        incremental_diff_path = session.work_root / "incremental_diff.patch"
+        incremental_diff_path = session.work_root / _INCREMENTAL_DIFF_FILE
         request_payload = {
             "analysis_commit": session.context.analysis_commit,
             "workspace": str(Path(session.context.workspace).resolve()),
@@ -1072,7 +1073,7 @@ class AnalysisAgentService:
             work_root / "manifest.json",
             *(work_root / "cases" / case.directory for case in cases),
         ]
-        incremental_diff = work_root / "incremental_diff.patch"
+        incremental_diff = work_root / _INCREMENTAL_DIFF_FILE
         if incremental_diff.is_file():
             outputs.append(incremental_diff)
         return tuple(outputs)
