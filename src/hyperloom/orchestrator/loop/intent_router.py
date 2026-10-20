@@ -28,14 +28,11 @@ from .verdicts import (
     verdict_map_entry_held_to_its_rule,
 )
 from hyperloom.common.coerce import to_int
-from hyperloom.common.timeutil import now_iso
-from hyperloom.inference_optimizer.session.session_paths import runs_dir
-from ..bus.message_bus import Message, TOPIC_ALLOWLIST
+from ..bus.message_bus import Message
 from ..policy.gate import (
     PolicyDenied,
     PRUNE_BRANCH_SCOPE_FAMILY,
     PRUNE_BRANCH_SCOPE_QUEUED,
-    SPECIALIST_FROM_AGENT_PREFIX,
 )
 from ..specialists.wall_budget import grant_wall_budget_extension
 from ..state.shared_state import (
@@ -63,6 +60,7 @@ from .kernel_request import (
     remembered_outcome,
     run_kernel_handler,
 )
+from .message_delivery import publish_send_message
 
 # ``Coordinator`` is intentionally NOT imported (avoids a module-level import cycle with coordinator.py); it is held
 # as a back-reference and the annotation below is a deferred string.
@@ -1340,52 +1338,8 @@ class IntentRouter(CoordinatorCollaborator):
         self.shared_state.save(self.session_dir)
 
     async def _handle_send_message(self, source: str, intent: Intent) -> None:
-        """Publish a free-form message onto the bus."""
-        topic = intent.payload.get("topic", "observation")
-        if topic not in TOPIC_ALLOWLIST:
-            # Soft-degrade unknown topic.
-            topic = "observation"
-        to_agent = intent.payload.get("to") or "*"
-        await self.bus.append_and_seq(
-            Message.new(
-                source,
-                to_agent,
-                topic,
-                {k: v for k, v in intent.payload.items() if k != "to"},
-            )
-        )
-        if str(to_agent).startswith(SPECIALIST_FROM_AGENT_PREFIX):
-            self._deliver_specialist_inbox(source, str(to_agent), intent.payload)
-
-    def _deliver_specialist_inbox(self, source: str, to_agent: str, payload: dict[str, Any]) -> None:
-        """Append a message to a running specialist's workspace inbox."""
-        task_id = to_agent[len(SPECIALIST_FROM_AGENT_PREFIX) :].strip()
-        if not task_id:
-            return
-        try:
-            workspace = runs_dir(self.session_dir, "specialist", task_id)
-            workspace.mkdir(parents=True, exist_ok=True)
-            # The prompt advertises the worktree when one exists; match it.
-            worktree = workspace / "worktree"
-            inbox = (worktree if worktree.is_dir() else workspace) / "inbox.json"
-            existing: list[Any] = []
-            if inbox.exists():
-                loaded = json.loads(inbox.read_text(encoding="utf-8"))
-                if isinstance(loaded, list):
-                    existing = loaded
-            existing.append(
-                {
-                    "from": source,
-                    "ts": now_iso(),
-                    "body": {k: v for k, v in payload.items() if k not in ("to", "topic")},
-                }
-            )
-            # Keep the last 32 so the file stays prompt-sized.
-            tmp = inbox.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps(existing[-32:], indent=2), encoding="utf-8")
-            tmp.replace(inbox)
-        except Exception:
-            log.exception("failed to deliver inbox message to %s", to_agent)
+        """Publish a free-form message onto the bus, once per recipient (see :mod:`.message_delivery`)."""
+        await publish_send_message(self.bus, self.session_dir, source, intent)
 
     async def _handle_alert(self, source: str, intent: Intent) -> None:
         """Broadcast an alert message."""
