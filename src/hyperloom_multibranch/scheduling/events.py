@@ -407,6 +407,7 @@ __all__ = [
     "MB_BOTTLENECK_SHIFT_PP",
     "PROFILED",
     "PROFILE_EXISTS",
+    "PROFILE_EXISTS_CODE",
     "PROFILE_UNAVAILABLE",
     "UNSUPPORTED_KIND",
     "EventKind",
