@@ -852,19 +852,11 @@ def _invoke_tuner(
     aiter instead of hanging the run.
     """
     if not _tr.is_isolation_enabled():
-        cmd = _tr.with_task_timeout(
-            [
-                "python3",
-                str(invocation.script),
-                "-i",
-                str(invocation.input_csv),
-                "-o",
-                str(invocation.tuned_csv),
-                *invocation.base_args,
-            ]
-        )
         rc, stdout, stderr = run_subprocess(
-            cmd, cwd=invocation.aiter_root, timeout_s=ctx.timeout_s, log_file=invocation.work_dir / "tune.log"
+            invocation.command(),
+            cwd=invocation.aiter_root,
+            timeout_s=ctx.timeout_s,
+            log_file=invocation.work_dir / "tune.log",
         )
         return rc, stdout, stderr, None
     # Per-shape process isolation + provenance-keyed fault blocklist.
@@ -881,7 +873,6 @@ def _invoke_tuner(
         invocation,
         _tr.IsolationGuard(
             outer_timeout_s=ctx.timeout_s,
-            task_timeout_s=_tr.DEFAULT_TASK_TIMEOUT_S,
             gpu_ids=getattr(ctx, "gpu_ids", "") or "",
             blocklist=blocklist,
         ),
