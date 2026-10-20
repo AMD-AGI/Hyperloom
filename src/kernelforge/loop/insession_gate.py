@@ -106,8 +106,15 @@ _PYTHON_COMMAND_PREFIX = re.compile(
     r"(?<![A-Za-z0-9_])(?:[A-Za-z0-9_./-]*/)?python"
     r"(?:\d+(?:\.\d+)*)?\s+"
     r"(?:-[A-Za-z][^\s;&|]*\s+)*"
-    r"-c(?=\s)",
+    r"-c\s+",
 )
+# Where a ``python -c`` payload word ends, by the quote it opens with: a single-quoted word at the next quote, a
+# double-quoted one at the next quote no backslash escapes, a bare word at whitespace or a command separator.
+_PAYLOAD_WORD_BODY = {
+    "'": re.compile(r"[^']*"),
+    '"': re.compile(r'(?:[^"\\]|\\.)*', re.DOTALL),
+    "": re.compile(r"[^\s;&|]*"),
+}
 # An interpreter as a simple command's verb, which _simple_commands has already reduced to a basename, so
 # `/usr/bin/python3.11` arrives here as `python3.11`.
 _PYTHON_VERB = re.compile(r"^python(?:\d+(?:\.\d+)*)?$")
@@ -187,39 +194,18 @@ def _python_command_payloads(command: str) -> list[tuple[str, int, int]]:
         if match is None:
             break
         start = match.end()
-        while start < len(command) and command[start].isspace():
-            start += 1
         if start >= len(command):
             break
 
         quote = command[start] if command[start] in {"'", '"'} else ""
         content_start = start + 1 if quote else start
-        end = content_start
-        escaped = False
-        while end < len(command):
-            char = command[end]
-            if quote == "'":
-                if char == "'":
-                    break
-            elif quote == '"':
-                if char == '"' and not escaped:
-                    break
-                if char == "\\" and not escaped:
-                    escaped = True
-                    end += 1
-                    continue
-                escaped = False
-            elif char.isspace() or char in ";&|\n":
-                break
-            end += 1
-
-        if quote and (end >= len(command) or command[end] != quote):
+        end = _PAYLOAD_WORD_BODY[quote].match(command, content_start).end()
+        if quote and not command.startswith(quote, end):
             cursor = start + 1
             continue
         payload_end = end + 1 if quote else end
-        raw = command[start:payload_end]
         try:
-            source = shlex.split(raw)[0]
+            source = shlex.split(command[start:payload_end])[0]
         except (ValueError, IndexError):
             cursor = max(payload_end, start + 1)
             continue
