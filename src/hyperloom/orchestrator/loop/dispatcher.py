@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import collections
 import math
+import sqlite3
 import time
 from collections.abc import Awaitable, Callable, Collection
 from functools import partial
@@ -48,7 +49,7 @@ from ..bus.resource_lock import (
 )
 from .sub_agent_runner import SubAgentResult
 from ..specialists.wall_budget import limit_wall_budget_extension
-from ..state.task_registry import Task, TaskNotFound
+from ..state.task_registry import IllegalTransition, Task, TaskNotFound
 from .time_budget import (
     TIME_BUDGET_EXEMPT_ACTIONS,
     expected_action_cost_minutes,
@@ -567,21 +568,17 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         # once per pass (a pure env-var read, zero cost). The actual slot probe
         # (serving_slot_busy()) is deferred to just before each GPU specialist
         # admit so we don't miss a serving start that happened after the pass
-        # began. A failure to resolve the probe leaves the check False (no
-        # pause) so dispatch is never blocked.
+        # began.
         _ray_serving_priority_enabled = False
         _serving_slot_busy_fn = None
-        try:
-            from ..actions.executors._ray_backend import (
-                ray_serving_priority_enabled as _rsp_enabled,
-                serving_slot_busy as _ssb,
-            )
+        from ..actions.executors._ray_backend import (
+            ray_serving_priority_enabled as _rsp_enabled,
+            serving_slot_busy as _ssb,
+        )
 
-            if _rsp_enabled():
-                _ray_serving_priority_enabled = True
-                _serving_slot_busy_fn = _ssb
-        except Exception:  # noqa: BLE001 — never block dispatch on the probe
-            pass
+        if _rsp_enabled():
+            _ray_serving_priority_enabled = True
+            _serving_slot_busy_fn = _ssb
         for task in queued:
             if task.task_id in self._inflight_actions:
                 continue
@@ -1479,7 +1476,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 "cancelled",
                 evidence={"reason": denied.rule, "error": str(denied)},
             )
-        except Exception:
+        except (sqlite3.Error, TaskNotFound, IllegalTransition):
             log.exception(
                 "dispatcher: could not cancel over-budget task=%s kind=%s",
                 task.task_id,

@@ -324,6 +324,7 @@ async def run_lanes(
                 # that cost hours as a deliberate no-op.
                 diff = _tracked_diff(lane_dir)
             except Exception as error:  # noqa: BLE001 - reported as a lost lane
+                log.warning("fanout lane %s lost: %s", lane.lane_id, error)
                 return LaneResult(
                     lane_id=lane.lane_id,
                     plan=lane.plan,

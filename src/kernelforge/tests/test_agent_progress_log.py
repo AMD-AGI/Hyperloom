@@ -96,3 +96,15 @@ def test_summary_counts_tools_and_keeps_the_tail():
 def test_summary_calls_out_an_agent_that_did_nothing():
     assert "no tool activity" in summarize_agent_progress([])
     assert "no tool calls at all" in summarize_agent_progress(["say: hmm"])
+
+
+def test_a_message_that_cannot_be_read_does_not_break_the_session():
+    class _Unreadable:
+        @property
+        def content(self):
+            raise RuntimeError("SDK message shape changed")
+
+    sink: list[str] = []
+    claude_backend._record_progress(sink, _Unreadable())
+
+    assert sink == []
