@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Builders of a baseline-prelude child's session for the scheduling tests: a framework git checkout and the
-``state.json`` of a completed child with one kept patch on it."""
+"""Builders of a baseline-prelude child's session for the scheduling tests: a framework git checkout, the
+``state.json`` of a completed child with one kept patch on it, and a roofline profile."""
 
 from __future__ import annotations
 
@@ -19,6 +19,9 @@ ROOFLINE_PEAK = 4000.0
 PATCH_TEXT = "--- a/f.py\n+++ b/f.py\n@@ -1 +1 @@\n-a\n+b\n"
 BASE_SHA = "ab" * 20
 SETUP_SCRIPT = "#!/bin/bash\npip install x\n"
+ROOFLINE_RUN_ID = "5f3e583beda4475e841f4bb7bacc9e4b"
+TRACE_FILE = "1785743528.38-TP-0.trace.json.gz"
+POINT_CONFIG = "benchmark:\n  envs:\n    CONC: 16\n    OSL: 1024\n"
 
 
 def _git(root: Path, *args: str) -> str:
@@ -85,3 +88,16 @@ def child_with_patch(tmp_path: Path) -> Path:
     script.parent.mkdir(parents=True)
     script.write_text(SETUP_SCRIPT)
     return write_child_session(session, state_document(framework, patch_file))
+
+
+def with_roofline_profile(session: Path, run_id: str = ROOFLINE_RUN_ID) -> Path:
+    """Add to the child ``session`` a roofline run ``run_id`` with a trace and its point config; return the trace
+    directory."""
+
+    run = session / "runs" / "roofline" / run_id
+    trace_dir = run / "benchmark_sglang_20260803_074937" / "torch_trace"
+    (trace_dir / "capture_traces").mkdir(parents=True)
+    (trace_dir / TRACE_FILE).write_bytes(b"trace")
+    (trace_dir / "capture_traces" / "bs_8_rank0.json.gz").write_bytes(b"capture")
+    (run / "baseline_config.with_envs.yaml").write_text(POINT_CONFIG)
+    return trace_dir

@@ -16,6 +16,11 @@ second step, once the caller has put the integration branch on the roster and gi
 of the root as the rule gate asks for, from which the gate writes the baseline and its bar. The longest of those
 tests, start to finish, is how long one test of this workload takes; FINAL's reserve is never shorter.
 
+Right after the root is committed, the toolbox is asked for the TraceLens report of the child's latest roofline
+profile, so the root has operator shares in the notebook; PRELUDE does not wait for it, and a child without a profile
+or a refusal only leaves a PRELUDE decision naming why. The toolbox reads a trace only inside its own directory, and the
+child's session lies outside the session, so the trace and its point config are copied there first.
+
 A session given the PRELUDE of an earlier one (:func:`reused_prelude`) starts no child: it roots on the child session
 that PRELUDE rooted on, which it only reads, the same way. The warm-start leads are read again, as their replays' files
 go to this session's blob store, and the baseline is measured as ever.
@@ -32,9 +37,9 @@ import json
 import shutil
 import sys
 from collections.abc import Iterable, Mapping
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from hyperloom.common.io import atomic_write_json
 from hyperloom.common.jsonio import read_json_strict
@@ -62,6 +67,7 @@ from hyperloom_multibranch.scheduling.context import SchedulerContext
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.prelude_reader import (
+    ChildProfile,
     PreludeArtifacts,
     PreludeReadError,
     framework_pin,
@@ -72,6 +78,9 @@ from hyperloom_multibranch.scheduling.prelude_reader import (
 from hyperloom_multibranch.scheduling.processes import RegisteredProcess
 from hyperloom_multibranch.scheduling.requests import SessionTests, integration_test_request
 from hyperloom_multibranch.scheduling.settings import ReusedPrelude, Workload
+
+if TYPE_CHECKING:
+    from hyperloom_multibranch.toolbox.toolbox import RealToolbox
 
 #: The ``hyperloom`` console script, run as a module so the child runs on the same install as the scheduler.
 HYPERLOOM_COMMAND = ("-m", "hyperloom", "optimize")
@@ -95,6 +104,8 @@ BASELINE_REFUSED = "another baseline test was refused"
 #: ``--reuse-prelude`` finds an earlier session's root by this reason and reads its ``child_session`` back.
 ROOT_COMMITTED = "root committed"
 CHILD_REUSED = "child reused"
+ROOT_PROFILE_STARTED = "root profile started"
+ROOT_PROFILE_NOT_STARTED = "root profile not started"
 #: The workload fields a reused PRELUDE must match: all of them but the kernel optimizer, which only scopes the
 #: session's recipes, so a field added to :class:`Workload` has to match as well.
 CHILD_WORKLOAD_FIELDS = tuple(field.name for field in fields(Workload) if field.name != "kernel_optimizer")
@@ -187,25 +198,31 @@ def _rooted_child(decisions: Path) -> Path:
     raise ValueError(f"{decisions} records no {ROOT_COMMITTED!r}")
 
 
+@dataclass(frozen=True)
+class PreludeServices:
+    """The experiment repository the root is committed to, the rule gate and the session's tests the baseline is
+    measured with, and the toolbox that analyses the child's profile."""
+
+    repo: ExperimentRepo
+    gate: SessionGate
+    tests: SessionTests
+    toolbox: RealToolbox
+
+
 class Prelude:
     """Runs PRELUDE for one session; ``warm_start`` is ``None`` when no Recipe KB is configured."""
 
     def __init__(
-        self,
-        context: SchedulerContext,
-        repo: ExperimentRepo,
-        gate: SessionGate,
-        tests: SessionTests,
-        *,
-        warm_start: WarmStartSource | None,
+        self, context: SchedulerContext, services: PreludeServices, *, warm_start: WarmStartSource | None
     ) -> None:
         self._layout = context.layout
         self._warm_start_source = warm_start
         self._processes = context.processes
         self._notebook = context.notebook
-        self._repo = repo
-        self._gate = gate
-        self._tests = tests
+        self._repo = services.repo
+        self._gate = services.gate
+        self._tests = services.tests
+        self._toolbox = services.toolbox
         self._decisions = context.decisions
         self._clock = context.clock
 
@@ -274,7 +291,42 @@ class Prelude:
                 },
             )
         )
+        await self._start_root_profile(root, artifacts.profile)
         return PreludeResult(root, profile, await self._warm_start(profile, recipe), child_gpu_seconds)
+
+    async def _start_root_profile(self, root: str, profile: ChildProfile | None) -> None:
+        """Start the toolbox's TraceLens report of the child's ``profile`` for the ``root`` commit, without waiting for
+        it; a ``PRELUDE`` decision names the job, or why none was started."""
+
+        if profile is None:
+            self._root_profile_not_started({"reason": "the child left no roofline profile"})
+            return
+        detail = {"source_id": profile.run_id, "trace_dir": str(profile.trace_dir)}
+        try:
+            copy = await asyncio.to_thread(self._copy_profile, profile)
+            job = await self._toolbox.analyze_root_profile(
+                root, copy.trace_dir, copy.point_config, source_id=copy.run_id
+            )
+        except OSError as exc:
+            self._root_profile_not_started({**detail, "reason": f"cannot copy the profile into the session: {exc}"})
+            return
+        except RequestRejected as exc:
+            self._root_profile_not_started({**detail, "code": exc.code, "reason": exc.reason})
+            return
+        self._decisions.record(
+            Decision(DecisionKind.PRELUDE, ROOT_PROFILE_STARTED, INTEGRATION_BRANCH, {**detail, "job_id": job})
+        )
+
+    def _root_profile_not_started(self, detail: dict[str, str]) -> None:
+        self._decisions.record(Decision(DecisionKind.PRELUDE, ROOT_PROFILE_NOT_STARTED, INTEGRATION_BRANCH, detail))
+
+    def _copy_profile(self, profile: ChildProfile) -> ChildProfile:
+        """``profile`` copied under the toolbox's directory; symlinks are followed, as the toolbox resolves them. Blocks."""
+
+        target = self._layout.root_profile / profile.run_id
+        trace_dir = shutil.copytree(profile.trace_dir, target / profile.trace_dir.name, dirs_exist_ok=True)
+        point_config = shutil.copy2(profile.point_config, target / profile.point_config.name)
+        return replace(profile, trace_dir=Path(trace_dir), point_config=Path(point_config))
 
     async def _warm_start(self, profile: SessionProfile, root: Recipe) -> tuple[WarmLead, ...]:
         """The Recipe KB's leads for ``profile``, the best prepared for replay on ``root``; the ``PRELUDE`` decision
@@ -428,4 +480,12 @@ def _session_profile(
     )
 
 
-__all__ = ["PreludeFailed", "Prelude", "PreludeResult", "WarmStartSource", "prelude_argv", "reused_prelude"]
+__all__ = [
+    "PreludeFailed",
+    "Prelude",
+    "PreludeResult",
+    "PreludeServices",
+    "WarmStartSource",
+    "prelude_argv",
+    "reused_prelude",
+]

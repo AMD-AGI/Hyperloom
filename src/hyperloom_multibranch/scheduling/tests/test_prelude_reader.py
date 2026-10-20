@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -24,11 +25,13 @@ from hyperloom_multibranch.scheduling.tests.child_sessions import (
     framework_checkout,
     head_of,
     state_document,
+    with_roofline_profile,
     write_child_session,
 )
 
 from hyperloom_multibranch.scheduling.prelude_reader import (
     MB_LATEST_STATE_SCHEMA_VERSION,
+    ChildProfile,
     PreludeArtifacts,
     PreludeReadError,
     UpstreamPin,
@@ -88,7 +91,21 @@ def test_baseline_without_enablement_is_read(tmp_path: Path) -> None:
     assert artifacts.framework_root is None
     assert artifacts.roofline_ceiling == {}
     assert artifacts.setup_script is None
+    assert artifacts.profile is None
     assert framework_pin(artifacts) is None
+
+
+def test_the_childs_latest_roofline_profile_is_located_beside_the_point_config_its_run_measured(
+    tmp_path: Path,
+) -> None:
+    session = child_with_patch(tmp_path)
+    earlier = with_roofline_profile(session, "a" * 32)
+    latest = with_roofline_profile(session, "b" * 32)
+    os.utime(earlier, (1.0, 1.0))
+
+    profile = read_prelude(session).profile
+
+    assert profile == ChildProfile("b" * 32, latest, latest.parents[1] / "baseline_config.with_envs.yaml")
 
 
 def test_without_a_roofline_snapshot_the_baseline_arm_ceiling_is_read(tmp_path: Path) -> None:

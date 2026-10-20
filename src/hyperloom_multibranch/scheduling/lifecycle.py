@@ -61,7 +61,13 @@ from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.llm import Completion, recorded
 from hyperloom_multibranch.scheduling.peers import PeerFactory, PeerSetup
 from hyperloom_multibranch.scheduling.policy import SCHEDULING_POLICY, policy_version
-from hyperloom_multibranch.scheduling.prelude import Prelude, PreludeFailed, PreludeResult, WarmStartSource
+from hyperloom_multibranch.scheduling.prelude import (
+    Prelude,
+    PreludeFailed,
+    PreludeResult,
+    PreludeServices,
+    WarmStartSource,
+)
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.requests import SessionChecks, SessionTests
 from hyperloom_multibranch.scheduling.roster import QUOTA_POLICY_VERSION, Roster
@@ -189,7 +195,9 @@ class Session:
             recorded(services.resolver_completion, self._notebook, UsageSource.RESOLVER), peers.repo
         )
         warm_start = None if services.recipe_kb is None else WarmStartSource(services.recipe_kb, blobs)
-        self._prelude = Prelude(context, peers.repo, peers.gate, tests, warm_start=warm_start)
+        self._prelude = Prelude(
+            context, PreludeServices(peers.repo, peers.gate, tests, peers.toolbox), warm_start=warm_start
+        )
         integrator = Integrator(MergeRecords(merger, DecisionLog(layout.merges, clock)), peers.repo, checks, resolver)
         judge = Judge(recorded(services.judge_completion, self._notebook, UsageSource.JUDGE), layout.judge, clock)
         widening = Widening(peers.toolbox, self._roster, progress.policy)

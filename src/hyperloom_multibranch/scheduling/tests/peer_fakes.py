@@ -53,7 +53,7 @@ from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.notebook.interfaces import SnapshotQuery
 from hyperloom_multibranch.contracts.repo import ExperimentRepo, RepoMerge
-from hyperloom_multibranch.contracts.toolbox import CancelOutcome, QueueState
+from hyperloom_multibranch.contracts.toolbox import CancelOutcome, QueueState, RequestRejected
 from hyperloom_multibranch.repo.git_repo import RECIPE_FILE, GitExperimentRepo
 from hyperloom_multibranch.rulegate import baseline as rulegate_baseline
 from hyperloom_multibranch.rulegate import rules as rulegate_rules
@@ -533,12 +533,24 @@ def recipe_effect(repo: Path, curves: Curves) -> Callable[[TestRequest], float]:
     return effect
 
 
+@dataclass(frozen=True)
+class RootProfileCall:
+    """The arguments of one ``analyze_root_profile`` call."""
+
+    commit_id: str
+    trace_dir: Path
+    point_config: Path
+    source_id: str
+
+
 class RecordingToolbox(FakeToolbox):
     """The toolbox module's fake, without noise, noting every queue policy, withdrawal and close it was given.
 
     ``withdrawals`` holds the reason of every session-wide withdrawal. ``effect`` sets what a test measures (see :func:`recipe_effect`); without one every test measures the baseline.
     ``accuracy`` is the accuracy score of a change by its fingerprint, and ``conc`` the workload's conc, which a test
-    whose request names none is measured at. Not a placeholder: the fake is the toolbox owner's own.
+    whose request names none is measured at. ``root_profiles`` holds every :meth:`analyze_root_profile` call, which
+    raises ``refusal`` when one is set. Not a placeholder: the fake is the toolbox owner's own, which has no
+    ``analyze_root_profile`` of its own yet.
     """
 
     def __init__(
@@ -559,12 +571,20 @@ class RecordingToolbox(FakeToolbox):
         self.withdrawals: list[str] = []
         self.queue_reads = 0
         self.closed = 0
+        self.root_profiles: list[RootProfileCall] = []
+        self.refusal: RequestRejected | None = None
 
     async def start(self) -> None:
         """Starts once: the fake also starts itself on its first use, which may come after the session's start."""
         if not self.serving:
             self.serving = True
             await super().start()
+
+    async def analyze_root_profile(self, commit_id: str, trace_dir: Path, point_config: Path, *, source_id: str) -> str:
+        if self.refusal is not None:
+            raise self.refusal
+        self.root_profiles.append(RootProfileCall(commit_id, trace_dir, point_config, source_id))
+        return f"prelude:{source_id}"
 
     async def set_policy(self, policy: QueuePolicy) -> None:
         self.policies.append(policy)

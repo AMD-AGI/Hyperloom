@@ -42,6 +42,7 @@ from hyperloom_multibranch.scheduling.prelude import (
     Prelude,
     PreludeFailed,
     PreludeResult,
+    PreludeServices,
     WarmStartSource,
     prelude_argv,
     reused_prelude,
@@ -61,8 +62,12 @@ from hyperloom_multibranch.scheduling.tests.peer_fakes import (
 from hyperloom_multibranch.toolbox.fake_model import Fate, FakeToolboxConfig
 from hyperloom_multibranch.scheduling.tests.child_sessions import (
     PATCH_TEXT,
+    POINT_CONFIG,
     ROOFLINE_PEAK,
+    ROOFLINE_RUN_ID,
+    TRACE_FILE,
     child_with_patch,
+    with_roofline_profile,
     write_child_session,
 )
 
@@ -146,7 +151,8 @@ def _prelude(
         layout, roster, _notebook(layout), decisions, processes, clock, desk, RecordedReservations()
     )
     warm_start = None if recipe_kb is None else WarmStartSource(recipe_kb, LocalBlobStore(layout.blobs))
-    return Prelude(context, peers.repo, peers.gate, peers.tests, warm_start=warm_start)
+    services = PreludeServices(peers.repo, peers.gate, peers.tests, peers.toolbox)
+    return Prelude(context, services, warm_start=warm_start)
 
 
 def _warm_start_decision(layout: SessionLayout) -> dict[str, Any]:
@@ -250,6 +256,75 @@ async def test_finished_child_roots_the_session_before_any_baseline_test(tmp_pat
     assert profile.kernel_optimizer == "geak"
     assert (profile.model_type, profile.architectures) == ("", ())
     assert peers.toolbox.requests == {}
+
+
+async def test_the_root_profile_of_the_childs_trace_is_started_right_after_the_root_is_committed(
+    tmp_path: Path,
+) -> None:
+    layout = _layout(tmp_path)
+    child = child_with_patch(tmp_path)
+    trace_dir = with_roofline_profile(child)
+    processes, peers = _registry(layout, child), _peers(layout)
+
+    result = await _run(_prelude(layout, processes, peers), SessionBudget.from_hours(2.0, NOW))
+
+    [call] = peers.toolbox.root_profiles
+    copy = layout.root_profile / ROOFLINE_RUN_ID
+    assert (call.commit_id, call.source_id) == (result.root_commit, ROOFLINE_RUN_ID)
+    assert (call.trace_dir, call.point_config) == (copy / "torch_trace", copy / "baseline_config.with_envs.yaml")
+    assert call.trace_dir.is_relative_to(layout.toolbox) and call.point_config.read_text() == POINT_CONFIG
+    assert (call.trace_dir / TRACE_FILE).read_bytes() == (trace_dir / TRACE_FILE).read_bytes()
+    assert (call.trace_dir / "capture_traces" / "bs_8_rank0.json.gz").is_file()
+    reasons = [entry["reason"] for entry in _logged(layout)]
+    assert reasons.index("root committed") + 1 == reasons.index("root profile started")
+    [started] = [entry for entry in _logged(layout) if entry["reason"] == "root profile started"]
+    assert started["detail"] == {
+        "source_id": ROOFLINE_RUN_ID,
+        "trace_dir": str(trace_dir),
+        "job_id": f"prelude:{ROOFLINE_RUN_ID}",
+    }
+
+
+async def test_a_refused_root_profile_is_recorded_and_prelude_goes_on(tmp_path: Path) -> None:
+    layout = _layout(tmp_path)
+    child = child_with_patch(tmp_path)
+    with_roofline_profile(child)
+    processes, peers = _registry(layout, child), _peers(layout)
+    peers.toolbox.refusal = RequestRejected("no *.trace.json* under the trace dir", "profile_without_trace")
+
+    result = await _run(_prelude(layout, processes, peers), SessionBudget.from_hours(2.0, NOW))
+
+    assert (await _notebook(layout).baseline()).root_commit == result.root_commit
+    [refused] = [entry for entry in _logged(layout) if entry["reason"] == "root profile not started"]
+    assert (refused["detail"]["code"], refused["detail"]["reason"]) == (
+        "profile_without_trace",
+        "no *.trace.json* under the trace dir",
+    )
+    assert peers.toolbox.root_profiles == []
+
+
+async def test_a_child_without_a_roofline_profile_starts_no_root_profile(tmp_path: Path) -> None:
+    layout = _layout(tmp_path)
+    processes, peers = _registry(layout, child_with_patch(tmp_path)), _peers(layout)
+
+    await _run(_prelude(layout, processes, peers), SessionBudget.from_hours(2.0, NOW))
+
+    [skipped] = [entry for entry in _logged(layout) if entry["reason"] == "root profile not started"]
+    assert skipped["detail"] == {"reason": "the child left no roofline profile"}
+    assert peers.toolbox.root_profiles == [] and not layout.root_profile.exists()
+
+
+async def test_a_root_profile_whose_point_config_is_gone_is_recorded_and_prelude_goes_on(tmp_path: Path) -> None:
+    layout = _layout(tmp_path)
+    child = child_with_patch(tmp_path)
+    (with_roofline_profile(child).parents[1] / "baseline_config.with_envs.yaml").unlink()
+    processes, peers = _registry(layout, child), _peers(layout)
+
+    await _run(_prelude(layout, processes, peers), SessionBudget.from_hours(2.0, NOW))
+
+    [skipped] = [entry for entry in _logged(layout) if entry["reason"] == "root profile not started"]
+    assert skipped["detail"]["reason"].startswith("cannot copy the profile into the session")
+    assert peers.toolbox.root_profiles == []
 
 
 class MbFakeSlowChildRegistry(MbFakeChildRegistry):
@@ -566,3 +641,22 @@ async def test_a_prelude_of_a_workload_differing_only_in_its_kernel_optimizer_is
 
     root = Recipe.from_document(json.loads(earlier.root_recipe.read_text()))
     assert reused == ReusedPrelude(str(earlier.root), str(child), root.digest())
+
+
+async def test_a_reused_prelude_starts_the_root_profile_from_the_earlier_childs_trace(tmp_path: Path) -> None:
+    child = child_with_patch(tmp_path)
+    with_roofline_profile(child)
+    earlier = await _rooted_session(tmp_path / "earlier", child)
+    layout = create_session(tmp_path / "later", WORKLOAD.model_basename, _clock())
+    peers = _peers(layout)
+
+    result = await _prelude(layout, _registry(layout, None), peers).reuse(
+        reused_prelude(earlier.root, WORKLOAD, IMAGE), WORKLOAD, IMAGE
+    )
+
+    [call] = peers.toolbox.root_profiles
+    assert (call.commit_id, call.source_id) == (result.root_commit, ROOFLINE_RUN_ID)
+    assert call.trace_dir == layout.root_profile / ROOFLINE_RUN_ID / "torch_trace"
+    assert (call.trace_dir / TRACE_FILE).is_file()
+    reasons = [entry["reason"] for entry in _logged(layout)]
+    assert reasons[:3] == ["child reused", "root committed", "root profile started"]

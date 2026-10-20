@@ -48,6 +48,7 @@ ROOT_RECIPE_FILE = "MB-root-recipe.json"
 PRELUDE_LOG_FILE = "MB-prelude.log"
 PRELUDE_PATCHES_DIR = "MB-unexpressed-patches"
 WARM_START_DIR = "MB-warm-start"
+ROOT_PROFILE_DIR = "MB-root-profile"
 MERGES_FILE = "MB-merges.jsonl"
 REPORT_FILE = "MB-report.json"
 REPORT_MARKDOWN_FILE = "MB-report.md"
@@ -175,6 +176,12 @@ class SessionLayout:
     def prelude_patches(self) -> Path:
         """The kept patches the root recipe names as unexpressed, copied out of the child session."""
         return self.prelude / PRELUDE_PATCHES_DIR
+
+    @property
+    def root_profile(self) -> Path:
+        """Where PRELUDE copies its child's profile trace and point config: inside the toolbox's directory, the only
+        place the toolbox reads them from."""
+        return self.toolbox / ROOT_PROFILE_DIR
 
     @property
     def warm_start(self) -> Path:

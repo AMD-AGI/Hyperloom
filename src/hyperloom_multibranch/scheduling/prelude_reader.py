@@ -10,7 +10,8 @@ recipe cannot express yet, a kept patch outside the framework's git checkout amo
 :attr:`PreludeArtifacts.unexpressed`, which the root recipe carries as its ``unexpressed`` mark. The launch is rebuilt from
 ``enablement.accepted_config``, the source the main flow writes ``reports/enablement/enablement_setting.sh`` from;
 that script is not parsed, only located (:attr:`PreludeArtifacts.setup_script`), so the setup the root recipe leaves
-out can be traced to it.
+out can be traced to it. The child's latest roofline profile is located on disk (:attr:`PreludeArtifacts.profile`), not
+through ``state.json``: the main flow records its trace only once its own analysis of it succeeded.
 """
 
 from __future__ import annotations
@@ -41,6 +42,10 @@ MB_SETUP_SCRIPT = Path("reports") / "enablement" / "enablement_setting.sh"
 MB_LAUNCH_SESSION_DIR_KEY = "session_dir"
 #: The decode ceiling of a roofline snapshot (src/hyperloom/inference_optimizer/roofline_snapshot.py).
 MB_ROOFLINE_PEAK_KEY = "theoretical_peak_tok_per_sec"
+#: Where the main flow's auto-roofline profile lands under its session directory, one directory per roofline run
+#: (src/hyperloom/orchestrator/actions/executors/roofline.py), and the point config that run measured beside it.
+MB_ROOFLINE_TRACE_GLOB = "runs/roofline/*/benchmark_*/torch_trace"
+MB_POINT_CONFIG_FILE = "baseline_config.with_envs.yaml"
 #: The ``outcome_status`` of a run that measured a baseline (src/hyperloom/inference_optimizer/breakdown/stop_reasons.py).
 MB_OUTCOME_COMPLETED = "completed"
 #: src/hyperloom/orchestrator/enablement/lane.py: an accepted config without ``args_mode`` appends its server args.
@@ -83,6 +88,16 @@ class UpstreamPin:
 
 
 @dataclass(frozen=True)
+class ChildProfile:
+    """The trace directory of one roofline profile of the child, the point config that run measured, and the run's id
+    (its ``runs/roofline/<run_id>`` directory)."""
+
+    run_id: str
+    trace_dir: Path
+    point_config: Path
+
+
+@dataclass(frozen=True)
 class PreludeArtifacts:
     """What the baseline prelude left behind, as the root recipe and the session profile need it.
 
@@ -91,7 +106,8 @@ class PreludeArtifacts:
     that checkout; ``foreign_patches`` apply to any other tree, so no component can carry them. ``unexpressed`` names,
     as recipe ``unexpressed`` entries, the foreign patches and whatever else enablement kept that a recipe cannot
     express yet. ``roofline_ceiling`` is keyed by the metric it bounds. ``setup_script`` is the child's
-    ``enablement_setting.sh``, ``None`` when it wrote none.
+    ``enablement_setting.sh``, ``None`` when it wrote none. ``profile`` is the child's latest roofline profile, ``None``
+    when it profiled nothing.
     """
 
     session_dir: Path
@@ -106,6 +122,7 @@ class PreludeArtifacts:
     roofline_ceiling: Mapping[str, float]
     unexpressed: tuple[str, ...]
     setup_script: Path | None
+    profile: ChildProfile | None
 
     @property
     def succeeded(self) -> bool:
@@ -157,7 +174,18 @@ def read_prelude(session_dir: Path) -> PreludeArtifacts:
         roofline_ceiling=_roofline_ceiling(state.get("roofline_snapshots"), state.get("baseline_roofline_ceiling")),
         unexpressed=(*_unexpressed(enablement, accepted), *(patch.unexpressed for patch in foreign)),
         setup_script=session_dir / MB_SETUP_SCRIPT if (session_dir / MB_SETUP_SCRIPT).is_file() else None,
+        profile=_latest_profile(session_dir),
     )
+
+
+def _latest_profile(session_dir: Path) -> ChildProfile | None:
+    """The roofline profile whose trace directory was written last; ``None`` when the child left none."""
+
+    traces = sorted(session_dir.glob(MB_ROOFLINE_TRACE_GLOB), key=lambda trace: trace.stat().st_mtime)
+    if not traces:
+        return None
+    run = traces[-1].parents[1]
+    return ChildProfile(run_id=run.name, trace_dir=traces[-1], point_config=run / MB_POINT_CONFIG_FILE)
 
 
 def framework_pin(artifacts: PreludeArtifacts) -> UpstreamPin | None:
@@ -353,6 +381,7 @@ def _git(root: Path, *args: str) -> str:
 
 __all__ = [
     "MB_LATEST_STATE_SCHEMA_VERSION",
+    "ChildProfile",
     "KeptPatch",
     "PreludeArtifacts",
     "PreludeReadError",
