@@ -258,7 +258,7 @@ async def test_resource_lock_unknown_lane_rejected(db):
 
 
 @pytest.mark.asyncio
-async def test_resource_lock_heartbeat_and_stale_release(db):
+async def test_resource_lock_release_ignores_another_holder(db):
     locks = ResourceLockManager(SqliteLeaseBackend(db))
     lease = await locks.acquire_many(
         ["profile_lane"],
@@ -267,7 +267,6 @@ async def test_resource_lock_heartbeat_and_stale_release(db):
         action="profile_runner",
         ttl_sec=60,
     )
-    await locks.heartbeat(lease, ttl_sec=120)
     # Wrong holder release must not delete the row
     fake = type(lease)(
         holder_id="other",

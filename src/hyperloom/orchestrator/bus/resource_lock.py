@@ -439,10 +439,6 @@ class LaneFull(RuntimeError):
         self.full_lanes = full_lanes
 
 
-class StaleLeaseError(RuntimeError):
-    """Heartbeat / release found that the lease no longer belongs to us."""
-
-
 class SqliteLeaseBackend:
     """Lease backend behind :class:`ResourceLockManager`; ``BEGIN IMMEDIATE`` + PK uniqueness gives atomic acquire-many."""
 
@@ -545,19 +541,6 @@ class SqliteLeaseBackend:
             acquired_at=stamp,
             expires_at=expires_iso,
         )
-
-    async def heartbeat(self, lease: Lease, *, ttl_sec: int) -> None:
-        """Refresh ``expires_at`` for every lane this holder owns (keyed on ``(lane, holder_id)`` PK)."""
-        new_expires_iso = _lease_iso(time.time() + ttl_sec)
-        stamp = now_iso()
-        async with self.db.transaction() as cur:
-            placeholders = ",".join("?" * len(lease.lanes))
-            cur.execute(
-                f"UPDATE leases SET expires_at=?, heartbeat_at=? WHERE lane IN ({placeholders}) AND holder_id=?",  # nosec B608 - generated placeholders only.
-                (new_expires_iso, stamp, *lease.lanes, lease.holder_id),
-            )
-            if cur.rowcount != len(lease.lanes):
-                raise StaleLeaseError(f"heartbeat mismatch: expected {len(lease.lanes)} rows, got {cur.rowcount}")
 
     async def heartbeat_by_task(self, task_id: str, *, ttl_sec: int) -> list[str]:
         """Refresh every lane row a task holds, whoever the holder is."""
@@ -706,10 +689,6 @@ class ResourceLockManager:
         except (LaneBusy, LaneFull):
             return None
 
-    async def heartbeat(self, lease: Lease, *, ttl_sec: int) -> None:
-        """Refresh a lease's TTL via the backend."""
-        return await self.backend.heartbeat(lease, ttl_sec=ttl_sec)
-
     async def heartbeat_by_task(self, task_id: str, *, ttl_sec: int) -> list[str]:
         """Refresh every lane row a task holds."""
         return await self.backend.heartbeat_by_task(task_id, ttl_sec=ttl_sec)
@@ -758,7 +737,6 @@ __all__ = [
     "Lease",
     "ResourceLockManager",
     "SqliteLeaseBackend",
-    "StaleLeaseError",
     "drop_round_lane",
     "hold_round_lane",
 ]
