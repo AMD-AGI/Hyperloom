@@ -1303,6 +1303,29 @@ def test_promote_warm_replay_failed_records_outcome(tmp_path):
     assert coord.shared_state.optimization_stack == []
 
 
+def test_a_failed_replay_whose_rollback_fails_reports_only_the_rollback(tmp_path, caplog):
+    """The trees did not come back, so the account is the restore errors, not the class the task failed under."""
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.warm_replay_outcome = {"status": "in_flight", "expected_gain_pct": 25.0}
+    coord.phase_prelude.rollback_combined_warm = (  # type: ignore[method-assign]
+        lambda result, task: {"ok": False, "errors": ["could not restore vllm"]}
+    )
+
+    with caplog.at_level("INFO"):
+        coord.phase_prelude.promote_warm_replay(
+            {"status": "failed", "error_class": "crash", "error": "GPU OOM during prefill"},
+            task=_StubTask(),
+        )
+
+    outcome = coord.shared_state.warm_replay_outcome
+    assert outcome["status"] == "rollback_failed"
+    assert outcome["reason"] == "combined warm replay rollback failed"
+    assert outcome["rollback"]["errors"] == ["could not restore vllm"]
+    assert "error_class" not in outcome
+    assert coord.shared_state.stop_reason == "warm_replay_rollback_failed"
+    assert "warm-replay failed" not in caplog.text
+
+
 # A FAILED replay_warm_recipe must route to promote_warm_replay (which clears in_flight); otherwise PRELUDE never
 # exits.
 def test_failed_replay_is_routed_to_promote_not_unpromotable(tmp_path):
