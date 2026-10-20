@@ -858,30 +858,14 @@ class IntentRouter(CoordinatorCollaborator):
     async def _prepare_specialist_dispatch(self, request: DelegateRequest, nested_idempotency_key: Any) -> bool:
         """Warm a specialist delegate's params through the KnowledgePlane.
 
-        False once a patch preflight error pruned the source-patch family instead.
+        False when it is a patch specialist with no git source tree to write into.
         """
         if request.action_name != "specialist":
             return True
-        await self._coord.specialist_dispatch.warm_specialist_params(request.params)
-        from ..specialists.runner import specialist_patch_preflight_error
-
-        preflight_error = specialist_patch_preflight_error(
-            request.params,
-            framework_repo_path=str(self.shared_state.framework_repo_path or ""),
-        )
-        if not preflight_error:
-            return True
-        if self.shared_state.add_pruned_family("source_patch"):
-            self.shared_state.record_action_failure(
-                action="specialist",
-                task_id=str(request.intent.payload.get("idempotency_key") or nested_idempotency_key or ""),
-                result={"error_class": preflight_error, "error": preflight_error},
-            )
-            try:
-                self.shared_state.save(self.session_dir)
-            except Exception:
-                log.exception("delegate specialist: source-patch prune save failed")
-        return False
+        dispatch = self._coord.specialist_dispatch
+        await dispatch.warm_specialist_params(request.params)
+        task_id = str(request.intent.payload.get("idempotency_key") or nested_idempotency_key or "")
+        return not dispatch.refuse_patch_without_source(request.params, task_id=task_id)
 
     async def _create_delegated_task(self, request: DelegateRequest, raw_key: Any) -> Any | None:
         """Register the delegate as a task, stepping its idempotency key past terminated twins.
