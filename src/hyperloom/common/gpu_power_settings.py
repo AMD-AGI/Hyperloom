@@ -15,13 +15,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess  # nosec B404 - fixed read-only amd-smi invocations.
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
 from hyperloom.common.env import env_flag
-from hyperloom.common.visible_devices import mask_tokens
 
 __all__ = [
     "GPU_POWER_SAMPLING_ENV",
@@ -89,18 +89,25 @@ _ROCR_MASKS = ("ROCR_VISIBLE_DEVICES",)
 _HIP_MASKS = ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")
 
 
+#: The only spelling the HIP runtime reads as written: it stops at a space, an empty or ``;``-joined token or a leading
+#: zero, so a looser parse would name cards the session's servers never see.
+_MASK_SPELLING = re.compile(r"(0|[1-9][0-9]*)(,(0|[1-9][0-9]*))*")
+
+
 def _first_mask(source: Mapping[str, str], names: tuple[str, ...]) -> list[int] | None:
     """The visible-device ordinals of the first of *names* that is set; ``None`` when none is."""
     for name in names:
         if name not in source:
             continue
-        raw = str(source.get(name) or "").strip()
-        tokens = mask_tokens(raw)
-        if not tokens:
+        raw = str(source.get(name) or "")
+        if not raw.strip():
             raise GpuPowerSettingsError(f"{name} is set but empty, so the session sees no cards")
-        if not all(token.isdigit() for token in tokens):
-            raise GpuPowerSettingsError(f"{name}={raw} is not a list of device numbers, so its cards cannot be named")
-        ordinals = [int(token) for token in tokens]
+        if not _MASK_SPELLING.fullmatch(raw):
+            raise GpuPowerSettingsError(
+                f"{name}={raw!r} is not a plain comma-separated list of device numbers, so the cards the runtime "
+                "exposes for it cannot be named"
+            )
+        ordinals = [int(token) for token in raw.split(",")]
         if len(set(ordinals)) != len(ordinals):
             raise GpuPowerSettingsError(f"{name}={raw} repeats a card, which the runtime does not expose as written")
         return ordinals

@@ -190,8 +190,24 @@ class TestVisibleCards:
             {"ROCR_VISIBLE_DEVICES": "0,1", "HIP_VISIBLE_DEVICES": "2"},
             {"ROCR_VISIBLE_DEVICES": "3,3,2"},
             {"HIP_VISIBLE_DEVICES": "", "CUDA_VISIBLE_DEVICES": "4"},
+            {"HIP_VISIBLE_DEVICES": "1, 2"},
+            {"HIP_VISIBLE_DEVICES": "1,,2"},
+            {"HIP_VISIBLE_DEVICES": "1;2"},
+            {"CUDA_VISIBLE_DEVICES": "01"},
+            {"ROCR_VISIBLE_DEVICES": " 2"},
         ],
-        ids=["uuid", "beyond-the-board", "hip-beyond-rocr", "repeated-card", "set-but-empty"],
+        ids=[
+            "uuid",
+            "beyond-the-board",
+            "hip-beyond-rocr",
+            "repeated-card",
+            "set-but-empty",
+            "space-after-comma",
+            "empty-token",
+            "semicolon",
+            "leading-zero",
+            "padded",
+        ],
     )
     def test_a_mask_whose_cards_cannot_be_named_refuses(self, env):
         with pytest.raises(GpuPowerSettingsError):

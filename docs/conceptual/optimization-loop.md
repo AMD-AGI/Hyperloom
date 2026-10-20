@@ -312,8 +312,9 @@ refuses, with nothing left changed:
   `ROCR_VISIBLE_DEVICES` left; `HSA_VISIBLE_DEVICES` and `GPU_DEVICE_ORDINAL`,
   which ROCm ignores, are not read. The read-only assertion, the per-GPU budget
   and the power sampler use the same translation. A mask that is set but empty,
-  is not numeric (GPU UUIDs), repeats a card or names one that does not exist is
-  refused;
+  is not written as plain comma-separated numbers (GPU UUIDs, spaces, `;`,
+  leading zeros, which HIP reads differently), repeats a card or names
+  one that does not exist is refused;
 - on a card not in SPX compute-partition mode: a cap is per socket, so it would
   change the sibling partitions, which other sessions may use;
 - when the declared cap is not a whole number of watts, which `amd-smi set`

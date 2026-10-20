@@ -64,7 +64,8 @@ def _session_gpus(observed: Mapping[int, Any], mask: set[int] | None) -> set[int
     """The cards the session may set: exactly its integer visible-device mask, every one of them readable."""
     if mask is None:
         raise GpuPowerSettingsError(
-            "--apply-gpu-power-settings needs an integer ROCR_VISIBLE_DEVICES / HIP_VISIBLE_DEVICES mask naming the "
+            "--apply-gpu-power-settings needs an integer ROCR_VISIBLE_DEVICES / HIP_VISIBLE_DEVICES (or "
+            "CUDA_VISIBLE_DEVICES) mask naming the "
             "cards to set; without one it would set every card on the host, including ones the session does not use"
         )
     missing = sorted(mask - set(observed))
