@@ -11,6 +11,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable
 
+from hyperloom.common import llm_config
+from hyperloom.common.agent_sdk_runner import AgentSessionRequest, drive_agent_session
 from hyperloom.common.llm_attribution import sdk_env_overlay
 from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL
 
@@ -172,6 +174,49 @@ SKILL.md retry/checkpoint protocol explicitly requires it.
 """
 
 
+_ATTEMPT_SYSTEM_PROMPT = (
+    "You are the Hyperloom quantization-agent. Drive the Quark workflow per "
+    "SKILL.md. Never modify files under quark_root. Treat artifact presence "
+    "in workspace as the source of truth; do not lie about success."
+)
+
+
+def _attempt_child_env() -> dict[str, str]:
+    """The Quark py310 shim plus the attribution tags, for the tools an attempt's session spawns."""
+    env = _quark_py310_compat_env()
+    env.update(sdk_env_overlay(component="quantization", operation="quantize_attempt"))
+    return env
+
+
+async def _run_attempt_on_deepseek(
+    attempt: AttemptContext,
+    prompt: str,
+    *,
+    model: str | None,
+    log: Callable[[str], None] | None,
+) -> AttemptResult:
+    """Run one attempt's session on the DeepSeek Harness."""
+    workspace = Path(attempt.workspace)
+    if log:
+        log(
+            f"quantization-agent DeepSeek runner: workspace={workspace} "
+            f"quark_root={attempt.quark_root} attempt={attempt.attempt_number}"
+        )
+    request = AgentSessionRequest(
+        prompt=prompt,
+        system_prompt=_ATTEMPT_SYSTEM_PROMPT,
+        cwd=workspace,
+        model=model,
+        max_turns=DEFAULT_MAX_TURNS,
+        allowed_tools=DEFAULT_ALLOWED_TOOLS,
+        child_env=_attempt_child_env(),
+        log=log,
+        backend=llm_config.AGENT_BACKEND_DEEPSEEK,
+    )
+    result = await drive_agent_session(request)
+    return AttemptResult(workspace=workspace, sdk_error=result.error, raw_text=result.text)
+
+
 async def run_one_attempt(
     attempt: AttemptContext,
     *,
@@ -197,21 +242,18 @@ async def run_one_attempt(
 
     prompt = build_attempt_prompt(attempt, skill_path=skill_path, fix_hypothesis_path=fix_hypothesis_path)
 
+    if sdk is None and llm_config.resolve_agent_backend() == llm_config.AGENT_BACKEND_DEEPSEEK:
+        return await _run_attempt_on_deepseek(attempt, prompt, model=model, log=log)
+
     sdk = sdk or _import_sdk()
 
-    system_prompt = (
-        "You are the Hyperloom quantization-agent. Drive the Quark workflow per "
-        "SKILL.md. Never modify files under quark_root. Treat artifact presence "
-        "in workspace as the source of truth; do not lie about success."
-    )
     kwargs: dict[str, Any] = {
         "max_turns": DEFAULT_MAX_TURNS,
-        "system_prompt": system_prompt,
+        "system_prompt": _ATTEMPT_SYSTEM_PROMPT,
         "allowed_tools": DEFAULT_ALLOWED_TOOLS,
         "stderr": (lambda line: log(f"[claude-sdk] {line.rstrip()}")) if log else None,
-        "env": _quark_py310_compat_env(),
+        "env": _attempt_child_env(),
     }
-    kwargs["env"].update(sdk_env_overlay(component="quantization", operation="quantize_attempt"))
     if model:
         kwargs["model"] = model
     kwargs["cwd"] = str(workspace)
