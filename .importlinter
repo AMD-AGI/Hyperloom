@@ -48,8 +48,6 @@ layers =
 ignore_imports =
     hyperloom.**.tests.** -> **
     kernelforge.tests.** -> **
-    kernelforge.**.tests.** -> **
-    kernelforge.conftest -> **
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._aiter_jit
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._partition_shape
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._subprocess_kill
@@ -121,8 +119,72 @@ forbidden_modules =
 ignore_imports =
     hyperloom.**.tests.** -> **
     kernelforge.tests.** -> **
-    kernelforge.**.tests.** -> **
-    kernelforge.conftest -> **
+unmatched_ignore_imports_alerting = none
+
+
+[importlinter:contract:kf-evaluation-foundation]
+name = kernelforge evaluation does not depend on product or entry layers
+type = forbidden
+source_modules = kernelforge.evaluation
+forbidden_modules =
+    kernelforge.agent_backends
+    kernelforge.assembly
+    kernelforge.cli
+    kernelforge.fusion
+    kernelforge.gemm_tune
+    kernelforge.kernel_backends
+    kernelforge.kernel_rewrite_controller
+    kernelforge.knowledge
+    kernelforge.loop
+    kernelforge.orchestrator
+    kernelforge.rewrite_by_flydsl
+    kernelforge.roofline_ceiling
+    kernelforge.tracker
+ignore_imports =
+    hyperloom.**.tests.** -> **
+    kernelforge.tests.** -> **
+unmatched_ignore_imports_alerting = none
+
+
+[importlinter:contract:kf-tools-foundation]
+name = kernelforge tools do not depend on evaluation, product or entry layers
+type = forbidden
+source_modules = kernelforge.tools
+forbidden_modules =
+    kernelforge.agent_backends
+    kernelforge.assembly
+    kernelforge.cli
+    kernelforge.evaluation
+    kernelforge.fusion
+    kernelforge.gemm_tune
+    kernelforge.kernel_backends
+    kernelforge.kernel_rewrite_controller
+    kernelforge.knowledge
+    kernelforge.loop
+    kernelforge.orchestrator
+    kernelforge.rewrite_by_flydsl
+    kernelforge.roofline_ceiling
+    kernelforge.tracker
+ignore_imports =
+    hyperloom.**.tests.** -> **
+    kernelforge.tests.** -> **
+unmatched_ignore_imports_alerting = none
+
+
+[importlinter:contract:kf-mcp-servers-light]
+name = kernelforge MCP servers start without the agent runtime or the iteration loop
+type = forbidden
+# An agent session waits on each server's startup. A new MCP server module must be added here.
+source_modules =
+    kernelforge.knowledge.pr_knowledge.mcp_server
+    kernelforge.orchestrator.specialist_probe_server
+forbidden_modules =
+    kernelforge.agent_backends
+    kernelforge.cli
+    kernelforge.loop
+ignore_imports =
+    hyperloom.**.tests.** -> **
+    kernelforge.tests.** -> **
 unmatched_ignore_imports_alerting = none
 
 
@@ -139,8 +201,6 @@ forbidden_modules =
 ignore_imports =
     hyperloom.**.tests.** -> **
     kernelforge.tests.** -> **
-    kernelforge.**.tests.** -> **
-    kernelforge.conftest -> **
 unmatched_ignore_imports_alerting = none
 
 
@@ -155,8 +215,6 @@ modules =
 ignore_imports =
     hyperloom.**.tests.** -> **
     kernelforge.tests.** -> **
-    kernelforge.**.tests.** -> **
-    kernelforge.conftest -> **
 unmatched_ignore_imports_alerting = none
 
 
@@ -177,8 +235,6 @@ modules =
 ignore_imports =
     hyperloom.**.tests.** -> **
     kernelforge.tests.** -> **
-    kernelforge.**.tests.** -> **
-    kernelforge.conftest -> **
 unmatched_ignore_imports_alerting = none
 
 
@@ -196,8 +252,6 @@ allow_indirect_imports = True
 ignore_imports =
     hyperloom.**.tests.** -> **
     kernelforge.tests.** -> **
-    kernelforge.**.tests.** -> **
-    kernelforge.conftest -> **
 unmatched_ignore_imports_alerting = none
 
 
@@ -212,8 +266,6 @@ ancestors =
 ignore_imports =
     hyperloom.**.tests.** -> **
     kernelforge.tests.** -> **
-    kernelforge.**.tests.** -> **
-    kernelforge.conftest -> **
     hyperloom.common.llm_config -> hyperloom.common.claude_oneshot
     hyperloom.inference_optimizer.breakdown.critic_reviews -> hyperloom.inference_optimizer.breakdown.collectors._common
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._aiter_jit
@@ -347,22 +399,12 @@ ignore_imports =
     hyperloom.orchestrator.state.shared_state -> hyperloom.orchestrator.phases.machine_state
     hyperloom.orchestrator.trace_analysis.tracelens_skill_runner -> hyperloom.orchestrator.roles.claude_requests
     kernelforge.agent_backends.workspace_guard -> kernelforge.loop.new_path_allowlist
-    kernelforge.assembly.prepare -> kernelforge.loop.canonical_correctness
-    kernelforge.assembly.prepare -> kernelforge.loop.numerical
-    kernelforge.assembly.prepare -> kernelforge.loop.validation
-    kernelforge.fusion.campaign -> kernelforge.loop.scoring
-    kernelforge.fusion.loop -> kernelforge.loop.scoring
     kernelforge.fusion.shadow_repo -> kernelforge.loop.path_ownership
-    kernelforge.fusion.validate -> kernelforge.loop.scoring
     kernelforge.gemm_tune.dense_shapes -> kernelforge.gemm_tune.tuners._aiter_dense_common
-    kernelforge.kernel_backends.base -> kernelforge.loop.scoring
     kernelforge.kernel_backends.fusion.prompts -> kernelforge.fusion.harness_contract
     kernelforge.kernel_backends.fusion.prompts -> kernelforge.fusion.validate
     kernelforge.knowledge.kb_store.recipe -> kernelforge.config
-    kernelforge.mcp_server.tools._subprocess -> kernelforge.loop.aiter_cache
-    kernelforge.mcp_server.tools.test -> kernelforge.loop.scoring
     kernelforge.orchestrator.agent -> kernelforge.loop.insession_gate
     kernelforge.orchestrator.agent -> kernelforge.loop.lessons
-    kernelforge.orchestrator.agent -> kernelforge.loop.scoring
     kernelforge.orchestrator.specialists -> kernelforge.loop.fanout
 unmatched_ignore_imports_alerting = error

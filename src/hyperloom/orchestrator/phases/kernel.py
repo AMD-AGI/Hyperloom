@@ -29,7 +29,7 @@ from . import geak_rebench as _geak_rebench
 from .geak_adoption import AdoptionMeasurement, adoption_entry
 from . import machine_state as _phase_state
 from ._kernel_timeline import RunnerRun
-from .kernel_round_budget import controller_round_stop, integrate_within_phase, measurement_round_sec
+from .kernel_round_budget import controller_round_stop, integrate_within_phase, measurement_round_sec, rebench_round_sec
 from hyperloom.common.env import env_bool, env_float, env_int
 from hyperloom.common.io import WriteOptions, atomic_write_json
 from hyperloom.common.perf_metric import axis_of, graded_axes_of
@@ -1480,7 +1480,7 @@ class KernelPhase(CoordinatorCollaborator):
             kill_budget = min(kill_budget, float(phase_rem))
         # A GEAK result reaches the headline only through this session's own re-measurement of it, which runs in this
         # phase after GEAK returns. Which results skip it is known only then, so every hand-off leaves room for it.
-        rebench_sec = measurement_round_sec(self.shared_state)
+        rebench_sec = rebench_round_sec(self.shared_state)
         log.info("GEAK: holding back %.0fs of the KERNEL budget to re-measure GEAK's result", rebench_sec)
         kill_budget -= rebench_sec
         # The runner self-stops ``margin`` before the hard subprocess kill, which reserves the closing-grace window.
@@ -1530,6 +1530,28 @@ class KernelPhase(CoordinatorCollaborator):
         log.error("geak handoff: %s; not delegating", error)
         return error
 
+    async def _wait_for_gpus_before_rebench(self, cards: list[int] | None) -> None:
+        """Let the GPUs GEAK hands back drain before the rebench boots a server on them.
+
+        A card still holding the VRAM of a process GEAK's run left behind fails the server's memory-balance check at
+        boot, and the candidate is then dropped unvalidated. The rebench is attempted either way: this only waits.
+        """
+        from ..actions.executors._server_lifecycle import free_gpus_for_handoff
+
+        gpus = await asyncio.to_thread(
+            free_gpus_for_handoff, self.session_dir, cards, timeout_sec=_GEAK_GPU_FREE_WAIT_SEC
+        )
+        if gpus.reaped:
+            log.warning(
+                "geak rebench: stopped %d server(s) this session left running: pids=%s", len(gpus.reaped), gpus.reaped
+            )
+        if gpus.busy:
+            busy = ", ".join(f"GPU{card} {used:.0f}/{total:.0f} MiB" for card, used, total in gpus.busy)
+            holders = f"; serving processes still up: {'; '.join(gpus.holders)}" if gpus.holders else ""
+            log.error("geak rebench: GPUs still hold VRAM after GEAK returned: %s%s; measuring anyway", busy, holders)
+        elif gpus.unverified:
+            log.warning("geak rebench: cannot confirm GPUs %s are free (%s)", cards, gpus.unverified)
+
     def _session_is_agentx(self) -> bool:
         """Whether this session measures the AgentX workload."""
         from hyperloom.common.perf_metric import is_agentx_mode
@@ -1548,11 +1570,10 @@ class KernelPhase(CoordinatorCollaborator):
         result_path = _geak_handoff.geak_dir(self.session_dir) / "result.json"
         if await self._promote_geak_result_left_on_disk(handoff, agentx=agentx, result_path=result_path):
             return
-        still_busy = await self._free_gpus_for_geak(
-            _resolve_handoff_physical_gpus(
-                gpu_ids=handoff["gpu_ids"], gpu_ids_space=handoff["gpu_ids_space"], gpu_pin=handoff.get("gpu_pin")
-            )
+        handoff_cards = _resolve_handoff_physical_gpus(
+            gpu_ids=handoff["gpu_ids"], gpu_ids_space=handoff["gpu_ids_space"], gpu_pin=handoff.get("gpu_pin")
         )
+        still_busy = await self._free_gpus_for_geak(handoff_cards)
         if still_busy:
             self._finish_geak_skip(
                 {"status": "error", "error_class": "gpus_busy_at_handoff", "error": still_busy}, handoff=handoff
@@ -1583,7 +1604,7 @@ class KernelPhase(CoordinatorCollaborator):
             proc = await asyncio.to_thread(self._run_geak_runner, cmd, kill_timeout=kill_timeout, term_grace=term_grace)
         except subprocess.TimeoutExpired:
             await self._keep_what_the_killed_geak_runner_flushed(
-                handoff, agentx=agentx, result_path=result_path, run=clock.observed()
+                handoff, agentx=agentx, result_path=result_path, run=clock.observed(), cards=handoff_cards
             )
             return
         except Exception as exc:
@@ -1603,7 +1624,9 @@ class KernelPhase(CoordinatorCollaborator):
             return
         # Carry the actual exit code so the breakdown can audit a nonzero rc.
         result.setdefault("returncode", proc.returncode)
-        await self._settle_geak_run(result, handoff=handoff, run=clock.observed(), result_path=result_path)
+        await self._settle_geak_run(
+            result, handoff=handoff, run=clock.observed(), result_path=result_path, cards=handoff_cards
+        )
 
     def _refuse_geak_product(
         self,
@@ -1784,7 +1807,7 @@ class KernelPhase(CoordinatorCollaborator):
         return True
 
     async def _keep_what_the_killed_geak_runner_flushed(
-        self, handoff: Mapping[str, Any], *, agentx: bool, result_path: Path, run: RunnerRun
+        self, handoff: Mapping[str, Any], *, agentx: bool, result_path: Path, run: RunnerRun, cards: list[int] | None
     ) -> None:
         """Keep a win the killed runner still flushed, or record the timeout.
 
@@ -1804,6 +1827,7 @@ class KernelPhase(CoordinatorCollaborator):
             if self._promote_recovered_geak_result(
                 recovered, handoff=handoff, recovered_from="sigterm_flushed_result_json", run=run
             ):
+                await self._wait_for_gpus_before_rebench(cards)
                 await self._revalidate_geak_candidate(reason="geak_e2e_win_sigterm_recovered")
             return
         self._finish_geak_skip(
@@ -1855,7 +1879,13 @@ class KernelPhase(CoordinatorCollaborator):
         return True
 
     async def _settle_geak_run(
-        self, result: dict[str, Any], *, handoff: Mapping[str, Any], run: RunnerRun, result_path: Path
+        self,
+        result: dict[str, Any],
+        *,
+        handoff: Mapping[str, Any],
+        run: RunnerRun,
+        result_path: Path,
+        cards: list[int] | None,
     ) -> None:
         """Record a completed GEAK run's product and enqueue the rebench that can validate it."""
         state = self.shared_state
@@ -1873,10 +1903,12 @@ class KernelPhase(CoordinatorCollaborator):
         self._record_geak_kernel_journey(result)
         # The same-harness rebench is the only path that writes the headline.
         if str(result.get("status") or "") == "ok":
+            await self._wait_for_gpus_before_rebench(cards)
             await self._revalidate_geak_candidate(reason="geak_e2e_win")
         elif _geak_has_accepted_kernel(result):
             # A no_gain headline over an accepted, parity-checked kernel still deserves the measurement — the rebench
             # is what decides, and without it the kernel is lost with no number attached to it.
+            await self._wait_for_gpus_before_rebench(cards)
             await self._revalidate_geak_candidate(reason="geak_e2e_accepted_kernel")
         self._coord.phase_machine.record_phase_entry_evidence(
             geak={

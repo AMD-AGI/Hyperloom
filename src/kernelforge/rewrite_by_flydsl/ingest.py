@@ -13,7 +13,7 @@ from pathlib import Path
 
 from kernelforge.rewrite_by_flydsl import protocol
 from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
-from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
 
 log = logging.getLogger(__name__)
 
