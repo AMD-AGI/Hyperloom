@@ -164,12 +164,8 @@ def reusable_recorded_runtime(
 ) -> dict[str, Any]:
     """Recover the runtime params from the last profile for an arm that records none of its own.
 
-    A bare baseline/profile ``current_best`` carries no runtime fields, so the last profile is the only record of
-    what the server actually ran with.
-
-    Returns:
-        Baseline-relative runtime params, or empty when the caller or the
-        current best already names the runtime.
+    A bare baseline/profile ``current_best`` carries no runtime fields, so the last profile is the
+    only record of what the server actually ran with.
     """
     if any(key in current_best for key in _RUNTIME_KEYS) or any(key in incoming for key in _RUNTIME_KEYS):
         return {}

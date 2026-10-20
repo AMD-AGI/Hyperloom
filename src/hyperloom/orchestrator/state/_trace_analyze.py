@@ -83,12 +83,7 @@ def recover_from_session_report(
     paths: ArtifactPaths,
     disk: Mapping[str, Any] | None,
 ) -> RecoveredEnvelope:
-    """Refill a thinned trace-analyze envelope from the session-level roofline report TraceLens wrote.
-
-    Returns:
-        The envelope and its artifact paths, unchanged when the report adds
-        nothing the envelope was missing.
-    """
+    """Refill a thinned trace-analyze envelope from the session-level roofline report TraceLens wrote."""
     if not disk:
         return RecoveredEnvelope(result, paths.candidates, paths.kernel_roofline)
     kernel_roofline_path = paths.kernel_roofline or str(disk["path"])
@@ -249,12 +244,7 @@ def build_trace_analyze_record(
     snapshot_id: int,
     baseline_gain: float,
 ) -> dict[str, Any]:
-    """Build the ``last_trace_analyze`` record a completed trace analysis leaves behind.
-
-    Returns:
-        The record, with every kernel projection and artifact pointer the
-        downstream phases read.
-    """
+    """Build the ``last_trace_analyze`` record a completed trace analysis leaves behind."""
     result = recovered.result
     kernels = _summarize_hot_kernels(result, recovered.kernel_roofline_path)
     task_groups = result.get("task_groups") or []

@@ -202,12 +202,7 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
         return gaps
 
     def _gap_from_failure_row(self, row: dict[str, Any], workload_id: str) -> dict[str, Any]:
-        """Build the gap row one action-failure entry contributes, carrying that failure as its single attempt.
-
-        Returns:
-            A gap row dict whose ``canonical_id`` discriminates on variant, so
-            distinct crash causes under one action stay in distinct gaps.
-        """
+        """Build the gap row one action-failure entry contributes, carrying that failure as its single attempt."""
         action = str(row.get("action") or "").strip() or "unknown"
         err = str(row.get("error_class") or "").strip() or "unknown_error"
         variant = str(row.get("variant_name") or "").strip()
@@ -235,12 +230,7 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
         }
 
     def _group_failures_into_gaps(self, workload_id: str) -> list[dict[str, Any]]:
-        """Group the rolling action-failure log into one gap row per recurring (action, error_class[, variant]).
-
-        Returns:
-            A list of gap rows, each accumulating every failure that shares its
-            canonical id as an attempt.
-        """
+        """Group the rolling action-failure log into one gap row per recurring (action, error_class[, variant])."""
         by_canonical_id: dict[str, dict[str, Any]] = {}
         # Already capped by ``record_action_failure``; read the whole log.
         for row in self.shared_state.last_action_failures or []:

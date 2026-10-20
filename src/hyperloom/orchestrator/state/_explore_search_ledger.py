@@ -71,11 +71,7 @@ def _normalized_winners_history(ledger: Mapping[str, Any]) -> list[dict[str, Any
 
 
 def shape_explore_search(existing: Any) -> dict[str, Any]:
-    """Shape the unified ``explore_search`` ledger at load time.
-
-    Returns:
-        The ledger with every section present and its winners normalized.
-    """
+    """Shape the unified ``explore_search`` ledger at load time."""
     ledger: dict[str, Any] = dict(existing) if isinstance(existing, dict) else {}
     ledger.setdefault("schema_version", 1)
     ledger.setdefault("tested", {})

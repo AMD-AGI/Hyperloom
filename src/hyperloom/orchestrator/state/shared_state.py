@@ -184,12 +184,7 @@ def _bottleneck_shift(
     domain_key: str,
     latest_cycle: int,
 ) -> dict[str, Any]:
-    """Describe how the top bottleneck moved between the previous macro cycle and this snapshot.
-
-    Returns:
-        The shift record ``bottleneck_shift`` holds, with both saturation
-        readings and the deltas between them.
-    """
+    """Describe how the top bottleneck moved between the previous macro cycle and this snapshot."""
     bound_kind_changed = bool(prev_sat) and str(prev_sat.get("bound_kind") or "") != str(sat.get("bound_kind") or "")
     return {
         "from": prev_sat.get("direction", "") if prev_sat else "",
@@ -1916,12 +1911,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         return _SnapshotArm("baseline", self._resolve_baseline_achieved_tput())
 
     def _build_roofline_snapshot(self, arm: _SnapshotArm) -> dict[str, Any]:
-        """Build the compact roofline snapshot the report's Roofline Comparison reads.
-
-        Returns:
-            The snapshot, carrying the arm's ceiling, what it achieved, and the
-            artifacts the reading was derived from.
-        """
+        """Build the compact roofline snapshot the report's Roofline Comparison reads."""
         from hyperloom.inference_optimizer.roofline_snapshot import (
             RooflineReading,
             attach_perfmodel_breakdown,

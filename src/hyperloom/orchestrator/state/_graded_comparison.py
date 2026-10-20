@@ -71,12 +71,7 @@ def grade_interactivity(
     anchor_perf: Any,
     noise_pct: float | None,
 ) -> InteractivityOutcome:
-    """Grade a candidate on median interactivity, guarded by the slow tail, output throughput and the session's constraints.
-
-    Returns:
-        The graded pair, or a degrade reason when either side cannot supply the
-        interactivity axes.
-    """
+    """Grade a candidate on median interactivity, guarded by the slow tail, output throughput and the session's constraints."""
     ref_perf, reason = _interactivity_reference(state, against_baseline=against_baseline, anchor_perf=anchor_perf)
     cand_perf = perf_snapshot_from_mapping(measurement)
     if not (ref_perf and cand_perf):
@@ -109,12 +104,8 @@ def grade_output_throughput(
 ) -> GradedComparison:
     """Grade a candidate on output throughput against *reference*, vetoed by the session's constraints.
 
-    A non-empty ``degrade_reason`` comes from a pair that could not be graded on
-    interactivity: its output figures are diagnostic only and must not read as a
-    throughput KEEP at this chokepoint.
-
-    Returns:
-        The graded pair on the output axis.
+    A non-empty ``degrade_reason`` marks a pair that could not be graded on interactivity, whose
+    output figures are diagnostic only and must never read as a throughput KEEP.
     """
     candidate = output_tput_of(measurement)
     gain = gain_pct(candidate, reference) if reference > 0 else None
