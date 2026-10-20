@@ -162,13 +162,17 @@ def test_send_message_without_to_broadcasts() -> None:
     _emit(_llm_gate(), IntentType.SEND_MESSAGE, {"topic": "observation", "body_md": "x"})
 
 
-@pytest.mark.parametrize("to", [["critic", "kernel_agent"], 3, {"agent": "critic"}, ""])
-def test_send_message_with_a_non_string_to_is_denied(to) -> None:
-    """A ``to`` the events row cannot bind is denied, not crashed on.
+def test_send_message_to_a_list_of_recipients_is_admitted() -> None:
+    """A JSON array is how a model addresses several agents at once; each becomes its own events row."""
+    _emit(_llm_gate(), IntentType.SEND_MESSAGE, {"to": ["critic", "specialist:t1"], "topic": "observation"})
 
-    A JSON array of recipients is the shape a model reaches for to address
-    several agents at once; before the check it reached the events INSERT
-    and faulted the running phase event.
+
+@pytest.mark.parametrize("to", [[], ["critic", ""], ["critic", 3], 3, {"agent": "critic"}, ""])
+def test_send_message_with_a_to_naming_no_recipient_is_denied(to) -> None:
+    """A ``to`` that is not a name or a list of names is denied, not crashed on.
+
+    Before the check a raw list reached the events INSERT as ``to_agent`` and faulted the running phase event; a
+    list is fanned out now, but one holding an empty or non-string name still names nobody.
     """
     with pytest.raises(PolicyDenied) as excinfo:
         _emit(_llm_gate(), IntentType.SEND_MESSAGE, {"to": to, "topic": "observation", "body_md": "x"})
