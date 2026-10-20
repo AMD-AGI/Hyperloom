@@ -14,7 +14,7 @@ from click.testing import CliRunner
 from kernelforge.cli import main
 from kernelforge.rewrite_by_flydsl import protocol
 
-from kernelforge.conftest import SRC_ROOT
+from kernelforge.tests.conftest import SRC_ROOT
 
 
 def _rewrite_command():

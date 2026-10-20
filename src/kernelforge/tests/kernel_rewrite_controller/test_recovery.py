@@ -4,16 +4,21 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
+
+import pytest
 
 from kernelforge.kernel_rewrite_controller import (
     ControllerLayout,
     TaskStateStore,
     load_task,
 )
-from kernelforge.kernel_rewrite_controller.publisher import published_operator_dirs
-from kernelforge.kernel_rewrite_controller.recovery import recover_task_result
+from kernelforge.kernel_rewrite_controller import recovery
+from kernelforge.kernel_rewrite_controller.contracts import TaskStateError
+from kernelforge.kernel_rewrite_controller.publisher import PublicationError, published_operator_dirs
 from kernelforge.kernel_rewrite_controller.worktree import (
+    WorktreeError,
     create_operator_worktree,
     export_patch_from_base,
 )
@@ -23,6 +28,8 @@ from kernelforge.knowledge.kb_store.identity.kernel_recipe import (
 )
 from kernelforge.loop.reporting import BestResultPublisher, KeepBundle, KeepIdentity, KeepScore
 from kernelforge.tests.kernel_rewrite_controller.conftest import _git
+
+recover_task_result = recovery.recover_task_result
 
 
 def _prepared_workspace(tmp_path: Path):
@@ -108,6 +115,49 @@ def test_recovery_publishes_a_validated_result_sidecar(tmp_path: Path) -> None:
     assert state is not None
     assert state.status == "succeeded"
     assert state.result_patch_dir == str(recovered.patch_dir)
+
+
+def _recover_with_publication_failure(tmp_path: Path, monkeypatch, failure: Exception):
+    layout, task_dir, _worktree, best_commit = _prepared_workspace(tmp_path)
+    (task_dir / "forge-result.json").write_text(
+        json.dumps({"improved": True, "best_commit": best_commit}),
+        encoding="utf-8",
+    )
+
+    def fail(*_args, **_kwargs):
+        raise failure
+
+    monkeypatch.setattr(recovery, "publish_operator_result", fail)
+    return layout, best_commit, recover_task_result(layout, task_dir)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        PublicationError("operator publication conflicts with existing version"),
+        WorktreeError("best commit is not based on controller base"),
+        TaskStateError("task state must be initialized before transition"),
+        subprocess.CalledProcessError(128, ["git", "diff"], stderr="fatal: bad object"),
+        OSError("disk full"),
+        UnicodeDecodeError("utf-8", b"\xfc", 0, 1, "invalid start byte"),
+    ],
+    ids=lambda failure: type(failure).__name__,
+)
+def test_an_expected_publication_failure_is_reported_not_raised(tmp_path: Path, monkeypatch, failure) -> None:
+    layout, best_commit, recovered = _recover_with_publication_failure(tmp_path, monkeypatch, failure)
+
+    assert recovered == recovery.RecoveryResult(
+        operator_id=recovered.operator_id,
+        published=False,
+        best_commit=best_commit,
+        reason=f"could not publish forge result sidecar: {failure}",
+    )
+    assert not published_operator_dirs(layout)
+
+
+def test_an_unexpected_publication_error_propagates(tmp_path: Path, monkeypatch) -> None:
+    with pytest.raises(TypeError, match="^publication fields drifted$"):
+        _recover_with_publication_failure(tmp_path, monkeypatch, TypeError("publication fields drifted"))
 
 
 def test_recovery_is_idempotent_for_an_already_published_best(tmp_path: Path) -> None:

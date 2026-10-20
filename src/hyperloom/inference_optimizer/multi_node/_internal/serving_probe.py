@@ -128,7 +128,7 @@ def cluster_is_serving(state: dict[str, Any], *, pd_mode: str, timeout_s: int) -
             if produced < floor:
                 log.info("serving probe: /v1/completions generated %d tokens (need %d)", produced, floor)
                 return False
-    except Exception as exc:  # noqa: BLE001
+    except (httpx.HTTPError, ValueError) as exc:
         log.info("serving probe: %r", exc)
         return False
     return True
