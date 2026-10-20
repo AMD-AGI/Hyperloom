@@ -475,7 +475,7 @@ def _require_dev_branch(workspace: Path) -> str:
     if _git_value(workspace, "status", "--porcelain=v1", "--untracked-files=no"):
         raise ValueError("workspace has uncommitted tracked changes")
     branch = _git_value(workspace, "branch", "--show-current")
-    if not branch or branch in {"main", "master"}:
+    if branch in {"", "main", "master"}:
         raise ValueError("forge-loop requires a non-main development branch in the workspace")
     return branch
 

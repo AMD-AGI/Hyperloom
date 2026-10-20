@@ -6212,7 +6212,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             on_best_committed=callbacks.on_best_committed,
         )
         self._campaign_started_at = self.start_time - max(0.0, float(self.run_state.round_costs.campaign_sec))
-        if state_exists and reconcile_stale_running_session(self.run_state):
+        if reconcile_stale_running_session(self.run_state):
             self.state_store.append_event(
                 make_event(
                     "session_interrupted",
@@ -6262,7 +6262,6 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         frame: _IterationFrame,
         *,
         session_sink: dict,
-        agent_fn,
         callbacks: LoopCallbacks,
     ) -> None:
         """Measure one sourced attempt, stamp it, rule on it, and close the iteration."""
@@ -6285,13 +6284,10 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             result = unmeasured_result
         else:
             try:
-                run_kwargs = {}
-                if reusable_benchmark is not None:
-                    run_kwargs["benchmark_measurement"] = reusable_benchmark
                 result = await self.run_one_iteration(
                     frame.iteration,
                     plan=session_sink.get("plan", ""),
-                    **run_kwargs,
+                    **({"benchmark_measurement": reusable_benchmark} if reusable_benchmark is not None else {}),
                 )
             except Exception as e:  # noqa: BLE001
                 print(f"  [CRASH] iteration {frame.iteration} crashed during run: {e}")
@@ -6309,10 +6305,9 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         self._stamp_result_profile(result, session_sink)
         result.session_end_reason = session_sink.get("end_reason", "")
         result.turns = session_sink.get("turns")
-        if agent_fn is not None:
-            self._apply_iteration_planning_state(
-                optimization_plan_created=optimization_plan_executable,
-            )
+        self._apply_iteration_planning_state(
+            optimization_plan_created=optimization_plan_executable,
+        )
         ruling = self._rule_on_attempt(result, attempt, frame, on_best_committed=callbacks.on_best_committed)
         await self._close_iteration(result, attempt, frame, ruling=ruling, callbacks=callbacks)
 
@@ -6390,7 +6385,6 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                 attempt,
                 frame,
                 session_sink=session_sink,
-                agent_fn=agent_fn,
                 callbacks=callbacks,
             )
         self._persist_terminal_state()
