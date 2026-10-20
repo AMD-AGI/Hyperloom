@@ -979,13 +979,15 @@ def test_store_construction_degrades_instead_of_raising(tmp_path, monkeypatch):
     assert store.degraded is True
     assert any("create root" in message for message in store.persistence_errors)
 
-    with monkeypatch.context() as patched:
-        patched.setattr(LoopStateStore, "read_events", _boom)
-        primed = LoopStateStore(str(tmp_path))
-    assert primed.degraded is True
-    assert any("prime recent cache" in message for message in primed.persistence_errors)
-    # A store that could not prime still answers, with an empty window.
-    assert primed.recent_events(5) == []
+
+def test_store_construction_propagates_a_priming_defect(tmp_path, monkeypatch):
+    def _boom(*args, **kwargs):
+        raise OSError("priming defect")
+
+    monkeypatch.setattr(LoopStateStore, "read_events", _boom)
+
+    with pytest.raises(OSError, match="^priming defect$"):
+        LoopStateStore(str(tmp_path))
 
 
 def test_write_failures_degrade_the_store_but_still_feed_the_prompt_view(tmp_path):

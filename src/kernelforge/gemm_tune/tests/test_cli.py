@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from click.testing import CliRunner
 
 from kernelforge.gemm_tune import cli as cli_mod
@@ -114,6 +115,24 @@ def test_hard_aiter_mismatch_aborts_before_tuning(tmp_path, monkeypatch):
     assert result.exit_code != 0
     assert "MISALIGNED" in result.output
     assert executed == []
+
+
+def test_aiter_preflight_defect_propagates(tmp_path, monkeypatch):
+    def _boom():
+        raise RuntimeError("preflight defect")
+
+    monkeypatch.setattr("kernelforge.gemm_tune.aiter_preflight.collect", _boom)
+
+    with pytest.raises(RuntimeError, match="^preflight defect$"):
+        cli_mod._aiter_preflight_problems(tmp_path)
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_aiter_preflight_returns_hard_problems(tmp_path, monkeypatch):
+    _stub_preflight(monkeypatch, soft=["note"], hard=["MISALIGNED"])
+
+    assert cli_mod._aiter_preflight_problems(tmp_path) == ["MISALIGNED"]
 
 
 def test_cli_resolves_auto_once_and_records_effective_gpu(tmp_path, monkeypatch):

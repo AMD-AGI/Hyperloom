@@ -740,3 +740,18 @@ def test_state_json_that_cannot_be_inspected_is_not_shipped(tmp_path: Path) -> N
     assert _manifest(out)["failed_files"] == ["state.json"]
     assert _manifest(out)["complete"] is False
     assert not (dest / "state.json").exists()
+
+
+def test_packaging_failure_propagates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from hyperloom.inference_optimizer.breakdown import session_package
+
+    sd = tmp_path / "session"
+    _write(sd / "session_breakdown.json", "{}")
+
+    def select_fails(_sd: Path) -> None:
+        raise RuntimeError("selector bug")
+
+    monkeypatch.setattr(session_package, "_select", select_fails)
+
+    with pytest.raises(RuntimeError):
+        package_session_artifacts(sd, session_id="sid", dest_root=tmp_path / "ws")

@@ -571,87 +571,83 @@ def package_session_artifacts(
     dest_root: Path | str | None = None,
 ) -> Path | None:
     """Bundle curated artifacts of ``session_dir`` into one zip under the dest root (default ``/workspace/<PACKAGE_SUBDIR>/``)."""
-    try:
-        sd = Path(session_dir).resolve()
-        if not sd.is_dir():
-            log.warning("session package skipped: session_dir not a dir: %s", sd)
-            return None
-
-        sid = (session_id or "").strip() or sd.name
-        matched, missing_globs, refused = _select(sd)
-        if not matched:
-            log.warning("session package skipped: no artifacts matched in %s", sd)
-            return None
-
-        selected, truncated, reserved_overflow, dropped, total = _pack(sd, matched)
-        plan = PackPlan(
-            session_dir=sd,
-            session_id=sid,
-            missing_globs=missing_globs,
-            truncated=truncated,
-            dropped_files=dropped,
-            refused_files=refused,
-            reserved_overflow=reserved_overflow,
-        )
-
-        root = Path(dest_root).resolve() if dest_root else _dest_root()
-        out_dir = root / PACKAGE_SUBDIR
-        out_dir.mkdir(parents=True, exist_ok=True)
-        target = out_dir / f"{sid}.zip"
-
-        # Atomic write: build into a temp zip in the same dir, then replace.
-        fd, tmp = tempfile.mkstemp(prefix=f".{sid}.", suffix=".zip.tmp", dir=str(out_dir))
-        os.close(fd)
-        tmp_path = Path(tmp)
-        try:
-            with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zf:
-                written: list[tuple[str, int]] = []
-                write_failures: list[str] = []
-                for p, rel, sz in selected:
-                    try:
-                        if rel == _STATE_JSON_REL:
-                            data = _exported_state_bytes(p)
-                            zf.writestr(rel, data)
-                            sz = len(data)
-                        else:
-                            zf.write(p, arcname=rel)
-                        written.append((rel, sz))
-                    except OSError:
-                        write_failures.append(rel)
-                        log.warning("session package: failed to add %s", rel)
-                # Built here so it describes the members that exist, not the ones that were selected.
-                manifest = _build_manifest(plan, written, write_failures)
-                zf.writestr(MANIFEST_JSON_NAME, json.dumps(manifest, indent=2))
-                zf.writestr(MANIFEST_TXT_NAME, _manifest_text(manifest))
-            os.replace(tmp_path, target)
-        except Exception:
-            with suppress(OSError):
-                tmp_path.unlink()
-            raise
-
-        log.info(
-            "session package: wrote %s (%d files, %d bytes pre-zip, complete=%s)",
-            target,
-            len(written),
-            total,
-            manifest["complete"],
-        )
-
-        # Also lay the same files down loose (uncompressed, original tree) straight under the dest root so a consumer
-        # can grab one file without unzip.
-        if _loose_enabled():
-            try:
-                copied, loose_failures = _copy_loose_tree(selected, root)
-                _write_loose_manifest(root, _build_manifest(plan, copied, loose_failures))
-                log.info(
-                    "session package: copied %d loose files into %s",
-                    len(copied),
-                    root,
-                )
-            except Exception:
-                log.exception("session package: loose copy failed (non-fatal)")
-
-        return target
-    except Exception:
-        log.exception("session package failed (non-fatal)")
+    sd = Path(session_dir).resolve()
+    if not sd.is_dir():
+        log.warning("session package skipped: session_dir not a dir: %s", sd)
         return None
+
+    sid = (session_id or "").strip() or sd.name
+    matched, missing_globs, refused = _select(sd)
+    if not matched:
+        log.warning("session package skipped: no artifacts matched in %s", sd)
+        return None
+
+    selected, truncated, reserved_overflow, dropped, total = _pack(sd, matched)
+    plan = PackPlan(
+        session_dir=sd,
+        session_id=sid,
+        missing_globs=missing_globs,
+        truncated=truncated,
+        dropped_files=dropped,
+        refused_files=refused,
+        reserved_overflow=reserved_overflow,
+    )
+
+    root = Path(dest_root).resolve() if dest_root else _dest_root()
+    out_dir = root / PACKAGE_SUBDIR
+    out_dir.mkdir(parents=True, exist_ok=True)
+    target = out_dir / f"{sid}.zip"
+
+    # Atomic write: build into a temp zip in the same dir, then replace.
+    fd, tmp = tempfile.mkstemp(prefix=f".{sid}.", suffix=".zip.tmp", dir=str(out_dir))
+    os.close(fd)
+    tmp_path = Path(tmp)
+    try:
+        with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            written: list[tuple[str, int]] = []
+            write_failures: list[str] = []
+            for p, rel, sz in selected:
+                try:
+                    if rel == _STATE_JSON_REL:
+                        data = _exported_state_bytes(p)
+                        zf.writestr(rel, data)
+                        sz = len(data)
+                    else:
+                        zf.write(p, arcname=rel)
+                    written.append((rel, sz))
+                except OSError:
+                    write_failures.append(rel)
+                    log.warning("session package: failed to add %s", rel)
+            # Built here so it describes the members that exist, not the ones that were selected.
+            manifest = _build_manifest(plan, written, write_failures)
+            zf.writestr(MANIFEST_JSON_NAME, json.dumps(manifest, indent=2))
+            zf.writestr(MANIFEST_TXT_NAME, _manifest_text(manifest))
+        os.replace(tmp_path, target)
+    except Exception:
+        with suppress(OSError):
+            tmp_path.unlink()
+        raise
+
+    log.info(
+        "session package: wrote %s (%d files, %d bytes pre-zip, complete=%s)",
+        target,
+        len(written),
+        total,
+        manifest["complete"],
+    )
+
+    # Also lay the same files down loose (uncompressed, original tree) straight under the dest root so a consumer
+    # can grab one file without unzip.
+    if _loose_enabled():
+        try:
+            copied, loose_failures = _copy_loose_tree(selected, root)
+            _write_loose_manifest(root, _build_manifest(plan, copied, loose_failures))
+            log.info(
+                "session package: copied %d loose files into %s",
+                len(copied),
+                root,
+            )
+        except Exception:
+            log.exception("session package: loose copy failed (non-fatal)")
+
+    return target
