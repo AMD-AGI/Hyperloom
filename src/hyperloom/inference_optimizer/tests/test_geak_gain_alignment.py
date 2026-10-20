@@ -897,9 +897,8 @@ def test_promote_with_a_proven_overlay_stamps_the_kernel_lever(tmp_path: Path) -
 def _journey_with_validated_keeps(tmp_path: Path, ratios: list[float]) -> str:
     """Write a journey whose KEEPs each carry a validated ``(base,new)`` pair.
 
-    Those KEEPs land in the per-KERNEL ledger, which feeds ``by_kernel`` and
-    ``kernel_lifecycle``. They are deliberately NOT part of the attribution
-    total, which is summed from the stack ledger alone.
+    Those KEEPs land in the per-KERNEL ledger. They are deliberately NOT part
+    of the attribution total, which is summed from the stack ledger alone.
     """
     path = tmp_path / "kernel_journey.json"
     path.write_text(

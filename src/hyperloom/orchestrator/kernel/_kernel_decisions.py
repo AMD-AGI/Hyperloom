@@ -676,8 +676,8 @@ def _canonical_kernel_recipe_operator(kernel_id: str) -> str:
     return parts[2]
 
 
-def _forge_loop_entries_by_operator_in_optimization_stack(state) -> dict[str, dict[str, Any]]:
-    """Map normalized operator name -> its integrating optimization_stack entry (forge-loop/flydsl/fusion).
+def _forge_loop_operators_in_optimization_stack(state) -> set[str]:
+    """Normalized operator names an integrating kernel-recipe lane (forge-loop/flydsl/fusion) has already landed.
 
     These lanes key their ``optimization_stack`` entries by the long-form recipe id
     (``kernel:forge-loop:<operator>:<framework>:<framework_version>:<backend>:<gpu>``), which never equals a roofline
@@ -685,19 +685,14 @@ def _forge_loop_entries_by_operator_in_optimization_stack(state) -> dict[str, di
     through the same ``normalize_operator_name`` the recipe id was built with — is the one identity the two sides
     share.
     """
-    entries: dict[str, dict[str, Any]] = {}
+    operators: set[str] = set()
     for e in state.optimization_stack or []:
         if not isinstance(e, dict) or e.get("action") not in INTEGRATING_STACK_ACTIONS:
             continue
         operator = _canonical_kernel_recipe_operator(str(e.get("kernel_id") or ""))
         if operator:
-            entries[normalize_operator_name(operator)] = e
-    return entries
-
-
-def _forge_loop_operators_in_optimization_stack(state) -> set[str]:
-    """Normalized operator names an integrating kernel-recipe lane has already landed; see the sibling ``_entries`` function."""
-    return set(_forge_loop_entries_by_operator_in_optimization_stack(state))
+            operators.add(normalize_operator_name(operator))
+    return operators
 
 
 def _kernel_trace_impact_pct(state, kernel_id: str) -> float:

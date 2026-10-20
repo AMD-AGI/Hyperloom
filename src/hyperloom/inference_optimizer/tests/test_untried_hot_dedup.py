@@ -8,6 +8,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from hyperloom.orchestrator.kernel import _kernel_decisions as kd
+from hyperloom.orchestrator.state import kernel_decision_settings as kds
 
 
 def _state(hot, *, integrate_attempts=None, pending=None, controller=None):
@@ -185,3 +186,8 @@ def test_missing_shape_dispatchable_field_stays_untried():
 
     untried = kd.untried_hot_reusable_kernels(state, min_gpu_pct=1.0, top_n=10)
     assert untried == ["k001"]
+
+
+def test_hot_kernel_floor_falls_back_on_an_unparseable_override(monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT", "not-a-number")
+    assert kds.resolve_hot_kernel_min_gpu_pct() == kds._DEFAULT_HOT_KERNEL_MIN_GPU_PCT

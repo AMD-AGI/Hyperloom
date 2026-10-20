@@ -359,8 +359,7 @@ class KernelStackPhase(CoordinatorCollaborator):
             drained += 1
         if drained >= max_drain:
             log.warning(
-                "SWEEP entry: drain cap (%d) reached; remaining pending "
-                "KEEPs will be visible in summary.by_kernel as KEEP_PENDING",
+                "SWEEP entry: drain cap (%d) reached; remaining pending KEEPs stay queued",
                 max_drain,
             )
 
