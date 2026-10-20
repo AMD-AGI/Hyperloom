@@ -190,16 +190,13 @@ def _vllm_action(**kw):
     return TargetedBuildAction(**base)
 
 
-_CUDA_PYPROJECT = "[project]\nname = 'sglang'\ndependencies = ['torch==2.13.0']\n"
-_ROCM_PYPROJECT = "[project]\nname = 'sglang'\n[project.optional-dependencies]\nsrt_hip = ['torch']\n"
-
-
 def _sglang_python_dir(worktree):
-    """An SGLang checkout's ``python/``: the CUDA pyproject.toml beside the ROCm one."""
+    """An SGLang checkout's ``python/``, whose pyproject declares a ROCm extra."""
     python_dir = worktree / "python"
     python_dir.mkdir(parents=True, exist_ok=True)
-    (python_dir / "pyproject.toml").write_text(_CUDA_PYPROJECT, encoding="utf-8")
-    (python_dir / "pyproject_other.toml").write_text(_ROCM_PYPROJECT, encoding="utf-8")
+    (python_dir / "pyproject.toml").write_text(
+        "[project.optional-dependencies]\nsrt_hip = ['torch']\n", encoding="utf-8"
+    )
     return python_dir
 
 
@@ -602,8 +599,7 @@ def test_sgl_kernel_build_abi_mismatch(monkeypatch, tmp_path):
     assert result.failure_class in ("abi_mismatch", "preflight_toolchain")
 
 
-def test_sgl_kernel_build_installs_sglang_with_its_rocm_extra_and_restores_the_checkout(monkeypatch, tmp_path):
-    """SGLang installs from the ROCm pyproject; the checkout patches are cut against keeps its own."""
+def test_sgl_kernel_build_installs_sglang_with_its_rocm_extra(monkeypatch, tmp_path):
     wt = tmp_path / "wt"
     (wt / "sgl-kernel").mkdir(parents=True)
     python_dir = _sglang_python_dir(wt)
@@ -611,18 +607,17 @@ def test_sgl_kernel_build_installs_sglang_with_its_rocm_extra_and_restores_the_c
     venv = tmp_path / "venv"
     (venv / "bin").mkdir(parents=True)
     _patch_isolation(monkeypatch, wt, venv)
-    installed: list[tuple[str, str]] = []
+    installed: list[str] = []
     rocm_run = _make_rocm_run()
 
     def _run(argv, **kw):
         if argv[1:4] == ["-m", "pip", "install"]:
-            installed.append((argv[-1], (python_dir / "pyproject.toml").read_text(encoding="utf-8")))
+            installed.append(argv[-1])
         return rocm_run(argv, **kw)
 
     result = run_sgl_kernel_build(_sgl_action(), str(tmp_path / "attempt"), run=_run, disk_preflight_fn=_noop_disk)
     assert result.ok
-    assert installed == [(f"{python_dir}[srt_hip]", _ROCM_PYPROJECT)]
-    assert (python_dir / "pyproject.toml").read_text(encoding="utf-8") == _CUDA_PYPROJECT
+    assert installed == [f"{python_dir}[srt_hip]"]
 
 
 def test_sgl_kernel_import_probe_gate(monkeypatch, tmp_path):

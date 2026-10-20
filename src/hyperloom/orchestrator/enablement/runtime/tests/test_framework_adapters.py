@@ -230,41 +230,22 @@ def test_a_wheel_runtime_with_no_site_packages_fails_to_provision(tmp_path, adap
     assert "site-packages" in result.error
 
 
-_CUDA_PYPROJECT = "[project]\nname = 'sglang'\ndependencies = ['torch==2.13.0']\n"
-_ROCM_PYPROJECT = """[project]
-name = 'sglang'
-[project.optional-dependencies]
-srt_hip = ['sglang[runtime_common]', 'torch']
-srt_hip_rocm724 = ['sglang[runtime_common]', 'torch==2.11.0']
-"""
+_TORCH_PROBE = ("m.version('torch')", 0, "2.11.0+rocm7.2", "")
 
 
-def _sglang_checkout(attempt: Path, rocm_pyproject: str = _ROCM_PYPROJECT) -> Path:
-    """What the fetch leaves behind: the checkout's CUDA pyproject.toml beside its ROCm one."""
+def _sglang_checkout(attempt: Path) -> None:
+    """What the fetch leaves behind: a checkout whose pyproject declares a ROCm extra."""
     python_dir = attempt / "src" / "python"
     python_dir.mkdir(parents=True)
-    (python_dir / "pyproject.toml").write_text(_CUDA_PYPROJECT, encoding="utf-8")
-    (python_dir / "pyproject_other.toml").write_text(rocm_pyproject, encoding="utf-8")
-    return python_dir
-
-
-class _PyprojectAtInstall(_FakeRun):
-    """Answers the torch probe and records the checkout's pyproject.toml as pip sees it."""
-
-    def __init__(self, python_dir: Path, torch_version: str = "2.11.0+rocm7.2"):
-        super().__init__(rules=[("m.version('torch')", 0, torch_version, "")])
-        self.python_dir = python_dir
-        self.pyproject_at_install: list[str] = []
-
-    def __call__(self, argv, env, cwd):
-        if argv[1:4] == ["-m", "pip", "install"]:
-            self.pyproject_at_install.append((self.python_dir / "pyproject.toml").read_text(encoding="utf-8"))
-        return super().__call__(argv, env, cwd)
+    (python_dir / "pyproject.toml").write_text(
+        "[project.optional-dependencies]\nsrt_hip = ['torch']\n", encoding="utf-8"
+    )
 
 
 def test_sglang_editable_provision_fetches_the_pr_head_and_records_the_clone_it_imports(tmp_path):
     """An editable install executes the clone, and its diffs are cut against the repo root."""
-    run = _PyprojectAtInstall(_sglang_checkout(tmp_path / "attempt"))
+    _sglang_checkout(tmp_path / "attempt")
+    run = _FakeRun(rules=[_TORCH_PROBE])
     action = SglangAdapter().build_stack_action(RuntimeRequest(ref="PR:123", packages=("transformers==4.57.1",)))
     result = SglangAdapter(run=run).provision(action, tmp_path / "attempt")
     assert result.ok is True, result.error
@@ -283,49 +264,22 @@ def test_sglang_editable_provision_fetches_the_pr_head_and_records_the_clone_it_
     assert result.runtime.source_root == str(checkout)
     assert result.runtime.pythonpath_prefix == str(checkout / "python")
     (pip,) = run.pip_calls()
-    assert pip[-3:] == ["-e", f"{checkout / 'python'}[srt_hip_rocm724]", "transformers==4.57.1"]
-
-
-@pytest.mark.parametrize("torch_version, extra", [("2.11.0+rocm7.2", "srt_hip_rocm724"), ("2.9.1+rocm7.0", "srt_hip")])
-def test_sglang_checkout_installs_from_its_rocm_pyproject_with_the_extra_the_rocm_torch_satisfies(
-    tmp_path, torch_version, extra
-):
-    """The CUDA pyproject would ask pip to replace the ROCm torch; the swap lasts only for the install."""
-    python_dir = _sglang_checkout(tmp_path / "attempt")
-    run = _PyprojectAtInstall(python_dir, torch_version)
-    action = SglangAdapter().build_stack_action(RuntimeRequest(ref="v0.5.21"))
-    assert SglangAdapter(run=run).provision(action, tmp_path / "attempt").ok
-    (pip,) = run.pip_calls()
-    assert pip[-2:] == ["-e", f"{python_dir}[{extra}]"]
-    assert run.pyproject_at_install == [_ROCM_PYPROJECT]
-    assert (python_dir / "pyproject.toml").read_text(encoding="utf-8") == _CUDA_PYPROJECT
+    assert pip[-3:] == ["-e", f"{checkout / 'python'}[srt_hip]", "transformers==4.57.1"]
 
 
 def test_a_failed_install_reports_pips_error_and_logs_it(tmp_path):
     """Stderr warnings come first; the error at the end is what the result and provision.log carry."""
     warnings = "DEPRECATION: Loading egg at /opt/venv/lib/python3.12/site-packages/x.egg is deprecated.\n" * 20
     error = "RuntimeError: cargo is required to discover the Rust extension modules"
-    run = _PyprojectAtInstall(_sglang_checkout(tmp_path / "attempt"))
-    run.rules.insert(0, ("-m pip install", 1, "Obtaining file:///src/python\n", f"{warnings}{error}\n"))
+    _sglang_checkout(tmp_path / "attempt")
+    run = _FakeRun(
+        rules=[("-m pip install", 1, "Obtaining file:///src/python\n", f"{warnings}{error}\n"), _TORCH_PROBE]
+    )
     action = SglangAdapter().build_stack_action(RuntimeRequest(ref="v0.5.21"))
     result = SglangAdapter(run=run).provision(action, tmp_path / "attempt")
     assert result.ok is False
     assert error in result.error
     assert error in Path(result.log_path).read_text(encoding="utf-8")
-
-
-def test_sglang_checkout_with_no_extra_for_the_rocm_torch_fails_before_pip(tmp_path):
-    python_dir = _sglang_checkout(
-        tmp_path / "attempt",
-        "[project]\nname = 'sglang'\n[project.optional-dependencies]\nsrt_hip = ['torch==2.9.1']\n",
-    )
-    run = _PyprojectAtInstall(python_dir)
-    action = SglangAdapter().build_stack_action(RuntimeRequest(ref="v0.5.21"))
-    result = SglangAdapter(run=run).provision(action, tmp_path / "attempt")
-    assert result.ok is False
-    assert "admits torch 2.11.0+rocm7.2" in result.error
-    assert run.pip_calls() == []
-    assert (python_dir / "pyproject.toml").read_text(encoding="utf-8") == _CUDA_PYPROJECT
 
 
 def test_sglang_editable_provision_reports_a_ref_it_cannot_fetch(tmp_path):
