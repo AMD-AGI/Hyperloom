@@ -14,7 +14,6 @@ cognitive-complexity src/hyperloom/inference_optimizer/breakdown/critic_reviews.
 cognitive-complexity src/hyperloom/inference_optimizer/breakdown/recorder/framework_event.py::FrameworkEventRecorder.record_attempt 68
 cognitive-complexity src/hyperloom/inference_optimizer/breakdown/recorder/instrument.py::_mirror_backend_attempts_to_kernel_timeline 53
 cognitive-complexity src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py::_merge_acceptances 31
-cognitive-complexity src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py::assemble_kernel_ext 50
 cognitive-complexity src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py::record_geak_attempts 31
 cognitive-complexity src/hyperloom/inference_optimizer/breakdown/reporters/_renderers/final.py::render 42
 cognitive-complexity src/hyperloom/inference_optimizer/breakdown/reporters/_renderers/kernel_lifecycle.py::render 59
@@ -514,10 +513,8 @@ function-lines src/hyperloom/inference_optimizer/breakdown/exporter.py::build 13
 function-lines src/hyperloom/inference_optimizer/breakdown/recorder/framework_event.py::FrameworkEventRecorder.record_attempt 111
 function-lines src/hyperloom/inference_optimizer/breakdown/recorder/framework_event.py::assemble_framework_ext 93
 function-lines src/hyperloom/inference_optimizer/breakdown/recorder/instrument.py::_mirror_backend_attempts_to_kernel_timeline 107
-function-lines src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py::assemble_kernel_ext 206
 function-lines src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py::record_geak_attempts 102
 function-lines src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py::record_integrate_verdict 89
-function-lines src/hyperloom/inference_optimizer/breakdown/reporters/_renderers/attribution.py::render 85
 function-lines src/hyperloom/inference_optimizer/breakdown/reporters/_renderers/baseline.py::render 134
 function-lines src/hyperloom/inference_optimizer/breakdown/reporters/_renderers/final.py::render 178
 function-lines src/hyperloom/inference_optimizer/breakdown/reporters/_renderers/kernel_lifecycle.py::render 156
@@ -888,7 +885,7 @@ function-lines src/kernelforge/rewrite_by_flydsl/kb.py::write_flydsl_kb_solution
 function-lines src/kernelforge/rewrite_by_flydsl/optimize.py::run_optimize 125
 function-lines src/kernelforge/rewrite_by_flydsl/port_loop.py::run_port_loop 166
 function-lines src/kernelforge/rewrite_by_flydsl/runner.py::run_rewrite 303
-module-lines src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py 2168
+module-lines src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py 2149
 module-lines src/hyperloom/inference_optimizer/breakdown/schema.py 2681
 module-lines src/hyperloom/inference_optimizer/cli/__init__.py 2569
 module-lines src/hyperloom/inference_optimizer/cli/model_gate.py 1815
