@@ -24,6 +24,7 @@ from hyperloom.inference_optimizer.breakdown.stop_reasons import (
     BACKEND_UNHEALTHY_STOP_REASON,
     PATCH_RECOVERY_INCOMPLETE_STOP_REASON,
 )
+from hyperloom.inference_optimizer.session.optimization_journal import read_journal_entries
 from hyperloom.inference_optimizer.session.paths import db_path_for
 from ...measurement.baseline_budget import BASELINE_BUDGET_STOP_EXPLANATIONS
 from ...state.shared_state import SharedState
@@ -36,15 +37,7 @@ def _count_server_boot_failures(session_dir: Path | None) -> int:
     """Count ``warmup_failed`` variants (server boot failures) from the journal."""
     if session_dir is None:
         return 0
-    path = Path(session_dir) / "reports" / "optimization_journal.json"
-    try:
-        blob = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return 0
-    entries = blob.get("entries") if isinstance(blob, dict) else None
-    if not isinstance(entries, list):
-        return 0
-    return sum(1 for e in entries if isinstance(e, dict) and str(e.get("reason") or "").strip() == "warmup_failed")
+    return sum(1 for e in read_journal_entries(session_dir) if str(e.reason or "").strip() == "warmup_failed")
 
 
 def _safe_call(state: Any, method: str, default: Any) -> Any:
