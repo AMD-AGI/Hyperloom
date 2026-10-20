@@ -647,7 +647,7 @@ class KernelStackPhase(CoordinatorCollaborator):
 
         accuracy_gate = _grade_integrate_accuracy(
             bench_result,
-            session_dir=self.session_dir,
+            baseline_accuracy=float(self.shared_state.baseline_accuracy or 0.0),
             workspace=workspace,
             # The args the bench server ran under, so a serving context too small to host an eval is not
             # read as a broken eval.

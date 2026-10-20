@@ -1939,10 +1939,6 @@ class TestKernelE2EMeasurementPromotion:
             pytest.param({"target_file": "/unexpected.py"}, id="target_file"),
             pytest.param({"source_file": "/unexpected.py"}, id="source_file"),
             pytest.param({"snapshot_dir": "/unexpected-snapshot"}, id="snapshot_dir"),
-            pytest.param(
-                {"preapplied_apply_result": {"status": "ok", "manifest_path": "/unexpected-manifest.json"}},
-                id="preapplied_apply_result",
-            ),
         ],
     )
     async def test_gemm_paired_native_handler_rejects_artifacts(

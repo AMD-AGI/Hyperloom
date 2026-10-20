@@ -91,7 +91,7 @@ def _integrate_eval_score(bench_result: dict[str, Any], workspace: Path) -> _Eva
 def _grade_integrate_accuracy(
     bench_result: dict[str, Any],
     *,
-    session_dir: Path,
+    baseline_accuracy: float,
     workspace: Path,
     strict: bool = False,
     server_args: str = "",
@@ -111,7 +111,9 @@ def _grade_integrate_accuracy(
 
     Args:
         bench_result: The re-baseline result dict from ``BaselineExecutor``.
-        session_dir: Session directory used to resolve ``baseline_accuracy``.
+        baseline_accuracy: The session's recorded baseline accuracy; ``0.0``
+            when no baseline has established one, which is what makes a missing
+            verdict degrade rather than block.
         workspace: The integrate task workspace holding both round slots.
         strict: Grade an artifact whose correctness has only ever been proven
             against a reference. This serving run is its first and only
@@ -130,14 +132,6 @@ def _grade_integrate_accuracy(
         resolve_served_context,
         served_context_hosts_eval,
     )
-
-    baseline_accuracy = 0.0
-    try:
-        from ..state.shared_state import SharedState
-
-        baseline_accuracy = float(SharedState.load_or_init(session_dir).baseline_accuracy or 0.0)
-    except Exception:
-        log.debug("integrate_handler: could not resolve baseline_accuracy", exc_info=True)
 
     scored = _integrate_eval_score(bench_result, workspace)
     new_accuracy = scored.accuracy

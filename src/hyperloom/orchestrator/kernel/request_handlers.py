@@ -4040,30 +4040,8 @@ def _applied_patch_result(
     session_dir: str,
     preapplied_git_patch: bool,
 ) -> dict[str, Any]:
-    """Apply the kernel patch, or adopt a pre-applied result the session can vouch for.
-
-    A pre-applied manifest is trusted only from under the session's own
-    ``patches`` directory. An agent's integrate params land in ``payload``
-    verbatim, so the payload can never vouch for itself.
-    """
+    """Apply the kernel patch, reading a git-applied publication as a snapshot."""
     kernel_id = payload.get("kernel_id")
-    preapplied = payload.get("preapplied_apply_result")
-    if isinstance(preapplied, dict) and preapplied.get("status") == "ok":
-        manifest_path = Path(str(preapplied.get("manifest_path") or ""))
-        patches_root = (Path(session_dir) / "patches").resolve()
-        try:
-            trusted_preapplied = manifest_path.is_file() and manifest_path.resolve().is_relative_to(patches_root)
-        except OSError:
-            trusted_preapplied = False
-        return (
-            dict(preapplied)
-            if trusted_preapplied
-            else {
-                "status": "failed",
-                "error_class": "untrusted_preapplied_manifest",
-                "error": f"invalid pre-applied manifest: {manifest_path}",
-            }
-        )
     if preapplied_git_patch:
         # A controller publication is git-applied to the worktree before the
         # validator runs, so its final bytes are already on disk; apply reads them
@@ -4084,55 +4062,69 @@ def _applied_patch_result(
     )
 
 
+def _integrate_failure(
+    payload: dict[str, Any],
+    apply_result: dict[str, Any],
+    *,
+    error_class: str,
+    error: str,
+    decision: str,
+    **extra: Any,
+) -> HandlerResult:
+    """What an integrate reports when it cannot fairly score the patch it applied.
+
+    Every one of these abandons the measurement with the patch on disk, so the
+    revert happens here rather than at each site, and ``decision`` says what the
+    candidate itself is left owing.
+    """
+    return {
+        "status": "failed",
+        "error_class": error_class,
+        "error": error,
+        "decision": decision,
+        "kernel_id": payload.get("kernel_id"),
+        "patch_path": payload.get("patch_path"),
+        "target_file": payload.get("target_file") or payload.get("source_file"),
+        "apply_result": apply_result,
+        "revert_result": _maybe_revert_kernel_patch(apply_result),
+        **extra,
+    }
+
+
 def _unmeasured_integration_failure(
     payload: dict[str, Any],
     *,
     apply_result: dict[str, Any],
     bench_result: Any,
-) -> dict[str, Any]:
+) -> HandlerResult:
     """Report a re-baseline that produced no usable measurement, and revert the patch.
 
     The patch was never fairly scored, so the fault is surfaced at the top level
     -- the re-baseline's own error class when it has one -- and routed through the
     fault retry budget rather than discarded as a genuine REVERT.
     """
-    kernel_id = payload.get("kernel_id")
-    patch_path = payload.get("patch_path")
-    revert_result = _maybe_revert_kernel_patch(apply_result)
-    # The re-baseline produced no usable measurement, so the patch was never
-    # fairly scored. Surface a top-level fault error_class (the re-baseline's
-    # own when present, else bench_exception) so this routes through the fault
-    # retry budget rather than being discarded as a genuine REVERT.
     rebaseline_error_class = (
         str((bench_result or {}).get("error_class") or "").strip() if isinstance(bench_result, dict) else ""
     ) or "bench_exception"
     stopped = stopped_by_the_run_class(rebaseline_error_class)
     if stopped is not None:
         # Nothing was measured, so the patch has no verdict to answer for.
-        return {
-            "status": "failed",
-            "error_class": stopped.error_class,
-            "error": stopped.interrupted,
-            "decision": "NEEDS_REVIEW",
-            "rebaseline_detail": bench_result,
-            "kernel_id": kernel_id,
-            "patch_path": patch_path,
-            "target_file": payload.get("target_file") or payload.get("source_file"),
-            "apply_result": apply_result,
-            "revert_result": revert_result,
-        }
-    return {
-        "status": "failed",
-        "error_class": rebaseline_error_class,
-        "error": "re-baseline did not succeed",
-        "decision": "REVERT",
-        "rebaseline_detail": bench_result,
-        "kernel_id": kernel_id,
-        "patch_path": patch_path,
-        "target_file": payload.get("target_file") or payload.get("source_file"),
-        "apply_result": apply_result,
-        "revert_result": revert_result,
-    }
+        return _integrate_failure(
+            payload,
+            apply_result,
+            error_class=stopped.error_class,
+            error=stopped.interrupted,
+            decision="NEEDS_REVIEW",
+            rebaseline_detail=bench_result,
+        )
+    return _integrate_failure(
+        payload,
+        apply_result,
+        error_class=rebaseline_error_class,
+        error="re-baseline did not succeed",
+        decision="REVERT",
+        rebaseline_detail=bench_result,
+    )
 
 
 def _confirm_source_import(
@@ -4173,18 +4165,11 @@ def _confirm_source_import(
 class _IntegrateRebaseline(NamedTuple):
     """The re-baseline run that measures one patched build end to end."""
 
-    session_dir: Path
     workspace: Path
     server_args: str
+    baseline_accuracy: float
     executor: Any
     ctx: Any
-
-
-class _IntegrateMeasurement(NamedTuple):
-    """The re-baseline's measurement, or the failure that stands in for it."""
-
-    bench_result: dict[str, Any]
-    failure: HandlerResult | None
 
 
 class _AccuracyVerdict(NamedTuple):
@@ -4192,7 +4177,6 @@ class _AccuracyVerdict(NamedTuple):
 
     gate: dict[str, Any] | None
     decision: str
-    infeasible_failure: HandlerResult | None
 
 
 class _PatchCleanup(NamedTuple):
@@ -4269,8 +4253,7 @@ def _integrate_request_refusal(payload: dict, *, requested_controls: bool) -> Ha
         }
     paired_measurement = _is_paired_gemm_measurement(payload)
     if paired_measurement and any(
-        payload.get(key)
-        for key in ("patch_path", "target_file", "source_file", "snapshot_dir", "preapplied_apply_result")
+        payload.get(key) for key in ("patch_path", "target_file", "source_file", "snapshot_dir")
     ):
         raise ValueError("GEMM paired measurement cannot apply a kernel artifact")
     if _integrate_mode(payload) != "env_only":
@@ -4375,9 +4358,9 @@ def _integrate_rebaseline(
         idempotency_key=f"{task_id}-rebaseline",
     )
     return _IntegrateRebaseline(
-        session_dir=session_dir,
         workspace=workspace,
         server_args=extra_args,
+        baseline_accuracy=float(state.baseline_accuracy or 0.0),
         executor=BaselineExecutor(session_dir=session_dir, shared_state=state),
         ctx=RunnerContext(task=task, lease=None),
     )
@@ -4434,66 +4417,16 @@ async def _multi_node_restart_failure(
             force_full_restart=True,
         )
     except ServerRestartFailed as exc:
-        return {
-            "status": "failed",
-            "error_class": "mn_server_restart_failed_post_patch",
-            "error": str(exc),
-            "kernel_id": payload.get("kernel_id"),
-            "patch_path": payload.get("patch_path"),
-            "apply_result": apply_result,
-            "revert_result": _maybe_revert_kernel_patch(apply_result),
-            "decision": "REVERT",
-        }
+        return _integrate_failure(
+            payload,
+            apply_result,
+            error_class="mn_server_restart_failed_post_patch",
+            error=str(exc),
+            decision="REVERT",
+        )
     ctx = rebaseline.ctx
     ctx.extra = {**(getattr(ctx, "extra", None) or {}), "mn_round_restarted": True}
     return None
-
-
-async def _measured_patched_build(
-    rebaseline: _IntegrateRebaseline,
-    payload: dict,
-    apply_result: dict,
-) -> _IntegrateMeasurement:
-    """Serve the patched build once and measure it end to end.
-
-    The lock sweep runs even when the regular JIT cache is warm: cpp_itfs
-    attention uses the separate AITER_ROOT_DIR/build tree and can carry a stale
-    baton from a timed-out Forge driver.
-    """
-    from ..actions.executors.benchmark_result import is_valid_measurement
-
-    with _forced_cpp_itfs_rebuild(apply_result):
-        _sweep_integrate_aiter_locks(reason="integrate server startup")
-        restart_failure = await _multi_node_restart_failure(rebaseline, payload, apply_result)
-        if restart_failure is not None:
-            return _IntegrateMeasurement({}, restart_failure)
-        try:
-            bench_result = await _run_integrate_rebaseline_with_lock_retry(
-                rebaseline.executor,
-                rebaseline.ctx,
-                workspace=rebaseline.workspace,
-                reason=f"integrate {payload.get('kernel_id') or 'anonymous'} rebaseline",
-            )
-        except Exception as exc:  # noqa: BLE001
-            return _IntegrateMeasurement(
-                {},
-                {
-                    "status": "failed",
-                    "error_class": "rebaseline_exception",
-                    "error": repr(exc),
-                    "kernel_id": payload.get("kernel_id"),
-                    "patch_path": payload.get("patch_path"),
-                    "target_file": payload.get("target_file") or payload.get("source_file"),
-                    "apply_result": apply_result,
-                    "revert_result": _maybe_revert_kernel_patch(apply_result),
-                },
-            )
-    if not is_valid_measurement(bench_result):
-        return _IntegrateMeasurement(
-            {},
-            _unmeasured_integration_failure(payload, apply_result=apply_result, bench_result=bench_result),
-        )
-    return _IntegrateMeasurement(bench_result, None)
 
 
 def _cpp_itfs_rebuild_check(apply_result: dict) -> HandlerResult:
@@ -4510,28 +4443,6 @@ def _cpp_itfs_rebuild_check(apply_result: dict) -> HandlerResult:
     if not cpp_itfs_backup.get("is_cpp_itfs") or is_multi_node():
         return {"verified": True, "status": "skipped"}
     return apply_kernel_patch.verify_cpp_itfs_rebuilt(cpp_itfs_backup)
-
-
-def _stale_cpp_itfs_binary_failure(
-    payload: dict,
-    apply_result: dict,
-    rebuild_check: HandlerResult,
-) -> HandlerResult:
-    """Refuse to score a candidate whose runtime-compiled kernel may still be the pre-patch binary."""
-    return {
-        "status": "failed",
-        "error_class": "cpp_itfs_rebuild_not_verified",
-        "error": (
-            "re-baseline did not produce a freshly-built cpp_itfs lib.so; refusing to score a possibly-stale binary"
-        ),
-        "decision": "NEEDS_REVIEW",
-        "kernel_id": payload.get("kernel_id"),
-        "patch_path": payload.get("patch_path"),
-        "target_file": payload.get("target_file") or payload.get("source_file"),
-        "apply_result": apply_result,
-        "revert_result": _maybe_revert_kernel_patch(apply_result),
-        "rebuild_check": rebuild_check,
-    }
 
 
 def _applyback_verdict_pending(payload: Mapping[str, Any]) -> bool:
@@ -4553,7 +4464,6 @@ def _integrate_accuracy_verdict(
     bench_result: dict[str, Any],
     rebaseline: _IntegrateRebaseline,
     performance: Any,
-    apply_result: dict,
 ) -> _AccuracyVerdict:
     """Grade the accuracy of a candidate that already cleared the throughput bar.
 
@@ -4564,43 +4474,34 @@ def _integrate_accuracy_verdict(
     that loses accuracy short-circuits before that.
     """
     if performance.decision != "KEEP":
-        return _AccuracyVerdict(None, performance.decision, None)
+        return _AccuracyVerdict(None, performance.decision)
     gate = _grade_integrate_accuracy(
         bench_result,
-        session_dir=rebaseline.session_dir,
+        baseline_accuracy=rebaseline.baseline_accuracy,
         workspace=rebaseline.workspace,
         strict=_applyback_verdict_pending(payload),
         server_args=rebaseline.server_args,
     )
-    if not gate["blocked"]:
-        return _AccuracyVerdict(gate, "KEEP", None)
-    if gate.get("infeasible"):
-        # The gate cannot run under this configuration, so this round measured
-        # nothing about the patch. Report it as an integration fault: faults
-        # carry their own budget and never consume one of the three attempts a
-        # patch gets to prove itself.
-        from ..actions.executors._accuracy_gate import EVAL_KIND_CONTEXT_TOO_SMALL
-
-        return _AccuracyVerdict(
-            gate,
-            "KEEP",
-            {
-                "status": "failed",
-                "error_class": EVAL_KIND_CONTEXT_TOO_SMALL,
-                "error": gate["reason"],
-                "decision": "NEEDS_REVIEW",
-                "gain_pct": performance.gain_pct,
-                "accuracy_gate": gate,
-                "revert_result": _maybe_revert_kernel_patch(apply_result),
-            },
-        )
+    if not gate["blocked"] or gate["infeasible"]:
+        return _AccuracyVerdict(gate, "KEEP")
     # A measured regression is hard negative evidence -> REVERT. A missing
     # verdict is only an evidence gap -> NEEDS_REVIEW.
-    return _AccuracyVerdict(gate, "REVERT" if gate["accuracy_pass"] is False else "NEEDS_REVIEW", None)
+    return _AccuracyVerdict(gate, "REVERT" if gate["accuracy_pass"] is False else "NEEDS_REVIEW")
 
 
-def _settled_patch(decision: str, apply_result: dict, finalize_result: HandlerResult) -> _PatchCleanup:
-    """Revert or keep the applied patch now the verdict is known, and say how that went."""
+def _settled_patch(decision: str, apply_result: dict, *, caller_owns_durability: bool) -> _PatchCleanup:
+    """Revert or keep the applied patch now the verdict is known, and say how that went.
+
+    ``caller_owns_durability`` belongs to a pre-applied KEEP: only the caller's
+    own commit makes one durable, and dropping the backups here would strand the
+    fanned-out pod-side patch if that commit then failed.
+    """
+    if decision != "KEEP":
+        finalize_result: HandlerResult = {"status": "skipped", "reason": "non-KEEP decision"}
+    elif caller_owns_durability:
+        finalize_result = {"status": "skipped", "reason": "caller owns the KEEP's durability"}
+    else:
+        finalize_result = _maybe_finalize_kernel_patch(apply_result)
     revert_result = (
         {"status": "skipped", "reason": "KEEP decision"}
         if decision == "KEEP"
@@ -4750,6 +4651,8 @@ async def integrate_handler(
         ``base_tput`` / ``new_tput`` remain output throughput; ``gain_pct``
         follows ``graded_objective`` and ``bench_result`` retains the E2E measurement.
     """
+    from ..actions.executors._accuracy_gate import EVAL_KIND_CONTEXT_TOO_SMALL
+    from ..actions.executors.benchmark_result import is_valid_measurement
     from ..measurement.integrate_performance import assess_integrate_performance
     from ..state.shared_state import SharedState
 
@@ -4790,14 +4693,40 @@ async def integrate_handler(
         "stack_incremental_keep_threshold_pct": STACK_INCREMENTAL_KEEP_THRESHOLD_PCT,
     }
     rebaseline = _integrate_rebaseline(payload, state, session_dir=session_dir, performance_policy=performance_policy)
-    measurement = await _measured_patched_build(rebaseline, payload, apply_result)
-    if measurement.failure is not None:
-        return measurement.failure
-    bench_result = measurement.bench_result
+    with _forced_cpp_itfs_rebuild(apply_result):
+        # The sweep runs even when the regular JIT cache is warm: cpp_itfs attention
+        # uses the separate AITER_ROOT_DIR/build tree and can carry a stale baton
+        # from a timed-out Forge driver.
+        _sweep_integrate_aiter_locks(reason="integrate server startup")
+        restart_failure = await _multi_node_restart_failure(rebaseline, payload, apply_result)
+        if restart_failure is not None:
+            return restart_failure
+        try:
+            bench_result = await _run_integrate_rebaseline_with_lock_retry(
+                rebaseline.executor,
+                rebaseline.ctx,
+                workspace=rebaseline.workspace,
+                reason=f"integrate {payload.get('kernel_id') or 'anonymous'} rebaseline",
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _integrate_failure(
+                payload, apply_result, error_class="rebaseline_exception", error=repr(exc), decision="REVERT"
+            )
+    if not is_valid_measurement(bench_result):
+        return _unmeasured_integration_failure(payload, apply_result=apply_result, bench_result=bench_result)
 
     rebuild_check = _cpp_itfs_rebuild_check(apply_result)
     if not rebuild_check.get("verified", True):
-        return _stale_cpp_itfs_binary_failure(payload, apply_result, rebuild_check)
+        return _integrate_failure(
+            payload,
+            apply_result,
+            error_class="cpp_itfs_rebuild_not_verified",
+            error=(
+                "re-baseline did not produce a freshly-built cpp_itfs lib.so; refusing to score a possibly-stale binary"
+            ),
+            decision="NEEDS_REVIEW",
+            rebuild_check=rebuild_check,
+        )
 
     if paired_measurement:
         return {
@@ -4811,9 +4740,20 @@ async def integrate_handler(
     performance = assess_integrate_performance(state, bench_result, **performance_policy)
     if performance.graded.degrade_reason:
         log.info("integrate_handler: grading unavailable (%s)", performance.graded.degrade_reason)
-    accuracy = _integrate_accuracy_verdict(payload, bench_result, rebaseline, performance, apply_result)
-    if accuracy.infeasible_failure is not None:
-        return accuracy.infeasible_failure
+    accuracy = _integrate_accuracy_verdict(payload, bench_result, rebaseline, performance)
+    if accuracy.gate is not None and accuracy.gate["blocked"] and accuracy.gate["infeasible"]:
+        # A gate that cannot run under this serving configuration measured nothing
+        # about the patch, so it is an integration fault: faults carry their own
+        # budget and never spend one of the attempts a patch gets to prove itself.
+        return _integrate_failure(
+            payload,
+            apply_result,
+            error_class=EVAL_KIND_CONTEXT_TOO_SMALL,
+            error=accuracy.gate["reason"],
+            decision="NEEDS_REVIEW",
+            gain_pct=performance.gain_pct,
+            accuracy_gate=accuracy.gate,
+        )
 
     # Only the strict sub-flag enforces the confirmation; an unknown never penalizes.
     confirmation = _confirm_source_import(
@@ -4821,21 +4761,12 @@ async def integrate_handler(
         workspace=bench_result.get("workspace"),
         decision=accuracy.decision,
     )
-    if confirmation.decision != "KEEP":
-        finalize_result: HandlerResult = {"status": "skipped", "reason": "non-KEEP decision"}
-    elif preapplied_git_patch:
-        # Only the caller's own commit makes a pre-applied KEEP durable, so the
-        # caller owns finalize. Dropping the backups here would strand the
-        # fanned-out pod-side patch if that commit then failed.
-        finalize_result = {"status": "skipped", "reason": "caller owns the KEEP's durability"}
-    else:
-        finalize_result = _maybe_finalize_kernel_patch(apply_result)
     return _integrate_result(
         _IntegrateVerdict(
             payload=payload,
             bench_result=bench_result,
             performance=performance,
-            cleanup=_settled_patch(confirmation.decision, apply_result, finalize_result),
+            cleanup=_settled_patch(confirmation.decision, apply_result, caller_owns_durability=preapplied_git_patch),
             accuracy=accuracy,
             source_import=confirmation,
             rebuild_check=rebuild_check,
