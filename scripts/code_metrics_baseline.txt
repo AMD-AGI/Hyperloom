@@ -631,7 +631,6 @@ function-lines src/hyperloom/orchestrator/actions/executors/targeted_build_execu
 function-lines src/hyperloom/orchestrator/actions/executors/trace_analyze.py::_build_trace_analyze_cmd 81
 function-lines src/hyperloom/orchestrator/actions/executors/trace_analyze.py::trace_analyze_handler 232
 function-lines src/hyperloom/orchestrator/bringup/argv_preflight.py::check_server_argv 107
-function-lines src/hyperloom/orchestrator/bringup/ladder.py::classify 101
 function-lines src/hyperloom/orchestrator/bus/resource_lock.py::SqliteLeaseBackend.acquire_many 95
 function-lines src/hyperloom/orchestrator/bus/resource_lock.py::_unverifiable_holders 89
 function-lines src/hyperloom/orchestrator/enablement/build.py::EnablementBuild._enqueue_build_launch_probe 84
