@@ -223,64 +223,48 @@ def _build_task_groups(hot_kernels: list[dict[str, Any]]) -> list[dict[str, Any]
     """Group routable candidates that share an editable source into task groups."""
     buckets: dict[str, dict[str, Any]] = {}
     for c in hot_kernels:
-        if not c.get("reusable_native_kernel"):
+        src = c["source_file"].strip()
+        if not c["reusable_native_kernel"] or not src:
             continue
-        src = str(c.get("source_file") or "").strip()
-        if not src:
-            continue
-        reported_source = src
-        operation = str(c.get("name") or "")
-        function_name = operation
-        legacy_function_name = str(c.get("device_kernel_name") or operation)
-        source_kind = "native" if src.lower().endswith(_NATIVE_SOURCE_EXTS) else "py"
-        identity = build_operator_identity(
-            source_kind=source_kind,
-            source_path=reported_source,
-            operation=operation,
-            function_name=function_name,
-        )
-        src = str(identity["source_path"])
-        operation_key = str(identity["operation"])
-        key = operator_identity_key(
-            source_kind=source_kind,
-            source_path=reported_source,
-            operation=operation,
-            function_name=function_name,
-        )
+        operation = c["name"]
+        identity_args = {
+            "source_kind": "native" if src.lower().endswith(_NATIVE_SOURCE_EXTS) else "py",
+            "source_path": src,
+            "operation": operation,
+        }
+        identity = build_operator_identity(**identity_args, function_name=operation)
+        key = operator_identity_key(**identity_args, function_name=operation)
         legacy_keys = legacy_operator_identity_keys(
-            source_kind=source_kind,
-            source_path=reported_source,
-            operation=operation,
-            function_name=legacy_function_name,
+            **identity_args, function_name=c.get("device_kernel_name") or operation
         )
-        shapes = c.get("input_shapes") or []
+        shapes = c.get("input_shapes", [])
         row = {
-            "kernel_id": c.get("kernel_id", ""),
-            "name": c.get("name", ""),
+            "kernel_id": c["kernel_id"],
+            "name": operation,
             "device_kernel_name": c.get("device_kernel_name", ""),
             "shapes": shapes,
             "input_shapes": shapes,
-            "input_dtypes": c.get("input_dtypes") or [],
-            "output_shapes": c.get("output_shapes") or [],
-            "output_dtypes": c.get("output_dtypes") or [],
-            "raw_arg_spec": c.get("raw_arg_spec") or {},
-            "call_count": c.get("call_count", 0),
-            "duration_us": c.get("duration_us", 0.0),
+            "input_dtypes": c.get("input_dtypes", []),
+            "output_shapes": [],
+            "output_dtypes": [],
+            "raw_arg_spec": {},
+            "call_count": c["call_count"],
+            "duration_us": c["duration_us"],
             "percent_of_total": c.get("percent_of_total", 0.0),
-            "gpu_pct": c.get("gpu_pct", 0.0),
+            "gpu_pct": c["gpu_pct"],
             "bound_type": c.get("bound_type", ""),
         }
-        bucket = buckets.get(key)
-        if bucket is None:
-            bucket = buckets[key] = {
+        bucket = buckets.setdefault(
+            key,
+            {
                 "task_group_id": "",
                 "task_group_key": key,
                 "operator_identity": identity,
                 "identity_route": "bypass",
-                "legacy_task_group_keys": legacy_keys,
+                "legacy_task_group_keys": [],
                 "operation": operation,
-                "operation_key": operation_key,
-                "source_path": src,
+                "operation_key": identity["operation"],
+                "source_path": identity["source_path"],
                 "kernel_ids": [],
                 "primary_kernel_id": "",
                 "rows": [],
@@ -288,29 +272,20 @@ def _build_task_groups(hot_kernels: list[dict[str, Any]]) -> list[dict[str, Any]
                 "aggregate_call_count": 0,
                 "aggregate_gpu_pct": 0.0,
                 "source": "bypass",
-            }
-        else:
-            bucket["legacy_task_group_keys"] = list(
-                dict.fromkeys(
-                    [
-                        *(bucket.get("legacy_task_group_keys") or []),
-                        *legacy_keys,
-                    ]
-                )
-            )
-        if row["kernel_id"] and row["kernel_id"] not in bucket["kernel_ids"]:
-            bucket["kernel_ids"].append(row["kernel_id"])
+            },
+        )
+        bucket["legacy_task_group_keys"] = list(dict.fromkeys([*bucket["legacy_task_group_keys"], *legacy_keys]))
+        bucket["kernel_ids"].append(row["kernel_id"])
         bucket["rows"].append(row)
-        bucket["aggregate_duration_us"] += float(row["duration_us"] or 0.0)
-        bucket["aggregate_call_count"] += int(row["call_count"] or 0)
-        bucket["aggregate_gpu_pct"] += float(row["gpu_pct"] or 0.0)
+        bucket["aggregate_duration_us"] += row["duration_us"]
+        bucket["aggregate_call_count"] += row["call_count"]
+        bucket["aggregate_gpu_pct"] += row["gpu_pct"]
 
     ordered = sorted(buckets.values(), key=lambda g: g["aggregate_duration_us"], reverse=True)
     for idx, group in enumerate(ordered, start=1):
         group["task_group_id"] = f"tg{idx:03d}"
-        group["rows"].sort(key=lambda r: float(r.get("duration_us") or 0.0), reverse=True)
-        if group["rows"]:
-            group["primary_kernel_id"] = group["rows"][0]["kernel_id"]
+        group["rows"].sort(key=lambda r: r["duration_us"], reverse=True)
+        group["primary_kernel_id"] = group["rows"][0]["kernel_id"]
         group["aggregate_duration_us"] = round(group["aggregate_duration_us"], 3)
         group["aggregate_gpu_pct"] = round(group["aggregate_gpu_pct"], 3)
         group["shape_cases"] = build_task_group_shape_cases(group)
