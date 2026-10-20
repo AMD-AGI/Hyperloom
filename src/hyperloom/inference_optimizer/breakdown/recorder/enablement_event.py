@@ -645,7 +645,7 @@ def assemble_enablement_ext(
             "count": len(attempts),
             # Rounds with a verdict; ``count`` includes one still in flight.
             "settled": sum(1 for row in attempts if row.get("status")),
-            **_landing_counts(attempts, revalidations),
+            "landed": sum(1 for row in attempts if str(row.get("status") or "") == ROUND_KEPT),
             "advanced": sum(1 for row in attempts if row.get("advanced")),
             "rows": attempts,
         },
@@ -672,32 +672,6 @@ def assemble_enablement_ext(
     if failure:
         status = STATUS_FAILED
     return ext, status
-
-
-def _landing_counts(
-    attempts: Sequence[Mapping[str, Any]],
-    revalidations: Sequence[Mapping[str, Any]],
-) -> dict[str, int]:
-    """How many rounds landed a fix and how many still await revalidation.
-
-    A KEEP that opened a revalidation window is provisional, and a window row
-    does not name its KEEP. A window the run stopped is replaced by a later
-    one, so the windows are matched to the provisional KEEPs from the newest
-    end: the latest window rules on the latest KEEP. A KEEP landed when its
-    window promoted, waits while its window is open or none was opened, and is
-    neither once the window closed without promoting.
-    """
-    provisional = [row for row in attempts if row.get("validation_pending")]
-    windows = list(revalidations)
-    landed = sum(1 for row in attempts if row.get("landed"))
-    pending = 0
-    for age in range(len(provisional)):
-        window = windows[-1 - age] if age < len(windows) else {}
-        if window.get("promoted"):
-            landed += 1
-        elif not window.get("closed_at"):
-            pending += 1
-    return {"landed": landed, "validation_pending": pending}
 
 
 def _status_for(outcome: str, *, attempts: int) -> str:

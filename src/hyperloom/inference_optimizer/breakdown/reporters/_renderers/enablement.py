@@ -48,15 +48,6 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     ]
     if attempts.get("landed"):
         facts.append(f"{attempts['landed']} round(s) landed a fix.")
-    if attempts.get("validation_pending"):
-        facts.append(f"{attempts['validation_pending']} round(s) kept a fix that is awaiting revalidation.")
-    rejected = sum(
-        1
-        for row in revalidations.get("rows") or []
-        if isinstance(row, dict) and row.get("closed_at") and not row.get("promoted")
-    )
-    if rejected:
-        facts.append(f"{rejected} revalidation(s) closed without promoting the kept fix.")
     if attempts.get("advanced"):
         facts.append(f"{attempts['advanced']} round(s) moved the boot forward without landing one.")
     if builds.get("failed"):
@@ -74,7 +65,6 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
                 ("rounds", attempts.get("count")),
                 ("settled", attempts.get("settled")),
                 ("landed", attempts.get("landed")),
-                ("validation_pending", attempts.get("validation_pending")),
                 ("advanced", attempts.get("advanced")),
                 ("builds", builds.get("count")),
                 ("builds_failed", builds.get("failed")),
