@@ -85,10 +85,16 @@ class TestRecordedFloat:
         assert recorded_float(value) == 0.0
         assert recorded_float(value, -1.0) == -1.0
 
-    def test_infinity_survives_so_a_broken_benchmark_stays_visible(self):
+    def test_infinity_survives_so_a_degenerate_measurement_stays_visible(self):
         assert recorded_float(float("inf")) == math.inf
         assert recorded_float("Infinity") == math.inf
         assert math.isnan(recorded_float(float("nan")))
+
+    @pytest.mark.parametrize("value", [float("inf"), float("nan"), True])
+    def test_keeps_what_to_float_rejects(self, value):
+        """The three inputs on which the two coercions disagree, so a swap is never silent."""
+        assert to_float(value, 0.0) == 0.0
+        assert recorded_float(value) != 0.0 or math.isnan(recorded_float(value))
 
 
 class TestToInt:

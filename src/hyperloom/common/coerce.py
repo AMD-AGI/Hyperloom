@@ -24,11 +24,13 @@ def to_float(value: Any, default: _T | None = None) -> float | _T | None:
 
 
 def recorded_float(value: Any, default: float = 0.0) -> float:
-    """Coerce a recorded value to ``float``, keeping ``inf`` / ``nan`` as they were recorded.
+    """Coerce a recorded value to ``float``, keeping ``inf``, ``nan`` and ``bool`` as they were recorded.
 
-    Unlike :func:`to_float`, a non-finite figure survives the coercion. It
-    records that whatever produced it was degenerate, and *default* would
-    render that as an ordinary value.
+    :func:`to_float` is not a drop-in replacement and the two disagree on
+    exactly those three: it returns *default* for each. A non-finite figure
+    survives here because it records that whatever produced it was degenerate,
+    and *default* would render that as an ordinary value nobody can tell from a
+    real one afterwards.
     """
     try:
         return float(value or default)
