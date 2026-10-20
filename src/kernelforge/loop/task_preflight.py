@@ -9,6 +9,7 @@ import asyncio
 import contextlib
 import json
 import glob
+import logging
 import os
 import pathlib
 import shutil
@@ -26,6 +27,7 @@ from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
 from kernelforge.mcp_server.tools.bench import BenchRun, bench_wallclock
 from kernelforge.mcp_server.tools.test import test_correctness
 
+log = logging.getLogger(__name__)
 
 # Preflight — deterministic driver-contract validation
 
@@ -657,6 +659,7 @@ async def _preflight_async(
             reasons.append(f"correctness mode produced no SNR/allclose metric ({cres.get('message')})")
             _record_stage_output(diagnostics, "correctness", cres)
     except Exception as exc:  # noqa: BLE001
+        log.warning("preflight correctness run raised: %s", exc)
         reasons.append(f"correctness run raised {type(exc).__name__}: {exc}")
         diagnostics["correctness"] = "".join(traceback.format_exception(exc))[-DIAG_TAIL_CHARS:]
 
@@ -705,6 +708,7 @@ async def _preflight_async(
         else:
             bench_ok = True
     except Exception as exc:  # noqa: BLE001
+        log.warning("preflight bench run raised: %s", exc)
         reasons.append(f"bench run raised {type(exc).__name__}: {exc}")
         diagnostics["bench"] = "".join(traceback.format_exception(exc))[-DIAG_TAIL_CHARS:]
 

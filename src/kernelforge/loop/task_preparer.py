@@ -808,6 +808,7 @@ async def prepare_task(
                 starved_retry_sec = starved
                 break
             except Exception as exc:  # noqa: BLE001
+                log.warning("task preparation agent attempt %d failed: %s", attempts, exc)
                 audit.driver(f"{attempt_dir}/driver_at_exception.py")
                 driver_edited = audit.driver_edited(digest_before)
                 edited_any_attempt = edited_any_attempt or driver_edited

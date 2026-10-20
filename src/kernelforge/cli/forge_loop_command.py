@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 import os
 import subprocess
@@ -78,6 +79,7 @@ if TYPE_CHECKING:
     from kernelforge.roofline_ceiling.command import AnalystAgent
     from kernelforge.tracker import ExperimentTracker, UsageAccumulator
 
+log = logging.getLogger(__name__)
 
 # A high runaway backstop, not a time bound.
 FORGE_IMPLEMENTER_TURN_BACKSTOP = 2000
@@ -396,6 +398,7 @@ class _RunReporter:
                 usage=self.run.usage,
             )
         except Exception as e:  # noqa: BLE001 - checkpoint publish must never break the loop
+            log.warning("experience KB publication failed for %s: %s", commit, e)
             status = {"written": False, "reason": f"error:{e!r}"}
         _record_remote_publication_result(
             self.remote_publication,

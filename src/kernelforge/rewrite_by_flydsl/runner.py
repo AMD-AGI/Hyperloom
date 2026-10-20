@@ -460,6 +460,7 @@ def run_rewrite(request: RewriteRun, config: Config) -> dict:
     try:
         spec = ingest.build_spec(subject, flydsl_kernel=str(candidate_kernel), workspace=workspace)
     except Exception as e:  # noqa: BLE001 - any ingest error must still be scorable
+        log.warning("rewrite ingest failed: %s", e)
         return _setup_failed(f"ingest error: {type(e).__name__}: {e}", INGEST_FAILED)
     driver_contract.export_driver_environment(spec)
     print(

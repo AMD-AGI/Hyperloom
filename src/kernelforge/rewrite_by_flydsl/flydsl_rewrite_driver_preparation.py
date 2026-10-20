@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -31,6 +32,7 @@ from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
 from kernelforge.durable_io import atomic_write_bytes
 from kernelforge.tracker import UsageAccumulator
 
+log = logging.getLogger(__name__)
 
 DRIVER_PREPARATION_FAILED = "driver_preparation_failed"
 DRIVER_PREPARATION_DEADLINE = "driver_preparation_deadline"
@@ -625,6 +627,7 @@ async def prepare_rewrite_driver(
                         {"status": "timeout", "timeout_sec": timeout_sec},
                     )
                 except Exception as error:  # noqa: BLE001
+                    log.warning("driver preparation attempt %d: agent invocation failed: %s", attempt, error)
                     prior_failure = f"agent invocation failed: {type(error).__name__}: {error}"
                     _audit_json(
                         audit,
@@ -699,6 +702,7 @@ async def prepare_rewrite_driver(
                         deadline_unix=deadline_unix,
                     )
                 except Exception as error:  # noqa: BLE001
+                    log.warning("driver preparation attempt %d: preflight raised: %s", attempt, error)
                     _restore_driver(destination, original)
                     prior_failure = f"deterministic preflight raised {type(error).__name__}: {error}"
                     continue
