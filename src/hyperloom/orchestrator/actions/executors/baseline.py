@@ -25,7 +25,7 @@ from contextlib import ExitStack, suppress
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, BinaryIO, Iterable, Iterator, Mapping, Sequence
+from typing import Any, Iterable, Iterator, Mapping, Sequence
 
 import yaml
 
@@ -237,13 +237,6 @@ _NON_RECOVERABLE_MARKERS = (
 _STRONG_OOM_CONTEXT_RADIUS = 1
 
 
-#: Bytes read from each end of a ``server.log`` when observing a bring-up.
-_BRINGUP_LOG_EDGE_BYTES = 65_536
-
-#: Cap on milestone lines carried out of the unread middle; the ladder needs
-#: one witness per milestone.
-_BRINGUP_MIDDLE_MARKER_LINES = 200
-
 #: Subdirectory of a round slot holding earlier attempts' server logs.
 _ATTEMPTS_DIRNAME = "attempts"
 
@@ -266,8 +259,8 @@ class BringupLog:
     """One bring-up log as far as it could be read.
 
     Attributes:
-        text: The decoded head-and-tail text; empty when no log was written and
-            empty when the log could not be read.
+        text: The decoded log; empty when no log was written and empty when
+            the log could not be read.
         degraded: Empty when the read answered for the log's contents;
             :data:`~hyperloom.orchestrator.bringup.DEGRADED_UNREADABLE` when a
             log that exists could not be read back.
@@ -277,39 +270,13 @@ class BringupLog:
     degraded: str = ""
 
 
-def _middle_marker_lines(handle: BinaryIO, *, start: int, stop: int) -> list[str]:
-    """Return the milestone-bearing lines in ``[start, stop)`` of an open log."""
-    from ...bringup.ladder import PROGRESS_MARKER_SUBSTRINGS
+def read_bringup_log(path: Path) -> BringupLog:
+    """Read a server log whole for bring-up classification.
 
-    handle.seek(start)
-    remaining = max(0, stop - start)
-    kept: list[str] = []
-    carry = b""
-    while remaining > 0 and len(kept) < _BRINGUP_MIDDLE_MARKER_LINES:
-        chunk = handle.read(min(1 << 20, remaining))
-        if not chunk:
-            break
-        remaining -= len(chunk)
-        lines = (carry + chunk).split(b"\n")
-        carry = lines.pop()
-        for raw in lines:
-            text = raw.decode("utf-8", "replace")
-            lowered = text.lower()
-            if any(marker in lowered for marker in PROGRESS_MARKER_SUBSTRINGS):
-                kept.append(text)
-                if len(kept) >= _BRINGUP_MIDDLE_MARKER_LINES:
-                    break
-    return kept
-
-
-def read_bringup_log(path: Path, *, edge_bytes: int = _BRINGUP_LOG_EDGE_BYTES) -> BringupLog:
-    """Read a server log for bring-up classification: both edges, plus milestones.
-
-    The edges carry the failure excerpt. The ladder needs a witness for every
-    milestone the boot passed, and those are not all near one: a build that logs
-    per kernel shape pushes the later rungs megabytes in, which would understate
-    ``stage_reached`` and make two unequal boots compare as equal. So the middle
-    is streamed for milestone lines and they are carried between the edges.
+    Neither what the ladder looks for nor where it lies is bounded: a build that
+    logs per kernel shape pushes the later milestones megabytes in, and a worker's
+    root traceback can sit megabytes above the engine-dead consequence that ends
+    the log.
 
     A log that was never written and a log the mount refuses to serve are
     different answers, and both are answers: an ESTALE or EIO on the session
@@ -317,34 +284,21 @@ def read_bringup_log(path: Path, *, edge_bytes: int = _BRINGUP_LOG_EDGE_BYTES) -
 
     Args:
         path: The log file to read.
-        edge_bytes: Bytes taken from each end; a log no larger than twice this
-            is read whole.
 
     Returns:
-        BringupLog: The decoded text, head first, and the degraded outcome when
-        a log that exists could not be read.
+        BringupLog: The decoded text and the degraded outcome when a log that
+        exists could not be read.
     """
     from ...bringup import DEGRADED_UNREADABLE
 
     try:
-        with open(path, "rb") as handle:
-            handle.seek(0, 2)
-            size = handle.tell()
-            if size <= edge_bytes * 2:
-                handle.seek(0)
-                return BringupLog(handle.read().decode("utf-8", "replace"))
-            handle.seek(0)
-            head = handle.read(edge_bytes)
-            middle = _middle_marker_lines(handle, start=edge_bytes, stop=size - edge_bytes)
-            handle.seek(size - edge_bytes)
-            tail = handle.read(edge_bytes)
+        data = path.read_bytes()
     except FileNotFoundError:
         return BringupLog("")
     except OSError as exc:
         log.warning("bringup: server log %s could not be read (%s)", path, exc)
         return BringupLog("", DEGRADED_UNREADABLE)
-    segments = [head.decode("utf-8", "replace"), *middle, tail.decode("utf-8", "replace")]
-    return BringupLog("\n".join(segments))
+    return BringupLog(data.decode("utf-8", "replace"))
 
 
 def server_child_elapsed_sec(server_log_text: str) -> float:

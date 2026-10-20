@@ -170,6 +170,27 @@ def test_a_traceback_whose_header_was_cut_off_still_keys_the_failure() -> None:
     assert observation.terminal_frame.exc_type == "UnboundLocalError"
 
 
+def test_a_rule_match_the_process_ran_past_does_not_name_the_failure() -> None:
+    """An autotuner's rejected config precedes a later milestone; the native line before the traceback does not."""
+    from hyperloom.orchestrator.bringup import observe_bringup
+
+    log = (
+        "(Worker_TP3 pid=91) Autotuning failed with out of resource: shared memory, "
+        "Required: 69632, Hardware limit: 65536. Reducing block sizes or `num_stages` may help.\n"
+        "INFO: Application startup complete.\n"
+        "host:1667128:1667733 [0] [FATAL ERROR]: HIP failure: 'out of memory'\n"
+        "Traceback (most recent call last):\n"
+        '  File "/opt/venv/lib/python3.12/site-packages/torch/distributed/distributed_c10d.py", line 4969, in barrier\n'
+        "torch.distributed.DistBackendError: NCCL error in: NCCLUtils.cpp:93, unhandled cuda error\n"
+    )
+    verdict = observe_bringup(server_log=log)
+
+    assert verdict.observation.matched_marker == "resource_constraint"
+    assert verdict.observation.env_fault == "resource_constraint"
+    assert verdict.observation.failure_text == "out of memory'"
+    assert verdict.signature.kind == "resource_constraint"
+
+
 def test_digest_ignores_stage_reached_noise() -> None:
     frame = TerminalFrame(exc_type="ValueError", module="a.b", file_rel="a/b.py", line=3)
     left = BootObservation(

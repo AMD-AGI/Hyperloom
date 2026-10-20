@@ -56,10 +56,6 @@ _PROGRESS_MARKERS: tuple[tuple[LadderStage, str], ...] = (
     (LadderStage.HTTP_READY, "the server is fired up and ready to roll"),
 )
 
-#: The marker substrings alone, for a reader that must guarantee its text still
-#: witnesses every milestone after it drops the bulk of a log.
-PROGRESS_MARKER_SUBSTRINGS: tuple[str, ...] = tuple(marker for _stage, marker in _PROGRESS_MARKERS)
-
 #: Where each enablement failure kind sits on the ladder. Kinds absent here
 #: carry no fixed position and are placed relative to observed progress.
 _KIND_STAGE: Mapping[str, LadderStage] = {
@@ -194,6 +190,27 @@ def _terminal_frame(root: _Traceback | None, roots: Sequence[str]) -> TerminalFr
     return TerminalFrame(exc_type=root.exc_type, module=module, file_rel=file_rel, line=int(line))
 
 
+def _region_start(text: str, root: _Traceback | None) -> int:
+    """Return where the failure rules start reading: the last milestone line before the root traceback."""
+    end = root.anchor if root is not None else len(text)
+    # Lowering keeps every offset but past U+0130, which lowers to two code points.
+    lowered = text[:end].replace("\u0130", "i").lower()
+    last = max(lowered.rfind(marker) for _stage, marker in _PROGRESS_MARKERS)
+    return 0 if last < 0 else text.rfind("\n", 0, last) + 1
+
+
+def failure_region(text: str) -> str:
+    """Return the stretch of a stream the failure rules read.
+
+    The process carried on past every line a later milestone follows, so a rule
+    match there (an autotuner rejecting a config, an allocation it retried) is not
+    what failed. Between the last milestone and the root traceback sit the lines a
+    failure prints natively before Python raises, so the region starts at that
+    milestone, not at the traceback.
+    """
+    return text[_region_start(text, _root_traceback(text)) :]
+
+
 def _failure_site(text: str, signature: rules.FailureSignature, root: _Traceback | None) -> tuple[int, str]:
     """Return where the excerpt is anchored and the line that states the failure.
 
@@ -204,8 +221,8 @@ def _failure_site(text: str, signature: rules.FailureSignature, root: _Traceback
     if head:
         # ``raw_excerpt`` is whitespace-collapsed; match it back with a
         # whitespace-flexible pattern so the anchor lands on the real line.
-        pattern = r"\s+".join(re.escape(tok) for tok in head.split())
-        found = re.search(pattern, text)
+        pattern = re.compile(r"\s+".join(re.escape(tok) for tok in head.split()))
+        found = pattern.search(text, _region_start(text, root))
         if found is not None:
             return found.start(), text[found.start() :].partition("\n")[0].strip()
     if root is None:
@@ -237,7 +254,7 @@ def _classified_streams(streams: BootStreams) -> tuple[tuple[str, str, rules.Fai
         (WRAPPER_STDOUT, streams.wrapper_stdout),
     ):
         if text.strip():
-            out.append((name, text, rules.classify_failure(text)))
+            out.append((name, text, rules.classify_failure(failure_region(text))))
     return tuple(out)
 
 
@@ -389,5 +406,6 @@ __all__ = [
     "WRAPPER_STDERR",
     "WRAPPER_STDOUT",
     "classify",
+    "failure_region",
     "observation_summary",
 ]
