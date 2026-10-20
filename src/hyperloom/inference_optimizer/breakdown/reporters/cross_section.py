@@ -42,7 +42,7 @@ class GlobalFacts:
     gain_attribution_lines: list[str]  # "explore: 5.00% of total (=100% share of 5.00%)"
     capabilities_not_attempted: list[str]
     capabilities_kept: list[str]
-    kernel_pipeline_funnel: dict[str, int]  # detected/recommended/optimized/adopted/...
+    kernel_pipeline_funnel: dict[str, int]  # detected/recommended/attempted/adopted/...
     variant_funnel: dict[str, Any]  # outcome.variants counts, keep_rate_pct, final_stack, validated_gain_pct
     data_quality_flags: list[str]
     # "stack_ledger" | "unattributed" | "unattributed (stack listed for
@@ -146,7 +146,7 @@ def _kernel_funnel(breakdown: dict[str, Any]) -> dict[str, int]:
 
     Returns:
         dict[str, int]: Counts keyed by lifecycle stage (``detected``,
-            ``recommended``, ``optimized``, ``adopted``, ``partial``,
+            ``recommended``, ``attempted`` (tried by at least one lane), ``adopted``, ``partial``,
             ``reverted`` and ``rejected``).
     """
     from ._renderers._kernels import kernel_rows
@@ -156,7 +156,7 @@ def _kernel_funnel(breakdown: dict[str, Any]) -> dict[str, int]:
     return {
         "detected": len(rows),
         "recommended": sum(1 for row in rows if row.get("selected_for_optimization")),
-        "optimized": sum(1 for row in rows if row.get("geak") or row.get("forge")),
+        "attempted": sum(1 for row in rows if row.get("geak") or row.get("forge")),
         "adopted": decisions.count("kept"),
         # A candidate a route measured and nothing gated: the win is real at
         # the micro level and was never ruled on end to end.

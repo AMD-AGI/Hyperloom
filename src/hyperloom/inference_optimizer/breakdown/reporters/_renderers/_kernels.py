@@ -109,20 +109,18 @@ def source_counters(breakdown: dict[str, Any], sources: tuple[str, ...]) -> dict
             continue
         totals["attempted"] += 1
         outcome = str(row.get("outcome") or "")
-        if outcome in totals:
-            totals[outcome] += 1
         e2e = as_dict(row.get("e2e"))
         decision = str(e2e.get("decision") or "").upper()
-        if decision == "KEEP":
-            totals["keeps"] += 1
-        elif decision:
+        if outcome == "adopted":
+            # Without an end-to-end ruling the keep is micro-only: a rebench
+            # promoted it, or a forge lane kept it ahead of the integrate gate.
+            totals["keeps" if decision else "micro_only_keeps"] += 1
+            totals["adopted"] += 1
+            totals["e2e_gain_pct"] = _best(totals["e2e_gain_pct"], e2e.get("e2e_gain_pct"))
+        elif decision == "REVERT":
             totals["reverts"] += 1
-        elif outcome == "adopted":
-            # Kept without the end-to-end gate ever ruling: either a rebench
-            # promoted it, or a forge lane kept it and the gate runs after the
-            # visit that produced it.
-            totals["micro_only_keeps"] += 1
-        totals["e2e_gain_pct"] = _best(totals["e2e_gain_pct"], e2e.get("e2e_gain_pct"))
+        elif outcome in totals:
+            totals[outcome] += 1
     return totals
 
 
