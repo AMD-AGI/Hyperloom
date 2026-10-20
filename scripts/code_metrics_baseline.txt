@@ -156,7 +156,7 @@ cognitive-complexity src/hyperloom/orchestrator/prompts/specialist_prompt_builde
 cognitive-complexity src/hyperloom/orchestrator/roles/claude.py::ClaudeBackend._update_turn_options 32
 cognitive-complexity src/hyperloom/orchestrator/specialists/dispatch.py::SpecialistDispatchCollaborator.build_specialist_round_entry 35
 cognitive-complexity src/hyperloom/orchestrator/specialists/dispatch.py::SpecialistDispatchCollaborator.maybe_force_stalled_domain_specialist 33
-cognitive-complexity src/hyperloom/orchestrator/specialists/dispatch.py::SpecialistDispatchCollaborator.warm_specialist_params 100
+cognitive-complexity src/hyperloom/orchestrator/specialists/dispatch.py::SpecialistDispatchCollaborator.warm_specialist_params 93
 cognitive-complexity src/hyperloom/orchestrator/specialists/patch_safety.py::resolve_patch_apply_root 40
 cognitive-complexity src/hyperloom/orchestrator/specialists/runner.py::SpecialistRunner._finalize 41
 cognitive-complexity src/hyperloom/orchestrator/specialists/subprocess_.py::SpecialistSubprocessDispatcher._reap_loop 47
@@ -296,7 +296,7 @@ cyclomatic-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._
 cyclomatic-complexity src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._prepare_warm_kernel_kb 33
 cyclomatic-complexity src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._settle_warm_replay 43
 cyclomatic-complexity src/hyperloom/orchestrator/phases/prelude.py::PreludePhase.maybe_enqueue_warm_replay 48
-cyclomatic-complexity src/hyperloom/orchestrator/specialists/dispatch.py::SpecialistDispatchCollaborator.warm_specialist_params 40
+cyclomatic-complexity src/hyperloom/orchestrator/specialists/dispatch.py::SpecialistDispatchCollaborator.warm_specialist_params 39
 cyclomatic-complexity src/hyperloom/orchestrator/specialists/patch_safety.py::resolve_patch_apply_root 21
 cyclomatic-complexity src/hyperloom/orchestrator/specialists/runner.py::SpecialistRunner._finalize 22
 cyclomatic-complexity src/hyperloom/orchestrator/specialists/subprocess_.py::SpecialistSubprocessDispatcher.run 39
@@ -738,7 +738,7 @@ function-lines src/hyperloom/orchestrator/specialists/dispatch.py::SpecialistDis
 function-lines src/hyperloom/orchestrator/specialists/dispatch.py::SpecialistDispatchCollaborator.maybe_auto_retry_specialist 134
 function-lines src/hyperloom/orchestrator/specialists/dispatch.py::SpecialistDispatchCollaborator.maybe_force_stalled_domain_specialist 108
 function-lines src/hyperloom/orchestrator/specialists/dispatch.py::SpecialistDispatchCollaborator.record_specialist_result 128
-function-lines src/hyperloom/orchestrator/specialists/dispatch.py::SpecialistDispatchCollaborator.warm_specialist_params 173
+function-lines src/hyperloom/orchestrator/specialists/dispatch.py::SpecialistDispatchCollaborator.warm_specialist_params 170
 function-lines src/hyperloom/orchestrator/specialists/patch_safety.py::resolve_patch_apply_root 104
 function-lines src/hyperloom/orchestrator/specialists/patch_safety.py::vet_patches 107
 function-lines src/hyperloom/orchestrator/specialists/rebench.py::run_specialist_rebench 86

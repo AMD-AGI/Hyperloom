@@ -5,9 +5,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
+from ..specialists.domains import gap_backfilled_domain
 from ..specialists.in_flight import held_domain, in_flight_domains
 from .denial import PolicyDenied
 from .gate import SPECIALIST_ACTION_NAME
@@ -17,9 +18,20 @@ __all__ = ["SPECIALIST_DOMAIN_IN_FLIGHT", "specialist_in_flight_denial"]
 SPECIALIST_DOMAIN_IN_FLIGHT = "specialist_domain_in_flight"
 
 
-def specialist_in_flight_denial(action_name: str, params: Mapping[str, Any] | None, tasks: Any) -> PolicyDenied | None:
-    """Refuse a single-domain specialist for a domain another queued or running one still holds."""
-    domain = held_domain(params or {}) if action_name == SPECIALIST_ACTION_NAME else ""
+def specialist_in_flight_denial(
+    action_name: str,
+    params: Mapping[str, Any] | None,
+    tasks: Any,
+    find_gap: Callable[[str], Mapping[str, Any] | None],
+) -> PolicyDenied | None:
+    """Refuse a single-domain specialist for a domain another queued or running one still holds.
+
+    Admission runs before warm-up, so the dispatch is judged with the domain warm-up will store for it.
+    """
+    if action_name != SPECIALIST_ACTION_NAME:
+        return None
+    p = params or {}
+    domain = held_domain({**p, "domain": gap_backfilled_domain(p, find_gap)})
     if not domain:
         return None
     holder = in_flight_domains([*tasks.queued_context_sync(), *tasks.running_context_sync()]).get(domain)

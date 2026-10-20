@@ -18,6 +18,7 @@ from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.specialists.in_flight import held_domain, in_flight_domains
 
 _SYSTEM = "system_specialist"
+_IDLE_GAP = "gap.system.gpu_idle_85pct"
 
 
 @pytest.fixture
@@ -36,6 +37,10 @@ async def coord(tmp_path, monkeypatch):
 async def _delegate(c: Coordinator, **params: Any) -> None:
     payload = {"action_name": "specialist", "params": {"mode": "research", **params}}
     await c.router.handle_delegate("orchestration", Intent(type=IntentType.DELEGATE, payload=payload))
+
+
+def _ledger_gap(c: Coordinator, *, domain_hint: str) -> None:
+    c.shared_state.upsert_gap({"canonical_id": _IDLE_GAP, "symptom": "GPU 85% idle", "domain_hint": domain_hint})
 
 
 async def _queued_domains(c: Coordinator) -> list[str]:
@@ -87,6 +92,27 @@ async def test_a_tag_only_dispatch_holds_the_domain_its_tag_resolves_to(coord):
     await _delegate(coord, domain=_SYSTEM, gap_canonical_id="gap.b")
 
     assert len(await coord.tasks.by_state("queued")) == 1
+    assert await _in_flight_denials(coord) == 1
+
+
+@pytest.mark.parametrize("shape", [{"task_description": "trace the decode host gap"}, {"scope": "domain"}])
+async def test_a_dispatch_citing_only_a_gap_holds_the_domain_the_gap_hints(coord, shape):
+    _ledger_gap(coord, domain_hint=_SYSTEM)
+    await _delegate(coord, gap_canonical_id=_IDLE_GAP, sub_kind="host_pacing", **shape)
+    await _delegate(coord, gap_canonical_id=_IDLE_GAP, sub_kind="launch_overhead", **shape)
+    await _delegate(coord, domain=_SYSTEM, gap_canonical_id="gap.b")
+
+    assert await _queued_domains(coord) == [_SYSTEM]
+    assert await _in_flight_denials(coord) == 2
+
+
+async def test_a_one_tag_dispatch_holds_the_domain_its_cited_gap_backfills(coord):
+    _ledger_gap(coord, domain_hint="compiler_specialist")
+    await _delegate(coord, tags=["systems"], gap_canonical_id=_IDLE_GAP, sub_kind="host_pacing")
+    await _delegate(coord, tags=["systems"], gap_canonical_id=_IDLE_GAP, sub_kind="launch_overhead")
+    await _delegate(coord, domain=_SYSTEM, gap_canonical_id="gap.s")
+
+    assert sorted(await _queued_domains(coord)) == ["compiler_specialist", _SYSTEM]
     assert await _in_flight_denials(coord) == 1
 
 

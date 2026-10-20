@@ -1440,7 +1440,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         return (
             self._phase_denial_for_action(action_name)
             or self._sequence_denial_for_action(action_name)
-            or specialist_in_flight_denial(action_name, params, self.tasks)
+            or specialist_in_flight_denial(action_name, params, self.tasks, self.shared_state.find_gap)
             or self.time_budget_denial_for_action(action_name, params=params)
         )
 

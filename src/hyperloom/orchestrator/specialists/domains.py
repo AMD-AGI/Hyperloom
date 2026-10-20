@@ -5,8 +5,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from hashlib import sha1
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -288,6 +290,16 @@ def dispatch_domain(params: dict) -> "SpecialistDomain | None":
     return domain_for_tag(dispatch_domain_key(params))
 
 
+def gap_backfilled_domain(params: Mapping[str, Any], find_gap: Callable[[str], Mapping[str, Any] | None]) -> str:
+    """The ``domain`` a dispatch is stored with: its own, else the ``domain_hint`` of the ledger gap it cites."""
+    named = str(params.get("domain") or "")
+    if named:
+        return named
+    gap_cid = str(params.get("gap_canonical_id") or "").strip() or str(params.get("gap") or "").strip()
+    gap = find_gap(gap_cid) if gap_cid else None
+    return str((gap or {}).get("domain_hint") or "")
+
+
 def is_custom_specialist_dispatch(params: dict) -> bool:
     """Whether a dispatch names ``custom_specialist`` as its domain or as a tag."""
     if str(params.get("domain") or "").strip() == CUSTOM_SPECIALIST_KEY:
@@ -354,6 +366,7 @@ __all__ = [
     "dispatch_domain",
     "dispatch_domain_key",
     "domain_for_tag",
+    "gap_backfilled_domain",
     "get_domain",
     "is_custom_specialist_dispatch",
     "normalize_dispatch_tags",

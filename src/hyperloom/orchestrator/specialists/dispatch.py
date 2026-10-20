@@ -105,7 +105,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         state = self.shared_state
         plane = self.knowledge_plane
 
-        from .domains import normalize_dispatch_tags
+        from .domains import gap_backfilled_domain, normalize_dispatch_tags
         from .profile import resolve_specialist_profile
 
         # Bench-capable specialists run a real serving + benchmark loop, so
@@ -113,6 +113,8 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         if resolve_specialist_profile(params).reserves_benchmark_lane:
             params.setdefault("needs_gpu", True)
 
+        if backfilled := gap_backfilled_domain(params, state.find_gap):
+            params["domain"] = backfilled
         domain = str(params.get("domain") or "").strip()
         normalize_dispatch_tags(params)
 
@@ -204,11 +206,6 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                     params["gap_symptom"] = str(gap.get("symptom") or "")
                 if not params.get("gap_layer"):
                     params["gap_layer"] = str(gap.get("layer") or "")
-                if not params.get("domain"):
-                    # LLM omitted domain → gap's domain_hint wins.
-                    hint = str(gap.get("domain_hint") or "")
-                    if hint:
-                        params["domain"] = hint
                 evidence = params.get("gap_evidence")
                 if not isinstance(evidence, dict) or not evidence:
                     attempts = list(gap.get("attempts") or [])[-5:]
