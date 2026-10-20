@@ -591,22 +591,9 @@ def _force_dispatch_site(_coord, force_coord):
     return force_coord.shared_state, run, lambda: force_coord.router.handle_intent.await_count == 1
 
 
-def _force_prune_site(_coord, force_coord):
-    state = force_coord.shared_state
-    state.framework_repo_path = ""
-    _stall_serving_domain(state)
-    run = force_coord.specialist_dispatch.maybe_force_stalled_domain_specialist
-    return (
-        state,
-        run,
-        lambda: force_coord.router.handle_intent.await_count == 0 and state.pruned_families == ["source_patch"],
-    )
-
-
 _SAVE_SITES = {
     "record_result": _record_result_site,
     "force_dispatch": _force_dispatch_site,
-    "force_prune": _force_prune_site,
 }
 
 
