@@ -16,6 +16,7 @@ from hyperloom_multibranch.contracts.lifecycle import BranchTask
 from hyperloom_multibranch.contracts.notebook.records import BranchLogRecord, InboxItem
 from hyperloom_multibranch.contracts.notebook.vocab import InboxKind
 from hyperloom_multibranch.specialist import prompts
+from hyperloom_multibranch.specialist.directions import DIRECTIONS
 from hyperloom_multibranch.specialist.prompts import (
     ENTRY_CHARS,
     RECENT_ENTRIES,
@@ -111,7 +112,14 @@ def test_the_role_goes_back_to_choosing_after_a_result_and_never_stops_its_branc
     prompt = role_prompt(WORKLOAD)
 
     assert "Then go back to step 2: the session decides when your branch stops, not you." in prompt
-    assert "When the config knobs are spent, profile and move to source or kernel directions." in prompt
+
+
+def test_the_role_keeps_settings_alone_to_the_branch_whose_direction_they_are():
+    prompt = role_prompt(WORKLOAD)
+
+    assert "every candidate of yours belongs to it" in prompt
+    assert "Only a branch whose direction is server arguments and environment variables tests settings alone" in prompt
+    assert "dig deeper in the same direction rather than switching to settings" in prompt
 
 
 def test_the_role_says_the_conversation_lives_on_and_what_arrives_wakes_it():
@@ -209,14 +217,24 @@ def test_every_launch_of_a_repair_branch_opens_with_the_candidate_s_change_and_i
     assert "Your branch repairs" not in _launch(brief="leads: none")
 
 
-def test_every_launch_shows_the_user_s_direction_as_the_branch_s_task_before_the_brief():
+def test_every_launch_shows_the_branch_s_direction_before_the_brief():
     prompt = _launch(brief="leads: fp8 KV cache", direction="  try a larger max_num_seqs first\n")
 
     assert prompt.startswith(
-        "Your branch follows a direction the user wrote; work on it before any direction of your own choosing:\n"
+        "Your branch's direction; every candidate of yours belongs to it:\n"
         "try a larger max_num_seqs first\n\nStartup brief:\nleads: fp8 KV cache"
     )
-    assert "a direction the user wrote" not in _launch(brief="leads: none", direction=" \n")
+    assert "Your branch's direction" not in _launch(brief="leads: none", direction=" \n")
+
+
+def test_the_session_s_directions_are_distinct_and_lead_with_the_four_a_small_session_takes():
+    assert len(set(DIRECTIONS)) == len(DIRECTIONS) == 7
+    assert [text.split(":")[0] for text in DIRECTIONS[:4]] == [
+        "server.log fixes",
+        "GEMM tuning",
+        "Fusion",
+        "Server arguments and environment variables",
+    ]
 
 
 def test_each_prompt_is_versioned_by_its_own_text(monkeypatch):

@@ -6,8 +6,8 @@
 The role says how a long-running specialist works through the session's tools, how its candidates are judged, how it
 declares a correctness fix with its repro case, and which gains the toolbox refuses as fake (main's ``FAKE_GAINS``
 catalog, so a new row reaches the role). The
-launch prompt opens with the repair a repair branch was opened for, the direction a user wrote for the branch and the
-startup brief, right after the role, then
+launch prompt opens with the repair a repair branch was opened for, the branch's direction (one the user wrote, or
+the session's) and the startup brief, right after the role, then
 the branch, its head, K and the branch's latest memory, so a new session goes on where the last one stopped. A
 session whose turn ended is woken by :func:`wake_message`, with what its inbox and the runtime's notices brought, or
 by :func:`nudge_message` when nothing came and it has nothing running.
@@ -24,6 +24,7 @@ from hyperloom.orchestrator.prompts.specialist_prompt_builder import BASH_KILL_S
 from hyperloom_multibranch.contracts.fork import RepairRequest
 from hyperloom_multibranch.contracts.notebook.records import BranchLogRecord, InboxItem
 from hyperloom_multibranch.rulegate.fix_case import CASE_SCRIPT
+from hyperloom_multibranch.specialist.directions import DIRECTIONS
 from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.runtime import SessionStart
 
@@ -36,7 +37,7 @@ VERSION_HEX = 12
 
 _BRIEF = "Startup brief:\n{brief}"
 _DIRECTION = """\
-Your branch follows a direction the user wrote; work on it before any direction of your own choosing:
+Your branch's direction; every candidate of yours belongs to it:
 {direction}"""
 _REPAIR = """\
 Your branch repairs {candidate}, a blocked candidate of {from_branch}: on {parent_commit} it measured \
@@ -76,6 +77,7 @@ _LAUNCH = (
     _NUDGE,
     str(RECENT_ENTRIES),
     str(ENTRY_CHARS),
+    *DIRECTIONS,
 )
 
 _ROLE = f"""\
@@ -128,8 +130,12 @@ reconsider your direction before your next claim.
 6. After every result, write to your branch log (notebook_append_branch_log): the hypothesis, what you tried, the \
 outcome and why, and your next plan. Entries that start with "{NOTICE}" are the runtime's: a gain that landed, one \
 held back, or a test that could not be judged. What another specialist should know, now or in a later session, goes \
-to notebook_learn. Then go back to step 2: the session decides when your branch stops, not you. When the config \
-knobs are spent, profile and move to source or kernel directions.
+to notebook_learn. Then go back to step 2: the session decides when your branch stops, not you.
+
+Your launch prompt names your branch's direction, and every candidate of yours belongs to it. Only a branch whose \
+direction is server arguments and environment variables tests settings alone; on any other direction a setting may \
+only ride along with the patch or kernel your direction makes. When your direction's first idea fails, profile and \
+dig deeper in the same direction rather than switching to settings.
 
 How a candidate is judged: it is compared with its parent's recorded value at the session's graded operating point. A \
 gain must clear the session's bar, set from the spread of the baseline measurements, and hold when it is measured \

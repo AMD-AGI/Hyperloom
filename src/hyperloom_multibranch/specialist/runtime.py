@@ -3,6 +3,10 @@
 
 """The specialist lifecycle: on each branch, the specialist's session and the branch's judge.
 
+A branch started with neither a direction nor a repair takes the next of the session's
+:data:`~hyperloom_multibranch.specialist.directions.DIRECTIONS`, so the first branches split the work instead of all
+sweeping the same settings.
+
 A session that crashes is restarted on its branch, at most ``MAX_RESTARTS`` times within ``RESTART_WINDOW_S``, and a
 lost one at most ``MAX_LOSS_RESTARTS`` times in a row with no session working in between: a loss takes the heartbeat
 timeout, so losses alone never fill the window. Past either the branch keeps its judge, which settles what was already measured,
@@ -15,17 +19,19 @@ not lapse while a model thinks; once a test carries a claim, the toolbox renews 
 from __future__ import annotations
 
 import asyncio
+import itertools
 import logging
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Protocol
 
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.lifecycle import BranchTask, SpecialistStatus
 from hyperloom_multibranch.contracts.notebook.interfaces import ClaimService, NotebookError
 from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus
+from hyperloom_multibranch.specialist.directions import DIRECTIONS
 from hyperloom_multibranch.specialist.judging import NOTICE, BranchJudge, JudgeNotebook, Judging
 
 logger = logging.getLogger(__name__)
@@ -119,10 +125,13 @@ class SpecialistRuntime:
         self._sessions = sessions
         self._pacing = pacing
         self._branches: dict[str, _Branch] = {}
+        self._handed = itertools.cycle(DIRECTIONS)
 
     async def start(self, branch: str, start_commit: str, task: BranchTask = BranchTask()) -> None:
         if branch in self._branches:
             raise ValueError(f"branch {branch!r} already has a specialist")
+        if not task.direction.strip() and task.repair is None:
+            task = replace(task, direction=next(self._handed))
         state = _Branch(branch, start_commit, task, self._notebook_for(branch))
         self._branches[branch] = state
         judge = BranchJudge(branch, state.notebook, self._judging)

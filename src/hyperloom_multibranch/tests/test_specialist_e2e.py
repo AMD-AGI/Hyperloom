@@ -30,6 +30,7 @@ from hyperloom_multibranch.rulegate.baseline import write_inferencex_baseline
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.rules import InferenceXRule
 from hyperloom_multibranch.specialist.agent_session import AgentCommand, AgentSetup
+from hyperloom_multibranch.specialist.directions import DIRECTIONS
 from hyperloom_multibranch.specialist.judging import NOTICE, Judging
 from hyperloom_multibranch.specialist.model_sessions import SESSION_DIR, model_sessions
 from hyperloom_multibranch.specialist.prompts import role_prompt
@@ -237,6 +238,7 @@ async def test_a_model_backed_specialist_lands_a_source_change_through_the_sessi
     assert any("max_num_seqs 256" in content for content in logged)
     assert any(content.startswith(f"{NOTICE} {first.request_id} landed on your branch") for content in logged)
     seen = (workspace / "seen-0.txt").read_text()
-    assert seen.startswith("Startup brief:\nleads: a larger max_num_seqs") and f"Your branch: {BRANCH}," in seen
+    assert seen.startswith(f"Your branch's direction; every candidate of yours belongs to it:\n{DIRECTIONS[0]}")
+    assert "Startup brief:\nleads: a larger max_num_seqs" in seen and f"Your branch: {BRANCH}," in seen
     # The role prompt has the specialist submit with the intent fingerprint its claim returned.
     assert first.request.intent_fingerprint == intent_fingerprint(TARGET, MECHANISM, IntentLayer.SOURCE)

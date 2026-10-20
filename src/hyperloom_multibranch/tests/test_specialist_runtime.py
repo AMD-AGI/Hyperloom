@@ -17,6 +17,7 @@ from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.tests.factories import delta, intent
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.rules import InferenceXRule
+from hyperloom_multibranch.specialist.directions import DIRECTIONS
 from hyperloom_multibranch.specialist.judging import NOTICE, Judging
 from hyperloom_multibranch.specialist.runtime import (
     MAX_LOSS_RESTARTS,
@@ -175,6 +176,28 @@ async def test_a_crashed_specialist_is_restarted_with_its_task_and_a_notice_each
     assert [run.start.task for run in runs.started] == [task] * 3
     assert len([notice for notice in await session.notices() if "is restarted" in notice]) == 2
     await runtime.stop(BRANCH)
+
+
+async def test_branches_started_with_no_direction_take_the_session_s_directions_in_order(session):
+    runs = _Runs()
+    runtime = session.runtime(runs)
+    head = await session.repo.head(BRANCH)
+    blocked = Judgement(Verdict.BLOCKED, 3.0, 2.0, ("s0-4", "s0-5"), {"output_throughput": 1030.0}, False)
+    repair = RepairRequest(intent("s0", "c0"), delta(), blocked, "per-tensor KV scales; scale per head")
+    handed = [f"b{index}" for index in range(len(DIRECTIONS) + 1)]
+
+    await runtime.start(handed[0], head)
+    await runtime.start("user", head, BranchTask(direction="the user's own"))
+    await runtime.start("repair", head, BranchTask(repair=repair))
+    for name in handed[1:]:
+        await runtime.start(name, head)
+    await _until(lambda: _true(len(runs.started) == len(handed) + 2), "every specialist to start")
+    for name in [*handed, "user", "repair"]:
+        await runtime.stop(name)
+
+    directions = {run.start.branch: run.start.task.direction for run in runs.started}
+    assert [directions[name] for name in handed] == [*DIRECTIONS, DIRECTIONS[0]]
+    assert (directions["user"], directions["repair"]) == ("the user's own", "")
 
 
 async def test_past_the_restarts_a_window_allows_the_specialist_stays_down(session):
