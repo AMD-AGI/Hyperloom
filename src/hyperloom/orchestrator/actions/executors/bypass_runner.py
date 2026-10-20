@@ -18,6 +18,7 @@ from typing import Any, NamedTuple
 
 import yaml
 
+from hyperloom.common.coerce import to_float, to_int
 from hyperloom.common.env import is_truthy
 from hyperloom.common.env_safety import build_benchmark_env
 
@@ -25,32 +26,6 @@ from . import bypass_analysis
 from . import bypass_engine
 from . import bypass_report
 from . import bypass_scriptable
-
-
-def _as_int(value: Any, default: int) -> int:
-    """Coerce to int, tolerating None/str; return default on failure."""
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _as_opt_int(value: Any) -> int | None:
-    """Coerce to int, or None when unset/blank/invalid."""
-    if value is None or str(value).strip() == "":
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _as_float(value: Any, default: float) -> float:
-    """Coerce to float, tolerating None/str; return default on failure."""
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
 
 
 def _run_eval_enabled(bench_envs: dict[str, Any]) -> bool:
@@ -160,9 +135,8 @@ def run_benchmark(
     if phase == "client":
         return _run_client_phase(r, pid_dir=pid_dir, cleanup=cleanup, start=time.time())
 
-    sl = spec.bench.get("server_lifecycle") or {}
-    if phase == "all" and bool(sl.get("enabled")):
-        return _run_declared_lifecycle(r, sl)
+    if phase == "all" and bool(spec.lifecycle.get("enabled")):
+        return _run_lifecycle_round(r, spec.lifecycle)
 
     # phase == "all": start server, run client, always teardown.
     start = time.time()
@@ -185,6 +159,10 @@ class _BenchSpec(NamedTuple):
     model: str
     bench_envs: dict[str, Any]
     timeout_s: float
+    # server_lifecycle, as inject_lifecycle writes it: cleanup/pid_dir/port, plus the server_ready_timeout_s
+    # that bounds a lifecycle round's server boot (default SERVER_READY_TIMEOUT_SEC /
+    # INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC).
+    lifecycle: dict[str, Any]
 
 
 def _read_bench_spec(config_path: Path) -> _BenchSpec:
@@ -198,6 +176,7 @@ def _read_bench_spec(config_path: Path) -> _BenchSpec:
         model=str(bench.get("model") or os.environ.get("MODEL", "")),
         bench_envs=dict(bench.get("envs") or {}),
         timeout_s=float(bench["timeout_seconds"]),
+        lifecycle=bench.get("server_lifecycle") or {},
     )
 
 
@@ -206,7 +185,7 @@ def _round_from_spec(spec: _BenchSpec, output_dir: Path, inferencex_root: str) -
     workspace = bypass_report.create_workspace(output_dir, spec.framework)
     _snapshot_config(workspace, spec.cfg)
     envs = spec.bench_envs
-    port = _as_int(os.environ.get("PORT") or envs.get("PORT"), bypass_engine.DEFAULT_PORT)
+    port = to_int(os.environ.get("PORT") or envs.get("PORT"), bypass_engine.DEFAULT_PORT)
 
     profiler = (spec.bench.get("profiler") or {}).get("torch_profiler") or {}
     profile = bool(profiler.get("enabled"))
@@ -214,52 +193,26 @@ def _round_from_spec(spec: _BenchSpec, output_dir: Path, inferencex_root: str) -
     if profile_dir:
         Path(profile_dir).mkdir(parents=True, exist_ok=True)
 
-    # server_lifecycle.server_ready_timeout_s (injected by inject_lifecycle, default SERVER_READY_TIMEOUT_SEC /
-    # INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC) is the server-boot budget for lifecycle rounds.
-    sl = spec.bench.get("server_lifecycle") or {}
     return _Round(
         framework=spec.framework,
         model=spec.model,
-        tp=_as_int(os.environ.get("TP") or envs.get("TP"), 1),
+        tp=to_int(os.environ.get("TP") or envs.get("TP"), 1),
         port=port,
-        max_model_len=_as_int(os.environ.get("MAX_MODEL_LEN") or envs.get("MAX_MODEL_LEN"), 0) or None,
+        max_model_len=to_int(os.environ.get("MAX_MODEL_LEN") or envs.get("MAX_MODEL_LEN"), 0) or None,
         profile=profile,
         profile_dir=profile_dir,
         bench_envs=envs,
         server_log=workspace / "server.log",
         base_url=f"http://127.0.0.1:{port}",
         timeout_s=spec.timeout_s,
-        server_ready_timeout_s=_as_float(sl.get("server_ready_timeout_s"), spec.timeout_s),
+        server_ready_timeout_s=to_float(spec.lifecycle.get("server_ready_timeout_s"), spec.timeout_s),
         inferencex_root=inferencex_root,
-        conc=_as_int(os.environ.get("CONC") or envs.get("CONC"), 32),
-        isl=_as_int(os.environ.get("ISL") or envs.get("ISL"), 1024),
-        osl=_as_int(os.environ.get("OSL") or envs.get("OSL"), 512),
-        rrr=_as_float(os.environ.get("RANDOM_RANGE_RATIO") or envs.get("RANDOM_RANGE_RATIO"), 0.5),
+        conc=to_int(os.environ.get("CONC") or envs.get("CONC"), 32),
+        isl=to_int(os.environ.get("ISL") or envs.get("ISL"), 1024),
+        osl=to_int(os.environ.get("OSL") or envs.get("OSL"), 512),
+        rrr=to_float(os.environ.get("RANDOM_RANGE_RATIO") or envs.get("RANDOM_RANGE_RATIO"), 0.5),
         workspace=workspace,
     )
-
-
-def _run_declared_lifecycle(r: _Round, sl: dict[str, Any]) -> int:
-    """Run a round under the lifecycle its config declares: boot only when asked, else reuse or boot and measure.
-
-    run_grid injects ``benchmark.server_lifecycle`` (cleanup/pid_dir/port) and drives warmup(cleanup=false) +
-    measure(cleanup=true) as two identical calls, delegating the phase choice to us. It asks for a boot-only
-    round through ``MAGPIE_RUN_PHASE`` in ``benchmark.envs``.
-    """
-    sl_pid_dir = str(sl.get("pid_dir") or r.workspace)
-    verdict = _server_reusable(r.base_url, sl_pid_dir, r.framework, r.port)
-    if verdict == _FOREIGN:
-        # Healthy port but no pid/meta: a server we did not launch holds it.
-        r.report_failure(time.time(), f"port {r.port} in use by a non-bypass server (no lifecycle pid/meta)")
-        return 1
-    if str(r.bench_envs.get("MAGPIE_RUN_PHASE") or "").strip().lower() == _PHASE_SERVER:
-        return 0 if verdict == _REUSE else _run_server_phase(r, pid_dir=sl_pid_dir)
-    sl_cleanup = bool(sl.get("cleanup", True))
-    if verdict == _REUSE:
-        # A persistent server from a prior round is up AND ours: reuse it.
-        return _run_client_phase(r, pid_dir=sl_pid_dir, cleanup=sl_cleanup, start=time.time())
-    # verdict == _BOOT: no server yet.
-    return _run_lifecycle_all(r, pid_dir=sl_pid_dir, cleanup=sl_cleanup)
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
@@ -331,8 +284,8 @@ class _Round:
         bench_envs = self.bench_envs
         # Honor materializer-computed request sizing (env then YAML envs) so the benchmark scale matches Magpie; fall
         # back to build_client_command defaults (conc*10 / 2*conc) when unset.
-        num_prompts = _as_opt_int(os.environ.get("NUM_PROMPTS") or bench_envs.get("NUM_PROMPTS"))
-        num_warmups = _as_opt_int(os.environ.get("NUM_WARMUPS") or bench_envs.get("NUM_WARMUPS"))
+        num_prompts = to_int(os.environ.get("NUM_PROMPTS") or bench_envs.get("NUM_PROMPTS"))
+        num_warmups = to_int(os.environ.get("NUM_WARMUPS") or bench_envs.get("NUM_WARMUPS"))
         client_cmd = bypass_engine.build_client_command(
             bypass_engine.ClientRun(
                 inferencex_root=self.inferencex_root,
@@ -448,6 +401,23 @@ def _run_client_phase(r: _Round, *, pid_dir: str | None, cleanup: bool, start: f
 
             teardown_lifecycle_server(pid_dir=pid_dir, framework=r.framework, port=r.port)
     return r.finalize(start, rc)
+
+
+def _run_lifecycle_round(r: _Round, sl: dict[str, Any]) -> int:
+    """Run one YAML-driven lifecycle round: boot only when the round asks for it, else reuse or boot and measure."""
+    pid_dir = str(sl.get("pid_dir") or r.workspace)
+    verdict = _server_reusable(r.base_url, pid_dir, r.framework, r.port)
+    if verdict == _FOREIGN:
+        # Healthy port but no pid/meta: a server we did not launch holds it.
+        r.report_failure(time.time(), f"port {r.port} in use by a non-bypass server (no lifecycle pid/meta)")
+        return 1
+    if str(r.bench_envs.get("MAGPIE_RUN_PHASE") or "").strip().lower() == _PHASE_SERVER:
+        return 0 if verdict == _REUSE else _run_server_phase(r, pid_dir=pid_dir)
+    cleanup = bool(sl.get("cleanup", True))
+    if verdict == _REUSE:
+        # A persistent server from a prior round is up AND ours: reuse it.
+        return _run_client_phase(r, pid_dir=pid_dir, cleanup=cleanup, start=time.time())
+    return _run_lifecycle_all(r, pid_dir=pid_dir, cleanup=cleanup)
 
 
 def _run_lifecycle_all(r: _Round, *, pid_dir: str, cleanup: bool) -> int:

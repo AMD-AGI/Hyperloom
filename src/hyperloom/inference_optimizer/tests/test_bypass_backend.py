@@ -69,21 +69,6 @@ def test_bypass_backend_selected(monkeypatch):
     ]
 
 
-def test_bypass_runner_scalar_coercions():
-    assert bypass_runner._as_int("7", 1) == 7
-    assert bypass_runner._as_int("bad", 3) == 3
-    assert bypass_runner._as_int(None, 4) == 4
-
-    assert bypass_runner._as_opt_int("9") == 9
-    assert bypass_runner._as_opt_int("") is None
-    assert bypass_runner._as_opt_int(None) is None
-    assert bypass_runner._as_opt_int("bad") is None
-
-    assert bypass_runner._as_float("1.25", 0.0) == 1.25
-    assert bypass_runner._as_float("bad", 2.5) == 2.5
-    assert bypass_runner._as_float(None, 3.5) == 3.5
-
-
 def test_run_eval_enabled_env_and_yaml(monkeypatch):
     monkeypatch.delenv("RUN_EVAL", raising=False)
     assert bypass_runner._run_eval_enabled({}) is False

@@ -390,27 +390,19 @@ def _pod_role_by_ip(pd: dict[str, Any]) -> dict[str, str]:
     return role_of
 
 
-class _SampleWindow(NamedTuple):
-    """The wall-clock span a pod sample has to fall in to belong to this round."""
+class _HarvestedGpuRows(NamedTuple):
+    """What the pod CSVs yielded: the gpu_metrics.csv the harvest wrote, and the rows that parsed into samples."""
 
-    lo: float | None
-    hi: float
-
-    def excludes(self, ts: float) -> bool:
-        """Whether ``ts`` falls outside the window; a window with no lower bound excludes nothing."""
-        return self.lo is not None and (ts < self.lo or ts > self.hi)
-
-
-class _MergedPodMetrics(NamedTuple):
-    """Every pod's GPU rows under one header, with the subset that parsed into samples."""
-
-    header: list[str] | None
-    rows: list[list[str]]
+    written: dict[str, Any]
     samples: list[dict[str, Any]]
 
 
-def _merge_pod_gpu_rows(pod_csvs: list[Path], role_of: dict[str, str], window: _SampleWindow) -> _MergedPodMetrics:
-    """Tag every in-window pod row with its host and role and collect them under a single header."""
+def _write_pod_gpu_csv(
+    destination: Path, pod_csvs: list[Path], role_of: dict[str, str], started_unix: float | None
+) -> _HarvestedGpuRows:
+    """Tag every in-window pod row with its host and role and write them under one header as ``gpu_metrics.csv``."""
+    lo = None if started_unix is None else float(started_unix) - _MN_GPU_WINDOW_SLACK_SEC
+    hi = time.time() + _MN_GPU_WINDOW_SLACK_SEC
     header: list[str] | None = None
     merged: list[list[str]] = []
     samples: list[dict[str, Any]] = []
@@ -429,7 +421,7 @@ def _merge_pod_gpu_rows(pod_csvs: list[Path], role_of: dict[str, str], window: _
             header = (["host", "role"] if role_of else ["host"]) + rocm_header
         for row in rows[1:]:
             ts = _num_from_cell(row[0]) if row else None
-            if ts is None or window.excludes(ts):
+            if ts is None or (lo is not None and (ts < lo or ts > hi)):
                 continue
             merged.append(([host, role] if role_of else [host]) + row)
             s = _row_to_gpu_sample(rocm_header, row)
@@ -437,24 +429,19 @@ def _merge_pod_gpu_rows(pod_csvs: list[Path], role_of: dict[str, str], window: _
                 if role:
                     s["role"] = role
                 samples.append(s)
-    return _MergedPodMetrics(header, merged, samples)
-
-
-def _write_merged_gpu_csv(destination: Path, merged: _MergedPodMetrics) -> dict[str, Any]:
-    """Write the tagged pod rows as ``gpu_metrics.csv`` under ``destination``."""
-    if not merged.header or not merged.rows:
-        return {}
+    if not header or not merged:
+        return _HarvestedGpuRows({}, samples)
     csv_path = destination / "gpu_metrics.csv"
     try:
         destination.mkdir(parents=True, exist_ok=True)
         with csv_path.open("w", encoding="utf-8", newline="") as f:
             w = csv.writer(f)
-            w.writerow(merged.header)
-            w.writerows(merged.rows)
+            w.writerow(header)
+            w.writerows(merged)
     except OSError as exc:
         log.warning("benchmark_result: MN gpu_metrics.csv write failed: %s", exc)
-        return {}
-    return {"gpu_metrics_csv": str(csv_path), "rows": len(merged.rows)}
+        return _HarvestedGpuRows({}, samples)
+    return _HarvestedGpuRows({"gpu_metrics_csv": str(csv_path), "rows": len(merged)}, samples)
 
 
 def _inject_gpu_monitor(report_path: Path, samples: list[dict[str, Any]], pd: dict[str, Any]) -> dict[str, Any]:
@@ -508,12 +495,9 @@ def harvest_mn_gpu_metrics(
         return {}
 
     pd = pd_topology_from_state()
-    lo = None if subprocess_started_unix is None else float(subprocess_started_unix) - _MN_GPU_WINDOW_SLACK_SEC
-    window = _SampleWindow(lo, time.time() + _MN_GPU_WINDOW_SLACK_SEC)
-    merged = _merge_pod_gpu_rows(pod_csvs, _pod_role_by_ip(pd), window)
-
-    out = _write_merged_gpu_csv(destination, merged)
-    out.update(_inject_gpu_monitor(destination / "benchmark_report.json", merged.samples, pd))
+    harvested = _write_pod_gpu_csv(destination, pod_csvs, _pod_role_by_ip(pd), subprocess_started_unix)
+    out = harvested.written
+    out.update(_inject_gpu_monitor(destination / "benchmark_report.json", harvested.samples, pd))
     if out:
         log.info("benchmark_result: harvested MN GPU metrics %s", out)
     return out
@@ -691,10 +675,7 @@ def extract_benchmark_measurement(
     if workspace is not None and measurement.get("raw_result_path"):
         warnings.append("raw_inferencex_result_used")
 
-    before = _latency_snapshot(measurement)
-    _derive_tpot_if_missing(measurement, report)
-    _tag_latency_origins(measurement, origins, label=LATENCY_DERIVED, before=before)
-    measurement["valid_measurement"] = is_valid_measurement(measurement)
+    _settle_derived_latency(measurement, origins, report)
 
     if not measurement["valid_measurement"] and workspace is not None:
         _salvage_from_leaked_results(measurement, origins, report, workspace, subprocess_started_unix)
@@ -783,6 +764,11 @@ def _salvage_from_leaked_results(
             if materialized is None:
                 warnings.append(f"rescued_copy_into_workspace_failed: {rescue_path}")
             break
+    _settle_derived_latency(measurement, origins, report)
+
+
+def _settle_derived_latency(measurement: dict[str, Any], origins: dict[str, str], report: dict[str, Any]) -> None:
+    """Fill TPOT from what the report allows deriving, label the fields that came from there, and settle validity."""
     before = _latency_snapshot(measurement)
     _derive_tpot_if_missing(measurement, report)
     _tag_latency_origins(measurement, origins, label=LATENCY_DERIVED, before=before)
