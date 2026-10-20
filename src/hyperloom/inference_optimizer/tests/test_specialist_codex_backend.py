@@ -18,6 +18,7 @@ from hyperloom.common import llm_config
 from hyperloom.common.deadline import Deadline
 
 import hyperloom.orchestrator.roles.claude as claude_role
+import hyperloom.orchestrator.specialists.agent_cli_config as agent_cli_config
 import hyperloom.orchestrator.specialists.subprocess_ as sp
 from hyperloom.inference_optimizer.trace import parse_usage as pu
 from hyperloom.orchestrator.specialists.subprocess_ import SpecialistSpawn
@@ -1277,7 +1278,7 @@ def test_codex_mcp_env_accepts_identical_benign_existing_value(
         encoding="utf-8",
     )
 
-    lines, additions = sp._codex_mcp_config(
+    lines, additions = agent_cli_config._codex_mcp_config(
         str(mcp_path),
         source={"SHARED_BENIGN_SETTING": "same-value"},
         child_env={"SHARED_BENIGN_SETTING": "same-value"},
