@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
 
 from dataclasses import dataclass, field
 from pathlib import Path
