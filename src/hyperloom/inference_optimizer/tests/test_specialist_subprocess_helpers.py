@@ -422,3 +422,14 @@ def test_read_done_unwraps_intent_envelope(tmp_path: Path) -> None:
     assert out["domain"] == "kernel_switch_specialist"
     assert out["proposal_set"] == [{"name": "v1"}]
     assert "intent_type" not in out and "payload" not in out
+
+
+def test_a_claude_specialist_loads_none_of_the_operators_settings(tmp_path: Path) -> None:
+    cmd = _dispatcher()._build_claude_cmd(
+        system_prompt_file=tmp_path / "system_prompt.md",
+        system_prompt="SYS",
+        workspace=tmp_path,
+        worktree=None,
+        disallowed_tools=frozenset(),
+    )
+    assert "--setting-sources=" in cmd

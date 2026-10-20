@@ -1336,6 +1336,9 @@ class SpecialistSubprocessDispatcher:
             # Worktrees and the tool denylist scope behaviour but are not filesystem containment.
             "--permission-mode",
             "bypassPermissions",
+            # HOME and CLAUDE_CONFIG_DIR are forwarded for credentials; the operator's settings and hooks are not
+            # the specialist's.
+            "--setting-sources=",
             "--system-prompt-file",
             str(system_prompt_file),
         ]
