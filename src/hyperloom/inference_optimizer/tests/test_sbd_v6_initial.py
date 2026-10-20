@@ -758,7 +758,6 @@ def _stub_preflight_steps(tmp_path, monkeypatch):
         resume_from=None,
         degraded_kb=True,
         framework="sglang",
-        no_eval=True,
         no_kernel=True,
         enable_roofline=False,
     )
