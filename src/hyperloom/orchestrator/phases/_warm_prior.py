@@ -33,11 +33,7 @@ WARM_REPLAY_DONOR_FIELDS = (
 
 
 def as_float(value: Any) -> float:
-    """Read a recorded number, answering 0.0 for a record that carries something else.
-
-    Not ``common.coerce.to_float``: a throughput or gain this session recorded as
-    ``inf`` reaches the gates that compare it, rather than being read as 0.0.
-    """
+    """Read a recorded number, answering 0.0 for a record that carries something else."""
     try:
         return float(value or 0.0)
     except (TypeError, ValueError):
@@ -67,11 +63,7 @@ def _merge_named_server_args(owners: list[tuple[str, Mapping[str, Any]]]) -> str
 
 
 def _server_arg_flags(owner: str, raw: str) -> list[tuple[str, tuple[str, ...]]]:
-    """Split one owner's server args into flags and the values each carries.
-
-    A bare word is a positional with no flag to compare against, so it is keyed
-    by its own identity and never conflicts with anything.
-    """
+    """Split one owner's server args into flags and the values each carries."""
     from hyperloom.inference_optimizer.grid_server_args import (
         tokenize_server_args_preserving_json,
     )
@@ -193,11 +185,7 @@ def point_envs_at_local_files(envs: dict[str, str], local: list[str]) -> None:
 
 
 def warm_recipe_history_rows(warm: Any, key: str) -> list[dict[str, Any]]:
-    """The ``what_worked``/``what_failed`` rows a warm-start prior recorded.
-
-    The history may sit on the recipe, under its ``attrs``, or under the
-    ``exact_history`` an identity match carries; whichever is present wins.
-    """
+    """The ``what_worked``/``what_failed`` rows a warm-start prior recorded."""
     recipe = warm.get("recipe") if isinstance(warm, Mapping) else None
     attrs = (recipe.get("attrs") or recipe) if isinstance(recipe, Mapping) else {}
     exact_history = attrs.get("exact_history")

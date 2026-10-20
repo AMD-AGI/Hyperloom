@@ -111,11 +111,7 @@ class _PromotableTree(NamedTuple):
 
 
 def _replayed_patch_trees(result: Mapping[str, Any], pending: Mapping[str, Any]) -> list[Mapping[str, Any]]:
-    """The checkouts a warm replay applied its overlays into.
-
-    A round that predates the list reports only its primary tree, under the
-    flat ``warm_patch_*`` keys.
-    """
+    """The checkouts a warm replay applied its overlays into."""
     trees = result.get("warm_patch_trees") or pending.get("recipe_patch_trees") or []
     listed = [tree for tree in trees if isinstance(tree, Mapping)]
     if listed:
@@ -1052,11 +1048,7 @@ class PreludePhase(CoordinatorCollaborator):
         return sdk_replay
 
     async def _prepared_warm_kernel_section(self, sdk_replay: Mapping[str, Any]) -> dict[str, Any]:
-        """Prepare the prior's kernel half, reporting a preparation that raised as an error outcome.
-
-        A current Recipe hands over the kernel section its own read already
-        opened; any other prior leaves the preparation to open one.
-        """
+        """Prepare the prior's kernel half, reporting a preparation that raised as an error outcome."""
         try:
             if opened_section := sdk_replay.get("kernel_kb"):
                 return await self._prepare_warm_kernel_kb(opened_section)
@@ -1125,11 +1117,7 @@ class PreludePhase(CoordinatorCollaborator):
 
     @staticmethod
     def _warm_kernel_overlay(kernel: Mapping[str, Any], launch: Mapping[str, Any]) -> WarmKernelOverlay:
-        """The kernel half a combined replay carries, and the launch overlay it brings.
-
-        ``launch`` is the current Recipe's own kernel config where it has one, so
-        a Recipe that recorded its overlay replays that rather than re-deriving it.
-        """
+        """The kernel half a combined replay carries, and the launch overlay it brings."""
         if kernel.get("status") != "prepared" or not kernel.get("pending"):
             return WarmKernelOverlay([], [], [], "", {})
         return WarmKernelOverlay(
@@ -1200,11 +1188,7 @@ class PreludePhase(CoordinatorCollaborator):
         overlay: WarmKernelOverlay,
         identity: Mapping[str, Any],
     ) -> WarmReplayConfig | None:
-        """Suppress a low-confidence config, refusing outright when no kernel item would survive it.
-
-        Low-confidence config/patch content is suppressed, but the kernel section
-        from the same Recipe can still receive a combined check.
-        """
+        """Suppress a low-confidence config, refusing outright when no kernel item would survive it."""
         min_conf = float(self.shared_state.warm_replay_min_confidence)
         if config.confidence >= min_conf:
             return config
@@ -1244,12 +1228,7 @@ class PreludePhase(CoordinatorCollaborator):
         )
 
     def _refuse_unusable_framework_roots(self, request: WarmReplayRequest) -> bool:
-        """Refuse a replay whose code overlays name a checkout this host cannot use.
-
-        Re-checked here because a persisted plan may be resumed under a different
-        image, and because the kernel half is already applied by now: a root that
-        has since gone means unwinding that too.
-        """
+        """Refuse a replay whose code overlays name a checkout this host cannot use."""
         roots = recorded_framework_roots(request.patches)
         if roots.complete and not roots.absent:
             return False
@@ -1629,12 +1608,7 @@ class PreludePhase(CoordinatorCollaborator):
         reading: _AccuracyReading,
         baseline_accuracy: float,
     ) -> None:
-        """Admit a replay no accuracy verdict could be read for, and say why there is none.
-
-        A measurement that failed is not evidence the config broke the model, so
-        it must not stop the run. Recording a pass here would claim evidence
-        there is none, so the gate is recorded as having ruled nothing.
-        """
+        """Admit a replay no accuracy verdict could be read for, and say why there is none."""
         log.warning(
             "warm-replay admitted without an accuracy verdict (eval_ran=%s, baseline %.4f): %s",
             reading.eval_ran,
@@ -1988,12 +1962,7 @@ class PreludePhase(CoordinatorCollaborator):
         return self._grade_warm_replay(settlement, measurement)
 
     def _warm_replay_measurement(self, settlement: _WarmReplaySettlement) -> _ReplayMeasurement:
-        """What the round measured, against the anchor the replay was enqueued with.
-
-        ``output_throughput`` is the HOT measure round and the comparison value;
-        the warmup round is retained for audit only. The anchor falls back to
-        live state for a replay whose params did not record one.
-        """
+        """What the round measured, against the anchor the replay was enqueued with."""
         result = settlement.result
         tput = as_float(result.get("output_throughput"))
         baseline_tput = as_float(settlement.params.get("baseline_tput_anchor"))
@@ -2028,12 +1997,7 @@ class PreludePhase(CoordinatorCollaborator):
 
     @staticmethod
     def _record_replay_measurement(settlement: _WarmReplaySettlement, measurement: _ReplayMeasurement) -> None:
-        """Put the numbers the replay was judged on, and any score read onto the outcome, on the timeline.
-
-        The anchor goes on record here, where it is used: back-solving it from
-        the gain is exact only until a re-baseline moves the number the replay
-        was never judged against.
-        """
+        """Put the numbers the replay was judged on, and any score read onto the outcome, on the timeline."""
         if settlement.recorder is None:
             return
         outcome = settlement.outcome
@@ -2068,13 +2032,7 @@ class PreludePhase(CoordinatorCollaborator):
         return self._conclude_warm_replay(outcome, Verdict.FAILED)
 
     def _judge_warm_replay_quality(self, settlement: _WarmReplaySettlement) -> Verdict | None:
-        """Rule on the replayed config's image quality against the baseline reference.
-
-        A replayed config lands on ``current_best``, so every later measurement
-        in the session is taken against it. Promoting on throughput alone
-        selects for garbage: breaking the numerics is itself a large throughput
-        win. ``require=False`` keeps a missing or skipped gate non-blocking.
-        """
+        """Rule on the replayed config's image quality against the baseline reference."""
         from ..actions.executors._accuracy_gate import quality_gate_passed
 
         recorder = settlement.recorder
@@ -2135,13 +2093,7 @@ class PreludePhase(CoordinatorCollaborator):
         settlement: _WarmReplaySettlement,
         measurement: _ReplayMeasurement,
     ) -> Verdict:
-        """Settle a warm replay that reproduced its prior, and say what it earned.
-
-        Every path here ends the settlement: the replay either promotes the
-        recipe it reproduced or is concluded against one of the gates, so the
-        drift rejection below this call is reached only by a replay that did not
-        reproduce at all.
-        """
+        """Settle a warm replay that reproduced its prior, and say what it earned."""
         outcome = settlement.outcome
         recorder = settlement.recorder
         promoted, promotion = self._resolve_promoted_recipe_checkout(settlement.result, settlement.task)
@@ -2311,14 +2263,7 @@ class PreludePhase(CoordinatorCollaborator):
         settlement: _WarmReplaySettlement,
         measurement: _ReplayMeasurement,
     ) -> Verdict:
-        """Publish the reproduced verdict, re-validate the session, and journal the promotion.
-
-        The verdict is published now that the stack entry exists but before the
-        cumulative update (the one step below that can raise and is swallowed by
-        the caller). Placed after the lift on purpose -- if the lift raises, the
-        outcome stays in_flight and both the stack and the post-ruling mirror
-        agree there is nothing adopted.
-        """
+        """Publish the reproduced verdict, re-validate the session, and journal the promotion."""
         self.shared_state.warm_replay_outcome = settlement.outcome
         self._coord.writeback.validate(measurement.tput, settlement.result, source="warm_replay")
         log.info(
@@ -2337,13 +2282,7 @@ class PreludePhase(CoordinatorCollaborator):
         promoted_checkout: str,
         replayed_patch_refs: list[str],
     ) -> dict[str, Any]:
-        """Describe what a replayed stack entry reproduced, for the audit trail.
-
-        None of this is configuration: it is what the replay touched -- the
-        framework checkout it ran against, the kernel columns it replayed, and
-        the patches that landed -- recorded so a later reader can tell a
-        reproduced stack entry from an originally measured one.
-        """
+        """Describe what a replayed stack entry reproduced, for the audit trail."""
         annotations: dict[str, Any] = {}
         if promoted_checkout:
             annotations["framework_source_root"] = promoted_checkout
@@ -2366,12 +2305,7 @@ class PreludePhase(CoordinatorCollaborator):
         settlement: _WarmReplaySettlement,
         promotion: Mapping[str, Any],
     ) -> Verdict:
-        """Conclude a reproduced replay whose Recipe checkout would not promote.
-
-        The replay measured what it claimed, but the checkout it measured cannot
-        be published, so nothing downstream may read it as adopted: the kernel
-        half is reported reverted alongside the recipe half that refused.
-        """
+        """Conclude a reproduced replay whose Recipe checkout would not promote."""
         outcome = settlement.outcome
         if settlement.recorder is not None:
             settlement.recorder.record_gate(
@@ -2394,12 +2328,7 @@ class PreludePhase(CoordinatorCollaborator):
 
     @staticmethod
     def _replayed_patch_refs(result: dict, params: Mapping[str, Any]) -> list[str]:
-        """Name the warm patches this replay actually landed.
-
-        A plan that required its patch timeline counts only the statuses that
-        mean the overlay is on disk; without that requirement every reported
-        patch file counts, since the apply had nothing to prove.
-        """
+        """Name the warm patches this replay actually landed."""
         return [
             str(item.get("patch_file") or "")
             for item in (result.get("warm_patches_applied") or [])
@@ -2426,11 +2355,7 @@ class PreludePhase(CoordinatorCollaborator):
         settlement: _WarmReplaySettlement,
         measurement: _ReplayMeasurement,
     ) -> None:
-        """Journal a warm replay as a synthetic KEEP; it carries no KB lesson.
-
-        Best-effort: the replay has already earned its verdict, so a journal
-        that cannot be written must not take the verdict down with it.
-        """
+        """Journal a warm replay as a synthetic KEEP; it carries no KB lesson."""
         warm_args = str(settlement.params.get("extra_server_args") or "").strip()
         try:
             journal = self._coord.recipe_journal.ensure_journal()
