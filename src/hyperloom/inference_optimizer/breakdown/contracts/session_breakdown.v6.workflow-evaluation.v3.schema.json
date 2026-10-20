@@ -1605,7 +1605,6 @@
         "gain_at_cycle_start_pct",
         "min_gain_pct",
         "prior_no_gain_cycle_streak",
-        "max_cycles",
         "no_gain_cycles",
         "saturated_directions",
         "session_remaining_sec",
@@ -1624,10 +1623,6 @@
         "prior_no_gain_cycle_streak": {
           "type": "integer",
           "minimum": 0
-        },
-        "max_cycles": {
-          "type": "integer",
-          "minimum": 1
         },
         "no_gain_cycles": {
           "type": "integer",

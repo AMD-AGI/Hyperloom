@@ -98,9 +98,6 @@ DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK: int = 5
 # R1 macro-cycle reloop: SWEEP loops back to FRAMEWORK_AGENT for a new macro-cycle while budget remains and the run
 # hasn't globally converged.
 
-# Safety ceiling on macro-cycles (defense against a pathological tight loop).
-DEFAULT_MAX_MACRO_CYCLES: int = 1000
-
 # Share of a bounded session's total budget that must remain to open a cycle.
 _CYCLE_RELOOP_BUDGET_RATIO: float = 0.15
 
@@ -998,7 +995,6 @@ def per_lever_dryness(state: Any) -> tuple[bool, dict[str, Any]]:
 #: any other reason keeps the ladder's own exit reason.
 _RELOOP_BLOCK_TERMINALS: dict[str, str] = {
     "global_converged": "global_converged",
-    "max_cycles": "global_converged",
     "target_reached": "target_reached",
 }
 
@@ -1201,7 +1197,6 @@ def _sweep_predicate_inputs(
             "gain_at_cycle_start_pct": _number(state.gain_at_cycle_start) or 0.0,
             "min_gain_pct": decaying_keep_threshold_pct(cycle),
             "prior_no_gain_cycle_streak": int(state.no_gain_cycle_streak or 0),
-            "max_cycles": DEFAULT_MAX_MACRO_CYCLES,
             "no_gain_cycles": DEFAULT_GLOBAL_CONVERGENCE_NO_GAIN_CYCLES,
             "saturated_directions": saturated_facts,
             "session_remaining_sec": session_remaining_seconds(state, now_unix=now_unix),
@@ -1485,14 +1480,11 @@ def _sweep_exit(inputs: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
 def _reloop_block_evidence(
     facts: dict[str, Any],
     global_inputs: dict[str, Any],
-    cycle: int,
     streak: int,
 ) -> dict[str, Any]:
     """The evidence naming the rule that refuses another macro-cycle; empty when none does."""
     if str(global_inputs.get("target_reached_at") or ""):
         return {"reloop_blocked": "target_reached"}
-    if cycle + 1 >= int(facts.get("max_cycles") or 0):
-        return {"reloop_blocked": "max_cycles"}
     saturated = dict(facts.get("saturated_directions") or {})
     if saturated and all(bool(value) for value in saturated.values()):
         return {"reloop_blocked": "all_directions_saturated", "saturated_directions": sorted(saturated)}
@@ -1516,7 +1508,7 @@ def _reloop_decision(inputs: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
         "cycle_gained": gained,
         "no_gain_cycle_streak_effective": streak,
     }
-    blocked = _reloop_block_evidence(facts, dict(inputs.get("global") or {}), cycle, streak)
+    blocked = _reloop_block_evidence(facts, dict(inputs.get("global") or {}), streak)
     if blocked:
         evidence.update(blocked)
         return False, evidence
@@ -2089,7 +2081,6 @@ __all__ = [
     "PhaseFlags",
     "lifecycle_label",
     "make_lifecycle_event",
-    "DEFAULT_MAX_MACRO_CYCLES",
     "DEFAULT_GLOBAL_CONVERGENCE_NO_GAIN_CYCLES",
     "DEFAULT_LONGRUN_THRESHOLD_MINUTES",
     "is_long_run",
