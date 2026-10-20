@@ -239,6 +239,300 @@ _AITER_DISK_PER_CANDIDATE_GB = 6.0
 # Default max parallel compile jobs; can be overridden by action.max_jobs.
 _AITER_DEFAULT_MAX_JOBS = 8
 
+_VLLM_DEFAULT_REPO = "https://github.com/ROCm/vllm"
+_VLLM_DISK_PER_CANDIDATE_GB = 20.0
+_VLLM_DEFAULT_MAX_JOBS = 8
+
+# Inline verify_vllm_rocm probe.
+_VERIFY_VLLM_ROCM_SCRIPT = """\
+import sys, torch
+if not getattr(torch.version, "hip", None):
+    print("torch is not a ROCm build", file=sys.stderr); raise SystemExit(1)
+import vllm
+try:
+    from vllm.platforms import current_platform
+except Exception as exc:
+    print(f"cannot import vllm platform: {exc}", file=sys.stderr); raise SystemExit(1)
+is_rocm = False
+checker = getattr(current_platform, "is_rocm", None)
+if callable(checker):
+    try: is_rocm = bool(checker())
+    except Exception: pass
+if "rocm" in f"{current_platform!r} {current_platform.__class__.__name__}".lower():
+    is_rocm = True
+if not is_rocm:
+    print("vLLM did not report ROCm platform", file=sys.stderr); raise SystemExit(1)
+print("vllm_rocm_ok")
+"""
+
+
+class _TargetedRecipe:
+    """Shared setup for an isolated ROCm package build; the install step is the subclass's."""
+
+    disk_gb: float
+    default_repo: str
+    default_max_jobs: int
+    replacing: str
+    run_timeout: int = 3600
+
+    def __init__(
+        self,
+        action: TargetedBuildAction,
+        attempt_root: str,
+        *,
+        run: Callable[..., Any],
+        git: Callable[..., Any] | None,
+        disk_preflight_fn: Callable[..., Any] | None,
+    ) -> None:
+        from .build_utils import (
+            AbiMismatchError,
+            check_rocm_toolchain_alignment,
+            probe_torch_abi,
+            run_argv,
+            write_rocm_constraints,
+        )
+
+        self._AbiMismatchError = AbiMismatchError
+        self._check_rocm = check_rocm_toolchain_alignment
+        self._probe_abi = probe_torch_abi
+        self._run_argv = run_argv
+        self._write_constraints = write_rocm_constraints
+        self.action = action
+        self.root = Path(attempt_root)
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.build_log = self.root / "build.log"
+        self._run_raw = run
+        self._git = git
+        self._disk_preflight_fn = disk_preflight_fn
+        self.result: BuildResult | None = None
+        self.abi: dict[str, Any] = {}
+        self.worktree_dir: Path
+        self.venv_dir: Path
+        self.attempt_py = ""
+        self.repo_url = ""
+        self.ref = ""
+
+    def _run(self, argv: Any, **kw: Any) -> Any:
+        kw.setdefault("capture_output", True)
+        kw.setdefault("text", True)
+        kw.setdefault("timeout", self.run_timeout)
+        return self._run_raw(argv, **kw)
+
+    def _fail(self, failure_class: str, summary: str) -> BuildResult:
+        return BuildResult(
+            ok=False,
+            attempt_root=str(self.root),
+            build_log_path=str(self.build_log),
+            failure_class=failure_class,
+            failure_summary=summary,
+            error=summary,
+        )
+
+    def preflight(self) -> None:
+        """Disk and toolchain checks; sets ``result`` on failure."""
+        import os as _os
+        import sys as _sys
+
+        try:
+            if self._disk_preflight_fn is not None:
+                self._disk_preflight_fn(self.root, 1, per_candidate_gb=self.disk_gb)
+            else:
+                from hyperloom.agents.framework.isolation import DiskPreflightError, disk_preflight
+
+                try:
+                    disk_preflight(self.root, 1, per_candidate_gb=self.disk_gb)
+                except DiskPreflightError as exc:
+                    self.result = self._fail("preflight_disk", str(exc))
+                    return
+        except (OSError, ValueError) as exc:
+            self.result = self._fail("preflight_disk", f"disk preflight raised: {exc!r}")
+            return
+
+        tc_ok, tc_msg = self._check_rocm(env=dict(_os.environ), run=self._run)
+        if not tc_ok:
+            self.result = self._fail("preflight_toolchain", tc_msg)
+            return
+        self.abi = self._probe_abi(_sys.executable, run=self._run)
+        if not self.abi.get("is_rocm"):
+            self.result = self._fail(
+                "preflight_toolchain",
+                f"host torch is not a ROCm build (torch={self.abi.get('torch_version')})",
+            )
+
+    def prepare(self) -> None:
+        """Isolation workspace and ROCm constraints; sets ``result`` on failure."""
+        self.repo_url = str(self.action.repo_url or self.default_repo).strip() or self.default_repo
+        self.ref = str(self.action.ref or "").strip()
+        try:
+            from hyperloom.agents.framework.isolation import prepare_candidate_workspace, prepare_repo_cache
+            from hyperloom.agents.framework.models import Candidate
+
+            prepare_repo_cache(self.repo_url, self.root)
+            candidate = Candidate(ref=self.ref or "HEAD", repo=self.repo_url)
+            ws = prepare_candidate_workspace(candidate, repo_url=self.repo_url, work_dir=self.root, index=0)
+            self.worktree_dir = ws.worktree_dir
+            self.venv_dir = ws.venv_dir
+            self.attempt_py = str(self.venv_dir / "bin" / "python")
+        except (OSError, subprocess.SubprocessError) as exc:
+            self.result = self._fail("compile_error", f"workspace preparation failed: {exc!r}")
+            return
+
+        try:
+            self._write_constraints(
+                self.attempt_py, str(self.root / ROCM_CONSTRAINTS_FILE), replacing=self.replacing, run=self._run
+            )
+        except self._AbiMismatchError as exc:
+            self.result = self._fail("abi_mismatch", str(exc))
+        except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+            self.result = self._fail("preflight_toolchain", f"ROCm constraint probe failed: {exc!r}")
+
+    def installed_versions(self, prefix: str, selected_ref: str, gpu_arch: str) -> dict[str, str]:
+        git_run = self._git if self._git is not None else self._run
+        sha_res = git_run(
+            ["git", *safe_directory_args(["-C", str(self.worktree_dir), "rev-parse", "--short", "HEAD"])],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        versions = {
+            "torch": self.abi.get("torch_version", ""),
+            f"{prefix}_ref": selected_ref,
+            f"{prefix}_sha": (getattr(sha_res, "stdout", "") or "").strip(),
+            "arch": gpu_arch,
+            "hip_version": self.abi.get("hip_version", ""),
+        }
+        if self.action.source_pr_url:
+            versions["source_pr_url"] = self.action.source_pr_url
+        return versions
+
+
+class _AiterBuild(_TargetedRecipe):
+    """Isolated AITER compile: shared setup, then pinned-ref or tag-descending install."""
+
+    disk_gb = _AITER_DISK_PER_CANDIDATE_GB
+    default_repo = _AITER_DEFAULT_REPO
+    default_max_jobs = _AITER_DEFAULT_MAX_JOBS
+    replacing = "amd-aiter"
+
+    def run(self) -> BuildResult:
+        self.jit_dir = self.root / "aiter_jit"
+        self.jit_dir.mkdir(parents=True, exist_ok=True)
+        self.aiter_home = self.root / "home"
+        self.aiter_home.mkdir(parents=True, exist_ok=True)
+        self.preflight()
+        if self.result is not None:
+            return self.result
+        self.prepare()
+        if self.result is not None:
+            return self.result
+        return self.install()
+
+    def install(self) -> BuildResult:
+        import os as _os
+
+        from .build_utils import sort_tags_desc
+
+        gpu_arch = str(self.action.gpu_arch or "").strip()
+        max_jobs = int(self.action.max_jobs or self.default_max_jobs)
+        env = {
+            **_os.environ,
+            "AITER_ROOT_DIR": str(self.aiter_home),
+            "HOME": str(self.aiter_home),
+            "INFERENCE_OPTIMIZER_AITER_JIT_DIR": str(self.jit_dir),
+            "AITER_REBUILD": "1",
+        }
+        if gpu_arch:
+            env["PYTORCH_ROCM_ARCH"] = gpu_arch
+            env["AITER_ROCM_ARCH"] = gpu_arch
+        if max_jobs:
+            env["MAX_JOBS"] = str(max_jobs)
+        pip = [
+            self.attempt_py,
+            "-m",
+            "pip",
+            "install",
+            "--constraint",
+            str(self.root / ROCM_CONSTRAINTS_FILE),
+            "--config-settings",
+            "editable_mode=compat",
+            "-e",
+            str(self.worktree_dir),
+        ]
+        if self.ref:
+            return self._pinned(pip, env, gpu_arch)
+        return self._autoselect(pip, env, gpu_arch, sort_tags_desc)
+
+    def _ok(self, selected_ref: str, gpu_arch: str) -> BuildResult:
+        return BuildResult(
+            ok=True,
+            attempt_root=str(self.root),
+            runtime=FrameworkRuntime(
+                pythonpath_prefixes=(str(self.worktree_dir),),
+                runtime_env={"INFERENCE_OPTIMIZER_AITER_JIT_DIR": str(self.jit_dir)},
+                source_root=str(self.worktree_dir),
+                attempt_root=str(self.root),
+            ),
+            installed_versions=self.installed_versions("aiter", selected_ref, gpu_arch),
+            build_log_path=str(self.build_log),
+            failure_class="ok",
+        )
+
+    def _pinned(self, pip: list[str], env: dict[str, str], gpu_arch: str) -> BuildResult:
+        res = self._run_argv(pip, cwd=str(self.worktree_dir), env=env, timeout_sec=3600, run=self._run)
+        if res.returncode != 0:
+            self.build_log.write_text(res.stderr_tail or res.stdout_tail, encoding="utf-8")
+            return self._fail("compile_error", f"pip install failed for ref={self.ref!r}: rc={res.returncode}")
+        probe = self._run_argv(
+            [self.attempt_py, "-c", "import aiter"],
+            cwd=str(self.root),
+            env=env,
+            timeout_sec=60,
+            run=self._run,
+        )
+        if probe.returncode != 0:
+            return self._fail(
+                "boot_failed",
+                f"aiter not importable after pip install (ref={self.ref!r}): {probe.stderr_tail or probe.stdout_tail}",
+            )
+        return self._ok(self.ref, gpu_arch)
+
+    def _autoselect(
+        self, pip: list[str], env: dict[str, str], gpu_arch: str, sort_tags_desc: Callable[..., list[str]]
+    ) -> BuildResult:
+        git_run = self._git if self._git is not None else self._run
+        tags_res = git_run(
+            ["git", *safe_directory_args(["-C", str(self.worktree_dir), "tag", "-l", "v*"])],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        raw_tags = (getattr(tags_res, "stdout", "") or "").strip().splitlines()
+        tags = sort_tags_desc([t.strip() for t in raw_tags if t.strip()])
+        if not tags:
+            return self._fail("compile_error", "no AITER version tags found in the cloned repo")
+        for tag in tags:
+            checkout_res = git_run(
+                ["git", *safe_directory_args(["-C", str(self.worktree_dir), "checkout", tag])],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            if getattr(checkout_res, "returncode", 1) != 0:
+                continue
+            res = self._run_argv(pip, cwd=str(self.worktree_dir), env=env, timeout_sec=3600, run=self._run)
+            if res.returncode != 0:
+                continue
+            probe = self._run_argv(
+                [self.attempt_py, "-c", "import aiter"],
+                cwd=str(self.root),
+                env=env,
+                timeout_sec=60,
+                run=self._run,
+            )
+            if probe.returncode == 0:
+                return self._ok(tag, gpu_arch)
+        return self._fail("compile_error", "no AITER tag installed and imported successfully")
+
 
 def run_aiter_build(
     action: TargetedBuildAction,
@@ -249,230 +543,8 @@ def run_aiter_build(
     disk_preflight_fn: Callable[..., Any] | None = None,
 ) -> BuildResult:
     """Run a full isolated AITER targeted build."""
-    from .build_utils import (
-        AbiMismatchError,
-        check_rocm_toolchain_alignment,
-        probe_torch_abi,
-        run_argv,
-        sort_tags_desc,
-        write_rocm_constraints,
-    )
-
-    root = Path(attempt_root)
-    root.mkdir(parents=True, exist_ok=True)
-    jit_dir = root / "aiter_jit"
-    jit_dir.mkdir(parents=True, exist_ok=True)
-    aiter_home = root / "home"
-    aiter_home.mkdir(parents=True, exist_ok=True)
-    build_log = root / "build.log"
-
-    def _run(argv, **kw):
-        """Route through injectable run shim; capture output for logs."""
-        kw.setdefault("capture_output", True)
-        kw.setdefault("text", True)
-        kw.setdefault("timeout", 3600)
-        return run(argv, **kw)
-
-    def _fail(failure_class: str, summary: str) -> BuildResult:
-        return BuildResult(
-            ok=False,
-            attempt_root=str(root),
-            build_log_path=str(build_log),
-            failure_class=failure_class,
-            failure_summary=summary,
-            error=summary,
-        )
-
-    # 1. Disk preflight -------------------------------------------------------
-    try:
-        if disk_preflight_fn is not None:
-            disk_preflight_fn(root, 1, per_candidate_gb=_AITER_DISK_PER_CANDIDATE_GB)
-        else:
-            from hyperloom.agents.framework.isolation import (
-                DiskPreflightError,
-                disk_preflight,
-            )
-
-            try:
-                disk_preflight(root, 1, per_candidate_gb=_AITER_DISK_PER_CANDIDATE_GB)
-            except DiskPreflightError as exc:
-                return _fail("preflight_disk", str(exc))
-    except (OSError, ValueError) as exc:
-        return _fail("preflight_disk", f"disk preflight raised: {exc!r}")
-
-    # 2. Toolchain + ABI preflight --------------------------------------------
-    import os as _os
-
-    tc_ok, tc_msg = check_rocm_toolchain_alignment(env=dict(_os.environ), run=_run)
-    if not tc_ok:
-        return _fail("preflight_toolchain", tc_msg)
-
-    # Choose the Python interpreter in the attempt venv (created below).
-    import sys as _sys
-
-    host_py = _sys.executable
-    abi = probe_torch_abi(host_py, run=_run)
-    if not abi.get("is_rocm"):
-        return _fail(
-            "preflight_toolchain",
-            f"host torch is not a ROCm build (torch={abi.get('torch_version')})",
-        )
-
-    # 3. Isolation worktree + venv -------------------------------------------
-    repo_url = str(action.repo_url or _AITER_DEFAULT_REPO).strip() or _AITER_DEFAULT_REPO
-    ref = str(action.ref or "").strip()
-    worktree_dir: Path | None = None
-    venv_dir: Path | None = None
-
-    try:
-        from hyperloom.agents.framework.isolation import (
-            prepare_candidate_workspace,
-            prepare_repo_cache,
-        )
-        from hyperloom.agents.framework.models import Candidate
-
-        prepare_repo_cache(repo_url, root)
-        candidate = Candidate(ref=ref or "HEAD", repo=repo_url)
-        ws = prepare_candidate_workspace(candidate, repo_url=repo_url, work_dir=root, index=0)
-        worktree_dir = ws.worktree_dir
-        venv_dir = ws.venv_dir
-        attempt_py = str(venv_dir / "bin" / "python")
-    except (OSError, subprocess.SubprocessError) as exc:
-        return _fail("compile_error", f"workspace preparation failed: {exc!r}")
-
-    # 4. ROCm constraint file -------------------------------------------------
-    constraint_path = root / ROCM_CONSTRAINTS_FILE
-    try:
-        write_rocm_constraints(attempt_py, str(constraint_path), replacing="amd-aiter", run=_run)
-    except AbiMismatchError as exc:
-        return _fail("abi_mismatch", str(exc))
-    except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
-        return _fail("preflight_toolchain", f"ROCm constraint probe failed: {exc!r}")
-
-    # 5. pip install (pinned ref or tag-desc autoselect) ----------------------
-    gpu_arch = str(action.gpu_arch or "").strip()
-    max_jobs = int(action.max_jobs or _AITER_DEFAULT_MAX_JOBS)
-    install_env = {
-        **_os.environ,
-        "AITER_ROOT_DIR": str(aiter_home),
-        "HOME": str(aiter_home),
-        "INFERENCE_OPTIMIZER_AITER_JIT_DIR": str(jit_dir),
-        "AITER_REBUILD": "1",
-    }
-    if gpu_arch:
-        install_env["PYTORCH_ROCM_ARCH"] = gpu_arch
-        install_env["AITER_ROCM_ARCH"] = gpu_arch
-    if max_jobs:
-        install_env["MAX_JOBS"] = str(max_jobs)
-
-    git_run = git if git is not None else _run
-    selected_ref = ref
-    installed_ok = False
-
-    pip_base = [
-        attempt_py,
-        "-m",
-        "pip",
-        "install",
-        "--constraint",
-        str(constraint_path),
-        "--config-settings",
-        "editable_mode=compat",
-        "-e",
-        str(worktree_dir),
-    ]
-
-    if ref:
-        res = run_argv(pip_base, cwd=str(worktree_dir), env=install_env, timeout_sec=3600, run=_run)
-        if res.returncode != 0:
-            log_msg = res.stderr_tail or res.stdout_tail
-            build_log.write_text(log_msg, encoding="utf-8")
-            return _fail("compile_error", f"pip install failed for ref={ref!r}: rc={res.returncode}")
-        probe = run_argv(
-            [attempt_py, "-c", "import aiter"],
-            cwd=str(root),
-            env=install_env,
-            timeout_sec=60,
-            run=_run,
-        )
-        if probe.returncode != 0:
-            return _fail(
-                "boot_failed",
-                f"aiter not importable after pip install (ref={ref!r}): {probe.stderr_tail or probe.stdout_tail}",
-            )
-        selected_ref = ref
-    else:
-        # Tag-descending autoselect
-        tags_res = git_run(
-            ["git", *safe_directory_args(["-C", str(worktree_dir), "tag", "-l", "v*"])],
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-        raw_tags = (getattr(tags_res, "stdout", "") or "").strip().splitlines()
-        tags = sort_tags_desc([t.strip() for t in raw_tags if t.strip()])
-        if not tags:
-            return _fail("compile_error", "no AITER version tags found in the cloned repo")
-
-        for tag in tags:
-            checkout_res = git_run(
-                ["git", *safe_directory_args(["-C", str(worktree_dir), "checkout", tag])],
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-            if getattr(checkout_res, "returncode", 1) != 0:
-                continue
-            res = run_argv(pip_base, cwd=str(worktree_dir), env=install_env, timeout_sec=3600, run=_run)
-            if res.returncode == 0:
-                probe = run_argv(
-                    [attempt_py, "-c", "import aiter"],
-                    cwd=str(root),
-                    env=install_env,
-                    timeout_sec=60,
-                    run=_run,
-                )
-                if probe.returncode == 0:
-                    installed_ok = True
-                    selected_ref = tag
-                    break
-        if not installed_ok:
-            return _fail("compile_error", "no AITER tag installed and imported successfully")
-
-    # 6. Collect installed_versions + return BuildResult -----------------------
-    sha_res = git_run(
-        ["git", *safe_directory_args(["-C", str(worktree_dir), "rev-parse", "--short", "HEAD"])],
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    commit_sha = (getattr(sha_res, "stdout", "") or "").strip()
-
-    installed_versions: dict[str, str] = {
-        "torch": abi.get("torch_version", ""),
-        "aiter_ref": selected_ref,
-        "aiter_sha": commit_sha,
-        "arch": gpu_arch,
-        "hip_version": abi.get("hip_version", ""),
-    }
-    if action.source_pr_url:
-        installed_versions["source_pr_url"] = action.source_pr_url
-
-    runtime = FrameworkRuntime(
-        pythonpath_prefixes=(str(worktree_dir),),
-        runtime_env={"INFERENCE_OPTIMIZER_AITER_JIT_DIR": str(jit_dir)},
-        source_root=str(worktree_dir),
-        attempt_root=str(root),
-    )
-
-    return BuildResult(
-        ok=True,
-        attempt_root=str(root),
-        runtime=runtime,
-        installed_versions=installed_versions,
-        build_log_path=str(build_log),
-        failure_class="ok",
-    )
+    build = _AiterBuild(action, attempt_root, run=run, git=git, disk_preflight_fn=disk_preflight_fn)
+    return build.run()
 
 
 # sgl-kernel recipe
@@ -672,31 +744,147 @@ def run_sgl_kernel_build(
 
 # vLLM from source recipe
 
-_VLLM_DEFAULT_REPO = "https://github.com/ROCm/vllm"
-_VLLM_DISK_PER_CANDIDATE_GB = 20.0
-_VLLM_DEFAULT_MAX_JOBS = 8
 
-# Inline verify_vllm_rocm probe.
-_VERIFY_VLLM_ROCM_SCRIPT = """\
-import sys, torch
-if not getattr(torch.version, "hip", None):
-    print("torch is not a ROCm build", file=sys.stderr); raise SystemExit(1)
-import vllm
-try:
-    from vllm.platforms import current_platform
-except Exception as exc:
-    print(f"cannot import vllm platform: {exc}", file=sys.stderr); raise SystemExit(1)
-is_rocm = False
-checker = getattr(current_platform, "is_rocm", None)
-if callable(checker):
-    try: is_rocm = bool(checker())
-    except Exception: pass
-if "rocm" in f"{current_platform!r} {current_platform.__class__.__name__}".lower():
-    is_rocm = True
-if not is_rocm:
-    print("vLLM did not report ROCm platform", file=sys.stderr); raise SystemExit(1)
-print("vllm_rocm_ok")
-"""
+class _VllmBuild(_TargetedRecipe):
+    """Isolated vLLM-from-source compile: shared setup, then pip + ROCm probes."""
+
+    disk_gb = _VLLM_DISK_PER_CANDIDATE_GB
+    default_repo = _VLLM_DEFAULT_REPO
+    default_max_jobs = _VLLM_DEFAULT_MAX_JOBS
+    replacing = "vllm"
+    run_timeout = 5400
+
+    def run(self) -> BuildResult:
+        import sys as _sys
+
+        self.preflight()
+        if self.result is not None:
+            return self.result
+        gpu_arch = str(self.action.gpu_arch or "").strip()
+        if not gpu_arch:
+            return self._fail("preflight_toolchain", "gpu_arch must be set explicitly for vLLM source (L6)")
+        host_pyver = f"{_sys.version_info.major}.{_sys.version_info.minor}"
+        abi_pyver = str(self.abi.get("python_version") or "").strip()
+        if abi_pyver and not abi_pyver.startswith(host_pyver):
+            import logging as _log
+
+            _log.getLogger(__name__).info(
+                "vLLM source build: torch ABI python %s != host %s; "
+                "runtime_python_exe will be set to the attempt venv interpreter",
+                abi_pyver,
+                host_pyver,
+            )
+        self.prepare()
+        if self.result is not None:
+            return self.result
+        return self.install(gpu_arch)
+
+    def install(self, gpu_arch: str) -> BuildResult:
+        import os as _os
+
+        max_jobs = int(self.action.max_jobs or self.default_max_jobs)
+        rocm_root = (
+            _os.environ.get("ROCM_HOME")
+            or _os.environ.get("CUDA_HOME")
+            or _os.environ.get("ROCM_PATH")
+            or _os.environ.get("HIP_PATH")
+            or "/opt/rocm"
+        ).strip() or "/opt/rocm"
+        env = {
+            **_os.environ,
+            "PYTORCH_ROCM_ARCH": gpu_arch,
+            "MAX_JOBS": str(max_jobs),
+            "CUDA_HOME": rocm_root,
+            "ROCM_HOME": rocm_root,
+            "ROCM_PATH": rocm_root,
+            "HIP_HOME": rocm_root,
+        }
+        # ``--no-build-isolation`` (below) means pip will NOT install the checkout's [build-system].requires — they must
+        # already be in the attempt venv.
+        try:
+            build_requires = _read_build_system_requires(self.worktree_dir)
+            if build_requires:
+                self._run_argv(
+                    [self.attempt_py, "-m", "pip", "install", *build_requires],
+                    cwd=str(self.worktree_dir),
+                    env=env,
+                    timeout_sec=1800,
+                    run=self._run,
+                )
+        except OSError:
+            import logging as _logmod
+
+            _logmod.getLogger(__name__).debug("vLLM source build: build-requires pre-install skipped", exc_info=True)
+
+        pip_cmd = [
+            self.attempt_py,
+            "-m",
+            "pip",
+            "install",
+            "--no-build-isolation",
+            "--constraint",
+            str(self.root / ROCM_CONSTRAINTS_FILE),
+            "-e",
+            str(self.worktree_dir),
+        ]
+        pip_res = self._run_argv(pip_cmd, cwd=str(self.worktree_dir), env=env, timeout_sec=5400, run=self._run)
+        if pip_res.returncode != 0:
+            self.build_log.write_text(pip_res.stderr_tail or pip_res.stdout_tail, encoding="utf-8")
+            return self._fail("compile_error", f"vLLM source pip install failed (rc={pip_res.returncode})")
+        return self._probed_success(gpu_arch)
+
+    def _probed_success(self, gpu_arch: str) -> BuildResult:
+        import os as _os
+
+        # The probes import vllm the way the runtime will: the editable finder runs
+        # after sys.path, where the base image's system-site vllm would otherwise win.
+        pythonpath_prefixes = (str(self.worktree_dir),)
+        pythonpath = _os.pathsep.join(p for p in (*pythonpath_prefixes, _os.environ.get("PYTHONPATH", "")) if p)
+        probe_env = {**_os.environ, "PYTHONPATH": pythonpath}
+
+        vllm_verify = self._run_argv(
+            [self.attempt_py, "-c", _VERIFY_VLLM_ROCM_SCRIPT],
+            cwd=str(self.root),
+            env=probe_env,
+            timeout_sec=120,
+            run=self._run,
+        )
+        if vllm_verify.returncode != 0:
+            return self._fail("boot_failed", f"vLLM ROCm platform check failed: {vllm_verify.stderr_tail[:500]}")
+
+        load_probe_script = (
+            f"import vllm, inspect, sys; f = inspect.getfile(vllm); print(f); "
+            f"sys.exit(0 if f.startswith({str(self.worktree_dir)!r}) else 3)"
+        )
+        load_probe = self._run_argv(
+            [self.attempt_py, "-c", load_probe_script],
+            cwd=str(self.root),
+            env=probe_env,
+            timeout_sec=60,
+            run=self._run,
+        )
+        if load_probe.returncode != 0:
+            return self._fail(
+                "boot_failed",
+                f"vLLM load probe failed: attempt venv does not load vllm from worktree "
+                f"(rc={load_probe.returncode}; out={load_probe.stdout_tail[:200]})",
+            )
+
+        return BuildResult(
+            ok=True,
+            attempt_root=str(self.root),
+            runtime=FrameworkRuntime(
+                pythonpath_prefixes=pythonpath_prefixes,
+                entrypoint_bin_dir=str(self.venv_dir / "bin"),
+                runtime_python_exe=self.attempt_py,
+                runtime_env={"PYTORCH_ROCM_ARCH": gpu_arch},
+                source_root=str(self.worktree_dir),
+                attempt_root=str(self.root),
+            ),
+            installed_versions=self.installed_versions("vllm", self.ref, gpu_arch),
+            build_log_path=str(self.build_log),
+            failure_class="ok",
+        )
 
 
 def run_vllm_source_build(
@@ -708,231 +896,8 @@ def run_vllm_source_build(
     disk_preflight_fn: Callable[..., Any] | None = None,
 ) -> BuildResult:
     """Run an isolated vLLM-from-source targeted build."""
-    import os as _os
-    import sys as _sys
-
-    from .build_utils import (
-        AbiMismatchError,
-        check_rocm_toolchain_alignment,
-        probe_torch_abi,
-        run_argv,
-        write_rocm_constraints,
-    )
-
-    root = Path(attempt_root)
-    root.mkdir(parents=True, exist_ok=True)
-    build_log = root / "build.log"
-
-    def _run(argv, **kw):
-        kw.setdefault("capture_output", True)
-        kw.setdefault("text", True)
-        kw.setdefault("timeout", 5400)
-        return run(argv, **kw)
-
-    def _fail(failure_class: str, summary: str) -> BuildResult:
-        return BuildResult(
-            ok=False,
-            attempt_root=str(root),
-            build_log_path=str(build_log),
-            failure_class=failure_class,
-            failure_summary=summary,
-            error=summary,
-        )
-
-    # Disk preflight (raised headroom: 20 GB for full vLLM build cache)
-    try:
-        if disk_preflight_fn is not None:
-            disk_preflight_fn(root, 1, per_candidate_gb=_VLLM_DISK_PER_CANDIDATE_GB)
-        else:
-            from hyperloom.agents.framework.isolation import DiskPreflightError, disk_preflight
-
-            try:
-                disk_preflight(root, 1, per_candidate_gb=_VLLM_DISK_PER_CANDIDATE_GB)
-            except DiskPreflightError as exc:
-                return _fail("preflight_disk", str(exc))
-    except (OSError, ValueError) as exc:
-        return _fail("preflight_disk", f"disk preflight raised: {exc!r}")
-
-    tc_ok, tc_msg = check_rocm_toolchain_alignment(env=dict(_os.environ), run=_run)
-    if not tc_ok:
-        return _fail("preflight_toolchain", tc_msg)
-
-    host_py = _sys.executable
-    abi = probe_torch_abi(host_py, run=_run)
-    if not abi.get("is_rocm"):
-        return _fail("preflight_toolchain", f"host torch is not a ROCm build (torch={abi.get('torch_version')})")
-
-    gpu_arch = str(action.gpu_arch or "").strip()
-    if not gpu_arch:
-        return _fail("preflight_toolchain", "gpu_arch must be set explicitly for vLLM source (L6)")
-
-    # ABI-match guard: log an advisory when the torch ABI reports a different Python version; the build continues and
-    # runtime_python_exe points to the attempt venv python so the server uses the correct interpreter.
-    host_pyver = f"{_sys.version_info.major}.{_sys.version_info.minor}"
-    abi_pyver = str(abi.get("python_version") or "").strip()
-    if abi_pyver and not abi_pyver.startswith(host_pyver):
-        import logging as _log
-
-        _log.getLogger(__name__).info(
-            "vLLM source build: torch ABI python %s != host %s; "
-            "runtime_python_exe will be set to the attempt venv interpreter",
-            abi_pyver,
-            host_pyver,
-        )
-
-    repo_url = str(action.repo_url or _VLLM_DEFAULT_REPO).strip() or _VLLM_DEFAULT_REPO
-    ref = str(action.ref or "").strip()
-    max_jobs = int(action.max_jobs or _VLLM_DEFAULT_MAX_JOBS)
-
-    # Isolation worktree + venv
-    worktree_dir: Path | None = None
-    venv_dir: Path | None = None
-
-    try:
-        from hyperloom.agents.framework.isolation import prepare_candidate_workspace, prepare_repo_cache
-        from hyperloom.agents.framework.models import Candidate
-
-        prepare_repo_cache(repo_url, root)
-        candidate = Candidate(ref=ref or "HEAD", repo=repo_url)
-        ws = prepare_candidate_workspace(candidate, repo_url=repo_url, work_dir=root, index=0)
-        worktree_dir = ws.worktree_dir
-        venv_dir = ws.venv_dir
-        attempt_py = str(venv_dir / "bin" / "python")
-    except (OSError, subprocess.SubprocessError) as exc:
-        return _fail("compile_error", f"workspace preparation failed: {exc!r}")
-
-    constraint_path = root / ROCM_CONSTRAINTS_FILE
-    try:
-        write_rocm_constraints(attempt_py, str(constraint_path), replacing="vllm", run=_run)
-    except AbiMismatchError as exc:
-        return _fail("abi_mismatch", str(exc))
-    except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
-        return _fail("preflight_toolchain", f"ROCm constraint probe failed: {exc!r}")
-
-    # vLLM's ROCm setup.py asserts ``CUDA_HOME is not set`` and reuses it as the toolchain root even on ROCm.
-    _rocm_root = (
-        _os.environ.get("ROCM_HOME")
-        or _os.environ.get("CUDA_HOME")
-        or _os.environ.get("ROCM_PATH")
-        or _os.environ.get("HIP_PATH")
-        or "/opt/rocm"
-    ).strip() or "/opt/rocm"
-    install_env = {
-        **_os.environ,
-        "PYTORCH_ROCM_ARCH": gpu_arch,
-        "MAX_JOBS": str(max_jobs),
-        "CUDA_HOME": _rocm_root,
-        "ROCM_HOME": _rocm_root,
-        "ROCM_PATH": _rocm_root,
-        "HIP_HOME": _rocm_root,
-    }
-
-    # ``--no-build-isolation`` (below) means pip will NOT install the checkout's [build-system].requires — they must
-    # already be in the attempt venv.
-    try:
-        build_requires = _read_build_system_requires(worktree_dir)
-        if build_requires:
-            run_argv(
-                [attempt_py, "-m", "pip", "install", *build_requires],
-                cwd=str(worktree_dir),
-                env=install_env,
-                timeout_sec=1800,
-                run=_run,
-            )
-    except OSError:
-        import logging as _logmod
-
-        _logmod.getLogger(__name__).debug("vLLM source build: build-requires pre-install skipped", exc_info=True)
-
-    # pip install -e triggers CMake build_ext.
-    pip_cmd = [
-        attempt_py,
-        "-m",
-        "pip",
-        "install",
-        "--no-build-isolation",
-        "--constraint",
-        str(constraint_path),
-        "-e",
-        str(worktree_dir),
-    ]
-    pip_res = run_argv(pip_cmd, cwd=str(worktree_dir), env=install_env, timeout_sec=5400, run=_run)
-    if pip_res.returncode != 0:
-        build_log.write_text(pip_res.stderr_tail or pip_res.stdout_tail, encoding="utf-8")
-        return _fail("compile_error", f"vLLM source pip install failed (rc={pip_res.returncode})")
-
-    # The probes import vllm the way the runtime will: the editable finder runs
-    # after sys.path, where the base image's system-site vllm would otherwise win.
-    pythonpath_prefixes = (str(worktree_dir),)
-    pythonpath = _os.pathsep.join(p for p in (*pythonpath_prefixes, _os.environ.get("PYTHONPATH", "")) if p)
-    probe_env = {**_os.environ, "PYTHONPATH": pythonpath}
-
-    # ROCm platform verify (port of verify_vllm_rocm from installer)
-    vllm_verify = run_argv(
-        [attempt_py, "-c", _VERIFY_VLLM_ROCM_SCRIPT],
-        cwd=str(root),
-        env=probe_env,
-        timeout_sec=120,
-        run=_run,
-    )
-    if vllm_verify.returncode != 0:
-        return _fail("boot_failed", f"vLLM ROCm platform check failed: {vllm_verify.stderr_tail[:500]}")
-
-    # Load probe: confirm the attempt venv loads vllm from the worktree.
-    load_probe_script = (
-        f"import vllm, inspect, sys; f = inspect.getfile(vllm); print(f); "
-        f"sys.exit(0 if f.startswith({str(worktree_dir)!r}) else 3)"
-    )
-    load_probe = run_argv(
-        [attempt_py, "-c", load_probe_script],
-        cwd=str(root),
-        env=probe_env,
-        timeout_sec=60,
-        run=_run,
-    )
-    if load_probe.returncode != 0:
-        return _fail(
-            "boot_failed",
-            f"vLLM load probe failed: attempt venv does not load vllm from worktree "
-            f"(rc={load_probe.returncode}; out={load_probe.stdout_tail[:200]})",
-        )
-
-    git_run = git if git is not None else _run
-    sha_res = git_run(
-        ["git", *safe_directory_args(["-C", str(worktree_dir), "rev-parse", "--short", "HEAD"])],
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    commit_sha = (getattr(sha_res, "stdout", "") or "").strip()
-
-    installed_versions = {
-        "torch": abi.get("torch_version", ""),
-        "vllm_ref": ref,
-        "vllm_sha": commit_sha,
-        "arch": gpu_arch,
-        "hip_version": abi.get("hip_version", ""),
-    }
-    if action.source_pr_url:
-        installed_versions["source_pr_url"] = action.source_pr_url
-
-    # vLLM source overlay: prepend the worktree so the attempt venv's vllm wins.
-    runtime = FrameworkRuntime(
-        pythonpath_prefixes=pythonpath_prefixes,
-        entrypoint_bin_dir=str(venv_dir / "bin") if venv_dir else "",
-        runtime_python_exe=attempt_py,
-        runtime_env={"PYTORCH_ROCM_ARCH": gpu_arch},
-        source_root=str(worktree_dir),
-        attempt_root=str(root),
-    )
-    return BuildResult(
-        ok=True,
-        attempt_root=str(root),
-        runtime=runtime,
-        installed_versions=installed_versions,
-        build_log_path=str(build_log),
-        failure_class="ok",
-    )
+    build = _VllmBuild(action, attempt_root, run=run, git=git, disk_preflight_fn=disk_preflight_fn)
+    return build.run()
 
 
 # Off-loop driver entrypoint
