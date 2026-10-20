@@ -149,7 +149,7 @@ def test_the_probe_tells_the_driver_and_itself_the_same_rank_count(monkeypatch):
 
     async def _fake_create(*args, **kwargs):
         captured.update(kwargs.get("env") or {})
-        raise RuntimeError("stop before running")
+        raise OSError("stop before running")
 
     monkeypatch.setattr(task_preflight.asyncio, "create_subprocess_exec", _fake_create)
 
@@ -170,7 +170,7 @@ def test_a_single_rank_probe_declares_no_rank_count(monkeypatch):
 
     async def _fake_create(*args, **kwargs):
         captured.update(kwargs.get("env") or {})
-        raise RuntimeError("stop before running")
+        raise OSError("stop before running")
 
     monkeypatch.setattr(task_preflight.asyncio, "create_subprocess_exec", _fake_create)
     monkeypatch.delenv("FORGE_NPROC_PER_NODE", raising=False)

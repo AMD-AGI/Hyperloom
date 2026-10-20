@@ -207,7 +207,7 @@ def test_an_unpublishable_validated_result_records_its_reason_durably(
     monkeypatch.setattr(
         recovery,
         "publish_operator_result",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("patches root is read-only")),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("patches root is read-only")),
     )
 
     state = controller.run_controller(

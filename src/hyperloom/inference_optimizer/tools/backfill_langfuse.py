@@ -234,7 +234,7 @@ def ingest(plan: dict[str, Any]) -> int:
     """Emit a backfill plan to Langfuse as a full trace tree."""
     try:
         from langfuse import get_client  # type: ignore[import-not-found]
-    except Exception as exc:  # noqa: BLE001
+    except ImportError as exc:
         print(
             "ERROR: langfuse SDK not importable. Install it first:\n"
             "  pip install 'hyperloom-inference_optimizer[trace]'\n"

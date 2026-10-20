@@ -16,6 +16,7 @@ import math
 import os
 import shutil
 import signal
+import subprocess
 import tempfile
 import textwrap
 import time
@@ -32,8 +33,8 @@ from kernelforge.llm.process_reaping import processes_under
 from kernelforge.llm.workspace_policy import is_protected_path
 from kernelforge.llm.git import git, git_bytes
 from kernelforge.config import Config
-from kernelforge.loop.canonical_correctness import accept_candidate
-from kernelforge.loop.validation import run_validation_pipeline
+from kernelforge.evaluation.correctness.canonical import accept_candidate
+from kernelforge.evaluation.correctness.pipeline import run_validation_pipeline
 from kernelforge.loop.experience import ExperienceLedger
 from kernelforge.loop.lessons import (
     SUMMARY_MIN_SECONDS,
@@ -118,20 +119,20 @@ from kernelforge.loop.prompt_view import (
     render_long_horizon_header,
 )
 from kernelforge.loop.reporting import BestResultPublisher, KeepBundle, KeepIdentity, KeepScore
-from kernelforge.mcp_server.tools.bench import (
+from kernelforge.evaluation.benchmark.runner import (
     CaseCoverageError,
     calculate_mean_case_speedup,
     calculate_measurement_case_speedups,
     BenchRun,
     measure_wallclock,
 )
-from kernelforge.mcp_server.tools._subprocess import communicate_process_group
+from kernelforge.tools.process_group import communicate_process_group
 from kernelforge.loop.new_path_allowlist import (
     matches_commit_new_paths,
     normalize_commit_new_paths,
 )
-from kernelforge.durable_io import atomic_write_text
-from kernelforge.loop.scoring import (
+from kernelforge.tools.durable_io import atomic_write_text
+from kernelforge.evaluation.scoring import (
     DEFAULT_SNR_THRESHOLD_DB,
     KEEP_MEASUREMENT_COUNT,
     SIGMA_REMEASURE_BATCH,
@@ -145,7 +146,7 @@ from kernelforge.loop.scoring import (
     rescaled_sigma,
     runs_task_suite_acceptance,
 )
-from kernelforge.loop.baseline_reference import (
+from kernelforge.evaluation.benchmark.baseline import (
     BASELINE_DRIFT_TOLERANCE,
     BASELINE_DRIFT_TOLERANCE_ENV,
     check_baseline_against_reference,
@@ -163,7 +164,7 @@ from kernelforge.loop.merge_candidates import (
     merge_plan,
     select_merge_pair,
 )
-from kernelforge.mcp_server.tools.registers import check_registers
+from kernelforge.evaluation.profiling.registers import check_registers
 from kernelforge.tracker import CampaignSegment, ExperimentTracker, Experiment, ExperimentSubject
 
 log = logging.getLogger(__name__)
@@ -837,7 +838,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                     self.experiment.experiment_id,
                     self.llm_usage,
                 )
-        except Exception:
+        except (OSError, TypeError, ValueError):
             log.debug("failed to checkpoint LLM usage", exc_info=True)
 
     def _git(self, *args: str) -> str:
@@ -1419,7 +1420,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                 path = Path(self.ic.workspace_dir) / path
             try:
                 texts.append(path.read_text())
-            except Exception as e:  # noqa: BLE001 - reported, not swallowed
+            except (OSError, ValueError) as e:  # reported, not swallowed
                 texts.append(None)
                 unreadable.append(str(path))
                 log.warning(
@@ -1466,7 +1467,7 @@ class IterationLoop(AnalysisRuntimeMixin):
             return ""
         try:
             return git("diff", f"{commit_hash}~1", commit_hash, cwd=self.ic.workspace_dir).stdout
-        except Exception as e:  # noqa: BLE001 - git wrapper does not export its error type here
+        except (OSError, subprocess.SubprocessError) as e:
             log.debug("could not diff commit %s: %s", commit_hash, e)
             return ""
 
@@ -1645,7 +1646,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                 round_budget=self._round_budget_summary(),
             )
             return True
-        except Exception as error:
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
             first_failure = not self.persistence_degraded
             self.persistence_degraded = True
             self.persistence_errors.append(f"publish best iteration {result.iteration}: {error}")
@@ -2390,7 +2391,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                 result.commit_hash,
                 result=result,
             )
-        except Exception as error:
+        except (OSError, ValueError, RuntimeError) as error:
             self.persistence_degraded = True
             self.persistence_errors.append(f"rebuild candidate archive iteration {result.iteration}: {error}")
             self.persistence_errors = self.persistence_errors[-10:]
@@ -2518,7 +2519,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                 events=events,
                 candidate_metadata=metadata,
             )
-        except Exception as error:
+        except (OSError, ValueError) as error:
             self.persistence_degraded = True
             self.persistence_errors.append(f"publish optimization history: {error}")
             self.persistence_errors = self.persistence_errors[-10:]
@@ -4656,12 +4657,12 @@ class IterationLoop(AnalysisRuntimeMixin):
             )
         finally:
             try:
-                from kernelforge.loop.aiter_cache import (
+                from kernelforge.tools.aiter_cache import (
                     cleanup_current_owned_aiter_locks,
                 )
 
                 cleanup_current_owned_aiter_locks()
-            except Exception:
+            except (OSError, ValueError):
                 log.debug("failed to clean AITER locks on loop exit", exc_info=True)
 
     async def _run_impl(
@@ -5288,7 +5289,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                 )
             )
             self.state_store.save(self.run_state)
-        except Exception:
+        except (OSError, subprocess.SubprocessError):
             log.debug("run_state: terminal save failed", exc_info=True)
         self.persistence_degraded = self.persistence_degraded or self.state_store.degraded
         self.persistence_errors = (self.persistence_errors + self.state_store.persistence_errors)[-10:]
@@ -5357,7 +5358,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                         )
                         self._persist_pending_keep(pending_keep)
                         commit_hash = self._git_commit(str(pending_keep["commit_message"]))
-                    except Exception as e:  # noqa: BLE001 - a KEEP that cannot be built is not a KEEP
+                    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as e:
                         result.kept = False
                         result.validation_passed = False
                         result.crashed = True
@@ -5726,18 +5727,18 @@ class IterationLoop(AnalysisRuntimeMixin):
             if callable(restore):
                 try:
                     restore()
-                except Exception as error:  # noqa: BLE001
+                except (RuntimeError, OSError) as error:
                     restore_errors.append(f"protected snapshot restore failed: {type(error).__name__}: {error}")
             else:
                 restore_errors.append("protected snapshot restore callback unavailable")
             try:
                 self._git_discard_worktree()
-            except Exception as error:  # noqa: BLE001
+            except (OSError, RuntimeError, subprocess.SubprocessError) as error:
                 restore_errors.append(f"tracked candidate restore failed: {type(error).__name__}: {error}")
             if not restore_errors:
                 try:
                     self._validate_driver_integrity(self.run_state)
-                except Exception as error:  # noqa: BLE001
+                except (ValueError, OSError) as error:
                     restore_errors.append(str(error))
             summary = (
                 "REVERT (protected integrity violation): canonical "
@@ -5786,7 +5787,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                 # The candidate itself may be sound, but nothing here can establish that, and HEAD has to stay
                 # at the last measured best rather than carry an unmeasured diff into the next iteration.
                 self._git_discard_worktree()
-            except Exception as error:  # noqa: BLE001
+            except (OSError, RuntimeError, subprocess.SubprocessError) as error:
                 summary += f" Candidate restore failed: {type(error).__name__}: {error}"
             session_sink["findings"] = "\n---\n".join(
                 part
