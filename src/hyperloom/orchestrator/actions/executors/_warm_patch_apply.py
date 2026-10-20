@@ -108,10 +108,7 @@ def _validated_restore_manifest(
     pre_sha: str,
     snapshot_manifest: Any,
 ) -> tuple[dict[str, Any], str]:
-    """Load the snapshot manifest and check it was taken of ``repo_path`` at ``pre_sha``.
-
-    Returns ``(manifest, "")`` when the restore may proceed, else ``({}, error)``.
-    """
+    """Load the snapshot manifest and check it was taken of ``repo_path`` at ``pre_sha``."""
     manifest = snapshot_manifest
     if isinstance(manifest, (str, Path)):
         try:
@@ -271,12 +268,7 @@ def _warm_tree_records(
     *,
     before_mutation: bool = False,
 ) -> list[dict[str, Any]]:
-    """Return one JSON-safe record per touched tree, in apply order.
-
-    ``before_mutation`` stamps ``mutated`` true. A record persisted ahead of the apply is
-    the one record that cannot know what the round went on to write, so a resume that finds
-    it has to treat the tree as written-to and restore it from the snapshot taken with it.
-    """
+    """Return one JSON-safe record per touched tree, in apply order."""
     records = [{field: trees[root][field] for field in _WARM_TREE_FIELDS} for root in order if root in trees]
     if before_mutation:
         for record in records:
@@ -387,20 +379,12 @@ def _refused_warm_replay(patches: list[Any], failure: str) -> dict[str, Any]:
 
 
 def _recorded_patch_roots(patches: list[Any]) -> list[str]:
-    """The checkout each overlay was taken from.
-
-    The recorded root is the tree the gain was measured on, so it outranks the locally resolved one rather
-    than being checked against it.
-    """
+    """The checkout each overlay was taken from."""
     return [str((patch or {}).get("framework_root") or "").strip() for patch in patches]
 
 
 def _warm_patch_trees(patch_roots: list[str]) -> _WarmPatchTrees:
-    """Resolve each recorded root to its work tree and record what a rollback of that tree will need.
-
-    Two recorded roots inside one checkout are one tree: a git diff's paths are work-tree-root relative, so both
-    resolve there and applying them separately would ignore whatever falls outside the narrower one.
-    """
+    """Resolve each recorded root to its work tree and record what a rollback of that tree will need."""
     from ._nogit_patch import _is_git_tree
 
     roots = list(patch_roots)
@@ -449,11 +433,7 @@ def _warm_patch_text(patch: Mapping[str, Any]) -> _OverlayText:
 
 
 def _unusable_patch_reason(content: str, patch_file: str) -> str:
-    """Why this overlay may not touch the live checkout, or ``""`` when it may.
-
-    Structural safety gate on untrusted KB-sourced ``patch_content`` before it is git-applied: reject non-diff
-    blobs and any patch whose header path escapes the tree (absolute / ``..``).
-    """
+    """Why this overlay may not touch the live checkout, or ``""`` when it may."""
     from ...specialists.patch_safety import is_unified_diff, patch_escapes_tree
 
     if not is_unified_diff(content) or "GIT binary patch" in content:
@@ -619,11 +599,7 @@ def _git_apply_overlay(
     *,
     required_timeline: bool,
 ) -> str:
-    """Overlay a git checkout, naming the method that landed it.
-
-    A required timeline has to tell an overlay the tree already carries from one that conflicts, so it reads
-    the reverse check back and falls through to a three-way merge; a best-effort one takes the refusal as it comes.
-    """
+    """Overlay a git checkout, naming the method that landed it."""
     checked = subprocess.run(
         ["git", "apply", "--check", str(patch_path)],
         cwd=target_repo,
@@ -857,14 +833,7 @@ def _stamp_warm_patch_outcome(
     params: Mapping[str, Any],
     pre_sha: str,
 ) -> None:
-    """Carry the patch application's report into the round's result.
-
-    A required timeline reports the structure prelude promotes or restores
-    from. A best-effort one reports only the patches that landed, so its
-    per-patch statuses are lifted out of ``params`` instead: a patch that
-    silently failed to apply would otherwise leave nothing behind, and the
-    round would be measured on a tree nobody downstream can describe.
-    """
+    """Carry the patch application's report into the round's result."""
     if isinstance(patch_application, Mapping):
         _stamp_warm_patch_trees(result, patch_application, pre_sha)
         result["warm_kernel_apply_results"] = list(params.get("warm_kernel_apply_results") or [])

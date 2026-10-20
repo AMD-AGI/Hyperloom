@@ -1766,12 +1766,7 @@ class BenchmarkRunExecutor:
         )
 
     def _record_round_invocation(self, setup: _RoundSetup, request: _BaselineRunRequest, config_path: Path) -> None:
-        """Report the invocation, with the config final and the server not yet booted.
-
-        This frame is the only one that knows the args as a fact: the one-shot eager fallback and the
-        MoE-runner drop have both had their say by here, and after the launch the same answer can only be
-        guessed at by parsing the server's own log back.
-        """
+        """Report the invocation, with the config final and the server not yet booted."""
         if request.recorder is None:
             return
         request.recorder.record_invocation(
@@ -1875,10 +1870,7 @@ class BenchmarkRunExecutor:
         )
 
     def _round_refused_before_ignition(self, prepared: _MaterializedRound) -> dict[str, Any] | None:
-        """Refuse a round the run can no longer afford.
-
-        Asked before the lease, because a round that will not be run should not hold a GPU while being refused.
-        """
+        """Refuse a round the run can no longer afford."""
         ignitable, evidence = self._round_affordable_before_ignition(
             double_run=prepared.double_run,
             ctx_extra=prepared.setup.ctx_extra,
@@ -2419,12 +2411,7 @@ class BenchmarkRunExecutor:
         output_dir: Any,
         live_shared_state: Any,
     ) -> _PatchSettlement:
-        """Read what applying the recipe's warm patches left behind.
-
-        A required timeline patch that failed is rolled back -- the kernel half
-        first, then the recipe half -- and reported as the failure that ends the
-        run, because a baseline measured over a half-applied tree scores nothing.
-        """
+        """Read what applying the recipe's warm patches left behind."""
         applied: Any = []
         pre_patch_sha = ""
         if isinstance(patch_application, dict):
@@ -2903,18 +2890,7 @@ class BenchmarkRunExecutor:
         wrapper_stderr: str = "",
         wrapper_stdout: str = "",
     ) -> str:
-        """Observe this attempt's boot once and name it on every later result.
-
-        Args:
-            round_: The round whose boot is being classified.
-            attempt_index: This attempt's index under the round's output dir.
-            workspaces_before: The workspaces that existed before the subprocess started.
-            wrapper_stderr: The launcher's stderr, fallback evidence.
-            wrapper_stdout: The launcher's stdout, fallback evidence.
-
-        Returns:
-            str: The server log text that was classified.
-        """
+        """Observe this attempt's boot once and name it on every later result."""
         from ...bringup import observe_bringup, write_boot_observation
 
         # Magpie writes the server log into the workspace it creates, not to $SERVER_LOG.
@@ -2951,11 +2927,7 @@ class BenchmarkRunExecutor:
             )
 
     async def _launch_benchmark(self, round_: _BenchmarkRound, started_unix: float) -> _BenchmarkOutput:
-        """Run Magpie to completion.
-
-        Launched via ``run_with_session_kill`` so the whole descendant tree is torn down on every exit path
-        (plain subprocess.run leaks daemonized server processes).
-        """
+        """Run Magpie to completion."""
         server_ready = self._server_is_already_ready(round_)
         if round_.serving_lease is not None:
             # Ray-managed GPU execution (§12 T1): run inside the lease's actor (holds num_gpus across this run's
@@ -3072,14 +3044,7 @@ class BenchmarkRunExecutor:
         workspaces_before: Any,
         server_log_text: str,
     ) -> _BenchmarkOutcome:
-        """Read the server log back for the classifications every failure branch below is decided on.
-
-        When the server's engine/worker bootstrap dies, the root cause is in server.log, not Magpie's
-        stdout/stderr tail, and the liveness watchdog may have reaped the hung parent with
-        ``SERVER_DEAD_RETURNCODE``. Detected once here and reused so the failure is classified
-        ``server_init_dead``. Backend-agnostic (vLLM + SGLang). The same read answers whether the wall is the
-        recoverable cuda-graph capture one (OOM-rooted ones excluded) that arms the one-shot eager retry.
-        """
+        """Read the server log back for the classifications every failure branch below is decided on."""
         death_excerpt = server_log_death_excerpt(str(round_.output_dir / "server.log"))
         stderr, stdout = output.stderr or "", output.stdout or ""
         return _BenchmarkOutcome(
@@ -3509,12 +3474,7 @@ class BenchmarkRunExecutor:
         output_dir: Any,
         harvested: Any,
     ) -> dict[str, Any]:
-        """Report a run that finished without ever creating a benchmark workspace.
-
-        Magpie never created a ``benchmark_*`` directory, so the wrapper never
-        wrote a server log: whatever the subprocess printed is the only evidence
-        there is, and the error class names which of the known causes it was.
-        """
+        """Report a run that finished without ever creating a benchmark workspace."""
         failure_extras = {
             "output_dir": str(output_dir),
             "harvested_artifacts": [str(dst) for _, dst in harvested],
@@ -3607,11 +3567,7 @@ class BenchmarkRunExecutor:
         output_dir: Any,
         live_shared_state: Any,
     ) -> _PatchSettlement:
-        """Unwind an apply that failed, and report it when the timeline required it.
-
-        The kernel half is rolled back first, then the recipe half, so the tree is
-        whole again before anything is reported.
-        """
+        """Unwind an apply that failed, and report it when the timeline required it."""
         kernel_rollback = _rollback_warm_kernel_apply_results(
             params.get("warm_kernel_apply_results"),
             params.get("warm_kernel_snapshots"),
