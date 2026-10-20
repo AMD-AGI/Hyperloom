@@ -195,6 +195,17 @@ def test_an_answer_for_an_intent_tested_elsewhere_lists_the_tests_in_flight_with
     assert render_answer(answer).splitlines()[1:] == ["- r9 on s1 from c1: in flight"]
 
 
+def test_an_answer_for_a_change_another_branch_is_testing_on_the_same_state_says_it_is_the_same_change() -> None:
+    running = TestRecord(request("r9", intent("s1", "c1")), requested_at=1.0)
+    other = intent("s2", "c1", "decode batch", "more sequences")
+
+    answer = DedupAnswer(ClaimKey("c1", other.fingerprint), "b", DedupStatus.TESTING_ELSEWHERE, None, (running,))
+
+    assert render_answer(answer).splitlines()[0] == (
+        "testing_elsewhere: s1 is testing the same change on c1; its outcome comes to your inbox when that test ends"
+    )
+
+
 async def test_a_claim_whose_change_misspells_a_key_is_refused_and_holds_nothing(tools_of: Tools) -> None:
     tools = tools_of("s1")
 

@@ -59,8 +59,9 @@ class ClaimDecision:
 
     ``ceiling_pct`` is the Amdahl ceiling of an intent that gave its target's share, and ``bar_pct`` the bar it was held
     to, ``None`` before a baseline; a refusal for the ceiling has ``ceiling_pct`` below ``bar_pct``. A refusal while
-    another branch tested the intent names those branches in ``holders`` and their tests in flight in ``matched``: it is
-    what tells the branch how those tests ended.
+    another branch tested the intent, or the same change on the same state, names those branches in ``holders`` and
+    their tests in flight in ``matched``: it is what tells the branch how those tests ended. The same change refused at
+    submit, after the claim was taken, is recorded the same way.
     """
 
     intent: Intent

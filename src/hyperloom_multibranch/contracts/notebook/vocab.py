@@ -33,7 +33,8 @@ class ClaimStatus(str, Enum):
 
 class DedupStatus(str, Enum):
     """What the notebook knows about an intent on a state (a parent commit); ``testing_elsewhere``: another branch holds
-    a claim on it, or has a test of it in flight, on another state."""
+    a claim on it, or has a test of it in flight, on another state, or has a test of the same change in flight on this
+    one."""
 
     FREE = "free"
     IN_PROGRESS = "in_progress"

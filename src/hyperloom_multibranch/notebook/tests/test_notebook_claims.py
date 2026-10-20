@@ -23,7 +23,7 @@ from hyperloom_multibranch.contracts.notebook import (
     UnknownRequest,
     WriterNotAllowed,
 )
-from hyperloom_multibranch.contracts.notebook.peers import IntentLayer, Validity
+from hyperloom_multibranch.contracts.notebook.peers import Intent, IntentLayer, Purpose, TestKind, Validity
 from hyperloom_multibranch.contracts.notebook.records import (
     REPLAY_TARGET,
     BaselineRecord,
@@ -267,6 +267,101 @@ async def test_a_branch_refused_before_the_holder_wrote_its_test_hears_how_that_
     await _end(open_as, "r1", "judged")
 
     assert [item.pointer for item in _heard((await s2.poll("s2")).items)] == ["r1"]
+
+
+NO_ACTION = RecipeDelta().fingerprint()
+MORE_SEQUENCES = intent("s2", "c0", "decode batch", "more sequences")
+
+
+async def _claimed_then_written(open_as: Open, of: Intent, request_id: str) -> ClaimKey:
+    """``of``'s branch claims it before writing its change, as the role asks; the toolbox writes the request, whose
+    change ``ACTION`` names, and has not attached it to the claim yet."""
+
+    claim = await open_as(Role.SPECIALIST_RUNTIME, of.branch).acquire(of, NO_ACTION, ttl_seconds=TTL)
+    await open_as(Role.TOOLBOX).write_request(request(request_id, of, delta("--max-num-seqs 256")))
+    return claim.key
+
+
+async def test_a_change_another_branch_is_testing_on_the_same_state_is_refused_whatever_the_intent(
+    open_as: Open,
+) -> None:
+    key = await _claimed_then_written(open_as, intent("s1", "c0"), "r1")
+    await open_as(Role.TOOLBOX).attach_request(key, "r1", ttl_seconds=TTL)
+    s2 = open_as(Role.SPECIALIST_RUNTIME, "s2")
+
+    with pytest.raises(ClaimHeld) as held:
+        await s2.acquire(MORE_SEQUENCES, ACTION, ttl_seconds=TTL)
+    other = await s2.acquire(MORE_SEQUENCES, OTHER_ACTION, ttl_seconds=TTL)
+
+    answer = held.value.answer
+    assert (answer.status, [record.request_id for record in answer.records]) == (DedupStatus.TESTING_ELSEWHERE, ["r1"])
+    assert other.holder == "s2"
+
+
+async def test_a_change_written_after_the_claim_is_refused_at_submit_and_hears_how_the_first_test_ended(
+    open_as: Open,
+) -> None:
+    first = await _claimed_then_written(open_as, intent("s1", "c0"), "r1")
+    toolbox = open_as(Role.TOOLBOX)
+    await toolbox.attach_request(first, "r1", ttl_seconds=TTL)
+    second = await _claimed_then_written(open_as, MORE_SEQUENCES, "r2")
+    s2 = open_as(Role.SPECIALIST_RUNTIME, "s2")
+
+    with pytest.raises(ClaimLost, match="s1 is testing the same change on c0 as r1; its outcome comes to your inbox"):
+        await toolbox.attach_request(second, "r2", ttl_seconds=TTL)
+    await toolbox.write_withdrawal(Withdrawal("r2", "claim lost"))
+    again = await s2.acquire(MORE_SEQUENCES, NO_ACTION, ttl_seconds=TTL)
+    await _end(open_as, "r1", "judged")
+
+    (decision,) = _decisions(s2)[-2:-1]
+    assert (decision["found"], decision["acquired"], decision["matched"], decision["holders"]) == (
+        "testing_elsewhere",
+        False,
+        ["r1"],
+        ["s1"],
+    )
+    assert again.holder == "s2"
+    (heard,) = _heard((await s2.poll("s2")).items)
+    assert heard.summary.startswith("s1's test of the same change on c0, which refused your claim, ended: ")
+    assert heard.summary.endswith("so there is nothing to replay")
+
+
+async def test_of_two_branches_submitting_one_change_on_one_state_only_the_later_is_refused(open_as: Open) -> None:
+    first = await _claimed_then_written(open_as, intent("s1", "c0"), "r1")
+    second = await _claimed_then_written(open_as, MORE_SEQUENCES, "r2")
+    toolbox = open_as(Role.TOOLBOX)
+
+    with pytest.raises(ClaimLost):
+        await toolbox.attach_request(second, "r2", ttl_seconds=TTL)
+    attached = await toolbox.attach_request(first, "r1", ttl_seconds=TTL)
+
+    assert attached.request_id == "r1"
+
+
+async def test_a_change_measured_on_the_state_is_refused_at_submit_but_not_a_profile_or_the_branchs_own_test(
+    open_as: Open,
+) -> None:
+    first = await _claimed_then_written(open_as, intent("s1", "c0"), "r1")
+    toolbox = open_as(Role.TOOLBOX)
+    await toolbox.attach_request(first, "r1", ttl_seconds=TTL)
+    await toolbox.write_result(result("r1"))
+    second = await _claimed_then_written(open_as, MORE_SEQUENCES, "r2")
+    own = await _claimed_then_written(open_as, intent("s1", "c0", "scheduler", "chunked prefill"), "r3")
+    profiled = request(
+        "p2", MORE_SEQUENCES, delta("--max-num-seqs 256"), kind=TestKind.PROFILE, purpose=Purpose.PROFILE
+    )
+    await toolbox.write_request(profiled)
+
+    with pytest.raises(ClaimLost, match="s1 already measured the same change on c0 as r1"):
+        await toolbox.attach_request(second, "r2", ttl_seconds=TTL)
+    await toolbox.write_withdrawal(Withdrawal("r2", "claim lost"))
+    again = await open_as(Role.SPECIALIST_RUNTIME, "s2").acquire(MORE_SEQUENCES, NO_ACTION, ttl_seconds=TTL)
+    kept = await toolbox.attach_request(own, "r3", ttl_seconds=TTL)
+    profile = await toolbox.attach_request(again.key, "p2", ttl_seconds=TTL)
+
+    assert (kept.request_id, profile.request_id) == ("r3", "p2")
+    refused = [row for row in _decisions(toolbox) if not row["acquired"]]
+    assert (refused[-1]["found"], refused[-1]["matched"], refused[-1]["holders"]) == ("tested", ["r1"], [])
 
 
 async def test_an_expired_claim_can_be_taken_over_and_its_old_holder_loses_it(open_as: Open, clock: FakeClock) -> None:

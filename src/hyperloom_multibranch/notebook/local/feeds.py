@@ -188,24 +188,32 @@ def _peer_item(
     request_id = _ended(value)
     if request_id is None or entry.branch == branch:
         return None
-    fingerprint = state.record(request_id).request.intent_fingerprint
+    ended = state.record(request_id).request
     refused = next(
         (
             decision
             for at, decision in refusals
             if at <= entry.at
-            and decision.intent.fingerprint == fingerprint
-            and (request_id in decision.matched or entry.branch in decision.holders)
+            and (
+                request_id in decision.matched
+                or (decision.intent.fingerprint == ended.intent_fingerprint and entry.branch in decision.holders)
+            )
         ),
         None,
     )
     if refused is None:
         return None
-    summary = (
-        f"{entry.branch}'s test of {refused.intent.target} / {refused.intent.mechanism}, which refused your claim, "
-        f"ended: {entry.summary}; on a gain, notebook_replay with request_id {request_id} replays its change on your "
-        "head, or record why not"
-    )
+    if ended.parent_commit == refused.intent.parent_commit:
+        summary = (
+            f"{entry.branch}'s test of the same change on {ended.parent_commit}, which refused your claim, ended: "
+            f"{entry.summary}; it measured the state you claimed on, so there is nothing to replay"
+        )
+    else:
+        summary = (
+            f"{entry.branch}'s test of {refused.intent.target} / {refused.intent.mechanism}, which refused your claim, "
+            f"ended: {entry.summary}; on a gain, notebook_replay with request_id {request_id} replays its change on "
+            "your head, or record why not"
+        )
     return InboxItem(InboxKind.PEER_OUTCOME, branch, request_id, summary, entry.at)
 
 

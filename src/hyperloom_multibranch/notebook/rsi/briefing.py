@@ -208,7 +208,8 @@ class CrossSessionBriefing(StartupBriefProvider):
 
     async def peer_replay(self, request_id: str) -> PeerReplay:
         """The change another branch's test ``request_id`` tried, to test on this branch's head; ``ValueError`` says
-        why there is none: the test is this branch's own or changed nothing, or this head has or cannot take it."""
+        why there is none: the test is this branch's own or changed nothing, was made on this head already, or this head
+        has or cannot take it."""
 
         request = (await self.notebook.record(request_id)).request
         if request.branch == self.branch:
@@ -218,6 +219,8 @@ class CrossSessionBriefing(StartupBriefProvider):
         if self.repo is None or not self.branch:
             raise ValueError("this brief reads no experiment repository, so it has no head to replay on")
         head = await self.repo.head(self.branch)
+        if request.parent_commit == head:
+            raise ValueError(f"{request_id} tested this change on your head {head}; there is nothing to replay")
         recipe = await self.repo.read_recipe(head)
         try:
             replayed = apply(recipe, request.delta)

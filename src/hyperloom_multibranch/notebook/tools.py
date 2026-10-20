@@ -127,9 +127,13 @@ def outcome(record: TestRecord) -> str:
 def _testing_elsewhere(answer: DedupAnswer) -> list[str]:
     tester = answer.claim.holder if answer.claim is not None else answer.records[0].request.branch
     state = answer.claim.key.parent_commit if answer.claim is not None else answer.records[0].request.parent_commit
+    if state == answer.key.parent_commit:
+        what, then = "the same change", ""
+    else:
+        what, then = "this intent", ", and the intent is free again then"
     return [
-        f"{answer.status.value}: {tester} is testing this intent on {state}; its outcome comes to your inbox when that "
-        "test ends, and the intent is free again then",
+        f"{answer.status.value}: {tester} is testing {what} on {state}; its outcome comes to your inbox when that test "
+        f"ends{then}",
         *(
             f"- {record.request_id} on {record.request.branch} from {record.request.parent_commit}: {outcome(record)}"
             for record in answer.records

@@ -263,6 +263,7 @@ async def test_a_peer_replay_says_why_when_there_is_nothing_to_replay_on_the_bra
         (replaying("s1"), "r1", "r1 is this branch's own test"),
         (replaying("s3", tuned), "r1", "your head c3 already has the change r1 tested"),
         (replaying("s3", None), "r1", "reads no experiment repository"),
+        (CrossSessionBriefing(notebook, branch="s3", repo=_Repo({"s3": "c0"}, {"c0": plain})), "r1", "on your head c0"),
     ):
         with pytest.raises(ValueError, match=re.escape(why)):
             await briefing.peer_replay(request_id)
