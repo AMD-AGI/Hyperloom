@@ -321,14 +321,24 @@ class TestPlanPreviewsWhatRunDoes:
         return inspect.getsource(getattr(cli, name).callback)
 
     def test_plan_derives_demand_from_the_serving_log_like_run(self):
+        import inspect
+
+        from kernelforge.gemm_tune import cli
+
         for name in ("run", "plan"):
-            assert "_demand_from_serving_log(" in self._src(name), name
+            assert "_with_serving_log_demand(" in self._src(name), name
+        assert "_demand_from_serving_log(" in inspect.getsource(cli._with_serving_log_demand)
 
     def test_plan_counts_demand_as_a_shape_source_like_run(self):
+        import inspect
+
+        from kernelforge.gemm_tune import cli
+
         for name in ("run", "plan"):
-            src = self._src(name)
-            idx = src.index("has_shapes_json=")
-            assert "demand_json" in src[idx : idx + 90], name
+            assert "_route(" in self._src(name), name
+        src = inspect.getsource(cli._route)
+        idx = src.index("has_shapes_json=")
+        assert "demand_json" in src[idx : idx + 90]
 
     def test_plan_accepts_an_explicit_demand_file(self):
         from kernelforge.gemm_tune import cli
