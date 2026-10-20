@@ -27,6 +27,7 @@ from hyperloom.common.env_safety import (
     is_python_package_root,
     redact_secret_values,
     scrub_benchmark_process_env,
+    ungrounded_env_file_reason,
 )
 
 from ...phases import machine_state as _phase_state
@@ -236,11 +237,12 @@ def _probe_vllm_aiter_shared_expert_unsupported() -> str | None:
 
 
 def unsupported_capability_reason(variant: "GridVariant") -> str | None:
-    """Return a drop reason if a variant sets an env flag the installed framework build cannot honour, else ``None``."""
-    fw = (os.environ.get("FRAMEWORK", "") or "sglang").strip().lower()
-    if fw != "vllm":
-        return None
+    """Return why a variant cannot boot (a config file not on disk, an env flag the build lacks), else ``None``."""
     envs = {str(k): str(v) for k, v in (getattr(variant, "extra_envs", None) or {}).items()}
+    if missing_file := ungrounded_env_file_reason(envs):
+        return missing_file
+    if (os.environ.get("FRAMEWORK", "") or "sglang").strip().lower() != "vllm":
+        return None
     val = envs.get("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS")
     if val is None or not is_truthy(val, default=True):
         return None
@@ -944,8 +946,6 @@ async def run_grid(
             await _unit_started(i, "variant")
             slot = output_root / f"variant_{i:02d}_{_safe(variant.name)}"
             server_log = slot / "server.log"
-            # Capability fast-fail: drop a variant whose env flag the build cannot honour before booting a doomed server,
-            # still recording the failure so the LLM learns not to re-pick it.
             cap_reason = unsupported_capability_reason(variant)
             if cap_reason:
                 log.warning(
