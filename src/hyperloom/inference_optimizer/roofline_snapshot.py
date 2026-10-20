@@ -681,8 +681,6 @@ def direction_saturation(snapshot: dict[str, Any] | None) -> dict[str, Any]:
 def build_profiler_digest(
     snapshots: list[dict[str, Any]] | None,
     trace_analyze: dict[str, Any] | None,
-    *,
-    top_n: int = 3,
 ) -> str:
     """Render a compact, bottleneck-focused profiler block for prompt injection."""
     snaps = [s for s in (snapshots or []) if isinstance(s, dict)]
@@ -691,17 +689,13 @@ def build_profiler_digest(
         return ""
     latest = snaps[-1] if snaps else {}
 
-    def _pct(v: Any) -> str:
-        """Format a value as a one-decimal percentage, or ``—`` when not numeric."""
-        return f"{float(v):.1f}%" if isinstance(v, (int, float)) else "—"
-
     bound_kind = str(latest.get("roofline_bound_kind") or "").strip() or "unknown"
     lines: list[str] = [
         f"bound_kind={bound_kind}  "
-        f"compute={_pct(latest.get('compute_pct'))}  "
-        f"idle={_pct(latest.get('idle_pct'))}  "
-        f"comm={_pct(latest.get('comm_pct'))}  "
-        f"memcpy={_pct(latest.get('memcpy_pct'))}"
+        f"compute={_fmt_pct_cell(latest.get('compute_pct'))}  "
+        f"idle={_fmt_pct_cell(latest.get('idle_pct'))}  "
+        f"comm={_fmt_pct_cell(latest.get('comm_pct'))}  "
+        f"memcpy={_fmt_pct_cell(latest.get('memcpy_pct'))}"
     ]
 
     if len(snaps) >= 2:
@@ -719,17 +713,13 @@ def build_profiler_digest(
             lines.append("delta_vs_prev: " + "  ".join(parts))
 
     rows: list[str] = []
-    hot = ta.get("hot_kernels_top15") or []
-    if isinstance(hot, list):
-        for entry in hot[:top_n]:
-            if not isinstance(entry, dict):
-                continue
-            name = str(entry.get("name") or entry.get("kernel_id") or "?")
-            seg = f"  {name}  {_pct(entry.get('gpu_pct'))} gpu"
-            eff = entry.get("efficiency_percent")
-            if isinstance(eff, (int, float)):
-                seg += f"  (eff {float(eff):.1f}%)"
-            rows.append(seg)
+    for entry in ta.get("hot_kernels_top15", [])[:3]:
+        name = str(entry.get("name") or entry.get("kernel_id") or "?")
+        seg = f"  {name}  {_fmt_pct_cell(entry.get('gpu_pct'))} gpu"
+        eff = entry.get("efficiency_percent")
+        if isinstance(eff, (int, float)):
+            seg += f"  (eff {float(eff):.1f}%)"
+        rows.append(seg)
     if not rows and latest.get("top_bottleneck"):
         rows.append(f"  {latest.get('top_bottleneck')}")
     if rows:
@@ -741,8 +731,8 @@ def build_profiler_digest(
     if lever:
         lines.append(f"suggested_lever (dominant={direction}): {lever[0]}")
 
-    reusable = ta.get("reusable_native_kernel_ids") or []
-    if isinstance(reusable, list) and reusable:
+    reusable = ta.get("reusable_native_kernel_ids")
+    if reusable:
         lines.append(f"reusable_native_kernel_ids={[str(r) for r in reusable[:12]]}")
 
     return "\n".join(lines)
