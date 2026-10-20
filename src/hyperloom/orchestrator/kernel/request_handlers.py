@@ -33,7 +33,7 @@ from hyperloom.orchestrator.trace_analysis._capture_shapes import (
 from hyperloom.common import codex_session, llm_config
 from hyperloom.common.checkpoint_quant import checkpoint_format
 from hyperloom.common.coerce import to_str_list
-from hyperloom.common.env import env_bool, forge_explicitly_enabled, is_truthy
+from hyperloom.common.env import env_bool, is_truthy
 from hyperloom.common.gpu_identity import is_gfx_arch
 from hyperloom.common.io import JsonLineFormat, append_jsonl
 from hyperloom.common.unified_diff import PatchOp, repo_relative_manifest
@@ -210,10 +210,6 @@ _COMPILE_GENERATED_NAME_MARKERS = (
 )
 
 
-# forge is the only per-kernel backend. The default phase-level backend is the
-# whole-pipeline GEAK delegate (``geak``); per-kernel selection is opt-in via
-# KERNEL_OPT_BACKEND_ORDER=forge.
-_DEFAULT_KERNEL_PHASE_BACKEND_ORDER = ("geak",)
 # Outer subprocess cap for the whole GEMM-tuning run (all shapes/tuners) when there is
 # no lane share to take, as in an unbounded session; sized for large models with many
 # GEMM shapes. Override via HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC (or payload timeout_sec).
@@ -3793,33 +3789,6 @@ def _summarize_dropped_patches(dropped: Any) -> dict[str, int]:
             reason,
         )
     return counts
-
-
-def _raw_kernel_backend_order() -> list[str]:
-    """Return the effective kernel backend order.
-
-    Forge is deliberately not request-selectable.  The only supported forge
-    opt-in is exactly ``KERNEL_OPT_BACKEND_ORDER=forge``; every other value,
-    missing value or legacy alias stays on the GEAK whole-phase backend.
-    """
-    if forge_explicitly_enabled():
-        return ["forge"]
-    return list(_DEFAULT_KERNEL_PHASE_BACKEND_ORDER)
-
-
-def geak_selected() -> bool:
-    """Whether ``geak`` (the whole-pipeline e2e delegate) is in the kernel backend order.
-
-    ``geak`` is not a per-kernel backend: when it appears in the order it
-    means "delegate the whole KERNEL_AGENT phase to the GEAK e2e optimizer".
-    It therefore *owns* the phase whenever present (any other backends in the
-    order are ignored for the kernel phase), so an order of just ``geak``
-    runs only the GEAK e2e optimizer. ``forge`` is the per-kernel backend.
-
-    Returns:
-        bool: ``True`` when ``geak`` is in the resolved order.
-    """
-    return "geak" in _raw_kernel_backend_order()
 
 
 def _sweep_integrate_aiter_locks(*, reason: str) -> dict[str, Any]:

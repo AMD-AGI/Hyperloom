@@ -465,9 +465,7 @@ class KernelPhase(CoordinatorCollaborator):
 
     def geak_enabled(self) -> bool:
         """Whether the KERNEL_AGENT phase is delegated to the GEAK e2e optimizer."""
-        from ..kernel.request_handlers import geak_selected
-
-        return geak_selected()
+        return self.shared_state.kernel_optimizer == "geak"
 
     def timeline(self) -> Any:
         """The in-flight kernel timeline recorder, or ``None``."""
@@ -3937,7 +3935,6 @@ class KernelPhase(CoordinatorCollaborator):
                 "skipped_count": 0,
             }
         self._record_kernel_rewrite_controller_timeline(result)
-        self.shared_state.kernel_optimizer = "forge"
         self.shared_state.kernel_rewrite_controller_result = result
         # The summary rides a ``response`` message the inbox dumps raw once.
         _integration = result.get("integration")

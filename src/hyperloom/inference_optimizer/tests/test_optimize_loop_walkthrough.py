@@ -103,19 +103,18 @@ async def test_a_baseline_carries_the_run_into_the_optimisation_phase_with_work(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("backend_order", "result_field", "result_key", "expected"),
+    ("kernel_optimizer", "result_field", "result_key", "expected"),
     # Neither route starts its work: with no measured baseline, the round held back to measure it is the benchmark
     # hard cap, which outlasts this KERNEL slice.
     [
-        ("", "geak_result", "error_class", "insufficient_budget"),
+        ("geak", "geak_result", "error_class", "insufficient_budget"),
         ("forge", "kernel_rewrite_controller_result", "status", "no_result"),
     ],
     ids=["geak", "forge"],
 )
 async def test_both_arms_dry_walks_the_rest_of_the_chain(
     session_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    backend_order: str,
+    kernel_optimizer: str,
     result_field: str,
     result_key: str,
     expected: str,
@@ -124,11 +123,10 @@ async def test_both_arms_dry_walks_the_rest_of_the_chain(
     from hyperloom.orchestrator.lever import LEVER_CONFIG
     from hyperloom.orchestrator.state.attempt_ledger import AttemptRow, record_attempt_row
 
-    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", backend_order)
-
     coord = _coordinator(session_dir)
     try:
         state = coord.shared_state
+        state.kernel_optimizer = kernel_optimizer
         state.baseline_tput = 1500.0
         state.max_minutes = 180
         # Source arm: no local exploration, and discovery past its retries.

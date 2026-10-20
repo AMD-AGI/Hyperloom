@@ -368,8 +368,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     profile_osl: int = 0
     max_model_len: int = 0
     kernel_enabled: bool = True
-    # KERNEL-phase optimizer: "geak" (default, one-shot whole-pipeline e2e) or "native" (per-kernel loop when
-    # explicitly requested).
+    # KERNEL-phase backend, recorded once when the session is created: "geak" (default) or "forge".
     kernel_optimizer: str = "geak"
     # Snapshot of the last GEAK e2e run (result.json + final_launch.sh / bench_e2e.sh handles the SWEEP phase reuses).
     geak_result: dict[str, Any] = field(default_factory=dict)
