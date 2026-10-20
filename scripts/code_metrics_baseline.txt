@@ -554,7 +554,7 @@ function-lines src/hyperloom/orchestrator/actions/executors/_geak_sweep.py::swee
 function-lines src/hyperloom/orchestrator/actions/executors/_gpu_pin.py::resolve_gpu_pin 105
 function-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py::_build_variant_yaml 135
 function-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py::_run_magpie 93
-function-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py::run_grid 1026
+function-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py::run_grid 1014
 function-lines src/hyperloom/orchestrator/actions/executors/_kernel_agent_tool.py::materialize_unified_patch_snapshot 94
 function-lines src/hyperloom/orchestrator/actions/executors/_kv_metrics.py::_read_aiperf_aggregate_json 101
 function-lines src/hyperloom/orchestrator/actions/executors/_kv_metrics.py::sample_from_families 100
@@ -897,7 +897,7 @@ module-lines src/hyperloom/inference_optimizer/cli/model_gate.py 1815
 module-lines src/hyperloom/inference_optimizer/cli/preflight.py 2647
 module-lines src/hyperloom/inference_optimizer/multi_node/cli.py 1867
 module-lines src/hyperloom/inference_optimizer/roofline_ceiling.py 1445
-module-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py 2089
+module-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py 2079
 module-lines src/hyperloom/orchestrator/actions/executors/_kv_metrics.py 1590
 module-lines src/hyperloom/orchestrator/actions/executors/_workload_envs.py 2158
 module-lines src/hyperloom/orchestrator/actions/executors/baseline.py 4203

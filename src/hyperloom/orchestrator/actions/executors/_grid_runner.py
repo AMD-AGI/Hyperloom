@@ -134,11 +134,7 @@ class _Halt(Enum):
 
 
 class _VariantAborted(Exception):
-    """A variant ended before its result was assembled, carrying what the grid records for it.
-
-    ``never_started`` is why the variants after this one never ran; the loop that owns the grid
-    writes their rows, so a ``STOP`` carries the reason rather than a copy of the rows.
-    """
+    """A variant ended before its result was assembled, carrying what the grid records for it."""
 
     def __init__(
         self, result: VariantResult, *, halt: _Halt = _Halt.ON_FAILURE, never_started: str | None = None
@@ -761,14 +757,8 @@ def session_grid_bounds(shared_state: Any) -> tuple[float | None, float | None]:
 
 
 class _RoundAttempt(NamedTuple):
-    """One variant's run of one round, and what it left behind.
+    """What one round of the current variant left behind: its exit, its timing and its servers."""
 
-    ``server_survivors`` are the servers the variant booted that outlived its teardown.
-    """
-
-    idx: int
-    variant: GridVariant
-    slot: Path
     returncode: int | None
     started_unix: float
     server_log: Path
@@ -885,15 +875,15 @@ async def run_grid(
         *,
         round_label: str,
     ) -> NoReturn:
-        """End the variant on a round the run stopped."""
+        """End the variant the loop is on, on a round the run stopped."""
         if attempt.returncode == SESSION_TIME_EXHAUSTED_RETURNCODE:
             stopped = deadline_stop
         runtime_sec = round(max(0.0, time.time() - attempt.started_unix), 2)
         log.warning(
             "grid_runner: variant %d/%d name=%s %s round reaped after %.1fs: %s; recorded as skipped, not failed",
-            attempt.idx + 1,
+            i + 1,
             len(grid),
-            attempt.variant.name,
+            variant.name,
             round_label,
             runtime_sec,
             stopped.interrupted,
@@ -902,24 +892,24 @@ async def run_grid(
         if attempt.server_survivors:
             teardown += f", but server pid(s) {', '.join(map(str, attempt.server_survivors))} survived SIGKILL"
         _write_variant_abort_marker(
-            attempt.slot,
-            variant_name=attempt.variant.name,
+            slot,
+            variant_name=variant.name,
             error_class=stopped.error_class,
             error_summary=f"{stopped.interrupted}; {teardown}",
-            extra_args=attempt.variant.extra_server_args,
+            extra_args=variant.extra_server_args,
         )
         raise _VariantAborted(
             VariantResult(
-                name=attempt.variant.name,
-                extra_server_args=attempt.variant.extra_server_args,
-                extra_envs=dict(attempt.variant.extra_envs),
+                name=variant.name,
+                extra_server_args=variant.extra_server_args,
+                extra_envs=dict(variant.extra_envs),
                 status="skipped",
                 returncode=attempt.returncode,
                 runtime_sec=runtime_sec,
                 error=stopped.interrupted,
                 error_class=stopped.error_class,
-                server_log_path=_measurement_server_log_path(attempt.server_log, slot=attempt.slot),
-                note=attempt.variant.note,
+                server_log_path=_measurement_server_log_path(attempt.server_log, slot=slot),
+                note=variant.note,
                 nonfatal_warnings=[f"server_survived_teardown:{pid}" for pid in attempt.server_survivors],
             ),
             halt=_Halt.STOP if stopped.ends_the_batch else _Halt.ON_FAILURE,
@@ -1200,9 +1190,6 @@ async def run_grid(
                     _abort_on_round_stop(
                         warmup_stopped,
                         _RoundAttempt(
-                            idx=i,
-                            variant=variant,
-                            slot=slot,
                             returncode=warmup_rc,
                             started_unix=warmup_started_unix,
                             server_log=warmup_server_log,
@@ -1400,9 +1387,6 @@ async def run_grid(
                     _abort_on_round_stop(
                         _mn_warm_stopped,
                         _RoundAttempt(
-                            idx=i,
-                            variant=variant,
-                            slot=slot,
                             returncode=_mn_warm_rc,
                             started_unix=_mn_warm_started_unix,
                             server_log=_mn_warm_slot / "server.log",
@@ -1601,9 +1585,6 @@ async def run_grid(
                 _abort_on_round_stop(
                     stopped,
                     _RoundAttempt(
-                        idx=i,
-                        variant=variant,
-                        slot=slot,
                         returncode=rc,
                         started_unix=variant_started_unix,
                         server_log=server_log,
