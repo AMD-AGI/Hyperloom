@@ -106,7 +106,7 @@ from ._inferencex_patcher import (
     failed_patch_anchors_in,
 )
 from ._agentx_prefix_cache import refuse_cacheless_agentx_baseline
-from ._magpie_patcher import ensure_client_tokenizer_hook, ensure_eval_concurrency_compat
+from ._magpie_patcher import client_tokenizer_hook_installed, ensure_eval_concurrency_compat
 from ._warm_patch_apply import (
     _apply_warm_patches,
     _revert_legacy_warm_patch_trees,
@@ -3703,24 +3703,18 @@ class BaselineExecutor(BenchmarkRunExecutor):
         return self._eval_patch_failure(ix_root)
 
     def _client_tokenizer_hook_failure(self, config_path: Path, ix_root: str) -> dict[str, Any] | None:
-        """Install the client-side tokenizer hook this model needs, reporting a tree it cannot be installed in."""
+        """Report a client script that cannot be told to load the custom tokenizer this model needs."""
         tok_mode = _client_tokenizer_mode(self._model_from_config(config_path))
         if not tok_mode:
             return None
-        try:
-            hook_ok = ensure_client_tokenizer_hook(
-                inferencex_dir=ix_root or None,
-                script_name=self._client_script_from_config(config_path),
-            )
-        except OSError as exc:
-            log.error("baseline_executor: client tokenizer hook raised for %s: %s", ix_root, exc)
-            hook_ok = False
-        if hook_ok:
+        script_name = self._client_script_from_config(config_path)
+        if script_name and client_tokenizer_hook_installed(script_name, inferencex_dir=ix_root or None):
             return None
         msg = (
-            f"the benchmark client cannot be told to load the {tok_mode!r} tokenizer: "
-            f"the hook could not be installed in InferenceX's benchmark scripts "
-            f"(inferencex={ix_root or '<unset>'}). This model's client resolves the "
+            f"the benchmark client script {script_name or '<unresolved>'!r} cannot be told to load the "
+            f"{tok_mode!r} tokenizer: it has no --tokenizer-mode hook "
+            f"(inferencex={ix_root or '<unset>'}). Use a Magpie revision at or above "
+            "1eb3df69de9cb26cb5c8109e43371dd1abb9bbed. This model's client resolves the "
             "checkpoint through HF AutoConfig, which cannot map its model_type, so it "
             "would die before issuing a request and the round would be graded a boot "
             "failure with the server up."
