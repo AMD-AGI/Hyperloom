@@ -3584,10 +3584,7 @@ def _resolve_forge_agent(
     known_backends = set(llm_config.AGENT_BACKEND_CHOICES)
     explicit_backend = str(payload.get("agent_backend") or "").strip().lower()
     if explicit_backend and explicit_backend not in known_backends:
-        raise ValueError(
-            f"agent_backend={payload.get('agent_backend')!r} is invalid; "
-            f"choose one of: {', '.join(sorted(known_backends))}"
-        )
+        raise ValueError(f"agent_backend={explicit_backend!r} is invalid; choose one of {sorted(known_backends)}")
 
     agent_backend = explicit_backend or llm_config.resolve_agent_backend(source)
     llm_model = llm_config.resolve_forge_llm_model(

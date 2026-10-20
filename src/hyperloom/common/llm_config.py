@@ -173,11 +173,7 @@ ORCHESTRATION_BACKEND_ENV = "INFERENCE_OPTIMIZER_ORCHESTRATION_BACKEND"
 #: inferred from credentials alone.
 AGENT_BACKEND_ENV = "INFERENCE_OPTIMIZER_AGENT_BACKEND"
 
-AGENT_BACKEND_CHOICES: tuple[str, ...] = (
-    AGENT_BACKEND_CLAUDE,
-    AGENT_BACKEND_CODEX,
-    AGENT_BACKEND_DEEPSEEK,
-)
+AGENT_BACKEND_CHOICES: tuple[str, ...] = (AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX, AGENT_BACKEND_DEEPSEEK)
 
 # The model each backend runs when neither the operator nor a known gateway host names one. This is the last rung of
 # every model ladder in both packages, so it lives beside the backend names it is keyed by.
@@ -290,25 +286,18 @@ def agent_backend_rank(*, credentialed: bool, sdk_installed: bool) -> tuple[int,
 UNRUNNABLE_AGENT_RANK: tuple[int, int] = agent_backend_rank(credentialed=False, sdk_installed=False)
 
 
-def _validate_explicit_agent_backend(requested: str) -> str:
-    """Return a canonical backend name or raise when the operator typoed it."""
-    backend = (requested or "").strip().lower()
-    if backend not in AGENT_BACKEND_CHOICES:
-        raise ValueError(f"{AGENT_BACKEND_ENV}={requested!r} not in {set(AGENT_BACKEND_CHOICES)}")
-    if backend == AGENT_BACKEND_DEEPSEEK and not deepseek_harness_sdk_installed():
-        raise ValueError(
-            f"{AGENT_BACKEND_ENV}=deepseek requires the DeepSeek Harness SDK: install the 'deepseek' extra"
-        )
-    return backend
+def explicit_agent_backend(env: Mapping[str, str] | None = None, *, env_name: str = AGENT_BACKEND_ENV) -> str:
+    """Return the agent backend ``env_name`` names, or ``""`` when unset.
 
-
-def explicit_agent_backend(env: Mapping[str, str] | None = None) -> str:
-    """Return the operator-named harness backend, or ``""`` when unset."""
-    source = env if env is not None else os.environ
-    requested = (source.get(AGENT_BACKEND_ENV) or "").strip().lower()
-    if not requested:
-        return ""
-    return _validate_explicit_agent_backend(requested)
+    Raises:
+        ValueError: When it names no known backend, or the DeepSeek Harness without its SDK.
+    """
+    requested = ((env if env is not None else os.environ).get(env_name) or "").strip().lower()
+    if requested and requested not in AGENT_BACKEND_CHOICES:
+        raise ValueError(f"{env_name}={requested!r} not in {set(AGENT_BACKEND_CHOICES)}")
+    if requested == AGENT_BACKEND_DEEPSEEK and not deepseek_harness_sdk_installed():
+        raise ValueError(f"{env_name}=deepseek requires the DeepSeek Harness SDK: install the 'deepseek' extra")
+    return requested
 
 
 def resolve_agent_backend(env: Mapping[str, str] | None = None) -> str:
@@ -318,10 +307,7 @@ def resolve_agent_backend(env: Mapping[str, str] | None = None) -> str:
     between Claude and Codex. DeepSeek is reachable only through that explicit
     name: it is not a third candidate in :func:`preferred_agent_backend`.
     """
-    explicit = explicit_agent_backend(env)
-    if explicit:
-        return explicit
-    return preferred_agent_backend(env)
+    return explicit_agent_backend(env) or preferred_agent_backend(env)
 
 
 def preferred_agent_backend(env: Mapping[str, str] | None = None) -> str:

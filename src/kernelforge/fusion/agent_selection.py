@@ -26,17 +26,6 @@ log = logging.getLogger("forge_fusion")
 _AGENT_SANDBOX_MODES = frozenset({"workspace-write", "read-only", "bypass"})
 
 
-def _validate_agent_backend(ctx, param, value):
-    """Accept ``auto`` or any provider the registry knows, including entry-point ones."""
-    requested = (value or "auto").strip().lower()
-    if requested == "auto":
-        return requested
-    try:
-        return get_agent_provider(requested).name
-    except ValueError as exc:
-        raise click.BadParameter(str(exc), ctx=ctx, param=param) from exc
-
-
 def _resolve_agent_choice(
     agent_backend: str,
     llm_model: Optional[str],

@@ -19,8 +19,9 @@ zstandard = pytest.importorskip("zstandard")
 from hyperloom.common import llm_config
 from hyperloom.common.deadline import Deadline
 
+import hyperloom.orchestrator.specialists.dsh_launch as dsh_launch
 import hyperloom.orchestrator.specialists.subprocess_ as sp
-from hyperloom.inference_optimizer.trace import parse_usage as pu
+from hyperloom.inference_optimizer.trace.parse_dsh_session import parse_dsh_session_trace
 
 SpecialistAgentUnavailableError = sp.SpecialistAgentUnavailableError
 SpecialistSubprocessConfig = sp.SpecialistSubprocessConfig
@@ -326,7 +327,7 @@ async def test_a_missing_dsh_cli_fails_the_task(
 ) -> None:
     _pin_provider_env(monkeypatch, _OPENAI_ENV)
     _select_deepseek(monkeypatch)
-    monkeypatch.setattr(sp, "resolve_dsh_executable", lambda explicit="": "")
+    monkeypatch.setattr(dsh_launch, "resolve_dsh_executable", lambda explicit="": "")
     monkeypatch.setattr(sp.subprocess, "Popen", lambda *_a, **_k: pytest.fail("no dsh means no spawn"))
 
     result = await _run(_dispatcher(""), tmp_path)
@@ -374,16 +375,19 @@ def test_mcp_servers_become_dsh_client_rows_without_their_secrets(
     )
     monkeypatch.setenv("PR_TOKEN", "pr-secret")
     monkeypatch.setenv("TOOL_KEY", "tool-secret")
-    dispatcher = _dispatcher("/usr/bin/dsh", mcp_config_path=str(mcp_config))
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-
-    cmd, env_additions = dispatcher._build_dsh_launch(
-        workspace=workspace,
+    config = SpecialistSubprocessConfig(dsh_executable="/usr/bin/dsh", mcp_config_path=str(mcp_config))
+    spawn = sp.SpecialistSpawn(
+        task_id="t-mcp",
+        workspace=tmp_path / "workspace",
+        worktree=None,
+        worktree_base=None,
         system_prompt="sys",
         user_prompt="usr",
-        base_env=dict(_OPENAI_ENV),
+        max_turns=1,
     )
+
+    launch = dsh_launch.build_dsh_launch(config, spawn, dict(_OPENAI_ENV))
+    cmd, env_additions = launch.cmd, launch.env_additions
 
     patch = Path(cmd[cmd.index("--patch") + 1]).read_text(encoding="utf-8")
     assert "pr-secret" not in patch and "tool-secret" not in patch
@@ -409,10 +413,10 @@ def test_a_truncated_dsh_session_log_still_yields_its_complete_records(tmp_path:
         truncate_last=True,
     )
 
-    usage = pu.parse_dsh_session_usage(home)
-    assert usage is not None
-    assert usage["output_tokens"] == 67 + 3
-    assert pu.parse_dsh_session_response(home) == "DONE"
+    trace = parse_dsh_session_trace(home)
+    assert trace.usage is not None
+    assert trace.usage["output_tokens"] == 67 + 3
+    assert trace.response == "DONE"
 
 
 def test_the_specialist_executor_pins_the_dsh_cli_for_a_deepseek_selection(
@@ -425,7 +429,7 @@ def test_the_specialist_executor_pins_the_dsh_cli_for_a_deepseek_selection(
 
     _pin_provider_env(monkeypatch, _OPENAI_ENV)
     _select_deepseek(monkeypatch)
-    monkeypatch.setattr(sp, "resolve_dsh_executable", lambda explicit="": "/opt/venv/bin/dsh")
+    monkeypatch.setattr(dsh_launch, "resolve_dsh_executable", lambda explicit="": "/opt/venv/bin/dsh")
     captured: dict[str, Any] = {}
 
     class _Runner:
@@ -457,7 +461,7 @@ def test_the_specialist_executor_refuses_to_start_without_a_dsh_cli(
 
     _pin_provider_env(monkeypatch, _OPENAI_ENV)
     _select_deepseek(monkeypatch)
-    monkeypatch.setattr(sp, "resolve_dsh_executable", lambda explicit="": "")
+    monkeypatch.setattr(dsh_launch, "resolve_dsh_executable", lambda explicit="": "")
     args = argparse.Namespace(
         claude_model="claude-opus-4-6",
         codex_model="gpt-5.5",

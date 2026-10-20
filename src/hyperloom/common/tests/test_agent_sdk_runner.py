@@ -46,17 +46,21 @@ def _install(monkeypatch: pytest.MonkeyPatch, effects: list[Any]) -> None:
     monkeypatch.setattr(agent_sdk_runner, "DeepSeekSession", lambda **kw: _FakeSession(effects=effects, **kw))
 
 
-async def _drive(tmp_path: Path, report: Path, **kwargs: Any) -> Any:
-    return await agent_sdk_runner.drive_agent_session(
+async def _drive(tmp_path: Path, report: Path, *, max_continuations: int = 3, timeout_sec: float | None = None) -> Any:
+    request = agent_sdk_runner.AgentSessionRequest(
         prompt="run the skill",
         system_prompt="",
         cwd=tmp_path,
         allowed_tools=["Read", "Write"],
         backend="deepseek",
+        timeout_sec=timeout_sec,
+    )
+    owed = agent_sdk_runner.OwedArtifact(
         done=report.exists,
         continuation_prompt=f"Write {report}.",
-        **kwargs,
+        max_continuations=max_continuations,
     )
+    return await agent_sdk_runner.drive_agent_session(request, owed)
 
 
 async def test_a_session_that_stopped_short_is_continued_until_its_report_exists(

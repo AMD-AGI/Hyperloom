@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from hyperloom.inference_optimizer.cli import _orchestration_banner
+from hyperloom.inference_optimizer.cli.backends import _orchestration_banner
 
 
 class DeepSeekBackend:

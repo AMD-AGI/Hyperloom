@@ -24,6 +24,9 @@ commands. References below to Read, Edit, Write, Grep, Glob, or Bash describe
 equivalent capabilities, not literal tool names.
 """
 
+_DEEPSEEK_LOG_PREFIX = "[deepseek-harness]"
+_CLAUDE_LOG_PREFIX = "[claude-sdk]"
+
 
 @dataclass
 class AgentSdkTurnResult:
@@ -32,6 +35,39 @@ class AgentSdkTurnResult:
     text: str = ""
     error: str = ""
     chunks: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class AgentSessionRequest:
+    """What one harness session is asked to do, and where."""
+
+    prompt: str
+    system_prompt: str
+    cwd: Path
+    model: str | None = None
+    max_turns: int = 12
+    allowed_tools: list[str] | None = None
+    child_env: Mapping[str, str] | None = None
+    log: Callable[[str], None] | None = None
+    backend: str | None = None
+    timeout_sec: float | None = None
+    """Wall-clock budget of the whole DeepSeek session, continuations included."""
+
+
+@dataclass(frozen=True)
+class OwedArtifact:
+    """The artifact a DeepSeek session owes, and how it is asked for again.
+
+    The DeepSeek Harness ends a turn whenever the model replies without a tool
+    call -- including when it writes one out as text -- so a session that
+    stopped before ``done()`` holds is continued with ``continuation_prompt``,
+    at most ``max_continuations`` times. Claude's own loop runs to its turn cap
+    and takes no continuation.
+    """
+
+    done: Callable[[], bool]
+    continuation_prompt: str
+    max_continuations: int = 3
 
 
 def _import_claude_sdk() -> tuple[Any, Any]:
@@ -48,166 +84,117 @@ def _permission_mode(writable: bool) -> str:
     return "danger-full-access" if writable else "read-only"
 
 
-async def drive_agent_session(
-    *,
-    prompt: str,
-    system_prompt: str,
-    cwd: Path,
-    model: str | None = None,
-    max_turns: int = 12,
-    allowed_tools: list[str] | None = None,
-    child_env: Mapping[str, str] | None = None,
-    log: Callable[[str], None] | None = None,
-    backend: str | None = None,
-    done: Callable[[], bool] | None = None,
-    continuation_prompt: str = "",
-    max_continuations: int = 3,
-    timeout_sec: float | None = None,
-) -> AgentSdkTurnResult:
-    """Run one harness session and return the accumulated assistant text.
+def _note(log: Callable[[str], None] | None, prefix: str, text: str) -> None:
+    if log:
+        log(f"{prefix} {text}")
 
-    ``done`` names the artifact the session owes. The DeepSeek Harness ends a
-    turn whenever the model replies without a tool call -- including when it
-    writes one out as text -- so a session that stopped before ``done()`` holds
-    is continued with ``continuation_prompt``, at most ``max_continuations``
-    times. Claude's own loop runs to its turn cap and takes no continuation.
-    ``timeout_sec`` is the wall-clock budget of the whole DeepSeek session,
-    continuations included.
-    """
-    resolved = (backend or llm_config.resolve_agent_backend()).strip().lower()
+
+async def drive_agent_session(request: AgentSessionRequest, owed: OwedArtifact | None = None) -> AgentSdkTurnResult:
+    """Run one harness session and return the accumulated assistant text."""
+    resolved = (request.backend or llm_config.resolve_agent_backend()).strip().lower()
     if resolved == llm_config.AGENT_BACKEND_DEEPSEEK:
-        return await _drive_deepseek(
-            prompt=prompt,
-            system_prompt=system_prompt,
-            cwd=cwd,
-            model=model,
-            allowed_tools=allowed_tools,
-            child_env=child_env,
-            log=log,
-            done=done,
-            continuation_prompt=continuation_prompt,
-            max_continuations=max_continuations,
-            timeout_sec=timeout_sec,
-        )
-    return await _drive_claude(
-        prompt=prompt,
-        system_prompt=system_prompt,
-        cwd=cwd,
-        model=model,
-        max_turns=max_turns,
-        allowed_tools=allowed_tools,
-        child_env=child_env,
-        log=log,
-    )
+        return await _drive_deepseek(request, owed)
+    return await _drive_claude(request)
 
 
-async def _drive_claude(
-    *,
-    prompt: str,
-    system_prompt: str,
-    cwd: Path,
-    model: str | None,
-    max_turns: int,
-    allowed_tools: list[str] | None,
-    child_env: Mapping[str, str] | None,
-    log: Callable[[str], None] | None,
-) -> AgentSdkTurnResult:
-    query, options_cls = _import_claude_sdk()
+def _claude_options(request: AgentSessionRequest, options_cls: Any) -> Any:
+    log = request.log
     kwargs: dict[str, Any] = {
-        "max_turns": max_turns,
-        "system_prompt": system_prompt,
-        "allowed_tools": allowed_tools or [],
-        "stderr": (lambda line: log(f"[claude-sdk] {line.rstrip()}")) if log else None,
+        "max_turns": request.max_turns,
+        "system_prompt": request.system_prompt,
+        "allowed_tools": request.allowed_tools or [],
+        "stderr": (lambda line: log(f"{_CLAUDE_LOG_PREFIX} {line.rstrip()}")) if log else None,
     }
-    if model:
-        kwargs["model"] = model
-    if child_env is not None:
-        kwargs["env"] = dict(child_env)
-    kwargs["cwd"] = str(cwd)
+    if request.model:
+        kwargs["model"] = request.model
+    if request.child_env is not None:
+        kwargs["env"] = dict(request.child_env)
+    kwargs["cwd"] = str(request.cwd)
     try:
-        options = options_cls(**kwargs)
+        return options_cls(**kwargs)
     except TypeError:
         kwargs.pop("cwd", None)
-        options = options_cls(**kwargs)
+        return options_cls(**kwargs)
 
+
+async def _drive_claude(request: AgentSessionRequest) -> AgentSdkTurnResult:
+    query, options_cls = _import_claude_sdk()
+    options = _claude_options(request, options_cls)
     chunks: list[str] = []
     error = ""
     try:
-        async for message in query(prompt=prompt, options=options):
+        async for message in query(prompt=request.prompt, options=options):
             for text in _iter_message_text(message):
                 chunks.append(text)
-                if log:
-                    log(f"[claude-sdk] {text[:1000]}")
+                _note(request.log, _CLAUDE_LOG_PREFIX, text[:1000])
     except Exception as exc:  # noqa: BLE001
         error = f"{type(exc).__name__}: {exc}"
-        if log:
-            log(f"[claude-sdk] WARNING: {error}")
+        _note(request.log, _CLAUDE_LOG_PREFIX, f"WARNING: {error}")
     return AgentSdkTurnResult(text="\n".join(chunks), error=error, chunks=chunks)
 
 
-async def _drive_deepseek(
-    *,
-    prompt: str,
-    system_prompt: str,
-    cwd: Path,
-    model: str | None,
-    allowed_tools: list[str] | None,
-    child_env: Mapping[str, str] | None,
-    log: Callable[[str], None] | None,
-    done: Callable[[], bool] | None = None,
-    continuation_prompt: str = "",
-    max_continuations: int = 0,
-    timeout_sec: float | None = None,
-) -> AgentSdkTurnResult:
-    writable = bool(allowed_tools)
-    deadline = monotonic() + timeout_sec if timeout_sec else None
-    instructions = "\n\n".join(part for part in (_RUNTIME_MAPPING.strip(), system_prompt.strip()) if part)
-    session = DeepSeekSession(
-        cwd=cwd,
-        model=model or llm_config.resolve_forge_llm_model(llm_config.AGENT_BACKEND_DEEPSEEK),
+def _deepseek_session(request: AgentSessionRequest) -> DeepSeekSession:
+    instructions = "\n\n".join(part for part in (_RUNTIME_MAPPING.strip(), request.system_prompt.strip()) if part)
+    return DeepSeekSession(
+        cwd=request.cwd,
+        model=request.model or llm_config.resolve_forge_llm_model(llm_config.AGENT_BACKEND_DEEPSEEK),
         instructions=instructions,
         reasoning_effort=harness_reasoning_effort(DEFAULT_REASONING_EFFORT),
-        permission_mode=_permission_mode(writable),
-        env=dict(child_env) if child_env is not None else None,
+        permission_mode=_permission_mode(bool(request.allowed_tools)),
+        env=dict(request.child_env) if request.child_env is not None else None,
         request_timeout_sec=7200.0,
     )
+
+
+def _turn_timeout(session: DeepSeekSession, deadline: float | None) -> float | None:
+    """The next turn's timeout, or ``None`` once the session budget is spent."""
+    if deadline is None:
+        return session.request_timeout_sec
+    remaining = deadline - monotonic()
+    return min(session.request_timeout_sec, remaining) if remaining > 0 else None
+
+
+async def _run_until_owed(
+    session: DeepSeekSession,
+    request: AgentSessionRequest,
+    owed: OwedArtifact | None,
+    chunks: list[str],
+) -> str:
+    """Run turns until the owed artifact exists; return the error that stopped them, if any."""
+    deadline = monotonic() + request.timeout_sec if request.timeout_sec else None
+    turn_prompt = request.prompt
+    for continuation in range((owed.max_continuations if owed else 0) + 1):
+        if continuation:
+            _note(
+                request.log,
+                _DEEPSEEK_LOG_PREFIX,
+                f"continuing: the owed artifact is not written (continuation {continuation})",
+            )
+        turn_timeout = _turn_timeout(session, deadline)
+        if turn_timeout is None:
+            return f"the {request.timeout_sec:.0f}s session budget ran out before the owed artifact was written"
+        result = await session.turn(turn_prompt, timeout_sec=turn_timeout)
+        if result.text:
+            chunks.append(result.text)
+            _note(request.log, _DEEPSEEK_LOG_PREFIX, result.text[:1000])
+        if result.error or owed is None or owed.done():
+            return result.error
+        turn_prompt = owed.continuation_prompt
+    return ""
+
+
+async def _drive_deepseek(request: AgentSessionRequest, owed: OwedArtifact | None) -> AgentSdkTurnResult:
+    session = _deepseek_session(request)
     chunks: list[str] = []
-    error = ""
     try:
         await session.start()
-        turn_prompt = prompt
-        for continuation in range(max_continuations + 1):
-            if continuation and log:
-                log(f"[deepseek-harness] continuing: the owed artifact is not written (continuation {continuation})")
-            turn_timeout = session.request_timeout_sec
-            if deadline is not None:
-                remaining = deadline - monotonic()
-                if remaining <= 0:
-                    error = f"the {timeout_sec:.0f}s session budget ran out before the owed artifact was written"
-                    if log:
-                        log(f"[deepseek-harness] WARNING: {error}")
-                    break
-                turn_timeout = min(turn_timeout, remaining)
-            result = await session.turn(turn_prompt, timeout_sec=turn_timeout)
-            text = result.text or ""
-            if text:
-                chunks.append(text)
-                if log:
-                    log(f"[deepseek-harness] {text[:1000]}")
-            if result.error:
-                error = result.error
-                if log:
-                    log(f"[deepseek-harness] WARNING: {error}")
-                break
-            if done is None or done():
-                break
-            turn_prompt = continuation_prompt
+        error = await _run_until_owed(session, request, owed, chunks)
     except DeepSeekSessionError as exc:
         error = f"{type(exc).__name__}: {exc}"
-        if log:
-            log(f"[deepseek-harness] WARNING: {error}")
     finally:
         await session.aclose()
+    if error:
+        _note(request.log, _DEEPSEEK_LOG_PREFIX, f"WARNING: {error}")
     return AgentSdkTurnResult(text="\n".join(chunks), error=error, chunks=chunks)
 
 
@@ -215,9 +202,15 @@ def _iter_message_text(message: Any) -> Iterable[str]:
     yield from (fragment for fragment in message_text(message) if fragment)
 
 
-def run_agent_session_sync(**kwargs: Any) -> AgentSdkTurnResult:
+def run_agent_session_sync(request: AgentSessionRequest, owed: OwedArtifact | None = None) -> AgentSdkTurnResult:
     """Synchronous wrapper around :func:`drive_agent_session`."""
-    return asyncio.run(drive_agent_session(**kwargs))
+    return asyncio.run(drive_agent_session(request, owed))
 
 
-__all__ = ["AgentSdkTurnResult", "drive_agent_session", "run_agent_session_sync"]
+__all__ = [
+    "AgentSdkTurnResult",
+    "AgentSessionRequest",
+    "OwedArtifact",
+    "drive_agent_session",
+    "run_agent_session_sync",
+]

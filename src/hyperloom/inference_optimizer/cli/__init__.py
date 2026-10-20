@@ -34,6 +34,7 @@ from .backends import (
     ModelRouting,
     _build_backends,
     _build_proposal_scorer,
+    _orchestration_banner,
     critic_review_target,
     orchestration_runs_on_codex,
 )
@@ -1079,18 +1080,6 @@ def _resolve_run_max_model_len(args: argparse.Namespace) -> tuple[int, str]:
         ),
         "auto",
     )
-
-
-def _orchestration_banner(backend: Any, *, claude_model: str, codex_model: str) -> str:
-    """Label the orchestration backend with the model it runs, for the launch banner."""
-    if backend is None:
-        return "DISABLED"
-    name = str(getattr(backend, "name", "") or "").strip().lower()
-    if name == "claude":
-        return f"Claude({claude_model})"
-    if name == "codex":
-        return f"Codex({codex_model})"
-    return f"{backend.__class__.__name__}({getattr(backend, 'model', '') or codex_model})"
 
 
 def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:

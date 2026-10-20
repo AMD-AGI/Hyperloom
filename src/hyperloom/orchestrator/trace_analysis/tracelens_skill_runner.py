@@ -30,12 +30,9 @@ from hyperloom.common.codex_session import (
     CodexTurnRequest,
     run_codex_turn,
 )
+from hyperloom.common import llm_config
 from hyperloom.common.llm_config import claude_sdk_env_options
-from hyperloom.common.llm_config import (
-    DEFAULT_CLAUDE_MODEL,
-    DEFAULT_CODEX_MODEL,
-    DEFAULT_DEEPSEEK_HARNESS_MODEL,
-)
+from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL
 
 from ._capture_shapes import is_capture_dir_name
 from ._io_utils import safe_float
@@ -523,27 +520,6 @@ def _import_sdk() -> tuple[Any, Any]:
     return sdk.query, sdk.ClaudeAgentOptions
 
 
-def _resolved_tracelens_runner() -> str:
-    """Return the harness backend that should execute this skill."""
-    from hyperloom.common import llm_config  # local import: keep module import-light
-
-    return llm_config.resolve_agent_backend()
-
-
-def _should_use_codex_runner() -> bool:
-    """Return true when the Codex Agent SDK runner should run this skill."""
-    from hyperloom.common import llm_config
-
-    return _resolved_tracelens_runner() == llm_config.AGENT_BACKEND_CODEX
-
-
-def _should_use_deepseek_runner() -> bool:
-    """Return true when the DeepSeek Harness should run this skill."""
-    from hyperloom.common import llm_config
-
-    return _resolved_tracelens_runner() == llm_config.AGENT_BACKEND_DEEPSEEK
-
-
 def _iter_message_text(message: Any) -> Iterable[str]:
     from hyperloom.common.claude_oneshot import message_text
 
@@ -673,66 +649,6 @@ async def _drive_sdk_stream(
     return sdk_error
 
 
-async def _run_tracelens_skill_deepseek(
-    *,
-    prompt: str,
-    output_dir: Path,
-    prefix_path: Path,
-    tracelens_root: Path,
-    model: str,
-    timeout_sec: float,
-    log: Callable[[str], None] | None,
-) -> TraceLensSkillRunResult:
-    """Run the TraceLens skill on the DeepSeek Harness."""
-    from hyperloom.common.agent_sdk_runner import drive_agent_session
-
-    harness_error = ""
-    raw_text = ""
-    report_path = output_dir / "analysis.md"
-    try:
-        result = await drive_agent_session(
-            prompt=prompt,
-            system_prompt=_CODEX_DEVELOPER_INSTRUCTIONS.replace("Codex", "DeepSeek Harness"),
-            cwd=tracelens_root,
-            model=model,
-            max_turns=300,
-            allowed_tools=DEFAULT_ALLOWED_TOOLS,
-            log=log,
-            done=report_path.exists,
-            timeout_sec=timeout_sec,
-            continuation_prompt=(
-                f"{report_path} has not been written yet, so the workflow is not finished. A tool call "
-                "written out as text in a reply is not executed. Continue from the step you stopped at, "
-                f"calling tools directly, and write {report_path} before you stop."
-            ),
-        )
-        raw_text = result.text
-        harness_error = result.error
-    except Exception as exc:  # noqa: BLE001
-        harness_error = f"{type(exc).__name__}: {exc}"
-        if log:
-            log(f"[deepseek-harness] WARNING: {harness_error}")
-
-    if not report_path.exists():
-        if harness_error:
-            raise RuntimeError(f"TraceLens DeepSeek runner failed before writing {report_path}: {harness_error}")
-        raise RuntimeError(f"TraceLens DeepSeek runner did not write {report_path}")
-
-    artifact_paths = {
-        "tracelens_agent_report": str(report_path),
-        "tracelens_cmd_prefix": str(prefix_path),
-    }
-    if harness_error:
-        artifact_paths["tracelens_agent_sdk_error"] = harness_error
-    return TraceLensSkillRunResult(
-        output_dir=output_dir,
-        report_path=report_path,
-        runner="deepseek",
-        raw_text=raw_text,
-        artifact_paths=artifact_paths,
-    )
-
-
 async def _run_tracelens_skill_codex(
     run: _SkillRun,
     turn: CodexTurnRequest,
@@ -807,6 +723,34 @@ async def _run_tracelens_skill_codex(
     )
 
 
+def _claude_skill_options(run: _SkillRun, model: str, bounds: _StreamIdleBounds) -> dict[str, Any]:
+    """The Claude Agent SDK options of one skill run, as keyword arguments."""
+    log = run.log
+    kwargs: dict[str, Any] = {
+        "max_turns": 300,
+        "system_prompt": (
+            "You are a TraceLens analysis runner inside Hyperloom. Execute only "
+            "the requested standalone analysis workflow. Use absolute paths, "
+            "write artifacts under the requested output directory, and do not "
+            "modify application source code."
+        ),
+        "allowed_tools": DEFAULT_ALLOWED_TOOLS,
+        "stderr": lambda line: log(f"[claude-sdk] {line.rstrip()}") if log else None,
+        "model": model,
+        # Stream events time each model request of the run onto the trajectory ledger.
+        "include_partial_messages": True,
+        # Roots Bash relative paths at TraceLens; harmless in tests via FakeOptions.
+        "cwd": str(run.request.tracelens_root),
+    }
+    kwargs.update(claude_sdk_env_options(model=model, component="tracelens", operation="analyze_trace"))
+    # In print mode the CLI terminates background sub-agents still running 600s
+    # after the main turn goes quiet, before the in-flight bound applies.
+    kwargs.setdefault("env", {})["CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS"] = os.environ.get(
+        "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS", str(int(bounds.tool * 1000))
+    )
+    return kwargs
+
+
 async def run_tracelens_skill(
     request: TraceLensSkillRequest,
     *,
@@ -818,8 +762,8 @@ async def run_tracelens_skill(
     """Execute the standalone TraceLens skill on the configured agent runtime.
 
     Prepares the command-prefix cache and orchestrator prompt, then dispatches
-    to the Codex Agent SDK when the deployment has only the OpenAI side
-    configured, and to the Claude Agent SDK otherwise. Either way the presence
+    to the agent runtime :mod:`hyperloom.common.llm_config` selects: the DeepSeek
+    Harness, the Codex Agent SDK, or the Claude Agent SDK. Either way the presence
     of ``analysis.md`` is the source of truth: a runtime error after the report
     was written is recorded as metadata rather than raised.
 
@@ -855,25 +799,21 @@ async def run_tracelens_skill(
     prompt = build_orchestrator_prompt(request)
 
     resolved_model = (model or "").strip()
-    if _should_use_deepseek_runner() and sdk_query_factory is None and sdk_options_cls is None:
-        deepseek_model = resolved_model or DEFAULT_DEEPSEEK_HARNESS_MODEL
-        return await _run_tracelens_skill_deepseek(
-            prompt=prompt,
-            output_dir=output_dir,
-            prefix_path=prefix_path,
-            tracelens_root=tracelens_root,
-            model=deepseek_model,
-            timeout_sec=max(60.0, float(budget_minutes) * 60.0),
-            log=log,
-        )
+    run = _SkillRun(request, prefix_path, log)
+    runner = llm_config.resolve_agent_backend()
+    no_injected_sdk = sdk_query_factory is None and sdk_options_cls is None
+    timeout_sec = max(60.0, float(budget_minutes) * 60.0)
+    if runner == llm_config.AGENT_BACKEND_DEEPSEEK and no_injected_sdk:
+        from .tracelens_deepseek import run_tracelens_skill_deepseek
 
-    if _should_use_codex_runner() and (
-        sdk.codex_turn_runner is not None or (sdk_query_factory is None and sdk_options_cls is None)
-    ):
+        model_id = resolved_model or llm_config.DEFAULT_DEEPSEEK_HARNESS_MODEL
+        return await run_tracelens_skill_deepseek(run, prompt, model=model_id, timeout_sec=timeout_sec)
+
+    if runner == llm_config.AGENT_BACKEND_CODEX and (sdk.codex_turn_runner is not None or no_injected_sdk):
         codex_model = resolved_model or (os.environ.get("CODEX_MODEL") or "").strip() or DEFAULT_CODEX_MODEL
         return await _run_tracelens_skill_codex(
-            _SkillRun(request, prefix_path, log),
-            CodexTurnRequest(prompt, timeout_sec=max(60.0, float(budget_minutes) * 60.0)),
+            run,
+            CodexTurnRequest(prompt, timeout_sec=timeout_sec),
             model=codex_model,
             codex_turn_runner=sdk.codex_turn_runner or run_codex_turn,
         )
@@ -886,39 +826,10 @@ async def run_tracelens_skill(
         os.environ.setdefault("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
         os.environ.setdefault("DISABLE_AUTOUPDATER", "1")
 
-    system_prompt = (
-        "You are a TraceLens analysis runner inside Hyperloom. Execute only "
-        "the requested standalone analysis workflow. Use absolute paths, "
-        "write artifacts under the requested output directory, and do not "
-        "modify application source code."
-    )
-    max_turns = 300
-    kwargs: dict[str, Any] = {
-        "max_turns": max_turns,
-        "system_prompt": system_prompt,
-        "allowed_tools": DEFAULT_ALLOWED_TOOLS,
-        "stderr": lambda line: log(f"[claude-sdk] {line.rstrip()}") if log else None,
-    }
     resolved_model = resolved_model or DEFAULT_CLAUDE_MODEL
-    kwargs["model"] = resolved_model
-    # Stream events time each model request of the run onto the trajectory ledger.
-    kwargs["include_partial_messages"] = True
-    # Roots Bash relative paths at TraceLens; harmless in tests via FakeOptions.
-    kwargs["cwd"] = str(tracelens_root)
-    kwargs.update(
-        claude_sdk_env_options(
-            model=resolved_model,
-            component="tracelens",
-            operation="analyze_trace",
-        )
-    )
     idle_timeout = _resolve_stream_idle_timeout_sec()
-    tool_idle_timeout = _resolve_tool_idle_timeout_sec(idle_timeout)
-    # In print mode the CLI terminates background sub-agents still running 600s
-    # after the main turn goes quiet, before the in-flight bound below applies.
-    kwargs.setdefault("env", {})["CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS"] = os.environ.get(
-        "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS", str(int(tool_idle_timeout * 1000))
-    )
+    bounds = _StreamIdleBounds(idle_timeout, _resolve_tool_idle_timeout_sec(idle_timeout))
+    kwargs = _claude_skill_options(run, resolved_model, bounds)
 
     try:
         options = sdk_options_cls(**kwargs)
@@ -935,7 +846,7 @@ async def run_tracelens_skill(
     with _TrajectoryCall(resolved_model) as trajectory:
         sdk_error = await _drive_sdk_stream(
             sdk_query_factory(prompt=prompt, options=options),
-            _StreamIdleBounds(idle_timeout, tool_idle_timeout),
+            bounds,
             chunks=chunks,
             observe=trajectory.observe,
             log=log,

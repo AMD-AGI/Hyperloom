@@ -323,19 +323,6 @@ async def test_a_changed_system_prompt_reopens_the_conversation(
     assert captured["resets"] == 1
 
 
-async def test_a_checkpoint_turn_drops_the_contract_and_parses_nothing(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """``allow_no_intent`` asks for a different shape, so the envelope must not be required."""
-    captured = _stub_turn(monkeypatch, DeepSeekSessionResult(text="a plain summary, no envelope"))
-    result = await _backend(tmp_path).run("summarize", allow_no_intent=True)
-
-    assert deepseek_module._PER_TURN_CONTRACT_OVERRIDE in captured["prompt"]
-    assert result.intents == []
-    assert result.raw_text == "a plain summary, no envelope"
-
-
 # Failures the harness reports without failing the call.
 
 

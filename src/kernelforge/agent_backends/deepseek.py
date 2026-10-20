@@ -14,6 +14,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.deepseek_session import turn_end_failure
 from hyperloom.common.reasoning_effort import (
     DEFAULT_REASONING_EFFORT,
     REASONING_EFFORT_LEVELS,
@@ -183,7 +184,7 @@ def _normalize_run_result(result: Any, session_id: str) -> AgentRunResult:
         subtype = "error_max_turns"
         end_reason = "turn_cap"
     elif finish_reason and finish_reason != "completed":
-        message = _turn_end_failure(events) or f"session ended with turn/end {finish_reason!r}"
+        message = turn_end_failure(events) or f"session ended with turn/end {finish_reason!r}"
         findings.append(message)
         stderr_tail = message[:2000]
         subtype = "error"
@@ -201,22 +202,6 @@ def _normalize_run_result(result: Any, session_id: str) -> AgentRunResult:
         findings=findings,
         stderr_tail=stderr_tail,
     )
-
-
-def _turn_end_failure(events: list[dict[str, Any]]) -> str:
-    """Return the message of the last failing ``turn/end``, if it carries one."""
-    for event in reversed(events):
-        if event.get("type") != "turn/end":
-            continue
-        data = event.get("data")
-        reason = data.get("reason") if isinstance(data, dict) else None
-        error = reason.get("error") if isinstance(reason, dict) else None
-        if isinstance(error, dict):
-            code = str(error.get("code") or "").strip()
-            message = str(error.get("message") or "").strip()
-            return f"{code}: {message}" if code and message else message or code
-        break
-    return ""
 
 
 class DeepSeekHarnessBackend:

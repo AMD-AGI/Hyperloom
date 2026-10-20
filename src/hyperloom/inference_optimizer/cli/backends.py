@@ -27,12 +27,7 @@ from hyperloom.orchestrator.scoring.proposal_scorer import DEFAULT_SCORER_MODELS
 CRITIC_PROTOCOL_CHOICES: tuple[str, ...] = ("auto", "openai", "anthropic")
 
 ORCHESTRATION_BACKEND_ENV = llm_config.ORCHESTRATION_BACKEND_ENV
-
-ORCHESTRATION_BACKEND_CHOICES: tuple[str, ...] = (
-    llm_config.AGENT_BACKEND_CLAUDE,
-    llm_config.AGENT_BACKEND_CODEX,
-    llm_config.AGENT_BACKEND_DEEPSEEK,
-)
+_ORCHESTRATION_ROLE = "orchestration"
 
 
 def _any_env_set(names: tuple[str, ...]) -> bool:
@@ -52,14 +47,9 @@ def orchestration_runs_on_codex(*, codex_follows_claude: bool, claude_follows_co
 def _resolve_orchestration_backend(*, codex_follows_claude: bool, claude_follows_codex: bool = False) -> str:
     """Pick the agent CLI that runs the orchestration role."""
     for env_name in (ORCHESTRATION_BACKEND_ENV, llm_config.AGENT_BACKEND_ENV):
-        requested = (os.environ.get(env_name) or "").strip().lower()
-        if not requested:
-            continue
-        if requested not in ORCHESTRATION_BACKEND_CHOICES:
-            raise ValueError(f"{env_name}={requested!r} not in {set(ORCHESTRATION_BACKEND_CHOICES)}")
-        if requested == llm_config.AGENT_BACKEND_DEEPSEEK and not llm_config.deepseek_harness_sdk_installed():
-            raise ValueError(f"{env_name}=deepseek requires the DeepSeek Harness SDK: install the 'deepseek' extra")
-        return requested
+        requested = llm_config.explicit_agent_backend(env_name=env_name)
+        if requested:
+            return requested
     if orchestration_runs_on_codex(
         codex_follows_claude=codex_follows_claude, claude_follows_codex=claude_follows_codex
     ):
@@ -142,20 +132,46 @@ class CriticSetup:
     protocol: str = "auto"
 
 
+def _build_orchestration_backend(models: ModelRouting, *, session_dir: Path) -> Any:
+    """The backend of the orchestration role, on the agent CLI :func:`_resolve_orchestration_backend` picks."""
+    name = _resolve_orchestration_backend(
+        codex_follows_claude=models.codex_follows_claude, claude_follows_codex=models.claude_follows_codex
+    )
+    allowed_intents = default_role_registry()[_ORCHESTRATION_ROLE].allowed_intents
+    # Scratch only.
+    scratch = agent_dir(session_dir, _ORCHESTRATION_ROLE)
+    if name == llm_config.AGENT_BACKEND_CODEX:
+        return CodexBackend(allowed_intents=allowed_intents, model=models.codex_model, cwd=scratch / "codex_workspace")
+    if name == llm_config.AGENT_BACKEND_DEEPSEEK:
+        # The role reads state and answers with intents; it writes no files,
+        # so the harness gets no write permission to confine.
+        return DeepSeekBackend(
+            allowed_intents=allowed_intents,
+            model=models.deepseek_model,
+            cwd=scratch / "deepseek_workspace",
+            permission_mode="read-only",
+        )
+    # Orchestration is stateless: every tick opens a fresh session and
+    # carries the full state projection, so it needs the agentic turn
+    # budget and the orchestration effort tier.
+    return ClaudeBackend(
+        model=models.claude_model,
+        effort_role=_ORCHESTRATION_ROLE,
+        capture_turn_diagnostics=True,
+        allowed_intents=allowed_intents,
+    )
+
+
 def _build_backends(models: ModelRouting, critic: CriticSetup, *, session_dir: Path) -> dict[str, Any]:
     """Construct all per-role backends."""
     critic_choice, critic_agent_root = critic.choice, critic.agent_root
     claude_model, codex_model = models.claude_model, models.codex_model
-    deepseek_model = models.deepseek_model
     if critic_choice not in ("mock", "agent"):
         raise ValueError(f"_build_backends: critic_choice={critic_choice!r} not in {{'mock','agent'}}")
 
     # Orchestration is an agentic role like any other, so which CLI runs it is the shared rule's answer rather than a
     # second reading of the endpoint shape.
     orchestration_on_codex = orchestration_runs_on_codex(
-        codex_follows_claude=models.codex_follows_claude, claude_follows_codex=models.claude_follows_codex
-    )
-    orchestration_backend_name = _resolve_orchestration_backend(
         codex_follows_claude=models.codex_follows_claude, claude_follows_codex=models.claude_follows_codex
     )
 
@@ -191,38 +207,22 @@ def _build_backends(models: ModelRouting, critic: CriticSetup, *, session_dir: P
                 action_verdict_policy=_policy,
             )
 
-    if orchestration_backend_name == llm_config.AGENT_BACKEND_CODEX:
-        orchestration_backend: Any = CodexBackend(
-            allowed_intents=default_role_registry()["orchestration"].allowed_intents,
-            model=codex_model,
-            # Scratch only.
-            cwd=agent_dir(session_dir, "orchestration") / "codex_workspace",
-        )
-    elif orchestration_backend_name == llm_config.AGENT_BACKEND_DEEPSEEK:
-        orchestration_backend = DeepSeekBackend(
-            allowed_intents=default_role_registry()["orchestration"].allowed_intents,
-            model=deepseek_model,
-            # Scratch only.
-            cwd=agent_dir(session_dir, "orchestration") / "deepseek_workspace",
-            # The role reads state and answers with intents; it writes no files,
-            # so the harness gets no write permission to confine.
-            permission_mode="read-only",
-        )
-    else:
-        # Orchestration is stateless: every tick opens a fresh session and
-        # carries the full state projection, so it needs the agentic turn
-        # budget and the orchestration effort tier.
-        orchestration_backend = ClaudeBackend(
-            model=claude_model,
-            effort_role="orchestration",
-            capture_turn_diagnostics=True,
-            allowed_intents=default_role_registry()["orchestration"].allowed_intents,
-        )
-
     return {
-        "orchestration": orchestration_backend,
+        _ORCHESTRATION_ROLE: _build_orchestration_backend(models, session_dir=session_dir),
         "critic": critic_backend,
     }
+
+
+def _orchestration_banner(backend: Any, *, claude_model: str, codex_model: str) -> str:
+    """Label the orchestration backend with the model it runs, for the launch banner."""
+    if backend is None:
+        return "DISABLED"
+    name = str(getattr(backend, "name", "") or "").strip().lower()
+    if name == "claude":
+        return f"Claude({claude_model})"
+    if name == "codex":
+        return f"Codex({codex_model})"
+    return f"{backend.__class__.__name__}({getattr(backend, 'model', '') or codex_model})"
 
 
 def _build_proposal_scorer(

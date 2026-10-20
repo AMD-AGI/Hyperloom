@@ -39,12 +39,6 @@ from .base import (
 
 from .mcp_emit_intent import constraints_sentence, payload_contract
 
-# Prepended to a turn that runs without the envelope contract.
-_PER_TURN_CONTRACT_OVERRIDE = (
-    "THIS TURN ONLY: ignore the OUTPUT FORMAT block in your instructions. "
-    "Do not emit an intent envelope. Reply exactly as the message below asks."
-)
-
 # Restated every turn. The contract rides the first message of a conversation
 # and the harness has no schema to hold the reply to it, so a long conversation
 # would otherwise drift back to prose.
@@ -261,25 +255,20 @@ class DeepSeekBackend:
         tools: list[str] | None = None,
         disallowed_tools: list[str] | None = None,
         max_turns: int = 1,
-        allow_no_intent: bool = False,
     ) -> BackendTurnResult:
         """Run one DeepSeek Harness turn and parse the intent envelope it replied with."""
         # The harness owns its tool set and its own turn loop, and the names a caller denies are Claude's.
         del tools, disallowed_tools, max_turns
-        if allow_no_intent:
-            turn_prompt = f"{_PER_TURN_CONTRACT_OVERRIDE}\n\n{prompt}"
-        else:
-            turn_prompt = f"{prompt}\n\n{_ENVELOPE_REMINDER} {self._legal_intent_types()}"
+        turn_prompt = f"{prompt}\n\n{_ENVELOPE_REMINDER} {self._legal_intent_types()}"
 
         sdk_result = await self._drive_turn(system_prompt, turn_prompt, prompt_chars=len(prompt))
         usage = dict(sdk_result.usage or {})
         rejection: NoIntentEmitted | None = None
         intents: list[Any] = []
-        if not allow_no_intent:
-            try:
-                intents = self._parse(sdk_result.text)
-            except NoIntentEmitted as exc:
-                rejection = exc
+        try:
+            intents = self._parse(sdk_result.text)
+        except NoIntentEmitted as exc:
+            rejection = exc
         if rejection is not None:
             # A schema-backed transport hands the validation error back to the model within the turn.
             correction = (
