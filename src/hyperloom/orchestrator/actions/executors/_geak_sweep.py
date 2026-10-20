@@ -11,6 +11,7 @@ import logging
 import os
 import shlex
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -35,40 +36,43 @@ from ._gpu_power import (
     read_measured_gpu_power,
     read_measured_gpu_power_by_gpu,
 )
-from ._subprocess_kill import _scan_logs_increment
+from ._subprocess_kill import _LogCursor
 from ._launch_evidence import build_launch_evidence, persist_launch_evidence
 from ._workload_envs import GEAK_METRIC_OUTPUT
 
 log = logging.getLogger(__name__)
 
 
-def _write_benchmark_report(
-    out_dir: Path,
-    *,
-    conc: int,
-    isl: int,
-    osl: int,
-    success: bool,
-    output_throughput_tok_s: float | None,
-    mean_ttft_ms: float | None,
-    mean_tpot_ms: float | None,
-    mean_e2el_ms: float | None,
-    error: str | None = None,
-) -> None:
+@dataclass(frozen=True)
+class _GeakPointReport:
+    """One replayed sweep point as its ``benchmark_report.json`` records it."""
+
+    conc: int
+    isl: int
+    osl: int
+    success: bool
+    output_throughput_tok_s: float | None
+    mean_ttft_ms: float | None
+    mean_tpot_ms: float | None
+    mean_e2el_ms: float | None
+    error: str | None = None
+
+
+def _write_benchmark_report(out_dir: Path, point: _GeakPointReport) -> None:
     """Write a session-breakdown-compatible ``benchmark_report.json``."""
     report = {
-        "success": bool(success),
-        "conc": conc,
-        "isl": isl,
-        "osl": osl,
-        "output_throughput_tok_s": output_throughput_tok_s,
-        "mean_ttft_ms": mean_ttft_ms,
-        "mean_tpot_ms": mean_tpot_ms,
-        "mean_e2el_ms": mean_e2el_ms,
+        "success": bool(point.success),
+        "conc": point.conc,
+        "isl": point.isl,
+        "osl": point.osl,
+        "output_throughput_tok_s": point.output_throughput_tok_s,
+        "mean_ttft_ms": point.mean_ttft_ms,
+        "mean_tpot_ms": point.mean_tpot_ms,
+        "mean_e2el_ms": point.mean_e2el_ms,
         "source": "geak",
     }
-    if error:
-        report["error"] = error
+    if point.error:
+        report["error"] = point.error
     try:
         (out_dir / "benchmark_report.json").write_text(
             json.dumps(report, indent=2),
@@ -127,7 +131,7 @@ def _run_sampled(
     recorder = build_gpu_power_recorder(str(out_dir / "server.log"), dict(env))
     if recorder is None:
         return run()
-    driver = ServerLogPhaseDriver(recorder, lambda: _replay_server_logs(out_dir), scan=_scan_logs_increment)
+    driver = ServerLogPhaseDriver(recorder, lambda: _replay_server_logs(out_dir), cursor=_LogCursor())
     driver.start()
     try:
         return run()
@@ -409,8 +413,7 @@ async def sweep_via_geak(
 
             # Emit a session-breakdown-compatible benchmark_report.json so the sweep collector parses this point like
             # the native sweep; bench_summary.json is kept as the raw artifact.
-            _write_benchmark_report(
-                out_dir,
+            point = _GeakPointReport(
                 conc=conc,
                 isl=isl,
                 osl=osl,
@@ -423,6 +426,7 @@ async def sweep_via_geak(
                 mean_e2el_ms=e2el if isinstance(e2el, (int, float)) else None,
                 error=err,
             )
+            _write_benchmark_report(out_dir, point)
             entries.append(entry)
 
     # The replay runs one (conc, isl, osl) repeated, so the best succeeded point is the headline. Every succeeded

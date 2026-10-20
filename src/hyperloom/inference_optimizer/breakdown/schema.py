@@ -319,6 +319,29 @@ class V6OutcomeValidation(TypedDict, total=False):
     notes: list[str]
 
 
+class V6OutcomeVariants(TypedDict, total=False):
+    """The framework phase's bench runs, counted by how each ended.
+
+    Read off the ``attempts`` of every ``framework_agent`` event, configuration
+    variants and source patches alike; an attempt that never reached the bench
+    is not counted, and kernel candidates are the kernel lane's own funnel.
+    """
+
+    #: ``kept + reverted + failed``.
+    bench_runs: int
+    #: Distinct changes among the runs, by arm and fingerprint: a change benched
+    #: again on a later stack is one change and two runs.
+    distinct: int
+    #: Runs adopted into the stack.
+    kept: int
+    #: Runs measured and not adopted.
+    reverted: int
+    #: Runs that reached the bench and produced no measurement.
+    failed: int
+    #: ``kept`` per bench run; ``None`` when nothing was benched.
+    keep_rate_pct: float | None
+
+
 class V6Outcome(TypedDict, total=False):
     """V6 session result projection for downstream consumers."""
 
@@ -329,6 +352,7 @@ class V6Outcome(TypedDict, total=False):
     anchoring_eval: dict[str, Any] | None
     final: dict[str, Any]
     validation: V6OutcomeValidation
+    variants: V6OutcomeVariants
 
 
 class V6TimelineEvent(TypedDict, total=False):
@@ -1875,6 +1899,9 @@ class V6FrameworkAttempt(TypedDict, total=False):
     stage: str
     decision: str
     adopted: bool | None
+    #: Whether the attempt reached the bench, whatever came of it; absent on a
+    #: row recorded before the field existed.
+    benched: bool | None
     attribution_eligible: bool | None
     validation_basis: str
     fingerprint: str
@@ -2653,6 +2680,7 @@ __all__ = [
     "V6OutcomeGainBucket",
     "V6OutcomeKernelAttribution",
     "V6OutcomeValidation",
+    "V6OutcomeVariants",
     "V6PhaseAction",
     "V6PhaseExt",
     "V6PhaseMarker",

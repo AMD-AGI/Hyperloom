@@ -2436,7 +2436,7 @@ class TestRunGemmTuningHandler:
         task = captured["task"]
         assert task.kind == "gemm_shape_capture"
         assert task.params["baseline_double_run"] is False
-        assert task.params["disable_run_eval"] is True
+        assert task.params["extra_envs"]["RUN_EVAL"] == "false"
         assert task.params["extra_server_args"] == "--enforce-eager --port 8888"
         assert "--port" in task.params["remove_args"]
         assert task.params["extra_envs"]["KEEP_ME"] == "1"
@@ -4303,6 +4303,27 @@ class TestTracelensRootResolution:
         assert out["status"] == "failed"
         assert out["error_class"] == "tracelens_root_missing"
 
+    def test_trace_analyze_handler_reports_missing_root_when_heal_module_cannot_import(self, tmp_path, monkeypatch):
+        # tracelens_analysis imports TraceLens from the checkout, so a vanished checkout fails the heal's own import.
+        from hyperloom.orchestrator import trace_analysis
+
+        monkeypatch.delenv("TRACELENS_ROOT", raising=False)
+        monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "podlocal"))
+        monkeypatch.delattr(trace_analysis, "tracelens_analysis", raising=False)
+        monkeypatch.setitem(sys.modules, f"{trace_analysis.__name__}.tracelens_analysis", None)
+
+        out = asyncio.run(
+            ta.trace_analyze_handler(
+                {"trace_input": str(tmp_path / "trace"), "analysis_route": "agent"}, session_dir=tmp_path
+            )
+        )
+
+        assert out == {
+            "status": "failed",
+            "error_class": "tracelens_root_missing",
+            "error": ta._tracelens_root_error(tmp_path / "podlocal" / "TraceLens"),
+        }
+
     def test_trace_analyze_handler_failfast_on_incomplete_override(self, tmp_path, monkeypatch):
         # an incomplete non-default operator override (dir present, no .git) must fail fast — never adopted, never
         # auto-cloned.
@@ -4373,6 +4394,36 @@ class TestTracelensRootResolution:
         assert called["n"] == 1
         assert called["root"] == default_root
 
+    @pytest.mark.parametrize("error", [OSError("disk gone"), subprocess.TimeoutExpired(cmd="git", timeout=600)])
+    def test_selfheal_logs_an_expected_failure_and_returns(self, tmp_path, monkeypatch, error):
+        monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "podlocal"))
+        default_root = tmp_path / "podlocal" / "TraceLens"
+        warnings = []
+
+        def _fail(root, *, log_path=None):
+            raise error
+
+        _stub_tracelens_analysis(monkeypatch, _fail)
+        ta._maybe_selfheal_tracelens_root(
+            default_root, log=types.SimpleNamespace(warning=lambda *a: warnings.append(a))
+        )
+
+        assert warnings == [
+            ("trace_analyze: TraceLens root %s missing; attempting self-heal", default_root),
+            ("trace_analyze: TraceLens self-heal failed: %s", error),
+        ]
+
+    def test_selfheal_lets_an_unexpected_failure_propagate(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "podlocal"))
+
+        def _fail(root, *, log_path=None):
+            raise RuntimeError("heal bug")
+
+        _stub_tracelens_analysis(monkeypatch, _fail)
+
+        with pytest.raises(RuntimeError, match="heal bug"):
+            ta._maybe_selfheal_tracelens_root(tmp_path / "podlocal" / "TraceLens")
+
 
 class TestBuildTraceAnalyzeCmd:
     """argv golden for ``_build_trace_analyze_cmd``: the splitter (non-scriptable) and diffusion (scriptable) surfaces, plus the bypass vs TraceLens difference."""
@@ -4387,18 +4438,20 @@ class TestBuildTraceAnalyzeCmd:
         state, session_dir = self._common(monkeypatch, tmp_path)
         cmd, steady = ta._build_trace_analyze_cmd(
             {"session_id": "sid", "trace_input": "/t/trace", "split_conc": "64", "split_osl": "1024"},
+            ta._AnalysisRun(
+                trace_input="/t/trace",
+                workspace_path="/ws",
+                tracelens_root=Path("/tl"),
+                is_bypass=False,
+                scriptable=False,
+                model_name="Qwen",
+                framework="sglang",
+                target_platform="MI300X",
+                analysis_mode="inference",
+            ),
             session_dir=session_dir,
             state=state,
-            workspace_path="/ws",
-            trace_input="/t/trace",
-            tracelens_root=Path("/tl"),
-            is_bypass=False,
-            scriptable=False,
             workload={"conc": 8, "osl": 256, "random_range_ratio": "0.5"},
-            model_name="Qwen",
-            framework="sglang",
-            target_platform="MI300X",
-            analysis_mode="inference",
         )
         assert cmd == [
             krh.sys.executable,
@@ -4436,18 +4489,20 @@ class TestBuildTraceAnalyzeCmd:
         state, session_dir = self._common(monkeypatch, tmp_path)
         cmd, _steady = ta._build_trace_analyze_cmd(
             {"trace_input": "/t/trace"},
+            ta._AnalysisRun(
+                trace_input="/t/trace",
+                workspace_path="/ws",
+                tracelens_root=Path("/tl"),
+                is_bypass=False,
+                scriptable=False,
+                model_name="",
+                framework="",
+                target_platform="",
+                analysis_mode="",
+            ),
             session_dir=session_dir,
             state=state,
-            workspace_path="/ws",
-            trace_input="/t/trace",
-            tracelens_root=Path("/tl"),
-            is_bypass=False,
-            scriptable=False,
             workload={"conc": 0, "osl": 0, "random_range_ratio": 0.0},
-            model_name="",
-            framework="",
-            target_platform="",
-            analysis_mode="",
         )
         assert cmd[cmd.index("--split-conc") :] == ["--split-conc", "0", "--split-osl", "0", "--split-r", "0.0"]
 
@@ -4458,18 +4513,20 @@ class TestBuildTraceAnalyzeCmd:
         state.precision = "fp8"
         cmd, _steady = ta._build_trace_analyze_cmd(
             {"trace_input": "/t/trace"},
+            ta._AnalysisRun(
+                trace_input="/t/trace",
+                workspace_path="/ws",
+                tracelens_root=Path("/tl"),
+                is_bypass=False,
+                scriptable=False,
+                model_name="MiniMax",
+                framework="sglang",
+                target_platform="MI355X",
+                analysis_mode="default",
+            ),
             session_dir=session_dir,
             state=state,
-            workspace_path="/ws",
-            trace_input="/t/trace",
-            tracelens_root=Path("/tl"),
-            is_bypass=False,
-            scriptable=False,
             workload={"precision": "mxfp8"},
-            model_name="MiniMax",
-            framework="sglang",
-            target_platform="MI355X",
-            analysis_mode="default",
         )
         assert cmd[cmd.index("--model-path") + 1] == "/models/sglang-model"
         assert cmd[cmd.index("--precision") + 1] == "fp8"
@@ -4486,18 +4543,20 @@ class TestBuildTraceAnalyzeCmd:
                 "steady_state_mode": "auto",
                 "dry_run": True,
             },
+            ta._AnalysisRun(
+                trace_input="/t/trace",
+                workspace_path="/ws",
+                tracelens_root=None,
+                is_bypass=True,
+                scriptable=True,
+                model_name="",
+                framework="",
+                target_platform="",
+                analysis_mode="",
+            ),
             session_dir=session_dir,
             state=state,
-            workspace_path="/ws",
-            trace_input="/t/trace",
-            tracelens_root=None,
-            is_bypass=True,
-            scriptable=True,
             workload={},
-            model_name="",
-            framework="",
-            target_platform="",
-            analysis_mode="",
         )
         # bypass tool module; no --tracelens-root and no --skip-split.
         assert cmd[0] == krh.sys.executable
@@ -4519,18 +4578,20 @@ class TestBuildTraceAnalyzeCmd:
         state.tp = 8
         cmd, _steady = ta._build_trace_analyze_cmd(
             {"trace_input": "/t/trace-dir"},
+            ta._AnalysisRun(
+                trace_input="/t/trace-dir",
+                workspace_path="/ws",
+                tracelens_root=None,
+                is_bypass=True,
+                scriptable=False,
+                model_name="",
+                framework="sglang",
+                target_platform="",
+                analysis_mode="inference",
+            ),
             session_dir=session_dir,
             state=state,
-            workspace_path="/ws",
-            trace_input="/t/trace-dir",
-            tracelens_root=None,
-            is_bypass=True,
-            scriptable=False,
             workload={},
-            model_name="",
-            framework="sglang",
-            target_platform="",
-            analysis_mode="inference",
         )
         assert "--require-single-rank" in cmd
         assert cmd[cmd.index("--tensor-parallel-size") + 1] == "8"
@@ -4539,12 +4600,9 @@ class TestBuildTraceAnalyzeCmd:
         from hyperloom.inference_optimizer.trace.trajectory_trace import trajectory_scope
 
         state, session_dir = self._common(monkeypatch, tmp_path)
-        kwargs = dict(
-            session_dir=session_dir,
-            state=state,
+        run = dict(
             workspace_path="/ws",
             trace_input="/t/trace",
-            workload={},
             model_name="",
             framework="",
             target_platform="",
@@ -4559,10 +4617,18 @@ class TestBuildTraceAnalyzeCmd:
             parent_span_id="span-roof",
         ):
             cmd, _steady = ta._build_trace_analyze_cmd(
-                {"trace_input": "/t/trace"}, tracelens_root=Path("/tl"), is_bypass=False, **kwargs
+                {"trace_input": "/t/trace"},
+                ta._AnalysisRun(tracelens_root=Path("/tl"), is_bypass=False, **run),
+                session_dir=session_dir,
+                state=state,
+                workload={},
             )
             bypass_cmd, _steady = ta._build_trace_analyze_cmd(
-                {"trace_input": "/t/trace"}, tracelens_root=None, is_bypass=True, **kwargs
+                {"trace_input": "/t/trace"},
+                ta._AnalysisRun(tracelens_root=None, is_bypass=True, **run),
+                session_dir=session_dir,
+                state=state,
+                workload={},
             )
         assert cmd[cmd.index("--trajectory-session-dir") + 1] == str(session_dir)
         assert cmd[cmd.index("--trajectory-phase") + 1] == "roofline"
@@ -4576,18 +4642,20 @@ class TestBuildTraceAnalyzeCmd:
         monkeypatch.setenv("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "median")
         cmd, steady = ta._build_trace_analyze_cmd(
             {"trace_input": "/t/trace"},
+            ta._AnalysisRun(
+                trace_input="/t/trace",
+                workspace_path="/ws",
+                tracelens_root=Path("/tl"),
+                is_bypass=False,
+                scriptable=False,
+                model_name="",
+                framework="",
+                target_platform="",
+                analysis_mode="",
+            ),
             session_dir=session_dir,
             state=state,
-            workspace_path="/ws",
-            trace_input="/t/trace",
-            tracelens_root=Path("/tl"),
-            is_bypass=False,
-            scriptable=False,
             workload={},
-            model_name="",
-            framework="",
-            target_platform="",
-            analysis_mode="",
         )
         assert steady == "median"
         assert cmd[cmd.index("--steady-state-mode") + 1] == "median"

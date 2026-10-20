@@ -11,6 +11,7 @@ import kernelforge.agent_backends.codex as codex_backend
 import kernelforge.agent_backends.registry as registry
 from kernelforge.agent_backends import (
     AgentCapabilities,
+    AgentRuntimeSettings,
     AgentProvider,
     AgentProviderUnavailableError,
     AgentRunResult,
@@ -140,13 +141,14 @@ def test_builtin_model_ownership_predicates() -> None:
     claude = get_agent_provider("claude")
     codex = get_agent_provider("codex")
     assert claude.default_model == "claude-opus-5-5"
-    assert codex.default_model == "gpt-5.6-sol"
+    assert codex.default_model == "gpt-6-astra"
     assert claude.owns_model("claude-opus-5")
     assert not claude.owns_model("gpt-5.6")
     assert codex.owns_model("gpt-5.6")
     # The gateway's deployment name is suffixed; the family predicate has to
     # keep recognising it or the default id routes to no provider at all.
     assert codex.owns_model("gpt-5.6-sol")
+    assert codex.owns_model(codex.default_model)
     assert codex.owns_model("o3-mini")
     assert codex.owns_model("internal-codex-preview")
     assert not codex.owns_model("olmo-7b")
@@ -206,7 +208,7 @@ def test_fallback_provider_failure_raises_combined_error() -> None:
     """When both the primary and fallback providers fail, both names are reported."""
     _register_fake("offlinecli", unavailable=True)
     _register_fake("backupcli", unavailable=True)
-    runtime = resolve_agent_runtime("offlinecli", fallback_provider="backupcli")
+    runtime = resolve_agent_runtime("offlinecli", settings=AgentRuntimeSettings(fallback_provider="backupcli"))
     with pytest.raises(
         AgentProviderUnavailableError,
         match="offlinecli unavailable:.*fallback backupcli unavailable",
@@ -287,6 +289,41 @@ def test_a_plugin_does_not_outrank_a_provider_whose_credential_is_absent(
     assert registry.select_default_agent_provider().name == "firstparty"
 
 
+def test_a_provider_whose_check_raises_is_skipped(only_registered_providers) -> None:
+    """A raising provider predicate counts as "no" instead of breaking the selection."""
+
+    def _broken(_model):
+        raise RuntimeError("model table unreadable")
+
+    register_agent_provider(
+        AgentProvider(
+            name="brokencli",
+            factory=lambda runtime: _FakeBackend(name=runtime.provider),
+            default_model="broken-model",
+            owns_model=_broken,
+        )
+    )
+    _register_owning_fake("goodcli", owns_prefix="good")
+
+    assert registry.select_default_agent_provider("good-1").name == "goodcli"
+
+
+def test_entry_point_discovery_failure_is_recorded(monkeypatch) -> None:
+    """Unreadable package metadata disables plugins instead of raising."""
+
+    class _EntryPoints:
+        @staticmethod
+        def select(*, group):
+            raise OSError("metadata unreadable")
+
+    monkeypatch.setattr(registry.metadata, "entry_points", _EntryPoints)
+    monkeypatch.setattr(registry, "_plugins_loaded", False)
+    monkeypatch.setattr(registry, "_plugin_errors", {})
+    registry.discover_agent_providers(force=True)
+
+    assert registry._plugin_errors == {"<discovery>": "OSError: metadata unreadable"}
+
+
 def test_select_unknown_model_uses_registration_order(
     only_registered_providers,
 ) -> None:
@@ -301,10 +338,7 @@ def test_custom_provider_uses_generic_runtime() -> None:
     """Construct a custom backend without changing any core dispatch code."""
     _register_fake("testcli")
     runtime = resolve_agent_runtime(
-        "testcli",
-        executable="/tmp/testcli",
-        timeout_sec=77,
-        options={"flag": "value"},
+        "testcli", settings=AgentRuntimeSettings(executable="/tmp/testcli", timeout_sec=77, options={"flag": "value"})
     )
 
     backend = create_registered_backend(runtime)
@@ -320,10 +354,7 @@ def test_generic_fallback_uses_registered_provider() -> None:
     """Fall back without hard-coding either provider name in dispatch."""
     _register_fake("offlinecli", unavailable=True)
     _register_fake("backupcli", model="backup-model")
-    runtime = resolve_agent_runtime(
-        "offlinecli",
-        fallback_provider="backupcli",
-    )
+    runtime = resolve_agent_runtime("offlinecli", settings=AgentRuntimeSettings(fallback_provider="backupcli"))
 
     backend = create_registered_backend(runtime)
 
@@ -405,12 +436,14 @@ def test_builtin_codex_consumes_generic_runtime() -> None:
     runtime = resolve_agent_runtime(
         "codex",
         model="gpt-test",
-        executable="/tmp/missing-codex",
-        timeout_sec=91,
-        reasoning_effort="medium",
-        sandbox_mode="workspace-write",
-        precheck=False,
-        fallback_provider="",
+        settings=AgentRuntimeSettings(
+            executable="/tmp/missing-codex",
+            timeout_sec=91,
+            reasoning_effort="medium",
+            sandbox_mode="workspace-write",
+            precheck=False,
+            fallback_provider="",
+        ),
     )
 
     backend = create_registered_backend(runtime)
@@ -434,8 +467,7 @@ def test_builtin_codex_uses_generic_fallback_on_preflight(monkeypatch) -> None:
     _register_fake("codexbackup", model="fallback-model")
     runtime = resolve_agent_runtime(
         "codex",
-        executable="/tmp/definitely-missing-codex",
-        fallback_provider="codexbackup",
+        settings=AgentRuntimeSettings(executable="/tmp/definitely-missing-codex", fallback_provider="codexbackup"),
     )
 
     backend = create_registered_backend(runtime)

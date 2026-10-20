@@ -93,14 +93,16 @@ def test_worker_uses_invoking_policy_and_reanchors_session(monkeypatch):
 
     monkeypatch.setattr(sk, "run_with_session_kill", run)
     result = rb._run_subprocess_worker(
-        cmd=["client"],
-        env={},
-        cwd=None,
-        timeout_s=7800,
-        silence_timeout_sec=600,
-        server_log_path="server.log",
-        server_already_ready=True,
-        session_remaining_sec=42,
+        rb.SessionKillRound(
+            cmd=["client"],
+            env={},
+            cwd=None,
+            timeout=7800,
+            silence_timeout_sec=600,
+            server_log_path="server.log",
+            server_already_ready=True,
+            session_remaining_sec=42,
+        )
     )
     assert result == (0, "out", "err")
     assert captured["timeout"] == 7800
@@ -610,9 +612,11 @@ class _FakeMethod:
     def __init__(self, ret):
         self._ret = ret
         self.calls: list[dict] = []
+        self.args: list[tuple] = []
 
-    def remote(self, *_a, **kw):
+    def remote(self, *a, **kw):
         self.calls.append(dict(kw))
+        self.args.append(a)
         return self._ret
 
 
@@ -620,19 +624,23 @@ class _FakeActor:
     def __init__(self, ret):
         self.run_blocking = _FakeMethod(ret)
         self.pid = _FakeMethod(None)
+        self.stop = _FakeMethod(True)
 
 
 class _LeaseFakeRay:
     """Minimal fake ``ray`` for ServingLease: get() unwraps refs, kill() records."""
 
     class exceptions:
-        class RayTaskError(Exception):
+        class RayError(Exception):
             pass
 
-        class RayActorError(Exception):
+        class RayTaskError(RayError):
             pass
 
-        class GetTimeoutError(Exception):
+        class RayActorError(RayError):
+            pass
+
+        class GetTimeoutError(RayError):
             pass
 
     def __init__(self):
@@ -1054,34 +1062,38 @@ class TestTheSessionBudgetReachesTheRayWorker:
 
         lease.run_session_kill(["echo", "hi"], timeout=5, session_remaining_sec=42.0)
 
-        assert lease._actor.run_blocking.calls[0]["session_remaining_sec"] == pytest.approx(42.0)
+        assert lease._actor.run_blocking.args[0][0].session_remaining_sec == pytest.approx(42.0)
 
     def test_the_worker_reaps_a_child_whose_budget_is_already_spent(self):
         """End of the chain: the duration becomes a deadline on the worker's own clock."""
         start = time.monotonic()
         rc, _out, _err = rb._run_subprocess_worker(
-            cmd=[sys.executable, "-c", "import time; time.sleep(30)"],
-            env=None,
-            cwd=None,
-            timeout_s=60,
-            silence_timeout_sec=None,
-            server_log_path=None,
-            server_already_ready=False,
-            session_remaining_sec=-1.0,
+            rb.SessionKillRound(
+                cmd=[sys.executable, "-c", "import time; time.sleep(30)"],
+                env=None,
+                cwd=None,
+                timeout=60,
+                silence_timeout_sec=None,
+                server_log_path=None,
+                server_already_ready=False,
+                session_remaining_sec=-1.0,
+            )
         )
         assert rc == SESSION_TIME_EXHAUSTED_RETURNCODE
         assert time.monotonic() - start < 10.0
 
     def test_the_worker_leaves_a_child_with_budget_left_alone(self):
         rc, out, _err = rb._run_subprocess_worker(
-            cmd=["echo", "still-running"],
-            env=None,
-            cwd=None,
-            timeout_s=60,
-            silence_timeout_sec=None,
-            server_log_path=None,
-            server_already_ready=False,
-            session_remaining_sec=3600.0,
+            rb.SessionKillRound(
+                cmd=["echo", "still-running"],
+                env=None,
+                cwd=None,
+                timeout=60,
+                silence_timeout_sec=None,
+                server_log_path=None,
+                server_already_ready=False,
+                session_remaining_sec=3600.0,
+            )
         )
         assert rc == 0
         assert "still-running" in out
@@ -1122,24 +1134,15 @@ class _FakeGpuActor:
         self.exit_code = _FakeActorMethodP2(lambda: self._exit)
         self.stop = _FakeActorMethodP2(self._stop)
 
-    def _start(
-        self,
-        cmd,
-        env=None,
-        cwd=None,
-        log_path=None,
-        scrub_benchmark_env=False,
-        env_mode="merge",
-        stdin_path=None,
-    ):
+    def _start(self, launch, scrub_benchmark_env=False):
         self.started_with = {
-            "cmd": cmd,
-            "env": env,
-            "cwd": cwd,
-            "log_path": log_path,
+            "cmd": launch.cmd,
+            "env": launch.env,
+            "cwd": launch.cwd,
+            "log_path": launch.log_path,
             "scrub_benchmark_env": scrub_benchmark_env,
-            "env_mode": env_mode,
-            "stdin_path": stdin_path,
+            "env_mode": launch.env_mode,
+            "stdin_path": launch.stdin_path,
         }
         return 4242
 
@@ -1152,13 +1155,16 @@ class _FakeGpuActor:
 
 class _FakeRayP2:
     class exceptions:
-        class RayTaskError(Exception):
+        class RayError(Exception):
             pass
 
-        class GetTimeoutError(Exception):
+        class RayTaskError(RayError):
             pass
 
-        class RayActorError(Exception):
+        class GetTimeoutError(RayError):
+            pass
+
+        class RayActorError(RayError):
             pass
 
     def __init__(self):
@@ -1220,12 +1226,7 @@ def test_gpu_specialist_lease_forwards_replace_env_and_stdin(
     stdin_path.write_text("prompt\n", encoding="utf-8")
 
     lease = rs.GpuSpecialistLease(num_gpus=2)
-    lease.start_async(
-        ["codex"],
-        env={"SAFE": "1"},
-        env_mode="replace",
-        stdin_path=str(stdin_path),
-    )
+    lease.start_async(["codex"], env={"SAFE": "1"}, env_mode="replace", stdin_path=str(stdin_path))
 
     assert lease.poll_started() == 4242
     assert actor.started_with["env_mode"] == "replace"
@@ -1553,7 +1554,9 @@ def test_serving_actor_body_methods_drive_real_subprocess(monkeypatch: pytest.Mo
     actor = actor_cls()  # plain instance (identity-decorated)
 
     # start(): device vars in caller env are dropped; non-device vars flow.
-    pid = actor.start(["sh", "-c", "sleep 0.3; exit 0"], env={"ROCR_VISIBLE_DEVICES": "9", "FOO": "bar"})
+    pid = actor.start(
+        rs.ActorLaunch(["sh", "-c", "sleep 0.3; exit 0"], env={"ROCR_VISIBLE_DEVICES": "9", "FOO": "bar"})
+    )
     assert isinstance(pid, int) and pid > 0
     assert actor.pid() == pid
     assert actor.is_alive() is True
@@ -1566,7 +1569,7 @@ def test_serving_actor_body_methods_drive_real_subprocess(monkeypatch: pytest.Mo
 
     # run_blocking(): fresh actor runs one round to completion, returns triple.
     actor2 = actor_cls()
-    rc, out, err = actor2.run_blocking(["echo", "hello-actor"], timeout=30)
+    rc, out, err = actor2.run_blocking(rb.SessionKillRound(["echo", "hello-actor"], timeout=30))
     assert rc == 0 and "hello-actor" in out
     actor2.stop()
 
@@ -1588,8 +1591,7 @@ def test_serving_actor_scrubs_benchmark_credentials_when_requested(monkeypatch: 
 
     actor = rs._serving_actor_body()()
     actor.start(
-        ["python", "-m", "server"],
-        env={"ROCR_VISIBLE_DEVICES": "caller", "WORKLOAD_FLAG": "1"},
+        rs.ActorLaunch(["python", "-m", "server"], env={"ROCR_VISIBLE_DEVICES": "caller", "WORKLOAD_FLAG": "1"}),
         scrub_benchmark_env=True,
     )
 
@@ -1625,15 +1627,17 @@ def test_serving_actor_replace_env_removes_secrets_and_preserves_ray_devices(
 
     actor = rs._serving_actor_body()()
     actor.start(
-        ["python", "-m", "specialist"],
-        env={
-            "SAFE_FLAG": "1",
-            "ROCR_VISIBLE_DEVICES": "caller-rocr",
-            "HIP_VISIBLE_DEVICES": "caller-hip",
-            "CUDA_VISIBLE_DEVICES": "caller-cuda",
-        },
-        env_mode="replace",
-        stdin_path="/tmp/prompt.txt",
+        rs.ActorLaunch(
+            ["python", "-m", "specialist"],
+            env={
+                "SAFE_FLAG": "1",
+                "ROCR_VISIBLE_DEVICES": "caller-rocr",
+                "HIP_VISIBLE_DEVICES": "caller-hip",
+                "CUDA_VISIBLE_DEVICES": "caller-cuda",
+            },
+            env_mode="replace",
+            stdin_path="/tmp/prompt.txt",
+        )
     )
 
     child_env = captured["env"]
@@ -1661,7 +1665,7 @@ def test_serving_actor_default_env_mode_keeps_merge_behavior(monkeypatch: pytest
     monkeypatch.setenv("EXISTING_SERVING_ENV", "preserved")
 
     actor = rs._serving_actor_body()()
-    actor.start(["python", "-m", "server"], env={"WORKLOAD_FLAG": "1"})
+    actor.start(rs.ActorLaunch(["python", "-m", "server"], env={"WORKLOAD_FLAG": "1"}))
 
     assert captured_env["EXISTING_SERVING_ENV"] == "preserved"
     assert captured_env["WORKLOAD_FLAG"] == "1"
@@ -1671,7 +1675,7 @@ def test_serving_actor_run_blocking_timeout_sentinel(monkeypatch: pytest.MonkeyP
     """A hard timeout in run_blocking is reported as the sentinel returncode."""
     monkeypatch.setitem(sys.modules, "ray", _PassthroughRay())
     actor = rs._serving_actor_body()()
-    rc, _out, err = actor.run_blocking(["sleep", "30"], timeout=1)
+    rc, _out, err = actor.run_blocking(rb.SessionKillRound(["sleep", "30"], timeout=1))
     assert rc == rs._ACTOR_TIMEOUT_RC
     assert "TimeoutExpired" in err
     actor.stop()
@@ -1803,7 +1807,7 @@ def test_serving_lease_close_swallows_kill_error(monkeypatch: pytest.MonkeyPatch
     """ServingLease.close swallows a ray.kill error and still clears the handle."""
     monkeypatch.setitem(sys.modules, "ray", _RaisingRay())  # kill() raises
     lease = rs.ServingLease(num_gpus=1)
-    lease._actor = object()
+    lease._actor = _FakeActor((0, "", ""))
     lease.close()  # except path swallowed
     assert lease._actor is None
 
@@ -1812,7 +1816,7 @@ def test_releasing_a_lease_reaps_the_served_process(serving_lease_on_a_ray_doubl
     """``ray.kill`` skips ``__ray_terminate__``, so the actor must be asked first."""
     lease = serving_lease_on_a_ray_double
     lease.ensure()
-    pid = lease._actor.start.remote(["sleep", "60"]).result(timeout=10)
+    pid = lease._actor.start.remote(rs.ActorLaunch(["sleep", "60"])).result(timeout=10)
     assert _pid_alive(pid)
 
     lease.close()
@@ -2104,3 +2108,15 @@ def test_ray_lease_process_poll_latched_returns_early():
     proc = _RayLeaseProcess(_NeverCallLease(), 9996)
     proc.returncode = _RAY_ACTOR_DIED_RC  # pre-latched
     assert proc.poll() == _RAY_ACTOR_DIED_RC
+
+
+def test_serving_lease_actor_death_recovery_bug_propagates(monkeypatch: pytest.MonkeyPatch):
+    """Only the narrowed shutdown errors are tolerated; a defect in recovery is not hidden."""
+    fake = _LeaseFakeRay()
+    monkeypatch.setitem(sys.modules, "ray", fake)
+    monkeypatch.setattr(rb, "mark_ray_backend_unhealthy", lambda: (_ for _ in ()).throw(ValueError("recovery bug")))
+    lease = ServingLease(num_gpus=1)
+    lease._actor = _FakeActor(fake.exceptions.RayActorError("worker died"))
+
+    with pytest.raises(ValueError, match="recovery bug"):
+        lease.run_session_kill(["x"], timeout=5)

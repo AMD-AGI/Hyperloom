@@ -19,6 +19,7 @@ from hyperloom.orchestrator.rehearsal import VirtualClock, installed_clock
 from hyperloom.orchestrator.specialists import subprocess_ as subprocess_module
 from hyperloom.orchestrator.specialists.subprocess_ import (
     UNBOUNDED_REAP_CAP_SEC,
+    ReapWatch,
     SpecialistSubprocessConfig,
     SpecialistSubprocessDispatcher,
 )
@@ -77,13 +78,10 @@ async def _reap(deadline: Deadline | None, clock: VirtualClock, workspace: Path)
 
     dispatcher._kill = _kill  # type: ignore[assignment,method-assign]
     return await dispatcher._reap_loop(
-        proc=proc,
-        workspace=workspace,
-        done_files=(),
-        heartbeat_file=workspace / "heartbeat.json",
+        proc,
+        ReapWatch(workspace=workspace, done_files=(), heartbeat_file=workspace / "heartbeat.json", task_id="t"),
         deadline=deadline,
         started=clock.monotonic(),
-        task_id="t",
     )
 
 
@@ -306,15 +304,14 @@ class TestOffloadedWorkCannotHoldTheTick:
         assert started == []
 
     @pytest.mark.asyncio
-    async def test_work_that_raises_does_not_end_the_tick(self):
+    async def test_work_that_raises_reaches_the_caller(self):
         from hyperloom.orchestrator.loop.offload import offload
 
         def _boom() -> str:
             raise RuntimeError("the network went away")
 
-        result = await offload(_boom, deadline=None, label="boom", default="degraded")
-
-        assert result == "degraded"
+        with pytest.raises(RuntimeError, match="the network went away"):
+            await offload(_boom, deadline=None, label="boom", default="degraded")
 
 
 class TestAStopIsRecordedBeforeItIsDispatched:

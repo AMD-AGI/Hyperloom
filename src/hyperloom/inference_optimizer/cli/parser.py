@@ -348,7 +348,7 @@ def _build_parser() -> argparse.ArgumentParser:
     opt.add_argument("--extra-env", action="append", default=[], help=argparse.SUPPRESS)
     opt.add_argument(
         "--tp",
-        type=int,
+        type=_positive_int_arg,
         default=None,
         help="Tensor parallel size. Pass `--tp N` directly from the prompt's "
         f"Environment block. Default: {DEFAULT_TP}.",
@@ -367,8 +367,8 @@ def _build_parser() -> argparse.ArgumentParser:
         type=_positive_int_arg,
         default=None,
         help="Explicit server-facing MAX_MODEL_LEN. Resolution: "
-        "--max-model-len > auto(ISL+OSL+headroom, "
-        "clamped to native context). Explicit values are preserved and "
+        "--max-model-len > $MAX_MODEL_LEN > auto(ISL+OSL+headroom, "
+        "clamped to native context). Explicit values must fit the known native context and are "
         "exported into the materialized Magpie YAML.",
     )
     opt.add_argument(
@@ -703,16 +703,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "parameter search). Useful when GEAK/GPU "
         "compile env is unavailable or you just want the "
         "quick-win parameter path. Default: kernel enabled.",
-    )
-    opt.add_argument(
-        "--no-eval",
-        action="store_true",
-        default=False,
-        help="Skip the accuracy eval everywhere. The baseline anchors on "
-        "throughput alone instead of halting on a missing accuracy "
-        "reference, and every candidate is graded on throughput only. "
-        "Useful for CI/CD tuning runs that care about performance and not "
-        "accuracy; the run is not accuracy-validated. Default: eval enabled.",
     )
     opt.add_argument(
         "--launch-info-file",

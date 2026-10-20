@@ -11,13 +11,14 @@ import os
 import shutil
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from hyperloom.common.unified_diff import touched_paths
 
-from kernelforge.llm.git import git
-from kernelforge.loop.scoring import aggregate_regression_detail
-from kernelforge.durable_io import atomic_write_text, fsync_directory, fsync_tree
+from kernelforge.llm.git import git_bytes
+from kernelforge.evaluation.scoring import aggregate_regression_detail
+from kernelforge.tools.durable_io import atomic_write_text, fsync_directory, fsync_tree
 
 # What every published best version must contain.
 BEST_BUNDLE_FILES = ("forge.patch", "validation.txt", "benchmark.json")
@@ -90,6 +91,40 @@ def _round_budget_lines(summary: object) -> list[str]:
     return lines
 
 
+@dataclass(frozen=True)
+class KeepIdentity:
+    """Which KEEP is published: its campaign, session, experiment, iteration, commit and plan."""
+
+    campaign_id: str
+    session_index: int
+    experiment_id: str
+    iteration: int
+    commit_hash: str
+    plan: str
+
+
+@dataclass(frozen=True)
+class KeepScore:
+    """What a KEEP measured against the pristine baseline and the search start."""
+
+    baseline_wall_ms: float
+    best_wall_ms: float
+    mean_case_speedup: float
+    search_start_mean_case_speedup: float
+    snr_db: float | None = None
+    search_start_ms: float | None = None
+
+
+@dataclass(frozen=True)
+class KeepBundle:
+    """The evidence stored with a KEEP: validation output, benchmark, changed files and patch."""
+
+    validation_text: str
+    benchmark: dict
+    changed_files: list[str]
+    patch: str
+
+
 class BestResultPublisher:
     """Publish immutable best versions behind one atomic manifest."""
 
@@ -144,13 +179,7 @@ class BestResultPublisher:
                     continue
             if ".." in relative.parts:
                 continue
-            result = git(
-                "show",
-                f"{commit_hash}:{relative.as_posix()}",
-                cwd=self.workspace,
-                check=False,
-                text=False,
-            )
+            result = git_bytes("show", f"{commit_hash}:{relative.as_posix()}", cwd=self.workspace, check=False)
             if result.returncode == 0:
                 sources[str(relative)] = result.stdout
         return sources
@@ -180,9 +209,7 @@ class BestResultPublisher:
         version_dir: Path,
         *,
         expected: dict,
-        validation_text: str,
-        benchmark: dict,
-        patch: str,
+        bundle: KeepBundle,
         source_files: dict[str, bytes],
     ) -> dict:
         """Accept only a complete immutable bundle for the same publication."""
@@ -221,15 +248,15 @@ class BestResultPublisher:
         }
         if not self._same_publication(publication, expected_with_time):
             raise ValueError(f"inconsistent best artifact version: {version_dir}")
-        if (version_dir / "forge.patch").read_text() != patch:
+        if (version_dir / "forge.patch").read_text() != bundle.patch:
             raise ValueError(f"inconsistent best artifact patch: {version_dir}")
-        if (version_dir / "validation.txt").read_text() != validation_text:
+        if (version_dir / "validation.txt").read_text() != bundle.validation_text:
             raise ValueError(f"inconsistent best artifact validation: {version_dir}")
         stored_benchmark = self._load_json(
             version_dir / "benchmark.json",
             label="best artifact benchmark",
         )
-        if stored_benchmark != benchmark:
+        if stored_benchmark != bundle.benchmark:
             raise ValueError(f"inconsistent best artifact benchmark: {version_dir}")
 
         files_root = version_dir / "files"
@@ -291,35 +318,23 @@ class BestResultPublisher:
 
     def publish(
         self,
+        keep: KeepIdentity,
+        score: KeepScore,
+        bundle: KeepBundle,
         *,
-        campaign_id: str,
-        session_index: int,
-        experiment_id: str,
-        iteration: int,
-        commit_hash: str,
-        plan: str,
-        baseline_wall_ms: float,
-        search_start_ms: float | None = None,
-        best_wall_ms: float,
-        mean_case_speedup: float,
-        search_start_mean_case_speedup: float,
-        snr_db: float | None,
-        validation_text: str,
-        benchmark: dict,
-        changed_files: list[str],
-        patch: str,
         round_budget: dict | None = None,
     ) -> dict:
         """Publish one KEEP and atomically point the campaign at it."""
+        iteration, baseline_wall_ms = keep.iteration, score.baseline_wall_ms
         self.best_root.mkdir(parents=True, exist_ok=True)
         version_name = f"iter_{iteration:03d}"
         sources = self._source_files(
-            changed_files,
-            commit_hash=commit_hash,
+            bundle.changed_files,
+            commit_hash=keep.commit_hash,
         )
-        search_start = search_start_ms if search_start_ms is not None else baseline_wall_ms
-        resolved_mean_case_speedup = float(mean_case_speedup)
-        resolved_search_start_speedup = float(search_start_mean_case_speedup)
+        search_start = score.search_start_ms if score.search_start_ms is not None else baseline_wall_ms
+        resolved_mean_case_speedup = float(score.mean_case_speedup)
+        resolved_search_start_speedup = float(score.search_start_mean_case_speedup)
         if (
             not math.isfinite(resolved_mean_case_speedup)
             or resolved_mean_case_speedup <= 0.0
@@ -332,20 +347,20 @@ class BestResultPublisher:
         # time, and that must not ship as an improvement.
         aggregate_regression = aggregate_regression_detail(
             baseline_ms=baseline_wall_ms,
-            best_ms=best_wall_ms,
+            best_ms=score.best_wall_ms,
             mean_case_speedup=resolved_mean_case_speedup,
         )
         expected = {
-            "campaign_id": campaign_id,
-            "session_index": session_index,
-            "experiment_id": experiment_id,
+            "campaign_id": keep.campaign_id,
+            "session_index": keep.session_index,
+            "experiment_id": keep.experiment_id,
             "iteration": iteration,
-            "commit_hash": commit_hash,
-            "plan": (plan or "").strip(),
+            "commit_hash": keep.commit_hash,
+            "plan": (keep.plan or "").strip(),
             "baseline_wall_ms": baseline_wall_ms,
             "pristine_baseline_ms": baseline_wall_ms,
             "search_start_ms": search_start,
-            "best_wall_ms": best_wall_ms,
+            "best_wall_ms": score.best_wall_ms,
             "mean_case_speedup": resolved_mean_case_speedup,
             "search_start_mean_case_speedup": (resolved_search_start_speedup),
             "speedup": round(resolved_mean_case_speedup, 6),
@@ -359,7 +374,7 @@ class BestResultPublisher:
             "incremental_improved": (resolved_mean_case_speedup > resolved_search_start_speedup),
             "improved_during_search": (resolved_mean_case_speedup > resolved_search_start_speedup),
             "correctness_passed": True,
-            "snr_db": snr_db,
+            "snr_db": score.snr_db,
             "changed_files": list(sources),
         }
 
@@ -383,9 +398,7 @@ class BestResultPublisher:
                 manifest = self._validate_existing_bundle(
                     candidate,
                     expected=candidate_expected,
-                    validation_text=validation_text,
-                    benchmark=benchmark,
-                    patch=patch,
+                    bundle=bundle,
                     source_files=sources,
                 )
                 break
@@ -423,11 +436,11 @@ class BestResultPublisher:
                 )
             )
             try:
-                self._write_text_durable(temporary / "forge.patch", patch)
-                self._write_text_durable(temporary / "validation.txt", validation_text)
+                self._write_text_durable(temporary / "forge.patch", bundle.patch)
+                self._write_text_durable(temporary / "validation.txt", bundle.validation_text)
                 self._write_text_durable(
                     temporary / "benchmark.json",
-                    json.dumps(benchmark, indent=2, sort_keys=True) + "\n",
+                    json.dumps(bundle.benchmark, indent=2, sort_keys=True) + "\n",
                 )
                 copied = self._copy_changed_files(
                     temporary / "files",

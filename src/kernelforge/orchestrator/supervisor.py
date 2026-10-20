@@ -10,13 +10,14 @@ import logging
 import math
 import sys
 import time
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Awaitable, Callable
 
 from kernelforge.agent_backends import AgentRunSpec, watchdog_timeout_sec
 from kernelforge.agent_backends.session_resume import is_api_failure
 from kernelforge.config import Config, resolve_agent_model
-from kernelforge.durable_io import atomic_write_text
+from kernelforge.tools.durable_io import atomic_write_text
 
 log = logging.getLogger(__name__)
 
@@ -65,10 +66,23 @@ def clear_latest_supervisor_ruling(workspace: str) -> bool:
     return True
 
 
-def _persist_interaction(
-    workspace: str, iteration: int, reason: str, system: str, user: str, reply: str, *, backend: str, model: str
-) -> None:
+@dataclass(frozen=True)
+class SupervisorInteraction:
+    """One supervisor intervention: its iteration and trigger, the prompts, the reply and who answered."""
+
+    iteration: int
+    reason: str
+    system: str
+    user: str
+    reply: str
+    backend: str
+    model: str
+
+
+def _persist_interaction(workspace: str, interaction: SupervisorInteraction) -> None:
     """Save one supervisor intervention (prompt + reply) for later inspection."""
+    iteration, reason, reply = interaction.iteration, interaction.reason, interaction.reply
+    system, user, backend, model = interaction.system, interaction.user, interaction.backend, interaction.model
     try:
         d = Path(workspace) / "forge_experiments" / "supervisor"
         d.mkdir(parents=True, exist_ok=True)
@@ -128,7 +142,7 @@ def persist_supervisor_ruling(
         persisted_interaction = interaction
         atomic_write_text(latest, reply)
         persisted_latest = latest
-    except Exception as error:  # noqa: BLE001 - persistence is best-effort
+    except OSError as error:
         log.debug(
             "supervisor: failed to persist injected ruling for iter %s: %s",
             iteration,
@@ -137,9 +151,7 @@ def persist_supervisor_ruling(
     return persisted_interaction, persisted_latest
 
 
-def _build_task_prompt(
-    program_md: str, digest: str, reason: str, gpu_target: str, directions: int, evidence_context: str = ""
-) -> str:
+def _build_task_prompt(program_md: str, digest: str, reason: str, gpu_target: str, evidence_context: str = "") -> str:
     """Build the bounded evidence prompt shown to the supervisor."""
     source_note = (
         "You MAY read the exact analysis, profile, orchestration, lesson, and "
@@ -178,7 +190,7 @@ trajectory below.
    measurements and concrete errors recorded beside it.
 4. Decide whether the current planning cycle should continue the same mechanism,
    switch mechanisms, or reanalyze stale evidence, and explain why.
-5. Recommend at most {directions} concrete directions. Each should name the source
+5. Recommend at most {SUPERVISOR_DIRECTIONS} concrete directions. Each should name the source
    region, exact mechanism, target cases, and why the profiling evidence supports
    it. A prior failed implementation is evidence about that implementation, not
    proof that the whole direction is exhausted.
@@ -194,7 +206,6 @@ def make_supervisor_fn(
     program_md: str = "",
     gpu_target: str = "gfx942",
     backend: str = "",
-    directions: int = SUPERVISOR_DIRECTIONS,
     usage=None,
     config: Config | None = None,
 ) -> Callable[..., Awaitable[str]]:
@@ -214,18 +225,10 @@ def make_supervisor_fn(
             # re-reading it. Leaving it out ran the supervisor on the registry
             # default no matter what ``CODEX_MODEL``/``CLAUDE_MODEL`` said.
             model=resolve_agent_model(backend),
-            executable="",
-            timeout_sec=config.agent_timeout_sec,
-            reasoning_effort=config.agent_reasoning_effort,
-            sandbox_mode=config.agent_sandbox_mode,
-            precheck=config.agent_precheck,
-            fallback_provider=config.agent_fallback_provider,
-            options={},
+            settings=replace(config.agent_runtime_settings(), executable="", options={}),
         )
     supervisor_model = str(runtime.options.get("supervisor_model") or runtime.model)
     if supervisor_model != runtime.model:
-        from dataclasses import replace
-
         runtime = replace(runtime, model=supervisor_model)
     timeout_sec = int(runtime.options.get("supervisor_timeout_sec") or runtime.timeout_sec)
     selected_backend = None
@@ -244,7 +247,6 @@ def make_supervisor_fn(
             digest,
             reason,
             gpu_target,
-            directions,
             evidence_context=evidence_context,
         )
         reply = ""
@@ -301,6 +303,7 @@ def make_supervisor_fn(
         except Exception as exc:  # noqa: BLE001 - supervisor is best-effort
             backend_name = selected_backend.name if selected_backend is not None else runtime.provider
             reply = ""
+            log.warning("supervisor %s call failed: %s", backend_name, exc)
             print(
                 f"  [supervisor] {backend_name} call failed ({exc}) — skipping",
                 file=sys.stderr,
@@ -310,13 +313,15 @@ def make_supervisor_fn(
         backend_model = selected_backend.runtime.model if selected_backend is not None else runtime.model
         _persist_interaction(
             workspace,
-            iteration,
-            reason,
-            _SUPERVISOR_ROLE,
-            task,
-            reply,
-            backend=backend_name,
-            model=backend_model,
+            SupervisorInteraction(
+                iteration,
+                reason,
+                _SUPERVISOR_ROLE,
+                task,
+                reply,
+                backend=backend_name,
+                model=backend_model,
+            ),
         )
         return reply
 

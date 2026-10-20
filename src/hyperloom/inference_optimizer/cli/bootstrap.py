@@ -9,8 +9,10 @@ import argparse
 import json
 import logging
 import os
+import shlex
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -557,7 +559,6 @@ def _seed_shared_state(
         framework_local_explore_enabled=not bool(getattr(args, "no_framework_local_explore", False)),
         # Enablement self-heal lanes; --enablement off opts out.
         enablement_mode=str(getattr(args, "enablement", "all") or "all"),
-        eval_disabled=bool(getattr(args, "no_eval", False)),
         research_scout_enabled=bool(getattr(args, "research_scout", True)),
         research_scout_interval=max(1, int(getattr(args, "research_scout_interval", 3) or 3)),
         static_recon_enabled=bool(getattr(args, "static_recon", True)),
@@ -611,6 +612,42 @@ def _print_session_skeleton(session_dir: Path) -> None:
         marker = "ok" if (session_dir / sub).is_dir() else "MISSING"
         print(f"  [{marker}] {sub}/")
     print("  [ok] manifest.json (written first)")
+
+
+@dataclass(frozen=True)
+class LaunchInfo:
+    """The optimizer process a launcher started and the session it serves, as harvested from HYPERLOOM_LAUNCH."""
+
+    pid: int
+    session_dir: Path
+    session_id: str
+    run_log: str
+    gpu_type: str
+    framework: str
+    model: str
+
+
+def _emit_launch_info(info: LaunchInfo, *, launch_info_file: str | None) -> dict[str, Any]:
+    """Print the machine-readable HYPERLOOM_LAUNCH stdout line; optionally JSON-dump to ``launch_info_file``."""
+    launch_info: dict[str, Any] = {
+        "event": "launch",
+        "pid": info.pid,
+        "session_dir": str(info.session_dir),
+        "session_id": info.session_id,
+        "run_log": info.run_log,
+        "manifest": str(info.session_dir / "manifest.json"),
+        "gpu_type": info.gpu_type,
+        "framework": info.framework,
+        "model": info.model,
+    }
+    kv_body = " ".join(f"{k}={shlex.quote(str(v))}" for k, v in launch_info.items())
+    print(f"HYPERLOOM_LAUNCH {kv_body}")
+    if launch_info_file:
+        path = Path(launch_info_file)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(launch_info, indent=2))
+        print(f"Launch info file: {path}")
+    return launch_info
 
 
 def _print_final_summary(

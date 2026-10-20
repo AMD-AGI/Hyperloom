@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import pytest
+
 from hyperloom.orchestrator.knowledge.trajectory_reviewer import (
     _exhausted_clusters,
     _stalled_cycle_count,
@@ -159,7 +161,7 @@ def test_build_trajectory_digest_with_dead_clusters(tmp_path):
         JournalEntry,
     )
 
-    journal = Journal.load_or_create(tmp_path, session_id="s1", model="m", hardware="h")
+    journal = Journal.load_or_create(tmp_path, Journal(session_id="s1", model="m", hardware="h"))
     for i in range(3):
         journal.append_entry(
             JournalEntry(
@@ -207,8 +209,8 @@ def test_build_trajectory_digest_snaps_without_direction_returns_empty(tmp_path)
     assert result == ""
 
 
-def test_build_trajectory_digest_outer_exception_returns_empty(tmp_path, monkeypatch):
-    """An unexpected error inside the digest builder is swallowed."""
+def test_build_trajectory_digest_propagates_builder_failure(tmp_path, monkeypatch):
+    """A failure inside the digest builder reaches the caller, which owns the advisory fallback."""
     from hyperloom.orchestrator.knowledge import trajectory_reviewer as tr
 
     def boom(*_a, **_k):
@@ -216,4 +218,5 @@ def test_build_trajectory_digest_outer_exception_returns_empty(tmp_path, monkeyp
 
     monkeypatch.setattr(tr, "_exhausted_clusters", boom)
     state = _FakeState(macro_cycle=1, explore_search={})
-    assert build_trajectory_digest(tmp_path, state) == ""
+    with pytest.raises(RuntimeError, match="kaboom"):
+        build_trajectory_digest(tmp_path, state)

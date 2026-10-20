@@ -6,11 +6,11 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 
 from kernelforge.rewrite_by_flydsl import protocol
 from kernelforge.rewrite_by_flydsl.budget import DEFAULT_REWRITE_BUDGET, RewriteBudgetPolicy
-from kernelforge.durable_io import atomic_write_text
+from kernelforge.tools.durable_io import atomic_write_text
 
 # The nested forge-loop sentinel is suppressed while its stdout is streamed by rewrite_by_flydsl.optimize, so this is
 # the only one a caller sees.
@@ -70,29 +70,42 @@ class RewriteResult:
         return asdict(self)
 
 
-def build_result(
-    *,
-    op_name: str,
-    port_ok: bool,
-    port_attempts: int,
-    source_ms: float | None,
-    optimize_result: dict,
-    applyback_result: dict | None = None,
-    applyback_required: bool = False,
-    llm_usage: dict | None = None,
-    kb_experience: dict | None = None,
-    failure_class: str = "",
-    failure_detail: str = "",
-    temporary_paths: list[str] | None = None,
-    budget_policy: RewriteBudgetPolicy | None = None,
-) -> RewriteResult:
-    """Combine the port + preflight + optimize outcomes into one result.
+@dataclass(frozen=True)
+class ResultScope:
+    """What every result of one run reports alike: the logical op, the producer's scratch paths, the budget applied.
 
-    ``budget_policy`` is the policy the run actually applied. It is reported
-    rather than assumed because a caller that declines apply-back holds no
-    reserve for it, and a reader comparing the search window against a default
-    would otherwise be told about time the run never set aside.
+    ``budget_policy`` is reported rather than assumed because a caller that declines apply-back holds no reserve for
+    it, and a reader comparing the search window against a default would otherwise be told about time never set aside.
     """
+
+    op_name: str
+    temporary_paths: list[str] = field(default_factory=list)
+    budget_policy: RewriteBudgetPolicy | None = None
+
+
+@dataclass(frozen=True)
+class RewriteOutcome:
+    """How far one run got: PORT, the source timing, OPTIMIZE and apply-back, its spend, KB traffic and any failure."""
+
+    port_ok: bool
+    port_attempts: int
+    source_ms: float | None
+    optimize_result: dict
+    applyback_result: dict | None = None
+    applyback_required: bool = False
+    llm_usage: dict | None = None
+    kb_experience: dict | None = None
+    failure_class: str = ""
+    failure_detail: str = ""
+
+
+def build_result(scope: ResultScope, outcome: RewriteOutcome) -> RewriteResult:
+    """Combine the port + preflight + optimize outcomes into one result."""
+    op_name = scope.op_name
+    port_ok = outcome.port_ok
+    optimize_result = outcome.optimize_result
+    applyback_result = outcome.applyback_result
+    applyback_required = outcome.applyback_required
     flydsl_best_ms = optimize_result.get("best_ms") if optimize_result else None
     experiment_id = optimize_result.get("experiment_id") if optimize_result else None
     applyback = applyback_result or {}
@@ -115,16 +128,18 @@ def build_result(
         port_ok=port_ok,
         compiled=port_ok,
         correct=port_ok,
-        source_ms=source_ms,
+        source_ms=outcome.source_ms,
         flydsl_best_ms=flydsl_best_ms,
         speedup=speedup,
         experiment_id=experiment_id,
-        llm_usage=dict(llm_usage if llm_usage is not None else (optimize_result.get("llm_usage") or {})),
-        port_attempts=port_attempts,
+        llm_usage=dict(
+            outcome.llm_usage if outcome.llm_usage is not None else (optimize_result.get("llm_usage") or {})
+        ),
+        port_attempts=outcome.port_attempts,
         success=bool(
             port_ok and (not applyback_required or (applyback.get("ok") if applyback_result is not None else False))
         ),
-        baseline_ms=source_ms,
+        baseline_ms=outcome.source_ms,
         best_ms=flydsl_best_ms,
         improved=bool(speedup and speedup > 1.0),
         total_speedup=speedup,
@@ -147,11 +162,11 @@ def build_result(
         applyback_ok=applyback_ok,
         applyback_error=str(applyback.get("error") or ""),
         terminated_for_deadline=bool(optimize_result.get("terminated_for_deadline")) if optimize_result else False,
-        failure_class=failure_class,
-        failure_detail=failure_detail,
-        temporary_paths=list(temporary_paths or []),
-        kb_experience=dict(kb_experience or {}),
-        budget_policy=(budget_policy or DEFAULT_REWRITE_BUDGET).to_dict(),
+        failure_class=outcome.failure_class,
+        failure_detail=outcome.failure_detail,
+        temporary_paths=list(scope.temporary_paths),
+        kb_experience=dict(outcome.kb_experience or {}),
+        budget_policy=(scope.budget_policy or DEFAULT_REWRITE_BUDGET).to_dict(),
     )
 
 

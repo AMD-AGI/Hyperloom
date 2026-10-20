@@ -19,6 +19,8 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.prompts.prompt_builder import (
     build_orchestration_prompt,
     default_enabled_actions,
+    PromptAssets,
+    SessionContext,
 )
 from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir, make_session_dir
 
@@ -40,10 +42,7 @@ def test_orchestration_prompt_includes_phase_contract(registry):
     text = build_orchestration_prompt(
         action_registry=registry,
         enabled_actions=default_enabled_actions(no_kernel=False),
-        framework="sglang",
-        objective_kind="gain_pct",
-        objective_value=10.0,
-        max_minutes=120,
+        session=SessionContext(framework="sglang", objective_kind="gain_pct", objective_value=10.0, max_minutes=120),
     )
     assert "PHASE CONTRACT" in text
     # Driven off the phase table: a hand-written list keeps naming a phase the build dropped, and passes on any other
@@ -58,11 +57,8 @@ def test_orchestration_prompt_defers_rescue_moves_to_reference(registry):
     text = build_orchestration_prompt(
         action_registry=registry,
         enabled_actions=default_enabled_actions(no_kernel=False),
-        framework="sglang",
-        objective_kind="gain_pct",
-        objective_value=10.0,
-        max_minutes=120,
-        rules_fragment_path=asset_system_prompts_dir() / "orchestration.md",
+        session=SessionContext(framework="sglang", objective_kind="gain_pct", objective_value=10.0, max_minutes=120),
+        assets=PromptAssets(rules_fragment_path=asset_system_prompts_dir() / "orchestration.md"),
     )
 
     assert "kill_task" not in text
@@ -73,8 +69,7 @@ def test_orchestration_prompt_no_kernel_marks_kernel_skipped(registry):
     text = build_orchestration_prompt(
         action_registry=registry,
         enabled_actions=default_enabled_actions(no_kernel=True),
-        framework="sglang",
-        max_minutes=120,
+        session=SessionContext(framework="sglang", max_minutes=120),
     )
     assert "(DISABLED: --no-kernel — phase skipped)" in text
 
@@ -83,10 +78,9 @@ def test_orchestration_prompt_no_framework_agent_marks_skipped_and_context(regis
     text = build_orchestration_prompt(
         action_registry=registry,
         enabled_actions=default_enabled_actions(no_kernel=False),
-        framework="sglang",
-        kernel_enabled=True,
-        framework_agent_phase_enabled=False,
-        max_minutes=120,
+        session=SessionContext(
+            framework="sglang", kernel_enabled=True, framework_agent_phase_enabled=False, max_minutes=120
+        ),
     )
     assert "(DISABLED: --no-framework-agent — phase skipped)" in text
     assert "optimize_enabled : false" in text
@@ -96,10 +90,9 @@ def test_orchestration_prompt_all_enabled_session_context_true(registry):
     text = build_orchestration_prompt(
         action_registry=registry,
         enabled_actions=default_enabled_actions(no_kernel=False),
-        framework="sglang",
-        kernel_enabled=True,
-        framework_agent_phase_enabled=True,
-        max_minutes=120,
+        session=SessionContext(
+            framework="sglang", kernel_enabled=True, framework_agent_phase_enabled=True, max_minutes=120
+        ),
     )
     assert "optimize_enabled : true" in text
     assert "kernel_enabled   : true" in text
@@ -121,7 +114,7 @@ def test_critic_phase_orientation_is_delivered_not_inlined():
     """Critic phase awareness lives in the per-phase injector, not in critic.md."""
     from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
     from hyperloom.orchestrator.phases import machine_state as _ps
-    from hyperloom.orchestrator.roles.critic_agent import _PHASE_ORIENTATION
+    from hyperloom.orchestrator.roles._review_constraints import _PHASE_ORIENTATION
 
     body = (asset_system_prompts_dir() / "critic.md").read_text(encoding="utf-8")
     assert "Phase-specific rules" in body
@@ -149,8 +142,7 @@ def test_shared_state_phase_status_summary_renders_compact_block():
         to_phase=phase,
         reason="prelude_done",
         evidence={"baseline_tput": 100},
-        ts="2026-05-19T00:00:00+00:00",
-        ts_unix=1_000_000.0,
+        at=_ps.PhaseClock(ts="2026-05-19T00:00:00+00:00", ts_unix=1_000_000.0),
     )
     s.phase_budget_pct = {phase: 0.5}
     out = _ps.phase_status_summary(s, now_unix=1_000_120.0)
@@ -173,8 +165,7 @@ def test_shared_state_phase_status_summary_no_max_minutes_marks_unlimited():
         to_phase="FRAMEWORK_AGENT",
         reason="prelude_done",
         evidence={},
-        ts="2026-05-19T00:00:00+00:00",
-        ts_unix=1.0,
+        at=_ps.PhaseClock(ts="2026-05-19T00:00:00+00:00", ts_unix=1.0),
     )
     out = _ps.phase_status_summary(s, now_unix=10.0)
     assert "unlimited run" in out.lower()
@@ -963,6 +954,64 @@ async def test_send_message_to_specialist_prefers_worktree_inbox(coordinator_wit
         assert not (workspace / "inbox.json").exists()
         entries = _json.loads(worktree_inbox.read_text(encoding="utf-8"))
         assert entries[0]["body"]["body_md"] == "steer toward decode"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_send_message_to_a_list_writes_one_message_per_recipient(coordinator_with_mocks):
+    """A ``to`` array is fanned out: one events row per recipient, and each specialist's copy in its inbox.
+
+    Before the gate's check the raw list reached the events INSERT as ``to_agent`` and
+    sqlite3.ProgrammingError escaped handle_intent, marking the running phase event failed.
+    """
+    import json as _json
+
+    from hyperloom.inference_optimizer.session.session_paths import runs_dir
+
+    c = coordinator_with_mocks
+    body = "redirecting both duplicates at once"
+    try:
+        await c.router.handle_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.SEND_MESSAGE,
+                payload={
+                    "to": ["specialist:dup-a", "specialist:dup-b", "critic", "specialist:dup-a"],
+                    "topic": "observation",
+                    "body_md": body,
+                },
+            ),
+        )
+        for name in ("specialist:dup-a", "specialist:dup-b", "critic"):
+            mine = [
+                m for m in c.bus.inbox_context_sync(name) if m.to_agent == name and m.payload.get("body_md") == body
+            ]
+            assert len(mine) == 1, name
+        for task_id in ("dup-a", "dup-b"):
+            inbox = runs_dir(c.session_dir, "specialist", task_id) / "inbox.json"
+            entries = _json.loads(inbox.read_text(encoding="utf-8"))
+            assert [e["body"]["body_md"] for e in entries] == [body]
+        assert not any(m.payload.get("kind") == "policy_denied" for m in c.bus.inbox_context_sync("orchestration"))
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_send_message_to_a_list_with_an_empty_name_is_denied_not_crashed(coordinator_with_mocks):
+    """A list holding an empty name is refused by the gate instead of faulting the phase event."""
+    c = coordinator_with_mocks
+    try:
+        await c.router.handle_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.SEND_MESSAGE,
+                payload={"to": ["critic", ""], "topic": "observation", "body_md": "one name is blank"},
+            ),
+        )
+        denials = c.bus.inbox_context_sync("orchestration")
+        kinds = [m.payload.get("kind") for m in denials if m.payload.get("kind") == "policy_denied"]
+        assert kinds, "expected a policy_denied observation for the malformed recipient"
     finally:
         await c.stop()
 

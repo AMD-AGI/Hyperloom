@@ -12,12 +12,14 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.agents.framework.sources.pr_monitor import PRMonitorError
 from hyperloom.common.bringup import BootObservation, Excerpt, LadderStage, TerminalFrame
 from hyperloom.common.failure_signature import FailureSignature
 from hyperloom.orchestrator.bringup import observation_summary
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
+from hyperloom.orchestrator.state.round_store import RoundRequest
 from hyperloom.orchestrator.state.shared_state import SharedState
-from hyperloom.orchestrator.state.task_registry import create_in_cursor
+from hyperloom.orchestrator.state.task_registry import TaskSpec, create_in_cursor
 
 from hyperloom.orchestrator.actions.executors._ray_serving import RAY_INFEASIBLE_MARKER
 from hyperloom.orchestrator.actions.executors._subprocess_kill import AGENTX_PREFLIGHT_ERROR_CLASS
@@ -205,7 +207,7 @@ def test_build_params_feeds_ranked_candidate_refs_into_mandate(monkeypatch, tmp_
 
 
 def test_build_params_degrades_gracefully_when_discovery_raises(monkeypatch, tmp_path):
-    _stub_enumerate(monkeypatch, RuntimeError("network down"))
+    _stub_enumerate(monkeypatch, PRMonitorError("network down"))
     fake = _enqueue_self(tmp_path)
     params = fake.enablement_params.build_enablement_specialist_params(_MISSING_ARCH_LOG)
     assert params is not None
@@ -238,11 +240,7 @@ async def _seed_task(fake, task_id: str, *, kind: str, state: str = "queued", pa
     """Put a real registry row in the state a case needs, under a chosen id."""
     async with fake.db.transaction() as cur:
         create_in_cursor(
-            cur,
-            kind=kind,
-            params=params or {},
-            idempotency_key=f"seed:{task_id}",
-            task_id=task_id,
+            cur, TaskSpec(kind=kind, params=params or {}, idempotency_key=f"seed:{task_id}", task_id=task_id)
         )
     if state != "queued":
         if state != "running":
@@ -260,10 +258,9 @@ async def _hold_round(fake, holder: str, *, holder_state: str = ""):
         await _seed_task(fake, holder, kind="specialist", state=holder_state)
     acquired = await fake.rounds.open(
         f"enablement-{holder}",
+        RoundRequest(now_unix=time.time(), request_id=f"seed:{holder}"),
         holder_task_id=holder,
         lease_sec=3600.0,
-        now_unix=time.time(),
-        request_id=f"seed:{holder}",
     )
     assert acquired.ok, acquired.reason
 
@@ -463,7 +460,7 @@ async def test_the_repair_pass_ends_a_round_whose_holder_finished_silently(monke
     """
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
-    from hyperloom.orchestrator.bringup.reconcile import Reconciler
+    from hyperloom.orchestrator.bringup.reconcile import ReconcileLinks, Reconciler, ReconcileStores
     from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager, SqliteLeaseBackend
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
@@ -471,11 +468,11 @@ async def test_the_repair_pass_ends_a_round_whose_holder_finished_silently(monke
     fake = _enqueue_self(tmp_path)
     await _hold_round(fake, "spec-stuck", holder_state="succeeded")
     reconciler = Reconciler(
-        rounds=fake.rounds,
-        tasks=fake.tasks,
-        locks=ResourceLockManager(SqliteLeaseBackend(fake.rounds.db)),
-        shared_state=fake.shared_state,
-        proposals=lambda: fake.state.pending_proposals,
+        ReconcileStores(
+            rounds=fake.rounds, tasks=fake.tasks, locks=ResourceLockManager(SqliteLeaseBackend(fake.rounds.db))
+        ),
+        fake.shared_state,
+        links=ReconcileLinks(proposals=lambda: fake.state.pending_proposals),
     )
 
     await reconciler.run(time.time() + 3600.0)
@@ -589,8 +586,33 @@ async def test_revalidation_enqueues_genuine_baseline(tmp_path):
     created = await fake.tasks.get(tid)
     assert created.kind == "baseline"
     assert created.params["config_path"] == "/runs/baseline/materialized.yaml"
-    assert created.params["disable_run_eval"] is False
     assert created.params["enablement_origin"] == "eval"
+
+
+@pytest.mark.asyncio
+async def test_revalidation_keeps_the_task_id_when_its_save_hits_an_os_error(tmp_path, monkeypatch):
+    fake = _enqueue_self(tmp_path, enablement_validation_pending=True, enablement_origin="eval")
+    monkeypatch.setattr(fake.shared_state, "save", _raise(OSError("no space left on device")))
+
+    tid = await fake.enablement_revalidation.maybe_enqueue_enablement_baseline_revalidation()
+
+    assert fake.shared_state.enablement.revalidation_task_id == tid
+
+
+@pytest.mark.asyncio
+async def test_revalidation_save_propagates_a_serialization_defect(tmp_path, monkeypatch):
+    fake = _enqueue_self(tmp_path, enablement_validation_pending=True, enablement_origin="eval")
+    monkeypatch.setattr(fake.shared_state, "save", _raise(TypeError("Object of type set is not JSON serializable")))
+
+    with pytest.raises(TypeError, match="not JSON serializable"):
+        await fake.enablement_revalidation.maybe_enqueue_enablement_baseline_revalidation()
+
+
+def _raise(error: Exception):
+    def _fail(_session_dir):
+        raise error
+
+    return _fail
 
 
 @pytest.mark.asyncio
@@ -1566,18 +1588,20 @@ async def test_rearm_records_the_rounds_disposition_on_the_executions_it_perform
     A discarded round still mutated the shared venv, so its rows stay in the
     ledger carrying the outcome the lane reported for them.
     """
-    from hyperloom.orchestrator.enablement.recipe.setup_ledger import build_execution_row
+    from hyperloom.orchestrator.enablement.recipe.setup_ledger import SetupExecution, build_execution_row
 
     fake = _enqueue_self(tmp_path)
     await _hold_round(fake, "spec-1")
     fake.shared_state.enablement.setup_executions = [
         build_execution_row(
-            seq=1,
-            round_task_id="spec-1",
-            cmd_index=0,
-            cmd="pip install -U transformers",
-            source="proposed",
-            outcome="applied",
+            SetupExecution(
+                seq=1,
+                round_task_id="spec-1",
+                cmd_index=0,
+                cmd="pip install -U transformers",
+                source="proposed",
+                outcome="applied",
+            ),
             env={},
             fs_root="/nonexistent-probe-root",
         )

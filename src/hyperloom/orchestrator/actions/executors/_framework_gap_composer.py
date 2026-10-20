@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 
 log = logging.getLogger(__name__)
@@ -82,6 +84,29 @@ def _extract_bottleneck_from_rewrite_evidence(evidence_path: str | Path | None) 
     return ""
 
 
+def _kernel_row_name(row: Any) -> str:
+    """The lowercase kernel name one breakdown row carries, or ``""`` when it names none."""
+    if isinstance(row, dict):
+        return str(row.get("name") or row.get("kernel") or "").strip().lower()
+    if isinstance(row, str):
+        return row.strip().lower()
+    return ""
+
+
+def _hottest_kernel_names(raw: Any) -> list[str]:
+    """The lowercase names of the hottest kernels a breakdown payload lists, time-sorted as it stored them."""
+    if isinstance(raw, dict):
+        rows = raw.get("top_kernels") or raw.get("kernels") or raw.get("rows") or []
+    elif isinstance(raw, list):
+        rows = raw
+    else:
+        return []
+    if not isinstance(rows, list):
+        return []
+    names = (_kernel_row_name(row) for row in rows[:_MAX_KERNELS_SCANNED])
+    return [name for name in names if name]
+
+
 def _extract_bottleneck_from_breakdown(breakdown_path: str | Path | None) -> str:
     """Read the kernel breakdown JSON and return one canonical bottleneck keyword."""
     if not breakdown_path:
@@ -98,28 +123,7 @@ def _extract_bottleneck_from_breakdown(breakdown_path: str | Path | None) -> str
             exc,
         )
         return ""
-    candidates: list[str] = []
-    if isinstance(raw, dict):
-        items = raw.get("top_kernels") or raw.get("kernels") or raw.get("rows") or []
-        if isinstance(items, list):
-            for item in items[:_MAX_KERNELS_SCANNED]:
-                if isinstance(item, dict):
-                    nm = str(item.get("name") or item.get("kernel") or "").strip()
-                    if nm:
-                        candidates.append(nm.lower())
-                elif isinstance(item, str):
-                    candidates.append(item.lower())
-    elif isinstance(raw, list):
-        for item in raw[:_MAX_KERNELS_SCANNED]:
-            if isinstance(item, dict):
-                nm = str(item.get("name") or item.get("kernel") or "").strip()
-                if nm:
-                    candidates.append(nm.lower())
-            elif isinstance(item, str):
-                candidates.append(item.lower())
-    if not candidates:
-        return ""
-    for name in candidates:
+    for name in _hottest_kernel_names(raw):
         for needle, keyword in _OP_TO_KEYWORD:
             if needle in name:
                 return keyword
@@ -146,22 +150,29 @@ def _model_class_to_search_token(model_class: str) -> str:
     return mc
 
 
+@dataclass(frozen=True)
+class GapEvidence:
+    """The profile artifacts a gap's bottleneck tokens are read from; an absent path contributes none."""
+
+    profile_kernel_breakdown_path: str | Path | None = None
+    rewrite_evidence_path: str | Path | None = None
+
+
 def compose_gap(
     *,
     framework: str = "",
     gpu_type: str = "",
     model_class: str = "",
     precision: str = "",
-    profile_kernel_breakdown_path: str | Path | None = None,
-    rewrite_evidence_path: str | Path | None = None,
+    evidence: GapEvidence = GapEvidence(),
 ) -> tuple[str, list[str]]:
     """Build ``(gap_description, keywords)`` for the framework arm."""
     fw = (framework or "").strip().lower()
     gpu = (gpu_type or "").strip().lower()
     arch = _model_class_to_search_token(model_class)
     prec = (precision or "").strip().lower()
-    bottleneck = _extract_bottleneck_from_breakdown(profile_kernel_breakdown_path)
-    host_bottleneck = _extract_bottleneck_from_rewrite_evidence(rewrite_evidence_path)
+    bottleneck = _extract_bottleneck_from_breakdown(evidence.profile_kernel_breakdown_path)
+    host_bottleneck = _extract_bottleneck_from_rewrite_evidence(evidence.rewrite_evidence_path)
 
     # Gap text mirrors the SKILL.md template.
     parts: list[str] = ["improve"]
@@ -189,4 +200,4 @@ def compose_gap(
     return gap, keywords
 
 
-__all__ = ["compose_gap"]
+__all__ = ["GapEvidence", "compose_gap"]

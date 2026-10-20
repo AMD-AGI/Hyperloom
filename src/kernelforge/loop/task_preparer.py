@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import time
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -23,14 +24,16 @@ from kernelforge.llm.git import ensure_commit_identity, git
 from kernelforge.config import Config
 from kernelforge.loop.external_artifacts import ExternalArtifactError, ExternalArtifactTransaction
 from kernelforge.resources import resource_path
-from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
-from kernelforge.loop.task_preflight import PreflightResult, _preflight_async
+from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.loop.task_preflight import DriverContract, PreflightResult, _preflight_async
 from kernelforge.loop.task_preparer_prompts import (
     DRIVER_CONTRACT_SPEC,
     REFERENCE_DRIVER_TEMPLATE,
     RETRY_HEADING_DEFAULT,
     RETRY_HEADING_NO_EDIT,
     _SYSTEM_PROMPT,
+    PromptBrief,
+    RetryNote,
     _build_prompt,
     _distributed_contract_note,
     _invocation_spec_note,
@@ -68,30 +71,14 @@ _REFERENCE_IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", "*.log", "for
 def preflight_task(
     *,
     driver: str,
-    snr_threshold: float = DEFAULT_SNR_THRESHOLD_DB,
+    contract: DriverContract = DriverContract(),
     warmup: int = PREFLIGHT_WARMUP,
     iters: int = PREFLIGHT_ITERS,
-    require_graph: bool = False,
-    require_profile: bool = False,
-    require_ranks: int = 1,
     deadline_unix: float = 0.0,
-    expected_case_ids: list[str] | None = None,
 ) -> PreflightResult:
     """Synchronous deterministic check of a driver against the loop's contract."""
 
-    return asyncio.run(
-        _preflight_async(
-            driver,
-            snr_threshold,
-            warmup,
-            iters,
-            require_graph,
-            require_profile,
-            require_ranks,
-            deadline_unix,
-            expected_case_ids,
-        )
-    )
+    return asyncio.run(_preflight_async(driver, contract, warmup, iters, deadline_unix=deadline_unix))
 
 
 # Prepare — bounded LLM repair loop with snapshot/rollback
@@ -382,17 +369,23 @@ def _ensure_agent_git_workspace(workspace: Path) -> None:
         raise RuntimeError(f"could not commit preparation workspace: {output}")
 
 
+@dataclass(frozen=True)
+class _AuthoringTurn:
+    """One driver-authoring turn: where it runs, what it is told, its budget and what it may touch."""
+
+    workspace: Path
+    prompt: str
+    timeout_sec: float
+    target_files: Sequence[str] = ()
+    protected_files: Sequence[str] = ()
+    additional_dirs: list[str] | None = None
+    allow_shell: bool = True
+
+
 async def _run_prepare_agent(
     *,
     config: Config,
-    workspace: Path,
-    system_prompt: str,
-    prompt: str,
-    timeout_sec: float,
-    additional_dirs: list[str] | None = None,
-    allow_shell: bool = True,
-    target_files: list[str] | None = None,
-    protected_files: list[str] | None = None,
+    turn: _AuthoringTurn,
     usage=None,
     progress_log: list[str] | None = None,
 ) -> str:
@@ -400,17 +393,17 @@ async def _run_prepare_agent(
     runtime = with_writable_sandbox(config.agent_runtime())
     backend = create_registered_backend(runtime)
     if backend.capabilities.requires_workspace_cwd:
-        _ensure_agent_git_workspace(workspace)
-    protected_globs = list(dict.fromkeys(Path(path).name for path in (protected_files or []) if path))
+        _ensure_agent_git_workspace(turn.workspace)
+    protected_globs = list(dict.fromkeys(Path(path).name for path in (turn.protected_files or []) if path))
     spec = AgentRunSpec(
-        system_prompt=system_prompt,
-        user_prompt=prompt,
+        system_prompt=_SYSTEM_PROMPT,
+        user_prompt=turn.prompt,
         role="task preparation",
-        cwd=str(workspace),
+        cwd=str(turn.workspace),
         writable=True,
-        timeout_sec=max(1, int(timeout_sec)),
-        additional_directories=[directory for directory in (additional_dirs or []) if directory],
-        target_files=list(target_files or []),
+        timeout_sec=max(1, int(turn.timeout_sec)),
+        additional_directories=[directory for directory in (turn.additional_dirs or []) if directory],
+        target_files=list(turn.target_files or []),
         # Deliberately no driver_script.
         protected_globs=protected_globs,
         allow_dirty_targets=True,
@@ -422,7 +415,7 @@ async def _run_prepare_agent(
             read=True,
             search=True,
             write=True,
-            shell=allow_shell,
+            shell=turn.allow_shell,
             max_turns=50,
             permission_mode=os.environ.get(
                 "FORGE_PERMISSION_MODE",
@@ -434,7 +427,7 @@ async def _run_prepare_agent(
     )
     result = await asyncio.wait_for(
         backend.run(spec, usage=usage),
-        timeout=watchdog_timeout_sec(timeout_sec),
+        timeout=watchdog_timeout_sec(turn.timeout_sec),
     )
     return result.text.strip()
 
@@ -457,15 +450,14 @@ def _is_compile_only_driver(text: str) -> bool:
 
 
 def _build_evidence(
+    task: PreparationTask,
     *,
     workspace: Path,
-    kernel: str,
     driver: str,
-    program_md: str,
-    target_functions: list[str],
-    source_files: list[str],
     preflight: PreflightResult | None,
 ) -> str:
+    kernel, program_md = task.kernel, task.program_md
+    target_functions, source_files = task.target_functions, task.source_files
     kernel_path = _abs(workspace, kernel)
     parts = [
         "## Task metadata",
@@ -539,35 +531,52 @@ def summarize_agent_progress(progress_log: list[str]) -> str:
     return "; ".join(parts[:1]) + ("\n" + parts[1] if len(parts) > 1 else "")
 
 
+@dataclass(frozen=True)
+class PreparationTask:
+    """The task preparation makes conform: its workspace, kernel, driver, guidance, sources and driver contract."""
+
+    workspace_dir: str
+    kernel: str
+    driver: str
+    program_md: str
+    target_functions: list[str]
+    source_files: list[str]
+    snr_threshold: float = DEFAULT_SNR_THRESHOLD_DB
+    invocation_spec_file: str = ""
+    expected_case_ids: list[str] | None = None
+    read_only_files: list[str] | None = None
+    nproc_per_node: int = 1
+
+
+@dataclass(frozen=True)
+class PreparationBudget:
+    """How long preparation may run, and the outer per-kernel deadline that bounds it when set."""
+
+    wall_sec: float = PREPARE_MAX_WALL_SEC
+    deadline_unix: float = 0.0
+
+
 async def prepare_task(
     *,
     config: Config,
-    workspace_dir: str,
-    kernel: str,
-    driver: str,
-    program_md: str,
-    target_functions: list[str],
-    source_files: list[str],
-    kernel_backend: str = "",
-    snr_threshold: float = DEFAULT_SNR_THRESHOLD_DB,
+    task: PreparationTask,
+    budget: PreparationBudget = PreparationBudget(),
     preflight: PreflightResult | None = None,
-    deadline_sec: float = PREPARE_MAX_WALL_SEC,
-    deadline_unix: float = 0.0,
-    invocation_spec_file: str = "",
-    expected_case_ids: list[str] | None = None,
-    read_only_files: list[str] | None = None,
-    nproc_per_node: int = 1,
     usage=None,
 ) -> PrepareResult:
     """Author/repair the driver so the task conforms; roll back on failure."""
 
-    deadline_sec = _preparation_wall(deadline_sec, deadline_unix)
-    workspace = Path(workspace_dir).resolve()
+    kernel, driver, source_files = task.kernel, task.driver, task.source_files
+    invocation_spec_file, nproc_per_node = task.invocation_spec_file, task.nproc_per_node
+    deadline_unix = budget.deadline_unix
+    deadline_sec = _preparation_wall(budget.wall_sec, deadline_unix)
+    workspace = Path(task.workspace_dir).resolve()
     driver_input_path = Path(os.path.abspath(os.path.expanduser(str(_abs(workspace, driver)))))
     driver_path = driver_input_path.resolve(strict=False)
     driver_external = not _driver_is_inside(workspace, driver_input_path, driver_path)
 
-    experiments_dir, audit_dir = _preparation_audit_dir(config)
+    audit_dirs = _preparation_audit_dir(config)
+    audit_dir = audit_dirs.audit_dir
     audit_dir_str = str(audit_dir) if audit_dir is not None else ""
 
     external_transaction: ExternalArtifactTransaction | None = None
@@ -577,10 +586,8 @@ async def prepare_task(
             workspace,
             driver_input_path=driver_input_path,
             driver_path=driver_path,
-            experiments_dir=experiments_dir,
-            audit_dir=audit_dir,
-            read_only_files=read_only_files,
-            invocation_spec_file=invocation_spec_file,
+            audit_dirs=audit_dirs,
+            read_only_paths=[Path(path) for path in [*(task.read_only_files or []), invocation_spec_file] if path],
         )
         if external_transaction is None:
             return PrepareResult(
@@ -619,15 +626,7 @@ async def prepare_task(
     guard = _SourceGuard(workspace, protected)
 
     driver_rel = os.path.relpath(driver_path, agent_workspace)
-    evidence = _build_evidence(
-        workspace=workspace,
-        kernel=kernel,
-        driver=str(driver_path),
-        program_md=program_md,
-        target_functions=target_functions,
-        source_files=source_files,
-        preflight=preflight,
-    )
+    evidence = _build_evidence(task, workspace=workspace, driver=str(driver_path), preflight=preflight)
 
     # Give the agent REAL reference files to Read (copied into the workspace so they are inside its cwd).
     ref_dir = _materialize_reference(workspace)
@@ -661,10 +660,17 @@ async def prepare_task(
             invocation_spec_file,
         )
     invocation_note = _invocation_spec_note(spec_path, agent_workspace)
-    expected_case_ids = list(expected_case_ids or [])
+    contract = DriverContract(
+        snr_threshold=task.snr_threshold,
+        # A produced driver must actually time under a CUDA/HIP graph, not eagerly (nor silently fall back to eager).
+        require_graph=True,
+        require_profile=True,
+        require_ranks=nproc_per_node,
+        expected_case_ids=list(task.expected_case_ids or []),
+    )
     backend_protected_files = [
         *(path.as_posix() for path in protected),
-        *(read_only_files or []),
+        *(task.read_only_files or []),
         *([spec_path.as_posix()] if spec_path is not None else []),
         # Protected rather than merely discouraged: the distributed guarantees
         # are only guarantees while this file is the one KernelForge shipped.
@@ -681,36 +687,27 @@ async def prepare_task(
     canonical_dist_harness = _place_dist_harness(dist_harness_path, nproc_per_node)
     reference_note = reference_prefix + _reference_note(ref_dir, agent_workspace)
 
-    scaffold = _PrepareScaffold(
-        workspace,
-        ref_dir=ref_dir,
-        reference_prefix=reference_prefix,
-        reference_note=reference_note,
+    layout = _PreparationLayout(
+        workspace=workspace,
         agent_workspace=agent_workspace,
         guard=guard,
+        driver_external=driver_external,
         external_transaction=external_transaction,
+        driver_path=driver_path,
         harness_path=harness_path,
-        canonical_harness=canonical_harness if provided_harness else None,
         dist_harness_path=dist_harness_path,
-        canonical_dist_harness=canonical_dist_harness,
         spec_path=spec_path,
-        canonical_spec=canonical_spec,
+        audit_dir_str=audit_dir_str,
     )
-
-    def _finish_success(pf: PreflightResult, attempt_count: int) -> PrepareResult:
-        return _finish_prepared_task(
-            pf,
-            attempt_count,
-            workspace=workspace,
-            guard=guard,
-            driver_external=driver_external,
-            external_transaction=external_transaction,
-            provided_harness=provided_harness,
-            driver_path=driver_path,
-            harness_path=harness_path,
-            spec_path=spec_path,
-            audit_dir_str=audit_dir_str,
-        )
+    scaffold = _PrepareScaffold(
+        layout,
+        reference=_ReferenceBundle(ref_dir, reference_prefix, reference_note),
+        canonical=_CanonicalFiles(
+            harness=canonical_harness if provided_harness else None,
+            dist_harness=canonical_dist_harness,
+            spec=canonical_spec,
+        ),
+    )
 
     start = time.monotonic()
     preflight_deadline_unix = _preflight_deadline(deadline_sec, deadline_unix)
@@ -736,13 +733,9 @@ async def prepare_task(
             # ``_PrepareScaffold.reset``).
             scaffold.open()
             prompt = _build_prompt(
-                evidence,
-                driver_rel,
+                PromptBrief(evidence, driver_rel, invocation_note, _distributed_contract_note(nproc_per_node)),
                 scaffold.reference_note,
-                prior_failure,
-                invocation_note,
-                prior_failure_heading,
-                _distributed_contract_note(nproc_per_node),
+                RetryNote(prior_failure, prior_failure_heading),
             )
             attempt_dir = f"attempt_{attempts:02d}"
             audit.text(f"{attempt_dir}/prompt.md", prompt)
@@ -755,17 +748,18 @@ async def prepare_task(
             try:
                 agent_output = await _run_prepare_agent(
                     config=config,
-                    workspace=agent_workspace,
-                    system_prompt=_SYSTEM_PROMPT,
-                    prompt=prompt,
-                    timeout_sec=attempt_timeout,
-                    additional_dirs=([str(workspace)] if driver_external else None),
-                    allow_shell=not driver_external,
-                    target_files=[
-                        driver_path.as_posix(),
-                        harness_path.as_posix(),
-                    ],
-                    protected_files=backend_protected_files,
+                    turn=_AuthoringTurn(
+                        workspace=agent_workspace,
+                        prompt=prompt,
+                        timeout_sec=attempt_timeout,
+                        target_files=[
+                            driver_path.as_posix(),
+                            harness_path.as_posix(),
+                        ],
+                        protected_files=backend_protected_files,
+                        additional_dirs=([str(workspace)] if driver_external else None),
+                        allow_shell=not driver_external,
+                    ),
                     usage=usage,
                     progress_log=progress_log,
                 )
@@ -791,19 +785,15 @@ async def prepare_task(
                 # The Agent may have completed a valid driver before getting stuck on self-verification.
                 last_pf = await _preflight_async(
                     driver_path.as_posix(),
-                    snr_threshold,
+                    contract,
                     PREFLIGHT_WARMUP,
                     PREFLIGHT_ITERS,
-                    require_graph=True,
-                    require_profile=True,
-                    require_ranks=nproc_per_node,
                     deadline_unix=preflight_deadline_unix,
-                    expected_case_ids=expected_case_ids,
                 )
                 audit.driver(f"{attempt_dir}/driver_after_timeout_preflight.py")
                 audit.json(f"{attempt_dir}/preflight.json", asdict(last_pf))
                 if last_pf.ok:
-                    return _finish_success(last_pf, attempts)
+                    return _finish_prepared_task(last_pf, attempts, layout, provided_harness=provided_harness)
                 prior_failure_heading = RETRY_HEADING_DEFAULT if driver_edited else RETRY_HEADING_NO_EDIT
                 prior_failure = _timeout_retry_prompt(
                     last_pf,
@@ -818,6 +808,7 @@ async def prepare_task(
                 starved_retry_sec = starved
                 break
             except Exception as exc:  # noqa: BLE001
+                log.warning("task preparation agent attempt %d failed: %s", attempts, exc)
                 audit.driver(f"{attempt_dir}/driver_at_exception.py")
                 driver_edited = audit.driver_edited(digest_before)
                 edited_any_attempt = edited_any_attempt or driver_edited
@@ -863,23 +854,17 @@ async def prepare_task(
             # before we judge the driver.
             scaffold.reset()
 
-            # require_graph=True: a produced driver must actually time under a CUDA/HIP graph, not eagerly (nor
-            # silently fall back to eager).
             last_pf = await _preflight_async(
                 driver_path.as_posix(),
-                snr_threshold,
+                contract,
                 PREFLIGHT_WARMUP,
                 PREFLIGHT_ITERS,
-                require_graph=True,
-                require_profile=True,
-                require_ranks=nproc_per_node,
                 deadline_unix=preflight_deadline_unix,
-                expected_case_ids=expected_case_ids,
             )
             audit.driver(f"{attempt_dir}/driver_at_preflight.py")
             audit.json(f"{attempt_dir}/preflight.json", asdict(last_pf))
             if last_pf.ok:
-                return _finish_success(last_pf, attempts)
+                return _finish_prepared_task(last_pf, attempts, layout, provided_harness=provided_harness)
             prior_failure_heading = RETRY_HEADING_DEFAULT if driver_edited else RETRY_HEADING_NO_EDIT
             prior_failure = _preflight_retry_prompt(last_pf, driver_rel=driver_rel, driver_edited=driver_edited)
     except ScaffoldRetirementError as exc:
@@ -902,11 +887,13 @@ async def prepare_task(
         final_preflight=last_pf,
         message=_prepare_failure_message(
             guard,
-            scaffold_error=scaffold_error,
-            attempts=attempts,
-            starved_retry_sec=starved_retry_sec,
-            edited_any_attempt=edited_any_attempt,
-            external_rollback_error=external_rollback_error,
+            _PrepareFailure(
+                scaffold_error=scaffold_error,
+                attempts=attempts,
+                starved_retry_sec=starved_retry_sec,
+                edited_any_attempt=edited_any_attempt,
+                external_rollback_error=external_rollback_error,
+            ),
         ),
         audit_dir=audit_dir_str,
     )
@@ -940,7 +927,15 @@ def _driver_is_inside(workspace: Path, driver_input_path: Path, driver_path: Pat
     return True
 
 
-def _preparation_audit_dir(config: Config) -> tuple[Path | None, Path | None]:
+@dataclass(frozen=True)
+class _AuditDirs:
+    """Where a preparation's experiments live, and its audit trail when that directory could be created."""
+
+    experiments_dir: Path | None
+    audit_dir: Path | None
+
+
+def _preparation_audit_dir(config: Config) -> _AuditDirs:
     """Where this preparation writes its experiments and its audit trail, as far as each resolves.
 
     They are reported separately because they fail separately: a directory that
@@ -954,8 +949,8 @@ def _preparation_audit_dir(config: Config) -> tuple[Path | None, Path | None]:
         audit_dir = experiments_dir / "task_preparation"
         audit_dir.mkdir(parents=True, exist_ok=True)
     except (AttributeError, OSError, TypeError, ValueError):
-        return experiments_dir, None
-    return experiments_dir, audit_dir
+        return _AuditDirs(experiments_dir, None)
+    return _AuditDirs(experiments_dir, audit_dir)
 
 
 def _stage_external_driver(
@@ -963,13 +958,12 @@ def _stage_external_driver(
     *,
     driver_input_path: Path,
     driver_path: Path,
-    experiments_dir: Path | None,
-    audit_dir: Path | None,
-    read_only_files: list[str] | None,
-    invocation_spec_file: str,
+    audit_dirs: _AuditDirs,
+    read_only_paths: list[Path],
 ) -> tuple[ExternalArtifactTransaction | None, str]:
     """Stage a driver that lives outside the workspace, or say why it cannot be staged."""
     external_exclusions = [workspace]
+    experiments_dir, audit_dir = audit_dirs.experiments_dir, audit_dirs.audit_dir
     if experiments_dir is not None:
         try:
             experiments_rel = experiments_dir.resolve().relative_to(driver_path.parent)
@@ -982,13 +976,12 @@ def _stage_external_driver(
             # Keep the conservative workspace exclusion when the external experiments path cannot be relativized
             # safely.
             pass
-    protected_external_inputs = [Path(path) for path in [*(read_only_files or []), invocation_spec_file] if path]
     try:
         transaction = ExternalArtifactTransaction(
             driver_path=driver_input_path,
             excluded_paths=external_exclusions,
             passthrough_paths=[workspace],
-            read_only_paths=protected_external_inputs,
+            read_only_paths=read_only_paths,
         )
     except ExternalArtifactError as exc:
         return None, f"could not stage external driver artifacts: {exc}"
@@ -1156,6 +1149,40 @@ def _place_dist_harness(dist_harness_path: Path, nproc_per_node: int) -> str | N
     return canonical_dist_harness
 
 
+@dataclass(frozen=True)
+class _PreparationLayout:
+    """Where one preparation runs: the workspace, the agent's tree, the guard and the files it authors."""
+
+    workspace: Path
+    agent_workspace: Path
+    guard: "_SourceGuard"
+    driver_external: bool
+    external_transaction: ExternalArtifactTransaction | None
+    driver_path: Path
+    harness_path: Path
+    dist_harness_path: Path
+    spec_path: Path | None
+    audit_dir_str: str
+
+
+@dataclass(frozen=True)
+class _ReferenceBundle:
+    """The authoring-only reference bundle and the prompt note that points the agent at it."""
+
+    ref_dir: Path | None
+    prefix: str
+    note: str
+
+
+@dataclass(frozen=True)
+class _CanonicalFiles:
+    """The shipped contents restored after every attempt: graph harness, distributed harness and spec."""
+
+    harness: str | None
+    dist_harness: str | None
+    spec: str
+
+
 class _PrepareScaffold:
     """The authoring-only reference bundle, and the state the driver is judged in.
 
@@ -1164,36 +1191,20 @@ class _PrepareScaffold:
     is left behind after a reset is exactly what the loop's baseline will run.
     """
 
-    def __init__(
-        self,
-        workspace: Path,
-        *,
-        ref_dir: Path | None,
-        reference_prefix: str,
-        reference_note: str,
-        agent_workspace: Path,
-        guard: "_SourceGuard",
-        external_transaction,
-        harness_path: Path,
-        canonical_harness: str | None,
-        dist_harness_path: Path,
-        canonical_dist_harness: str | None,
-        spec_path: Path | None,
-        canonical_spec: str,
-    ) -> None:
-        self._workspace = workspace
-        self._ref_dir = ref_dir
-        self._reference_prefix = reference_prefix
-        self.reference_note = reference_note
-        self._agent_workspace = agent_workspace
-        self._guard = guard
-        self._external_transaction = external_transaction
-        self._harness_path = harness_path
-        self._canonical_harness = canonical_harness
-        self._dist_harness_path = dist_harness_path
-        self._canonical_dist_harness = canonical_dist_harness
-        self._spec_path = spec_path
-        self._canonical_spec = canonical_spec
+    def __init__(self, layout: _PreparationLayout, *, reference: _ReferenceBundle, canonical: _CanonicalFiles) -> None:
+        self._workspace = layout.workspace
+        self._ref_dir = reference.ref_dir
+        self._reference_prefix = reference.prefix
+        self.reference_note = reference.note
+        self._agent_workspace = layout.agent_workspace
+        self._guard = layout.guard
+        self._external_transaction = layout.external_transaction
+        self._harness_path = layout.harness_path
+        self._canonical_harness = canonical.harness
+        self._dist_harness_path = layout.dist_harness_path
+        self._canonical_dist_harness = canonical.dist_harness
+        self._spec_path = layout.spec_path
+        self._canonical_spec = canonical.spec
 
     def open(self) -> None:
         """Put the authoring-only reference bundle back for the next attempt."""
@@ -1240,18 +1251,13 @@ class _PrepareScaffold:
 def _finish_prepared_task(
     pf: PreflightResult,
     attempt_count: int,
+    layout: _PreparationLayout,
     *,
-    workspace: Path,
-    guard: "_SourceGuard",
-    driver_external: bool,
-    external_transaction,
     provided_harness: bool,
-    driver_path: Path,
-    harness_path: Path,
-    spec_path: Path | None,
-    audit_dir_str: str,
 ) -> PrepareResult:
     """Sign off a driver that conforms, by whichever route this task is delivered."""
+    guard, external_transaction, audit_dir_str = layout.guard, layout.external_transaction, layout.audit_dir_str
+    driver_external = layout.driver_external
     if driver_external:
         # Publish the complete validated driver/helper change set from the isolated staging tree.
         guard.rollback()
@@ -1261,11 +1267,11 @@ def _finish_prepared_task(
         # Drop an unused provided harness so it does not become persistent scaffolding when the driver does not
         # import it.
         try:
-            uses_harness = "graph_harness" in driver_path.read_text()
+            uses_harness = "graph_harness" in layout.driver_path.read_text()
         except OSError:
             uses_harness = True
         if not uses_harness:
-            _safe_unlink(harness_path)
+            _safe_unlink(layout.harness_path)
     if guard.unrestored:
         # Signing off here would carry the agent's edit of the source under optimization into the pristine
         # commit, and every measurement after it would judge a kernel the caller never wrote.
@@ -1281,14 +1287,7 @@ def _finish_prepared_task(
         )
     if driver_external:
         return _publish_external_preparation(external_transaction, pf, attempt_count, audit_dir_str)
-    return _commit_prepared_task(
-        workspace,
-        guard,
-        spec_path=spec_path,
-        pf=pf,
-        attempt_count=attempt_count,
-        audit_dir_str=audit_dir_str,
-    )
+    return _commit_prepared_task(layout, pf=pf, attempt_count=attempt_count)
 
 
 def _preflight_deadline(deadline_sec: float, deadline_unix: float) -> float:
@@ -1411,21 +1410,25 @@ def _close_external_transaction(external_transaction, guard: "_SourceGuard") -> 
     return error
 
 
-def _prepare_failure_message(
-    guard: "_SourceGuard",
-    *,
-    scaffold_error: str,
-    attempts: int,
-    starved_retry_sec: float,
-    edited_any_attempt: bool,
-    external_rollback_error: str,
-) -> str:
+@dataclass(frozen=True)
+class _PrepareFailure:
+    """How a preparation ended without a conforming driver."""
+
+    scaffold_error: str
+    attempts: int
+    starved_retry_sec: float
+    edited_any_attempt: bool
+    external_rollback_error: str
+
+
+def _prepare_failure_message(guard: "_SourceGuard", failure: _PrepareFailure) -> str:
     """Why preparation failed, led by whichever fact the operator has to deal with first."""
     if guard.unrestored:
         # The operator has a file on disk that is not theirs any more, which they have to deal with before any
         # reason the driver was refused.
         log.error("%s", guard.unrestored_message())
         return guard.unrestored_message()
+    scaffold_error, attempts, starved_retry_sec = failure.scaffold_error, failure.attempts, failure.starved_retry_sec
     if scaffold_error:
         # The preflight reasons describe a driver judged in a state that was never valid, so quoting them first
         # would send the operator after the driver.
@@ -1438,7 +1441,7 @@ def _prepare_failure_message(
             "minimum retry budget, so no further attempt was started — raise "
             "the per-kernel deadline to give preparation more room"
         )
-    elif edited_any_attempt or not attempts:
+    elif failure.edited_any_attempt or not attempts:
         reason = "could not produce a conforming driver within the budget"
     else:
         reason = (
@@ -1446,25 +1449,18 @@ def _prepare_failure_message(
             "the driver is unchanged, so the preflight reasons below describe "
             "the ORIGINAL driver, not a failed repair"
         )
-    if external_rollback_error:
-        reason += f"; external artifact rollback failed: {external_rollback_error}"
+    if failure.external_rollback_error:
+        reason += f"; external artifact rollback failed: {failure.external_rollback_error}"
     return reason
 
 
-def _commit_prepared_task(
-    workspace: Path,
-    guard: "_SourceGuard",
-    *,
-    spec_path: Path | None,
-    pf,
-    attempt_count: int,
-    audit_dir_str: str,
-) -> PrepareResult:
+def _commit_prepared_task(layout: _PreparationLayout, *, pf, attempt_count: int) -> PrepareResult:
     """Make the prepared driver, and everything it reads at runtime, part of pristine.
 
     IterationLoop captures its base SHA from this commit, so anything left out
     of it is not there for the measurements that follow.
     """
+    workspace, guard, spec_path, audit_dir_str = layout.workspace, layout.guard, layout.spec_path, layout.audit_dir_str
     stage_code, stage_out = _stage_preparation_changes(workspace, guard.pre_untracked)
     if stage_code != 0:
         guard.rollback()

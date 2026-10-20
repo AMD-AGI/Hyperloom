@@ -20,7 +20,8 @@ from kernelforge.knowledge.kb_store.identity.implementation import (
     canonical_editable_source_map,
     implementation_signature,
 )
-from kernelforge.knowledge.kb_store.identity.run import PATCH_ARTIFACT
+from kernelforge.knowledge.kb_store.identity.run import PATCH_ARTIFACT, LoopKernel
+from kernelforge.knowledge.kb_store.record_store import KBStoreError, RewriteRecordError
 
 #: Workspace-relative home for the candidates a warm start materialized.
 _CANDIDATE_REL = "forge_experiments/kb_candidates"
@@ -70,32 +71,12 @@ def _bundle_patch(bundle: _CandidateBundle) -> str:
         return ""
 
 
-def read_best_solution(
-    *,
-    config,
-    kernel_path: str,
-    kernel_source: str,
-    kernel_backend: str,
-    target_functions: list[str] | None = None,
-    framework: str = "",
-    source_files: list[str] | None = None,
-    workspace: str = "",
-    operator_name: str = "",
-) -> dict[str, Any] | None:
+def read_best_solution(*, config, kernel: LoopKernel) -> dict[str, Any] | None:
     """Return the best prior solution for this operator on this GPU, or None."""
     try:
-        return _read_best_solution_impl(
-            config=config,
-            kernel_path=kernel_path,
-            kernel_source=kernel_source,
-            kernel_backend=kernel_backend,
-            target_functions=target_functions,
-            framework=framework,
-            source_files=source_files,
-            workspace=workspace,
-            operator_name=operator_name,
-        )
-    except Exception as exc:  # noqa: BLE001 - warm-start read must never break a run
+        top = _read_top_solutions_impl(config=config, kernel=kernel, top_k=1)
+        return top[0] if top else None
+    except (KBStoreError, RewriteRecordError, OSError, ValueError) as exc:
         log.warning("experience read failed (cold start): %r", exc)
         return None
 
@@ -103,15 +84,8 @@ def read_best_solution(
 def read_top_solutions(
     *,
     config,
-    kernel_path: str,
-    kernel_source: str,
-    kernel_backend: str,
-    target_functions: list[str] | None = None,
-    framework: str = "",
+    kernel: LoopKernel,
     top_k: int = 3,
-    source_files: list[str] | None = None,
-    workspace: str = "",
-    operator_name: str = "",
     read_status: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Return up to ``top_k`` prior solutions for this operator."""
@@ -119,18 +93,11 @@ def read_top_solutions(
     try:
         return _read_top_solutions_impl(
             config=config,
-            kernel_path=kernel_path,
-            kernel_source=kernel_source,
-            kernel_backend=kernel_backend,
-            target_functions=target_functions,
-            framework=framework,
+            kernel=kernel,
             top_k=max(1, int(top_k)),
-            source_files=source_files,
-            workspace=workspace,
-            operator_name=operator_name,
             read_status=read_status,
         )
-    except Exception as exc:  # noqa: BLE001 - warm-start read must never break a run
+    except (KBStoreError, RewriteRecordError, OSError, ValueError) as exc:
         error = sanitize_read_error(exc, secrets=kb_store_secrets(config))
         log.warning("experience top-k read failed (cold start): %s", error)
         _set_read_status(
@@ -141,36 +108,8 @@ def read_top_solutions(
         return []
 
 
-def _read_best_solution_impl(
-    *,
-    config,
-    kernel_path,
-    kernel_source,
-    kernel_backend,
-    target_functions=None,
-    framework="",
-    source_files=None,
-    workspace="",
-    operator_name="",
-):
-    """Single highest-speedup solution — thin wrapper over the top-k impl."""
-    top = _read_top_solutions_impl(
-        config=config,
-        kernel_path=kernel_path,
-        kernel_source=kernel_source,
-        kernel_backend=kernel_backend,
-        target_functions=target_functions,
-        framework=framework,
-        top_k=1,
-        source_files=source_files,
-        workspace=workspace,
-        operator_name=operator_name,
-    )
-    return top[0] if top else None
-
-
 def _build_solution_dict(
-    *, canonical_id, prior, patch, consumer_signature, consumer_identity, consumer_source_map
+    *, canonical_id, prior, consumer_signature, consumer_identity, consumer_source_map
 ) -> dict[str, Any]:
     """Assemble the warm-start payload for one recorded candidate."""
     attrs = dict(prior.value)
@@ -191,7 +130,7 @@ def _build_solution_dict(
         "consumer_implementation_identity": consumer_identity,
         "consumer_source_map": consumer_source_map,
         "implementation_match": implementation_match,
-        "patch_content": patch,
+        "patch_content": _bundle_patch(prior),
         "strategy": str(attrs.get("strategy") or ""),
         "recipe": str(attrs.get("recipe") or ""),
         "lessons": str(attrs.get("lessons") or ""),
@@ -199,20 +138,7 @@ def _build_solution_dict(
     }
 
 
-def _read_top_solutions_impl(
-    *,
-    config,
-    kernel_path,
-    kernel_source,
-    kernel_backend,
-    target_functions=None,
-    framework="",
-    top_k=3,
-    source_files=None,
-    workspace="",
-    operator_name="",
-    read_status=None,
-):
+def _read_top_solutions_impl(*, config, kernel: LoopKernel, top_k=3, read_status=None):
     # Must be the same dimension the write side addresses by, or the read resolves to an address no run ever wrote to
     # and every start looks cold.
     gpu_type = str(getattr(config, "gpu_type", "") or "").strip()
@@ -225,14 +151,8 @@ def _read_top_solutions_impl(
     from kernelforge.knowledge.kb_store.identity.run import resolve_loop_identity
 
     identity, _concrete_op, framework = resolve_loop_identity(
-        kernel_path=kernel_path,
-        kernel_source=kernel_source,
-        kernel_backend=kernel_backend,
+        kernel,
         gpu_type=gpu_type,
-        target_functions=target_functions,
-        source_files=source_files,
-        framework=framework,
-        operator_name=operator_name,
         producer=getattr(config, "producer", ""),
     )
 
@@ -246,17 +166,17 @@ def _read_top_solutions_impl(
         _set_read_status(read_status, kb.reason or "not_configured")
         return []
 
-    consumer_workspace = workspace or str(Path(kernel_path).resolve().parent)
+    consumer_workspace = kernel.workspace or str(Path(kernel.kernel_path).resolve().parent)
     consumer_signature, consumer_identity = implementation_signature(
         workspace=consumer_workspace,
-        kernel_path=kernel_path,
-        source_files=source_files,
+        kernel_path=kernel.kernel_path,
+        source_files=kernel.source_files,
         framework=framework,
     )
     consumer_source_map = canonical_editable_source_map(
         workspace=consumer_workspace,
-        kernel_path=kernel_path,
-        source_files=source_files,
+        kernel_path=kernel.kernel_path,
+        source_files=kernel.source_files,
         framework=framework,
     )
     log.info("experience read: identity=%s", kb.canonical_id)
@@ -264,7 +184,7 @@ def _read_top_solutions_impl(
     # Materialize the Top-N and read them back off disk: that is the SDK's normal consumer path, it downloads each
     # selected session once under its integrity checks, and it leaves the candidates where a person debugging the run
     # can look at them.
-    with _candidate_destination(workspace) as destination:
+    with _candidate_destination(kernel.workspace) as destination:
         candidates = kb.read_top_n(destination, limit=top_k)
         if kb.reason:
             # The facade swallows transport failures into ``reason``; surface it as a read error so a cold start is
@@ -309,7 +229,6 @@ def _read_top_solutions_impl(
             _build_solution_dict(
                 canonical_id=selected_kb.canonical_id,
                 prior=bundle,
-                patch=_bundle_patch(bundle),
                 consumer_signature=consumer_signature,
                 consumer_identity=consumer_identity,
                 consumer_source_map=consumer_source_map,

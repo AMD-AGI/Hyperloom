@@ -24,7 +24,7 @@ from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     DETOKENIZER_STALL_RETURNCODE,
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
-    _scan_logs_increment,
+    _LogCursor,
     _scan_server_log_increment,
     kill_my_spawned_server,
     new_session_kwargs,
@@ -161,15 +161,17 @@ def test_watchdog_clock_boundaries(monkeypatch, tmp_path, reused, ready, log, no
             raise subprocess.TimeoutExpired(self.args, timeout)
 
     monkeypatch.setattr(sk.time, "monotonic", lambda: now[0])
-    monkeypatch.setattr(sk, "_scan_logs_increment", lambda *args: sk._LogScan(ready, False, False, noise, False))
+    monkeypatch.setattr(sk._LogCursor, "advance", lambda *args: sk._LogScan(ready, False, False, noise, False))
     error = sk._ServerStalledDetected if expected == 600 else subprocess.TimeoutExpired
     with pytest.raises(error):
         sk._communicate_with_watchdog(
             Proc(),
-            hard_timeout=7800,
-            silence_timeout_sec=600,
-            server_log_path=str(tmp_path / "server.log") if log else None,
-            server_already_ready=reused,
+            sk._WatchedRound(
+                hard_timeout=7800,
+                server_log_path=str(tmp_path / "server.log") if log else None,
+                silence_timeout_sec=600,
+                server_already_ready=reused,
+            ),
             recorders=sk._RecorderFanout([]),
         )
     assert now[0] == expected
@@ -208,11 +210,13 @@ def test_unobserved_reuse_keeps_other_stop_gates_and_telemetry(monkeypatch, tmp_
     with pytest.raises(error[gate]):
         sk._communicate_with_watchdog(
             Proc(),
-            hard_timeout=10,
-            silence_timeout_sec=1,
-            server_log_path=str(tmp_path / "server.log"),
-            server_already_ready=True,
-            session_deadline_sec=3 if gate == "session" else None,
+            sk._WatchedRound(
+                hard_timeout=10,
+                server_log_path=str(tmp_path / "server.log"),
+                silence_timeout_sec=1,
+                server_already_ready=True,
+                session_deadline_sec=3 if gate == "session" else None,
+            ),
             cancel_scope=scope,
             recorders=sk._RecorderFanout([recorder]),
         )
@@ -232,7 +236,7 @@ def test_exited_process_wins_over_expired_gates(monkeypatch):
             return "finished", ""
 
     out = sk._communicate_with_watchdog(
-        Proc(), hard_timeout=0, session_deadline_sec=-1, recorders=sk._RecorderFanout([])
+        Proc(), sk._WatchedRound(hard_timeout=0, session_deadline_sec=-1), recorders=sk._RecorderFanout([])
     )
     assert out == ("finished", "")
 
@@ -242,18 +246,18 @@ def test_log_rotation_and_truncation_do_not_invent_activity(tmp_path):
 
     path = tmp_path / "server.log"
     path.write_text("x" * 100, encoding="utf-8")
-    offsets, residuals, identities = {}, {}, {}
-    sk._scan_logs_increment(str(path), offsets, residuals, identities)
+    cursor = sk._LogCursor()
+    cursor.advance(str(path))
     path.write_text("Application startup complete\n", encoding="utf-8")
-    scan = sk._scan_logs_increment(str(path), offsets, residuals, identities)
+    scan = cursor.advance(str(path))
     assert not scan.grew and not scan.saw_ready
     path.rename(tmp_path / "old.log")
     path.write_text("Application startup complete\n" * 100, encoding="utf-8")
-    scan = sk._scan_logs_increment(str(path), offsets, residuals, identities)
+    scan = cursor.advance(str(path))
     assert not scan.grew and not scan.saw_ready
     with path.open("a", encoding="utf-8") as stream:
         stream.write("new bytes\n")
-    assert sk._scan_logs_increment(str(path), offsets, residuals, identities).grew
+    assert cursor.advance(str(path)).grew
 
 
 def test_hard_timeout_preserves_partial_captured_output():
@@ -1099,7 +1103,7 @@ def test_scan_server_log_increment_detects_ready_and_progress(tmp_path):
     assert fifth.saw_progress is False and fifth.offset == log_path.stat().st_size
 
 
-def test_scan_logs_increment_reads_nested_stderr_for_eval_start(tmp_path):
+def test_log_cursor_reads_nested_stderr_for_eval_start(tmp_path):
     """The real Magpie layout: the caller passes ``<output_dir>/server.log``,
     which does not exist, while the engine log and the eval-start marker live in
     a ``benchmark_*/`` subdir -- the marker only ever reaching stderr."""
@@ -1111,22 +1115,22 @@ def test_scan_logs_increment_reads_nested_stderr_for_eval_start(tmp_path):
     passed = str(output_dir / "server.log")
     assert not Path(passed).exists()
 
-    offsets: dict[str, int] = {}
-    first = _scan_logs_increment(passed, offsets)
+    cursor = _LogCursor()
+    first = cursor.advance(passed)
     assert first.saw_ready is True and first.saw_eval_start is False and first.grew is True
 
     # The marker lands in stderr, never in server.log.
     with (bench / "benchmark_stderr.log").open("a") as f:
         f.write("HYPERLOOM_EVAL_START\n")
-    second = _scan_logs_increment(passed, offsets)
+    second = cursor.advance(passed)
     assert second.saw_eval_start is True and second.saw_ready is False and second.grew is True
 
     # Nothing new appended: no re-trigger, offsets stay put.
-    third = _scan_logs_increment(passed, offsets)
+    third = cursor.advance(passed)
     assert third.saw_eval_start is False and third.grew is False
 
 
-def test_scan_logs_increment_tells_the_childs_own_log_from_the_servers(tmp_path):
+def test_log_cursor_tells_the_childs_own_log_from_the_servers(tmp_path):
     """Only one of the resolved logs is written by the process being waited on.
 
     ``server.log`` is the inference server's; ``benchmark_stderr.log`` is where
@@ -1142,17 +1146,17 @@ def test_scan_logs_increment_tells_the_childs_own_log_from_the_servers(tmp_path)
     server_log.write_text("Application startup complete\n")
     child_log.write_text("running benchmark\n")
     passed = str(tmp_path / "server.log")
-    offsets: dict[str, int] = {}
-    _scan_logs_increment(passed, offsets)
+    cursor = _LogCursor()
+    cursor.advance(passed)
 
     with server_log.open("a") as f:
         f.write("[atom 22:29:41] Scheduled prefill batch: 4 reqs, 3707 new tokens\n")
-    server_only = _scan_logs_increment(passed, offsets)
+    server_only = cursor.advance(passed)
     assert server_only.grew is True and server_only.child_spoke is False
 
     with child_log.open("a") as f:
         f.write("bench: 128/2000 requests done\n")
-    child_only = _scan_logs_increment(passed, offsets)
+    child_only = cursor.advance(passed)
     assert child_only.grew is True and child_only.child_spoke is True
 
 
@@ -1166,18 +1170,18 @@ def test_health_probe_lines_are_not_server_activity(tmp_path):
     """
     log_path = tmp_path / "server.log"
     log_path.write_text("Application startup complete\n", encoding="utf-8")
-    offsets: dict[str, int] = {}
-    _scan_logs_increment(str(log_path), offsets)
+    cursor = _LogCursor()
+    cursor.advance(str(log_path))
 
     with log_path.open("a", encoding="utf-8") as f:
         f.write('INFO:     127.0.0.1:45518 - "GET /metrics HTTP/1.1" 200 OK\n')
         f.write('INFO:     127.0.0.1:45520 - "GET /health HTTP/1.1" 200 OK\n')
-    assert _scan_logs_increment(str(log_path), offsets).grew is False
+    assert cursor.advance(str(log_path)).grew is False
 
     with log_path.open("a", encoding="utf-8") as f:
         f.write('INFO:     127.0.0.1:45522 - "GET /metrics HTTP/1.1" 200 OK\n')
         f.write("[atom 23:29:42] Request 639 arrived, input tokens: 1295, pending requests: 64\n")
-    assert _scan_logs_increment(str(log_path), offsets).grew is True
+    assert cursor.advance(str(log_path)).grew is True
 
 
 def test_run_with_session_kill_detok_stall_reaps_ready_but_silent_server(tmp_path):

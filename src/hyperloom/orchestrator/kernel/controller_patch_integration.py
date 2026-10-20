@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import subprocess
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
@@ -31,7 +32,9 @@ from .controller_publication import (
     discover_controller_patch_dirs,
     load_controller_publication,
 )
-from .patch_conflict_merge import apply_patch_resolving_conflicts
+from .patch_conflict_merge import LandingContext, apply_patch_resolving_conflicts
+
+log = logging.getLogger(__name__)
 
 _CONTROLLER_SOURCE = "kernel_rewrite_controller"
 _CONTROLLER_BACKEND = "forge"
@@ -124,7 +127,7 @@ def _head_commit(repo: Path) -> str:
     """Return the repository's HEAD, or an empty string when it cannot be read."""
     try:
         return _git_output(repo, "rev-parse", "HEAD").lower()
-    except Exception:  # noqa: BLE001 - an unreadable HEAD reads as "no commit landed"
+    except (OSError, subprocess.SubprocessError):  # an unreadable HEAD reads as "no commit landed"
         return ""
 
 
@@ -132,7 +135,7 @@ def _tracked_at_head(repo: Path, relative: str) -> bool:
     """Whether HEAD carries ``relative``, i.e. whether it has a version to restore."""
     try:
         _git_output(repo, "cat-file", "-e", f"HEAD:{relative}")
-    except Exception:  # noqa: BLE001 - anything but a hit means "no version at HEAD"
+    except (OSError, subprocess.SubprocessError):  # a failed lookup means "no version at HEAD"
         return False
     return True
 
@@ -372,10 +375,12 @@ async def integrate_controller_patches(
         merge = await apply_patch_resolving_conflicts(
             repo,
             publication.patch_path,
-            operator_id=publication.operator_id,
-            landed_operator_ids=[operator for operator, _ in landed.get(repo, [])],
-            landed_patches=[patch for _, patch in landed.get(repo, [])],
-            intent=f"{publication.operator_name} in {publication.kernel_path}",
+            LandingContext(
+                operator_id=publication.operator_id,
+                landed_operator_ids=[operator for operator, _ in landed.get(repo, [])],
+                landed_patches=[patch for _, patch in landed.get(repo, [])],
+                intent=f"{publication.operator_name} in {publication.kernel_path}",
+            ),
         )
         if not merge.applied:
             result = PatchIntegrationResult(
@@ -394,7 +399,8 @@ async def integrate_controller_patches(
         rounds_run += 1
         try:
             validation = await validate(publication)
-        except Exception as error:  # noqa: BLE001 - translated into a skipped_invalid result
+        except Exception as error:  # noqa: BLE001 - translated into a reverted_e2e_failed result
+            log.warning("E2E validation raised for %s: %s", publication.operator_id, error)
             result = PatchIntegrationResult(
                 operator_id=publication.operator_id,
                 status="reverted_e2e_failed",
@@ -457,7 +463,8 @@ async def integrate_controller_patches(
         try:
             await record_keep(_keep_result(publication, validation, keep_commit))
             shared_state.save(Path(session_dir))
-        except Exception as error:  # noqa: BLE001 - KEEP is already committed to Git
+        except Exception as error:  # noqa: BLE001 - KEEP is already committed to Git; record_keep runs the whole writeback
+            log.warning("KEEP %s committed but recording it failed: %s", publication.operator_id, error)
             record_reason = f"Git KEEP committed; SharedState recording failed: {error}"
         else:
             record_reason = ""

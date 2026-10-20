@@ -21,6 +21,7 @@ from ._vendor.kb_store_client import KBStoreClient, KBStoreError
 from .models import (
     MAX_FILE_BYTES,
     MAX_FILES,
+    KBSelectionProfile,
     KnowledgeBundle,
     RecipeScope,
     RemoteRecipeValidationError,
@@ -450,19 +451,16 @@ class RemoteRecipeClient:
         canonical_id: str,
         session_id: str,
         bundle: KnowledgeBundle,
+        profile: KBSelectionProfile,
         *,
-        scope: RecipeScope,
         files_dir: Path,
-        primary_metric: str,
-        primary_value: float,
-        objective_schema: str = "",
     ) -> RemoteWriteResult:
         """Write files, replace knowledge, then promote on the mode's primary metric."""
-        if not primary_metric:
+        if not profile.primary_metric:
             raise RemoteRecipeValidationError("primary_metric is required")
-        if not math.isfinite(primary_value):
-            raise RemoteRecipeValidationError(f"{primary_metric} must be finite, got {primary_value!r}")
-        score = primary_value
+        if not math.isfinite(profile.primary_value):
+            raise RemoteRecipeValidationError(f"{profile.primary_metric} must be finite, got {profile.primary_value!r}")
+        score = profile.primary_value
 
         def outcome(status: str, reason: str = "") -> RemoteWriteResult:
             return RemoteWriteResult(
@@ -470,7 +468,7 @@ class RemoteRecipeClient:
                 reason=reason,
                 canonical_id=canonical_id,
                 session_id=session_id,
-                primary_metric=primary_metric,
+                primary_metric=profile.primary_metric,
                 primary_value=score,
             )
 
@@ -482,13 +480,13 @@ class RemoteRecipeClient:
                 "Remote Recipe KB rejected a session with no replay material: cid=%s sid=%s %s=%s",
                 canonical_id,
                 session_id,
-                primary_metric,
+                profile.primary_metric,
                 score,
             )
             return outcome("skipped", "empty_replay_material")
-        scope_payload = scope.as_dict()
+        scope_payload = profile.scope.as_dict()
         rollup = self.store.get_rollup(canonical_id, scope=scope_payload)
-        _, prior, _ = _champion(rollup, validate_metric=True, expected_metric=primary_metric)
+        _, prior, _ = _champion(rollup, validate_metric=True, expected_metric=profile.primary_metric)
         if score <= prior:
             return outcome("skipped", "not_better_than_champion")
         expected = {artifact.path for artifact in bundle.artifacts}
@@ -510,13 +508,13 @@ class RemoteRecipeClient:
             session_id=session_id,
             mode="replace",
             scope=scope_payload,
-            objective_schema=objective_schema,
+            objective_schema=profile.objective_schema,
         )
         try:
             self.store.set_champion(
                 canonical_id,
                 session_id,
-                metric=primary_metric,
+                metric=profile.primary_metric,
                 value=score,
                 scope=scope_payload,
             )
@@ -526,13 +524,13 @@ class RemoteRecipeClient:
             _, winner, _ = _champion(
                 self.store.get_rollup(canonical_id, scope=scope_payload),
                 validate_metric=True,
-                expected_metric=primary_metric,
+                expected_metric=profile.primary_metric,
             )
             if winner < score:
                 self.store.set_champion(
                     canonical_id,
                     session_id,
-                    metric=primary_metric,
+                    metric=profile.primary_metric,
                     value=score,
                     scope=scope_payload,
                 )

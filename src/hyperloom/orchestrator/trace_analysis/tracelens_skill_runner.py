@@ -373,18 +373,60 @@ def discover_capture_folder(trace_input: Path, trace_files: list[Path]) -> Path 
     return None
 
 
-def build_orchestrator_prompt(
-    *,
-    skill_path: Path,
-    trace_path: Path,
-    output_dir: Path,
-    tracelens_root: Path,
-    tracelens_internal_root: Path | None,
-    platform: str,
-    framework: str,
-    analysis_mode: str,
-    capture_folder: Path | None,
-) -> str:
+@dataclass(frozen=True)
+class TraceLensSkillRequest:
+    """The inputs one TraceLens skill run pins in its prompt.
+
+    Attributes:
+        skill_path: Path to the TraceLens skill file to follow.
+        trace_path: Path to the trace file to analyze.
+        output_dir: Directory where TraceLens outputs are written.
+        tracelens_root: The TraceLens project root.
+        tracelens_internal_root: The TraceLens-internal root, ``None`` in OSS-only mode.
+        platform: The target platform string.
+        framework: The framework that produced the trace.
+        analysis_mode: The requested analysis mode (resolved internally).
+        capture_folder: Graph-capture folder for inference runs.
+    """
+
+    skill_path: Path
+    trace_path: Path
+    output_dir: Path
+    tracelens_root: Path
+    tracelens_internal_root: Path | None
+    platform: str
+    framework: str
+    analysis_mode: str
+    capture_folder: Path | None
+
+
+@dataclass(frozen=True)
+class SdkEntryPoints:
+    """Agent SDK entry points that replace the installed ones; ``None`` keeps the real one."""
+
+    query: Callable[..., Any] | None = None
+    options_cls: Any | None = None
+    codex_turn_runner: Callable[..., Awaitable[CodexSessionResult]] | None = None
+
+
+@dataclass(frozen=True)
+class _SkillRun:
+    """One skill run after its command-prefix cache is written."""
+
+    request: TraceLensSkillRequest
+    prefix_path: Path
+    log: Callable[[str], None] | None
+
+
+@dataclass(frozen=True)
+class _StreamIdleBounds:
+    """Seconds an SDK stream may stay silent between messages, and while a tool call or background task is in flight."""
+
+    message: float
+    tool: float
+
+
+def build_orchestrator_prompt(request: TraceLensSkillRequest) -> str:
     """Prompt an agent to execute the TraceLens standalone skill.
 
     Provider-neutral: the same prompt drives the Claude SDK runner and the
@@ -395,20 +437,16 @@ def build_orchestrator_prompt(
     so the agent can run the analysis-orchestrator workflow without prompting.
 
     Args:
-        skill_path (Path): Path to the TraceLens skill file to follow.
-        trace_path (Path): Path to the trace file to analyze.
-        output_dir (Path): Directory where TraceLens outputs must be written.
-        tracelens_root (Path): The TraceLens project root.
-        platform (str): The target platform string.
-        framework (str): The framework that produced the trace.
-        analysis_mode (str): The requested analysis mode (resolved internally).
-        capture_folder (Path | None): Graph-capture folder for inference runs.
+        request (TraceLensSkillRequest): The run's inputs.
 
     Returns:
         str: The fully assembled orchestrator prompt text.
     """
 
-    analysis_mode = infer_analysis_mode(framework, analysis_mode)
+    tracelens_internal_root = request.tracelens_internal_root
+    framework = request.framework
+    capture_folder = request.capture_folder
+    analysis_mode = infer_analysis_mode(framework, request.analysis_mode)
     if analysis_mode == "inference" and capture_folder is not None:
         exec_mode = "graph_capture"
     elif analysis_mode == "inference":
@@ -424,19 +462,19 @@ def build_orchestrator_prompt(
     return f"""You are running TraceLens standalone analysis for Hyperloom.
 
 Read and follow the FULL instructions in this skill file:
-{skill_path}
+{request.skill_path}
 
 All required Step 0 inputs are already provided below. Do not ask the user any
 questions; proceed with the analysis.
 
 Execution context:
 - Environment: local
-- TraceLens root: {tracelens_root}
+- TraceLens root: {request.tracelens_root}
 - TraceLens-internal root: {internal_root_text}
-- Command prefix cache: {output_dir / "cache" / "cmd_prefix.txt"}
-- Trace file path: {trace_path}
-- Output directory: {output_dir}
-- Platform: {platform}
+- Command prefix cache: {request.output_dir / "cache" / "cmd_prefix.txt"}
+- Trace file path: {request.trace_path}
+- Output directory: {request.output_dir}
+- Platform: {request.platform}
 - Framework: {framework or "unknown"}
 - Comparison scope: {comparison_scope}
 - Analysis mode: {analysis_mode}
@@ -452,7 +490,7 @@ Important requirements:
    capture folder to the inference perf-report CLI exactly as the skill says.
 4. Write all TraceLens outputs under the output directory above.
 5. Ensure this file exists before you finish:
-   - {output_dir / "analysis.md"}  (TraceLens final report; REQUIRED)
+   - {request.output_dir / "analysis.md"}  (TraceLens final report; REQUIRED)
 6. Do not run GEAK, kernel optimization, or modify model/framework source.
 
 When complete, respond with a short summary of the artifacts you wrote.
@@ -564,10 +602,9 @@ class _TrajectoryCall:
 
 async def _drive_sdk_stream(
     stream: Any,
+    bounds: _StreamIdleBounds,
     *,
     chunks: list[str],
-    idle_timeout: float,
-    tool_idle_timeout: float,
     observe: Callable[[Any], None],
     log: Callable[[str], None] | None,
 ) -> str:
@@ -581,7 +618,7 @@ async def _drive_sdk_stream(
     stream_iter = stream.__aiter__() if hasattr(stream, "__aiter__") else stream
     try:
         while True:
-            wait_for = tool_idle_timeout if in_flight.busy else idle_timeout
+            wait_for = bounds.tool if in_flight.busy else bounds.message
             try:
                 if wait_for > 0:
                     message = await asyncio.wait_for(stream_iter.__anext__(), timeout=wait_for)
@@ -608,7 +645,7 @@ async def _drive_sdk_stream(
                     try:
                         await asyncio.wait_for(aclose(), timeout=10.0)
                     except (asyncio.TimeoutError, Exception):  # noqa: BLE001
-                        pass
+                        _log.debug("tracelens: stream aclose failed", exc_info=True)
                 break
             observe(message)
             in_flight.observe(message)
@@ -619,22 +656,18 @@ async def _drive_sdk_stream(
     except Exception as exc:  # noqa: BLE001
         # SDK may error after writing artifacts; treat artifact presence as truth.
         sdk_error = f"{type(exc).__name__}: {exc}"
+        _log.warning("tracelens: claude SDK stream failed: %s", sdk_error)
         if log:
             log(f"[claude-sdk] WARNING: {sdk_error}")
     return sdk_error
 
 
 async def _run_tracelens_skill_codex(
+    run: _SkillRun,
+    turn: CodexTurnRequest,
     *,
-    prompt: str,
-    output_dir: Path,
-    prefix_path: Path,
-    tracelens_root: Path,
-    capture_folder: Path | None,
     model: str,
-    timeout_sec: float,
     codex_turn_runner: Callable[..., Awaitable[CodexSessionResult]],
-    log: Callable[[str], None] | None,
 ) -> TraceLensSkillRunResult:
     """Run the TraceLens skill on the Codex Agent SDK.
 
@@ -650,18 +683,13 @@ async def _run_tracelens_skill_codex(
     classification writes ``execution_details.json`` into the folder itself.
 
     Args:
-        prompt (str): The orchestrator prompt.
-        output_dir (Path): Directory the report is written to.
-        prefix_path (Path): The command-prefix cache path, reported as an
-            artifact.
-        tracelens_root (Path): The TraceLens project root; the session cwd.
-        capture_folder (Path | None): Graph-capture folder the inference perf
-            report writes into, or ``None`` outside graph-capture runs.
+        run (_SkillRun): The run's request, command-prefix cache path (reported
+            as an artifact) and logging callback.
+        turn (CodexTurnRequest): The orchestrator prompt and the turn's
+            wall-clock budget.
         model (str): The Codex model id.
-        timeout_sec (float): Wall-clock budget for the turn.
         codex_turn_runner (Callable[..., Awaitable[CodexSessionResult]]): The
             Codex turn entry point (injected by tests).
-        log (Callable[[str], None] | None): Optional logging callback.
 
     Returns:
         TraceLensSkillRunResult: The artifacts produced by the run.
@@ -669,20 +697,22 @@ async def _run_tracelens_skill_codex(
     Raises:
         RuntimeError: If ``analysis.md`` was not written.
     """
+    output_dir = run.request.output_dir
+    capture_folder = run.request.capture_folder
     codex_error = ""
     result = CodexSessionResult()
     try:
         roots = (output_dir, capture_folder) if capture_folder else (output_dir,)
         result = await codex_turn_runner(
-            config=CodexSessionConfig(cwd=tracelens_root, model=model, writable_roots=roots),
-            request=CodexTurnRequest(prompt, timeout_sec=timeout_sec),
+            config=CodexSessionConfig(cwd=run.request.tracelens_root, model=model, writable_roots=roots),
+            request=turn,
             developer_instructions=_CODEX_DEVELOPER_INSTRUCTIONS,
         )
     except CodexSessionError as exc:
         # The SDK can fail after the report landed; artifact presence decides.
         codex_error = f"{type(exc).__name__}: {exc}"
-        if log:
-            log(f"[codex-sdk] WARNING: {codex_error}")
+        if run.log:
+            run.log(f"[codex-sdk] WARNING: {codex_error}")
     codex_error = codex_error or result.error
 
     report_path = output_dir / "analysis.md"
@@ -693,7 +723,7 @@ async def _run_tracelens_skill_codex(
 
     artifact_paths = {
         "tracelens_agent_report": str(report_path),
-        "tracelens_cmd_prefix": str(prefix_path),
+        "tracelens_cmd_prefix": str(run.prefix_path),
     }
     if codex_error:
         artifact_paths["tracelens_agent_sdk_error"] = codex_error
@@ -707,21 +737,11 @@ async def _run_tracelens_skill_codex(
 
 
 async def run_tracelens_skill(
+    request: TraceLensSkillRequest,
     *,
-    skill_path: Path,
-    trace_path: Path,
-    output_dir: Path,
-    tracelens_root: Path,
-    tracelens_internal_root: Path | None,
-    platform: str,
-    framework: str,
-    analysis_mode: str,
-    capture_folder: Path | None,
     budget_minutes: float,
     model: str | None = None,
-    sdk_query_factory: Callable[..., Any] | None = None,
-    sdk_options_cls: Any | None = None,
-    codex_turn_runner: Callable[..., Awaitable[CodexSessionResult]] | None = None,
+    sdk: SdkEntryPoints = SdkEntryPoints(),
     log: Callable[[str], None] | None = None,
 ) -> TraceLensSkillRunResult:
     """Execute the standalone TraceLens skill on the configured agent runtime.
@@ -733,14 +753,7 @@ async def run_tracelens_skill(
     was written is recorded as metadata rather than raised.
 
     Args:
-        skill_path (Path): Path to the TraceLens skill file to follow.
-        trace_path (Path): Path to the trace file to analyze.
-        output_dir (Path): Directory where TraceLens outputs are written.
-        tracelens_root (Path): The TraceLens project root.
-        platform (str): The target platform string.
-        framework (str): The framework that produced the trace.
-        analysis_mode (str): The requested analysis mode.
-        capture_folder (Path | None): Graph-capture folder for inference runs.
+        request (TraceLensSkillRequest): The run's inputs.
         budget_minutes (float): Time budget for the run. The Codex path spends
             it as the turn's wall-clock timeout (floored at 60s, matching the
             other TraceLens subprocess timeouts); the Claude path bounds each
@@ -748,13 +761,11 @@ async def run_tracelens_skill(
         model (str | None): Optional model override. Defaults to
             :data:`DEFAULT_CLAUDE_MODEL` on the Claude SDK path, or ``$CODEX_MODEL`` /
             :data:`DEFAULT_CODEX_MODEL` on the Codex SDK path.
-        sdk_query_factory (Callable[..., Any] | None): Optional injected query
-            factory (used by tests); imported from the SDK when ``None``.
-        sdk_options_cls (Any | None): Optional injected options class (used by
-            tests); imported from the SDK when ``None``.
-        codex_turn_runner (Callable[..., Awaitable[CodexSessionResult]] | None):
-            Optional injected Codex turn entry point (used by tests); defaults
-            to :func:`hyperloom.common.codex_session.run_codex_turn`.
+        sdk (SdkEntryPoints): Optional injected query factory, options class
+            and Codex turn entry point (used by tests); the query factory and
+            options class are imported from the SDK when ``None``, and the
+            Codex turn entry point defaults to
+            :func:`hyperloom.common.codex_session.run_codex_turn`.
         log (Callable[[str], None] | None): Optional logging callback.
 
     Returns:
@@ -764,35 +775,24 @@ async def run_tracelens_skill(
         RuntimeError: If ``analysis.md`` is not written by the run.
     """
 
+    output_dir = request.output_dir
+    tracelens_root = request.tracelens_root
+    sdk_query_factory = sdk.query
+    sdk_options_cls = sdk.options_cls
     output_dir.mkdir(parents=True, exist_ok=True)
     prefix_path = write_local_cmd_prefix(output_dir, tracelens_root)
-    prompt = build_orchestrator_prompt(
-        skill_path=skill_path,
-        trace_path=trace_path,
-        output_dir=output_dir,
-        tracelens_root=tracelens_root,
-        tracelens_internal_root=tracelens_internal_root,
-        platform=platform,
-        framework=framework,
-        analysis_mode=analysis_mode,
-        capture_folder=capture_folder,
-    )
+    prompt = build_orchestrator_prompt(request)
 
     resolved_model = (model or "").strip()
     if _should_use_codex_runner() and (
-        codex_turn_runner is not None or (sdk_query_factory is None and sdk_options_cls is None)
+        sdk.codex_turn_runner is not None or (sdk_query_factory is None and sdk_options_cls is None)
     ):
         codex_model = resolved_model or (os.environ.get("CODEX_MODEL") or "").strip() or DEFAULT_CODEX_MODEL
         return await _run_tracelens_skill_codex(
-            prompt=prompt,
-            output_dir=output_dir,
-            prefix_path=prefix_path,
-            tracelens_root=tracelens_root,
-            capture_folder=capture_folder,
+            _SkillRun(request, prefix_path, log),
+            CodexTurnRequest(prompt, timeout_sec=max(60.0, float(budget_minutes) * 60.0)),
             model=codex_model,
-            timeout_sec=max(60.0, float(budget_minutes) * 60.0),
-            codex_turn_runner=codex_turn_runner or run_codex_turn,
-            log=log,
+            codex_turn_runner=sdk.codex_turn_runner or run_codex_turn,
         )
 
     if sdk_query_factory is None or sdk_options_cls is None:
@@ -852,9 +852,8 @@ async def run_tracelens_skill(
     with _TrajectoryCall(resolved_model) as trajectory:
         sdk_error = await _drive_sdk_stream(
             sdk_query_factory(prompt=prompt, options=options),
+            _StreamIdleBounds(idle_timeout, tool_idle_timeout),
             chunks=chunks,
-            idle_timeout=idle_timeout,
-            tool_idle_timeout=tool_idle_timeout,
             observe=trajectory.observe,
             log=log,
         )
@@ -1349,6 +1348,8 @@ def aggregate_by_source_function(candidates: list[dict[str, Any]]) -> list[dict[
 
 
 __all__ = [
+    "SdkEntryPoints",
+    "TraceLensSkillRequest",
     "TraceLensSkillRunResult",
     "UPSTREAM_CATEGORY_TO_GEAK",
     "_function_line_from_ast",

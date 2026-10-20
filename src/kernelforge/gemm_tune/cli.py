@@ -102,13 +102,9 @@ def _load_demand_report(demand_json: str) -> dict | None:
     """Parse the demand file once, for both selection and the coverage report."""
     if not demand_json:
         return None
-    try:
-        from .evidence import load_demand
+    from .evidence import load_demand
 
-        return load_demand(demand_json)
-    except Exception:
-        log.debug("could not load demand report", exc_info=True)
-        return None
+    return load_demand(demand_json)
 
 
 def _coverage_gaps(
@@ -318,13 +314,9 @@ def _write_gpu_check(output_dir: Path) -> None:
 
 def _aiter_preflight_problems(output_dir: Path) -> list[str]:
     """Record the aiter tune/serve alignment check and return the problems that block tuning."""
-    try:
-        from .aiter_preflight import collect as _aiter_collect
+    from .aiter_preflight import collect as _aiter_collect
 
-        preflight = _aiter_collect()
-    except Exception as exc:  # noqa: BLE001 - unavailable diagnostics remain best-effort
-        log.debug("aiter preflight skipped: %s", exc)
-        return []
+    preflight = _aiter_collect()
     (output_dir / "aiter_preflight.json").write_text(json.dumps(preflight, indent=2), encoding="utf-8")
     for message in preflight["soft"]:
         log.warning("aiter preflight: %s", message)

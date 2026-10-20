@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import collections
 import math
+import sqlite3
 import time
 from collections.abc import Awaitable, Callable, Collection
 from functools import partial
@@ -48,7 +49,7 @@ from ..bus.resource_lock import (
 )
 from .sub_agent_runner import SubAgentResult
 from ..specialists.wall_budget import limit_wall_budget_extension
-from ..state.task_registry import Task, TaskNotFound
+from ..state.task_registry import IllegalTransition, Task, TaskNotFound
 from .time_budget import (
     TIME_BUDGET_EXEMPT_ACTIONS,
     expected_action_cost_minutes,
@@ -125,6 +126,18 @@ _CANCEL_NOTICE_SEC: float = STOP_GATE_POLL_SECONDS
 #: Kinds whose execution manages its own completion: the pump does not book
 #: their result. Admission is unchanged — same budget, lane and lease gates.
 _SELF_SETTLING_KINDS: frozenset[str] = frozenset({"targeted_build", "kernel_agent"})
+
+
+class HeldLeases(NamedTuple):
+    """Leases a caller already holds for a task, released when the task's run ends.
+
+    ``prebound_lease`` is the lanes; ``gpu_lease`` the SQLite GPU-specialist accounting lease; ``gpu_specialist_lease``
+    the Ray ``GpuSpecialistLease`` to close.
+    """
+
+    prebound_lease: Any = None
+    gpu_lease: Any = None
+    gpu_specialist_lease: Any = None
 
 
 class _InflightAction(NamedTuple):
@@ -555,21 +568,17 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         # once per pass (a pure env-var read, zero cost). The actual slot probe
         # (serving_slot_busy()) is deferred to just before each GPU specialist
         # admit so we don't miss a serving start that happened after the pass
-        # began. Both reads are best-effort — any failure leaves the check False
-        # (no pause) so dispatch is never blocked.
+        # began.
         _ray_serving_priority_enabled = False
         _serving_slot_busy_fn = None
-        try:
-            from ..actions.executors._ray_backend import (
-                ray_serving_priority_enabled as _rsp_enabled,
-                serving_slot_busy as _ssb,
-            )
+        from ..actions.executors._ray_backend import (
+            ray_serving_priority_enabled as _rsp_enabled,
+            serving_slot_busy as _ssb,
+        )
 
-            if _rsp_enabled():
-                _ray_serving_priority_enabled = True
-                _serving_slot_busy_fn = _ssb
-        except Exception:  # noqa: BLE001 — never block dispatch on the probe
-            pass
+        if _rsp_enabled():
+            _ray_serving_priority_enabled = True
+            _serving_slot_busy_fn = _ssb
         for task in queued:
             if task.task_id in self._inflight_actions:
                 continue
@@ -622,8 +631,8 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 if needs_gpu:
                     # Probe serving-slot state immediately before admitting
                     # this GPU specialist (not once per pass) so a serving start
-                    # that races the pass does not slip through. Still best-effort:
-                    # any probe failure is treated as False (no pause).
+                    # that races the pass does not slip through. A Ray or OS error
+                    # in the probe is treated as False (no pause).
                     _immediate_pause = False
                     if _ray_serving_priority_enabled and _serving_slot_busy_fn is not None:
                         _immediate_pause = _serving_slot_busy_fn()
@@ -763,10 +772,8 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             atask = asyncio.create_task(
                 self.run_task_registered(
                     task,
-                    prebound_lease=lease,
+                    HeldLeases(prebound_lease=lease, gpu_lease=gpu_lease, gpu_specialist_lease=gpu_specialist_lease),
                     extra_context=extra_context,
-                    gpu_lease=gpu_lease,
-                    gpu_specialist_lease=gpu_specialist_lease,
                     cancel_scope=cancel_scope,
                     on_complete=None if self_settling else partial(self._queue_completion, task),
                 ),
@@ -800,11 +807,9 @@ class DispatcherCollaborator(CoordinatorCollaborator):
     async def run_task_registered(
         self,
         task: Task,
+        held: HeldLeases = HeldLeases(),
         *,
-        prebound_lease: Any = None,
         extra_context: dict[str, Any] | None = None,
-        gpu_lease: Any = None,
-        gpu_specialist_lease: Any = None,
         cancel_scope: CancelScope | None = None,
         on_complete: Callable[[SubAgentResult], Awaitable[None]] | None = None,
     ) -> "SubAgentResult | None":
@@ -817,11 +822,10 @@ class DispatcherCollaborator(CoordinatorCollaborator):
 
         Args:
             task: The task row to run.
-            prebound_lease: Lanes the caller already holds; when ``None`` and
-                the task needs lanes they are taken here, non-blocking.
+            held: Leases the caller already holds and this call releases; when
+                no lanes are held and the task needs lanes they are taken
+                here, non-blocking.
             extra_context: Per-task extras (wall budget, gpu ids, …).
-            gpu_lease: SQLite GPU-specialist accounting lease to release, if any.
-            gpu_specialist_lease: Ray ``GpuSpecialistLease`` to close, if any.
             cancel_scope: The caller's cancel channel. The pump passes one
                 because it registers its handle before this coroutine starts;
                 other callers leave it ``None`` and are registered here.
@@ -832,7 +836,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             The runner's result, or ``None`` when the task's lanes were busy, in
             which case the row is untouched and still queued.
         """
-        lease = prebound_lease
+        lease = held.prebound_lease
         if lease is None and task.requires_lanes:
             lease = await self.locks.try_acquire_many(
                 list(task.requires_lanes),
@@ -856,13 +860,13 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 self._inflight_actions[task.task_id] = _InflightAction(task.kind, handle, cancel_scope)
 
         async def release_resources() -> bool:
-            if gpu_specialist_lease is not None:
-                closed = await asyncio.to_thread(gpu_specialist_lease.close)
+            if held.gpu_specialist_lease is not None:
+                closed = await asyncio.to_thread(held.gpu_specialist_lease.close)
                 if closed is not True:
                     log.warning("dispatcher: task=%s GPU cleanup unconfirmed; retaining capacity", task.task_id)
                     return False
-            if gpu_lease is not None:
-                await self.gpu_specialist_pool.release(gpu_lease)
+            if held.gpu_lease is not None:
+                await self.gpu_specialist_pool.release(held.gpu_lease)
             return True
 
         # Fresh tasks carry the phase coordinates frozen when their row was
@@ -1472,7 +1476,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 "cancelled",
                 evidence={"reason": denied.rule, "error": str(denied)},
             )
-        except Exception:
+        except (sqlite3.Error, TaskNotFound, IllegalTransition):
             log.exception(
                 "dispatcher: could not cancel over-budget task=%s kind=%s",
                 task.task_id,

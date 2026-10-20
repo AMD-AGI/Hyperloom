@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from ._kernel_category import canonical_category
@@ -65,19 +66,32 @@ def _text(value: Any) -> str:
     return s or DASH
 
 
-def render_report(
-    *,
-    route: str,
-    model_name: str,
-    provenance_detail: str,
-    exec_summary: dict[str, Any],
-    system_signals: dict[str, Any],
-    idle_threshold: float,
-    hot_kernels: list[dict[str, Any]],
-    p_items: list[dict[str, Any]],
-    extra_sections: str = "",
-) -> str:
+@dataclass(frozen=True)
+class AnalysisReport:
+    """Everything the canonical ``analysis.md`` body is rendered from."""
+
+    route: str
+    model_name: str
+    provenance_detail: str
+    exec_summary: dict[str, Any]
+    system_signals: dict[str, Any]
+    idle_threshold: float
+    hot_kernels: list[dict[str, Any]]
+    p_items: list[dict[str, Any]]
+    extra_sections: str = ""
+
+
+def render_report(report: AnalysisReport) -> str:
     """Render the canonical ``analysis.md`` body."""
+    route = report.route
+    model_name = report.model_name
+    provenance_detail = report.provenance_detail
+    exec_summary = report.exec_summary
+    system_signals = report.system_signals
+    idle_threshold = report.idle_threshold
+    hot_kernels = report.hot_kernels
+    p_items = report.p_items
+    extra_sections = report.extra_sections
     lines: list[str] = []
     title = f"# Performance Analysis Report \u2014 {model_name}" if model_name else "# Performance Analysis Report"
     lines.append(title)

@@ -13,6 +13,7 @@ import pytest
 from click.testing import CliRunner
 
 import kernelforge.cli.forge_loop_command as forge_loop_command
+import kernelforge.cli.relay as relay_module
 import kernelforge.loop.recovery as recovery_module
 import kernelforge.orchestrator.agent as agent_module
 import kernelforge.orchestrator.analysis as analysis_module
@@ -23,9 +24,18 @@ from kernelforge.cli.session_budget import _forge_session_timeout_sec
 from kernelforge.config import Config
 from kernelforge.loop.campaign_config import (
     CampaignConfigStore,
+    CampaignInputs,
     create_campaign_config,
 )
 from kernelforge.loop.experience import ExperienceLedger
+from kernelforge.loop.agent_relay import (
+    AgentAvailabilitySnapshot,
+    AgentProfileSpec,
+    AgentRelayPolicy,
+    AgentRelayState,
+    ProfileAvailability,
+    ProviderAvailability,
+)
 from kernelforge.loop.run_state import (
     SESSION_PAUSED,
     LoopStateStore,
@@ -159,6 +169,8 @@ def _install_cli_fakes(monkeypatch, tmp_path):
                     iteration=8 if resume else 4,
                     commit_hash="best-commit",
                 ),
+                agent_relay=AgentRelayState(),
+                agent_availability_snapshot=AgentAvailabilitySnapshot(),
             )
             captured["loops"].append(self)
 
@@ -168,8 +180,8 @@ def _install_cli_fakes(monkeypatch, tmp_path):
         def _checkpoint_llm_usage(self):
             captured["final_usage_checkpointed"] = True
 
-        async def run(self, **_kwargs):
-            captured["run_kwargs"] = _kwargs
+        async def run(self, agents, **_kwargs):
+            captured["run_kwargs"] = {"agents": agents, **_kwargs}
             try:
                 with LoopStateStore(str(self.ic.workspace_dir)).workspace_lock():
                     pass
@@ -180,7 +192,7 @@ def _install_cli_fakes(monkeypatch, tmp_path):
     def fake_warmstart(**kwargs):
         captured["warmstarts"].append(kwargs)
         try:
-            with LoopStateStore(str(kwargs["workspace_dir"])).workspace_lock():
+            with LoopStateStore(str(kwargs["kernel"].workspace)).workspace_lock():
                 pass
         except WorkspaceLockError:
             captured["lock_held_during_warmstart"] = True
@@ -193,13 +205,35 @@ def _install_cli_fakes(monkeypatch, tmp_path):
     def fake_write(**kwargs):
         captured["kb_writes"].append(kwargs)
         try:
-            with LoopStateStore(str(kwargs["workspace_dir"])).workspace_lock():
+            with LoopStateStore(str(kwargs["kernel"].workspace)).workspace_lock():
                 pass
         except WorkspaceLockError:
             captured["lock_held_during_finalization"] = True
         return {"written": False, "reason": "test"}
 
     monkeypatch.setattr(forge_loop_command.Config, "from_env", staticmethod(fake_from_env))
+
+    def fake_probe_agent_profiles(relay_config, **_kwargs):
+        if relay_config is None:
+            return None
+        providers = {profile.provider: ProviderAvailability(available=True) for profile in relay_config.profiles}
+        profiles = {
+            profile.profile_id: ProfileAvailability(
+                provider=profile.provider,
+                model=profile.model,
+                provider_available=True,
+                model_available=True,
+                available=True,
+            )
+            for profile in relay_config.profiles
+        }
+        return AgentAvailabilitySnapshot(
+            checked_at="2026-10-16T08:00:00Z",
+            providers=providers,
+            profiles=profiles,
+        )
+
+    monkeypatch.setattr(relay_module, "probe_agent_profiles", fake_probe_agent_profiles)
     monkeypatch.setattr(forge_loop_command, "kb_warmstart", fake_warmstart)
     monkeypatch.setattr(
         forge_loop_command,
@@ -209,8 +243,8 @@ def _install_cli_fakes(monkeypatch, tmp_path):
     monkeypatch.setattr("kernelforge.loop.runner.IterationLoop", FakeLoop)
     monkeypatch.setattr("kernelforge.tracker.ExperimentTracker", FakeTracker)
 
-    def fake_make_agent_fn(**kwargs):
-        captured["agent_fn_kwargs"] = kwargs
+    def fake_make_agent_fn(config, setup, **kwargs):
+        captured["agent_fn_setup"] = setup
         return
 
     monkeypatch.setattr(agent_module, "make_agent_fn", fake_make_agent_fn)
@@ -275,6 +309,10 @@ def _initialize_workspace(tmp_path):
     return workspace, kernel, driver
 
 
+# A checkpoint the CLI can read; the faked loop never inspects its contents.
+_RESUMABLE_RUN_STATE = json.dumps(RunState().to_dict())
+
+
 def _invoke_forge_loop(
     tmp_path,
     extra_args,
@@ -286,17 +324,14 @@ def _invoke_forge_loop(
     workspace, kernel, driver = _initialize_workspace(tmp_path)
     if existing_config:
         config = create_campaign_config(
-            workspace_dir=str(workspace),
-            kernel=str(kernel),
-            driver=str(driver),
-            source_files=[],
-            program_md_file=None,
+            str(workspace),
+            CampaignInputs(kernel=str(kernel), driver=str(driver), source_files="", program_md_file=None),
         )
         CampaignConfigStore(str(workspace)).save(config)
     if existing_state or existing_config or "--resume" in extra_args:
         campaign_root = workspace / "forge_experiments"
         campaign_root.mkdir(exist_ok=True)
-        (campaign_root / "run_state.json").write_text("{}")
+        (campaign_root / "run_state.json").write_text(_RESUMABLE_RUN_STATE)
     command = [
         "forge-loop",
         "--workspace",
@@ -418,7 +453,7 @@ def test_validated_warm_start_publishes_recovery_before_iteration(tmp_path):
 
     result_json = tmp_path / "forge_cli_result.json"
     result = recovery_module.publish_warm_start_recovery(
-        workspace_dir=str(workspace),
+        str(workspace),
         base_commit=base_commit,
         warm={
             "applied": True,
@@ -427,10 +462,10 @@ def test_validated_warm_start_publishes_recovery_before_iteration(tmp_path):
             "mean_case_speedup": 1.25,
             "solution_slug": "prior/solution",
         },
-        caller_experiment_id="hyperloom",
-        experience_id="experience",
+        caller=recovery_module.CallerRecovery(
+            caller_experiment_id="hyperloom", experience_id="experience", result_json=str(result_json)
+        ),
         tracker=Tracker(),
-        result_json=str(result_json),
     )
 
     root = workspace / "forge_experiments"
@@ -520,8 +555,8 @@ def test_warm_start_post_commit_point_failures_are_degraded(
     if failure_stage == "derived-best-view":
         original_publish = recovery_module.BestResultPublisher.publish
 
-        def fail_after_commit_point(self, **kwargs):
-            original_publish(self, **kwargs)
+        def fail_after_commit_point(self, *args, **kwargs):
+            original_publish(self, *args, **kwargs)
             raise OSError("report unavailable")
 
         monkeypatch.setattr(
@@ -541,7 +576,7 @@ def test_warm_start_post_commit_point_failures_are_degraded(
         )
     result_json = tmp_path / "forge_cli_result.json"
     result = recovery_module.publish_warm_start_recovery(
-        workspace_dir=str(workspace),
+        str(workspace),
         base_commit=base_commit,
         warm={
             "applied": True,
@@ -550,10 +585,10 @@ def test_warm_start_post_commit_point_failures_are_degraded(
             "mean_case_speedup": 1.25,
             "solution_slug": "prior/solution",
         },
-        caller_experiment_id="hyperloom",
-        experience_id="experience",
+        caller=recovery_module.CallerRecovery(
+            caller_experiment_id="hyperloom", experience_id="experience", result_json=str(result_json)
+        ),
         tracker=Tracker(),
-        result_json=str(result_json),
     )
 
     assert result is not None
@@ -574,8 +609,8 @@ def test_warm_start_publication_failure_rolls_back_and_continues_reference_only(
     captured = _install_cli_fakes(monkeypatch, tmp_path)
 
     def applied_warmstart(**kwargs):
-        workspace = Path(kwargs["workspace_dir"])
-        kernel = Path(kwargs["kernel"])
+        workspace = Path(kwargs["kernel"].workspace)
+        kernel = Path(kwargs["kernel"].kernel_path)
         kernel.write_text("def kernel():\n    return 2\n")
         subprocess.run(["git", "add", "-u"], cwd=workspace, check=True)
         subprocess.run(
@@ -597,7 +632,7 @@ def test_warm_start_publication_failure_rolls_back_and_continues_reference_only(
 
     monkeypatch.setattr(forge_loop_command, "kb_warmstart", applied_warmstart)
 
-    def fail_publication(**_kwargs):
+    def fail_publication(*_args, **_kwargs):
         raise OSError("manifest failed")
 
     monkeypatch.setattr(
@@ -668,10 +703,10 @@ def test_assembly_cli_prepares_before_optimizer_and_keeps_original_export_base(t
     workspace, kernel, driver = _initialize_workspace(tmp_path)
     original = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=workspace, text=True).strip()
 
-    async def prepare(**kwargs):
+    async def prepare(_config, task, **kwargs):
         assert captured["loops"] == []
         assert kwargs["base_commit"] == original
-        assert kwargs["kernel"] == str(kernel)
+        assert task.kernel == str(kernel)
         if not prepare_ok:
             raise preparation.AssemblyPreparationError("injected preparation failure")
         return {
@@ -698,7 +733,7 @@ def test_assembly_cli_prepares_before_optimizer_and_keeps_original_export_base(t
     assert loop.ic.baseline_case_times == {"case": 1.0}
     assert loop.ic.commit_new_paths == []
     assert captured["warmstarts"] == []
-    assert captured["agent_fn_kwargs"]["source_files"] == [str(workspace / "kernel.s")]
+    assert captured["agent_fn_setup"].task.source_files == [str(workspace / "kernel.s")]
 
 
 def _driver_integrity_resume(tmp_path, monkeypatch):
@@ -720,11 +755,7 @@ def _driver_integrity_resume(tmp_path, monkeypatch):
     monkeypatch.setenv("GPU_TARGET", "gfx942")
     monkeypatch.setenv("FORGE_KERNEL_BACKEND", "triton")
     campaign = create_campaign_config(
-        workspace_dir=str(workspace),
-        kernel=str(kernel),
-        driver=str(driver),
-        source_files=[],
-        program_md_file=None,
+        str(workspace), CampaignInputs(kernel=str(kernel), driver=str(driver), source_files="", program_md_file=None)
     )
     CampaignConfigStore(str(workspace)).save(campaign)
     iter_config = IterationConfig(
@@ -779,10 +810,10 @@ def test_forge_loop_defaults_to_fresh_and_workspace_campaign_root(tmp_path, monk
     assert len(captured["warmstarts"]) == 1
     assert captured["run_kwargs"]["workspace_lock_held"] is True
     assert captured["run_kwargs"]["usage"] is not None
-    assert captured["run_kwargs"]["orchestration_service"] is captured["orchestration_service"]
-    assert captured["run_kwargs"]["analysis_service"] is captured["analysis_service"]
+    assert captured["run_kwargs"]["agents"].orchestration_service is captured["orchestration_service"]
+    assert captured["run_kwargs"]["agents"].analysis_service is captured["analysis_service"]
     assert captured["analysis_service_kwargs"]["profiling_enabled"] is False
-    assert captured["agent_fn_kwargs"]["profiling_enabled"] is False
+    assert captured["agent_fn_setup"].task.profiling_enabled is False
     assert captured["orchestration_service_kwargs"]["enable_plan_critic"] is False
     assert captured["lock_held_during_warmstart"] is True
     assert captured["lock_held_during_run"] is True
@@ -819,10 +850,10 @@ def test_short_forge_budget_keeps_profiling_disabled(
     )
 
     assert result.exit_code == 0, result.output
-    assert captured["run_kwargs"]["analysis_service"] is captured["analysis_service"]
+    assert captured["run_kwargs"]["agents"].analysis_service is captured["analysis_service"]
     assert captured["analysis_service_kwargs"]["profiling_enabled"] is False
     assert captured["analysis_service_kwargs"]["timeout_sec"] == 7200
-    assert captured["agent_fn_kwargs"]["profiling_enabled"] is False
+    assert captured["agent_fn_setup"].task.profiling_enabled is False
     assert captured["orchestration_service_kwargs"]["enable_plan_critic"] is False
 
 
@@ -836,7 +867,7 @@ def test_long_forge_budget_enables_analysis_profiling(tmp_path, monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert captured["analysis_service_kwargs"]["profiling_enabled"] is True
-    assert captured["agent_fn_kwargs"]["profiling_enabled"] is True
+    assert captured["agent_fn_setup"].task.profiling_enabled is True
     assert captured["orchestration_service_kwargs"]["enable_plan_critic"] is True
 
 
@@ -854,7 +885,7 @@ def test_multi_lane_long_horizon_reports_the_critic_it_enabled(
 
     assert result.exit_code == 0, result.output
     assert captured["analysis_service_kwargs"]["profiling_enabled"] is True
-    assert captured["agent_fn_kwargs"]["profiling_enabled"] is True
+    assert captured["agent_fn_setup"].task.profiling_enabled is True
     assert captured["orchestration_service_kwargs"]["enable_plan_critic"] is True
     assert "Plan Critic: enabled (long-horizon, same backend/model)" in result.output
 
@@ -1053,16 +1084,12 @@ def test_resume_reuses_persisted_framework_without_inference(
     captured = _install_cli_fakes(monkeypatch, tmp_path)
     workspace, kernel, driver = _initialize_workspace(tmp_path)
     campaign = create_campaign_config(
-        workspace_dir=str(workspace),
-        kernel=str(kernel),
-        driver=str(driver),
-        source_files=[],
-        program_md_file=None,
-        framework="vllm",
+        str(workspace),
+        CampaignInputs(kernel=str(kernel), driver=str(driver), source_files="", program_md_file=None, framework="vllm"),
     )
     store = CampaignConfigStore(str(workspace))
     store.save(campaign)
-    (store.root / "run_state.json").write_text("{}")
+    (store.root / "run_state.json").write_text(_RESUMABLE_RUN_STATE)
 
     def fail_inference(**_kwargs):
         raise AssertionError("resume must not infer framework")
@@ -1087,7 +1114,7 @@ def test_resume_reuses_persisted_framework_without_inference(
 
     assert result.exit_code == 0, result.output
     assert store.load().framework == "vllm"
-    assert captured["kb_writes"][-1]["framework"] == "vllm"
+    assert captured["kb_writes"][-1]["kernel"].framework == "vllm"
 
 
 def test_keep_callback_snapshots_result_and_kb_before_iteration_callback(
@@ -1106,14 +1133,14 @@ def test_keep_callback_snapshots_result_and_kb_before_iteration_callback(
         ],
     )
     assert result.exit_code == 0, result.output
-    assert "on_iteration" not in captured["run_kwargs"]
+    assert captured["run_kwargs"]["callbacks"].on_iteration is None
 
     # Discard finalization effects and invoke the exact callback that runner calls synchronously after a durable KEEP,
     # before post-KEEP profiling.
     result_json.unlink()
     captured["kb_writes"].clear()
     captured["loops"][0].experiment = None
-    callback = captured["run_kwargs"]["on_best_committed"]
+    callback = captured["run_kwargs"]["callbacks"].on_best_committed
     callback(
         SimpleNamespace(
             kept=True,
@@ -1132,10 +1159,10 @@ def test_keep_callback_snapshots_result_and_kb_before_iteration_callback(
     assert snapshot["best_ms"] == 0.8
     assert snapshot["search_start_mean_case_speedup"] == 1.0
     assert not captured["kb_writes"]
-    remote_callback = captured["run_kwargs"]["on_best_ready"]
+    remote_callback = captured["run_kwargs"]["callbacks"].on_best_ready
     remote_callback(SimpleNamespace(kept=True))
     assert captured["kb_writes"]
-    assert captured["kb_writes"][-1]["llm_summary"] is False
+    assert captured["kb_writes"][-1]["publication"].llm_summary is False
     checkpoint = captured["checkpoints"]["hyperloom"]
     assert checkpoint["best_commit"] == "best-commit"
     assert checkpoint["search_start_mean_case_speedup"] == 1.0
@@ -1186,6 +1213,88 @@ def test_forge_loop_resume_routes_new_budget_without_warmstart(tmp_path, monkeyp
     assert captured["kb_experience"][1]["read"] == payload["kb_experience"]["read"]
 
 
+def _resume_relay_campaign(tmp_path, monkeypatch, extra_args, *, active_profile_id="", unavailable=()):
+    """Resume a campaign created with relay starting on claude, under this session's agent options."""
+    captured = _install_cli_fakes(monkeypatch, tmp_path)
+    fake_from_env = forge_loop_command.Config.from_env
+
+    def from_env(**overrides):
+        config = fake_from_env(**overrides)
+        config.agent_backend = overrides.get("agent_backend", "auto")
+        config.agent_fallback_provider = overrides.get("agent_fallback_provider", config.agent_fallback_provider)
+        return config
+
+    monkeypatch.setattr(forge_loop_command.Config, "from_env", staticmethod(from_env))
+    probed = captured.setdefault("probed_relays", [])
+
+    def probe(relay_config, **kwargs):
+        probed.append(relay_config)
+        snapshot = captured["fake_probe"](relay_config, **kwargs)
+        for profile_id in unavailable:
+            snapshot.profiles[profile_id].available = False
+            snapshot.profiles[profile_id].reason = "gateway 401"
+        return snapshot
+
+    captured["fake_probe"] = relay_module.probe_agent_profiles
+    monkeypatch.setattr(relay_module, "probe_agent_profiles", probe)
+    workspace, kernel, driver = _initialize_workspace(tmp_path)
+    policy = AgentRelayPolicy(
+        primary_profile_id="claude",
+        profiles=(AgentProfileSpec("claude", "claude"), AgentProfileSpec("codex", "codex")),
+    )
+    CampaignConfigStore(str(workspace)).save(
+        create_campaign_config(
+            str(workspace),
+            CampaignInputs(kernel=str(kernel), driver=str(driver), source_files="", agent_relay=policy),
+        )
+    )
+    campaign_root = workspace / "forge_experiments"
+    campaign_root.mkdir(exist_ok=True)
+    state = RunState()
+    state.agent_relay.active_profile_id = active_profile_id
+    (campaign_root / "run_state.json").write_text(json.dumps(state.to_dict()))
+    command = ["forge-loop", "--workspace", str(workspace), "--max-hours", "1", "--no-profiling", "--no-prepare-task"]
+    result = CliRunner().invoke(main, [*command, "--resume", *extra_args])
+    return result, probed
+
+
+def test_a_resumed_relay_campaign_runs_the_model_this_session_names(tmp_path, monkeypatch):
+    result, probed = _resume_relay_campaign(tmp_path, monkeypatch, ["--model", "claude-opus-4-8"])
+
+    assert result.exit_code == 0, result.output
+    assert probed[-1].primary_profile.model == "claude-opus-4-8"
+    assert [profile.profile_id for profile in probed[-1].profiles] == ["claude", "codex"]
+
+
+@pytest.mark.parametrize("fallback_args", [[], ["--agent-fallback-provider", "none"]], ids=["default", "disabled"])
+def test_a_resumed_relay_campaign_continues_on_its_profile_while_the_primary_is_down(
+    tmp_path, monkeypatch, fallback_args
+):
+    result, _probed = _resume_relay_campaign(
+        tmp_path, monkeypatch, fallback_args, active_profile_id="codex", unavailable=("claude",)
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "starting on profile codex" in result.output
+
+
+def test_with_no_profile_to_resume_disabled_fallback_refuses_an_unavailable_primary(tmp_path, monkeypatch):
+    result, _probed = _resume_relay_campaign(
+        tmp_path, monkeypatch, ["--agent-fallback-provider", "none"], unavailable=("claude",)
+    )
+
+    assert result.exit_code != 0
+    assert "Agent profile claude is unavailable: gateway 401; provider fallback is disabled" in result.output
+
+
+def test_a_resumed_relay_campaign_refuses_a_different_agent_backend(tmp_path, monkeypatch):
+    result, probed = _resume_relay_campaign(tmp_path, monkeypatch, ["--agent-backend", "codex"])
+
+    assert result.exit_code != 0
+    assert "model relay starts on claude; the agent backend cannot change on resume" in result.output
+    assert probed == []
+
+
 def test_forge_loop_resume_adds_existing_kb_reference_pointer(
     tmp_path,
     monkeypatch,
@@ -1193,15 +1302,11 @@ def test_forge_loop_resume_adds_existing_kb_reference_pointer(
     captured = _install_cli_fakes(monkeypatch, tmp_path)
     workspace, kernel, driver = _initialize_workspace(tmp_path)
     campaign = create_campaign_config(
-        workspace_dir=str(workspace),
-        kernel=str(kernel),
-        driver=str(driver),
-        source_files=[],
-        program_md_file=None,
+        str(workspace), CampaignInputs(kernel=str(kernel), driver=str(driver), source_files="", program_md_file=None)
     )
     store = CampaignConfigStore(str(workspace))
     store.save(campaign)
-    (store.root / "run_state.json").write_text("{}")
+    (store.root / "run_state.json").write_text(_RESUMABLE_RUN_STATE)
     references = store.root / "kb_references"
     reference = references / "sets" / "generation-a" / "reference_01.md"
     reference.parent.mkdir(parents=True)
@@ -1405,15 +1510,12 @@ def test_resume_rejects_missing_or_changed_program_context(
     source_program = tmp_path / "program.md"
     source_program.write_text("# Immutable task context\n")
     campaign = create_campaign_config(
-        workspace_dir=str(workspace),
-        kernel=str(kernel),
-        driver=str(driver),
-        source_files=[],
-        program_md_file=str(source_program),
+        str(workspace),
+        CampaignInputs(kernel=str(kernel), driver=str(driver), source_files="", program_md_file=str(source_program)),
     )
     store = CampaignConfigStore(str(workspace))
     store.save(campaign, program_md=source_program.read_text())
-    (store.root / "run_state.json").write_text("{}")
+    (store.root / "run_state.json").write_text(_RESUMABLE_RUN_STATE)
     if mutation == "missing":
         store.program_path.unlink()
     else:
@@ -1509,8 +1611,8 @@ def test_fresh_campaign_contains_no_shape_metadata(tmp_path, monkeypatch):
     assert "shapes" not in campaign.to_dict()
     assert "workload_key" not in campaign.to_dict()
     assert captured["loops"]
-    assert captured["agent_fn_kwargs"]["validation_timeout_sec"] == 1800
-    assert captured["agent_fn_kwargs"]["bench_timeout_sec"] == 300
+    assert captured["agent_fn_setup"].measurement.stage_timeout_sec == 1800
+    assert captured["agent_fn_setup"].measurement.bench_timeout_sec == 300
 
 
 def test_a_retired_iteration_cap_is_rejected(tmp_path, monkeypatch):
@@ -1653,7 +1755,7 @@ def test_fresh_campaign_captures_post_prep_driver_digest_and_base(tmp_path, monk
     def fake_prepare(**kwargs):
         # Simulate the prep agent: repair the driver and commit scaffolding into pristine, advancing HEAD and changing
         # the driver digest.
-        Path(kwargs["driver"]).write_text(repaired_body)
+        Path(kwargs["task"].driver).write_text(repaired_body)
         (workspace / "task_helper.py").write_text("# scaffolding\n")
         subprocess.run(
             ["git", "add", "-A", "--", ".", ":(exclude)forge_experiments"],

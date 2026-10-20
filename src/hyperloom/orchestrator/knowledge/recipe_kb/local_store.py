@@ -60,6 +60,21 @@ _ORDER_BY_KEYS: dict[str, tuple[str, bool]] = {
 }
 
 
+@dataclass(frozen=True)
+class RecipeFilters:
+    """Metric, recency and ordering terms of a recipe search, beside its label match.
+
+    Attributes:
+        metric_filters: Per-metric ``min`` / ``max`` bounds a row must satisfy.
+        updated_since: ISO timestamp a row must have been updated at or after.
+        order_by: One of the ``_ORDER_BY_KEYS`` spellings.
+    """
+
+    metric_filters: dict[str, Any] | None = None
+    updated_since: str | None = None
+    order_by: str = "updated_at DESC"
+
+
 # Errors
 class LocalRecipeStoreError(RuntimeError):
     """Raised on unrecoverable failures inside the local KB store."""
@@ -193,6 +208,51 @@ class LocalRecipeStore:
                 continue
             yield recipe_dir
 
+    def _archive_live_version(
+        self,
+        *,
+        canonical_id: str,
+        snapshot: dict[str, Any],
+        version: int,
+        archived_at: str,
+        replaced_by: dict[str, Any] | None,
+    ) -> None:
+        """Copy the live row into ``history`` under its own version, leaving an identical archive untouched.
+
+        ``replaced_by`` carries the triggering write's provenance, so an audit consumer can
+        attribute the archive to the write that displaced it.
+        """
+        archive_path = self._history_version_path(canonical_id, version)
+        try:
+            existing_archive = _read_json(archive_path)
+        except LocalRecipeStoreError as exc:
+            log.warning(
+                "put_recipe: unreadable history v%s at %s (%s); rewriting it",
+                version,
+                archive_path,
+                exc,
+            )
+            existing_archive = None
+        if (
+            isinstance(existing_archive, dict)
+            and isinstance(existing_archive.get("snapshot"), dict)
+            and existing_archive["snapshot"] == snapshot
+        ):
+            log.debug(
+                "put_recipe: keeping existing history v%s at %s (crash residue)",
+                version,
+                archive_path,
+            )
+            return
+        archive_payload: dict[str, Any] = {
+            "canonical_id": canonical_id,
+            "version": version,
+            "archived_at": archived_at,
+            "replaced_by": dict(replaced_by or {}),
+            "snapshot": snapshot,
+        }
+        atomic_write_json(archive_path, archive_payload, options=WriteOptions(make_parents=True, fsync=True))
+
     # put_recipe
     def put_recipe(
         self,
@@ -238,45 +298,14 @@ class LocalRecipeStore:
             prior_version = int(live.get("version", 0)) if isinstance(live, dict) else 0
             new_version = prior_version + 1 if not created else 1
 
-            if not created:
-                # Archive prior live before overwrite; ``replaced_by`` carries the triggering write's provenance for
-                # audit.
-                archive_path = self._history_version_path(
-                    canonical_id,
-                    prior_version,
+            if live is not None:
+                self._archive_live_version(
+                    canonical_id=canonical_id,
+                    snapshot=dict(live),
+                    version=prior_version,
+                    archived_at=now,
+                    replaced_by=provenance,
                 )
-                try:
-                    existing_archive = _read_json(archive_path)
-                except LocalRecipeStoreError as exc:
-                    log.warning(
-                        "put_recipe: unreadable history v%s at %s (%s); rewriting it",
-                        prior_version,
-                        archive_path,
-                        exc,
-                    )
-                    existing_archive = None
-                snapshot = dict(live) if isinstance(live, dict) else {}
-                if (
-                    isinstance(existing_archive, dict)
-                    and isinstance(existing_archive.get("snapshot"), dict)
-                    and existing_archive["snapshot"] == snapshot
-                ):
-                    log.debug(
-                        "put_recipe: keeping existing history v%s at %s (crash residue)",
-                        prior_version,
-                        archive_path,
-                    )
-                else:
-                    archive_payload: dict[str, Any] = {
-                        "canonical_id": canonical_id,
-                        "version": prior_version,
-                        "archived_at": now,
-                        "replaced_by": dict(provenance or {}),
-                        "snapshot": snapshot,
-                    }
-                    atomic_write_json(
-                        archive_path, archive_payload, options=WriteOptions(make_parents=True, fsync=True)
-                    )
 
             # Build payload via ``Recipe.from_dict`` so dataclass instances and dicts both round-trip into the same
             # on-disk shape.
@@ -358,19 +387,15 @@ class LocalRecipeStore:
         self,
         *,
         label_match: dict[str, Any] | None = None,
-        metric_filters: dict[str, Any] | None = None,
-        updated_since: str | None = None,
-        order_by: str = "updated_at DESC",
         limit: int = 50,
-        prefer: dict[str, Any] | None = None,
+        filters: RecipeFilters = RecipeFilters(),
     ) -> list[dict[str, Any]]:
         """Filter live recipes by labels / metrics / updated_at."""
-        del prefer  # client-side rerank lives in RecipeKB
-        if order_by not in _ORDER_BY_KEYS:
+        if filters.order_by not in _ORDER_BY_KEYS:
             raise ValueError(
-                f"order_by must be one of {sorted(_ORDER_BY_KEYS)!r}, got {order_by!r}",
+                f"order_by must be one of {sorted(_ORDER_BY_KEYS)!r}, got {filters.order_by!r}",
             )
-        sort_key, descending = _ORDER_BY_KEYS[order_by]
+        sort_key, descending = _ORDER_BY_KEYS[filters.order_by]
         clamped_limit = max(1, min(1000, int(limit) if limit else 50))
 
         rows: list[dict[str, Any]] = []
@@ -394,9 +419,9 @@ class LocalRecipeStore:
             payload.setdefault("canonical_id", cid)
             if not _matches_labels(payload, label_match or {}):
                 continue
-            if not _matches_metrics(payload, metric_filters or {}):
+            if not _matches_metrics(payload, filters.metric_filters or {}):
                 continue
-            if not _matches_updated_since(payload, updated_since):
+            if not _matches_updated_since(payload, filters.updated_since):
                 continue
             rows.append(payload)
 

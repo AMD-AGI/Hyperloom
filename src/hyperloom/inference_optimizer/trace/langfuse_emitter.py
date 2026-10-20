@@ -108,7 +108,7 @@ def _sdk_available() -> bool:
 
     try:
         return importlib.util.find_spec("langfuse") is not None
-    except Exception:  # noqa: BLE001
+    except ValueError:
         return False
 
 
@@ -121,7 +121,7 @@ def _to_ns(dt: Any) -> int | None:
 
         if isinstance(dt, datetime):
             return int(dt.timestamp() * 1_000_000_000)
-    except Exception:  # noqa: BLE001
+    except ValueError:
         return None
     return None
 
@@ -179,10 +179,7 @@ def _end_obs(obs: Any, end_dt: Any) -> None:
     try:
         obs.end(end_time=end_time)
     except (TypeError, ValueError):
-        try:
-            obs.end()
-        except Exception:  # noqa: BLE001
-            pass
+        obs.end()
 
 
 def _otel_attr_value(v: Any) -> Any:
@@ -195,7 +192,7 @@ def _otel_attr_value(v: Any) -> Any:
         import json
 
         return json.dumps(v, ensure_ascii=False, default=str)
-    except Exception:  # noqa: BLE001
+    except (TypeError, ValueError):
         return str(v)
 
 
@@ -212,28 +209,19 @@ def _set_trace_attrs(
         return
     except AttributeError:
         pass  # v4: no update_trace
-    except Exception:
-        log.debug("langfuse: update_trace failed", exc_info=True)
-        return
     otel = getattr(span, "_otel_span", None)
     if otel is None or not hasattr(otel, "set_attribute"):
         log.debug("langfuse: no OTEL span to set trace attrs on")
         return
-    try:
-        if name is not None:
-            otel.set_attribute("langfuse.trace.name", name)
-        if session_id is not None:
-            otel.set_attribute("session.id", session_id)
-        for k, v in (metadata or {}).items():
-            clean = _otel_attr_value(v)
-            if clean is None:
-                continue  # OTEL rejects None
-            try:
-                otel.set_attribute(f"langfuse.trace.metadata.{k}", clean)
-            except Exception:  # noqa: BLE001 — skip unserialisable values
-                continue
-    except Exception:
-        log.debug("langfuse: setting OTEL trace attrs failed", exc_info=True)
+    if name is not None:
+        otel.set_attribute("langfuse.trace.name", name)
+    if session_id is not None:
+        otel.set_attribute("session.id", session_id)
+    for k, v in (metadata or {}).items():
+        clean = _otel_attr_value(v)
+        if clean is None:
+            continue  # OTEL rejects None
+        otel.set_attribute(f"langfuse.trace.metadata.{k}", clean)
 
 
 def _load_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -384,7 +372,7 @@ class LangfuseEmitter:
             return False
         try:
             from langfuse import get_client  # type: ignore[import-not-found]
-        except Exception as exc:  # noqa: BLE001
+        except ImportError as exc:
             self._disabled_reason = "sdk_missing"
             log.warning(
                 "langfuse: SDK not importable (%s: %s); live push disabled. "
@@ -484,10 +472,7 @@ class LangfuseEmitter:
         """Buffer a token row; emit the Generation if its text half is in."""
         if not self._enabled:
             return
-        try:
-            self._buffer(row, half="llm")
-        except Exception:
-            log.debug("langfuse: record_llm_call failed", exc_info=True)
+        self._buffer(row, half="llm")
 
     def record_conversation(self, row: dict[str, Any]) -> None:
         """Buffer a conversation row; emit the Generation if its tokens are in."""
@@ -522,7 +507,6 @@ class LangfuseEmitter:
         name: str,
         agent: str,
         output: Any,
-        phase: str = lfmap.UNPHASED,
         metadata: dict[str, Any] | None = None,
         ts: str | None = None,
     ) -> bool:
@@ -531,7 +515,7 @@ class LangfuseEmitter:
             return False
         try:
             start = lfmap.parse_ts(ts)
-            parent = self._ensure_agent_span(phase, agent, start)
+            parent = self._ensure_agent_span(lfmap.UNPHASED, agent, start)
             obs = _start_obs(
                 parent,
                 name=name,
@@ -1095,7 +1079,7 @@ class LangfuseEmitter:
                 _stamp_receipt_hash(receipt),
                 options=WriteOptions(make_parents=True, fsync=True, fsync_dir=True),
             )
-        except Exception:
+        except (OSError, TypeError, ValueError):
             log.debug("langfuse: receipt write failed", exc_info=True)
         record_metadata_langfuse(self.session_dir, receipt)
 

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +22,7 @@ from .inferencex_client import (
     find_reference_rows,
     normalize_benchmark_id,
 )
-from .types import BaselinePoint, BaselineQuery, BaselineReason, BaselineSummary, BenchmarkMode
+from .types import BaselinePoint, BaselineQuery, BaselineReason, BaselineSummary, TargetAnalysisRequest
 
 
 # --- InferenceX model name mapping -------------------------------------------
@@ -212,32 +213,29 @@ def _write_measured_competitor_target(
         per_conc.append(row)
     if not per_conc:
         return False
-    try:
-        from hyperloom.inference_optimizer.baseline_comparison import research_hints
+    from hyperloom.inference_optimizer.baseline_comparison import research_hints
 
-        target = {
-            "gpu": query.gpu,
-            "model": query.model,
-            "framework": query.framework,
-            "precision": query.precision,
-            "per_conc": per_conc,
-            "notes": f"InferenceX measured reference ({query.model} @ {query.gpu})",
-        }
-        if query.benchmark_mode == "agentx":
-            target.update(benchmark_mode="agentx", throughput_basis="total_token_throughput_per_gpu")
-        return research_hints.write_competitor_target(Path(session_dir), target)
-    except Exception:  # noqa: BLE001 — advisory feed is best-effort
-        return False
+    target = {
+        "gpu": query.gpu,
+        "model": query.model,
+        "framework": query.framework,
+        "precision": query.precision,
+        "per_conc": per_conc,
+        "notes": f"InferenceX measured reference ({query.model} @ {query.gpu})",
+    }
+    if query.benchmark_mode == "agentx":
+        target.update(benchmark_mode="agentx", throughput_basis="total_token_throughput_per_gpu")
+    return research_hints.write_competitor_target(Path(session_dir), target)
 
 
 def clear_competitor_target(session_dir: Path) -> None:
-    """Remove any existing ``competitor_target.json``. Best-effort, never raises."""
+    """Remove any existing ``competitor_target.json``; filesystem errors are ignored."""
     try:
         from ..session import session_paths
 
         path = session_paths.competitor_target_json(Path(session_dir))
         path.unlink(missing_ok=True)
-    except Exception:  # noqa: BLE001 — best-effort cleanup
+    except OSError:
         pass
 
 
@@ -249,14 +247,7 @@ def _no_match_reason(rows: list, query: BaselineQuery, canonical_model: str) -> 
         return "unsupported_target_gpu", f"InferenceX has no {query.gpu!r} data for model={canonical_model!r}"
     # GPU present but no comparable row.
     if query.precision:
-        shape_rows = find_reference_rows(
-            rows,
-            hardware=query.gpu,
-            isl=query.isl,
-            osl=query.osl,
-            precision="",
-            benchmark_mode=query.benchmark_mode,
-        )
+        shape_rows = find_reference_rows(rows, replace(query, precision=""))
         if shape_rows:
             return "precision_mismatch", (
                 f"InferenceX has gpu={query.gpu} isl/osl={query.isl}/{query.osl} rows "
@@ -310,42 +301,27 @@ def _agentx_warnings(points: list[BaselinePoint], by_id: dict[str, BaselinePoint
     return warnings
 
 
-def analyze(
-    *,
-    session_dir: Path,
-    model_path: str,
-    compare_against_gpu: str,
-    framework: str = "",
-    precision: str = "",
-    isl: int | None = 0,
-    osl: int | None = 0,
-    benchmark_mode: BenchmarkMode = "synthetic",
-) -> BaselineSummary:
+def analyze(*, session_dir: Path, request: TargetAnalysisRequest) -> BaselineSummary:
     """Build the target-analysis summary from live InferenceX measurements.
 
     Args:
         session_dir: Destination for the summary and measured competitor target.
-        model_path: Local path or model name to map to InferenceX.
-        compare_against_gpu: Target hardware; empty skips the lookup.
-        framework: Query metadata only, not a row filter.
-        precision: Optional filter; agentx maps MXFP4/NVFP4 to FP4.
-        isl: Synthetic input length; ignored in agentx mode.
-        osl: Synthetic output length; ignored in agentx mode.
-        benchmark_mode: Synthetic fixed-shape or agentx agentic-trace matching.
+        request: The session's workload as configured, before mapping onto InferenceX.
     """
+    model_path = request.model_path
     canonical_model = to_inferencex_name(model_path) or ""
-    agentx = benchmark_mode == "agentx"
-    query_precision = precision.strip()
+    agentx = request.benchmark_mode == "agentx"
+    query_precision = request.precision.strip()
     if agentx and query_precision.casefold() in {"mxfp4", "nvfp4"}:
         query_precision = "fp4"
     query = BaselineQuery(
         model=canonical_model,
-        gpu=compare_against_gpu.strip(),
-        framework=framework.strip(),
+        gpu=request.compare_against_gpu.strip(),
+        framework=request.framework.strip(),
         precision=query_precision,
-        isl=None if agentx else int(isl or 0),
-        osl=None if agentx else int(osl or 0),
-        benchmark_mode=benchmark_mode,
+        isl=None if agentx else int(request.isl or 0),
+        osl=None if agentx else int(request.osl or 0),
+        benchmark_mode=request.benchmark_mode,
     )
     now = now_iso(timespec="seconds", z_suffix=True)
     source = base_url()
@@ -382,14 +358,7 @@ def analyze(
             "no_match", "no_inferencex_data", f"InferenceX returned no benchmarks for model={canonical_model!r}"
         )
 
-    matched = find_reference_rows(
-        rows,
-        hardware=query.gpu,
-        isl=query.isl,
-        osl=query.osl,
-        precision=query.precision,
-        benchmark_mode=query.benchmark_mode,
-    )
+    matched = find_reference_rows(rows, query)
     if not matched:
         reason, warning = _no_match_reason(rows, query, canonical_model)
         return _skip("no_match", reason, warning)

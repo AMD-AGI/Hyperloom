@@ -20,7 +20,9 @@ from kernelforge.cli.options import (
 from kernelforge.option_groups import option_group
 from kernelforge.config import Config
 from kernelforge.knowledge.kb_store.config import KnowledgeConfig
-from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.rewrite_by_flydsl.optimize import OptimizeOptions
+from kernelforge.rewrite_by_flydsl.request import ApplybackSwitch, RewriteBudget, RewriteWorkspace
 
 
 def _validate_rewrite_framework(_ctx, _param, value):
@@ -65,14 +67,6 @@ class RewriteSource:
 
 
 @dataclass(frozen=True)
-class RewriteWorkspace:
-    """The git workspace and where the forge experiments are written."""
-
-    workspace_dir: str
-    experiments_dir: str
-
-
-@dataclass(frozen=True)
 class SourceDescription:
     """What the source kernel is, the shapes it is checked on, and the correctness threshold."""
 
@@ -94,36 +88,11 @@ class PortOptions:
 
 
 @dataclass(frozen=True)
-class ApplybackSwitch:
-    """Whether the apply-back stage runs, and how many integration sessions it may use."""
-
-    applyback: bool
-    max_applyback_attempts: int
-
-
-@dataclass(frozen=True)
-class RewriteBudget:
-    """The rewrite's runtime budget and its absolute deadline."""
-
-    max_hours: float
-    deadline_unix: float
-
-
-@dataclass(frozen=True)
 class ApplybackTarget:
     """The framework the apply-back patch targets and the imports checked around it."""
 
     framework: str
     applyback_import_modules: tuple[str, ...]
-
-
-@dataclass(frozen=True)
-class OptimizeOptions:
-    """The nested forge-loop's branch, supervisor backend and Analysis timeout."""
-
-    git_branch: str
-    supervisor_backend: str
-    profile_timeout_sec: int
 
 
 @dataclass(frozen=True)
@@ -375,37 +344,36 @@ def forge_rewrite(request: RewriteRequest):
         os.environ.setdefault("IS_SANDBOX", "1")
 
     from kernelforge.rewrite_by_flydsl import run_rewrite
+    from kernelforge.rewrite_by_flydsl.ingest import RewriteSubject
+    from kernelforge.rewrite_by_flydsl.request import DriverSetup, RewriteRun
 
-    result = run_rewrite(
-        op_name=request.source.op_name,
-        source_kernel=request.source.source_kernel,
-        driver=request.source.driver,
-        workspace=request.workspace.workspace_dir,
-        experiments_dir=request.workspace.experiments_dir,
+    source = request.source
+    subject = RewriteSubject(
+        op_name=source.op_name,
+        source_kernel=source.source_kernel,
         target_functions=targets,
-        config=config,
         source_entry=description.source_entry,
         source_language=description.source_language,
+        framework=request.applyback_target.framework,
         shapes=shapes,
         snr_threshold=description.snr_threshold,
+    )
+    run = RewriteRun(
+        subject=subject,
+        driver=DriverSetup(source.driver, source.prepare_driver, source.invocation_spec_file),
+        workspace=request.workspace,
+        budget=request.budget,
+        optimize=request.optimize,
+        roofline_ceiling=request.roofline_ceiling.enabled,
+        applyback=request.applyback,
+        applyback_import_modules=request.applyback_target.applyback_import_modules,
+        rewrite_kb_enabled=rewrite_kb_enabled,
         flydsl_kernel_name=description.flydsl_kernel_name,
         max_port_attempts=request.port.max_port_attempts,
-        optimize_max_hours=request.budget.max_hours,
         permission_mode=request.port.permission_mode,
-        supervisor_backend=request.optimize.supervisor_backend,
-        profile_timeout_sec=request.optimize.profile_timeout_sec,
-        roofline_ceiling=request.roofline_ceiling.enabled,
         result_json=request.result_json,
-        deadline_unix=request.budget.deadline_unix,
-        framework=request.applyback_target.framework,
-        optimize_git_branch=request.optimize.git_branch,
-        prepare_driver=request.source.prepare_driver,
-        invocation_spec_file=request.source.invocation_spec_file,
-        applyback_import_modules=request.applyback_target.applyback_import_modules,
-        max_applyback_attempts=request.applyback.max_applyback_attempts,
-        applyback_enabled=bool(request.applyback.applyback),
-        rewrite_kb_enabled=rewrite_kb_enabled,
     )
+    result = run_rewrite(run, config)
     # The structured result and sentinel were already emitted for callers to parse.
     if not (result or {}).get("success"):
         raise SystemExit(1)

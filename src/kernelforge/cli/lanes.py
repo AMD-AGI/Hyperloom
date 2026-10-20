@@ -7,11 +7,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Iterable
+from typing import TYPE_CHECKING, Iterable
 
 import click
 
 from kernelforge.config import Config
+
+if TYPE_CHECKING:
+    from kernelforge.orchestrator.agent import ImplementerSetup
 
 
 # Suffix naming one lane's private AITER build cache, placed beside the lane copy rather than inside it.
@@ -142,41 +145,41 @@ def _make_lane_agent_factory(
     make_agent,
     config: Config,
     binding: LaneBinding,
-    session_kwargs: dict,
+    setup: ImplementerSetup,
+    usage=None,
 ):
     """Build the factory that binds one Implementer session to one lane."""
     from kernelforge.agent_backends.base import session_environment
-    from kernelforge.loop.aiter_cache import child_cache_environment
+    from kernelforge.tools.aiter_cache import child_cache_environment
 
     def factory(lane_dir: str, serialized_driver: str | None):
         # Each lane gets its own Config: a provider that requires the workspace as its cwd would otherwise start every
         # lane's session in the shared canonical workspace.
         lane_root = Path(lane_dir).resolve()
         lane_config = replace(config, workspace=str(lane_root))
-        lane_agent = make_agent(
-            config=lane_config,
-            insession_gate=True,
-            insession_gate_stop_check=False,
-            driver_script=_lane_workspace_path(
-                binding.driver,
+        lane_driver = _lane_workspace_path(
+            binding.driver,
+            lane_dir=lane_dir,
+            workspace_dir=binding.workspace_dir,
+            label="driver",
+        )
+        lane_sources = [
+            _lane_workspace_path(
+                path,
                 lane_dir=lane_dir,
                 workspace_dir=binding.workspace_dir,
-                label="driver",
-            ),
+                label="source file",
+            )
+            for path in binding.source_files
+        ]
+        lane_setup = replace(
+            setup,
+            task=replace(setup.task, source_files=lane_sources, profiling_enabled=False),
             # The lock-taking wrapper the round installed for this lane.
-            interposed_driver_path=serialized_driver,
-            source_files=[
-                _lane_workspace_path(
-                    path,
-                    lane_dir=lane_dir,
-                    workspace_dir=binding.workspace_dir,
-                    label="source file",
-                )
-                for path in binding.source_files
-            ],
-            profiling_enabled=False,
-            **session_kwargs,
+            measurement=replace(setup.measurement, driver_script=lane_driver, interposed_driver_path=serialized_driver),
+            session=replace(setup.session, insession_gate=True, insession_gate_stop_check=False),
         )
+        lane_agent = make_agent(lane_config, lane_setup, usage=usage)
         # Each lane compiles a different edit of the same kernel. aiter imports a JIT module by name and never checks
         # the .so against the source it was built from, so lanes sharing one build cache load each other's binaries
         # and each one measures a kernel it did not write.

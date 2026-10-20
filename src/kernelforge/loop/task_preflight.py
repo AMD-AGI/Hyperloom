@@ -9,6 +9,7 @@ import asyncio
 import contextlib
 import json
 import glob
+import logging
 import os
 import pathlib
 import shutil
@@ -20,11 +21,13 @@ import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from kernelforge.loop.aiter_cache import cleanup_current_owned_aiter_locks
-from kernelforge.loop.profile_contract import PROFILE_RUN_FLAG
-from kernelforge.mcp_server.tools.bench import bench_wallclock
-from kernelforge.mcp_server.tools.test import test_correctness
+from kernelforge.evaluation.benchmark.runner import BenchRun, bench_wallclock
+from kernelforge.evaluation.correctness.driver import test_correctness
+from kernelforge.evaluation.profiling.contracts import PROFILE_RUN_FLAG
+from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.tools.aiter_cache import cleanup_current_owned_aiter_locks
 
+log = logging.getLogger(__name__)
 
 # Preflight — deterministic driver-contract validation
 
@@ -519,7 +522,7 @@ async def _count_graph_replays(
         cleanup_current_owned_aiter_locks()
         _cleanup_probe(out_path, probe_dir)
         raise
-    except Exception as exc:  # noqa: BLE001
+    except OSError as exc:
         _cleanup_probe(out_path, probe_dir)
         return PROBE_FAILED, f"{type(exc).__name__}: {exc}"
     tail = ((out.decode(errors="replace") if out else "") + (err.decode(errors="replace") if err else ""))[-400:]
@@ -581,17 +584,31 @@ async def _check_profile_contract(
     return True, "verified"
 
 
+@dataclass(frozen=True)
+class DriverContract:
+    """What a driver must satisfy: the correctness threshold, graph timing, a profile run, its ranks and cases."""
+
+    snr_threshold: float = DEFAULT_SNR_THRESHOLD_DB
+    require_graph: bool = False
+    require_profile: bool = False
+    require_ranks: int = 1
+    expected_case_ids: list[str] | None = None
+
+
 async def _preflight_async(
     driver: str,
-    snr_threshold: float,
+    contract: DriverContract,
     warmup: int,
     iters: int,
-    require_graph: bool = False,
-    require_profile: bool = False,
-    require_ranks: int = 1,
+    *,
     deadline_unix: float = 0.0,
-    expected_case_ids: list[str] | None = None,
 ) -> PreflightResult:
+    snr_threshold, expected_case_ids = contract.snr_threshold, contract.expected_case_ids
+    require_graph, require_profile, require_ranks = (
+        contract.require_graph,
+        contract.require_profile,
+        contract.require_ranks,
+    )
     reasons: list[str] = []
     details: dict = {}
     diagnostics: dict = {}
@@ -642,6 +659,7 @@ async def _preflight_async(
             reasons.append(f"correctness mode produced no SNR/allclose metric ({cres.get('message')})")
             _record_stage_output(diagnostics, "correctness", cres)
     except Exception as exc:  # noqa: BLE001
+        log.warning("preflight correctness run raised: %s", exc)
         reasons.append(f"correctness run raised {type(exc).__name__}: {exc}")
         diagnostics["correctness"] = "".join(traceback.format_exception(exc))[-DIAG_TAIL_CHARS:]
 
@@ -651,10 +669,7 @@ async def _preflight_async(
     stage_started = time.monotonic()
     try:
         bres = await bench_wallclock(
-            driver_script=driver,
-            driver_args=[],
-            warmup_iters=warmup,
-            bench_iters=iters,
+            BenchRun(driver, driver_args=[], warmup_iters=warmup, bench_iters=iters),
             timeout_sec=int(_deadline_timeout(deadline_unix, PREFLIGHT_BENCH_TIMEOUT_S)),
         )
         reported_cases = bres.get("case_times") or {}
@@ -693,6 +708,7 @@ async def _preflight_async(
         else:
             bench_ok = True
     except Exception as exc:  # noqa: BLE001
+        log.warning("preflight bench run raised: %s", exc)
         reasons.append(f"bench run raised {type(exc).__name__}: {exc}")
         diagnostics["bench"] = "".join(traceback.format_exception(exc))[-DIAG_TAIL_CHARS:]
 
@@ -791,9 +807,7 @@ def _kill_process_group(proc) -> None:
         try:
             os.killpg(pid, signal.SIGKILL)
             signalled = True
-        except (ProcessLookupError, PermissionError):
-            pass
-        except Exception:  # noqa: BLE001 - group may already be gone
+        except OSError:  # group may already be gone
             pass
     if not signalled:
         with contextlib.suppress(ProcessLookupError, PermissionError):

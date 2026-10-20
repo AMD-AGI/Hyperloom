@@ -19,11 +19,11 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NamedTuple, NoReturn
 
 from hyperloom.common import provenance
-from hyperloom.common.env import is_truthy
 from hyperloom.common.env_safety import (
     filter_untrusted_env_mapping,
     is_allowed_dotenv_key,
@@ -52,8 +52,11 @@ from hyperloom.common.provenance import (
 )
 from hyperloom.common.timeutil import now_iso
 from hyperloom.common.visible_devices import hip_mask_within_rocr
+from hyperloom.common.model_paths import resolve_serving_model_path
 
 from .. import inferencex_checkout
+from .bootstrap import parse_operator_extra_env
+from .server_args import validate_server_args
 
 from .credentials import (
     _is_stale_proxy_url,
@@ -1256,14 +1259,6 @@ def _resumed_session_state(args: argparse.Namespace | None) -> dict[str, Any] | 
     return state if isinstance(state, dict) else None
 
 
-def _resolved_eval_disabled(args: argparse.Namespace) -> bool:
-    """Effective ``--no-eval`` for this launch, flag or persisted."""
-    if bool(getattr(args, "no_eval", False)):
-        return True
-    state = _resumed_session_state(args)
-    return bool(state and state.get("eval_disabled"))
-
-
 def _supported_framework_names() -> tuple[str, ...]:
     """The framework names ``--framework`` accepts (the framework registry)."""
     from hyperloom.inference_optimizer import framework_registry
@@ -1355,8 +1350,6 @@ def _pin_resumed_session_args(args: argparse.Namespace | None) -> None:
 def _ensure_lm_eval_dep(
     python_exe: str,
     pip_extra: list[str],
-    *,
-    eval_disabled: bool = False,
 ) -> dict[str, Any]:
     """Probe-then-install ``lm_eval`` in python_exe when the accuracy gate is on."""
     from hyperloom.orchestrator.actions.executors._multi_node_env import is_multi_node
@@ -1368,23 +1361,6 @@ def _ensure_lm_eval_dep(
             "target": "lm_eval[api]",
             "interpreter": python_exe,
             "message": "single-node InferenceX installs lm_eval on first use",
-        }
-    if eval_disabled:
-        return {
-            "status": "skipped",
-            "skip_reason": "eval_disabled",
-            "target": "lm_eval[api]",
-            "interpreter": python_exe,
-            "message": "accuracy evaluation is disabled",
-        }
-    run_eval = os.environ.get("RUN_EVAL")
-    if not is_truthy(run_eval, default=True):
-        return {
-            "status": "skipped",
-            "skip_reason": "eval_disabled",
-            "target": "lm_eval[api]",
-            "interpreter": python_exe,
-            "message": f"RUN_EVAL={run_eval}",
         }
     missing = _probe_missing_lm_eval_deps(python_exe)
     if missing is None:
@@ -1743,7 +1719,7 @@ def _emit_preflight_diagnostics(
     diagnostics_message: str | None = None
     try:
         queue_status = _print_recipe_kb_queue_status()
-    except Exception as exc:  # noqa: BLE001 — defensive
+    except (OSError, ValueError) as exc:
         print(f"  recipe_kb_queue     = <probe_failed: {exc!r}>")
         queue_status = {
             "pending": None,
@@ -1813,15 +1789,11 @@ def _print_recipe_kb_queue_status() -> dict[str, Any]:
 
 def _ensure_eval_concurrency_compat(magpie_path: str, inferencex_path: str) -> bool:
     """Scrub the fatal ``--concurrent-requests`` eval flag from the resolved trees."""
-    try:
-        from hyperloom.orchestrator.actions.executors._magpie_patcher import (
-            ensure_eval_concurrency_compat,
-        )
+    from hyperloom.orchestrator.actions.executors._magpie_patcher import (
+        ensure_eval_concurrency_compat,
+    )
 
-        ok = ensure_eval_concurrency_compat(magpie_path or None, inferencex_path or None)
-    except Exception as exc:  # noqa: BLE001 — preflight must not die here
-        print(f"Preflight: WARNING — eval-concurrency compat patch failed to run: {exc}")
-        return False
+    ok = ensure_eval_concurrency_compat(magpie_path or None, inferencex_path or None)
     if not ok:
         print(
             "Preflight: WARNING — could not remove the redundant "
@@ -1866,15 +1838,11 @@ def _ensure_client_trust_compat(magpie_path: str) -> bool:
 
     if not is_multi_node():
         return True
-    try:
-        from hyperloom.orchestrator.actions.executors._magpie_patcher import (
-            ensure_client_trust_compat,
-        )
+    from hyperloom.orchestrator.actions.executors._magpie_patcher import (
+        ensure_client_trust_compat,
+    )
 
-        ok = ensure_client_trust_compat(magpie_path or None)
-    except Exception as exc:  # noqa: BLE001 — preflight must not die here
-        print(f"Preflight: WARNING — client trust compat patch failed to run: {exc}")
-        return False
+    ok = ensure_client_trust_compat(magpie_path or None)
     if not ok:
         print(
             "Preflight: WARNING — could not apply the custom-tokenizer trust "
@@ -1901,35 +1869,34 @@ def _begin_install_event(args: argparse.Namespace | None) -> dict[str, Any]:
             "steps": [],
         },
     }
-    try:
-        from ..session.sbd_v6 import set_pending_install_event
+    from ..session.sbd_v6 import set_pending_install_event
 
-        set_pending_install_event(args, event)
-    except Exception:
-        log.warning("failed to initialize SBD V6 install event", exc_info=True)
+    set_pending_install_event(args, event)
     return event
 
 
-def _record_install_step(
-    event: dict[str, Any],
-    *,
-    step_id: str,
-    category: str,
-    status: str,
-    skip_reason: str | None = None,
-    message: str | None = None,
-    **fields: Any,
-) -> None:
-    step: dict[str, Any] = {
-        "step_id": step_id,
-        "category": category,
-        "status": status,
-        "skip_reason": skip_reason,
+@dataclass(frozen=True)
+class InstallStep:
+    """One install-event step: its id and category, the status it ended in, and why it skipped or what it said."""
+
+    step_id: str
+    category: str
+    status: str
+    skip_reason: str | None = None
+    message: str | None = None
+
+
+def _record_install_step(event: dict[str, Any], step: InstallStep, **fields: Any) -> None:
+    row: dict[str, Any] = {
+        "step_id": step.step_id,
+        "category": step.category,
+        "status": step.status,
+        "skip_reason": step.skip_reason,
     }
-    if message is not None:
-        step["message"] = message
-    step.update(fields)
-    event["ext"]["steps"].append(step)
+    if step.message is not None:
+        row["message"] = step.message
+    row.update(fields)
+    event["ext"]["steps"].append(row)
 
 
 def _fail_install_step(
@@ -1944,10 +1911,7 @@ def _fail_install_step(
         failure_fields["detail"] = {"exit_code": exc.code}
     _record_install_step(
         event,
-        step_id=step_id,
-        category=category,
-        status="failed",
-        message=str(exc) or type(exc).__name__,
+        InstallStep(step_id, category, "failed", message=str(exc) or type(exc).__name__),
         error_class=type(exc).__name__,
         **failure_fields,
     )
@@ -1959,25 +1923,21 @@ def _fail_install_step(
 def _mark_pending_install_event_failed(
     args: argparse.Namespace | None,
     exc: BaseException,
-) -> dict[str, Any] | None:
+) -> dict[str, Any]:
     """Mark an unwrapped preflight exception on the pending install event."""
-    try:
-        from ..session.sbd_v6 import pending_install_event
+    from ..session.sbd_v6 import pending_install_event
 
-        event = pending_install_event(args)
-        if event is None:
-            event = _begin_install_event(args)
-        if str(event.get("status") or "") != "failed":
-            _fail_install_step(
-                event,
-                step_id="unhandled_preflight",
-                category="check",
-                exc=exc,
-            )
-        return event
-    except Exception:
-        log.warning("failed to finalize SBD V6 install failure", exc_info=True)
-        return None
+    event = pending_install_event(args)
+    if event is None:
+        event = _begin_install_event(args)
+    if str(event.get("status") or "") != "failed":
+        _fail_install_step(
+            event,
+            step_id="unhandled_preflight",
+            category="check",
+            exc=exc,
+        )
+    return event
 
 
 def _run_install_step(
@@ -2004,11 +1964,7 @@ def _run_install_step(
     fields = {**success_fields, **outcome}
     _record_install_step(
         event,
-        step_id=step_id,
-        category=category,
-        status=status,
-        skip_reason=skip_reason,
-        message=message,
+        InstallStep(step_id, category, status, skip_reason=skip_reason, message=message),
         **fields,
     )
     return result
@@ -2025,28 +1981,30 @@ def _resolved_provider_mode(resolved_urls: tuple[str, str] | None) -> str | None
     return None
 
 
-def _finish_install_event(
-    event: dict[str, Any],
-    *,
-    args: argparse.Namespace | None,
-    benchmark_backend: str,
-    benchmark_python: str,
-    magpie_python: str,
-    inferencex_path: str,
-    resolved_urls: tuple[str, str] | None,
-) -> None:
+@dataclass(frozen=True)
+class PreflightRuntime:
+    """The benchmark runtime preflight settled on: backend, interpreters, InferenceX checkout and LLM endpoints."""
+
+    benchmark_backend: str
+    benchmark_python: str
+    magpie_python: str
+    inferencex_path: str
+    resolved_urls: tuple[str, str] | None
+
+
+def _finish_install_event(event: dict[str, Any], *, args: argparse.Namespace | None, runtime: PreflightRuntime) -> None:
     no_kernel = bool(getattr(args, "no_kernel", False)) if args is not None else False
     enable_roofline = bool(getattr(args, "enable_roofline", True)) if args is not None else True
     tracelens_required = _tracelens_required_at_preflight(no_kernel, enable_roofline)
     event["ext"]["runtime_snapshot"] = {
-        "benchmark_backend": benchmark_backend,
-        "benchmark_interpreter": benchmark_python,
-        "magpie_python": magpie_python,
-        "inferencex_path": inferencex_path,
+        "benchmark_backend": runtime.benchmark_backend,
+        "benchmark_interpreter": runtime.benchmark_python,
+        "magpie_python": runtime.magpie_python,
+        "inferencex_path": runtime.inferencex_path,
         "magpie_path": os.environ.get("MAGPIE_PATH") or None,
         "tracelens_required": tracelens_required,
         "tracelens_route_hint": "agent" if not no_kernel else ("bypass" if enable_roofline else None),
-        "provider_mode": _resolved_provider_mode(resolved_urls),
+        "provider_mode": _resolved_provider_mode(runtime.resolved_urls),
     }
     statuses = {str(step.get("status") or "") for step in event["ext"]["steps"]}
     if "failed" in statuses:
@@ -2197,16 +2155,18 @@ def _ensure_magpie(
         raise
     _record_install_step(
         install_event,
-        step_id="ensure_magpie",
-        category="install",
-        status=("skipped" if not magpie_active else "applied" if magpie_installed else "already_present"),
-        skip_reason=None if magpie_active else "benchmark_backend_not_magpie",
-        message=(
-            f"installed {magpie_spec}"
-            if magpie_installed
-            else f"benchmark backend is {benchmark_backend!r}"
-            if not magpie_active
-            else None
+        InstallStep(
+            "ensure_magpie",
+            "install",
+            "skipped" if not magpie_active else "applied" if magpie_installed else "already_present",
+            skip_reason=None if magpie_active else "benchmark_backend_not_magpie",
+            message=(
+                f"installed {magpie_spec}"
+                if magpie_installed
+                else f"benchmark backend is {benchmark_backend!r}"
+                if not magpie_active
+                else None
+            ),
         ),
         target="magpie-eval",
         interpreter=magpie_python,
@@ -2273,10 +2233,7 @@ def _ensure_inferencex(install_event: Any) -> str:
         )
     _record_install_step(
         install_event,
-        step_id=_CLONE_INFERENCEX_STEP,
-        category="install",
-        status="applied" if inferencex_cloned else "already_present",
-        skip_reason=None,
+        InstallStep(_CLONE_INFERENCEX_STEP, "install", "applied" if inferencex_cloned else "already_present"),
         target="InferenceX",
         version_after=inferencex_checkout.head_sha(inferencex_path) or None,
         detail={
@@ -2314,10 +2271,12 @@ def _patch_magpie_compat(install_event: Any, inferencex_path: str, *, magpie_act
     patch_ok = trust_ok and concurrency_ok and anchors_ok
     _record_install_step(
         install_event,
-        step_id="patch_magpie_eval_concurrency",
-        category="patch",
-        status=("skipped" if not magpie_active else "applied" if patch_ok else "warned"),
-        skip_reason=None if magpie_active else "benchmark_backend_not_magpie",
+        InstallStep(
+            "patch_magpie_eval_concurrency",
+            "patch",
+            "skipped" if not magpie_active else "applied" if patch_ok else "warned",
+            skip_reason=None if magpie_active else "benchmark_backend_not_magpie",
+        ),
         detail={
             "client_trust_compatible": trust_ok,
             "eval_concurrency_compatible": concurrency_ok,
@@ -2334,10 +2293,7 @@ def _prepare_inferencex(install_event: Any, *, magpie_active: bool) -> str:
     if agentx_enabled() and not is_mlperf_backend():
         _record_install_step(
             install_event,
-            step_id=_CLONE_INFERENCEX_STEP,
-            category="install",
-            status="skipped",
-            skip_reason="magpie_manages_native_agentx",
+            InstallStep(_CLONE_INFERENCEX_STEP, "install", "skipped", skip_reason="magpie_manages_native_agentx"),
         )
         return ""
     inferencex_path = _ensure_inferencex(install_event)
@@ -2358,10 +2314,7 @@ def _check_kernel_and_tracelens_clis(install_event: Any, args: argparse.Namespac
     if no_kernel:
         _record_install_step(
             install_event,
-            step_id="check_kernel_tuning_clis",
-            category="check",
-            status="skipped",
-            skip_reason="no_kernel",
+            InstallStep("check_kernel_tuning_clis", "check", "skipped", skip_reason="no_kernel"),
         )
     else:
         _run_install_step(
@@ -2386,21 +2339,38 @@ def _check_kernel_and_tracelens_clis(install_event: Any, args: argparse.Namespac
         )
     _record_install_step(
         install_event,
-        step_id="check_tracelens_cli",
-        category="check",
-        status="skipped",
-        skip_reason="no_kernel_and_roofline_disabled",
+        InstallStep(
+            "check_tracelens_cli",
+            "check",
+            "skipped",
+            skip_reason="no_kernel_and_roofline_disabled",
+            message=f"missing CLIs: {missing}" if missing else None,
+        ),
         target="TraceLens",
-        message=f"missing CLIs: {missing}" if missing else None,
     )
     _record_install_step(
         install_event,
-        step_id="check_tracelens_root",
-        category="check",
-        status="skipped",
-        skip_reason="tracelens_not_required",
+        InstallStep("check_tracelens_root", "check", "skipped", skip_reason="tracelens_not_required"),
         target="TRACELENS_ROOT",
     )
+
+
+def _validate_explicit_server_limits(args: argparse.Namespace | None) -> None:
+    effective = argparse.Namespace(**vars(args)) if args is not None else argparse.Namespace()
+    state = _resumed_session_state(args) or {}
+    pins = parse_operator_extra_env(effective) or state.get("operator_extra_env", {})
+    if state:
+        effective.server_args = str(getattr(args, "server_args", "") or "").strip() or state.get(
+            "operator_server_args", ""
+        )
+        if getattr(args, "max_model_len", None) is None:
+            effective.max_model_len = (
+                pins["MAX_MODEL_LEN"]
+                if "MAX_MODEL_LEN" in pins
+                else state.get("max_model_len") or os.environ.get("MAX_MODEL_LEN", "").strip() or None
+            )
+    model = str(state.get("model_path") or getattr(args, "model", None) or os.environ.get("MODEL_PATH", ""))
+    validate_server_args(effective, resolve_serving_model_path(model, model_base=pins.get("HL_MODEL_BASE")))
 
 
 def _preflight(
@@ -2427,6 +2397,12 @@ def _preflight(
     )
     if framework_arg := getattr(args, "framework", None):
         os.environ["FRAMEWORK"] = framework_arg.strip().lower()
+    _run_install_step(
+        install_event,
+        step_id="validate_server_args",
+        category="check",
+        action=lambda: _validate_explicit_server_limits(args),
+    )
     _derive_runtime_paths()
     _restore_provider_only_mode(provider_mode, provider_snapshot)
     _run_install_step(
@@ -2550,7 +2526,6 @@ def _preflight(
         action=lambda: _ensure_lm_eval_dep(
             benchmark_python,
             pip_extra,
-            eval_disabled=_resolved_eval_disabled(args),
         ),
     )
 
@@ -2598,10 +2573,7 @@ def _preflight(
     else:
         _record_install_step(
             install_event,
-            step_id="ir3_pr_monitor_probe",
-            category="degrade",
-            status="skipped",
-            skip_reason="args_unavailable",
+            InstallStep("ir3_pr_monitor_probe", "degrade", "skipped", skip_reason="args_unavailable"),
         )
 
     # --- Single canonical diagnostics block ---
@@ -2616,18 +2588,11 @@ def _preflight(
         ),
     )
 
-    try:
-        _finish_install_event(
-            install_event,
-            args=args,
-            benchmark_backend=benchmark_backend,
-            benchmark_python=benchmark_python,
-            magpie_python=magpie_python,
-            inferencex_path=inferencex_path,
-            resolved_urls=resolved_urls,
-        )
-    except Exception:
-        log.warning("failed to finalize SBD V6 install event", exc_info=True)
+    _finish_install_event(
+        install_event,
+        args=args,
+        runtime=PreflightRuntime(benchmark_backend, benchmark_python, magpie_python, inferencex_path, resolved_urls),
+    )
 
     return resolved_urls
 

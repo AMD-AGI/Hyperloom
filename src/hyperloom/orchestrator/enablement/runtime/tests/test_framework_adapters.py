@@ -274,3 +274,45 @@ def test_verify_torch_is_rocm_true_false():
 def test_verify_vllm_rocm_true_false():
     assert ad.verify_vllm_rocm("/py", run=_FakeRun(default_rc=0)) is True
     assert ad.verify_vllm_rocm("/py", run=_FakeRun(default_rc=1)) is False
+
+
+def _raiser(exc: BaseException):
+    def raise_it(*_args, **_kwargs):
+        raise exc
+
+    return raise_it
+
+
+_VERIFIERS = {"torch": ad.verify_torch_is_rocm, "vllm": ad.verify_vllm_rocm}
+_ADAPTERS = {"vllm_provision": VllmRocmAdapter, "sglang_provision": SglangAdapter}
+
+
+def _outcome(site, failure, tmp_path, monkeypatch):
+    """Run ``site`` with ``failure`` raised underneath it."""
+    if site in _VERIFIERS:
+        return _VERIFIERS[site]("/py", run=_raiser(failure))
+    monkeypatch.setattr(ad, "create_venv", _raiser(failure))
+    result = _ADAPTERS[site](run=_FakeRun()).provision(_wheel_action(), tmp_path / "attempt")
+    return result.ok, result.error
+
+
+@pytest.mark.parametrize("site", [*_VERIFIERS, *_ADAPTERS])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        OSError("no such interpreter"),
+        subprocess.CalledProcessError(1, ["python", "-m", "venv"]),
+        subprocess.TimeoutExpired(cmd="probe", timeout=1),
+    ],
+    ids=["oserror", "called-process", "timeout"],
+)
+def test_an_expected_probe_or_venv_failure_is_absorbed(tmp_path, monkeypatch, site, failure):
+    expected = False if site in _VERIFIERS else (False, f"venv setup failed: {failure!r}")
+    outcome = _outcome(site, failure, tmp_path, monkeypatch)
+    assert outcome == expected
+
+
+@pytest.mark.parametrize("site", [*_VERIFIERS, *_ADAPTERS])
+def test_an_unexpected_probe_or_venv_failure_propagates(tmp_path, monkeypatch, site):
+    with pytest.raises(TypeError, match="unexpected failure"):
+        _outcome(site, TypeError("unexpected failure"), tmp_path, monkeypatch)

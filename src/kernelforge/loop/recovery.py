@@ -7,15 +7,19 @@ from __future__ import annotations
 
 import json
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
 
 from kernelforge.llm.git import git
-from kernelforge.durable_io import atomic_write_text
+from kernelforge.tools.durable_io import atomic_write_text
 from kernelforge.loop.reporting import (
     BestResultPublisher,
+    KeepBundle,
+    KeepIdentity,
+    KeepScore,
     is_best_manifest,
 )
-from kernelforge.loop.scoring import warm_start_improvement_flags
+from kernelforge.evaluation.scoring import warm_start_improvement_flags
 
 
 def atomic_write_json(path: str | Path, payload: dict) -> None:
@@ -92,15 +96,22 @@ def rollback_unpublished_warm_start(
         Path(result_json).unlink(missing_ok=True)
 
 
+@dataclass(frozen=True)
+class CallerRecovery:
+    """How the external caller finds a killed run again: its experiment record, KB experience id and result file."""
+
+    caller_experiment_id: str
+    experience_id: str
+    result_json: str | None
+
+
 def publish_warm_start_recovery(
-    *,
     workspace_dir: str,
+    *,
     base_commit: str,
     warm: dict,
-    caller_experiment_id: str,
-    experience_id: str,
+    caller: CallerRecovery,
     tracker,
-    result_json: str | None,
 ) -> dict | None:
     """Publish a validated warm-start as a kill-recoverable local best."""
     if warm.get("applied") is not True:
@@ -134,35 +145,37 @@ def publish_warm_start_recovery(
 
     root = Path(workspace_dir) / "forge_experiments"
     solution = str(warm.get("solution_slug") or "warm-start")
-    external_id = caller_experiment_id or experience_id or "warm-start"
-    publisher = BestResultPublisher(workspace_dir)
-    publish_kwargs = {
-        "campaign_id": f"warm-start:{solution}",
-        "session_index": 0,
-        "experiment_id": external_id,
-        "iteration": 0,
-        "commit_hash": head,
-        "plan": f"apply prior solution {solution}",
-        "baseline_wall_ms": float(baseline_ms),
-        "search_start_ms": float(best_ms),
-        "best_wall_ms": float(best_ms),
-        "mean_case_speedup": float(mean_case_speedup),
-        "search_start_mean_case_speedup": float(mean_case_speedup),
-        "snr_db": None,
-        "validation_text": ("validated KB warm-start passed canonical correctness"),
-        "benchmark": {
+    external_id = caller.caller_experiment_id or caller.experience_id or "warm-start"
+    keep = KeepIdentity(
+        campaign_id=f"warm-start:{solution}",
+        session_index=0,
+        experiment_id=external_id,
+        iteration=0,
+        commit_hash=head,
+        plan=f"apply prior solution {solution}",
+    )
+    score = KeepScore(
+        baseline_wall_ms=float(baseline_ms),
+        best_wall_ms=float(best_ms),
+        mean_case_speedup=float(mean_case_speedup),
+        search_start_mean_case_speedup=float(mean_case_speedup),
+        search_start_ms=float(best_ms),
+    )
+    bundle = KeepBundle(
+        validation_text=("validated KB warm-start passed canonical correctness"),
+        benchmark={
             "median_ms": float(best_ms),
             "mean_case_speedup": float(mean_case_speedup),
             "case_times": case_times,
             "unscored_cases": unscored_cases,
             "warm_start": True,
         },
-        "changed_files": changed_files,
-        "patch": patch,
-    }
+        changed_files=changed_files,
+        patch=patch,
+    )
     publication_errors: list[str] = []
     try:
-        manifest = publisher.publish(**publish_kwargs)
+        manifest = BestResultPublisher(workspace_dir).publish(keep, score, bundle)
     except Exception as error:
         # A derived view can fail after best_result.json is already durable.
         manifest = _validated_warm_start_result(
@@ -208,7 +221,7 @@ def publish_warm_start_recovery(
         "case_times": case_times,
         "unscored_cases": unscored_cases,
         **improvement,
-        "experiment_id": caller_experiment_id or None,
+        "experiment_id": caller.caller_experiment_id or None,
         "campaign_id": manifest["campaign_id"],
         "session_index": 0,
         "segment_index": 0,
@@ -225,18 +238,18 @@ def publish_warm_start_recovery(
         "warm_start": True,
     }
     persistence_errors: list[str] = list(publication_errors)
-    if caller_experiment_id:
+    if caller.caller_experiment_id:
         try:
-            tracker.set_checkpoint(caller_experiment_id, checkpoint)
-        except Exception as error:  # noqa: BLE001 - collected into persistence_errors
+            tracker.set_checkpoint(caller.caller_experiment_id, checkpoint)
+        except (OSError, TypeError, ValueError) as error:
             persistence_errors.append(f"checkpoint: {error}")
     if persistence_errors:
         result["persistence_degraded"] = True
         result["persistence_errors"] = list(persistence_errors)
-    if result_json:
+    if caller.result_json:
         try:
-            atomic_write_json(result_json, result)
-        except Exception as error:  # noqa: BLE001 - collected into persistence_errors
+            atomic_write_json(caller.result_json, result)
+        except (OSError, TypeError, ValueError) as error:
             persistence_errors.append(f"result-json: {error}")
     if persistence_errors:
         result["persistence_degraded"] = True

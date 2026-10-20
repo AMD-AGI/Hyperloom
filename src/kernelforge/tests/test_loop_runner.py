@@ -28,7 +28,7 @@ from kernelforge.loop import runner as runner_module
 from kernelforge.loop.analysis_refresh_policy import AnalysisRefreshDecision
 from kernelforge.loop.archive import CandidateRecord
 from kernelforge.loop.device_hazard import MAX_BLOCKED_ITERATIONS
-from kernelforge.loop.reporting import _round_budget_lines
+from kernelforge.loop.reporting import KeepBundle, KeepIdentity, KeepScore, _round_budget_lines
 from kernelforge.loop.round_budget import (
     ADMISSION_SESSION_SEC,
     FIRST_ROUND_MEASUREMENT_SEC,
@@ -36,6 +36,10 @@ from kernelforge.loop.round_budget import (
     admit_round,
 )
 from kernelforge.loop.run_state import (
+    IterationVerdict,
+    LoopStanding,
+    RoundCost,
+    StallPolicy,
     ORCHESTRATION_CIRCUIT_CLOSED,
     ORCHESTRATION_CIRCUIT_OPEN,
     PHASE_STALLED,
@@ -60,7 +64,7 @@ from kernelforge.loop.runner import (
     IterationResult,
     WindowGain,
 )
-from kernelforge.loop.scoring import passes_keep_threshold
+from kernelforge.evaluation.scoring import passes_keep_threshold
 from kernelforge.loop.search_policy import (
     MARGINAL_GAIN_WINDOW,
     OBJECTIVE_DISCOVER_NEW_MECHANISM,
@@ -727,10 +731,12 @@ def test_a_single_lane_runs_the_ordinary_session(tmp_path, monkeypatch):
 
     asyncio.run(
         loop.run(
-            agent_fn=_no_change_agent,
-            supervisor_fn=_unused_supervisor,
-            orchestration_service=object(),
-            agent_factory=_lane_agent_factory({}),
+            runner_module.LoopAgents(
+                agent_fn=_no_change_agent,
+                agent_factory=_lane_agent_factory({}),
+                orchestration_service=object(),
+                supervisor_fn=_unused_supervisor,
+            )
         )
     )
 
@@ -759,10 +765,12 @@ def test_more_than_one_lane_fans_the_round_out(tmp_path, monkeypatch):
 
     asyncio.run(
         loop.run(
-            agent_fn=_no_change_agent,
-            supervisor_fn=_unused_supervisor,
-            orchestration_service=object(),
-            agent_factory=_lane_agent_factory({}),
+            runner_module.LoopAgents(
+                agent_fn=_no_change_agent,
+                agent_factory=_lane_agent_factory({}),
+                orchestration_service=object(),
+                supervisor_fn=_unused_supervisor,
+            )
         )
     )
 
@@ -800,10 +808,12 @@ def _fan_out_iteration(tmp_path, monkeypatch, rounds, **plan_kwargs):
 
     asyncio.run(
         loop.run(
-            agent_fn=_no_change_agent,
-            supervisor_fn=_unused_supervisor,
-            orchestration_service=object(),
-            agent_factory=_lane_agent_factory({}),
+            runner_module.LoopAgents(
+                agent_fn=_no_change_agent,
+                agent_factory=_lane_agent_factory({}),
+                orchestration_service=object(),
+                supervisor_fn=_unused_supervisor,
+            )
         )
     )
     return [
@@ -926,10 +936,7 @@ def _seed_round_costs(workspace, *, planning_sec, lanes=3, rounds=2):
     for iteration in range(1, rounds + 1):
         apply_round_cost(
             state,
-            iteration=iteration,
-            lanes=lanes,
-            planning_sec=planning_sec,
-            total_sec=planning_sec + 2400.0,
+            RoundCost(iteration=iteration, lanes=lanes, planning_sec=planning_sec, total_sec=planning_sec + 2400.0),
             campaign_sec=iteration * (planning_sec + 2400.0),
         )
     LoopStateStore(str(workspace)).save(state)
@@ -964,10 +971,12 @@ def _round_admission_loop(
 
     asyncio.run(
         loop.run(
-            agent_fn=_no_change_agent,
-            supervisor_fn=_unused_supervisor,
-            orchestration_service=object(),
-            agent_factory=_lane_agent_factory({}),
+            runner_module.LoopAgents(
+                agent_fn=_no_change_agent,
+                agent_factory=_lane_agent_factory({}),
+                orchestration_service=object(),
+                supervisor_fn=_unused_supervisor,
+            )
         )
     )
     return loop, workspace
@@ -1099,7 +1108,7 @@ def test_a_resumed_campaign_reports_a_planning_share_within_its_definition(
         lambda: 0.0 if loop.results else 12 * 3600.0,
     )
 
-    asyncio.run(loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     summary = loop._round_budget_summary()
     share = summary["planning_share_pct"]
@@ -1146,10 +1155,12 @@ def test_a_finished_round_records_what_its_planning_cost(tmp_path, monkeypatch):
 
     asyncio.run(
         loop.run(
-            agent_fn=_no_change_agent,
-            supervisor_fn=_unused_supervisor,
-            orchestration_service=object(),
-            agent_factory=_lane_agent_factory({}),
+            runner_module.LoopAgents(
+                agent_fn=_no_change_agent,
+                agent_factory=_lane_agent_factory({}),
+                orchestration_service=object(),
+                supervisor_fn=_unused_supervisor,
+            )
         )
     )
 
@@ -1165,7 +1176,7 @@ def test_an_iteration_that_did_not_plan_records_no_round_cost(tmp_path, monkeypa
     """A campaign with no orchestration never learns that planning is free."""
     loop, workspace = _make_loop(tmp_path, monkeypatch)
 
-    asyncio.run(loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     assert loop.results
     assert LoopStateStore(str(workspace)).load().round_costs.rounds == 0
@@ -1539,10 +1550,12 @@ def test_a_stack_does_not_take_an_iteration_that_is_holding_a_plan(tmp_path, mon
 
     asyncio.run(
         loop.run(
-            agent_fn=_no_change_agent,
-            supervisor_fn=_unused_supervisor,
-            orchestration_service=object(),
-            agent_factory=_lane_agent_factory({}),
+            runner_module.LoopAgents(
+                agent_fn=_no_change_agent,
+                agent_factory=_lane_agent_factory({}),
+                orchestration_service=object(),
+                supervisor_fn=_unused_supervisor,
+            )
         )
     )
 
@@ -1879,7 +1892,7 @@ def test_a_queue_that_never_empties_does_not_starve_stacking(tmp_path, monkeypat
     loop, workspace = _stalled_loop_behind_a_full_queue(tmp_path, monkeypatch)
     monkeypatch.setattr(loop, "run_one_iteration", _reverting_iteration)
 
-    asyncio.run(loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     events = LoopStateStore(str(workspace)).read_events()
     staged = [item for item in events if item.get("type") == "merge_attempt_staged"]
@@ -1905,7 +1918,7 @@ def test_a_fresh_run_still_measures_the_candidates_it_bought(tmp_path, monkeypat
     loop, workspace = _stalled_loop_behind_a_full_queue(tmp_path, monkeypatch, stall=MERGE_ATTEMPT_STALL_THRESHOLD - 1)
     monkeypatch.setattr(loop, "run_one_iteration", _reverting_iteration)
 
-    asyncio.run(loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     events = LoopStateStore(str(workspace)).read_events()
 
@@ -1929,7 +1942,7 @@ def test_taking_precedence_and_failing_to_stage_costs_the_queue_nothing(tmp_path
     )
     monkeypatch.setattr(loop, "run_one_iteration", _reverting_iteration)
 
-    asyncio.run(loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     events = LoopStateStore(str(workspace)).read_events()
 
@@ -1973,7 +1986,7 @@ def test_a_merge_streak_is_bounded_so_the_queue_is_reached(tmp_path, monkeypatch
     loop, workspace = _stalled_loop_behind_a_full_queue(tmp_path, monkeypatch, candidates=4, iterations=5)
     monkeypatch.setattr(loop, "run_one_iteration", _reverting_iteration)
 
-    asyncio.run(loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     # Each of those iterations has to have reached the KEEP gate and been
     # turned down there, because that is the outcome that leaves the stall
@@ -2028,7 +2041,7 @@ def test_what_precedence_records_is_a_queue_depth(tmp_path, monkeypatch):
     loop._persist_lane_queue()
     monkeypatch.setattr(loop, "run_one_iteration", _reverting_iteration)
 
-    asyncio.run(loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     events = LoopStateStore(str(workspace)).read_events()
 
@@ -2181,6 +2194,38 @@ def test_a_resume_without_a_pending_keep_replays_each_event_exactly_once(tmp_pat
     assert applied == [1, 2, 3]
     assert planned.next_iteration == 4
     assert planned.cumulative.iterations == 3
+
+
+def test_resume_replay_advances_the_relay_streak_only_for_the_active_profiles_search(tmp_path, monkeypatch):
+    loop, workspace = _make_loop(tmp_path, monkeypatch, resume=True)
+    store = LoopStateStore(str(workspace))
+    state = RunState(campaign_id="campaign", iteration=0, next_iteration=1, baseline_wall_ms=1.0)
+    state.agent_relay.active_profile_id = "claude"
+    store.save(state)
+    for iteration, decision, producer in (
+        (1, "REVERT_PERF", "claude"),
+        (2, "REVERT_PERF", None),
+        (3, "API_ERROR", "claude"),
+        (4, "BUILD_FAILED", "claude"),
+    ):
+        store.append_event(
+            make_event(
+                "iteration_result",
+                iteration,
+                decision=decision,
+                plan=f"attempt {iteration}",
+                wall_ms=1.1,
+                best_after_ms=1.0,
+                agent_profile_id=producer,
+            )
+        )
+    loop.state_store = store
+    loop.run_state = state
+
+    planned, _, _, _ = loop._plan_resume_recovery(state, None)
+
+    assert planned.next_iteration == 5
+    assert planned.agent_relay.active_no_improvement_streak == 2
 
 
 def test_keep_expires_active_supervisor_ruling(tmp_path, monkeypatch):
@@ -2339,7 +2384,7 @@ def _measurement_loop(monkeypatch, benchmark_result, workspace_dir="."):
     async def fake_validation(**_kwargs):
         return report
 
-    async def fake_benchmark(**kwargs):
+    async def fake_benchmark(_run, **kwargs):
         benchmark_calls.append(kwargs)
         return dict(benchmark_result)
 
@@ -2494,7 +2539,7 @@ async def test_a_non_assembly_keep_rests_on_the_driver_not_on_the_task_config(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["missing", "unstable", "valid"])
 async def test_assembly_keep_requires_fresh_source_relative_numerics(tmp_path, monkeypatch, kind):
-    from kernelforge.tests.test_numerical_contract import _task, evidence
+    from kernelforge.tests.evaluation.correctness.test_numerical import _task, evidence
 
     if kind != "missing":
         _task(tmp_path, evidence(candidate_repeat_db=27 if kind == "unstable" else 45))
@@ -2521,7 +2566,7 @@ async def test_snr_pass_with_failing_assembly_acceptance_is_reverted(tmp_path, m
     backend declares rejects it. That candidate must not be kept, and the
     tolerance it broke -- not the dB figure -- has to reach the agent.
     """
-    from kernelforge.tests.test_numerical_contract import _task, evidence
+    from kernelforge.tests.evaluation.correctness.test_numerical import _task, evidence
 
     _task(tmp_path, evidence())
     tmp_path.joinpath("driver.py").write_text("raise AssertionError('normalized max err 0.02468 too high')\n")
@@ -2590,7 +2635,7 @@ def test_agent_error_is_reduced_and_persisted(tmp_path, monkeypatch):
     async def failing_agent(*_args, **_kwargs):
         raise RuntimeError("agent exploded")
 
-    asyncio.run(loop.run(agent_fn=failing_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=failing_agent, supervisor_fn=_unused_supervisor)))
 
     store = LoopStateStore(str(workspace))
     state = store.load()
@@ -2625,10 +2670,7 @@ def test_agent_error_with_diff_is_handed_to_outer_validation(tmp_path, monkeypat
 
     monkeypatch.setattr(loop, "run_one_iteration", reject_candidate)
     asyncio.run(
-        loop.run(
-            agent_fn=editing_then_failing_agent,
-            supervisor_fn=_unused_supervisor,
-        )
+        loop.run(runner_module.LoopAgents(agent_fn=editing_then_failing_agent, supervisor_fn=_unused_supervisor))
     )
 
     decisions = [
@@ -2675,12 +2717,7 @@ def test_integrity_violation_restores_and_skips_canonical_validation(
 
     monkeypatch.setattr(loop, "run_one_iteration", unexpected_validation)
 
-    asyncio.run(
-        loop.run(
-            agent_fn=unsafe_agent,
-            supervisor_fn=_unused_supervisor,
-        )
-    )
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=unsafe_agent, supervisor_fn=_unused_supervisor)))
 
     assert validation_calls == []
     assert kernel.read_text() == "def kernel():\n    return 1\n"
@@ -2723,12 +2760,7 @@ def test_a_contended_workspace_skips_the_canonical_measurement(
 
     monkeypatch.setattr(loop, "run_one_iteration", unexpected_validation)
 
-    asyncio.run(
-        loop.run(
-            agent_fn=contended_agent,
-            supervisor_fn=_unused_supervisor,
-        )
-    )
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=contended_agent, supervisor_fn=_unused_supervisor)))
 
     assert validation_calls == []
     # Unmeasured means unkept: HEAD stays at the last state a benchmark ever
@@ -2812,10 +2844,12 @@ def test_one_contended_lane_costs_the_whole_round_its_measurement(
 
     asyncio.run(
         loop.run(
-            agent_fn=_no_change_agent,
-            supervisor_fn=_unused_supervisor,
-            orchestration_service=object(),
-            agent_factory=_lane_agent_factory({"tune prefill": ("return 1", "return 2")}),
+            runner_module.LoopAgents(
+                agent_fn=_no_change_agent,
+                agent_factory=_lane_agent_factory({"tune prefill": ("return 1", "return 2")}),
+                orchestration_service=object(),
+                supervisor_fn=_unused_supervisor,
+            )
         )
     )
 
@@ -2873,10 +2907,12 @@ def test_a_leaked_probe_costs_the_round_its_measurement(tmp_path, monkeypatch):
 
     asyncio.run(
         loop.run(
-            agent_fn=_no_change_agent,
-            supervisor_fn=_unused_supervisor,
-            orchestration_service=_ProbeLeakingService(),
-            agent_factory=_lane_agent_factory({"tune prefill": ("return 1", "return 2")}),
+            runner_module.LoopAgents(
+                agent_fn=_no_change_agent,
+                agent_factory=_lane_agent_factory({"tune prefill": ("return 1", "return 2")}),
+                orchestration_service=_ProbeLeakingService(),
+                supervisor_fn=_unused_supervisor,
+            )
         )
     )
 
@@ -2923,9 +2959,8 @@ def test_a_hazard_outlives_the_iteration_that_found_it(tmp_path, monkeypatch):
 
     asyncio.run(
         loop.run(
-            agent_fn=agent,
-            supervisor_fn=_unused_supervisor,
-            on_iteration=free_the_device_after_the_second_refusal,
+            runner_module.LoopAgents(agent_fn=agent, supervisor_fn=_unused_supervisor),
+            callbacks=runner_module.LoopCallbacks(on_iteration=free_the_device_after_the_second_refusal),
         )
     )
 
@@ -2957,12 +2992,7 @@ def test_a_hazard_nothing_clears_stops_the_run_rather_than_spinning(
     _fake_device(monkeypatch, {4321: 99})
     monkeypatch.setattr(runner_module, "processes_under", lambda _dir: {4321})
 
-    asyncio.run(
-        loop.run(
-            agent_fn=_contended_agent,
-            supervisor_fn=_unused_supervisor,
-        )
-    )
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_contended_agent, supervisor_fn=_unused_supervisor)))
 
     decisions = [
         event.get("decision")
@@ -2990,7 +3020,7 @@ def test_an_api_outage_is_not_recorded_as_an_agent_decision(tmp_path, monkeypatc
         session_sink["end_reason"] = "api_error"
         return "agent session ended with an API error"
 
-    asyncio.run(loop.run(agent_fn=api_failed_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=api_failed_agent, supervisor_fn=_unused_supervisor)))
 
     store = LoopStateStore(str(workspace))
     decisions = [event.get("decision") for event in store.read_events() if event.get("type") == "iteration_result"]
@@ -3001,7 +3031,7 @@ def test_an_api_outage_is_not_recorded_as_an_agent_decision(tmp_path, monkeypatc
 
 def test_no_change_attempt_is_reduced_and_persisted(tmp_path, monkeypatch):
     loop, workspace = _make_loop(tmp_path, monkeypatch)
-    asyncio.run(loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     store = LoopStateStore(str(workspace))
     state = store.load()
@@ -3049,9 +3079,9 @@ def test_optimization_plan_path_is_injected_before_implementer(
     monkeypatch.setattr(loop, "_run_orchestration", run_orchestration)
     asyncio.run(
         loop.run(
-            agent_fn=agent_fn,
-            orchestration_service=orchestration_service,
-            supervisor_fn=_unused_supervisor,
+            runner_module.LoopAgents(
+                agent_fn=agent_fn, orchestration_service=orchestration_service, supervisor_fn=_unused_supervisor
+            )
         )
     )
 
@@ -3140,12 +3170,7 @@ def test_lessons_are_orchestration_evidence_and_handoff_is_audit_only(
     monkeypatch,
 ):
     loop, workspace = _make_loop(tmp_path, monkeypatch)
-    asyncio.run(
-        loop.run(
-            agent_fn=_no_change_agent,
-            supervisor_fn=_unused_supervisor,
-        )
-    )
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
     loop.config = SimpleNamespace(
         experiments_dir=workspace / "forge_experiments",
         gpu_target="gfx942",
@@ -3645,15 +3670,16 @@ def test_a_supervisor_intervention_no_longer_erases_the_stall_it_answers(
     for iteration in (1, 2, 3):
         apply_iteration(
             loop.run_state,
-            iteration=iteration,
-            decision="REVERT_PERF",
-            kept=False,
-            wall_ms=1.1,
-            commit_hash="",
-            plan="another pass over the same loop body",
-            baseline_wall_ms=1.0,
-            best_wall_ms=1.0,
-            stall_threshold=3,
+            IterationVerdict(
+                iteration=iteration,
+                decision="REVERT_PERF",
+                kept=False,
+                wall_ms=1.1,
+                commit_hash="",
+                plan="another pass over the same loop body",
+            ),
+            LoopStanding(baseline_wall_ms=1.0, best_wall_ms=1.0),
+            StallPolicy(stall_threshold=3),
         )
         loop.monitor.record(kept=False)
 
@@ -3920,7 +3946,7 @@ def test_repeated_empty_diffs_escalate_before_the_generic_stall_threshold(
         observed_modes.append(loop.run_state.search_mode)
         return "No source change was needed."
 
-    asyncio.run(loop.run(agent_fn=stuck_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=stuck_agent, supervisor_fn=_unused_supervisor)))
 
     store = LoopStateStore(str(workspace))
     state = store.load()
@@ -3936,7 +3962,7 @@ def test_single_empty_diff_does_not_escalate(tmp_path, monkeypatch):
     """One session that found nothing to change is not proof of a dead end."""
     loop, workspace = _make_loop(tmp_path, monkeypatch)
 
-    asyncio.run(loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     state = LoopStateStore(str(workspace)).load()
 
@@ -3969,7 +3995,7 @@ def test_the_empty_diff_streak_survives_a_reworded_plan_headline(
         observed_modes.append(loop.run_state.search_mode)
         return "No source change was needed."
 
-    asyncio.run(loop.run(agent_fn=reworded_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=reworded_agent, supervisor_fn=_unused_supervisor)))
 
     store = LoopStateStore(str(workspace))
     state = store.load()
@@ -4003,7 +4029,7 @@ def test_api_outage_does_not_break_the_empty_diff_streak(tmp_path, monkeypatch):
             return "agent session ended with an API error"
         return "No source change was needed."
 
-    asyncio.run(loop.run(agent_fn=flaky_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=flaky_agent, supervisor_fn=_unused_supervisor)))
 
     store = LoopStateStore(str(workspace))
     state = store.load()
@@ -4036,7 +4062,7 @@ def test_a_crashed_session_does_not_break_the_empty_diff_streak(
             raise RuntimeError("SDK stream died mid-session")
         return "No source change was needed."
 
-    asyncio.run(loop.run(agent_fn=crashing_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=crashing_agent, supervisor_fn=_unused_supervisor)))
 
     store = LoopStateStore(str(workspace))
     state = store.load()
@@ -4075,7 +4101,7 @@ def test_an_outage_run_cannot_push_the_first_empty_diff_out_of_the_window(
             return "agent session ended with an API error"
         return "No source change was needed."
 
-    asyncio.run(loop.run(agent_fn=outage_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=outage_agent, supervisor_fn=_unused_supervisor)))
 
     reopened = LoopStateStore(str(workspace))
     live = reopened.load()
@@ -4507,9 +4533,7 @@ def test_keep_defers_incremental_analysis_until_next_request(
     async def exercise():
         service = AnalysisService()
         await loop.run(
-            agent_fn=editing_agent,
-            analysis_service=service,
-            supervisor_fn=_unused_supervisor,
+            runner_module.LoopAgents(agent_fn=editing_agent, analysis_service=service, supervisor_fn=_unused_supervisor)
         )
         assert len(analysis_calls) == 1
         assert loop._analysis_bundle is None
@@ -4778,7 +4802,7 @@ def test_missing_cumulative_diff_degrades_without_forcing_refresh(
     assert all("simulated diff failure" in event["cumulative_diff_error"] for event in decisions[-3:])
 
 
-def test_analysis_refresh_event_failure_marks_persistence_degraded(
+def test_analysis_refresh_event_failure_propagates(
     tmp_path,
     monkeypatch,
 ):
@@ -4794,19 +4818,47 @@ def test_analysis_refresh_event_failure_marks_persistence_degraded(
     )
     context = loop._build_orchestration_context()
 
-    loop._record_analysis_refresh_decision(
-        context,
-        AnalysisRefreshDecision(
-            refresh=False,
-            reasons=("CURRENT_EVIDENCE",),
-            evidence_stale=False,
-            gain_since_evidence=0.0,
-        ),
-        iteration=1,
-    )
+    with pytest.raises(OSError, match="^event log unavailable$"):
+        loop._record_analysis_refresh_decision(
+            context,
+            AnalysisRefreshDecision(
+                refresh=False,
+                reasons=("CURRENT_EVIDENCE",),
+                evidence_stale=False,
+                gain_since_evidence=0.0,
+            ),
+            iteration=1,
+        )
 
-    assert loop.persistence_degraded is True
-    assert any("event log unavailable" in error for error in loop.persistence_errors)
+    assert loop.persistence_degraded is False
+    assert loop.persistence_errors == []
+
+
+def test_analysis_refresh_state_save_failure_propagates(tmp_path, monkeypatch):
+    loop, workspace = _make_loop(tmp_path, monkeypatch)
+    loop.config = SimpleNamespace(
+        experiments_dir=workspace / "forge_experiments",
+        gpu_target="gfx942",
+        local_knowledge_dir=None,
+    )
+    loop.state_store = LoopStateStore(str(workspace))
+    loop.run_state = RunState()
+    monkeypatch.setattr(loop.state_store, "save", lambda _state: (_ for _ in ()).throw(OSError("save unavailable")))
+
+    class AnalysisService:
+        profiling_enabled = True
+
+        async def ensure_bundle(self, _context, **_kwargs):
+            raise RuntimeError("bundle unavailable")
+
+        def apply_checkpoint(self, context):
+            return context
+
+    with pytest.raises(OSError, match="^save unavailable$"):
+        asyncio.run(loop._resolve_analysis_context(AnalysisService()))
+
+    assert loop.persistence_degraded is False
+    assert loop.persistence_errors == []
 
 
 def test_partial_bundle_does_not_inherit_prior_commit_evidence_refs(
@@ -5056,9 +5108,9 @@ def test_loop_refreshes_stale_analysis_before_supervisor(
 
     asyncio.run(
         loop.run(
-            agent_fn=editing_agent,
-            analysis_service=AnalysisService(),
-            supervisor_fn=supervisor,
+            runner_module.LoopAgents(
+                agent_fn=editing_agent, analysis_service=AnalysisService(), supervisor_fn=supervisor
+            )
         )
     )
 
@@ -5099,9 +5151,9 @@ def test_handoff_records_optimization_plan_path(
     monkeypatch.setattr(loop, "_run_orchestration", create_plan)
     asyncio.run(
         loop.run(
-            agent_fn=agent_fn,
-            orchestration_service=object(),
-            supervisor_fn=_unused_supervisor,
+            runner_module.LoopAgents(
+                agent_fn=agent_fn, orchestration_service=object(), supervisor_fn=_unused_supervisor
+            )
         )
     )
 
@@ -5193,9 +5245,7 @@ def test_resume_propagates_complete_ruling_to_planner_and_implementer(
 
     asyncio.run(
         loop.run(
-            agent_fn=agent,
-            orchestration_service=object(),
-            supervisor_fn=_unused_supervisor,
+            runner_module.LoopAgents(agent_fn=agent, orchestration_service=object(), supervisor_fn=_unused_supervisor)
         )
     )
 
@@ -5298,7 +5348,7 @@ def test_run_fails_before_agent_without_baseline_cases(
         RuntimeError,
         match="requires pristine per-case timings",
     ):
-        asyncio.run(loop.run(agent_fn=agent))
+        asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=agent)))
 
     assert called is False
 
@@ -5306,7 +5356,7 @@ def test_run_fails_before_agent_without_baseline_cases(
 def _static_bench(result: dict):
     """A measurement stand-in that always returns ``result``."""
 
-    async def bench(**_kwargs):
+    async def bench(_run, **_kwargs):
         return dict(result)
 
     return bench
@@ -5422,7 +5472,7 @@ def test_baseline_case_coverage_drift_names_the_cases(
     """Coverage that moves between measurements must name what moved."""
     loop, _workspace = _make_loop(tmp_path, monkeypatch)
 
-    async def bench(**_kwargs):
+    async def bench(_run, **_kwargs):
         return {
             "success": False,
             "message": ("MEASUREMENT CASE COVERAGE MISMATCH: expected=['case_001', 'case_002'], got=['case_001']"),
@@ -5483,7 +5533,7 @@ def test_resume_restores_baselines_before_best_publication_reconcile(
     monkeypatch.setattr(loop, "_reconcile_best_publication", inspect_reconcile)
     monkeypatch.setattr(loop, "_time_remaining", lambda: 0.0)
 
-    asyncio.run(loop.run(agent_fn=_no_change_agent))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent)))
 
     assert observed == [(0.8, 1.0)]
 
@@ -5506,21 +5556,27 @@ def test_reconcile_skips_republishing_a_best_the_manifest_already_names(
     loop.best_publisher = runner_module.BestResultPublisher(str(workspace))
     head = loop._git("rev-parse", "HEAD").strip()
     loop.best_publisher.publish(
-        campaign_id="campaign",
-        session_index=1,
-        experiment_id="experiment-one",
-        iteration=1,
-        commit_hash=head,
-        plan="prior keep",
-        baseline_wall_ms=1.0,
-        best_wall_ms=0.8,
-        mean_case_speedup=1.4,
-        search_start_mean_case_speedup=1.0,
-        snr_db=None,
-        validation_text="canonical correctness passed",
-        benchmark={"median_ms": 0.8},
-        changed_files=["kernel.py"],
-        patch="prior patch\n",
+        KeepIdentity(
+            campaign_id="campaign",
+            session_index=1,
+            experiment_id="experiment-one",
+            iteration=1,
+            commit_hash=head,
+            plan="prior keep",
+        ),
+        KeepScore(
+            baseline_wall_ms=1.0,
+            best_wall_ms=0.8,
+            mean_case_speedup=1.4,
+            search_start_mean_case_speedup=1.0,
+            snr_db=None,
+        ),
+        KeepBundle(
+            validation_text="canonical correctness passed",
+            benchmark={"median_ms": 0.8},
+            changed_files=["kernel.py"],
+            patch="prior patch\n",
+        ),
     )
     loop.run_state = RunState(campaign_id="campaign", session_index=2)
     # The recomputed identity a resumed session would carry into the republish.
@@ -5537,7 +5593,7 @@ def test_reconcile_skips_republishing_a_best_the_manifest_already_names(
     monkeypatch.setattr(
         loop.best_publisher,
         "publish",
-        lambda **kwargs: republished.append(kwargs),
+        lambda *args, **kwargs: republished.append(args),
     )
 
     loop._reconcile_best_publication()
@@ -5557,21 +5613,27 @@ def test_reconcile_republishes_a_best_a_stale_manifest_does_not_name(
     loop.archive = runner_module.CandidateArchive(str(workspace), loop.ic.kernel_file)
     stale_commit = loop._git("rev-parse", "HEAD").strip()
     loop.best_publisher.publish(
-        campaign_id="campaign",
-        session_index=1,
-        experiment_id="experiment-one",
-        iteration=1,
-        commit_hash=stale_commit,
-        plan="earlier keep",
-        baseline_wall_ms=1.0,
-        best_wall_ms=0.9,
-        mean_case_speedup=1.1,
-        search_start_mean_case_speedup=1.0,
-        snr_db=None,
-        validation_text="canonical correctness passed",
-        benchmark={"median_ms": 0.9},
-        changed_files=["kernel.py"],
-        patch="earlier patch\n",
+        KeepIdentity(
+            campaign_id="campaign",
+            session_index=1,
+            experiment_id="experiment-one",
+            iteration=1,
+            commit_hash=stale_commit,
+            plan="earlier keep",
+        ),
+        KeepScore(
+            baseline_wall_ms=1.0,
+            best_wall_ms=0.9,
+            mean_case_speedup=1.1,
+            search_start_mean_case_speedup=1.0,
+            snr_db=None,
+        ),
+        KeepBundle(
+            validation_text="canonical correctness passed",
+            benchmark={"median_ms": 0.9},
+            changed_files=["kernel.py"],
+            patch="earlier patch\n",
+        ),
     )
     kernel = workspace / "kernel.py"
     kernel.write_text("def kernel():\n    return 3\n")
@@ -5594,16 +5656,16 @@ def test_reconcile_republishes_a_best_a_stale_manifest_does_not_name(
     )
     republished: list[dict] = []
 
-    def _record(**kwargs):
-        republished.append(kwargs)
-        return {"iteration": kwargs["iteration"]}
+    def _record(keep, _score, _bundle, **_kwargs):
+        republished.append(keep)
+        return {"iteration": keep.iteration}
 
     monkeypatch.setattr(loop.best_publisher, "publish", _record)
 
     loop._reconcile_best_publication()
 
     assert len(republished) == 1
-    assert republished[0]["commit_hash"] == head
+    assert republished[0].commit_hash == head
     assert loop.persistence_degraded is False
 
 
@@ -5648,7 +5710,7 @@ def test_intervention_reset_is_persisted_before_agent_runs(tmp_path, monkeypatch
         raise asyncio.CancelledError
 
     with pytest.raises(asyncio.CancelledError):
-        asyncio.run(loop.run(agent_fn=cancelled_agent, supervisor_fn=supervisor))
+        asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=cancelled_agent, supervisor_fn=supervisor)))
 
     persisted = LoopStateStore(str(workspace)).load()
     assert loop.run_state.stall.no_improvement_iters == 0
@@ -5705,12 +5767,7 @@ def test_empty_supervisor_expires_prior_ruling_without_resetting_stall(
         )
 
     monkeypatch.setattr(loop, "run_one_iteration", reverted_iteration)
-    asyncio.run(
-        loop.run(
-            agent_fn=editing_agent,
-            supervisor_fn=empty_supervisor,
-        )
-    )
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=editing_agent, supervisor_fn=empty_supervisor)))
 
     assert loop.monitor.intervention_count == 0
     assert loop.run_state.stall.no_improvement_iters == 3
@@ -5781,9 +5838,7 @@ def test_free_form_supervisor_ruling_still_creates_fresh_plan_each_iteration(
     monkeypatch.setattr(loop, "run_one_iteration", reverted_iteration)
     asyncio.run(
         loop.run(
-            agent_fn=editing_agent,
-            orchestration_service=object(),
-            supervisor_fn=supervisor,
+            runner_module.LoopAgents(agent_fn=editing_agent, orchestration_service=object(), supervisor_fn=supervisor)
         )
     )
 
@@ -5880,9 +5935,9 @@ def test_orchestration_failure_skips_implementer_without_fallback(
     monkeypatch.setattr(loop, "_run_orchestration", orchestration)
     results = asyncio.run(
         loop.run(
-            agent_fn=implementer,
-            orchestration_service=object(),
-            supervisor_fn=_unused_supervisor,
+            runner_module.LoopAgents(
+                agent_fn=implementer, orchestration_service=object(), supervisor_fn=_unused_supervisor
+            )
         )
     )
 
@@ -5913,9 +5968,9 @@ def test_consecutive_orchestration_errors_open_circuit(
 
     results = asyncio.run(
         loop.run(
-            agent_fn=implementer,
-            orchestration_service=service,
-            supervisor_fn=_unused_supervisor,
+            runner_module.LoopAgents(
+                agent_fn=implementer, orchestration_service=service, supervisor_fn=_unused_supervisor
+            )
         )
     )
 
@@ -5944,9 +5999,11 @@ def test_orchestration_failed_resume_allows_one_half_open_probe(
     first_backend = _OrchestrationTestBackend([_orchestration_api_failure() for _ in range(3)])
     asyncio.run(
         first.run(
-            agent_fn=_no_change_agent,
-            orchestration_service=_runner_orchestration_service(first_backend),
-            supervisor_fn=_unused_supervisor,
+            runner_module.LoopAgents(
+                agent_fn=_no_change_agent,
+                orchestration_service=_runner_orchestration_service(first_backend),
+                supervisor_fn=_unused_supervisor,
+            )
         )
     )
 
@@ -5964,9 +6021,11 @@ def test_orchestration_failed_resume_allows_one_half_open_probe(
     failed_backend = _OrchestrationTestBackend([_orchestration_api_failure()])
     failed_results = asyncio.run(
         failed_probe.run(
-            agent_fn=_no_change_agent,
-            orchestration_service=_runner_orchestration_service(failed_backend),
-            supervisor_fn=_unused_supervisor,
+            runner_module.LoopAgents(
+                agent_fn=_no_change_agent,
+                orchestration_service=_runner_orchestration_service(failed_backend),
+                supervisor_fn=_unused_supervisor,
+            )
         )
     )
 
@@ -6008,9 +6067,11 @@ def test_orchestration_failed_resume_allows_one_half_open_probe(
     )
     successful_results = asyncio.run(
         successful_probe.run(
-            agent_fn=_no_change_agent,
-            orchestration_service=_runner_orchestration_service(successful_backend),
-            supervisor_fn=_unused_supervisor,
+            runner_module.LoopAgents(
+                agent_fn=_no_change_agent,
+                orchestration_service=_runner_orchestration_service(successful_backend),
+                supervisor_fn=_unused_supervisor,
+            )
         )
     )
 
@@ -6024,7 +6085,7 @@ def test_orchestration_failed_resume_allows_one_half_open_probe(
 
 def test_two_loop_instances_resume_global_iteration_and_fresh_budget(tmp_path, monkeypatch):
     first, workspace = _make_loop(tmp_path, monkeypatch)
-    asyncio.run(first.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(first.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     first_state = LoopStateStore(str(workspace)).load()
     first_experiment = first.experiment
@@ -6044,7 +6105,9 @@ def test_two_loop_instances_resume_global_iteration_and_fresh_budget(tmp_path, m
         "_time_remaining",
         lambda: _AMPLE_BUDGET_SEC if len(second.results) < 1 else 0.0,
     )
-    second_results = asyncio.run(second.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
+    second_results = asyncio.run(
+        second.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
+    )
 
     resumed = LoopStateStore(str(workspace)).load()
     assert [result.iteration for result in second_results] == [2]
@@ -6064,7 +6127,7 @@ def test_two_loop_instances_resume_global_iteration_and_fresh_budget(tmp_path, m
 
 def test_resume_advances_past_abruptly_started_event(tmp_path, monkeypatch):
     first, workspace = _make_loop(tmp_path, monkeypatch)
-    asyncio.run(first.run(agent_fn=_no_change_agent))
+    asyncio.run(first.run(runner_module.LoopAgents(agent_fn=_no_change_agent)))
     store = LoopStateStore(str(workspace))
     state = store.load()
     interrupted_iteration = state.next_iteration
@@ -6087,7 +6150,7 @@ def test_resume_advances_past_abruptly_started_event(tmp_path, monkeypatch):
         "_time_remaining",
         lambda: _AMPLE_BUDGET_SEC if len(resumed.results) < 1 else 0.0,
     )
-    results = asyncio.run(resumed.run(agent_fn=_no_change_agent))
+    results = asyncio.run(resumed.run(runner_module.LoopAgents(agent_fn=_no_change_agent)))
 
     assert [result.iteration for result in results] == [interrupted_iteration + 1]
     assert LoopStateStore(str(workspace)).load().next_iteration == (interrupted_iteration + 2)
@@ -6128,12 +6191,7 @@ def test_validated_warm_start_is_immediately_recoverable_without_keep(
     loop.ic.warm_start_commit = warm_commit
     loop.ic.warm_start_solution_slug = "kernelforge-exp/op/run"
 
-    asyncio.run(
-        loop.run(
-            agent_fn=_no_change_agent,
-            supervisor_fn=_unused_supervisor,
-        )
-    )
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     state = LoopStateStore(str(workspace)).load()
     manifest = json.loads((workspace / "forge_experiments" / "best" / "manifest.json").read_text())
@@ -6178,22 +6236,28 @@ def test_validated_warm_start_reuses_cli_prepublication(
     ).stdout
     publisher = runner_module.BestResultPublisher(str(workspace))
     manifest = publisher.publish(
-        campaign_id="warm-start:kernelforge-exp/op/run",
-        session_index=0,
-        experiment_id="caller-run",
-        iteration=0,
-        commit_hash=warm_commit,
-        plan="apply prior solution kernelforge-exp/op/run",
-        baseline_wall_ms=1.0,
-        search_start_ms=0.8,
-        best_wall_ms=0.8,
-        mean_case_speedup=1.25,
-        search_start_mean_case_speedup=1.25,
-        snr_db=None,
-        validation_text="validated KB warm-start passed canonical correctness",
-        benchmark={"median_ms": 0.8, "warm_start": True},
-        changed_files=["kernel.py"],
-        patch=patch,
+        KeepIdentity(
+            campaign_id="warm-start:kernelforge-exp/op/run",
+            session_index=0,
+            experiment_id="caller-run",
+            iteration=0,
+            commit_hash=warm_commit,
+            plan="apply prior solution kernelforge-exp/op/run",
+        ),
+        KeepScore(
+            baseline_wall_ms=1.0,
+            best_wall_ms=0.8,
+            mean_case_speedup=1.25,
+            search_start_mean_case_speedup=1.25,
+            snr_db=None,
+            search_start_ms=0.8,
+        ),
+        KeepBundle(
+            validation_text="validated KB warm-start passed canonical correctness",
+            benchmark={"median_ms": 0.8, "warm_start": True},
+            changed_files=["kernel.py"],
+            patch=patch,
+        ),
     )
 
     loop.ic.campaign_base_commit = base_commit
@@ -6216,12 +6280,7 @@ def test_validated_warm_start_reuses_cli_prepublication(
         pytest.fail("runner must not republish a CLI-published warm-start")
 
     monkeypatch.setattr(loop, "_publish_best_result", duplicate_publication)
-    asyncio.run(
-        loop.run(
-            agent_fn=_no_change_agent,
-            supervisor_fn=_unused_supervisor,
-        )
-    )
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     persisted_manifest = json.loads((workspace / "forge_experiments" / "best" / "manifest.json").read_text())
     assert persisted_manifest == manifest
@@ -6259,7 +6318,7 @@ def test_keep_with_missing_diagnostic_wall_time_completes(
 
     monkeypatch.setattr(loop, "run_one_iteration", successful_iteration)
 
-    results = asyncio.run(loop.run(agent_fn=editing_agent))
+    results = asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=editing_agent)))
 
     assert len(results) == 1
     assert results[0].kept is True
@@ -6305,7 +6364,7 @@ def test_keep_archive_failure_retains_pending_journal(
     monkeypatch.setattr(loop, "run_one_iteration", successful_iteration)
     monkeypatch.setattr(runner_module.CandidateArchive, "record", fail_record)
 
-    asyncio.run(loop.run(agent_fn=editing_agent))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=editing_agent)))
 
     pending_path = workspace / "forge_experiments" / "pending_keep.json"
     assert not pending_path.is_file()
@@ -6343,7 +6402,7 @@ def test_recovered_keep_archive_none_retains_pending_journal(
 
 def test_fresh_run_rejects_existing_campaign_without_modifying_state(tmp_path, monkeypatch):
     first, workspace = _make_loop(tmp_path, monkeypatch)
-    asyncio.run(first.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(first.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
     state_path = workspace / "forge_experiments" / "run_state.json"
     before = state_path.read_bytes()
 
@@ -6354,10 +6413,7 @@ def test_fresh_run_rejects_existing_campaign_without_modifying_state(tmp_path, m
     )
     with pytest.raises(ValueError, match="--resume"):
         asyncio.run(
-            duplicate_fresh.run(
-                agent_fn=_no_change_agent,
-                supervisor_fn=_unused_supervisor,
-            )
+            duplicate_fresh.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
         )
 
     assert state_path.read_bytes() == before
@@ -6366,7 +6422,7 @@ def test_fresh_run_rejects_existing_campaign_without_modifying_state(tmp_path, m
 def test_a_rejected_fresh_run_persists_no_pr_references(tmp_path, monkeypatch):
     """Deferred PR writes must not survive an invocation the guard rejects."""
     first, workspace = _make_loop(tmp_path, monkeypatch)
-    asyncio.run(first.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(first.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     def tree() -> dict:
         """Every workspace file, git included, so nothing can slip through."""
@@ -6388,10 +6444,7 @@ def test_a_rejected_fresh_run_persists_no_pr_references(tmp_path, monkeypatch):
     )
     with pytest.raises(ValueError, match="--resume"):
         asyncio.run(
-            duplicate_fresh.run(
-                agent_fn=_no_change_agent,
-                supervisor_fn=_unused_supervisor,
-            )
+            duplicate_fresh.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
         )
 
     assert tree() == before
@@ -6416,7 +6469,7 @@ def test_a_snapshot_write_failure_records_degradation_and_continues(
         fail_snapshot,
     )
 
-    asyncio.run(loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     events = [event for event in LoopStateStore(str(workspace)).read_events() if event["type"] == "pr_refs_refreshed"]
     assert len(events) == 1
@@ -6442,7 +6495,7 @@ def test_a_pr_event_write_failure_cannot_abort_the_campaign(
 
     monkeypatch.setattr(LoopStateStore, "append_event", fail_pr_event)
 
-    asyncio.run(loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     assert "warning: event not recorded" in capsys.readouterr().out
 
@@ -6462,7 +6515,7 @@ def test_resume_rejects_identity_mismatch_without_modifying_state(
     error,
 ):
     first, workspace = _make_loop(tmp_path, monkeypatch)
-    asyncio.run(first.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(first.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
     state_path = workspace / "forge_experiments" / "run_state.json"
     before = state_path.read_bytes()
     experiment_count = len(first.tracker.list_experiments())
@@ -6476,10 +6529,7 @@ def test_resume_rejects_identity_mismatch_without_modifying_state(
     )
     with pytest.raises(ValueError, match=error):
         asyncio.run(
-            mismatched.run(
-                agent_fn=_no_change_agent,
-                supervisor_fn=_unused_supervisor,
-            )
+            mismatched.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
         )
 
     assert state_path.read_bytes() == before
@@ -6488,7 +6538,7 @@ def test_resume_rejects_identity_mismatch_without_modifying_state(
 
 def test_resume_rejects_head_mismatch_without_modifying_state(tmp_path, monkeypatch):
     first, workspace = _make_loop(tmp_path, monkeypatch)
-    asyncio.run(first.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(first.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
     state_path = workspace / "forge_experiments" / "run_state.json"
     before = state_path.read_bytes()
 
@@ -6509,10 +6559,7 @@ def test_resume_rejects_head_mismatch_without_modifying_state(tmp_path, monkeypa
     )
     with pytest.raises(ValueError, match="HEAD mismatch"):
         asyncio.run(
-            mismatched.run(
-                agent_fn=_no_change_agent,
-                supervisor_fn=_unused_supervisor,
-            )
+            mismatched.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
         )
 
     assert state_path.read_bytes() == before
@@ -6984,7 +7031,7 @@ def test_an_unreadable_kernel_reaches_the_prompt_as_unchecked(tmp_path, monkeypa
         session_sink["summarize"] = summarizer
         return "rationale"
 
-    asyncio.run(loop.run(agent_fn=agent_fn))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=agent_fn)))
 
     assert len(prompts) == 2
     assert "were not checked against the current kernel" in prompts[1]
@@ -7411,7 +7458,7 @@ def test_an_unscored_case_does_not_reopen_a_stored_negative_in_the_prompt(tmp_pa
         session_sink["plan"] = "inspect only"
         return "No source change was needed."
 
-    asyncio.run(loop.run(agent_fn=agent_fn))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=agent_fn)))
 
     assert loop._scored_case_ids() == ["decode-t1", "prefill-t16384"]
     assert prompts and "swept split-K" in prompts[0]
@@ -7791,7 +7838,7 @@ def _stub_measurement(monkeypatch, walls):
     async def fake_validation(**_kwargs):
         return _StubReport()
 
-    async def fake_bench(**_kwargs):
+    async def fake_bench(_run, **_kwargs):
         wall_ms = walls.pop(0) if walls else 1.0
         return {
             "success": True,
@@ -7846,7 +7893,7 @@ def test_lesson_flows_from_one_iteration_into_the_next_prompt(tmp_path, monkeypa
         session_sink["summarize"] = summarizer
         return "rationale"
 
-    asyncio.run(loop.run(agent_fn=agent_fn))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=agent_fn)))
 
     # The first iteration produced a document with both authors' halves.
     first = (workspace / "forge_experiments" / "lessons" / "iter_001.md").read_text()
@@ -7887,7 +7934,7 @@ def test_prompt_omits_the_digest_once_lessons_exist(tmp_path, monkeypatch):
         session_sink["summarize"] = summarizer
         return "rationale"
 
-    asyncio.run(loop.run(agent_fn=agent_fn))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=agent_fn)))
 
     # The archive digest's own header would appear verbatim if it were inlined.
     assert "Solution archive — your lineage so far" not in prompts[1]
@@ -7920,3 +7967,365 @@ def test_the_anti_gaming_boundary_is_stated_wherever_it_is_enforced():
         assert "are NOT gaming" in block, f"boundary not stated near: {marker}"
         assert "read the harness" in block, f"no read-before-refusing near: {marker}"
         assert "not a reason" in block, f"assumption not rejected near: {marker}"
+
+
+def _raise_os_error(message):
+    def _raise(*_args, **_kwargs):
+        raise OSError(message)
+
+    return _raise
+
+
+def test_close_round_failure_propagates(tmp_path, monkeypatch):
+    loop, workspace = _make_loop(tmp_path, monkeypatch)
+    loop.state_store = LoopStateStore(str(workspace))
+    loop.run_state = RunState()
+    loop._open_round(1, lanes=1)
+    loop._round_planning_sec = 10.0
+    monkeypatch.setattr(loop.state_store, "append_event", _raise_os_error("round event unavailable"))
+
+    with pytest.raises(OSError, match="^round event unavailable$"):
+        loop._close_round()
+
+    assert loop._round_started_at is None
+    assert loop._round_planning_sec == 0.0
+
+
+def test_baseline_case_times_save_failure_propagates(tmp_path, monkeypatch):
+    loop, workspace = _make_loop(tmp_path, monkeypatch)
+    loop.state_store = SimpleNamespace(save=_raise_os_error("baseline save unavailable"))
+    loop.run_state = RunState()
+    loop._baseline_case_times = {}
+
+    with pytest.raises(OSError, match="^baseline save unavailable$"):
+        loop._set_baseline_case_times({"case": 2.0})
+
+    assert loop._baseline_case_times == {"case": 2.0}
+    assert loop.persistence_degraded is False
+    assert loop.persistence_errors == []
+
+
+def test_scoring_state_save_failure_propagates(tmp_path, monkeypatch):
+    loop, workspace = _make_loop(tmp_path, monkeypatch)
+    loop.state_store = SimpleNamespace(save=_raise_os_error("scoring save unavailable"))
+    loop.run_state = RunState()
+
+    with pytest.raises(OSError, match="^scoring save unavailable$"):
+        loop._persist_scoring_state()
+
+    assert loop.persistence_degraded is False
+    assert loop.persistence_errors == []
+
+
+def test_search_policy_persistence_failure_propagates(tmp_path, monkeypatch):
+    loop, workspace = _make_loop(tmp_path, monkeypatch)
+    loop.state_store = LoopStateStore(str(workspace))
+    loop.run_state = RunState()
+    loop.handoff_store = runner_module.HandoffStore(str(workspace))
+    monkeypatch.setattr(loop.state_store, "append_event", _raise_os_error("policy event unavailable"))
+
+    with pytest.raises(OSError, match="^policy event unavailable$"):
+        loop._update_search_policy(1)
+
+
+def _supervisor_loop(tmp_path, monkeypatch):
+    loop, workspace = _make_loop(tmp_path, monkeypatch)
+    loop.state_store = LoopStateStore(str(workspace))
+    loop.run_state = RunState()
+    loop.monitor = SupervisionMonitor()
+    monkeypatch.setattr(loop, "_build_supervisor_evidence_context", lambda _iteration: "{}")
+
+    async def supervisor(**_kwargs):
+        return "Change the route."
+
+    return loop, supervisor
+
+
+def test_supervisor_ruling_event_failure_propagates(tmp_path, monkeypatch):
+    loop, supervisor = _supervisor_loop(tmp_path, monkeypatch)
+    real_append = loop.state_store.append_event
+
+    def append_event(event):
+        if event["type"] == "supervisor_ruling":
+            raise OSError("ruling event unavailable")
+        real_append(event)
+
+    monkeypatch.setattr(loop.state_store, "append_event", append_event)
+
+    with pytest.raises(OSError, match="^ruling event unavailable$"):
+        asyncio.run(
+            loop._run_supervisor_review(
+                supervisor,
+                iteration=3,
+                digest="digest",
+                supervisor_due=True,
+                supervisor_reason="stalled",
+            )
+        )
+
+
+def test_supervisor_intervention_save_failure_propagates(tmp_path, monkeypatch):
+    loop, supervisor = _supervisor_loop(tmp_path, monkeypatch)
+    real_save = loop.state_store.save
+    saves = []
+
+    def save(state):
+        saves.append(1)
+        if len(saves) > 1:
+            raise OSError("intervention save unavailable")
+        real_save(state)
+
+    monkeypatch.setattr(loop.state_store, "save", save)
+
+    with pytest.raises(OSError, match="^intervention save unavailable$"):
+        asyncio.run(
+            loop._run_supervisor_review(
+                supervisor,
+                iteration=3,
+                digest="digest",
+                supervisor_due=True,
+                supervisor_reason="stalled",
+            )
+        )
+
+
+def test_seed_and_hydrate_failure_propagates_on_resume(tmp_path, monkeypatch):
+    loop, workspace = _make_loop(tmp_path, monkeypatch, resume=True)
+    loop.state_store = LoopStateStore(str(workspace))
+    loop.run_state = RunState()
+    monkeypatch.setattr(loop, "_restore_scoring_state", _raise_os_error("scoring restore unavailable"))
+
+    with pytest.raises(OSError, match="^scoring restore unavailable$"):
+        loop._seed_and_hydrate_run_state()
+
+
+_GIT_FAILURES = [
+    GitError(128, ["git", "diff"], "", "fatal: bad object"),
+    subprocess.TimeoutExpired(["git", "diff"], 300.0),
+    OSError("git is not installed"),
+]
+_DISCARD_FAILURES = [RuntimeError("git clean failed: Permission denied"), *_GIT_FAILURES]
+
+
+def _failure_id(failure: BaseException) -> str:
+    return type(failure).__name__
+
+
+def _raiser(failure: BaseException):
+    def fail(*_args, **_kwargs):
+        raise failure
+
+    return fail
+
+
+def _kept_result() -> IterationResult:
+    return _lesson_result(iteration=1, kept=True, commit_hash="c0ffee", mean_case_speedup=1.1)
+
+
+def _bare_loop(tmp_path, monkeypatch, *, running: bool = False):
+    """A loop with the durable state ``run`` would have opened, before any iteration."""
+    loop, workspace = _make_loop(tmp_path, monkeypatch)
+    loop.best_publisher = runner_module.BestResultPublisher(str(workspace))
+    loop.state_store = LoopStateStore(str(workspace))
+    loop.run_state = loop.state_store.load()
+    loop.experiment = None
+    if running:
+        runner_module.start_session(loop.run_state)
+    return loop
+
+
+def _site_full_diff(tmp_path, monkeypatch, failure):
+    loop, _workspace = _make_loop(tmp_path, monkeypatch)
+    monkeypatch.setattr(runner_module, "git", _raiser(failure))
+    return loop._full_diff("c0ffee")
+
+
+def _site_publish_best(tmp_path, monkeypatch, failure):
+    loop = _bare_loop(tmp_path, monkeypatch)
+    monkeypatch.setattr(loop, "_publication_changed_files", lambda _commit: [])
+    monkeypatch.setattr(loop, "_publication_patch", lambda _commit: "")
+    monkeypatch.setattr(loop.best_publisher, "publish", _raiser(failure))
+    published = loop._publish_best_result(_kept_result(), plan="p", best_before=None)
+    return loop, published
+
+
+def _site_archive_rebuild(tmp_path, monkeypatch, failure):
+    loop, _workspace = _make_loop(tmp_path, monkeypatch)
+    loop._recovered_pending_keep = ({"plan": "recovered"}, _kept_result())
+    steps: list[str] = []
+    monkeypatch.setattr(loop, "_archive_pending_keep", _raiser(failure))
+    monkeypatch.setattr(loop, "_publish_best_result", lambda *_a, **_k: steps.append("publish"))
+    monkeypatch.setattr(loop, "_clear_pending_keep", lambda: steps.append("clear"))
+    monkeypatch.setattr(loop, "_publish_optimization_history", lambda: steps.append("history"))
+    monkeypatch.setattr(loop, "_checkpoint_llm_usage", lambda: steps.append("usage"))
+    asyncio.run(loop._finish_recovered_pending_keep())
+    return loop, steps
+
+
+def _site_terminal_stamp(tmp_path, monkeypatch, failure):
+    loop = _bare_loop(tmp_path, monkeypatch, running=True)
+    steps: list[str] = []
+    monkeypatch.setattr(loop, "_git", _raiser(failure))
+    monkeypatch.setattr(loop, "_checkpoint_llm_usage", lambda: steps.append("usage"))
+    loop._persist_terminal_state()
+    return steps
+
+
+def _fail_first_discard(loop, monkeypatch, failure: BaseException) -> None:
+    """Make the session-recovery discard fail once; the verdict's own discard runs for real."""
+    pending = [failure]
+    real_discard = loop._git_discard_worktree
+
+    def discard():
+        if pending:
+            raise pending.pop()
+        real_discard()
+
+    monkeypatch.setattr(loop, "_git_discard_worktree", discard)
+
+
+def _run_verdict(tmp_path, monkeypatch, failure, **sink_fields):
+    loop, _workspace = _make_loop(tmp_path, monkeypatch)
+    _fail_first_discard(loop, monkeypatch, failure)
+
+    async def agent(kernel_path, _history, session_sink):
+        Path(kernel_path).write_text("def kernel():\n    return 99\n")
+        session_sink.update(plan="candidate", end_reason="candidate_submitted", **sink_fields)
+        return "candidate"
+
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=agent, supervisor_fn=_unused_supervisor)))
+    return loop
+
+
+def _site_integrity_verdict(tmp_path, monkeypatch, failure):
+    return _run_verdict(
+        tmp_path,
+        monkeypatch,
+        failure,
+        integrity_violation=True,
+        integrity_reason="modified oracle",
+        integrity_restore=lambda: None,
+    )
+
+
+def _site_contention_verdict(tmp_path, monkeypatch, failure):
+    return _run_verdict(tmp_path, monkeypatch, failure, workspace_contention="pid(s) [4321] hold a device node")
+
+
+def _site_keep_commit(tmp_path, monkeypatch, failure):
+    loop, workspace = _make_loop(tmp_path, monkeypatch)
+
+    async def editing_agent(kernel_path, _history, session_sink):
+        session_sink["plan"] = "keep that cannot be committed"
+        Path(kernel_path).write_text("def kernel():\n    return 2\n")
+        return "verified improvement"
+
+    async def successful_iteration(iteration, plan=""):
+        return replace(_kept_result(), iteration=iteration, commit_hash="", duration_sec=0.01)
+
+    monkeypatch.setattr(loop, "run_one_iteration", successful_iteration)
+    monkeypatch.setattr(loop, "_git_commit", _raiser(failure))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=editing_agent, supervisor_fn=_unused_supervisor)))
+    return loop, workspace
+
+
+@pytest.mark.parametrize(
+    "site",
+    [
+        _site_full_diff,
+        _site_publish_best,
+        _site_archive_rebuild,
+        _site_terminal_stamp,
+        _site_integrity_verdict,
+        _site_contention_verdict,
+        _site_keep_commit,
+    ],
+    ids=lambda site: site.__name__,
+)
+def test_an_unexpected_error_at_a_narrowed_handler_propagates(tmp_path, monkeypatch, site):
+    with pytest.raises(TypeError, match="^seam drifted$"):
+        site(tmp_path, monkeypatch, TypeError("seam drifted"))
+
+
+@pytest.mark.parametrize("failure", _GIT_FAILURES, ids=_failure_id)
+def test_a_failed_commit_diff_archives_an_empty_change_diff(tmp_path, monkeypatch, failure):
+    assert _site_full_diff(tmp_path, monkeypatch, failure) == ""
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [OSError("disk full"), ValueError("best manifest is ahead of iteration 1: 2"), *_GIT_FAILURES[:2]],
+    ids=_failure_id,
+)
+def test_a_failed_best_publication_degrades_persistence_instead_of_raising(tmp_path, monkeypatch, failure):
+    loop, published = _site_publish_best(tmp_path, monkeypatch, failure)
+
+    assert published is False
+    assert (loop.persistence_degraded, loop.persistence_errors) == (True, [f"publish best iteration 1: {failure}"])
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ValueError("candidate archive conflicts with pending KEEP iteration 1"),
+        RuntimeError("failed to recover candidate archive for iteration 1"),
+        OSError("archive index not writable"),
+    ],
+    ids=_failure_id,
+)
+def test_a_failed_archive_rebuild_still_publishes_the_recovered_best(tmp_path, monkeypatch, failure):
+    loop, steps = _site_archive_rebuild(tmp_path, monkeypatch, failure)
+
+    assert (loop.persistence_degraded, loop.persistence_errors) == (
+        True,
+        [f"rebuild candidate archive iteration 1: {failure}"],
+    )
+    assert steps == ["publish", "clear", "history", "usage"]
+
+
+@pytest.mark.parametrize("failure", _GIT_FAILURES[1:], ids=_failure_id)
+def test_a_failed_terminal_stamp_does_not_skip_the_usage_checkpoint(tmp_path, monkeypatch, failure):
+    assert _site_terminal_stamp(tmp_path, monkeypatch, failure) == ["usage"]
+
+
+@pytest.mark.parametrize("failure", _DISCARD_FAILURES, ids=_failure_id)
+@pytest.mark.parametrize(
+    ("site", "summary"),
+    [
+        (
+            _site_integrity_verdict,
+            "REVERT (protected integrity violation): canonical correctness and benchmark were skipped before "
+            "executing the measurement surface. modified oracle Restoration errors: tracked candidate restore failed: ",
+        ),
+        (
+            _site_contention_verdict,
+            "REVERT (workspace contention): canonical correctness and benchmark were skipped because the session's "
+            "workspace could not be cleared. pid(s) [4321] hold a device node Candidate restore failed: ",
+        ),
+    ],
+    ids=["integrity", "contention"],
+)
+def test_a_failed_restore_is_reported_on_the_verdict(tmp_path, monkeypatch, site, summary, failure):
+    loop = site(tmp_path, monkeypatch, failure)
+
+    assert loop.results[0].validation_summary == f"{summary}{type(failure).__name__}: {failure}"
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        OSError("pending journal not writable"),
+        ValueError("verified KEEP has no candidate diff"),
+        RuntimeError("git commit did not advance HEAD"),
+        GitError(1, ["git", "commit"], "", "hook rejected commit"),
+    ],
+    ids=_failure_id,
+)
+def test_a_keep_that_cannot_be_committed_is_reverted_as_a_crash(tmp_path, monkeypatch, failure):
+    loop, workspace = _site_keep_commit(tmp_path, monkeypatch, failure)
+
+    result = loop.results[0]
+    assert (result.kept, result.validation_passed, result.crashed) == (False, False, True)
+    assert result.validation_summary == f"COMMIT FAILED: {failure}"
+    assert (workspace / "kernel.py").read_text() == "def kernel():\n    return 1\n"
+    assert not (workspace / "forge_experiments" / "pending_keep.json").exists()

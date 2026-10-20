@@ -16,6 +16,7 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
@@ -35,6 +36,51 @@ _EXPERIMENT_RE = re.compile(r"^\s*Experiment:\s*(\S+)\s*$", re.MULTILINE)
 # How often the supervising loop wakes to check on forge-loop. It also floors how often the result file is read for
 # new bests: asking more often than the loop itself ticks cannot observe anything sooner.
 _TICK_SEC = 0.1
+
+
+@dataclass(frozen=True)
+class OptimizeOptions:
+    """The nested forge-loop's branch, supervisor backend and Analysis timeout."""
+
+    git_branch: str = "forge-rewrite-optimize"
+    supervisor_backend: str = "codex"
+    profile_timeout_sec: int = 1800
+
+
+@dataclass(frozen=True)
+class OptimizeRequest:
+    """One nested forge-loop run: where it writes, how it runs, when it stops, what anchors it, who hears its KEEPs.
+
+    ``source_ms`` and ``source_case_ms`` are the source kernel's own timings. Passed together they become the loop's
+    scoring anchor, so every speedup it reports -- each KEEP and the final result -- is measured against the kernel
+    the port replaced rather than against the port. Without them the loop anchors on its own first bench, which
+    scores the search against the port and cannot be composed back onto the source: the equal-weight mean of
+    per-case ratios does not multiply.
+
+    ``on_new_best`` is polled every ``new_best_poll_sec`` with the parsed result of each KEEP, and once more after the
+    loop exits so the last one cannot be missed by timing. Anything it raises is logged and swallowed, because the
+    rewrite layer publishes from it and publishing is not worth losing an optimization run over.
+    """
+
+    experiments_dir: str
+    options: OptimizeOptions = OptimizeOptions()
+    roofline_ceiling: bool = False
+    permission_mode: str | None = None
+    max_hours: float = 1.0
+    deadline_unix: float | None = None
+    stop_at_unix: float | None = None
+    source_ms: float | None = None
+    source_case_ms: dict[str, float] | None = None
+    result_json: str | None = None
+    on_new_best: Callable[[dict], None] | None = None
+    new_best_poll_sec: float = 5.0
+
+    @property
+    def result_path(self) -> str:
+        """Where forge-loop writes its result: ``result_json``, or a file in the experiments directory."""
+        if self.result_json is None:
+            return str(Path(self.experiments_dir) / "forge_loop_result.json")
+        return self.result_json
 
 
 def _announced_experiment_id(stdout_text: str) -> str | None:
@@ -242,19 +288,11 @@ def _forge_loop_cmd(
     spec: RewriteSpec,
     driver_path: str,
     config: Config,
-    *,
-    experiments_dir: str,
-    result_json: str,
-    max_hours: float,
-    git_branch: str,
-    supervisor_backend: str,
-    profile_timeout_sec: int,
-    roofline_ceiling: bool,
+    request: OptimizeRequest,
     baseline_json: str,
-    deadline_unix: float | None,
-    permission_mode: str | None,
 ) -> list[str]:
     """The forge-loop invocation this rewrite optimizes its ported kernel with."""
+    options = request.options
     cmd = _forge_loop_argv() + [
         "forge-loop",
         "--kernel",
@@ -264,15 +302,15 @@ def _forge_loop_cmd(
         "--workspace",
         spec.workspace,
         "--experiments-dir",
-        str(experiments_dir),
+        str(request.experiments_dir),
         "--result-json",
-        result_json,
+        request.result_path,
         "--snr-threshold",
         str(spec.snr_threshold),
         "--max-hours",
-        str(max(1.0, max_hours)),
+        str(max(1.0, request.max_hours)),
         "--git-branch",
-        git_branch,
+        options.git_branch,
         "--gpu-target",
         config.gpu_target,
         "--kernel-backend",
@@ -288,26 +326,26 @@ def _forge_loop_cmd(
         # The rewrite driver has already passed its independent dual-path preparation and preflight.
         "--no-prepare-task",
         "--supervisor-backend",
-        supervisor_backend,
+        options.supervisor_backend,
         "--profile-timeout-sec",
-        str(profile_timeout_sec),
+        str(options.profile_timeout_sec),
         # Spelled out either way, so the nested loop does what this caller asked rather than whatever its default is.
         "--roofline-ceiling",
-        "on" if roofline_ceiling else "off",
+        "on" if request.roofline_ceiling else "off",
     ]
     if baseline_json:
         cmd += ["--baseline-json", baseline_json]
     if config.gpu_type:
         cmd += ["--gpu-type", config.gpu_type]
-    if deadline_unix and deadline_unix > 0:
-        cmd += ["--deadline-unix", str(deadline_unix)]
+    if request.deadline_unix and request.deadline_unix > 0:
+        cmd += ["--deadline-unix", str(request.deadline_unix)]
     # Propagate the selected model only when one is configured; an empty agent_model lets forge-loop resolve its own
     # default from the environment (CLAUDE_MODEL / CODEX_MODEL). ``Config`` exposes the model as ``agent_model`` --
     # there is no ``config.model``.
     if config.agent_model:
         cmd += ["--model", config.agent_model]
-    if permission_mode:
-        cmd += ["--permission-mode", permission_mode]
+    if request.permission_mode:
+        cmd += ["--permission-mode", request.permission_mode]
     return cmd
 
 
@@ -366,58 +404,22 @@ def run_optimize(
     spec: RewriteSpec,
     driver_path: str,
     config: Config,
-    *,
-    experiments_dir: str,
-    max_hours: float = 1.0,
-    git_branch: str = "forge-rewrite-optimize",
-    permission_mode: str | None = None,
-    supervisor_backend: str = "codex",
-    profile_timeout_sec: int = 1800,
-    roofline_ceiling: bool = False,
-    result_json: str | None = None,
-    deadline_unix: float | None = None,
-    stop_at_unix: float | None = None,
-    source_ms: float | None = None,
-    source_case_ms: dict[str, float] | None = None,
-    on_new_best: Callable[[dict], None] | None = None,
-    new_best_poll_sec: float = 5.0,
+    request: OptimizeRequest,
 ) -> dict:
     """Run forge-loop over the FlyDSL kernel; return its parsed result dict.
-
-    ``source_ms`` and ``source_case_ms`` are the source kernel's own timings. Passed together they become the loop's
-    scoring anchor, so every speedup it reports -- each KEEP and the final result -- is measured against the kernel
-    the port replaced rather than against the port. Without them the loop anchors on its own first bench, which
-    scores the search against the port and cannot be composed back onto the source: the equal-weight mean of
-    per-case ratios does not multiply.
-
-    ``on_new_best`` is polled every ``new_best_poll_sec`` with the parsed result of each KEEP, and once more after the
-    loop exits so the last one cannot be missed by timing. Anything it raises is logged and swallowed, because the
-    rewrite layer publishes from it and publishing is not worth losing an optimization run over.
 
     ``llm_usage`` on the returned dict is the run's furthest-along token ledger, recovered from the experiment record
     when the result file could not carry it. ``llm_usage_complete`` is set only when the loop exited cleanly with a
     result of its own, which is the one case where that ledger is final.
     """
-    if result_json is None:
-        result_json = str(Path(experiments_dir) / "forge_loop_result.json")
+    experiments_dir = request.experiments_dir
+    result_json = request.result_path
+    on_new_best = request.on_new_best
+    stop_at_unix = request.stop_at_unix
 
-    baseline_json = _source_baseline_json(experiments_dir, source_ms, source_case_ms)
+    baseline_json = _source_baseline_json(experiments_dir, request.source_ms, request.source_case_ms)
 
-    cmd = _forge_loop_cmd(
-        spec,
-        driver_path,
-        config,
-        experiments_dir=experiments_dir,
-        result_json=result_json,
-        max_hours=max_hours,
-        git_branch=git_branch,
-        supervisor_backend=supervisor_backend,
-        profile_timeout_sec=profile_timeout_sec,
-        roofline_ceiling=roofline_ceiling,
-        baseline_json=baseline_json,
-        deadline_unix=deadline_unix,
-        permission_mode=permission_mode,
-    )
+    cmd = _forge_loop_cmd(spec, driver_path, config, request, baseline_json)
 
     log.info("optimize: launching forge-loop over %s", spec.flydsl_kernel_name)
     print(f"  [forge-rewrite] optimize: {' '.join(cmd)}", flush=True)
@@ -469,7 +471,7 @@ def run_optimize(
                 return published_commit
             try:
                 on_new_best(payload)
-            except Exception as error:  # noqa: BLE001 - publishing never breaks OPTIMIZE
+            except (OSError, ValueError, subprocess.SubprocessError) as error:
                 log.warning(
                     "optimize: new-best callback failed (%s: %s)",
                     type(error).__name__,
@@ -490,17 +492,16 @@ def run_optimize(
                 break
             if on_new_best is not None and time.monotonic() >= next_poll:
                 published_commit = _publish_new_best()
-                next_poll = time.monotonic() + max(_TICK_SEC, new_best_poll_sec)
+                next_poll = time.monotonic() + max(_TICK_SEC, request.new_best_poll_sec)
             time.sleep(_TICK_SEC)
         _wait_process(proc)
         stream_thread.join(timeout=5.0)
         # The loop may have recorded a KEEP between the last poll and its exit,
         # including one it produced while being terminated for the deadline.
         published_commit = _publish_new_best()
-    except Exception as e:  # noqa: BLE001 - a launch/stream failure must not crash the whole rewrite pipeline
-        # Honor this function's contract ("Returns {} when forge-loop cannot be launched"): a missing kernelforge on
-        # PATH, a bad interpreter, or a malformed command must NOT propagate a traceback out of run_rewrite (which
-        # would skip the final result + sentinel).
+    except (OSError, ValueError) as e:
+        # A missing executable, a bad interpreter or a malformed command is a launch failure: the contract is to
+        # return what was recovered rather than raise out of run_rewrite, which would skip the final result.
         log.warning("optimize: forge-loop could not be launched/run (%s: %s)", type(e).__name__, e)
         print(
             f"  [forge-rewrite] OPTIMIZE launch failed ({type(e).__name__}: {e}); keeping the port-only result",

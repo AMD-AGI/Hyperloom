@@ -524,6 +524,21 @@ def test_detect_checkpoint_precision_fallback_on_missing():
     assert _detect_checkpoint_precision(None) == ""
 
 
+def test_detect_checkpoint_precision_propagates_summary_failure(monkeypatch):
+    import pytest
+
+    from hyperloom.inference_optimizer import model_config_utils
+    from hyperloom.inference_optimizer.cli import _detect_checkpoint_precision
+
+    def summary_fails(_path):
+        raise RuntimeError("summary bug")
+
+    monkeypatch.setattr(model_config_utils, "summarize_model_config", summary_fails)
+
+    with pytest.raises(RuntimeError):
+        _detect_checkpoint_precision("/models/any")
+
+
 def test_detect_checkpoint_precision_float8_e4m3fn(tmp_path):
     from hyperloom.inference_optimizer.cli import _detect_checkpoint_precision
 

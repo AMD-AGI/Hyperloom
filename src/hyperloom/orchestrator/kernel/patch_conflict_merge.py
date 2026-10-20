@@ -30,6 +30,7 @@ does not land -- and can never produce an unmeasured KEEP.
 from __future__ import annotations
 
 import ast
+import logging
 import re
 import subprocess
 from collections.abc import Sequence
@@ -47,6 +48,8 @@ from hyperloom.orchestrator.actions.executors.integrate_patch import (
     _git_restore_to_head,
 )
 from hyperloom.orchestrator.specialists.patch_safety import patch_file_targets
+
+log = logging.getLogger(__name__)
 
 STRATEGY_STRICT = "strict"
 STRATEGY_THREE_WAY = "three_way"
@@ -101,21 +104,54 @@ class PatchMergeOutcome:
         return " (" + "; ".join(self.steps) + ")" if self.steps else ""
 
 
+@dataclass(frozen=True)
+class MergeLabels:
+    """How the resolver is told what the two sides of a merge are.
+
+    Attributes:
+        ours_label: The optimization already landed.
+        theirs_label: The optimization being landed now.
+        intent: What the incoming patch optimizes.
+    """
+
+    ours_label: str
+    theirs_label: str
+    intent: str
+
+
+@dataclass(frozen=True)
+class ConflictQuery:
+    """One conflicted region, its surrounding source and the merge it belongs to."""
+
+    relative_path: str
+    region: str
+    context_before: str
+    context_after: str
+    labels: MergeLabels
+
+
+@dataclass(frozen=True)
+class LandingContext:
+    """What a patch is landed alongside, named for the resolver and held to by the merge.
+
+    Attributes:
+        operator_id: The incoming operator.
+        landed_operator_ids: Operators already committed.
+        landed_patches: Their diffs. Every line they added must survive a merge.
+        intent: What the incoming patch optimizes.
+    """
+
+    operator_id: str = ""
+    landed_operator_ids: Sequence[str] = ()
+    landed_patches: Sequence[Path] = ()
+    intent: str = ""
+
+
 class ConflictResolver(Protocol):
     """Resolves one conflicted region."""
 
-    async def __call__(
-        self,
-        *,
-        relative_path: str,
-        region: str,
-        context_before: str,
-        context_after: str,
-        ours_label: str,
-        theirs_label: str,
-        intent: str,
-    ) -> str | None:
-        """Return the lines that replace ``region``, or ``None`` to decline."""
+    async def __call__(self, query: ConflictQuery) -> str | None:
+        """Return the lines that replace ``query.region``, or ``None`` to decline."""
 
 
 def _run_git(repo: Path, *args: str, timeout: float = 120.0) -> subprocess.CompletedProcess[str]:
@@ -334,25 +370,16 @@ def _strip_code_fence(text: str) -> str | None:
     return "\n".join(lines) + "\n" if lines else None
 
 
-def _resolver_prompt(
-    *,
-    relative_path: str,
-    region: str,
-    context_before: str,
-    context_after: str,
-    ours_label: str,
-    theirs_label: str,
-    intent: str,
-) -> str:
+def _resolver_prompt(query: ConflictQuery) -> str:
     """The one region, its two labels and its surrounding source."""
     return (
-        f"File: {relative_path}\n"
-        f"`ours` is the optimization already landed: {ours_label}\n"
-        f"`theirs` is the optimization being landed now: {theirs_label}\n"
-        f"{intent}\n\n"
-        f"Lines before the region:\n```\n{context_before}\n```\n\n"
-        f"Conflicted region:\n```\n{region}```\n\n"
-        f"Lines after the region:\n```\n{context_after}\n```"
+        f"File: {query.relative_path}\n"
+        f"`ours` is the optimization already landed: {query.labels.ours_label}\n"
+        f"`theirs` is the optimization being landed now: {query.labels.theirs_label}\n"
+        f"{query.labels.intent}\n\n"
+        f"Lines before the region:\n```\n{query.context_before}\n```\n\n"
+        f"Conflicted region:\n```\n{query.region}```\n\n"
+        f"Lines after the region:\n```\n{query.context_after}\n```"
     )
 
 
@@ -369,16 +396,7 @@ def _conflict_resolver() -> ConflictResolver | None:
 
 
 def _anthropic_resolver() -> ConflictResolver:
-    async def resolve(
-        *,
-        relative_path: str,
-        region: str,
-        context_before: str,
-        context_after: str,
-        ours_label: str,
-        theirs_label: str,
-        intent: str,
-    ) -> str | None:
+    async def resolve(query: ConflictQuery) -> str | None:
         from hyperloom.common.llm_config import (
             AnthropicCompletionRequest,
             aanthropic_completion,
@@ -386,15 +404,7 @@ def _anthropic_resolver() -> ConflictResolver:
             resolve_forge_llm_model,
         )
 
-        prompt = _resolver_prompt(
-            relative_path=relative_path,
-            region=region,
-            context_before=context_before,
-            context_after=context_after,
-            ours_label=ours_label,
-            theirs_label=theirs_label,
-            intent=intent,
-        )
+        prompt = _resolver_prompt(query)
         result = await aanthropic_completion(
             request=AnthropicCompletionRequest(
                 model=resolve_forge_llm_model("claude"),
@@ -413,16 +423,7 @@ def _anthropic_resolver() -> ConflictResolver:
 
 
 def _codex_resolver() -> ConflictResolver:
-    async def resolve(
-        *,
-        relative_path: str,
-        region: str,
-        context_before: str,
-        context_after: str,
-        ours_label: str,
-        theirs_label: str,
-        intent: str,
-    ) -> str | None:
+    async def resolve(query: ConflictQuery) -> str | None:
         from hyperloom.common.llm_config import (
             achat_completion,
             apply_reasoning_effort,
@@ -432,15 +433,7 @@ def _codex_resolver() -> ConflictResolver:
         )
         from hyperloom.orchestrator.roles.base import build_chat_messages
 
-        prompt = _resolver_prompt(
-            relative_path=relative_path,
-            region=region,
-            context_before=context_before,
-            context_after=context_after,
-            ours_label=ours_label,
-            theirs_label=theirs_label,
-            intent=intent,
-        )
+        prompt = _resolver_prompt(query)
         params: dict[str, object] = {
             "model": resolve_forge_llm_model("codex"),
             "messages": build_chat_messages(_RESOLVER_SYSTEM, prompt),
@@ -481,9 +474,7 @@ async def _resolve_regions(
     *,
     relative: str,
     resolver: ConflictResolver,
-    ours_label: str,
-    theirs_label: str,
-    intent: str,
+    labels: MergeLabels,
 ) -> tuple[str, str]:
     """Splice a resolution into every conflict region. Returns (text, error).
 
@@ -496,13 +487,13 @@ async def _resolve_regions(
     cursor = 0
     for match in _CONFLICT_RE.finditer(text):
         proposed = await resolver(
-            relative_path=relative,
-            region=match.group(0),
-            context_before="\n".join(text[: match.start()].splitlines()[-_CONTEXT_LINES:]),
-            context_after="\n".join(text[match.end() :].splitlines()[:_CONTEXT_LINES]),
-            ours_label=ours_label,
-            theirs_label=theirs_label,
-            intent=intent,
+            ConflictQuery(
+                relative_path=relative,
+                region=match.group(0),
+                context_before="\n".join(text[: match.start()].splitlines()[-_CONTEXT_LINES:]),
+                context_after="\n".join(text[match.end() :].splitlines()[:_CONTEXT_LINES]),
+                labels=labels,
+            )
         )
         if not proposed:
             return "", f"{relative}: resolver returned nothing"
@@ -519,9 +510,7 @@ async def _resolve_conflicts(
     conflicted: Sequence[str],
     *,
     resolver: ConflictResolver | None,
-    ours_label: str,
-    theirs_label: str,
-    intent: str,
+    labels: MergeLabels,
     steps: list[str],
 ) -> tuple[str, str]:
     """Write a resolution for every conflicted file. Returns (strategy, error)."""
@@ -547,14 +536,13 @@ async def _resolve_conflicts(
                     marked if rejection else resolved,
                     relative=relative,
                     resolver=resolver,
-                    ours_label=ours_label,
-                    theirs_label=theirs_label,
-                    intent=intent,
+                    labels=labels,
                 )
             # The resolver is an injected callable reaching a network and an
             # optional SDK; its failures share no base class, and an escape
             # would abort integration with a marked-up tree still on disk.
             except Exception as failure:  # noqa: BLE001 - a broken resolver costs the lane, nothing else
+                log.warning("conflict resolver failed for %s: %s", relative, failure)
                 return strategy, f"{relative}: resolver call failed ({failure!r})"
             if error:
                 return strategy, error
@@ -571,11 +559,8 @@ async def _resolve_conflicts(
 async def apply_patch_resolving_conflicts(
     repo: Path,
     patch_path: Path,
+    context: LandingContext = LandingContext(),
     *,
-    operator_id: str = "",
-    landed_operator_ids: Sequence[str] = (),
-    landed_patches: Sequence[Path] = (),
-    intent: str = "",
     resolver: ConflictResolver | None = None,
 ) -> PatchMergeOutcome:
     """Apply ``patch_path`` into ``repo``, rebuilding it if its context has moved.
@@ -583,10 +568,7 @@ async def apply_patch_resolving_conflicts(
     Args:
         repo: The integration checkout, at the commit carrying every KEEP so far.
         patch_path: The publication's diff, written against the pinned base.
-        operator_id: The incoming operator, named for the resolver.
-        landed_operator_ids: Operators already committed, named for the resolver.
-        landed_patches: Their diffs. Every line they added must survive a merge.
-        intent: What the incoming patch optimizes, for the resolver.
+        context: The incoming operator and what already landed beside it.
         resolver: Overrides this deployment's resolver; tests inject here.
 
     Returns:
@@ -627,15 +609,17 @@ async def apply_patch_resolving_conflicts(
         repo,
         conflicted,
         resolver=resolver,
-        ours_label=", ".join(landed_operator_ids) or "previously kept patches",
-        theirs_label=operator_id or patch_path.stem,
-        intent=intent,
+        labels=MergeLabels(
+            ours_label=", ".join(context.landed_operator_ids) or "previously kept patches",
+            theirs_label=context.operator_id or patch_path.stem,
+            intent=context.intent,
+        ),
         steps=steps,
     )
     if error:
         return give_up(error)
 
-    for source in (patch_path, *landed_patches):
+    for source in (patch_path, *context.landed_patches):
         missing = _missing_additions(repo, Path(source))
         if missing:
             return give_up(f"merge dropped {len(missing)} added line(s), first: {missing[0][:80]}")
@@ -650,7 +634,10 @@ __all__ = [
     "STRATEGY_STRICT",
     "STRATEGY_THREE_WAY",
     "STRATEGY_UNION",
+    "ConflictQuery",
     "ConflictResolver",
+    "LandingContext",
+    "MergeLabels",
     "PatchMergeOutcome",
     "apply_patch_resolving_conflicts",
 ]

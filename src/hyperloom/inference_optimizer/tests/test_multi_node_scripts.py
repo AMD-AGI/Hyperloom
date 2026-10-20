@@ -678,14 +678,10 @@ def test_pd_decode_dist_init_port_derives_from_prefill():
 
 def test_build_sglang_cmd_head_has_host_port():
     lm = _load_script_module("lm_test_sglang_head", "launch_multinode.py")
-    cmd = lm._build_sglang_cmd(
-        model="/m",
-        tp=2,
-        nnodes=2,
-        node_rank=0,
-        dist_init_addr="10.0.0.1:5000",
-        extra_args=["--x"],
+    group = lm._ServerGroup(
+        framework="sglang", model="/m", tp=2, nnodes=2, head_ip="10.0.0.1", dist_init_port=5000, extra_args=["--x"]
     )
+    cmd = lm._build_sglang_cmd(group, 0)
     assert "--host" in cmd and "--port" in cmd
     assert cmd[cmd.index("--port") + 1] == "8888"
     assert "--x" in cmd
@@ -693,14 +689,10 @@ def test_build_sglang_cmd_head_has_host_port():
 
 def test_build_sglang_cmd_worker_omits_http_bind():
     lm = _load_script_module("lm_test_sglang_worker", "launch_multinode.py")
-    cmd = lm._build_sglang_cmd(
-        model="/m",
-        tp=2,
-        nnodes=2,
-        node_rank=1,
-        dist_init_addr="10.0.0.1:5000",
-        extra_args=[],
+    group = lm._ServerGroup(
+        framework="sglang", model="/m", tp=2, nnodes=2, head_ip="10.0.0.1", dist_init_port=5000, extra_args=[]
     )
+    cmd = lm._build_sglang_cmd(group, 1)
     assert "--host" not in cmd
     assert "--port" not in cmd
 
@@ -725,10 +717,7 @@ def test_build_vllm_cmd_kv_transfer_config_escapes_quotes():
         model="/m",
         tp=8,
         extra_args=[],
-        pd_role="prefill",
-        pd_transfer_backend=connector,
-        pd_kv_rank=0,
-        pd_kv_parallel_size=2,
+        pd=lm._PdRole(role="prefill", transfer_backend=connector, kv_rank=0, kv_parallel_size=2),
     )
     cfg = _kv_transfer_config(cmd)
     assert cfg["kv_connector"] == connector
@@ -747,8 +736,8 @@ def test_build_vllm_cmd_kv_transfer_config_escapes_quotes():
 
 def test_build_vllm_cmd_kv_transfer_config_defaults_and_roles():
     lm = _load_script_module("lm_test_vllm_kv_roles", "launch_multinode.py")
-    prefill = lm._build_vllm_cmd(model="/m", tp=8, extra_args=[], pd_role="prefill")
-    decode = lm._build_vllm_cmd(model="/m", tp=8, extra_args=[], pd_role="decode")
+    prefill = lm._build_vllm_cmd(model="/m", tp=8, extra_args=[], pd=lm._PdRole(role="prefill"))
+    decode = lm._build_vllm_cmd(model="/m", tp=8, extra_args=[], pd=lm._PdRole(role="decode"))
     pcfg = _kv_transfer_config(prefill)
     dcfg = _kv_transfer_config(decode)
     assert pcfg["kv_connector"] == "NixlConnector"
@@ -901,18 +890,10 @@ def test_spawn_remote_vllm_worker_writes_sentinel_pid(tmp_path):
     lm = _load_script_module("lm_test_spawn_vllm", "launch_multinode.py")
     pid_dir = tmp_path / "p"
     log_dir = tmp_path / "l"
-    rc = lm._spawn_remote(
-        framework="vllm",
-        model="/m",
-        tp=8,
-        nnodes=2,
-        node_rank=1,
-        head_ip="127.0.0.1",
-        dist_init_port=5000,
-        pid_dir=str(pid_dir),
-        log_dir=str(log_dir),
-        extra_args=[],
+    group = lm._ServerGroup(
+        framework="vllm", model="/m", tp=8, nnodes=2, head_ip="127.0.0.1", dist_init_port=5000, extra_args=[]
     )
+    rc = lm._spawn_remote(group, 1, lm._LaunchDirs(pid_dir=str(pid_dir), log_dir=str(log_dir)))
     assert rc == 0
     assert (pid_dir / "rank_1.pid").read_text(encoding="utf-8") == "0"
 
@@ -970,12 +951,9 @@ def test_infera_disagg_flags_and_launch_args():
     assert infera_support.disagg_flags("bogus", "nixl") == ""
 
     la = infera_support.build_node_launch_args(
-        framework="sglang",
-        model="/m",
-        tp=8,
-        nnodes=1,
-        disagg_mode="decode",
-        kv_transfer_backend="nixl",
+        infera_support.NodeLaunch(
+            framework="sglang", model="/m", tp=8, nnodes=1, disagg_mode="decode", kv_transfer_backend="nixl"
+        )
     )
     assert "--extra-args" in la and "decode" in la
 
@@ -987,12 +965,9 @@ def test_infera_build_node_launch_args_sglang_and_kill_only():
     from hyperloom.inference_optimizer.multi_node._internal import infera_support
 
     a = infera_support.build_node_launch_args(
-        framework="sglang",
-        model="/m/x",
-        tp=16,
-        nnodes=2,
-        ep=16,
-        extra_args="--mem-fraction-static 0.7",
+        infera_support.NodeLaunch(
+            framework="sglang", model="/m/x", tp=16, nnodes=2, ep=16, extra_args="--mem-fraction-static 0.7"
+        )
     )
     assert "--framework sglang" in a
     assert "--tp 16" in a and "--nnodes 2" in a and "--ep 16" in a
@@ -1000,13 +975,7 @@ def test_infera_build_node_launch_args_sglang_and_kill_only():
     assert "--node-rank" not in a
     assert "--extra-args" in a and "0.7" in a
 
-    k = infera_support.build_node_launch_args(
-        framework="vllm",
-        model="",
-        tp=0,
-        nnodes=2,
-        kill_only=True,
-    )
+    k = infera_support.build_node_kill_args("vllm")
     assert "--kill-only" in k and "--framework vllm" in k
     assert "--model" not in k
 
@@ -1068,6 +1037,44 @@ def test_install_geak_best_effort_noop_for_rayjob(tmp_path, monkeypatch):
     sp.chmod(0o600)
     monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(sp))
     assert mn_cli.install_geak_on_pods_best_effort() == 0
+
+
+def test_install_geak_propagates_install_failure(monkeypatch):
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    def install_fails(_ns):
+        raise RuntimeError("install-geak failed")
+
+    monkeypatch.setattr(mn_cli, "_load_state", lambda: {"backend": "infera"})
+    monkeypatch.setattr(mn_cli, "cmd_install_geak", install_fails)
+
+    with pytest.raises(RuntimeError, match="^install-geak failed$"):
+        mn_cli.install_geak_on_pods_best_effort()
+
+
+def test_kill_inference_for_kernel_agent_warns_on_a_command_failure(monkeypatch, capsys):
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    def kill_fails(_ns):
+        raise RuntimeError("kill-inference failed")
+
+    monkeypatch.setattr(mn_cli, "cmd_kill_inference", kill_fails)
+
+    assert mn_cli.kill_inference_for_kernel_agent_best_effort() is None
+    err = capsys.readouterr().err
+    assert re.fullmatch(r"\[[^\]]+\] WARN kill-inference skipped: RuntimeError: kill-inference failed\n", err)
+
+
+def test_kill_inference_for_kernel_agent_propagates_an_unexpected_error(monkeypatch):
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    def kill_has_a_bug(_ns):
+        raise KeyError("pid_file")
+
+    monkeypatch.setattr(mn_cli, "cmd_kill_inference", kill_has_a_bug)
+
+    with pytest.raises(KeyError, match="pid_file"):
+        mn_cli.kill_inference_for_kernel_agent_best_effort()
 
 
 def test_install_geak_noop_for_rayjob(tmp_path, monkeypatch):
@@ -1304,7 +1311,7 @@ def test_multinode_entrypoint_shlex_quotes_malicious_value():
     from hyperloom.inference_optimizer.multi_node import cli as mn_cli
 
     evil = "k'; touch /tmp/pwned #"
-    ep = mn_cli._build_multinode_apply_patch_entrypoint("/t/x", "QUJD", "/bak", evil, 60)
+    ep = mn_cli._build_multinode_apply_patch_entrypoint(mn_cli.KernelPatchApply("/t/x", "QUJD", "/bak", evil), 60)
     # The value is carried, but only as a single shlex-quoted token.
     assert shlex.quote(evil) in ep
     # The raw ``--kernel-id k'; touch ...`` (unquoted) form must NOT appear.
@@ -1390,11 +1397,9 @@ def test_infera_build_node_launch_args_neutralizes_malicious_extra_args():
     from hyperloom.inference_optimizer.multi_node._internal import infera_support
 
     la = infera_support.build_node_launch_args(
-        framework="sglang",
-        model="/m",
-        tp=8,
-        nnodes=1,
-        extra_args="--foo 1; touch /tmp/pwned",
+        infera_support.NodeLaunch(
+            framework="sglang", model="/m", tp=8, nnodes=1, extra_args="--foo 1; touch /tmp/pwned"
+        )
     )
     assert "1; touch /tmp/pwned" not in la
     assert "'1;'" in la
@@ -1406,11 +1411,7 @@ def test_infera_build_node_launch_args_rejects_denied_extra_args():
 
     with pytest.raises(ServerArgsRejected, match="denied server flags"):
         infera_support.build_node_launch_args(
-            framework="sglang",
-            model="/m",
-            tp=8,
-            nnodes=1,
-            extra_args="--model-path /evil",
+            infera_support.NodeLaunch(framework="sglang", model="/m", tp=8, nnodes=1, extra_args="--model-path /evil")
         )
 
 
@@ -1637,7 +1638,7 @@ def test_ray_patch_siblings_reach_isolated_actor_through_runtime_env(tmp_path, a
     )
     encoded = base64.b64encode(b"value = 2\n").decode()
     entrypoint = mn_cli._build_multinode_apply_patch_entrypoint(
-        str(target), encoded, str(backup), "gemm", 20, str(jit / "build")
+        mn_cli.KernelPatchApply(str(target), encoded, str(backup), "gemm", str(jit / "build")), 20
     )
     script = _stage_ray_patch_entrypoint(entrypoint, tmp_path / "shipped")
     applied, log = _run_isolated_pod(

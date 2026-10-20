@@ -8,11 +8,12 @@ from __future__ import annotations
 import ast
 import logging
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from kernelforge.rewrite_by_flydsl import protocol
 from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
-from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
 
 log = logging.getLogger(__name__)
 
@@ -113,20 +114,26 @@ def discover_source_entry(
     return candidates[0][1]
 
 
-def build_spec(
-    *,
-    op_name: str,
-    source_kernel: str,
-    flydsl_kernel: str,
-    workspace: str,
-    target_functions: list[str],
-    source_entry: str = "",
-    source_language: str = "",
-    shapes: list[dict] | None = None,
-    snr_threshold: float = DEFAULT_SNR_THRESHOLD_DB,
-) -> RewriteSpec:
+@dataclass(frozen=True)
+class RewriteSubject:
+    """The kernel a caller asks to rewrite: its logical name, source, entry hints, framework, shapes and SNR gate."""
+
+    op_name: str
+    source_kernel: str
+    target_functions: list[str]
+    source_entry: str = ""
+    source_language: str = ""
+    framework: str = ""
+    shapes: list[dict] | None = None
+    snr_threshold: float = DEFAULT_SNR_THRESHOLD_DB
+
+
+def build_spec(subject: RewriteSubject, *, flydsl_kernel: str, workspace: str) -> RewriteSpec:
     """Resolve paths, the source language, and an auto-discovered entry."""
-    source_kernel = str(Path(source_kernel).resolve())
+    op_name = subject.op_name
+    source_language = subject.source_language
+    target_functions = subject.target_functions
+    source_kernel = str(Path(subject.source_kernel).resolve())
     flydsl_kernel = str(Path(flydsl_kernel).resolve())
     language = resolve_source_language(source_kernel, source_language)
     if not language:
@@ -137,7 +144,7 @@ def build_spec(
             source_language,
         )
 
-    entry = source_entry.strip()
+    entry = subject.source_entry.strip()
     if not entry:
         entry = discover_source_entry(
             source_kernel,
@@ -164,8 +171,9 @@ def build_spec(
         target_functions=list(target_functions or []),
         source_entry=entry,
         source_language=language,
+        framework=subject.framework,
         flydsl_kernel=flydsl_kernel,
-        shapes=list(shapes or []),
-        snr_threshold=snr_threshold,
+        shapes=list(subject.shapes or []),
+        snr_threshold=subject.snr_threshold,
         workspace=str(Path(workspace).resolve()),
     )

@@ -49,7 +49,7 @@ def collect_langfuse(
     # Tier 1: the persisted post-flush receipt (final counts).
     try:
         receipt = lfe.read_receipt(session_dir)
-    except Exception as exc:  # noqa: BLE001
+    except ValueError as exc:
         warnings.append(f"langfuse: read_receipt failed: {type(exc).__name__}: {exc}")
         receipt = None
     if receipt is not None:
@@ -61,7 +61,7 @@ def collect_langfuse(
         section = lfe.get_emitter(session_dir).receipt()
         section["receipt_source"] = "live_emitter"
         return section
-    except Exception as exc:  # noqa: BLE001
+    except (OSError, ValueError) as exc:
         warnings.append(f"langfuse: live receipt failed: {type(exc).__name__}: {exc}")
 
     # Tier 3 fallback: config-only view straight from env + manifest, so the

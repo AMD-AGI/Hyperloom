@@ -566,6 +566,7 @@ def build_kernel_optimization_summary(state: Any, session_dir: Path | str) -> di
     sd_path = Path(session_dir)
     session_id = str(getattr(state, "session_id", "") or "")
     results_dir = _backend_results_dir(sd_path, session_id)
+    where = ResultsLocation(results_dir=results_dir, session_dir=sd_path)
 
     top15: list[dict[str, Any]] = list(
         (getattr(state, "last_trace_analyze", {}) or {}).get("kernel_roofline_top15") or []
@@ -653,8 +654,7 @@ def build_kernel_optimization_summary(state: Any, session_dir: Path | str) -> di
                 top_entry,
                 attempt,
                 category,
-                results_dir=results_dir,
-                session_dir=sd_path,
+                where,
                 last_kernel_opt=last_kernel_opt if kid == keep_pending_kid else None,
             )
         )
@@ -681,8 +681,7 @@ def build_kernel_optimization_summary(state: Any, session_dir: Path | str) -> di
                 {"kernel_id": kid},
                 attempt,
                 category,
-                results_dir=results_dir,
-                session_dir=sd_path,
+                where,
                 last_kernel_opt=None,
             )
         )
@@ -699,8 +698,7 @@ def build_kernel_optimization_summary(state: Any, session_dir: Path | str) -> di
                 {"kernel_id": gemm_kid, "name": gemm_kid, "kernel_category": "gemm_tuning"},
                 _synthetic_gemm_tuning_attempt(gemm_entry),
                 CATEGORY_INTEGRATED,
-                results_dir=results_dir,
-                session_dir=sd_path,
+                where,
                 last_kernel_opt=None,
             )
         )
@@ -755,16 +753,23 @@ def build_kernel_optimization_summary(state: Any, session_dir: Path | str) -> di
     }
 
 
+class ResultsLocation(NamedTuple):
+    """Where a session's per-kernel result files live and what their paths are relative to."""
+
+    results_dir: Path | None
+    session_dir: Path
+
+
 def _render_attempted_row(
     top_entry: dict[str, Any],
     attempt: dict[str, Any],
     category: str,
+    where: ResultsLocation,
     *,
-    results_dir: Path | None,
-    session_dir: Path,
     last_kernel_opt: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """Build a summary row for a kernel that was attempted."""
+    results_dir, session_dir = where
     kid = str(top_entry.get("kernel_id") or attempt.get("kernel_id") or "")
     ladder, ladder_unavailable = _load_backend_ladder(results_dir, kid)
     kernel_result, _ = _load_kernel_result(results_dir, kid)

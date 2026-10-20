@@ -5,9 +5,10 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -22,14 +23,17 @@ from kernelforge.agent_backends import (
 from kernelforge.agent_backends.session_resume import run_session_with_api_resume
 from kernelforge.config import Config, resolve_agent_model
 from kernelforge.llm.workspace_policy import TOOL_OWNED_UNTRACKED_GLOBS
-from kernelforge.mcp_server.pr_stdio_server import TOOL_NAMES as PR_TOOL_NAMES
-from kernelforge.loop.scoring import (
-    DEFAULT_SNR_THRESHOLD_DB,
+from kernelforge.knowledge.pr_knowledge.agent_tools import TOOL_NAMES as PR_TOOL_NAMES
+from kernelforge.loop.insession_gate import GateMeasurement, GateScope, InSessionGate
+from kernelforge.loop.lessons import SessionEnd
+from kernelforge.evaluation.scoring import (
     KEEP_MEASUREMENT_COUNT,
     KEEP_MIN_MARGIN_FRACTION,
     keep_t_critical,
 )
 from kernelforge.tracker.usage import UsageAccumulator
+
+log = logging.getLogger(__name__)
 
 # Repository / image_kernel tasks ship the correctness reference + tests INSIDE the repo tree (e.g. AITER's
 # op_tests/.../test_<op>.py), which the in-session gate's default protected globs do not catch.
@@ -86,38 +90,14 @@ def _gate_scoring_context(baseline_case_times: dict | None, best_mean_case_speed
     )
 
 
-def _build_insession_gate(
-    kernel_path: str,
-    *,
-    driver_script: str | None,
-    snr_threshold: float,
-    baseline_case_times: dict | None,
-    best_mean_case_speedup: float | None,
-    max_blocks: int,
-    validation_timeout_sec: int,
-    bench_timeout_sec: int,
-    bench_repeat: int,
+def _gate_scope(
     source_files: list[str],
     is_repo_task: bool,
     extra_protected_globs: list[str] | None,
     extra_protected_paths: list[str] | None,
-    correctness_only: bool,
-    interposed_driver_path: str | None,
-    workspace: Path | None,
-):
-    """The in-session gate for one iteration: what it measures, and what it refuses to let the session touch."""
-    from kernelforge.loop.insession_gate import InSessionGate
-
-    return InSessionGate(
-        driver_script=driver_script,
-        snr_threshold=snr_threshold,
-        baseline_case_times=baseline_case_times,
-        best_mean_case_speedup=best_mean_case_speedup,
-        kernel_file=kernel_path,
-        max_blocks=max_blocks,
-        stage_timeout_sec=validation_timeout_sec,
-        bench_timeout_sec=bench_timeout_sec,
-        bench_repeat=bench_repeat,
+) -> GateScope:
+    """What every session's gate protects, before the per-session kernel and workspace are known."""
+    return GateScope(
         # Declared sources seed profiling/JIT orientation.
         target_files=(source_files or None),
         # Combine repo reference/test globs (repo tasks) with any caller-supplied protected globs (e.g. the
@@ -129,14 +109,6 @@ def _build_insession_gate(
         # Exact-path measurement files (e.g. the PORT phase's source kernel, which the driver imports as the
         # oracle).
         extra_protected_paths=extra_protected_paths,
-        # PORT (and any correctness-only phase): require only correctness; the gate skips the perf benchmark
-        # entirely.
-        correctness_only=correctness_only,
-        # The interposed command, so the hooks refuse a driver run that goes around it.
-        interposed_driver_path=interposed_driver_path,
-        # The declared tree, not one guessed from the driver's location: forge-fuse keeps its driver in the
-        # run's output dir, which is outside the workspace and is not a repository.
-        workspace=workspace,
     )
 
 
@@ -154,13 +126,8 @@ def _resolve_implementer_backend(config: Config, agent_backend: str | None, usag
             # not to the one being switched to; carrying it across the switch
             # is how a Claude model id reaches the OpenAI-protocol gateway.
             model=resolve_agent_model(agent_backend),
-            executable=config.agent_cli,
-            timeout_sec=config.agent_timeout_sec,
-            reasoning_effort=config.agent_reasoning_effort,
-            sandbox_mode=config.agent_sandbox_mode,
-            precheck=config.agent_precheck,
-            fallback_provider=config.agent_fallback_provider,
-            options=config.agent_options,
+            # The executable and provider options, like the model, belong to the resolved provider.
+            settings=replace(config.agent_runtime_settings(), executable="", options={}),
         )
     requested_backend = runtime.provider
     precheck_cwd = (
@@ -191,8 +158,7 @@ def _target_section(
     is_repo_task: bool,
     source_files: list[str],
     target_functions: list[str],
-    kernel_backend_name: str,
-    correctness_only: bool,
+    assembly_session: bool,
 ) -> str:
     """The prompt section naming what this session may edit, and what is only a hint.
 
@@ -200,7 +166,7 @@ def _target_section(
     orientation, never the edit boundary; an assembly session is the opposite,
     with everything but the declared ``.s`` frozen.
     """
-    if kernel_backend_name == "assembly" and not correctness_only:
+    if assembly_session:
         return (
             "## Editable assembly source\n"
             + _bullet_list(source_files)
@@ -277,7 +243,8 @@ async def _run_outer_gate_turns(gate, backend, run_spec: AgentRunSpec, run_resul
                 feedback,
                 usage=usage,
             )
-        except Exception as exc:  # noqa: BLE001 - outer gate remains final
+        except Exception as exc:  # noqa: BLE001 - SDK errors are unbounded; the outer gate stays final
+            log.warning("outer-gate resume failed: %s", exc)
             if getattr(exc, "agent_safety_rejection", False):
                 integrity_error = exc
             gate.end_reason = "resume_error"
@@ -360,9 +327,7 @@ def _fill_session_sink(
     *,
     gate,
     run_result,
-    plan: str,
-    end_reason: str,
-    num_turns: int | None,
+    ending: SessionEnd,
     summarize,
 ) -> None:
     """Hand the runner what only this scope saw of the session.
@@ -371,11 +336,12 @@ def _fill_session_sink(
     workspace the reaper could not clear can reach the code that decides
     whether to run the canonical measurement.
     """
-    session_sink["plan"] = plan
+    # PLAN — one-sentence description of THIS iteration's FINAL modification.
+    session_sink["plan"] = _parse_output_tag(run_result.text, "PLAN:", 160, last=True)
     session_sink["session_id"] = run_result.session_id
     session_sink["summarize"] = summarize
-    session_sink["end_reason"] = end_reason
-    session_sink["turns"] = num_turns
+    session_sink["end_reason"] = ending.end_reason
+    session_sink["turns"] = ending.turns
     session_sink["workspace_contention"] = run_result.workspace_contention
     if gate is not None:
         session_sink["findings"] = gate.findings_blob()
@@ -389,47 +355,73 @@ def _fill_session_sink(
         session_sink["edit_count"] = run_result.edit_count
 
 
-def make_agent_fn(
-    config: Config,
-    program_md: str,
-    kernel_backend_name: str = "ck",
-    pre_task_context: str = "",
-    pr_kb_repo: str = "",
-    usage: "UsageAccumulator | None" = None,
-    insession_gate: bool = False,
+@dataclass(frozen=True)
+class ImplementerTask:
+    """What an Implementer session works on: its program, backend, context, sources and protected files."""
+
+    program_md: str
+    kernel_backend_name: str = "ck"
+    pre_task_context: str = ""
+    pr_kb_repo: str = ""
+    task_type: str = ""
+    source_files: list[str] | None = None
+    target_functions: list[str] | None = None
+    profiling_enabled: bool = True
+    commit_new_paths: list[str] | None = None
+    extra_protected_globs: list[str] | None = None
+    extra_protected_paths: list[str] | None = None
+
+
+@dataclass(frozen=True)
+class SessionOptions:
+    """How each Implementer session runs: its budget, permission mode, provider and in-session gate."""
+
+    # One implementer session's wall-clock budget (see kernelforge.cli.session_budget._forge_session_timeout_sec).
+    session_timeout_sec: int | None = None
+    permission_mode: str | None = None
+    agent_backend: str | None = None
+    insession_gate: bool = False
     # Whether an enabled gate also installs its Stop hook, which runs canonical correctness and a benchmark before the
     # session may end.
-    insession_gate_stop_check: bool = True,
-    driver_script: str | None = None,
-    # The wrapper script the session is told to run the driver through, when that is not the driver itself.
-    interposed_driver_path: str | None = None,
-    snr_threshold: float = DEFAULT_SNR_THRESHOLD_DB,
-    max_blocks: int = 10,
-    # One implementer session's wall-clock budget (see kernelforge.cli.session_budget._forge_session_timeout_sec).
-    session_timeout_sec: int | None = None,
-    validation_timeout_sec: int = 1800,
-    bench_timeout_sec: int = 300,
-    bench_repeat: int = 1,
-    permission_mode: str | None = None,
-    task_type: str = "",
-    source_files: list[str] | None = None,
-    target_functions: list[str] | None = None,
-    profiling_enabled: bool = True,
-    agent_backend: str | None = None,
-    extra_protected_globs: list[str] | None = None,
-    extra_protected_paths: list[str] | None = None,
-    correctness_only: bool = False,
-    commit_new_paths: list[str] | None = None,
+    insession_gate_stop_check: bool = True
+
+
+@dataclass(frozen=True)
+class ImplementerSetup:
+    """Everything an Implementer session is built from besides the config: task, gate measurement and options."""
+
+    task: ImplementerTask
+    measurement: GateMeasurement = field(default_factory=GateMeasurement)
+    session: SessionOptions = field(default_factory=SessionOptions)
+
+
+def make_agent_fn(
+    config: Config,
+    setup: ImplementerSetup,
+    *,
+    usage: "UsageAccumulator | None" = None,
 ) -> Callable[..., Awaitable[str]]:
     """Create an agent_fn callback for the autonomous iteration loop."""
-    backend, requested_backend = _resolve_implementer_backend(config, agent_backend, usage)
+    task, measurement, session = setup.task, setup.measurement, setup.session
+    program_md, kernel_backend_name, pre_task_context = task.program_md, task.kernel_backend_name, task.pre_task_context
+    pr_kb_repo, task_type, profiling_enabled = task.pr_kb_repo, task.task_type, task.profiling_enabled
+    extra_protected_globs, extra_protected_paths = task.extra_protected_globs, task.extra_protected_paths
+    commit_new_paths = task.commit_new_paths
+    driver_script, max_blocks, correctness_only = (
+        measurement.driver_script,
+        measurement.max_blocks,
+        measurement.correctness_only,
+    )
+    session_timeout_sec, permission_mode = session.session_timeout_sec, session.permission_mode
+    backend, requested_backend = _resolve_implementer_backend(config, session.agent_backend, usage)
     backend_model = backend.runtime.model
 
     # Multi-file / repository awareness.
-    source_files = [f for f in (source_files or []) if f]
-    target_functions = [f for f in (target_functions or []) if f]
+    source_files = [f for f in (task.source_files or []) if f]
+    target_functions = [f for f in (task.target_functions or []) if f]
     is_repo_task = (task_type or "").strip().lower() in _REPO_TASK_TYPES
-    if kernel_backend_name == "assembly" and not correctness_only:
+    assembly_session = kernel_backend_name == "assembly" and not correctness_only
+    if assembly_session:
         from kernelforge.assembly.prepare import frozen_paths
 
         assembly_files = [path for path in source_files if Path(path).suffix.lower() in {".s", ".asm"}]
@@ -444,18 +436,11 @@ def make_agent_fn(
 
     # Load the kernel backend's prompt as extra domain context; without it the agent gets only the generic
     # instructions below and misses backend discipline (e.g. ck's tile/pipeline tuning + stale-.cuda.o cleaning).
-    kernel_backend_context = ""
-    try:
-        from kernelforge.kernel_backends.base import build_single_kernel_backend_prompt
+    from kernelforge.kernel_backends.base import build_single_kernel_backend_prompt
 
-        kernel_backend_context = build_single_kernel_backend_prompt(
-            config, kernel_backend_name, task_type=task_type, source_paths=source_files
-        )
-    except Exception as e:  # noqa: BLE001
-        print(
-            f"  Warning: kernel_backend prompt load failed for {kernel_backend_name} ({e}); using generic prompt",
-            file=sys.stderr,
-        )
+    kernel_backend_context = build_single_kernel_backend_prompt(
+        config, kernel_backend_name, task_type=task_type, source_paths=source_files
+    )
 
     # The backend prompts name the STEPS (build, run the driver, profile) but not the mechanism, because only this
     # loop knows it: this agent has Bash and the driver documented above, and no build/test/bench/pmc tools. So this
@@ -504,7 +489,7 @@ def make_agent_fn(
     # instead of re-billing each call.
     driver_base = Path(driver_script).name if driver_script else "forge_driver.py"
     # What the session is told to execute.
-    driver_run = interposed_driver_path or driver_base
+    driver_run = measurement.interposed_driver_path or driver_base
     # Empty unless a wrapper was interposed, so a session without one carries a byte-identical prompt.
     driver_interposition_section = (
         ""
@@ -546,7 +531,7 @@ prints the tables). If this environment lacks rocprof-compute's deps the script 
     if pr_kb_repo and backend.capabilities.mcp:
         pr_mcp_servers["pr_monitor"] = StdioMcpServer(
             command=sys.executable,
-            args=("-m", "kernelforge.mcp_server.pr_stdio_server"),
+            args=("-m", "kernelforge.knowledge.pr_knowledge.mcp_server"),
             env={"PR_KB_REPO": pr_kb_repo, **_pr_kb_child_env()},
             startup_timeout_sec=15,
             # Claude ignores this field; the REST client also enforces a budget.
@@ -608,10 +593,11 @@ Never `cat` a whole file — use the Read tool (it's cheaper than a shell pipe).
 """
 
     # In-session self-correction mode: the agent may build/test/fix itself inside ONE session.
-    gate_enabled = bool(insession_gate and driver_script)
+    gate_enabled = bool(session.insession_gate and driver_script)
     # Without the stop check the gate is protection only: its hooks deny an edit or a shell write to the measurement
     # surface while the session runs, and nothing decides when the session may end.
-    gate_stop_check = gate_enabled and insession_gate_stop_check
+    gate_stop_check = gate_enabled and session.insession_gate_stop_check
+    gate_scope = _gate_scope(source_files, is_repo_task, extra_protected_globs, extra_protected_paths)
     gate_system_prompt = f"""\
 You are a GPU kernel optimization agent working in ONE self-correcting session.
 
@@ -736,8 +722,7 @@ Never `cat` a whole file — use the Read tool.
             is_repo_task=is_repo_task,
             source_files=source_files,
             target_functions=target_functions,
-            kernel_backend_name=kernel_backend_name,
-            correctness_only=correctness_only,
+            assembly_session=assembly_session,
         )
 
         # One value drives both the run spec's hard deadline and the deadline the session is told, so the enforced cut
@@ -782,23 +767,13 @@ Make your change(s) now.
             run_cwd = str(configured_workspace.resolve())
 
         gate = (
-            _build_insession_gate(
-                kernel_path,
-                driver_script=driver_script,
-                snr_threshold=snr_threshold,
+            InSessionGate(
+                measurement,
+                # The declared tree, not one guessed from the driver's location: forge-fuse keeps its driver in the
+                # run's output dir, which is outside the workspace and is not a repository.
+                replace(gate_scope, kernel_file=kernel_path, workspace=configured_workspace),
                 baseline_case_times=baseline_case_times,
                 best_mean_case_speedup=best_mean_case_speedup,
-                max_blocks=max_blocks,
-                validation_timeout_sec=validation_timeout_sec,
-                bench_timeout_sec=bench_timeout_sec,
-                bench_repeat=bench_repeat,
-                source_files=source_files,
-                is_repo_task=is_repo_task,
-                extra_protected_globs=extra_protected_globs,
-                extra_protected_paths=extra_protected_paths,
-                correctness_only=correctness_only,
-                interposed_driver_path=interposed_driver_path,
-                workspace=configured_workspace,
             )
             if gate_enabled
             else None
@@ -898,8 +873,6 @@ Make your change(s) now.
         result_subtype = run_result.subtype
         num_turns = continuation_turns if uses_outer_gate else run_result.num_turns
 
-        # PLAN — one-sentence description of THIS iteration's FINAL modification.
-        plan = _parse_output_tag(full, "PLAN:", 160, last=True)
         submitted = any(line.strip().upper() == "SUBMIT_CANDIDATE" for line in full.splitlines())
         end_reason = _session_end_reason(
             submitted=submitted,
@@ -930,9 +903,7 @@ Make your change(s) now.
                 session_sink,
                 gate=gate,
                 run_result=run_result,
-                plan=plan,
-                end_reason=end_reason,
-                num_turns=num_turns,
+                ending=SessionEnd(end_reason, turns=num_turns),
                 summarize=_make_session_summarizer(
                     backend=backend,
                     spec=run_spec,

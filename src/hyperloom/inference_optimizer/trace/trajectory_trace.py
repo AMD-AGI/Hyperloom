@@ -241,38 +241,12 @@ def _validate_row(row: dict[str, Any]) -> None:
             raise TrajectoryRowError(f"trajectory {key}={value!r} is not one of {sorted(vocabulary)!r}")
 
 
-def _build_row(
-    ctx: TrajectoryContext,
-    *,
-    event_type: str,
-    status: str,
-    span_id: str,
-    start_ts: str | None,
-    ts: str | None,
-    attributes: dict[str, Any] | None,
-) -> dict[str, Any]:
-    """Assemble one closed-schema row from the resolved context."""
-    phase, tick = _resolved_phase_tick(ctx)
-    return {
-        "schema_version": SCHEMA_VERSION,
-        "event_id": uuid.uuid4().hex,
-        "event_type": event_type,
-        "status": status,
-        "ts": ts or now_iso(),
-        "start_ts": coerce_optional_str(start_ts),
-        "writer": _WRITER.writer,
-        "seq": _WRITER.next_seq(),
-        "session_id": ctx.session_dir.name if ctx.session_dir is not None else "",
-        "span_id": span_id,
-        "parent_span_id": coerce_optional_str(ctx.parent_span_id),
-        "component": coerce_optional_str(ctx.component),
-        "agent": coerce_optional_str(ctx.agent),
-        "phase": phase,
-        "tick": tick,
-        "task_id": coerce_optional_str(ctx.task_id),
-        "call_id": coerce_optional_str(ctx.call_id),
-        "attributes": _jsonable_attributes(attributes),
-    }
+@dataclass(frozen=True)
+class EventWindow:
+    """When an event happened: ``ts`` (now when unset) and, for a span's terminal row, the ``start_ts`` it opened at."""
+
+    start_ts: str | None = None
+    ts: str | None = None
 
 
 def record_event(
@@ -280,14 +254,13 @@ def record_event(
     *,
     status: str = STATUS_POINT,
     span_id: str | None = None,
-    start_ts: str | None = None,
-    ts: str | None = None,
+    window: EventWindow = EventWindow(),
     attributes: dict[str, Any] | None = None,
     **context: Any,
 ) -> str | None:
     """Append one event to this process's trajectory shard.
 
-    ``ts`` defaults to now; pass it when the event is written after it happened. ``context`` overrides
+    Pass ``window`` when the event is written after it happened. ``context`` overrides
     :class:`TrajectoryContext` fields for this row only. A no-op (returning ``None``) when no ``session_dir`` is in
     scope; otherwise returns the row's ``span_id``, minted when not given.
     """
@@ -296,15 +269,27 @@ def record_event(
         return None
     span_id = span_id or new_span_id()
     with _WRITER.lock:
-        row = _build_row(
-            ctx,
-            event_type=event_type,
-            status=status,
-            span_id=span_id,
-            start_ts=start_ts,
-            ts=ts,
-            attributes=attributes,
-        )
+        phase, tick = _resolved_phase_tick(ctx)
+        row = {
+            "schema_version": SCHEMA_VERSION,
+            "event_id": uuid.uuid4().hex,
+            "event_type": event_type,
+            "status": status,
+            "ts": window.ts or now_iso(),
+            "start_ts": coerce_optional_str(window.start_ts),
+            "writer": _WRITER.writer,
+            "seq": _WRITER.next_seq(),
+            "session_id": ctx.session_dir.name,
+            "span_id": span_id,
+            "parent_span_id": coerce_optional_str(ctx.parent_span_id),
+            "component": coerce_optional_str(ctx.component),
+            "agent": coerce_optional_str(ctx.agent),
+            "phase": phase,
+            "tick": tick,
+            "task_id": coerce_optional_str(ctx.task_id),
+            "call_id": coerce_optional_str(ctx.call_id),
+            "attributes": _jsonable_attributes(attributes),
+        }
         _validate_row(row)
         dest = trajectory_dir(ctx.session_dir) / f"{row['writer']}.jsonl"
         try:
@@ -394,7 +379,7 @@ def trajectory_span(
             event_type,
             status=status if error else (span.status or STATUS_COMPLETED),
             span_id=span.span_id,
-            start_ts=start_ts,
+            window=EventWindow(start_ts=start_ts),
             attributes={**span.attributes, **error},
             **context,
         )
@@ -462,8 +447,7 @@ def record_gateway_request(record: LLMRequestRecord) -> None:
     record_event(
         EVENT_LLM_REQUEST,
         status=STATUS_FAILED if failed else STATUS_COMPLETED,
-        start_ts=_epoch_iso(record.start),
-        ts=_epoch_iso(record.end),
+        window=EventWindow(start_ts=_epoch_iso(record.start), ts=_epoch_iso(record.end)),
         attributes=attributes,
         **context,
     )
@@ -484,6 +468,7 @@ __all__ = [
     "EVENT_TASK",
     "EVENT_TASK_RETRY",
     "EVENT_TOOL",
+    "EventWindow",
     "OPEN_STATUSES",
     "SCHEMA_VERSION",
     "STATUS_CANCELLED",

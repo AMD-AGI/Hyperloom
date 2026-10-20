@@ -95,67 +95,87 @@ def _pick_head_first(nodes: list[dict]) -> list[dict]:
     return local + others
 
 
-def _build_sglang_cmd(
-    *,
-    model: str,
-    tp: int,
-    nnodes: int,
-    node_rank: int,
-    dist_init_addr: str,
-    extra_args: list[str],
-    ep: int = 1,
-    pd_role: str = "",
-    pd_port: int = _INFERENCE_PORT,
-    pd_transfer_backend: str = "",
-    pd_ib_device: str = "",
-    pd_bootstrap_port: int = _PD_DEFAULT_BOOTSTRAP_PORT,
-) -> list[str]:
+@dataclass(frozen=True)
+class _PdRole:
+    """A server group's part in a PD split; the defaults describe an aggregated group on the public port."""
+
+    role: str = ""
+    port: int = _INFERENCE_PORT
+    transfer_backend: str = ""
+    ib_device: str = ""
+    bootstrap_port: int = _PD_DEFAULT_BOOTSTRAP_PORT
+    kv_rank: int = 0
+    kv_parallel_size: int = 1
+
+
+@dataclass(frozen=True)
+class _ServerGroup:
+    """One framework server group: what it serves, how it is parallelised, and where its ranks rendezvous."""
+
+    framework: str
+    model: str
+    tp: int
+    nnodes: int
+    head_ip: str
+    dist_init_port: int
+    extra_args: list[str]
+    ep: int = 1
+    pd: _PdRole = _PdRole()
+
+
+@dataclass(frozen=True)
+class _LaunchDirs:
+    """Where a launch's ranks write PID files and logs, and the shared torch profiler dir when one is set."""
+
+    pid_dir: str
+    log_dir: str
+    torch_profiler_dir: str = ""
+
+
+def _build_sglang_cmd(group: _ServerGroup, node_rank: int) -> list[str]:
     """Compose the sglang multi-node launch command."""
+    pd = group.pd
     cmd = [
         "python3",
         "-m",
         "sglang.launch_server",
         "--model-path",
-        model,
+        group.model,
         "--trust-remote-code",
         "--tp",
-        str(tp),
+        str(group.tp),
         "--nnodes",
-        str(nnodes),
+        str(group.nnodes),
         "--node-rank",
         str(node_rank),
         "--dist-init-addr",
-        dist_init_addr,
+        f"{group.head_ip}:{group.dist_init_port}",
     ]
     if node_rank == 0:
         # rank-0 HTTP port = internal prefill/decode port in PD mode, else public.
-        cmd.extend(["--host", "0.0.0.0", "--port", str(pd_port)])  # nosec B104 - rank-0 server must accept pod traffic.
-    if ep > 1:
-        cmd.extend(["--expert-parallel-size", str(ep)])
-    role = pd_role.strip().lower()
+        cmd.extend(["--host", "0.0.0.0", "--port", str(pd.port)])  # nosec B104 - rank-0 server must accept pod traffic.
+    if group.ep > 1:
+        cmd.extend(["--expert-parallel-size", str(group.ep)])
+    role = pd.role.strip().lower()
     if role in ("prefill", "decode"):
         cmd.extend(["--disaggregation-mode", role])
-        cmd.extend(["--disaggregation-bootstrap-port", str(pd_bootstrap_port)])
-        if pd_transfer_backend:
-            cmd.extend(["--disaggregation-transfer-backend", pd_transfer_backend])
-        if pd_ib_device:
-            cmd.extend(["--disaggregation-ib-device", pd_ib_device])
-    if extra_args:
-        cmd.extend(extra_args)
+        cmd.extend(["--disaggregation-bootstrap-port", str(pd.bootstrap_port)])
+        if pd.transfer_backend:
+            cmd.extend(["--disaggregation-transfer-backend", pd.transfer_backend])
+        if pd.ib_device:
+            cmd.extend(["--disaggregation-ib-device", pd.ib_device])
+    if group.extra_args:
+        cmd.extend(group.extra_args)
     return cmd
 
 
 def _build_vllm_cmd(
-    *,
     model: str,
     tp: int,
     extra_args: list[str],
+    *,
     ep: int = 1,
-    pd_role: str = "",
-    pd_port: int = _INFERENCE_PORT,
-    pd_transfer_backend: str = "",
-    pd_kv_rank: int = 0,
-    pd_kv_parallel_size: int = 1,
+    pd: _PdRole = _PdRole(),
 ) -> list[str]:
     """vLLM multi-node command for rank 0 (workers are KubeRay-joined and vLLM auto-discovers them via the GCS)."""
     cmd = [
@@ -167,25 +187,25 @@ def _build_vllm_cmd(
         "--host",
         "0.0.0.0",  # nosec B104 - vLLM rank-0 server must accept pod traffic.
         "--port",
-        str(pd_port),
+        str(pd.port),
         "--distributed-executor-backend",
         "ray",
     ]
     if ep > 1:
         cmd.append("--enable-expert-parallel")
-    role = pd_role.strip().lower()
+    role = pd.role.strip().lower()
     if role in ("prefill", "decode"):
         # vllm PD: kv-transfer-config JSON with connector + role + kv slot.
         kv_role = "kv_producer" if role == "prefill" else "kv_consumer"
-        connector = pd_transfer_backend or "NixlConnector"
+        connector = pd.transfer_backend or "NixlConnector"
         if connector not in _VLLM_KV_CONNECTORS:
             _log(f"WARN unknown vLLM kv connector {connector!r}; known: {sorted(_VLLM_KV_CONNECTORS)}")
         kv_cfg = json.dumps(
             {
                 "kv_connector": connector,
                 "kv_role": kv_role,
-                "kv_rank": int(pd_kv_rank),
-                "kv_parallel_size": int(pd_kv_parallel_size),
+                "kv_rank": int(pd.kv_rank),
+                "kv_parallel_size": int(pd.kv_parallel_size),
                 "kv_buffer_device": "cuda",
             },
             separators=(",", ":"),
@@ -302,43 +322,21 @@ def _detach_framework_launch(
     return pid
 
 
-def _spawn_remote(
-    *,
-    framework: str,
-    model: str,
-    tp: int,
-    nnodes: int,
-    node_rank: int,
-    head_ip: str,
-    dist_init_port: int,
-    pid_dir: str,
-    log_dir: str,
-    extra_args: list[str],
-    torch_profiler_dir: str = "",
-    ep: int = 1,
-    pd_role: str = "",
-    pd_port: int = _INFERENCE_PORT,
-    pd_transfer_backend: str = "",
-    pd_ib_device: str = "",
-    pd_bootstrap_port: int = _PD_DEFAULT_BOOTSTRAP_PORT,
-    pd_kv_rank: int = 0,
-    pd_kv_parallel_size: int = 1,
-    pid_file_name: str = "",
-) -> int:
+def _spawn_remote(group: _ServerGroup, node_rank: int, dirs: _LaunchDirs, *, pid_file_name: str = "") -> int:
     """Spawn the framework launcher detached on the local actor's pod, recording the PID."""
-    Path(pid_dir).mkdir(parents=True, exist_ok=True)
-    Path(log_dir).mkdir(parents=True, exist_ok=True)
+    Path(dirs.pid_dir).mkdir(parents=True, exist_ok=True)
+    Path(dirs.log_dir).mkdir(parents=True, exist_ok=True)
     # PD mode runs two groups with overlapping rank numbers; caller passes a role-tagged pid_file_name so they don't
     # collide on disk.
     fname = pid_file_name or f"rank_{node_rank}.pid"
     log_fname = f"{Path(fname).stem}.log" if pid_file_name else f"rank_{node_rank}.log"
-    pid_file = Path(pid_dir) / fname
-    log_file = Path(log_dir) / log_fname
+    pid_file = Path(dirs.pid_dir) / fname
+    log_file = Path(dirs.log_dir) / log_fname
 
     sub_env = _subprocess_env()
     # Fall back to $HYPERLOOM_MN_PROFILE_TRACE_DIR so traces still reach a shared dir when a reused server skips this
     # launch.
-    tpd = (torch_profiler_dir or "").strip() or os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip()
+    tpd = (dirs.torch_profiler_dir or "").strip() or os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip()
     if tpd:
         # Pin profiler output to a shared dir; mkdir failure is non-fatal.
         try:
@@ -351,24 +349,10 @@ def _spawn_remote(
         else:
             sub_env["SGLANG_TORCH_PROFILER_DIR"] = tpd
 
-    dist_init_addr = f"{head_ip}:{dist_init_port}"
-    fw = framework.lower()
+    fw = group.framework.lower()
     if fw == "sglang":
         activate_kernel_shape_tool(sub_env)
-        cmd = _build_sglang_cmd(
-            model=model,
-            tp=tp,
-            nnodes=nnodes,
-            node_rank=node_rank,
-            dist_init_addr=dist_init_addr,
-            extra_args=extra_args,
-            ep=ep,
-            pd_role=pd_role,
-            pd_port=pd_port,
-            pd_transfer_backend=pd_transfer_backend,
-            pd_ib_device=pd_ib_device,
-            pd_bootstrap_port=pd_bootstrap_port,
-        )
+        cmd = _build_sglang_cmd(group, node_rank)
     elif fw == "vllm":
         # vLLM multi-node: workers are already KubeRay-joined to the GCS, so worker actors do nothing; rank-0 vllm
         # serve discovers them.
@@ -381,19 +365,9 @@ def _spawn_remote(
             # Sentinel PID 0 so kill_multinode treats the file as stale.
             pid_file.write_text("0")
             return 0
-        cmd = _build_vllm_cmd(
-            model=model,
-            tp=tp,
-            extra_args=extra_args,
-            ep=ep,
-            pd_role=pd_role,
-            pd_port=pd_port,
-            pd_transfer_backend=pd_transfer_backend,
-            pd_kv_rank=pd_kv_rank,
-            pd_kv_parallel_size=pd_kv_parallel_size,
-        )
+        cmd = _build_vllm_cmd(group.model, group.tp, group.extra_args, ep=group.ep, pd=group.pd)
     else:
-        raise RuntimeError(f"unsupported framework: {framework!r}")
+        raise RuntimeError(f"unsupported framework: {group.framework!r}")
 
     sys.stderr.write(f"[rank {node_rank}] launching: {' '.join(cmd)}\n")
     sys.stderr.write(f"[rank {node_rank}] log={log_file} pid={pid_file}\n")
@@ -428,7 +402,7 @@ def _rank0_pid_from_log(pid_dir: str) -> int | None:
         if not pid_path.is_file():
             pid_path = pathlib.Path(tempfile.gettempdir()) / "multi_node_pids" / "rank_0.pid"
         return int(pid_path.read_text().strip())
-    except Exception:  # noqa: BLE001
+    except (OSError, ValueError):
         return None
 
 
@@ -745,6 +719,15 @@ def _resolve_pd_plan(args: argparse.Namespace) -> _PdPlan | None:
     )
 
 
+@dataclass(frozen=True)
+class _GroupHeads:
+    """The driver node and the address each server group's rank 0 binds (all the driver when aggregated)."""
+
+    head_ip: str
+    prefill_head_ip: str
+    decode_head_ip: str
+
+
 def _on_node(spawn_actor, node: dict):
     """Pin one spawn actor to the node whose GPUs its rank will use."""
     return spawn_actor.options(
@@ -759,89 +742,83 @@ def _spawn_rank_actors(
     head_ip: str,
     plan: _PdPlan,
     extra_args: list[str],
-) -> tuple[list, str, str]:
+) -> tuple[list, _GroupHeads]:
     """Spawn one actor per rank, and say which address each server group rendezvous on.
 
     ``num_gpus=0`` on the actors: the framework process reserves the GPUs itself.
     """
     spawn_actor = ray.remote(num_cpus=1, num_gpus=0)(_spawn_remote)
+    dirs = _LaunchDirs(pid_dir=args.pid_dir, log_dir=args.log_dir, torch_profiler_dir=args.torch_profiler_dir)
     refs: list = []
     if not plan.disaggregated:
         # Aggregated: single server group spans all nodes.
+        group = _ServerGroup(
+            framework=args.framework,
+            model=args.model,
+            tp=args.tp,
+            nnodes=args.nnodes,
+            head_ip=head_ip,
+            dist_init_port=args.dist_init_port,
+            extra_args=extra_args,
+            ep=int(args.ep or 1),
+        )
         for rank, node in enumerate(nodes):
-            actor_ref = _on_node(spawn_actor, node).remote(
-                framework=args.framework,
-                model=args.model,
-                tp=args.tp,
-                nnodes=args.nnodes,
-                node_rank=rank,
-                head_ip=head_ip,
-                dist_init_port=args.dist_init_port,
-                pid_dir=args.pid_dir,
-                log_dir=args.log_dir,
-                extra_args=extra_args,
-                torch_profiler_dir=args.torch_profiler_dir,
-                ep=int(args.ep or 1),
-            )
+            actor_ref = _on_node(spawn_actor, node).remote(group, rank, dirs)
             refs.append((f"rank_{rank}", node["NodeID"], actor_ref))
-        return refs, head_ip, head_ip
+        return refs, _GroupHeads(head_ip, head_ip, head_ip)
 
     # Group A: prefill -- nodes[0:pn], TP=ptp; rank-0 binds the prefill port.
     prefill_head_ip = nodes[0].get("NodeManagerAddress", head_ip)
+    prefill = _ServerGroup(
+        framework=args.framework,
+        model=args.model,
+        tp=plan.prefill_tp,
+        nnodes=plan.prefill_nodes,
+        head_ip=prefill_head_ip,
+        dist_init_port=args.dist_init_port,
+        extra_args=extra_args,
+        ep=int(args.ep or 1),
+        pd=_PdRole(
+            role="prefill",
+            port=_PD_PREFILL_PORT,
+            transfer_backend=args.pd_transfer_backend,
+            ib_device=plan.ib_device,
+            bootstrap_port=args.pd_bootstrap_port,
+            kv_rank=0,  # vllm-only; sglang ignores
+            kv_parallel_size=2,
+        ),
+    )
     for grp_rank in range(plan.prefill_nodes):
         node = nodes[grp_rank]
-        actor_ref = _on_node(spawn_actor, node).remote(
-            framework=args.framework,
-            model=args.model,
-            tp=plan.prefill_tp,
-            nnodes=plan.prefill_nodes,
-            node_rank=grp_rank,
-            head_ip=prefill_head_ip,
-            dist_init_port=args.dist_init_port,
-            pid_dir=args.pid_dir,
-            log_dir=args.log_dir,
-            extra_args=extra_args,
-            torch_profiler_dir=args.torch_profiler_dir,
-            ep=int(args.ep or 1),
-            pd_role="prefill",
-            pd_port=_PD_PREFILL_PORT,
-            pd_transfer_backend=args.pd_transfer_backend,
-            pd_ib_device=plan.ib_device,
-            pd_bootstrap_port=args.pd_bootstrap_port,
-            pd_kv_rank=0,  # vllm-only; sglang ignores
-            pd_kv_parallel_size=2,
-            pid_file_name=f"prefill_{grp_rank}.pid",
-        )
+        actor_ref = _on_node(spawn_actor, node).remote(prefill, grp_rank, dirs, pid_file_name=f"prefill_{grp_rank}.pid")
         refs.append((f"prefill_{grp_rank}", node["NodeID"], actor_ref))
 
     # Group B: decode -- nodes[pn:pn+dn]; dist-init port = prefill + 1.
     decode_head_ip = nodes[plan.prefill_nodes].get("NodeManagerAddress", head_ip)
+    decode = _ServerGroup(
+        framework=args.framework,
+        model=args.model,
+        tp=plan.decode_tp,
+        nnodes=plan.decode_nodes,
+        head_ip=decode_head_ip,
+        dist_init_port=_pd_decode_dist_init_port(args.dist_init_port),
+        extra_args=extra_args,
+        ep=int(args.ep or 1),
+        pd=_PdRole(
+            role="decode",
+            port=_PD_DECODE_PORT,
+            transfer_backend=args.pd_transfer_backend,
+            ib_device=plan.ib_device,
+            bootstrap_port=args.pd_bootstrap_port,
+            kv_rank=1,
+            kv_parallel_size=2,
+        ),
+    )
     for grp_rank in range(plan.decode_nodes):
         node = nodes[plan.prefill_nodes + grp_rank]
-        actor_ref = _on_node(spawn_actor, node).remote(
-            framework=args.framework,
-            model=args.model,
-            tp=plan.decode_tp,
-            nnodes=plan.decode_nodes,
-            node_rank=grp_rank,
-            head_ip=decode_head_ip,
-            dist_init_port=_pd_decode_dist_init_port(args.dist_init_port),
-            pid_dir=args.pid_dir,
-            log_dir=args.log_dir,
-            extra_args=extra_args,
-            torch_profiler_dir=args.torch_profiler_dir,
-            ep=int(args.ep or 1),
-            pd_role="decode",
-            pd_port=_PD_DECODE_PORT,
-            pd_transfer_backend=args.pd_transfer_backend,
-            pd_ib_device=plan.ib_device,
-            pd_bootstrap_port=args.pd_bootstrap_port,
-            pd_kv_rank=1,
-            pd_kv_parallel_size=2,
-            pid_file_name=f"decode_{grp_rank}.pid",
-        )
+        actor_ref = _on_node(spawn_actor, node).remote(decode, grp_rank, dirs, pid_file_name=f"decode_{grp_rank}.pid")
         refs.append((f"decode_{grp_rank}", node["NodeID"], actor_ref))
-    return refs, prefill_head_ip, decode_head_ip
+    return refs, _GroupHeads(head_ip, prefill_head_ip, decode_head_ip)
 
 
 def _rollback_spawned(pids: dict[str, tuple[str, int]]) -> None:
@@ -991,10 +968,8 @@ def _launch_summary(
     args: argparse.Namespace,
     *,
     plan: _PdPlan,
-    head_ip: str,
+    heads: _GroupHeads,
     pids: dict[str, tuple[str, int]],
-    prefill_head_ip: str,
-    decode_head_ip: str,
 ) -> dict:
     """What the caller needs to reach and manage the servers this launch started."""
     summary: dict[str, Any] = {
@@ -1003,7 +978,7 @@ def _launch_summary(
         "tp": args.tp,
         "ep": int(args.ep or 1),
         "nnodes": args.nnodes,
-        "head_ip": head_ip,
+        "head_ip": heads.head_ip,
         "dist_init_port": args.dist_init_port,
         "ranks": [{"tag": tag, "node_id": pids[tag][0], "pid": pids[tag][1]} for tag in sorted(pids)],
         "pid_dir": args.pid_dir,
@@ -1023,8 +998,8 @@ def _launch_summary(
     )
     summary["pd_ib_device"] = plan.ib_device
     summary["pd_bootstrap_port"] = args.pd_bootstrap_port
-    summary["pd_prefill_url"] = f"http://{prefill_head_ip}:{_PD_PREFILL_PORT}"
-    summary["pd_decode_url"] = f"http://{decode_head_ip}:{_PD_DECODE_PORT}"
+    summary["pd_prefill_url"] = f"http://{heads.prefill_head_ip}:{_PD_PREFILL_PORT}"
+    summary["pd_decode_url"] = f"http://{heads.decode_head_ip}:{_PD_DECODE_PORT}"
     return summary
 
 
@@ -1067,7 +1042,7 @@ def main() -> int:
 
     ray.init(ignore_reinit_error=True, log_to_driver=True)
     nodes, head_ip = _discover_ranked_nodes(args.nnodes)
-    refs, prefill_head_ip, decode_head_ip = _spawn_rank_actors(
+    refs, heads = _spawn_rank_actors(
         args,
         nodes=nodes,
         head_ip=head_ip,
@@ -1082,14 +1057,7 @@ def main() -> int:
     leader_entry = pids.get("prefill_0" if plan.disaggregated else "rank_0")
     _log_rank0_post_spawn(Path(args.log_dir), leader_entry[1] if leader_entry else None)
 
-    summary = _launch_summary(
-        args,
-        plan=plan,
-        head_ip=head_ip,
-        pids=pids,
-        prefill_head_ip=prefill_head_ip,
-        decode_head_ip=decode_head_ip,
-    )
+    summary = _launch_summary(args, plan=plan, heads=heads, pids=pids)
     sys.stdout.write(json.dumps(summary, indent=2) + "\n")
     sys.stdout.flush()
 

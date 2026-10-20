@@ -20,6 +20,7 @@ from kernelforge.agent_backends.base import (
     AgentCapabilities,
     AgentProviderUnavailableError,
     AgentRuntimeConfig,
+    AgentRuntimeSettings,
 )
 
 log = logging.getLogger(__name__)
@@ -110,6 +111,7 @@ def discover_agent_providers(*, force: bool = False) -> None:
             entries = list(metadata.entry_points().select(group=PROVIDER_ENTRY_POINT_GROUP))
         except Exception as exc:  # noqa: BLE001 - plugin discovery is optional
             _plugin_errors["<discovery>"] = f"{type(exc).__name__}: {exc}"
+            log.warning("agent provider entry-point discovery failed: %s", exc)
             return
 
         for entry in entries:
@@ -124,7 +126,7 @@ def discover_agent_providers(*, force: bool = False) -> None:
                 if provider.name != entry_name:
                     raise ValueError(f"entry-point name {entry_name!r} does not match provider name {provider.name!r}")
                 register_agent_provider(provider)
-            except Exception as exc:  # noqa: BLE001 - isolate broken plugins
+            except Exception as exc:  # noqa: BLE001 - isolate broken third-party plugins
                 _plugin_errors[entry.name] = f"{type(exc).__name__}: {exc}"
                 log.warning(
                     "failed to load Agent provider entry point %s: %s",
@@ -181,6 +183,7 @@ def select_default_agent_provider(preferred_model: str = "") -> AgentProvider:
             return bool(predicate())
         except Exception as exc:  # noqa: BLE001 - one provider must not decide the whole selection
             failures.append(f"{provider.name}: {type(exc).__name__}: {exc}")
+            log.warning("agent provider %s check failed: %s", provider.name, exc)
             return False
 
     providers = list(_providers.values())
@@ -215,17 +218,11 @@ def resolve_agent_runtime(
     provider: str,
     *,
     model: str = "",
-    executable: str = "",
-    timeout_sec: int = 1800,
-    reasoning_effort: str = DEFAULT_REASONING_EFFORT,
-    sandbox_mode: str = "bypass",
-    precheck: bool = True,
-    fallback_provider: str = "",
-    options: dict | None = None,
+    settings: AgentRuntimeSettings = AgentRuntimeSettings(),
 ) -> AgentRuntimeConfig:
     """Resolve provider defaults into one complete runtime configuration."""
     registration = get_agent_provider(provider)
-    fallback = normalize_provider_name(fallback_provider) if fallback_provider else ""
+    fallback = normalize_provider_name(settings.fallback_provider) if settings.fallback_provider else ""
     if fallback == registration.name:
         fallback = ""
     if fallback:
@@ -234,13 +231,13 @@ def resolve_agent_runtime(
     return AgentRuntimeConfig(
         provider=registration.name,
         model=selected,
-        executable=executable.strip(),
-        timeout_sec=timeout_sec,
-        reasoning_effort=reasoning_effort.strip() or DEFAULT_REASONING_EFFORT,
-        sandbox_mode=sandbox_mode.strip() or "bypass",
-        precheck=precheck,
+        executable=settings.executable.strip(),
+        timeout_sec=settings.timeout_sec,
+        reasoning_effort=settings.reasoning_effort.strip() or DEFAULT_REASONING_EFFORT,
+        sandbox_mode=settings.sandbox_mode.strip() or "bypass",
+        precheck=settings.precheck,
         fallback_provider=fallback,
-        options=dict(options or {}),
+        options=dict(settings.options or {}),
     )
 
 

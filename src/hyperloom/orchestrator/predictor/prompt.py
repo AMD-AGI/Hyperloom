@@ -34,7 +34,7 @@ _HEADER = (
 def _accuracy_gate(state: SessionView) -> list[str]:
     """The accuracy gate every explore KEEP passes; nothing while the session measures no accuracy."""
     baseline = float(state.baseline_accuracy or 0.0)
-    if state.eval_disabled or baseline <= 0:
+    if baseline <= 0:
         return []
     return [
         f"Every variant runs the accuracy eval, and a KEEP needs accuracy no more than {ACCURACY_THRESHOLD:g} below",

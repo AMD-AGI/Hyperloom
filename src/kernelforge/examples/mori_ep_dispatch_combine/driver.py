@@ -18,6 +18,7 @@ os.environ.setdefault("MORI_GPU_ARCHS", "gfx942")
 
 import argparse
 import sys
+from dataclasses import dataclass
 
 import torch
 import torch.distributed as dist
@@ -73,14 +74,11 @@ def _dist_teardown(op=None, *, healthy: bool = True) -> None:
     # SIGABRT.
     had_op = op is not None
     if op is not None:
-        try:
-            del op
-        except Exception:  # noqa: BLE001 - best-effort cleanup
-            pass
+        del op
     if healthy and dist.is_initialized():
         try:
             dist.barrier()
-        except Exception:  # noqa: BLE001
+        except RuntimeError:
             pass
     if had_op:
         try:
@@ -92,7 +90,7 @@ def _dist_teardown(op=None, *, healthy: bool = True) -> None:
     if dist.is_initialized():
         try:
             dist.destroy_process_group()
-        except Exception:  # noqa: BLE001
+        except RuntimeError:
             pass
 
 
@@ -154,7 +152,7 @@ def _make_config(rank: int, world_size: int, dtype, max_tokens: int, kernel_type
         max_total_recv_tokens=0,
         warp_num_per_block=8,
         block_num=80,
-        # Class-level default only -- actual mode is chosen per-call in _combine_with_config() via
+        # Class-level default only -- actual mode is chosen per-call in _TunedOp.combine_with_config() via
         # cfg["combine_zero_copy"], which is the tunable the agent controls (see mori_ep_config.py).
         use_external_inp_buf=True,
         gpu_per_node=world_size,
@@ -174,28 +172,55 @@ def _build_op(rank: int, world_size: int, dtype, combine_dtype, max_tokens: int)
     return op, cfg
 
 
-def _combine_with_config(
-    op, cfg: dict, expert_output: torch.Tensor, weights: torch.Tensor, indices: torch.Tensor,
-    call_reset: bool = False, prime_buffer: bool = True,
-):
-    """Runs op.combine() honoring cfg[\"combine_zero_copy\"] (default False)."""
-    block_num = cfg["combine_block_num"]
-    warp_per_block = cfg["combine_warp_per_block"]
-    if cfg["combine_zero_copy"]:
-        buf = op.get_registered_combine_input_buffer(expert_output.dtype)
-        n = expert_output.size(0)
-        if prime_buffer:
-            buf[:n].copy_(expert_output)
+@dataclass(frozen=True)
+class _TunedOp:
+    """A dispatch/combine op and the launch config get_ep_launch_config() tunes it with."""
+
+    op: object
+    cfg: dict
+
+    def combine_with_config(
+        self, expert_output: torch.Tensor, weights: torch.Tensor, indices: torch.Tensor,
+        call_reset: bool = False, prime_buffer: bool = True,
+    ):
+        """Runs op.combine() honoring cfg[\"combine_zero_copy\"] (default False)."""
+        op, cfg = self.op, self.cfg
+        block_num = cfg["combine_block_num"]
+        warp_per_block = cfg["combine_warp_per_block"]
+        if cfg["combine_zero_copy"]:
+            buf = op.get_registered_combine_input_buffer(expert_output.dtype)
+            n = expert_output.size(0)
+            if prime_buffer:
+                buf[:n].copy_(expert_output)
+            return op.combine(
+                buf[:n], weights, indices,
+                block_num=block_num, warp_per_block=warp_per_block,
+                use_external_inp_buf=0, call_reset=call_reset,
+            )
         return op.combine(
-            buf[:n], weights, indices,
+            expert_output, weights, indices,
             block_num=block_num, warp_per_block=warp_per_block,
-            use_external_inp_buf=0, call_reset=call_reset,
+            use_external_inp_buf=1, call_reset=call_reset,
         )
-    return op.combine(
-        expert_output, weights, indices,
-        block_num=block_num, warp_per_block=warp_per_block,
-        use_external_inp_buf=1, call_reset=call_reset,
-    )
+
+
+@dataclass(frozen=True)
+class _CorrectnessCase:
+    """One correctness mode's workload: tokens per rank, input scale, and the dispatch and combine dtypes."""
+
+    n_tokens: int
+    scale: float
+    dtype: torch.dtype
+    combine_dtype: torch.dtype
+
+
+@dataclass(frozen=True)
+class _BenchPlan:
+    """How bench mode times a round: warmup and timed rounds, and whether each rank replays CUDA graphs."""
+
+    warmup: int
+    iters: int
+    graph_mode: bool = False
 
 
 def _make_routing(n_tokens: int, world_size: int, rank: int, device, scale: float):
@@ -215,9 +240,8 @@ def _make_routing(n_tokens: int, world_size: int, rank: int, device, scale: floa
     return x, weights, indices
 
 
-def _correctness_worker(
-    rank: int, world_size: int, n_tokens: int, scale: float, dtype, combine_dtype, result_path: str,
-) -> None:
+def _correctness_worker(rank: int, world_size: int, case: _CorrectnessCase, result_path: str) -> None:
+    n_tokens, scale, dtype, combine_dtype = case.n_tokens, case.scale, case.dtype, case.combine_dtype
     _dist_setup(rank, world_size)
     op = None
     healthy = False
@@ -263,8 +287,8 @@ def _correctness_worker(
         # mirrors _bench_worker's separately-allocated bf16 combine_input, just derived from dispatch_output instead
         # of being random (identity expert has no other transformation to apply).
         expert_output = dispatch_output.to(combine_dtype)
-        combine_output, combine_output_weight = _combine_with_config(
-            op, cfg, expert_output, dispatch_weights, all_rank_indices[rank], call_reset=True,
+        combine_output, combine_output_weight = _TunedOp(op, cfg).combine_with_config(
+            expert_output, dispatch_weights, all_rank_indices[rank], call_reset=True,
         )
         # combine_data_type defaults to config.data_type (dispatch's dtype) -- must be overridden explicitly here
         # whenever combine_dtype differs (the fp8-dispatch/bf16-combine "bench" mode), or check_combine_ result
@@ -283,33 +307,30 @@ def _correctness_worker(
         _dist_teardown(op, healthy=healthy)
 
 
-def _capture_bench_graphs(op, cfg, x_fp8, weights, indices, combine_input, n_recv):
+def _capture_bench_graphs(tuned: _TunedOp, x_fp8, weights, indices, combine_input):
     """Per-rank CUDA graph capture of one dispatch+combine round."""
     dispatch_graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(dispatch_graph):
-        _do, dispatch_weights, _dsc, _di, _rn = op.dispatch(
+        _do, dispatch_weights, _dsc, _di, _rn = tuned.op.dispatch(
             x_fp8, weights, None, indices,
-            block_num=cfg["dispatch_block_num"], warp_per_block=cfg["dispatch_warp_per_block"],
+            block_num=tuned.cfg["dispatch_block_num"], warp_per_block=tuned.cfg["dispatch_warp_per_block"],
         )
 
     combine_graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(combine_graph):
-        _combine_with_config(
-            op, cfg, combine_input[:n_recv], dispatch_weights, indices, prime_buffer=False,
-        )
+        tuned.combine_with_config(combine_input, dispatch_weights, indices, prime_buffer=False)
     torch.cuda.synchronize()
     return dispatch_graph, combine_graph
 
 
-def _bench_worker(
-    rank: int, world_size: int, warmup: int, iters: int, graph_mode: bool, result_path: str,
-) -> None:
+def _bench_worker(rank: int, world_size: int, plan: _BenchPlan, result_path: str) -> None:
     _dist_setup(rank, world_size)
     op = None
     healthy = False
     try:
         device = torch.device("cuda", rank)
         op, cfg = _build_op(rank, world_size, torch.float8_e4m3fnuz, torch.bfloat16, _BENCH_TOKENS_PER_RANK)
+        tuned = _TunedOp(op, cfg)
         x_fp8, weights, indices = _make_routing(_BENCH_TOKENS_PER_RANK, world_size, rank, device, 1.0)
         x_fp8 = x_fp8.to(torch.float8_e4m3fnuz)
         # Combine's expert-output input must be in combine dtype (bf16); its numeric content does not matter for a
@@ -330,14 +351,14 @@ def _bench_worker(
         n_recv = max(n_recv, 1)
         # Prime the zero-copy registered buffer (a no-op read for the external-buffer path) with this fixed-content
         # slice ONCE; the timed loop below never copies into it again.
-        _combine_with_config(
-            op, cfg, combine_input[:n_recv], dispatch_weights0, indices, call_reset=True, prime_buffer=True,
+        tuned.combine_with_config(
+            combine_input[:n_recv], dispatch_weights0, indices, call_reset=True, prime_buffer=True,
         )
         torch.cuda.synchronize()
 
-        if graph_mode:
+        if plan.graph_mode:
             dispatch_graph, combine_graph = _capture_bench_graphs(
-                op, cfg, x_fp8, weights, indices, combine_input, n_recv,
+                tuned, x_fp8, weights, indices, combine_input[:n_recv],
             )
 
             def one_round_local_ms() -> float:
@@ -364,8 +385,8 @@ def _bench_worker(
                 # call_reset=True: mori's own docs require reset() "between iterations" for repeated eager (non-graph)
                 # calls -- a real eager-mode production serving loop pays this same cost every round, so it belongs
                 # inside the timed region, not around it.
-                _combine_with_config(
-                    op, cfg, combine_input[:n_recv], dispatch_weights, indices,
+                tuned.combine_with_config(
+                    combine_input[:n_recv], dispatch_weights, indices,
                     call_reset=True, prime_buffer=False,
                 )
                 end.record()
@@ -380,10 +401,10 @@ def _bench_worker(
             dist.all_reduce(t, op=dist.ReduceOp.MAX)
             return t.item()
 
-        for _ in range(warmup):
+        for _ in range(plan.warmup):
             one_round()
 
-        round_ms = [one_round() for _ in range(iters)]
+        round_ms = [one_round() for _ in range(plan.iters)]
         if rank == 0:
             with open(result_path, "w") as f:
                 f.write("\n".join(f"{v:.6f}" for v in round_ms) + "\n")
@@ -412,8 +433,8 @@ def _profile_worker(rank: int, world_size: int) -> None:
             )
             n_recv = int(recv_n.sum().item()) if hasattr(recv_n, "sum") else int(recv_n)
             # call_reset=True between iterations -- see _bench_worker.
-            _combine_with_config(
-                op, cfg, combine_input[: max(n_recv, 1)], dispatch_weights, indices, call_reset=True,
+            _TunedOp(op, cfg).combine_with_config(
+                combine_input[: max(n_recv, 1)], dispatch_weights, indices, call_reset=True,
             )
         torch.cuda.synchronize()
         healthy = True
@@ -431,7 +452,7 @@ def _run_correctness(mode: str) -> int:
     try:
         mp.spawn(
             _correctness_worker,
-            args=(_WORLD_SIZE, n_tokens, scale, dtype, combine_dtype, result_path),
+            args=(_WORLD_SIZE, _CorrectnessCase(n_tokens, scale, dtype, combine_dtype), result_path),
             nprocs=_WORLD_SIZE,
             join=True,
         )
@@ -448,12 +469,12 @@ def _run_correctness(mode: str) -> int:
     return 0
 
 
-def _run_bench(warmup: int, iters: int, graph_mode: bool = False) -> int:
+def _run_bench(plan: _BenchPlan) -> int:
     result_path = f"/tmp/.mori_forge_bench_result_{os.getpid()}.txt"
     try:
         mp.spawn(
             _bench_worker,
-            args=(_WORLD_SIZE, warmup, iters, graph_mode, result_path),
+            args=(_WORLD_SIZE, plan, result_path),
             nprocs=_WORLD_SIZE,
             join=True,
         )
@@ -521,7 +542,7 @@ def main() -> int:
     if args.profile_run:
         return _run_profile(args.profile_case)
     if args.bench_mode:
-        return _run_bench(args.warmup, args.iters, args.graph_mode)
+        return _run_bench(_BenchPlan(args.warmup, args.iters, args.graph_mode))
     return _run_correctness(args.mode)
 
 

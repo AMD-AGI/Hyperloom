@@ -14,6 +14,7 @@ import pytest
 from hyperloom.common.timeutil import iso_z
 from hyperloom.inference_optimizer.breakdown import exporter as ex
 from hyperloom.inference_optimizer.breakdown.collectors import sessions
+from hyperloom.inference_optimizer.trace import decision_trace
 
 # ---- _load_session_json ----
 
@@ -105,6 +106,31 @@ def test_write_breakdown_json(tmp_path):
     assert target.is_file()
     data = json.loads(target.read_text())
     assert data["exporter_version"] == ex.EXPORTER_VERSION
+
+
+# ---- decision trace failure ----
+
+
+def test_decision_trace_failure_reaches_the_caller(monkeypatch, tmp_path):
+    def explode(_session_dir, _state, _warnings):
+        raise RuntimeError("join failed")
+
+    monkeypatch.setattr(decision_trace, "write_decision_trace", explode)
+
+    with pytest.raises(RuntimeError, match="join failed"):
+        decision_trace.write_session_decision_trace(tmp_path)
+
+
+def test_breakdown_is_still_written_when_the_decision_trace_fails(monkeypatch, tmp_path):
+    def explode(_session_dir):
+        raise RuntimeError("join failed")
+
+    monkeypatch.setattr(decision_trace, "write_session_decision_trace", explode)
+
+    target = ex.write_breakdown_json(tmp_path)
+
+    assert target == (tmp_path / ex.BREAKDOWN_FILENAME).resolve()
+    assert target.is_file()
 
 
 def test_write_breakdown_json_custom_output(tmp_path):
@@ -494,10 +520,12 @@ def test_a_resumed_session_is_not_reported_as_stopped_by_the_previous_legs_close
         state,
         to_phase="CLOSE",
         reason="time_exhausted",
-        ts=(now - timedelta(days=6)).isoformat(timespec="seconds"),
+        at=machine_state.PhaseClock(ts=(now - timedelta(days=6)).isoformat(timespec="seconds")),
     )
     state.start_ts = (now - timedelta(minutes=30)).isoformat(timespec="microseconds")
-    machine_state.record_phase_transition(state, to_phase="PRELUDE", reason="resumed", ts=state.start_ts)
+    machine_state.record_phase_transition(
+        state, to_phase="PRELUDE", reason="resumed", at=machine_state.PhaseClock(ts=state.start_ts)
+    )
     state.save(tmp_path)
 
     bd = ex.build(tmp_path)

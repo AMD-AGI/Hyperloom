@@ -70,30 +70,36 @@ def _axes_for_metric(metric: str, tp_eff: float) -> _Axes:
     )
 
 
+@dataclass(frozen=True)
+class ConcCurveOptions:
+    """Labels and workload shape a sweep curve is drawn for.
+
+    Attributes:
+        model_label: Model name in the chart title.
+        gpu_label: GPU name in the chart title.
+        tp: Tensor-parallel size the per-chip axes divide by.
+        isl: Input sequence length the roofline ceiling is computed for.
+        osl: Output sequence length the roofline ceiling is computed for.
+        draw_ceiling: Whether to draw the roofline ceiling.
+    """
+
+    model_label: str = ""
+    gpu_label: str = ""
+    tp: int = 1
+    isl: int = 0
+    osl: int = 0
+    draw_ceiling: bool = False
+
+
 def render_conc_sweep_curve(
     payload: dict[str, Any] | str | Path,
     out_path: str | Path,
-    *,
-    model_label: str = "",
-    gpu_label: str = "",
-    tp: int = 1,
-    isl: int = 0,
-    osl: int = 0,
-    draw_ceiling: bool = False,
+    options: ConcCurveOptions = ConcCurveOptions(),
 ) -> Path | None:
     """Render a throughput-vs-interactivity PNG from a ``conc_sweep_summary.json``."""
     try:
-        return _render(
-            payload=payload,
-            out_path=Path(out_path),
-            model_label=model_label,
-            gpu_label=gpu_label,
-            tp=tp,
-            isl=isl,
-            osl=osl,
-            draw_ceiling=draw_ceiling,
-        )
-    except Exception:
+        return _render(payload, Path(out_path), options)
+    except (ImportError, OSError):
         log.debug("conc_sweep_plot: render failed", exc_info=True)
         return None
 
@@ -208,24 +214,14 @@ def _ceiling_series(
     return [p[0] for p in pairs], [p[1] for p in pairs]
 
 
-def _render(
-    payload: dict[str, Any] | str | Path,
-    out_path: Path,
-    *,
-    model_label: str,
-    gpu_label: str,
-    tp: int,
-    isl: int,
-    osl: int,
-    draw_ceiling: bool,
-) -> Path | None:
+def _render(payload: dict[str, Any] | str | Path, out_path: Path, options: ConcCurveOptions) -> Path | None:
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     data = _load_payload(payload)
-    tp_eff = float(max(tp, 1))
+    tp_eff = float(max(options.tp, 1))
     # Two independent facts the payload records separately: the axis the sweep was graded on, which an operator can
     # pin against the workload's default, and whether the workload was an agentic replay at all.
     metric = _graded_metric_of(data)
@@ -257,7 +253,7 @@ def _render(
 
     # The roofline is a decode-only output_throughput bound computed from the session's ISL/OSL, and
     # ``_ceiling_series`` returns it in that axis pair's units.
-    if draw_ceiling and not agentic and metric == GRADED_OUTPUT:
+    if options.draw_ceiling and not agentic and metric == GRADED_OUTPUT:
         ceiling_data = data.get("roofline_ceiling") or {}
         cx, cy = _ceiling_series(ceiling_data, tp_eff)
         if cx:
@@ -284,15 +280,15 @@ def _render(
     ax.set_xlabel(axes.x_label, fontsize=10, color=fg)
     ax.set_ylabel(axes.y_label, fontsize=10, color=fg)
 
-    title_parts = [model_label or "Model"]
-    if gpu_label:
-        title_parts.append(gpu_label)
+    title_parts = [options.model_label or "Model"]
+    if options.gpu_label:
+        title_parts.append(options.gpu_label)
     # An agentic replay takes its request shapes from the trace corpus, so the session's ISL/OSL are inert
     # placeholders and naming them would misreport what was measured.
     if agentic:
         title_parts.append("Agentic")
-    elif isl or osl:
-        title_parts.append(f"ISL={isl} OSL={osl}")
+    elif options.isl or options.osl:
+        title_parts.append(f"ISL={options.isl} OSL={options.osl}")
     ax.set_title(
         "Concurrency Sweep — Throughput vs Interactivity\n" + " | ".join(title_parts),
         fontsize=11,
@@ -315,4 +311,4 @@ def _render(
     return out_path
 
 
-__all__ = ["render_conc_sweep_curve"]
+__all__ = ["ConcCurveOptions", "render_conc_sweep_curve"]

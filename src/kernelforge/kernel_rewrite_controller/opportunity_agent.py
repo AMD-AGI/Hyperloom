@@ -29,10 +29,11 @@ from kernelforge.agent_backends.base import (
 from kernelforge.agent_backends.registry import create_registered_backend
 from kernelforge.agent_backends.session_resume import (
     TERMINAL_END_REASONS,
+    ResumePolicy,
     run_session_with_api_resume,
 )
 from kernelforge.config import Config
-from kernelforge.durable_io import atomic_write_text
+from kernelforge.tools.durable_io import atomic_write_text
 from kernelforge.kernel_backends.constants import KERNEL_BACKENDS
 from kernelforge.kernel_rewrite_controller.contracts import HandoffBundle
 from kernelforge.kernel_rewrite_controller.paths import ControllerLayout
@@ -216,61 +217,67 @@ class _AnalysisToolGuard:
             }
 
 
-async def _resume_for_refused_staging_drafts(
-    backend: AgentBackend,
-    spec: AgentRunSpec,
-    guard: _AnalysisToolGuard,
-    result: AgentRunResult,
-    *,
-    layout: ControllerLayout,
-    refused: dict[str, float],
-    deadline_monotonic: float,
-    usage: UsageAccumulator,
-) -> tuple[AgentRunResult, str | None, _ResumePublications]:
-    """Drive Stop refusals from outside the provider when hooks are not executed."""
-    run_result = result
-    resume_publications: list[TaskPublicationResult] = []
-    if backend.capabilities.stop_hooks or not backend.capabilities.resumable:
-        return run_result, None, ()
-    if not hasattr(backend, "resume"):
-        return run_result, None, ()
-    resume_error: str | None = None
-    while True:
-        resume_publications.extend(publish_complete_staged_tasks(layout, quiescent_sec=0.0, refused=refused))
-        decision = await guard._on_stop({}, None, None)
-        if decision.get("decision") != "block":
-            break
-        remaining = deadline_monotonic - time.monotonic()
-        if remaining <= 0:
-            run_result = replace(run_result, end_reason="timeout")
-            resume_error = resume_error or "opportunity analysis exceeded budget during draft recovery"
-            break
-        session_id = str(run_result.session_id or "").strip()
-        if not session_id:
-            break
-        feedback = str(decision.get("reason") or "").strip()
-        if not feedback:
-            break
-        resume_spec = replace(spec, timeout_sec=max(1, int(remaining)))
-        try:
-            run_result = await backend.resume(resume_spec, session_id, feedback, usage=usage)
-            if time.monotonic() >= deadline_monotonic:
+@dataclass
+class _AnalysisSession:
+    """One running analysis session: its provider, spec, Stop guard, staging layout, refusals, deadline and usage."""
+
+    backend: AgentBackend
+    spec: AgentRunSpec
+    guard: _AnalysisToolGuard
+    layout: ControllerLayout
+    refused: dict[str, float]
+    deadline_monotonic: float
+    usage: UsageAccumulator
+
+    async def resume_for_refused_staging_drafts(
+        self, result: AgentRunResult
+    ) -> tuple[AgentRunResult, str | None, _ResumePublications]:
+        """Drive Stop refusals from outside the provider when hooks are not executed."""
+        run_result = result
+        resume_publications: list[TaskPublicationResult] = []
+        if self.backend.capabilities.stop_hooks or not self.backend.capabilities.resumable:
+            return run_result, None, ()
+        if not hasattr(self.backend, "resume"):
+            return run_result, None, ()
+        resume_error: str | None = None
+        while True:
+            resume_publications.extend(
+                publish_complete_staged_tasks(self.layout, quiescent_sec=0.0, refused=self.refused)
+            )
+            decision = await self.guard._on_stop({}, None, None)
+            if decision.get("decision") != "block":
+                break
+            remaining = self.deadline_monotonic - time.monotonic()
+            if remaining <= 0:
                 run_result = replace(run_result, end_reason="timeout")
                 resume_error = resume_error or "opportunity analysis exceeded budget during draft recovery"
                 break
-        except AgentProviderError as exc:
-            log.warning("opportunity analysis resume failed: %s", exc)
-            resume_error = f"opportunity analysis resume failed: {exc}"
-            run_result = replace(run_result, end_reason="resume_error", stderr_tail=str(exc))
-            break
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            log.exception("opportunity analysis resume failed")
-            resume_error = f"opportunity analysis resume failed: {type(exc).__name__}: {exc}"
-            run_result = replace(run_result, end_reason="resume_error", stderr_tail=str(exc))
-            break
-    return run_result, resume_error, tuple(resume_publications)
+            session_id = str(run_result.session_id or "").strip()
+            if not session_id:
+                break
+            feedback = str(decision.get("reason") or "").strip()
+            if not feedback:
+                break
+            resume_spec = replace(self.spec, timeout_sec=max(1, int(remaining)))
+            try:
+                run_result = await self.backend.resume(resume_spec, session_id, feedback, usage=self.usage)
+                if time.monotonic() >= self.deadline_monotonic:
+                    run_result = replace(run_result, end_reason="timeout")
+                    resume_error = resume_error or "opportunity analysis exceeded budget during draft recovery"
+                    break
+            except AgentProviderError as exc:
+                log.warning("opportunity analysis resume failed: %s", exc)
+                resume_error = f"opportunity analysis resume failed: {exc}"
+                run_result = replace(run_result, end_reason="resume_error", stderr_tail=str(exc))
+                break
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.exception("opportunity analysis resume failed")
+                resume_error = f"opportunity analysis resume failed: {type(exc).__name__}: {exc}"
+                run_result = replace(run_result, end_reason="resume_error", stderr_tail=str(exc))
+                break
+        return run_result, resume_error, tuple(resume_publications)
 
 
 def _ensure_agent_workspace(path: Path) -> None:
@@ -588,7 +595,7 @@ class OpportunityAnalysisAgent:
                 self.backend,
                 spec,
                 usage=usage,
-                deadline_sec=self.timeout_sec,
+                policy=ResumePolicy(deadline_sec=self.timeout_sec),
             )
         )
         publications: dict[str, TaskPublicationResult] = {}
@@ -612,15 +619,9 @@ class OpportunityAnalysisAgent:
             if not backend_task.cancelled():
                 try:
                     agent_result = await backend_task
-                    agent_result, resume_error, resume_publications = await _resume_for_refused_staging_drafts(
-                        self.backend,
-                        spec,
-                        tool_guard,
-                        agent_result,
-                        layout=layout,
-                        refused=refused,
-                        deadline_monotonic=deadline,
-                        usage=usage,
+                    session = _AnalysisSession(self.backend, spec, tool_guard, layout, refused, deadline, usage)
+                    agent_result, resume_error, resume_publications = await session.resume_for_refused_staging_drafts(
+                        agent_result
                     )
                     for pub in resume_publications:
                         publications[pub.source_dir.name] = pub
@@ -717,6 +718,7 @@ def run_opportunity_analysis(
         )
         return asyncio.run(agent.run(handoff=handoff, layout=layout))
     except Exception as error:  # noqa: BLE001 - agent backend failure is not enumerable
+        log.warning("opportunity analysis setup failed: %s", error)
         result = OpportunityAnalysisResult(
             status=ANALYSIS_STATUS_FAILED,
             reason=f"opportunity analysis setup failed: {error}",

@@ -47,6 +47,7 @@ from ..actions.executors._grid_runner import (
     variant_conc,
 )
 from ..actions.executors._subprocess_kill import resolve_benchmark_timeouts, session_deadline_to_remaining_sec
+from ..actions.executors.benchmark_backend import resolve_backend
 from ..actions.cancel_channel import current_cancel_scope
 from ..actions.stop_attribution import (
     ORCHESTRATOR_CANCELLED_CLASS,
@@ -60,6 +61,8 @@ from ..actions.executors._workload_envs import (
 )
 from ..actions.executors._proposal_identity import controls_of, is_executable, normalize_proposal
 from hyperloom.inference_optimizer.roofline_ceiling import (
+    ComputeTarget,
+    DecodeShape,
     compute_compute_bound_ceiling_tok_per_sec,
     compute_theoretical_peak_output_tok_per_sec,
     load_model_meta,
@@ -259,14 +262,21 @@ def _write_csv(csv_path: Path, points: list[dict[str, Any]]) -> None:
             writer.writerow({k: p.get(k) for k in columns})
 
 
+@dataclass(frozen=True)
+class _ArmCurves:
+    """The measured points of both arms of a sweep."""
+
+    baseline: list[dict[str, Any]]
+    optimized: list[dict[str, Any]]
+
+
 def _build_roofline_ceiling(
     state: SharedState,
+    curves: _ArmCurves,
     *,
     concs: list[int],
     isl: int,
     osl: int,
-    baseline_points: list[dict[str, Any]],
-    optimized_points: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
     """Per-conc decode roofline alongside the measured curves."""
     model_path = str(getattr(state, "model_path", "") or "")
@@ -280,34 +290,23 @@ def _build_roofline_ceiling(
         return None
 
     t_cmp = compute_compute_bound_ceiling_tok_per_sec(
-        gpu_type=gpu_type,
-        num_gpus=num_gpus,
-        precision_tag=precision,
+        ComputeTarget(gpu_type=gpu_type, num_gpus=num_gpus, precision_tag=precision),
         active_weight_bytes=meta.active_weight_bytes,
         weight_bytes=meta.weight_bytes,
         weight_dtype_bytes=meta.weight_dtype_bytes,
     )
 
-    by_conc_b = {p["conc"]: p for p in baseline_points}
-    by_conc_o = {p["conc"]: p for p in optimized_points}
+    by_conc_b = {p["conc"]: p for p in curves.baseline}
+    by_conc_o = {p["conc"]: p for p in curves.optimized}
 
     rows: list[dict[str, Any]] = []
     for c in concs:
         t_mem = compute_theoretical_peak_output_tok_per_sec(
+            meta,
+            DecodeShape(isl=isl, osl=osl, concurrency=c),
             gpu_type=gpu_type,
             num_gpus=num_gpus,
-            weight_bytes=meta.weight_bytes,
-            active_weight_bytes=meta.active_weight_bytes,
-            num_experts=meta.num_experts,
-            experts_per_tok=meta.experts_per_tok,
-            expert_weight_bytes=meta.expert_weight_bytes,
-            num_layers=meta.num_layers,
-            num_kv_heads=meta.num_kv_heads,
-            head_dim=meta.head_dim,
             kv_dtype_bytes=meta.weight_dtype_bytes,
-            isl=isl,
-            osl=osl,
-            concurrency=c,
         )
         t_peak, bound_kind = select_peak_and_bound(t_mem, t_cmp)
         # Local import avoids a module-level import cycle.
@@ -441,6 +440,33 @@ class _Budget:
         return self.exhausted and self.skip_reason != _SESSION_RESERVE
 
 
+@dataclass(frozen=True)
+class _RungNote:
+    """How one rung came to run and whether it is part of the published curve.
+
+    ``stage`` is a ``STAGE_*`` value, ``committed`` says whether the rung is part
+    of the published curve, and the seconds fields are wall clock.
+    """
+
+    stage: str
+    committed: bool = True
+    start_time: str = ""
+    wall_duration_sec: float | None = None
+    budget_remaining_sec: float | None = None
+
+
+@dataclass(frozen=True)
+class _RungServer:
+    """The serving lease and server lifecycle a rung runs under."""
+
+    serving_lease: Any
+    base_extra_envs: dict[str, str] | None = None
+    server_lifecycle: dict[str, Any] | None = None
+    server_already_ready: bool = False
+    warmup_before_measure: bool | None = None
+    lifecycle_boot_only: bool = False
+
+
 @dataclass
 class _SweepRun:
     """One conc sweep's fixed inputs, and the progress both of its arms add to.
@@ -519,24 +545,11 @@ class _SweepRun:
         prefix = f"{arm_name}_"
         return [result for result in self.results if result.name.startswith(prefix)]
 
-    def record_rung(
-        self,
-        arm_name: str,
-        result: VariantResult,
-        *,
-        stage: str,
-        committed: bool = True,
-        start_time: str = "",
-        wall_duration_sec: float | None = None,
-        budget_remaining_sec: float | None = None,
-    ) -> None:
+    def record_rung(self, arm_name: str, result: VariantResult, note: _RungNote) -> None:
         """Record one rung on the sweep's event, if the sweep is being recorded.
 
         The result is flattened into the same point the report writes, so the
-        recorded curve and the written one cannot differ. ``stage`` is a
-        ``STAGE_*`` value naming how the rung came to run, ``committed`` says
-        whether it is part of the published curve, and the seconds fields are
-        wall clock.
+        recorded curve and the written one cannot differ.
         """
         if self.recorder is None:
             return
@@ -544,15 +557,15 @@ class _SweepRun:
         self.recorder.record_variant(
             arm_name,
             SweepRung(
-                stage=stage,
+                stage=note.stage,
                 conc=point.get("conc"),
                 point=point,
-                committed=committed,
+                committed=note.committed,
                 num_prompts=(result.extra_envs or {}).get("NUM_PROMPTS"),
-                start_time=start_time,
-                wall_duration_sec=wall_duration_sec,
+                start_time=note.start_time,
+                wall_duration_sec=note.wall_duration_sec,
                 granted_cap_sec=self.benchmark_timeout_sec,
-                budget_remaining_sec=budget_remaining_sec,
+                budget_remaining_sec=note.budget_remaining_sec,
             ),
         )
 
@@ -583,17 +596,7 @@ class _SweepRun:
         else:
             self.recorder.fail_arm(arm_name, exc)
 
-    async def run_rung(
-        self,
-        variant: GridVariant,
-        *,
-        serving_lease: Any,
-        base_extra_envs: dict[str, str] | None = None,
-        server_lifecycle: dict[str, Any] | None = None,
-        server_already_ready: bool = False,
-        warmup_before_measure: bool | None = None,
-        lifecycle_boot_only: bool = False,
-    ) -> list[VariantResult]:
+    async def run_rung(self, variant: GridVariant, server: _RungServer) -> list[VariantResult]:
         """Run one rung from the sweep's base config; a deadline stop inside it exhausts the sweep's budget."""
         if self.observe_cancel():
             return [_deadline_skip_result(variant, _CANCEL_STOP)]
@@ -607,15 +610,15 @@ class _SweepRun:
             model_path=self.model_path,
             gpu_type=self.gpu_type,
             benchmark_script=self.benchmark_script,
-            server_lifecycle=server_lifecycle,
-            base_extra_envs=base_extra_envs,
-            warmup_before_measure=warmup_before_measure,
-            server_already_ready=server_already_ready,
-            serving_lease=serving_lease,
+            server_lifecycle=server.server_lifecycle,
+            base_extra_envs=server.base_extra_envs,
+            warmup_before_measure=server.warmup_before_measure,
+            server_already_ready=server.server_already_ready,
+            serving_lease=server.serving_lease,
             session_deadline_sec=self.session_deadline_sec,
             variant_expected_sec=self.variant_expected_sec,
             deadline_stop=self.deadline_stop,
-            lifecycle_boot_only=lifecycle_boot_only,
+            lifecycle_boot_only=server.lifecycle_boot_only,
         )
         self.observe_cancel(results)
         if any(result.error_class == self.deadline_stop.error_class for result in results):
@@ -835,12 +838,14 @@ async def _sweep_one_arm_single_server(run: _SweepRun, arm: _Arm) -> None:
         try:
             boot_results = await run.run_rung(
                 boot_variant,
-                serving_lease=arm_lease,
-                base_extra_envs={"MAGPIE_RUN_PHASE": "server"},
-                server_lifecycle=server_lifecycle_boot,
-                server_already_ready=False,
-                warmup_before_measure=False,
-                lifecycle_boot_only=True,
+                _RungServer(
+                    serving_lease=arm_lease,
+                    base_extra_envs=dict(resolve_backend().boot_phase_envs),
+                    server_lifecycle=server_lifecycle_boot,
+                    server_already_ready=False,
+                    warmup_before_measure=False,
+                    lifecycle_boot_only=True,
+                ),
             )
         except Exception as exc:  # noqa: BLE001
             log.warning(
@@ -884,7 +889,7 @@ async def _sweep_one_arm_single_server(run: _SweepRun, arm: _Arm) -> None:
             for stopped in stopped_results:
                 run.results.append(stopped)
                 run.record_rung(
-                    arm_name, stopped, stage=STAGE_BUDGET_SKIP, budget_remaining_sec=run.budget.remaining_sec
+                    arm_name, stopped, _RungNote(stage=STAGE_BUDGET_SKIP, budget_remaining_sec=run.budget.remaining_sec)
                 )
             try:
                 teardown_lifecycle_server(pid_dir=pid_dir, framework=framework, port=port)
@@ -896,10 +901,7 @@ async def _sweep_one_arm_single_server(run: _SweepRun, arm: _Arm) -> None:
 
         if boot_failed:
             # Ensure server is torn down before retrying at a lower CONC.
-            try:
-                teardown_lifecycle_server(pid_dir=pid_dir, framework=framework, port=port)
-            except Exception:  # noqa: BLE001
-                pass
+            teardown_lifecycle_server(pid_dir=pid_dir, framework=framework, port=port)
             failed = br or VariantResult(
                 name=boot_variant.name,
                 extra_server_args=boot_variant.extra_server_args,
@@ -915,10 +917,12 @@ async def _sweep_one_arm_single_server(run: _SweepRun, arm: _Arm) -> None:
             run.record_rung(
                 arm_name,
                 failed,
-                stage=STAGE_BOOT_ATTEMPT,
-                committed=False,
-                start_time=boot_started_iso,
-                wall_duration_sec=boot_elapsed,
+                _RungNote(
+                    stage=STAGE_BOOT_ATTEMPT,
+                    committed=False,
+                    start_time=boot_started_iso,
+                    wall_duration_sec=boot_elapsed,
+                ),
             )
             boot_idx += 1
             continue
@@ -931,7 +935,9 @@ async def _sweep_one_arm_single_server(run: _SweepRun, arm: _Arm) -> None:
         run.commit_failed_boots(arm_name, failed_boots)
         if not boot_only:
             run.results.append(br)
-        run.record_rung(arm_name, br, stage=STAGE_BOOT, start_time=boot_started_iso, wall_duration_sec=boot_elapsed)
+        run.record_rung(
+            arm_name, br, _RungNote(stage=STAGE_BOOT, start_time=boot_started_iso, wall_duration_sec=boot_elapsed)
+        )
         if recorder is not None:
             recorder.record_arm_boot(
                 arm_name,
@@ -982,7 +988,7 @@ async def _sweep_one_arm_single_server(run: _SweepRun, arm: _Arm) -> None:
                 for v in reuse_grid[r_idx:]:
                     skip_r = _deadline_skip_result(v, _CANCEL_STOP)
                     run.results.append(skip_r)
-                    run.record_rung(arm_name, skip_r, stage=STAGE_BUDGET_SKIP)
+                    run.record_rung(arm_name, skip_r, _RungNote(stage=STAGE_BUDGET_SKIP))
                 break
             # Check session deadline before each reuse point.
             if run.session_closing():
@@ -990,7 +996,7 @@ async def _sweep_one_arm_single_server(run: _SweepRun, arm: _Arm) -> None:
                 for v in reuse_grid[r_idx:]:
                     skip_r = _budget_skip_result(v)
                     run.results.append(skip_r)
-                    run.record_rung(arm_name, skip_r, stage=STAGE_BUDGET_SKIP, budget_remaining_sec=0.0)
+                    run.record_rung(arm_name, skip_r, _RungNote(stage=STAGE_BUDGET_SKIP, budget_remaining_sec=0.0))
                 break
 
             is_last = r_idx == len(reuse_grid) - 1
@@ -1004,10 +1010,12 @@ async def _sweep_one_arm_single_server(run: _SweepRun, arm: _Arm) -> None:
             try:
                 reuse_results = await run.run_rung(
                     variant,
-                    serving_lease=arm_lease,
-                    server_lifecycle=server_lifecycle_reuse,
-                    server_already_ready=True,
-                    warmup_before_measure=False,
+                    _RungServer(
+                        serving_lease=arm_lease,
+                        server_lifecycle=server_lifecycle_reuse,
+                        server_already_ready=True,
+                        warmup_before_measure=False,
+                    ),
                 )
             except Exception as exc:  # noqa: BLE001
                 log.warning(
@@ -1033,10 +1041,12 @@ async def _sweep_one_arm_single_server(run: _SweepRun, arm: _Arm) -> None:
                 run.record_rung(
                     arm_name,
                     rr,
-                    stage=STAGE_BUDGET_SKIP if stopped else STAGE_REUSE,
-                    start_time=reuse_started_iso,
-                    wall_duration_sec=reuse_elapsed,
-                    budget_remaining_sec=run.budget.remaining_sec if stopped else _reuse_remaining,
+                    _RungNote(
+                        stage=STAGE_BUDGET_SKIP if stopped else STAGE_REUSE,
+                        start_time=reuse_started_iso,
+                        wall_duration_sec=reuse_elapsed,
+                        budget_remaining_sec=run.budget.remaining_sec if stopped else _reuse_remaining,
+                    ),
                 )
             # Incremental flush after each reuse point.
             run.flush_progress()
@@ -1077,19 +1087,20 @@ async def _sweep_arm_option_b(
         if run.observe_cancel():
             skip_r = _deadline_skip_result(variant, _CANCEL_STOP)
             run.results.append(skip_r)
-            run.record_rung(arm_name, skip_r, stage=STAGE_BUDGET_SKIP)
+            run.record_rung(arm_name, skip_r, _RungNote(stage=STAGE_BUDGET_SKIP))
             continue
         if run.session_closing():
             run.budget.spend_on_session_reserve()
             skip_r = _budget_skip_result(variant)
             run.results.append(skip_r)
-            run.record_rung(arm_name, skip_r, stage=STAGE_BUDGET_SKIP, budget_remaining_sec=0.0)
+            run.record_rung(arm_name, skip_r, _RungNote(stage=STAGE_BUDGET_SKIP, budget_remaining_sec=0.0))
             continue
         rung_started_iso = now_iso("seconds")
         rung_started_at = time.time()
         try:
-            sub = await run.run_rung(variant, serving_lease=serving_lease)
+            sub = await run.run_rung(variant, _RungServer(serving_lease=serving_lease))
         except Exception as exc:  # noqa: BLE001
+            log.warning("conc_sweep option B: arm=%s variant=%s raised %r", arm_name, variant.name, exc)
             sub = [
                 VariantResult(
                     name=variant.name,
@@ -1107,10 +1118,12 @@ async def _sweep_arm_option_b(
             run.record_rung(
                 arm_name,
                 r,
-                stage=STAGE_BUDGET_SKIP if stopped else STAGE_SERVER_RESTART,
-                start_time=rung_started_iso,
-                wall_duration_sec=rung_elapsed,
-                budget_remaining_sec=run.budget.remaining_sec if stopped else _ob_rem,
+                _RungNote(
+                    stage=STAGE_BUDGET_SKIP if stopped else STAGE_SERVER_RESTART,
+                    start_time=rung_started_iso,
+                    wall_duration_sec=rung_elapsed,
+                    budget_remaining_sec=run.budget.remaining_sec if stopped else _ob_rem,
+                ),
             )
         run.flush_progress()
 
@@ -1134,7 +1147,7 @@ def _flush_conc_sweep_report(payload: dict[str, Any], session_dir: Path) -> Exce
             (payload.get("optimized") or {}).get("points") or []
         )
         _write_csv(csv_path, all_points)
-    except Exception as exc:
+    except (OSError, ValueError, csv.Error) as exc:
         log.warning("conc_sweep: _flush_conc_sweep_report failed", exc_info=True)
         return exc
     return None
@@ -1176,7 +1189,6 @@ async def run_conc_sweep(
     *,
     concs: list[int] | None = None,
     total_budget_sec: int | None = DEFAULT_TOTAL_BUDGET_SEC,
-    num_prompts_factor: int = DEFAULT_NUM_PROMPTS_FACTOR,
     recorder: Any = None,
 ) -> dict[str, Any]:
     """Run the full conc-sweep SWEEP-phase action end-to-end (always returns a dict; never raises; no files written when skipped).
@@ -1335,7 +1347,7 @@ async def run_conc_sweep(
         isl=isl,
         osl=osl,
         concs=concs,
-        num_prompts_factor=num_prompts_factor,
+        num_prompts_factor=DEFAULT_NUM_PROMPTS_FACTOR,
         optimized=optimized,
         baseline=_Arm(name="baseline"),
         benchmark_timeout_sec=benchmark_timeout_sec,
@@ -1362,7 +1374,7 @@ async def run_conc_sweep(
                 concs_requested=concs,
                 concs_ordered=run.concs_desc,
                 grid_source=grid_source,
-                num_prompts_factor=num_prompts_factor,
+                num_prompts_factor=DEFAULT_NUM_PROMPTS_FACTOR,
                 variant_timeout_sec=benchmark_timeout_sec,
                 arms_order=[arm.name for arm in arms_order],
             )
@@ -1395,11 +1407,10 @@ async def run_conc_sweep(
     comparison, summary = payload["comparison"], payload["summary"]
     ceiling = _build_roofline_ceiling(
         state,
+        _ArmCurves(baseline=payload["baseline"]["points"], optimized=payload["optimized"]["points"]),
         concs=concs,
         isl=isl,
         osl=osl,
-        baseline_points=payload["baseline"]["points"],
-        optimized_points=payload["optimized"]["points"],
     )
     if ceiling is not None:
         payload["roofline_ceiling"] = ceiling

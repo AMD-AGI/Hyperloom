@@ -10,6 +10,7 @@ from hyperloom.orchestrator.phases.machine_state import (
     lifecycle_label,
     make_lifecycle_event,
     record_lifecycle_event,
+    LifecycleMark,
 )
 from hyperloom.orchestrator.state.shared_state import (
     _LIFECYCLE_CAP,
@@ -38,13 +39,15 @@ def test_lifecycle_label_falls_back_to_phase_then_verbatim():
 
 def test_make_lifecycle_event_shape():
     event = make_lifecycle_event(
-        step="trace_analyze",
-        status="start",  # lower-cased on purpose
-        phase="kernel_agent",  # lower-cased on purpose
-        label=None,  # default from step
-        artifacts={"out_dir": "/tmp/run", "empty": "", "none": None},
-        detail="  starting  ",
-        duration_s=1.23456,
+        LifecycleMark(
+            step="trace_analyze",
+            status="start",
+            phase="kernel_agent",
+            label=None,
+            artifacts={"out_dir": "/tmp/run", "empty": "", "none": None},
+            detail="  starting  ",
+            duration_s=1.23456,
+        ),
         seq=3,
         ts="2026-06-09T00:00:00+00:00",
     )
@@ -62,13 +65,9 @@ def test_make_lifecycle_event_shape():
 
 def test_make_lifecycle_event_omits_duration_when_none():
     event = make_lifecycle_event(
-        step="report",
-        status="START",
-        phase="CLOSE",
-        label=None,
-        artifacts=None,
-        detail="",
-        duration_s=None,
+        LifecycleMark(
+            step="report", status="START", phase="CLOSE", label=None, artifacts=None, detail="", duration_s=None
+        ),
         seq=0,
         ts="2026-06-09T00:00:00+00:00",
     )

@@ -182,13 +182,9 @@ def _build_failure_summary(
         server_log_abs = _resolve_attempt_server_log(attempt)
         # Only the benign WARN (or nothing) survived: dig the real terminal marker out of server.log when available.
         if not error_text and server_log_abs is not None:
-            try:
-                from ._subprocess_kill import server_log_death_excerpt
+            from ._subprocess_kill import server_log_death_excerpt
 
-                excerpt = server_log_death_excerpt(str(server_log_abs))
-            except Exception:
-                log.debug("server_log_death_excerpt failed", exc_info=True)
-                excerpt = None
+            excerpt = server_log_death_excerpt(str(server_log_abs))
             if excerpt:
                 error_text = excerpt.strip()
                 if error_class in ("", "unknown"):
@@ -297,7 +293,7 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
         "Preflight gate: config.json is corrupt or declares RoPE scaling without a max-position field, "
         "which would crash engine init."
     ),
-    "baseline_arg_error": "Two or more baseline attempts fast-exited on a bad CLI arg (deterministic), so the slow-baseline retry budget was not burned.",
+    "baseline_arg_error": "Two or more baseline attempts failed argument or configuration validation, so further baseline retries were stopped.",
     "enablement_attempts_exhausted": "The enablement loop stopped after too many consecutive rounds bought no ground. A bring-up that is still clearing new boot failures is bounded by the run's wall clock instead.",
     "baseline_accuracy_failed": "The baseline produced no accuracy result even though the accuracy test was expected to run (broken eval or missing quality gate). The run stopped rather than optimize against an unvalidated baseline.",
     AGENTX_PREFLIGHT_STOP_REASON: (
@@ -355,13 +351,10 @@ def _explain_conc_sweep_skip(state) -> str:
 
 def _platform_fingerprint(gpu_type: str | None = None) -> dict[str, Any]:
     """Platform record for the run report, scoped to this session's node count."""
-    try:  # local import keeps this free of executor import order
-        from ._multi_node_env import is_multi_node
+    # Local import keeps this free of executor import order.
+    from ._multi_node_env import is_multi_node
 
-        multi_node: bool | None = bool(is_multi_node())
-    except Exception:  # noqa: BLE001 - scope marker only; unknown is not False
-        multi_node = None
-    return platform_fingerprint(gpu_type, multi_node=multi_node)
+    return platform_fingerprint(gpu_type, multi_node=is_multi_node())
 
 
 def _format_composite_perf_section(summary: dict[str, Any]) -> list[str]:
@@ -1072,7 +1065,7 @@ def _render_conc_sweep_curve_for_report(
 ) -> Path | None:
     """Render the concurrency-sweep curve PNG into the reports directory."""
     from hyperloom.inference_optimizer.session.session_paths import reports_dir as _reports_dir
-    from hyperloom.orchestrator.kernel.conc_sweep_plot import render_conc_sweep_curve
+    from hyperloom.orchestrator.kernel.conc_sweep_plot import ConcCurveOptions, render_conc_sweep_curve
 
     json_path = _reports_dir(session_dir) / "conc_sweep_summary.json"
     try:
@@ -1090,14 +1083,7 @@ def _render_conc_sweep_curve_for_report(
     osl = int(payload.get("osl") or 0)
 
     return render_conc_sweep_curve(
-        payload,
-        png_path,
-        model_label=model_label,
-        gpu_label=gpu_label,
-        tp=tp,
-        isl=isl,
-        osl=osl,
-        draw_ceiling=False,
+        payload, png_path, ConcCurveOptions(model_label=model_label, gpu_label=gpu_label, tp=tp, isl=isl, osl=osl)
     )
 
 
@@ -1110,7 +1096,7 @@ def _load_external_baseline(session_dir: Path) -> dict[str, Any] | None:
         if not path.exists():
             return None
         return json.loads(path.read_text(encoding="utf-8"))
-    except Exception as exc:  # noqa: BLE001
+    except (OSError, ValueError) as exc:
         log.warning(
             "report_executor: failed to load external baseline from %s: %s",
             session_dir,

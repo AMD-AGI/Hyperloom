@@ -24,6 +24,7 @@ from kernelforge.agent_backends.base import (
     AgentRunResult,
     AgentRunSpec,
     AgentRuntimeConfig,
+    AgentRuntimeSettings,
     AgentToolPolicy,
     StdioMcpServer,
 )
@@ -541,7 +542,7 @@ def test_codex_backend_materializes_custom_agent_roles(
                 command=sys.executable,
                 args=(
                     "-m",
-                    "kernelforge.mcp_server.pr_stdio_server",
+                    "kernelforge.knowledge.pr_knowledge.mcp_server",
                 ),
                 env={"PR_KB_REPO": "ROCm/aiter"},
                 startup_timeout_sec=15,
@@ -561,7 +562,7 @@ def test_codex_backend_materializes_custom_agent_roles(
     assert 'sandbox_mode = "read-only"' in role_text
     assert "Review only. Never edit files." in role_text
     assert f'mcp_servers.gpu.command="{sys.executable}"' in overrides
-    assert ('mcp_servers.gpu.args=["-m", "kernelforge.mcp_server.pr_stdio_server"]') in overrides
+    assert ('mcp_servers.gpu.args=["-m", "kernelforge.knowledge.pr_knowledge.mcp_server"]') in overrides
     assert 'mcp_servers.gpu.env={PR_KB_REPO="ROCm/aiter"}' in overrides
     assert "mcp_servers.gpu.startup_timeout_sec=15" in overrides
 
@@ -726,7 +727,7 @@ def test_shared_model_option_is_provider_neutral() -> None:
         "agent_backend": "codex",
     }
     assert resolve_codex_model("provider-model") == "provider-model"
-    assert resolve_codex_model("") == "gpt-5.6-sol"
+    assert resolve_codex_model("") == "gpt-6-astra"
     assert resolve_codex_reasoning_effort("") == "high"
     assert resolve_codex_reasoning_effort("xhigh") == "xhigh"
     assert resolve_codex_reasoning_effort(" MEDIUM ") == "medium"
@@ -764,18 +765,10 @@ def test_backend_factory_falls_back_only_when_enabled(
     )
 
     with pytest.raises(CodexUnavailableError):
-        create_registered_backend(
-            resolve_agent_runtime(
-                "codex",
-                fallback_provider="",
-            )
-        )
+        create_registered_backend(resolve_agent_runtime("codex", settings=AgentRuntimeSettings(fallback_provider="")))
 
     backend = create_registered_backend(
-        resolve_agent_runtime(
-            "codex",
-            fallback_provider="claude",
-        )
+        resolve_agent_runtime("codex", settings=AgentRuntimeSettings(fallback_provider="claude"))
     )
 
     assert backend.name == "claude"
@@ -833,11 +826,12 @@ def test_make_agent_fn_dispatches_codex_without_claude_model(
     session: dict[str, object] = {}
 
     agent_fn = agent_module.make_agent_fn(
-        config=config,
-        program_md="Optimize VALUE.",
-        agent_backend="codex",
-        insession_gate=True,
-        driver_script=str(driver),
+        config,
+        agent_module.ImplementerSetup(
+            agent_module.ImplementerTask(program_md="Optimize VALUE."),
+            measurement=agent_module.GateMeasurement(driver_script=str(driver)),
+            session=agent_module.SessionOptions(agent_backend="codex", insession_gate=True),
+        ),
     )
     rationale = asyncio.run(agent_fn(str(kernel), "", session_sink=session))
 
@@ -921,13 +915,16 @@ def test_final_integrity_verdict_survives_session_end_reason(
     )
     session: dict[str, object] = {}
     agent_fn = agent_module.make_agent_fn(
-        config=config,
-        program_md="Optimize VALUE.",
-        agent_backend="codex",
-        insession_gate=True,
-        driver_script=str(driver),
-        extra_protected_paths=[str(source_oracle)],
-        extra_protected_globs=["golden*.json"],
+        config,
+        agent_module.ImplementerSetup(
+            agent_module.ImplementerTask(
+                program_md="Optimize VALUE.",
+                extra_protected_globs=["golden*.json"],
+                extra_protected_paths=[str(source_oracle)],
+            ),
+            measurement=agent_module.GateMeasurement(driver_script=str(driver)),
+            session=agent_module.SessionOptions(agent_backend="codex", insession_gate=True),
+        ),
     )
 
     asyncio.run(agent_fn(str(kernel), "", session_sink=session))
@@ -971,16 +968,17 @@ def test_final_integrity_scan_runs_when_backend_raises(
     monkeypatch.setattr(agent_module, "create_registered_backend", fake_factory)
     session: dict[str, object] = {}
     agent_fn = agent_module.make_agent_fn(
-        config=Config(
+        Config(
             workspace=str(tmp_path),
             agent_backend="codex",
             agent_model="gpt-codex-test",
             agent_precheck=False,
         ),
-        program_md="Optimize VALUE.",
-        agent_backend="codex",
-        insession_gate=True,
-        driver_script=str(driver),
+        agent_module.ImplementerSetup(
+            agent_module.ImplementerTask(program_md="Optimize VALUE."),
+            measurement=agent_module.GateMeasurement(driver_script=str(driver)),
+            session=agent_module.SessionOptions(agent_backend="codex", insession_gate=True),
+        ),
     )
 
     with pytest.raises(RuntimeError, match="SDK stream failed"):
@@ -1029,11 +1027,12 @@ def test_implementer_turn_inherits_the_worktree_the_loop_dirtied(
     )
 
     agent_fn = agent_module.make_agent_fn(
-        config=config,
-        program_md="Optimize VALUE.",
-        agent_backend="codex",
-        driver_script=str(driver),
-        commit_new_paths=["kernels/*.s"],
+        config,
+        agent_module.ImplementerSetup(
+            agent_module.ImplementerTask(program_md="Optimize VALUE.", commit_new_paths=["kernels/*.s"]),
+            measurement=agent_module.GateMeasurement(driver_script=str(driver)),
+            session=agent_module.SessionOptions(agent_backend="codex"),
+        ),
     )
     asyncio.run(agent_fn(str(kernel), ""))
 
@@ -1118,11 +1117,12 @@ def test_outer_gate_counts_only_incremental_resume_target_edits(
     )
     session: dict[str, object] = {}
     agent_fn = agent_module.make_agent_fn(
-        config=config,
-        program_md="Optimize VALUE.",
-        agent_backend="codex",
-        insession_gate=True,
-        driver_script=str(driver),
+        config,
+        agent_module.ImplementerSetup(
+            agent_module.ImplementerTask(program_md="Optimize VALUE."),
+            measurement=agent_module.GateMeasurement(driver_script=str(driver)),
+            session=agent_module.SessionOptions(agent_backend="codex", insession_gate=True),
+        ),
     )
 
     asyncio.run(agent_fn(str(kernel), "", session_sink=session))
@@ -1178,9 +1178,7 @@ def test_make_agent_fn_falls_back_after_gateway_probe_failure(
         """Return the fallback selected by the registered backend factory."""
         backend = FakeClaudeBackend()
         backend.runtime = resolve_agent_runtime(
-            "claude",
-            model="claude-fallback-model",
-            fallback_provider="",
+            "claude", model="claude-fallback-model", settings=AgentRuntimeSettings(fallback_provider="")
         )
         backend.fallback_reason = "gateway returned 401"
         return backend
@@ -1198,9 +1196,11 @@ def test_make_agent_fn_falls_back_after_gateway_probe_failure(
     )
 
     agent_fn = agent_module.make_agent_fn(
-        config=config,
-        program_md="Optimize the kernel.",
-        agent_backend="codex",
+        config,
+        agent_module.ImplementerSetup(
+            agent_module.ImplementerTask(program_md="Optimize the kernel."),
+            session=agent_module.SessionOptions(agent_backend="codex"),
+        ),
     )
 
     assert getattr(agent_fn, "backend_name") == "claude"
@@ -1234,9 +1234,11 @@ def test_make_agent_fn_does_not_system_exit_when_claude_fallback_unavailable(
         match="fallback claude unavailable",
     ):
         agent_module.make_agent_fn(
-            config=config,
-            program_md="Optimize the kernel.",
-            agent_backend="codex",
+            config,
+            agent_module.ImplementerSetup(
+                agent_module.ImplementerTask(program_md="Optimize the kernel."),
+                session=agent_module.SessionOptions(agent_backend="codex"),
+            ),
         )
 
 
@@ -2304,3 +2306,48 @@ def test_a_protected_file_is_still_caught_once_git_is_excluded(tmp_path: Path) -
     with pytest.raises(WorkspaceSafetyError, match="read-only session changed the workspace"):
         guard.verify()
     assert driver.read_text() == "DRIVER = 'original'\n"
+
+
+def _fake_cli(path: Path, version_line: str) -> str:
+    path.write_text(f"#!/bin/sh\necho '{version_line}'\n")
+    path.chmod(0o755)
+    return str(path)
+
+
+def _gateway_backend(**kwargs) -> CodexBackend:
+    return CodexBackend(
+        gateway={"base_url": "https://gateway.example.invalid/v1", "key_env": "FAKE_CODEX_API_KEY"},
+        bypass_sandbox=True,
+        **kwargs,
+    )
+
+
+def test_agent_cli_variable_naming_another_providers_cli_is_ignored(tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv("FAKE_CODEX_API_KEY", "key")
+    monkeypatch.setenv("FORGE_AGENT_CLI", _fake_cli(tmp_path / "claude", "2.1.0 (Claude Code)"))
+    backend = _gateway_backend()
+
+    backend.preflight()
+
+    assert backend.codex_bin == ""
+    assert "ignoring FORGE_AGENT_CLI" in caplog.text
+
+
+def test_agent_cli_variable_naming_a_codex_runtime_is_used(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_CODEX_API_KEY", "key")
+    codex = _fake_cli(tmp_path / "codex", "codex-cli 0.9.0")
+    monkeypatch.setenv("FORGE_AGENT_CLI", codex)
+    backend = _gateway_backend()
+
+    backend.preflight()
+
+    assert backend.codex_bin == codex
+
+
+def test_an_explicit_pin_to_another_providers_cli_still_fails(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_CODEX_API_KEY", "key")
+    monkeypatch.delenv("FORGE_AGENT_CLI", raising=False)
+    backend = _gateway_backend(codex_bin=_fake_cli(tmp_path / "claude", "2.1.0 (Claude Code)"))
+
+    with pytest.raises(CodexUnavailableError, match="does not appear to be Codex"):
+        backend.preflight()

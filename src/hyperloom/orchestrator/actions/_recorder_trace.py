@@ -24,5 +24,5 @@ def trace_recording_skipped(
         from hyperloom.inference_optimizer.breakdown.recorder.trace import trace_skip
 
         trace_skip(reason=reason, section=section, entity=entity, error=error)
-    except Exception:  # noqa: BLE001 - a trace must never break the caller
+    except ImportError:
         pass

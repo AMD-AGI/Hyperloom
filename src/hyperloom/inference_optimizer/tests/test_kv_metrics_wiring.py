@@ -350,20 +350,6 @@ def test_close_never_raises_on_an_unwritable_path(tmp_path):
     assert payload["schema_version"] == 1
 
 
-def test_sampling_failure_does_not_propagate():
-    class _Boom:
-        url = "http://x/metrics"
-        available = None
-
-        def sample(self):
-            raise RuntimeError("scrape exploded")
-
-    rec = KvMetricsRecorder(poller=_Boom(), min_interval_sec=0.0)
-    rec.tick(0.0)
-
-    assert rec.rows() == []
-
-
 # --------------------------------------------------------------------------
 # loop integration
 # --------------------------------------------------------------------------
@@ -407,11 +393,7 @@ class _HangingProc:
 
 def test_recorder_is_closed_on_the_normal_return_path():
     rec = _Recorder()
-    sk._communicate_with_watchdog(
-        _DoneProc(),
-        hard_timeout=5,
-        recorders=sk._RecorderFanout([rec]),
-    )
+    sk._communicate_with_watchdog(_DoneProc(), sk._WatchedRound(hard_timeout=5), recorders=sk._RecorderFanout([rec]))
 
     assert rec.closed_aborted is False
 
@@ -422,11 +404,7 @@ def test_no_scraping_before_the_server_is_up():
     the ready marker and the death gate most need it responsive. Boot has no
     traffic to measure anyway."""
     rec = _Recorder()
-    sk._communicate_with_watchdog(
-        _DoneProc(),
-        hard_timeout=5,
-        recorders=sk._RecorderFanout([rec]),
-    )
+    sk._communicate_with_watchdog(_DoneProc(), sk._WatchedRound(hard_timeout=5), recorders=sk._RecorderFanout([rec]))
 
     assert rec.ticks == 0
 
@@ -440,10 +418,7 @@ def test_warm_reuse_rounds_scrape_immediately_and_are_tagged_measured():
     """
     rec = _Recorder()
     sk._communicate_with_watchdog(
-        _DoneProc(),
-        hard_timeout=5,
-        server_already_ready=True,
-        recorders=sk._RecorderFanout([rec]),
+        _DoneProc(), sk._WatchedRound(hard_timeout=5, server_already_ready=True), recorders=sk._RecorderFanout([rec])
     )
 
     assert rec.ticks >= 1
@@ -476,12 +451,11 @@ def test_residual_is_held_per_path(tmp_path):
     (bench / "server.log").write_text("Phase profiling (prof", encoding="utf-8")
     (bench / "benchmark_stderr.log").write_text("iling) started\n", encoding="utf-8")
 
-    offsets: dict[str, int] = {}
-    residuals: dict[str, str] = {}
-    scan = sk._scan_logs_increment(str(tmp_path / "server.log"), offsets, residuals)
+    cursor = sk._LogCursor()
+    scan = cursor.advance(str(tmp_path / "server.log"))
 
     assert scan.saw_measured_begin is False
-    assert len(residuals) >= 2
+    assert len(cursor.residuals) >= 2
 
 
 def test_truncation_drops_the_carried_tail(tmp_path):
@@ -514,9 +488,7 @@ def test_recorder_is_closed_as_aborted_when_a_gate_raises():
     rec = _Recorder()
     with pytest.raises(sk.subprocess.TimeoutExpired):
         sk._communicate_with_watchdog(
-            _HangingProc(),
-            hard_timeout=0.01,
-            recorders=sk._RecorderFanout([rec]),
+            _HangingProc(), sk._WatchedRound(hard_timeout=0.01), recorders=sk._RecorderFanout([rec])
         )
 
     assert rec.closed_aborted is True
@@ -533,7 +505,7 @@ def test_phase_transitions_reach_the_recorder(tmp_path, monkeypatch):
             sk._LogScan(False, False, True, True, False, False, False),
         ]
     )
-    monkeypatch.setattr(sk, "_scan_logs_increment", lambda *_a, **_k: next(scans, sk._LogScan(*([False] * 7))))
+    monkeypatch.setattr(sk._LogCursor, "advance", lambda *_a, **_k: next(scans, sk._LogScan(*([False] * 7))))
     monkeypatch.setattr(sk, "stamp_server_ready", lambda *_a, **_k: None)
     log_path = tmp_path / "server.log"
     log_path.write_text("x\n", encoding="utf-8")
@@ -553,8 +525,7 @@ def test_phase_transitions_reach_the_recorder(tmp_path, monkeypatch):
 
     sk._communicate_with_watchdog(
         _SlowProc(),
-        hard_timeout=60,
-        server_log_path=str(log_path),
+        sk._WatchedRound(hard_timeout=60, server_log_path=str(log_path)),
         recorders=sk._RecorderFanout([rec]),
     )
 
@@ -564,11 +535,7 @@ def test_phase_transitions_reach_the_recorder(tmp_path, monkeypatch):
 
 def test_no_recorder_leaves_the_loop_unchanged():
     """An empty fanout must be a strict no-op: this is a production watchdog."""
-    out = sk._communicate_with_watchdog(
-        _DoneProc(),
-        hard_timeout=5,
-        recorders=sk._RecorderFanout([]),
-    )
+    out = sk._communicate_with_watchdog(_DoneProc(), sk._WatchedRound(hard_timeout=5), recorders=sk._RecorderFanout([]))
     assert out == ("out", "err")
 
 
@@ -589,8 +556,7 @@ def test_a_lone_failing_recorder_does_not_fail_the_round(monkeypatch, tmp_path):
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors._gpu_power.build_gpu_power_recorder", lambda *a: None)
     out = sk._communicate_with_watchdog(
         _DoneProc(),
-        hard_timeout=5,
-        server_already_ready=True,
+        sk._WatchedRound(hard_timeout=5, server_already_ready=True),
         recorders=sk._build_round_recorders(str(tmp_path / "server.log"), {}),
     )
     assert out == ("out", "err")
@@ -1503,16 +1469,58 @@ def test_a_round_without_an_aiperf_export_reports_no_timeline(tmp_path):
     assert not (tmp_path / "agentx_timeline.jsonl").exists()
 
 
-def test_progress_failures_never_reach_the_round():
-    """Collection is observational; a broken endpoint costs nothing."""
+class _RaisingPoller(_StubPoller):
+    def sample(self):
+        raise RuntimeError("sample bug")
 
-    class _Exploding:
-        def poll(self):
-            raise RuntimeError("progress API on fire")
 
-    rec = KvMetricsRecorder(poller=_StubPoller([_sample()]), progress=_Exploding(), min_interval_sec=0)
-    rec.tick(1.0)
-    payload = rec.summary()
+class _RaisingProgress:
+    def poll(self):
+        raise RuntimeError("poll bug")
 
-    assert payload["phase_source"] == "log_markers"
-    assert payload["sample_count"] == 1
+
+def test_a_failing_poller_sample_propagates_from_the_scrape():
+    rec = KvMetricsRecorder(poller=_RaisingPoller([]), min_interval_sec=0.0)
+
+    with pytest.raises(RuntimeError, match="sample bug"):
+        rec.tick(0.0)
+
+    assert rec.rows() == []
+
+
+def test_a_failing_progress_poll_propagates_before_the_engine_is_scraped():
+    poller = _StubPoller([_sample()])
+    rec = KvMetricsRecorder(poller=poller, min_interval_sec=0.0, progress=_RaisingProgress())
+
+    with pytest.raises(RuntimeError, match="poll bug"):
+        rec.tick(0.0)
+
+    assert poller.calls == 0
+    assert rec.rows() == []
+
+
+def test_a_failing_aiperf_read_propagates_from_the_summary(tmp_path, monkeypatch):
+    from hyperloom.orchestrator.actions.executors import _kv_metrics as kv
+
+    def _boom(_path):
+        raise RuntimeError("aiperf read bug")
+
+    monkeypatch.setattr(kv, "_server_metrics_exports", lambda _workspace: [tmp_path / "export.json"])
+    monkeypatch.setattr(kv, "read_aiperf_server_metrics", _boom)
+    rec = KvMetricsRecorder(poller=_StubPoller([]), min_interval_sec=0.0, workspace=tmp_path)
+
+    with pytest.raises(RuntimeError, match="aiperf read bug"):
+        rec.summary()
+
+
+def test_a_failing_timeline_build_propagates_from_the_summary(tmp_path, monkeypatch):
+    from hyperloom.orchestrator.actions.executors import _agentx_timeline as timeline
+
+    def _boom(_workspace):
+        raise RuntimeError("timeline bug")
+
+    monkeypatch.setattr(timeline, "find_profile_export", _boom)
+    rec = KvMetricsRecorder(poller=_StubPoller([]), min_interval_sec=0.0, workspace=tmp_path)
+
+    with pytest.raises(RuntimeError, match="timeline bug"):
+        rec.summary()
