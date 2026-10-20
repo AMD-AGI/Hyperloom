@@ -140,6 +140,7 @@ from kernelforge.evaluation.scoring import (
     KEEP_MEASUREMENT_COUNT,
     SIGMA_REMEASURE_BATCH,
     SIGMA_REMEASURE_MAX_ROUNDS,
+    SigmaAttribution,
     attribute_sigma,
     beats_current_best,
     keep_score,
@@ -2995,6 +2996,57 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             if case_id not in excluded and isinstance(baseline_ms, (int, float)) and float(baseline_ms) > 0.0
         }
 
+    async def _remeasure_keep_sigma(
+        self,
+        found: SigmaResolution,
+        measured: float,
+        base: SigmaAttribution,
+        series: dict[str, list[float]],
+        baseline: dict[str, float],
+    ) -> SigmaResolution:
+        """Buy extra benches until the dominant case's sigma settles or the budget ends."""
+        dominant = found.dominant_case
+        current = base
+        rounds = 0
+        stopped = ""
+        while rounds < SIGMA_REMEASURE_MAX_ROUNDS and current.dominant_case is not None:
+            remeasure_started = time.time()
+            extra = await measure_wallclock(
+                BenchRun(self.ic.driver_script, driver_args=[], repeat=self.ic.bench_repeat),
+                measurements=SIGMA_REMEASURE_BATCH,
+                timeout_sec=self.ic.bench_timeout_sec,
+            )
+            self._observe_measurement(remeasure_started)
+            rounds += 1
+            extra_series = _measurement_case_times(extra)
+            if not extra.get("success"):
+                stopped = "re-measure bench failed"
+                break
+            if set(series) - set(extra_series):
+                stopped = "re-measure lost a scored case"
+                break
+            for case_id in series:
+                series[case_id].extend(extra_series[case_id])
+            refreshed = attribute_sigma(series, baseline)
+            if refreshed is None:
+                stopped = "re-measure produced no usable spread"
+                break
+            current = refreshed
+        if current is base:
+            return replace(found, rounds=rounds, detail=stopped)
+        share = current.variance_shares.get(dominant)
+        settled = current.case_sigmas[dominant] < base.case_sigmas[dominant]
+        return replace(
+            found,
+            sigma=rescaled_sigma(measured, base, current),
+            variance_share=share if share is not None else found.variance_share,
+            wall_share=current.wall_shares.get(dominant, found.wall_share),
+            rounds=rounds,
+            sample_size=current.sample_size,
+            unstable=current.dominant_case is not None and not settled,
+            detail=stopped,
+        )
+
     async def _resolve_keep_sigma(
         self,
         bench_result: dict,
@@ -3035,10 +3087,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             sample_size=base.sample_size,
         )
         incumbent = self.best_mean_case_speedup or 1.0
-        if not beats_current_best(
-            keep_score(measurement_scores),
-            best_mean_case_speedup=incumbent,
-        ):
+        if not beats_current_best(keep_score(measurement_scores), best_mean_case_speedup=incumbent):
             return replace(found, detail="reverted at every sigma")
         if passes_keep_threshold(
             measurement_scores,
@@ -3047,50 +3096,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             sigma_sample_size=base.sample_size,
         ):
             return replace(found, detail="kept at the measured sigma")
-
-        current = base
-        rounds = 0
-        stopped = ""
-        while rounds < SIGMA_REMEASURE_MAX_ROUNDS and current.dominant_case is not None:
-            remeasure_started = time.time()
-            extra = await measure_wallclock(
-                BenchRun(self.ic.driver_script, driver_args=[], repeat=self.ic.bench_repeat),
-                measurements=SIGMA_REMEASURE_BATCH,
-                timeout_sec=self.ic.bench_timeout_sec,
-            )
-            self._observe_measurement(remeasure_started)
-            rounds += 1
-            extra_series = _measurement_case_times(extra if isinstance(extra, dict) else {})
-            if not (isinstance(extra, dict) and extra.get("success")):
-                stopped = "re-measure bench failed"
-                break
-            if set(series) - set(extra_series):
-                stopped = "re-measure lost a scored case"
-                break
-            for case_id in series:
-                series[case_id].extend(extra_series[case_id])
-            refreshed = attribute_sigma(series, baseline)
-            if refreshed is None:
-                stopped = "re-measure produced no usable spread"
-                break
-            current = refreshed
-
-        if current is base:
-            return replace(found, rounds=rounds, detail=stopped)
-        share = current.variance_shares.get(dominant)
-        # A case's *share* of the variance is structural -- q61's speedup term is 8x the others', so it holds most of
-        # the variance at any sample size -- and re-measuring cannot be expected to move it.
-        settled = current.case_sigmas[dominant] < base.case_sigmas[dominant]
-        return replace(
-            found,
-            sigma=rescaled_sigma(measured, base, current),
-            variance_share=share if share is not None else found.variance_share,
-            wall_share=current.wall_shares.get(dominant, found.wall_share),
-            rounds=rounds,
-            sample_size=current.sample_size,
-            unstable=current.dominant_case is not None and not settled,
-            detail=stopped,
-        )
+        return await self._remeasure_keep_sigma(found, measured, base, series, baseline)
 
     def _case_move_rule(
         self,
