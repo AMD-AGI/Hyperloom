@@ -238,7 +238,7 @@ async def test_a_model_backed_specialist_lands_a_source_change_through_the_sessi
     assert any("max_num_seqs 256" in content for content in logged)
     assert any(content.startswith(f"{NOTICE} {first.request_id} landed on your branch") for content in logged)
     seen = (workspace / "seen-0.txt").read_text()
-    assert seen.startswith(f"Your branch's direction; every candidate of yours belongs to it:\n{DIRECTIONS[0]}")
+    assert seen.startswith(f"Your branch's direction, to work on first:\n{DIRECTIONS[0]}")
     assert "Startup brief:\nleads: a larger max_num_seqs" in seen and f"Your branch: {BRANCH}," in seen
     # The role prompt has the specialist submit with the intent fingerprint its claim returned.
     assert first.request.intent_fingerprint == intent_fingerprint(TARGET, MECHANISM, IntentLayer.SOURCE)

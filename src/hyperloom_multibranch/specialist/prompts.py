@@ -37,7 +37,7 @@ VERSION_HEX = 12
 
 _BRIEF = "Startup brief:\n{brief}"
 _DIRECTION = """\
-Your branch's direction; every candidate of yours belongs to it:
+Your branch's direction, to work on first:
 {direction}"""
 _REPAIR = """\
 Your branch repairs {candidate}, a blocked candidate of {from_branch}: on {parent_commit} it measured \
@@ -132,10 +132,10 @@ outcome and why, and your next plan. Entries that start with "{NOTICE}" are the 
 held back, or a test that could not be judged. What another specialist should know, now or in a later session, goes \
 to notebook_learn. Then go back to step 2: the session decides when your branch stops, not you.
 
-Your launch prompt names your branch's direction, and every candidate of yours belongs to it. Only a branch whose \
-direction is server arguments and environment variables tests settings alone; on any other direction a setting may \
-only ride along with the patch or kernel your direction makes. When your direction's first idea fails, profile and \
-dig deeper in the same direction rather than switching to settings.
+Your launch prompt names your branch's direction: work on it first. When its first idea fails, profile and dig \
+deeper in it rather than switching to settings. Once it is done, with nothing promising left in it (a tuning pass \
+can be done within the hour), take another of the session's directions, preferring one no running branch covers: \
+{{directions}}.
 
 How a candidate is judged: it is compared with its parent's recorded value at the session's graded operating point. A \
 gain must clear the session's bar, set from the spread of the baseline measurements, and hold when it is measured \
@@ -183,7 +183,7 @@ def role_prompt(workload: str) -> str:
     named = " ".join(workload.split())
     if not named:
         raise ValueError("a specialist's role names the workload its session optimizes")
-    return _ROLE.format(workload=named, fake_gains=_fake_gains())
+    return _ROLE.format(workload=named, fake_gains=_fake_gains(), directions=_direction_names())
 
 
 def launch_prompt(
@@ -225,9 +225,13 @@ def nudge_message() -> str:
 
 def prompt_versions() -> dict[str, str]:
     """``{prompt name: the first hex digits of the sha256 of its text}``, for the session's manifest fingerprint."""
-    role = _ROLE.format(workload="{workload}", fake_gains=_fake_gains())
+    role = _ROLE.format(workload="{workload}", fake_gains=_fake_gains(), directions=_direction_names())
     texts = {"specialist_role": role, "specialist_launch": "\n".join(_LAUNCH)}
     return {name: hashlib.sha256(text.encode()).hexdigest()[:VERSION_HEX] for name, text in texts.items()}
+
+
+def _direction_names() -> str:
+    return "; ".join(direction.split(":", 1)[0] for direction in DIRECTIONS)
 
 
 def _fake_gains() -> str:

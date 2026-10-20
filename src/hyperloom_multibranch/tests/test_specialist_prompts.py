@@ -114,12 +114,13 @@ def test_the_role_goes_back_to_choosing_after_a_result_and_never_stops_its_branc
     assert "Then go back to step 2: the session decides when your branch stops, not you." in prompt
 
 
-def test_the_role_keeps_settings_alone_to_the_branch_whose_direction_they_are():
+def test_the_role_works_its_direction_first_and_then_moves_to_one_no_branch_covers():
     prompt = role_prompt(WORKLOAD)
 
-    assert "every candidate of yours belongs to it" in prompt
-    assert "Only a branch whose direction is server arguments and environment variables tests settings alone" in prompt
-    assert "dig deeper in the same direction rather than switching to settings" in prompt
+    assert "Your launch prompt names your branch's direction: work on it first." in prompt
+    assert "dig deeper in it rather than switching to settings" in prompt
+    assert "take another of the session's directions, preferring one no running branch covers" in prompt
+    assert "server.log fixes; GEMM tuning; Fusion; Server arguments and environment variables; ROCm code gaps" in prompt
 
 
 def test_the_role_says_the_conversation_lives_on_and_what_arrives_wakes_it():
@@ -221,7 +222,7 @@ def test_every_launch_shows_the_branch_s_direction_before_the_brief():
     prompt = _launch(brief="leads: fp8 KV cache", direction="  try a larger max_num_seqs first\n")
 
     assert prompt.startswith(
-        "Your branch's direction; every candidate of yours belongs to it:\n"
+        "Your branch's direction, to work on first:\n"
         "try a larger max_num_seqs first\n\nStartup brief:\nleads: fp8 KV cache"
     )
     assert "Your branch's direction" not in _launch(brief="leads: none", direction=" \n")

@@ -34,7 +34,6 @@ from typing import Protocol
 from hyperloom.common.llm_config import AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX
 from hyperloom.contracts.measurement import TestKind
 from hyperloom.orchestrator.specialists.agent_runner import (
-    LONG_RUNNING_SESSION_SEC,
     PROCESS_LOG,
     STATE_LOST,
     AgentEnded,
@@ -65,6 +64,9 @@ logger = logging.getLogger(__name__)
 MCP_SERVER = "hyperloom"
 #: A session ending sooner than this did not work, whatever its exit code: a misconfigured CLI must not relaunch forever.
 MIN_SESSION_S = 120.0
+#: A launch's own deadline, past any session: the scheduler ends a branch that stops gaining, and the liveness check
+#: ends a CLI that hangs, so a deadline would only cut a working conversation short.
+SPECIALIST_SESSION_S = 14 * 24 * 3600.0
 #: Turns in a row a model may end with no test of its branch running and nothing arrived, each nudged, before its
 #: session raises: a model that keeps stopping must not be woken forever.
 IDLE_TURNS = 3
@@ -169,7 +171,7 @@ class AgentSetup:
     processes: Processes
     repo: ExperimentRepo
     briefs: Callable[[str, str], Awaitable[str]] | None = None
-    session_seconds: float = LONG_RUNNING_SESSION_SEC
+    session_seconds: float = SPECIALIST_SESSION_S
     min_session_seconds: float = MIN_SESSION_S
     poll_seconds: float = 5.0
     clock: Callable[[], float] = time.time
@@ -476,6 +478,7 @@ def _describe(status: AgentStatus, seconds: float) -> str:
 
 __all__ = [
     "IDLE_TURNS",
+    "SPECIALIST_SESSION_S",
     "MCP_SERVER",
     "MIN_SESSION_S",
     "AgentCommand",

@@ -25,6 +25,7 @@ from hyperloom_multibranch.notebook.tests.factories import intent, request, resu
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.specialist.agent_session import (
     IDLE_TURNS,
+    SPECIALIST_SESSION_S,
     WAITED_END,
     AgentCommand,
     AgentSession,
@@ -209,6 +210,7 @@ async def test_a_session_that_ends_as_it_should_is_followed_by_a_fresh_one(rig):
     assert "ended: it reached its deadline" in third
     spec = rig.runner.specs[0]
     assert (spec.cwd, spec.env[TOKEN_ENV], spec.gpus) == (rig.worktree.path, "token-of-s1", 0)
+    assert spec.deadline_unix - 1_800_000_000.0 == SPECIALIST_SESSION_S >= 7 * 24 * 3600
     assert not (rig.workspace / "specialist_done.json").exists()
     assert [pid for pid, _, _ in rig.processes.adopted] == [1, 2, 3]
     assert rig.processes.adopted[0][1:] == (BRANCH, spec.argv)
