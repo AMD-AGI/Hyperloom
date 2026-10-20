@@ -33,7 +33,11 @@ WARM_REPLAY_DONOR_FIELDS = (
 
 
 def as_float(value: Any) -> float:
-    """Read a recorded number, answering 0.0 for a record that carries something else."""
+    """Read a recorded number, answering 0.0 for a record that carries something else.
+
+    Not ``common.coerce.to_float``: a throughput or gain this session recorded as
+    ``inf`` reaches the gates that compare it, rather than being read as 0.0.
+    """
     try:
         return float(value or 0.0)
     except (TypeError, ValueError):
