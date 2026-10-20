@@ -221,10 +221,9 @@ def _patch_member_list(raw: Any) -> list[Any]:
 def _declared_patch_members(result: Mapping[str, Any], params: Mapping[str, Any]) -> list[Any] | None:
     """The patch members a settled KEEP names, or ``None`` when it names no field at all.
 
-    An executor verdict's ``patches_applied`` is authoritative, including an
-    explicit empty list left after every candidate was rejected: a field that
-    names nothing is still an answer, and the workspace must not be searched
-    behind it.
+    An executor verdict's ``patches_applied`` is authoritative, including an explicit empty list left after
+    every candidate was rejected: a field that names nothing is still an answer, and the workspace must not
+    be searched behind it.
     """
     if "patches_applied" in result:
         return _patch_member_list(result.get("patches_applied"))
@@ -239,11 +238,7 @@ def _declared_patch_members(result: Mapping[str, Any], params: Mapping[str, Any]
 
 
 def _workspace_patch_files(workspace: str) -> list[Path]:
-    """The patch files a run workspace holds.
-
-    A recovery path for the older result envelopes that persisted only
-    ``workspace``; a raw framework-agent diff comes back in ``patches_applied``.
-    """
+    """The patch files a run workspace holds."""
     root = Path(workspace) if workspace else None
     if root is None or not root.is_dir():
         return []
@@ -282,11 +277,7 @@ def _existing_patch_paths(candidates: list[Any]) -> tuple[list[Path], list[str]]
 
 
 def _keep_origin_provenance(result: Mapping[str, Any], sources: list[Path], *, realized: bool) -> dict[str, Any]:
-    """How a staged KEEP's overlay was captured, and which checkout it came from.
-
-    ``apply_root`` becomes a per-ref answer once the refs exist; the rest is
-    recorded so a section that would not replay can still be read back.
-    """
+    """How a staged KEEP's overlay was captured, and which checkout it came from."""
     return {
         "base_sha": str(result.get("base_sha") or ""),
         "complete": bool(result.get("source_snapshot_complete", True)),
@@ -304,8 +295,7 @@ def _keep_origin_provenance(result: Mapping[str, Any], sources: list[Path], *, r
 def _profile_trace_path(result: Mapping[str, Any]) -> Any:
     """The trace a profile round produced, surfaced so Orch hands trace_analyze a real path.
 
-    A round whose trace input was never ready has none, whatever files it left
-    behind.
+    A round whose trace input was never ready has none, whatever files it left behind.
     """
     if result.get("trace_input_ready") is False:
         return None
@@ -327,8 +317,8 @@ def _unstageable_patch_sources(row: Mapping[str, Any]) -> list[str]:
 def _integrate_keep_tput(result: Mapping[str, Any], measurement: Mapping[str, Any]) -> float | None:
     """The throughput an integrate KEEP is promoted on, or ``None`` when it measured none.
 
-    A bench_result of its own outranks the envelope, which keeps the figure the
-    attempt started from under the same name.
+    A bench_result of its own outranks the envelope, which keeps the figure the attempt started from under
+    the same name.
     """
     if measurement is not result and "output_throughput" in measurement:
         measured = measurement["output_throughput"]
@@ -428,9 +418,8 @@ def _baseline_perf_axes(snapshot: Mapping[str, Any] | None) -> dict[str, Any]:
 def _integrate_verdict(status: str, *, lifted: bool, kept: bool) -> Verdict:
     """The settlement verdict a finished integrate_patch attempt earns.
 
-    ``kept_inert`` means applied with every switch off: nothing was adopted,
-    yet the patch stays on disk as registered levers, so it is not a failure
-    either.
+    ``kept_inert`` means applied with every switch off: nothing was adopted, yet the patch stays on disk as
+    registered levers, so it is not a failure either.
     """
     if status == "kept_inert":
         return Verdict.RECORDED
@@ -442,10 +431,7 @@ def _integrate_verdict(status: str, *, lifted: bool, kept: bool) -> Verdict:
 
 
 def _integrate_keep_recipe_delta(result: Mapping[str, Any], task_params: Mapping[str, Any]) -> dict[str, Any]:
-    """The recipe delta a settled integrate_patch KEEP re-applies.
-
-    What the applier reports it applied outranks what the mandate asked for.
-    """
+    """The recipe delta a settled integrate_patch KEEP re-applies."""
     return {
         "extra_server_args": str(result.get("extra_server_args_applied") or ""),
         "extra_envs": dict(result.get("extra_envs_applied") or {}),
@@ -456,11 +442,7 @@ def _integrate_keep_recipe_delta(result: Mapping[str, Any], task_params: Mapping
 
 
 def _integrate_keep_origin(result: Mapping[str, Any], task_params: Mapping[str, Any]) -> dict[str, Any]:
-    """Who a settled integrate_patch KEEP is attributed to.
-
-    The mandate's stamp and the deliverable's markers travel together, and the
-    result wins on a collision.
-    """
+    """Who a settled integrate_patch KEEP is attributed to."""
     domain = str(task_params.get("domain") or task_params.get("source_domain") or result.get("domain") or "").strip()
     provenance = str(task_params.get("provenance") or result.get("provenance") or "").strip()
     if domain and not provenance.startswith("specialist:"):
@@ -492,11 +474,7 @@ def _integrate_keep_variant(
     measurement: Mapping[str, Any],
     tput: float,
 ) -> dict[str, Any]:
-    """The winning variant a settled integrate_patch KEEP lifts.
-
-    The durable source-layer handles are what keep ``current_best``
-    relaunchable and reproducible in the GEAK baseline.
-    """
+    """The winning variant a settled integrate_patch KEEP lifts."""
     task_params = (getattr(task, "params", None) or {}) if task is not None else {}
     specialist_task_id = str(result.get("specialist_task_id") or task_params.get("specialist_task_id") or "")
     return {
@@ -558,8 +536,8 @@ class _ResolvedLaunch(NamedTuple):
 def _is_prebaseline_enablement(task_kind: str, bv: Mapping[str, Any], baseline_tput: Any) -> bool:
     """Whether this lift is an enablement patch landing before any runnable baseline.
 
-    Such a patch has no runnable reference to grade against, so its
-    configuration is retained without gain attribution.
+    Such a patch has no runnable reference to grade against, so its configuration is retained without gain
+    attribution.
     """
     return (
         task_kind == "integrate_patch"
@@ -572,12 +550,8 @@ def _is_prebaseline_enablement(task_kind: str, bv: Mapping[str, Any], baseline_t
 def _resolved_launch(previous: Mapping[str, Any], bv: Mapping[str, Any]) -> _ResolvedLaunch:
     """The cumulative launch a winner lifts ``current_best`` to.
 
-    Every args string passes through :func:`strip_benchmark_harness_flags`, the
-    previous ``current_best`` included since it is re-merged onto the winner.
-    A removal or replace winner publishes its own effective cumulative config
-    from ExploreExecutor, so prepending the prior launch would reintroduce
-    flags it deliberately removed. An authored-kernel overlay stays active
-    until another KEEP replaces it.
+    Every args string passes through :func:`strip_benchmark_harness_flags`, the previous ``current_best``
+    included since it is re-merged onto the winner.
     """
     candidate_args = strip_benchmark_harness_flags(bv.get("candidate_extra_server_args") or bv.get("extra_server_args"))
     full_args = strip_benchmark_harness_flags(bv.get("extra_server_args"))
@@ -603,8 +577,8 @@ def _resolved_launch(previous: Mapping[str, Any], bv: Mapping[str, Any]) -> _Res
 def _already_stacked(stack: list[Any], request: _LiftRequest, variant_name: Any) -> bool:
     """Whether the winner's configuration is already applied on the stack.
 
-    Keyed by ``(action, variant_name)`` and by fingerprint, so a rerun under a
-    new name cannot re-apply a config the stack already carries.
+    Keyed by ``(action, variant_name)`` and by fingerprint, so a rerun under a new name cannot re-apply a
+    config the stack already carries.
     """
     rows = [row for row in stack if isinstance(row, dict)]
     applied = {(str(row.get("action")), str(row.get("variant_name"))) for row in rows}
@@ -617,8 +591,7 @@ def _already_stacked(stack: list[Any], request: _LiftRequest, variant_name: Any)
 def _variant_fingerprint(bv: Mapping[str, Any], candidate_args: str, full_args: str) -> str:
     """The winner's stable join key, computed from its config when it carries none.
 
-    Breakdown attribution maps an explore gain to its specialist provenance
-    through this key.
+    Breakdown attribution maps an explore gain to its specialist provenance through this key.
     """
     recorded = str(bv.get("fingerprint") or "").strip()
     if recorded:
@@ -701,13 +674,8 @@ def _variant_source_layer(bv: Mapping[str, Any]) -> dict[str, Any]:
 def _preserves_measured_eval_trigger(state: Any, result_payload: Mapping[str, Any]) -> bool:
     """Whether the stored enablement trigger outranks this eval failure's own.
 
-    A run that never executed the eval characterizes nothing: it reports
-    ``accuracy_unavailable`` with no task, metric or source. Letting it
-    overwrite a trigger that did measure an accuracy downgrades real
-    ``accuracy_below_floor`` evidence, and the next enablement attempt loses the
-    measurement it is supposed to reproduce. Contract fingerprints cannot gate
-    this: ``RUN_EVAL`` is itself a contract field, so the eval-less run's
-    fingerprint never matches the measured one.
+    A run that never executed the eval characterizes nothing: it reports ``accuracy_unavailable`` with no
+    task, metric or source.
     """
     if result_payload.get(BASELINE_EVAL_FAILURE_KIND_KEY) != EVAL_KIND_ACCURACY_UNAVAILABLE:
         return False
@@ -718,11 +686,7 @@ def _preserves_measured_eval_trigger(state: Any, result_payload: Mapping[str, An
 
 
 def _adopt_eval_trigger(state: Any, result_payload: Mapping[str, Any]) -> None:
-    """Make this eval failure the evidence the enablement lane authors against.
-
-    Seeds ``enablement_launch_log`` from the evidence so the FRAMEWORK pump
-    dispatches even when the failure carries no boot log.
-    """
+    """Make this eval failure the evidence the enablement lane authors against."""
     enablement = state.enablement
     cfg = result_payload.get("materialized_config")
     if isinstance(cfg, str) and cfg:
@@ -763,11 +727,7 @@ def _stacked_keep_keys(stack: Any) -> set[_StackKey]:
 
 
 def _orphan_stack_key(kind: str, result: Mapping[str, Any]) -> _StackKey | None:
-    """Where a recorded KEEP would sit on the stack, or ``None`` for a kind that never stacks.
-
-    ``framework_agent`` stacks under the framework family label, keyed by the
-    canonical candidate key, so it is reconciled on both.
-    """
+    """Where a recorded KEEP would sit on the stack, or ``None`` for a kind that never stacks."""
     if kind == "integrate_patch":
         return _StackKey(kind, str(result.get("specialist_task_id") or ""))
     if kind == "framework_agent":
@@ -838,9 +798,9 @@ def _replayed_recipe_delta(result: Mapping[str, Any]) -> dict[str, Any]:
 def _replay_origin_fields(result: Mapping[str, Any]) -> dict[str, Any]:
     """Who a recorded patch KEEP is attributed to: provenance, authoring phase, domain, gap layer.
 
-    A KEEP whose authoring phase was never recorded cannot be republished as a
-    recipe, and neither can an enablement landing: the first because nothing can
-    say which column it belongs to, the second because it describes this host.
+    A KEEP whose authoring phase was never recorded cannot be republished as a recipe, and neither can an
+    enablement landing: the first because nothing can say which column it belongs to, the second because it
+    describes this host.
     """
     domain = str(result.get("domain") or result.get("source_domain") or "").strip()
     provenance = str(result.get("provenance") or "").strip()
@@ -868,12 +828,7 @@ def _replay_origin_fields(result: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _replayed_integrate_variant(result: Mapping[str, Any], tput: float) -> dict[str, Any] | None:
-    """The winning variant a recorded integrate_patch KEEP replays, or ``None`` when it names none.
-
-    Carries the same durable source-layer handles as the live KEEP lift, so a
-    ``source_patch`` recovered on this path is equally reproducible in the GEAK
-    baseline and no path is left snapshot-less.
-    """
+    """The winning variant a recorded integrate_patch KEEP replays, or ``None`` when it names none."""
     from hyperloom.common.perf_metric import constraint_fields, graded_axes_of
 
     specialist_task_id = str(result.get("specialist_task_id") or "")
@@ -923,11 +878,7 @@ _WORKLOAD_ARG_COUNTS: dict[str, str] = {
 
 
 def _server_arg_workload_fields(extra_server_args: str) -> dict[str, Any]:
-    """The workload-shape fields a Magpie extra-server-args line declares.
-
-    A count whose CLI value is not an integer leaves its field unset: the tag
-    describes the workload, and an unparsable number describes nothing.
-    """
+    """The workload-shape fields a Magpie extra-server-args line declares."""
     out: dict[str, Any] = {}
     tokens = extra_server_args.split()
     for index, token in enumerate(tokens):
@@ -1168,11 +1119,7 @@ class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
         row: Mapping[str, Any],
         missing: list[str],
     ) -> list[dict[str, Any]]:
-        """Drop a staged KEEP section whose patch sources are gone; release the row that claimed it.
-
-        Returns:
-            The dead-letter ledger carrying this row's latest failure.
-        """
+        """Drop a staged KEEP section whose patch sources are gone; release the row that claimed it."""
         owner = str(row.get("owner") or "").upper()
         index = int(row.get("stack_index") or 0)
         stack = self.shared_state.optimization_stack or []
@@ -1745,12 +1692,8 @@ class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
     ) -> dict[str, Any]:
         """Charge a failed baseline to the streaks and the stop gates; the event it reports.
 
-        A round the run itself stopped -- the session budget reaped it, or the
-        orchestrator cancelled the action -- measured nothing, so it says
-        nothing about whether this baseline boots. Charging it to the streaks
-        would let three stops the run chose end the session as
-        ``baseline_failed``, blaming the model for the clock. The executor
-        already refuses to grade such a round; the ledger has to agree.
+        A round the run itself stopped -- the session budget reaped it, or the orchestrator cancelled the
+        action -- measured nothing, so it says nothing about whether this baseline boots.
         """
         from ..actions.executors._accuracy_gate import eval_enablement_allowed
         from ..actions.executors._multi_node_env import is_multi_node
@@ -1808,11 +1751,7 @@ class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
         *,
         retries_suppressed: bool,
     ) -> None:
-        """Set the stop reason a failed baseline of this class earns, if it earns one.
-
-        A fast arg error gets its own streak so deterministic failures do not
-        burn the slow-baseline retry budget.
-        """
+        """Set the stop reason a failed baseline of this class earns, if it earns one."""
         if stopped_by_the_run_class(err_class) is not None:
             log.warning(
                 "baseline %s was stopped by the run (%s); the failure streak stays at %d "
@@ -1857,11 +1796,7 @@ class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
         )
 
     def _stash_enablement_launch_log(self, result_payload: dict[str, Any], err_class: str) -> None:
-        """Stash a failed boot's launch text for the FRAMEWORK pump to author against.
-
-        Only the first trigger is kept, so a serial enablement does not rewrite
-        the reason the lane opened with the gap it is now on.
-        """
+        """Stash a failed boot's launch text for the FRAMEWORK pump to author against."""
         launch_log = _authorable_launch_log(result_payload, err_class=err_class)
         if not launch_log:
             return
@@ -1933,10 +1868,9 @@ class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
     def _refuses_graded_winner(self, task_kind: str, bv: Mapping[str, Any], graded: "GradedComparison") -> bool:
         """Whether grading turns this winner down, logging the reason it was refused.
 
-        AgentX sessions fail closed when the interactivity axis could not apply:
-        the output figure on a degraded pair is diagnostic only, and promoting
-        on it would record a throughput KEEP the session never asked for. A
-        verified correctness fix was already bounded by the integrate gate.
+        AgentX sessions fail closed when the interactivity axis could not apply: the output figure on a
+        degraded pair is diagnostic only, and promoting on it would record a throughput KEEP the session
+        never asked for.
         """
         from hyperloom.common.perf_metric import VERDICT_KEEP
 
@@ -1977,11 +1911,7 @@ class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
         launch: _ResolvedLaunch,
         graded: "GradedComparison | None",
     ) -> None:
-        """Record the winner on the optimization stack, unless it is already applied.
-
-        ``graded`` is ``None`` for a pre-baseline enablement patch: it was never
-        graded against an anchor, so it has no adoption to claim.
-        """
+        """Record the winner on the optimization stack, unless it is already applied."""
         if _already_stacked(self.shared_state.optimization_stack, request, launch.variant_name):
             return
         stack_entry = self._stack_entry(request, launch)
@@ -2056,11 +1986,7 @@ class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
         return entry
 
     def _variant_authorship(self, task_kind: str, bv: Mapping[str, Any], variant_name: Any) -> dict[str, Any]:
-        """Which phase and which lever a winner is credited to.
-
-        The phase fallback inherits whatever is live at writeback time, which is
-        not what authored the winner.
-        """
+        """Which phase and which lever a winner is credited to."""
         fields: dict[str, Any] = {}
         source_phase = str(
             bv.get("source_phase") or (self.shared_state.phase if task_kind != "integrate_patch" else "") or ""
@@ -2085,11 +2011,7 @@ class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
         cand_source: Mapping[str, Any],
         previous: Mapping[str, Any],
     ) -> None:
-        """Make the lifted winner the session's ``current_best``.
-
-        Envs start from the previous stack top so a source-layer KEEP, which
-        applies none of its own, does not clear prior explore and env layers.
-        """
+        """Make the lifted winner the session's ``current_best``."""
         from hyperloom.common.perf_metric import constraint_fields, graded_axes_of
 
         bv = request.variant
@@ -2334,8 +2256,8 @@ class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
     ) -> None:
         """Make this measured baseline the session's anchor, unless the anchor is held.
 
-        The anchor is the hot measure round; the cold warmup round is discarded
-        so gain math never mixes a cold "before" with a hot "after".
+        The anchor is the hot measure round; the cold warmup round is discarded so gain math never mixes a
+        cold "before" with a hot "after".
         """
         measured = float(result.get("output_throughput"))
         if held_reason:
@@ -2358,8 +2280,8 @@ class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
     ) -> None:
         """Close an open enablement revalidation window on this promoted baseline.
 
-        An unrelated baseline promoting while the window is open only anchors
-        the throughput: it must not consume or clear the pending state.
+        An unrelated baseline promoting while the window is open only anchors the throughput: it must not
+        consume or clear the pending state.
         """
         enablement = self.shared_state.enablement
         tracked_tid = str(getattr(enablement, "revalidation_task_id", "") or "").strip()
@@ -2392,11 +2314,7 @@ class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
         floor: float,
         promoting_tid: str,
     ) -> None:
-        """Close the enablement lane on a revalidation that met its accuracy floor.
-
-        This promote is the lane's terminal: the KEEP that preceded it was
-        provisional, so the round that landed it did not close the lane.
-        """
+        """Close the enablement lane on a revalidation that met its accuracy floor."""
         enablement = self.shared_state.enablement
         enablement.succeeded = True
         enablement.validation_pending = False
@@ -2423,11 +2341,7 @@ class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
         floor: float,
         promoting_tid: str,
     ) -> None:
-        """Rearm the specialist loop after a revalidation measured below its floor.
-
-        The frozen trigger identity is left alone: the lane still owes the
-        accuracy it opened on.
-        """
+        """Rearm the specialist loop after a revalidation measured below its floor."""
         log.warning(
             "enablement revalidation: accuracy %.4f below floor %.4f; rearming",
             accuracy if isinstance(accuracy, (int, float)) else float("nan"),
@@ -2447,12 +2361,7 @@ class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
         )
 
     def _promote_anchor_run_facts(self, result: dict, task_params: Mapping[str, Any]) -> bool:
-        """Promote the accuracy, config and wall-clock the anchor run measured; whether any moved.
-
-        All of them describe the anchor run, so they only move when the anchor
-        itself does; otherwise the recorded reference tput and the config it was
-        measured with drift apart.
-        """
+        """Promote the accuracy, config and wall-clock the anchor run measured; whether any moved."""
         from hyperloom.common.perf_metric import perf_snapshot_from_mapping
 
         state = self.shared_state
@@ -2493,10 +2402,9 @@ class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
     def _promote_anchor_round_split(self, result: dict) -> bool:
         """Promote the anchor's warm and boot wall-clock splits; whether either moved.
 
-        Both are cleared by a later baseline that carries neither, so a stale
-        split can never be subtracted from a fresh total and reported as this
-        workload's boot, and a resumed session with a fresh clock is not held to
-        an earlier leg's shortfall.
+        Both are cleared by a later baseline that carries neither, so a stale split can never be subtracted
+        from a fresh total and reported as this workload's boot, and a resumed session with a fresh clock is
+        not held to an earlier leg's shortfall.
         """
         state = self.shared_state
         changed = False
@@ -2518,11 +2426,7 @@ class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
         return changed
 
     def _anchor_current_best(self, result: dict) -> None:
-        """Make the anchor run the session's ``current_best``.
-
-        ``current_best.tput`` follows the same hot baseline contract as the
-        anchor, so the gain numerator and denominator stay aligned.
-        """
+        """Make the anchor run the session's ``current_best``."""
         from hyperloom.common.perf_metric import constraint_fields
 
         tput = result.get("output_throughput")
@@ -2594,11 +2498,7 @@ class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
         return extras
 
     async def _bootstrap_prelude_after_baseline(self, tput: Any) -> None:
-        """Fire the post-baseline PRELUDE chain, in the order it has to run in.
-
-        History injection, then warm replay, then auto-analysis, then the
-        research scout and the static recon.
-        """
+        """Fire the post-baseline PRELUDE chain, in the order it has to run in."""
         # History injection fires regardless of --no-warm-replay.
         self._coord.phase_prelude.inject_warm_recipe_history_into_ledger()
         # Warm-recipe replay, anchored on the hot baseline_tput contract.
@@ -2678,11 +2578,7 @@ class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
         await self._coord.phase_prelude.maybe_enqueue_prelude_initial_analysis_after_baseline()
 
     def _record_failed_profile(self, trace_path: Any) -> None:
-        """Mark the session's last profile as failed, keeping a trace the round did produce.
-
-        A round that failed after capturing a usable trace still leaves
-        ``trace_analyze`` something to read.
-        """
+        """Mark the session's last profile as failed, keeping a trace the round did produce."""
         self.shared_state.last_profile_status = "failed"
         self.shared_state.last_profile_workload = {}
         if not trace_path:
@@ -2692,11 +2588,7 @@ class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
         self.shared_state.last_profile_workload_action = ""
 
     def _adopt_profile_trace(self, result: dict, task: "Task | None", trace_path: Any) -> str:
-        """Make this trace the session's last profile, and invalidate the stale analysis.
-
-        Returns:
-            The server args the trace was taken with.
-        """
+        """Make this trace the session's last profile, and invalidate the stale analysis."""
         self.shared_state.last_profile_trace = str(trace_path)
         self.shared_state.last_profile_launch_evidence_path = str(result.get("launch_evidence_path") or "")
         self.shared_state.last_profile_status = "succeeded"
@@ -2785,10 +2677,9 @@ class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
     def _anchor_watermark_on_roofline(self, result: dict, task: "Task | None") -> dict[str, Any]:
         """Re-anchor the watermark step on a succeeded roofline; describe its snapshot.
 
-        The anchor is what stops the watermark firing again until throughput
-        climbs another 10%, so a roofline that produced no analysis leaves it
-        where it is: anchoring on an empty snapshot would buy a whole cycle of
-        silence for one that says nothing.
+        The anchor is what stops the watermark firing again until throughput climbs another 10%, so a
+        roofline that produced no analysis leaves it where it is: anchoring on an empty snapshot would buy a
+        whole cycle of silence for one that says nothing.
         """
         # Prefer the executor's last_trace_analyze snapshot over the result dict.
         last_ta = self.shared_state.last_trace_analyze or {}
@@ -2813,11 +2704,7 @@ class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
         }
 
     def _charge_roofline_failure(self, result: dict, task: "Task | None") -> dict[str, Any]:
-        """Charge a failed roofline to the streak; describe what it failed on.
-
-        There is no retry and no fallback: specialists and explore go on without
-        a fresh ``analysis_md``.
-        """
+        """Charge a failed roofline to the streak; describe what it failed on."""
         self.shared_state.roofline_failure_streak += 1
         log.warning(
             "Auto-roofline %s failed (reason=%s phase=%s "
@@ -2935,12 +2822,7 @@ class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
         outcome.audit_extras = _explore_audit_extras(result)
 
     def _record_framework_lever_attributions(self, result: Mapping[str, Any]) -> bool:
-        """Record what each framework lever this round measured was worth; whether any landed.
-
-        Recorded whether or not the lever's own variant won: a rewrite measured
-        at +0.1% is as useful to know as one measured at +8%, and without the
-        number the lever would be re-benched every round.
-        """
+        """Record what each framework lever this round measured was worth; whether any landed."""
         recorded = False
         for attribution in result.get("framework_lever_attributions") or []:
             if not isinstance(attribution, dict):
@@ -2956,10 +2838,8 @@ class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
     async def _warn_on_stale_revalidation(self, task: "Task") -> bool:
         """Whether a revalidation measured an older recipe than the one now live.
 
-        A lift since the row was enqueued means the grid ran an older
-        ``current_best``, and crediting it to the newer one is the mismatch
-        CLOSE refuses to publish. Rows enqueued before generations existed carry
-        no stamp.
+        A lift since the row was enqueued means the grid ran an older ``current_best``, and crediting it to
+        the newer one is the mismatch CLOSE refuses to publish.
         """
         measured_generation = (task.params or {}).get("recipe_generation")
         working_generation = int(self.shared_state.working_recipe_generation or 0)
@@ -2985,12 +2865,7 @@ class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
         return True
 
     async def _reconcile_revalidated_watermark(self, result: dict, *, stale: bool) -> None:
-        """Move the validation watermark onto what a stack revalidation measured.
-
-        A failed or empty rebench leaves the watermark where it is, so the round
-        reports a keep warning rather than claiming a validation it has no
-        measurement for.
-        """
+        """Move the validation watermark onto what a stack revalidation measured."""
         measured = result.get("output_throughput")
         if stale or not isinstance(measured, (int, float)) or measured <= 0:
             return
@@ -3036,11 +2911,8 @@ class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
     ) -> _ExploreLift:
         """Enter this round's explore winners and lift the ones that still beat the anchor.
 
-        Winners arrive already graded by the executor, on the decision round
-        that judged them; the lift still refuses one that no longer beats the
-        live anchor. They are lifted cumulatively, in application order and each
-        on its own measurement, because the graded axis can improve even when
-        output throughput falls.
+        Winners arrive already graded by the executor, on the decision round that judged them; the lift
+        still refuses one that no longer beats the live anchor.
         """
         winners = [winner for winner in result.get("winners") or [] if isinstance(winner, dict)]
         self._record_accepted_winners(result, winners)
@@ -3139,14 +3011,7 @@ class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
         outcome.changed = changed
 
     def _record_authored_levers(self, result: Mapping[str, Any]) -> bool:
-        """Register this patch's framework-rewrite switches as search levers; whether any landed.
-
-        Done for both KEEP verdicts: a bundle that cleared the gate is on and
-        gets leave-one-out attribution, while an inert KEEP is dormant and gets
-        additive attribution. ``kept_inert`` deliberately does not lift
-        current_best -- the code is applied but every switch is off, so the
-        running configuration is unchanged.
-        """
+        """Register this patch's framework-rewrite switches as search levers; whether any landed."""
         levers = result.get("framework_levers")
         if not (isinstance(levers, list) and levers):
             return False
@@ -3170,11 +3035,7 @@ class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
     ) -> bool:
         """Lift a settled integrate_patch KEEP onto current_best; whether it landed.
 
-        A patch landing before any runnable baseline establishes the baseline
-        environment. It stays in the configuration stack for reproducibility but
-        is ineligible for gain attribution, because no runnable "before"
-        measurement exists to attribute a gain against -- and so it claims no
-        validated watermark either.
+        A patch landing before any runnable baseline establishes the baseline environment.
         """
         task_params = (getattr(task, "params", None) or {}) if task is not None else {}
         new_tput = float(measurement.get("output_throughput", result.get("output_throughput")))
@@ -3303,8 +3164,8 @@ class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
     def _publish_recovered_keeps(self, report: dict[str, Any]) -> None:
         """Materialise the KB sections the recovered KEEPs owe, once the state is durable.
 
-        The outbox must never publish a config the state file has not made
-        authoritative yet, so a save that failed leaves the sections pending.
+        The outbox must never publish a config the state file has not made authoritative yet, so a save that
+        failed leaves the sections pending.
         """
         state = self.shared_state
         resume_state_durable = True
@@ -3524,13 +3385,7 @@ class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
         report: dict[str, Any],
         marker: _IntegrateMarker,
     ) -> bool:
-        """Clear a sentinel whose records show the tree was put back; whether it was cleared.
-
-        A confirmed outcome carrying no result still counts when the phase says
-        the tree is clean: the attempt restored it and then died before
-        recording what it decided. An unconfirmed or absent outcome is a
-        different case and is left to the caller.
-        """
+        """Clear a sentinel whose records show the tree was put back; whether it was cleared."""
         task_id = str(pending.get("task_id") or "")
         if marker.verdict == "settled":
             fix = {
@@ -3886,8 +3741,8 @@ class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
     async def _surface_orphaned_keep(self, report: dict[str, Any], kind: str, variant: str, task_id: Any) -> None:
         """Alert on an explore or framework KEEP the stack lost, without resurrecting it.
 
-        Which stack such a KEEP landed on is known only to the round that ran
-        it, so a replay here cannot tell recovery from re-applying an eviction.
+        Which stack such a KEEP landed on is known only to the round that ran it, so a replay here cannot
+        tell recovery from re-applying an eviction.
         """
         report["warnings"].append(
             {"kind": "orphaned_keep", "orphan_kind": kind, "variant": variant, "task_id": task_id}
@@ -3905,11 +3760,7 @@ class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
         variant: str,
         task_id: Any,
     ) -> bool:
-        """Replay an integrate_patch KEEP the stack lost; whether the stack now carries it.
-
-        A KEEP whose run workspace is gone can no longer be replayed, so it is
-        discarded with an operator alert instead.
-        """
+        """Replay an integrate_patch KEEP the stack lost; whether the stack now carries it."""
         kind = "integrate_patch"
         workspace = str(result.get("workspace") or "").strip()
         if workspace and not Path(workspace).exists():

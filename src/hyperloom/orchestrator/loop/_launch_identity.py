@@ -33,9 +33,8 @@ from ..kernel.geak_config import _geak_overlay_digest
 def _source_snapshot_layer(entry: Mapping[str, Any]) -> dict[str, Any]:
     """One durable source-layer snapshot of the stack, as a consumer replays it.
 
-    A ``source_patch`` entry with no durable snapshot is still surfaced, with an
-    empty directory, so the consumer can flag an unreproducible baseline rather
-    than silently launch a weaker stock tree.
+    A ``source_patch`` entry with no durable snapshot is still surfaced, with an empty directory, so the
+    consumer can flag an unreproducible baseline rather than silently launch a weaker stock tree.
     """
     from ..source_snapshot import source_layer_overlay_dir, source_layer_reproducible
 
@@ -148,9 +147,7 @@ class LaunchIdentity(CoordinatorCollaborator):
     def _resolved_sglang_server_config(launch_evidence: Mapping[str, Any]) -> dict[str, Any]:
         """Resolve selected SGLang ``ServerArgs`` fields from declared args.
 
-        A captured command line is preferred evidence. This fallback makes the
-        declaration inspectable when a reused ready server did not emit a fresh
-        CLI line; it is intentionally not treated as observed launch evidence.
+        A captured command line is preferred evidence.
         """
         if str(launch_evidence.get("framework") or "").strip().lower() != "sglang":
             return {}
@@ -311,11 +308,7 @@ class LaunchIdentity(CoordinatorCollaborator):
         self.shared_state.current_best_measurement = measurement
 
     def current_best_launch_config(self) -> dict[str, Any]:
-        """The launch config ``current_best`` was measured on.
-
-        Returns:
-            Server args, envs, removal/replacement controls, and ``final_overlay``.
-        """
+        """The launch config ``current_best`` was measured on."""
         cb = self.shared_state.current_best
         args = str(cb.get("extra_server_args") or "").strip()
         envs: dict[str, str] = {}
@@ -348,20 +341,8 @@ class LaunchIdentity(CoordinatorCollaborator):
     ) -> dict[str, Any]:
         """Fully-reproducible descriptor of ``current_best``'s launch environment.
 
-        Layers, in the order a consumer must apply them to reconstruct the exact
-        stack ``current_best`` was measured on:
-
-          * ``config``  — cumulative server args + env vars (the reversible layer).
-          * ``source_snapshots`` — ordered durable source-layer snapshots
-            (``scope=source_patch`` entries), each a self-contained directory
-            (see :mod:`source_snapshot`) that reconstructs the patched framework
-            tree independent of the mutable live checkout.
-          * ``overlay_pythonpath`` — the authored-kernel overlay prefix.
-          * ``base_launch_recipe`` — the baseline Magpie recipe to launch from.
-
-        This is the single source of truth the GEAK handoff forwards so the
-        baseline ref is materialized from the SAME layers as ``current_best``
-        (not just its flags/env), closing the cross-harness baseline gap.
+        Layers, in the order a consumer must apply them to reconstruct the exact stack ``current_best`` was
+        measured on:
         """
         materialized = self.current_best_launch_config()
         # current_best's embedded stack was promoted with its tput. Reading the
@@ -405,8 +386,8 @@ class LaunchIdentity(CoordinatorCollaborator):
     def _promoted_measurement(self) -> Mapping[str, Any]:
         """The measurement ``current_best`` was promoted on.
 
-        The complete engine flags have to come from that measurement, never from
-        a search over historical benchmarks with a similar throughput.
+        The complete engine flags have to come from that measurement, never from a search over historical
+        benchmarks with a similar throughput.
         """
         stored = self.shared_state.current_best_measurement
         if isinstance(stored, Mapping) and stored:
