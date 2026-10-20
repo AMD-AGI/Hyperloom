@@ -44,8 +44,10 @@ from hyperloom_multibranch.toolbox.analysis import (
     ANALYSIS_TOOLS,
     CODE_NO_EXECUTOR,
     CODE_TOOL_UNAVAILABLE,
+    ROOT_PROFILE_JOB_PREFIX,
     AnalysisAsk,
     analysis_request,
+    root_profile_request,
 )
 from hyperloom_multibranch.toolbox.acceptance import Acceptance, AcceptanceSetup, check_kind
 from hyperloom_multibranch.toolbox.attachments import store_attachment
@@ -53,7 +55,7 @@ from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES, At
 from hyperloom_multibranch.toolbox.quarantine import Quarantine
 from hyperloom_multibranch.toolbox.queue import QueuedTest, QueuePolicy, State, WorkQueue, sandbox_priority
 from hyperloom_multibranch.toolbox.submission_log import LogEntry, SubmissionLog
-from hyperloom_multibranch.toolbox.tools import JobStatus, ToolJobs, ToolRequest
+from hyperloom_multibranch.toolbox.tools import TRACELENS_TOOL, JobStatus, ToolJobs, ToolRequest
 
 logger = logging.getLogger(__name__)
 
@@ -293,7 +295,7 @@ class RealToolbox:
             return 0
         return sum(self._tools.cancel(job) for job in self._tool_jobs.pop(branch_id, []))
 
-    def submit_tool(self, request: ToolRequest) -> str:
+    def submit_tool(self, request: ToolRequest, *, job_id: str | None = None) -> str:
         """Start an asynchronous tool (profile, roofline, build, ...) for a branch; returns its job id at once.
 
         Tool jobs are not tests: they take no slot of K and write no test record. Their result reaches the branch's
@@ -302,9 +304,16 @@ class RealToolbox:
 
         if self._tools is None:
             raise RequestRejected("this toolbox serves no asynchronous tools", CODE_NO_EXECUTOR)
-        job_id = self._tools.submit(request)
+        job_id = self._tools.submit(request, job_id=job_id)
         self._tool_jobs.setdefault(request.branch, []).append(job_id)
         return job_id
+
+    def _analysis_jobs(self, tool: str) -> ToolJobs:
+        if self._tools is None:
+            raise RequestRejected("this toolbox serves no asynchronous tools", CODE_NO_EXECUTOR)
+        if tool in ANALYSIS_TOOLS and tool not in self._tools.tool_names:
+            raise RequestRejected(f"{tool!r} is not run by this toolbox's backend", CODE_TOOL_UNAVAILABLE)
+        return self._tools
 
     async def submit_analysis(
         self, branch: str, tool: str, params: Mapping[str, Any], profile_request_id: str = ""
@@ -315,14 +324,29 @@ class RealToolbox:
         from ``params``. ``profile_request_id`` is kept only for a PROFILE test of this branch on that commit.
         """
 
-        if self._tools is None:
-            raise RequestRejected("this toolbox serves no asynchronous tools", CODE_NO_EXECUTOR)
-        if tool in ANALYSIS_TOOLS and tool not in self._tools.tool_names:
-            raise RequestRejected(f"{tool!r} is not run by this toolbox's backend", CODE_TOOL_UNAVAILABLE)
+        self._analysis_jobs(tool)
         request = await analysis_request(
             self._repo, self._records, AnalysisAsk(branch, tool, params, profile_request_id), self.trace_root
         )
         return self.submit_tool(request)
+
+    async def analyze_root_profile(self, commit_id: str, trace_dir: Path, point_config: Path, *, source_id: str) -> str:
+        """Start the deterministic TraceLens report of the PRELUDE child's trace as job ``prelude:<source_id>``; return its id.
+
+        For the scheduler, not a specialist: ``trace_dir`` and ``point_config`` (whose ``benchmark.envs`` give the
+        splitter its hints) must lie inside the session directory, and ``trace_dir`` must hold a ``*.trace.json*``.
+        The job takes no GPU lease and no slot of any branch; its pointer reaches the integration branch's inbox with the
+        op shares on ``commit_id``, or with none when the report is degraded or failed. A second call with the same
+        ``source_id`` returns the job already started.
+        """
+
+        jobs = self._analysis_jobs(TRACELENS_TOOL)
+        job_id = f"{ROOT_PROFILE_JOB_PREFIX}{source_id}"
+        if jobs.has_job(job_id):
+            return job_id
+        return self.submit_tool(
+            root_profile_request(self.trace_root, commit_id, trace_dir, point_config), job_id=job_id
+        )
 
     def tool_status(self, job_id: str) -> JobStatus:
         if self._tools is None:

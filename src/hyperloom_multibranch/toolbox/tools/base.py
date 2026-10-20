@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import quote
 
 from hyperloom.common.io import atomic_write_json
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cancel_scope
@@ -35,7 +36,7 @@ log = logging.getLogger(__name__)
 
 RESULT_FILE = "result.json"
 _SUMMARY_LIMIT = 400
-_JOB_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+_JOB_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _REAP_POLL_SECONDS = 0.05
 
 
@@ -167,10 +168,13 @@ class ToolJobs:
             raise InvalidRequest(f"job id {job_id!r} is not a plain file name")
         if job_id in self._jobs:
             raise InvalidRequest(f"job id {job_id!r} is already in use")
-        job = _Job(job_id, request, self._results_dir / job_id)
+        job = _Job(job_id, request, self._results_dir / quote(job_id, safe=""))  # shared storage rejects ":" in names
         self._jobs[job_id] = job
         job.task = asyncio.get_running_loop().create_task(self._run(job), name=f"tool-job-{job_id}")
         return job_id
+
+    def has_job(self, job_id: str) -> bool:
+        return job_id in self._jobs
 
     def status(self, job_id: str) -> JobStatus:
         return self._job(job_id).status

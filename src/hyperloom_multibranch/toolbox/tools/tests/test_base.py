@@ -157,3 +157,14 @@ async def test_validation_by_the_tool_refuses_at_submit(tmp_path: Path) -> None:
     runner = jobs(tmp_path, Picky(), RecordingSink())
     with pytest.raises(InvalidRequest, match="params need a repo"):
         runner.submit(request())
+
+
+async def test_a_job_id_may_carry_a_colon_and_its_directory_never_does(tmp_path: Path) -> None:
+    sink = RecordingSink()
+    runner = jobs(tmp_path, ScriptedTool(), sink)
+    runner.submit(request(), job_id="prelude:abc")
+    assert runner.has_job("prelude:abc") and not runner.has_job("prelude_abc")
+    await runner.wait("prelude:abc")
+    (pointer,) = sink.pointers
+    assert pointer.job_id == "prelude:abc"
+    assert Path(pointer.location).parent == tmp_path / "results" / "prelude%3Aabc"

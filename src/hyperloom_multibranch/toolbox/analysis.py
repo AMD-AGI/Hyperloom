@@ -6,7 +6,9 @@
 The caller names the tool and its own parameters. The commit the analysis is about is never the caller's: it is the
 head of the caller's branch in the experiment repository, read here. ``profile_request_id`` is kept only when the
 notebook holds a PROFILE test of that id, asked by the same branch, on that commit. The trace and the trace splitter's
-workload hints are that profile test's own: the caller names neither.
+workload hints are that profile test's own: the caller names neither. The scheduler's own request, for the trace the
+PRELUDE child profiled, is built here too (:func:`root_profile_request`), its hints read from the child's point config by
+the same rule.
 """
 
 from __future__ import annotations
@@ -20,12 +22,13 @@ import yaml
 
 from hyperloom_multibranch.contracts.notebook.interfaces import RecordSearch
 from hyperloom_multibranch.contracts.notebook.records import TestRecord
+from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.toolbox.tools.base import ToolRequest
 from hyperloom_multibranch.toolbox.tools.op_shares import COMMIT_PARAM, PROFILE_REQUEST_PARAM
 from hyperloom_multibranch.toolbox.tools.roofline import ROOFLINE_TOOL, TRACELENS_TOOL
-from hyperloom_multibranch.toolbox.tools.tracelens_report import SPLIT_HINTS, split_hint
+from hyperloom_multibranch.toolbox.tools.tracelens_report import REPORT_ROUTE, SPLIT_HINTS, split_hint
 
 ANALYSIS_TOOLS = (TRACELENS_TOOL, ROOFLINE_TOOL)
 CODE_TOOL_NOT_ALLOWED = "tool_not_allowed"
@@ -37,6 +40,9 @@ CODE_NO_EXECUTOR = "no_tool_executor"
 CODE_TOOL_UNAVAILABLE = "tool_unavailable_on_backend"
 CODE_PROFILE_WITHOUT_TRACE = "profile_without_trace"
 TRACE_INPUT_PARAM = "trace_input"
+ANALYSIS_ROUTE_PARAM = "analysis_route"
+ROOT_PROFILE_JOB_PREFIX = "prelude:"
+TRACE_GLOB = "*.trace.json*"
 SPLIT_HINT_PARAMS = tuple(key for _, key, _ in SPLIT_HINTS)
 #: The YAML the grid runner wrote for the point a test ran, in the test's landed directory; a profile test runs one.
 POINT_CONFIG_GLOB = "variant_*/config.yaml"
@@ -80,6 +86,13 @@ async def _verified_profile(
     )
 
 
+def _in_session(location: str | Path, root: Path) -> Path | None:
+    """``location`` (relative to the session directory ``root``, or absolute) resolved with symlinks followed; ``None``
+    when it does not lie inside ``root``."""
+    resolved = (root / location).resolve()  # an absolute location replaces ``root`` in the join, then is checked
+    return resolved if resolved.is_relative_to(root.resolve()) else None
+
+
 def _trace_input(record: TestRecord, root: Path | None) -> str:
     """Where the host reads the trace of a verified PROFILE record: its ``profile_location``.
 
@@ -94,8 +107,8 @@ def _trace_input(record: TestRecord, root: Path | None) -> str:
         )
     if root is None:
         return location
-    resolved = (root / location).resolve()  # an absolute location replaces ``root`` in the join, then is checked
-    if not resolved.is_relative_to(root.resolve()):
+    resolved = _in_session(location, root)
+    if resolved is None:
         raise RequestRejected(
             f"the trace location of profile test {record.request_id!r} leaves the session", CODE_PROFILE_WITHOUT_TRACE
         )
@@ -113,23 +126,28 @@ def _point_envs(path: Path, root: Path) -> Mapping[str, Any]:
     return envs if isinstance(envs, Mapping) else {}
 
 
+def point_split_hints(point: Path, root: Path) -> dict[str, str]:
+    """The trace splitter's workload hints, by request key, read from the point YAML at ``point`` inside ``root``.
+
+    A point that cannot be read, a missing variable or a value the splitter would not take gives no hint for it, and the
+    splitter then picks its window without that hint.
+    """
+    envs = _point_envs(point, root.resolve())
+    found = {key: split_hint(flag, envs[name]) for flag, key, name in SPLIT_HINTS if name in envs}
+    return {key: hint for key, hint in found.items() if hint is not None}
+
+
 def _split_hints(record: TestRecord, root: Path | None) -> dict[str, str]:
-    """The trace splitter's workload hints, by request key, read from the point the PROFILE ``record`` measured.
+    """The splitter's hints from the point the PROFILE ``record`` measured.
 
     The record's landed test directory (``output_dir``, relative to ``root``) holds the point YAML the profile test ran,
-    in the signed bundle. A profile test runs one point: a directory without exactly one, a missing variable or a value
-    the splitter would not take gives no hint for it, and the splitter then picks its window without that hint.
+    in the signed bundle. A profile test runs one point: a directory without exactly one gives no hint.
     """
     if root is None or record.result is None or not record.result.output_dir:
         return {}
-    session = root.resolve()
-    directory = (session / record.result.output_dir).resolve()
-    if not directory.is_relative_to(session):
-        return {}
-    points = sorted(directory.glob(POINT_CONFIG_GLOB))
-    envs = _point_envs(points[0], session) if len(points) == 1 else {}
-    found = {key: split_hint(flag, envs[name]) for flag, key, name in SPLIT_HINTS if name in envs}
-    return {key: hint for key, hint in found.items() if hint is not None}
+    directory = _in_session(record.result.output_dir, root)
+    points = sorted(directory.glob(POINT_CONFIG_GLOB)) if directory is not None else []
+    return point_split_hints(points[0], root) if len(points) == 1 else {}
 
 
 @dataclass(frozen=True)
@@ -178,4 +196,35 @@ async def analysis_request(
     return ToolRequest(ask.tool, ask.branch, params)
 
 
-__all__ = ["ANALYSIS_TOOLS", "AnalysisAsk", "AnalysisStarter", "analysis_request"]
+def root_profile_request(root: Path | None, commit_id: str, trace_dir: Path, point_config: Path) -> ToolRequest:
+    """The deterministic ``tracelens`` report of the trace the PRELUDE child profiled, for the integration branch.
+
+    ``trace_dir`` and ``point_config`` must lie inside the session directory ``root``. The splitter's hints are read
+    from ``point_config`` by the rule a PROFILE test's own point is read by; the caller names none. Raises
+    RequestRejected: ``invalid_request`` outside the session, ``profile_without_trace`` when ``trace_dir`` holds no trace.
+    """
+    if root is None:
+        raise RequestRejected("this toolbox has no session directory to read the root profile from")
+    trace, point = _in_session(trace_dir, root), _in_session(point_config, root)
+    if trace is None or point is None:
+        raise RequestRejected("the root profile's trace directory and point config must lie inside the session")
+    if next(trace.rglob(TRACE_GLOB), None) is None:
+        raise RequestRejected(f"no {TRACE_GLOB} under {trace_dir}", CODE_PROFILE_WITHOUT_TRACE)
+    params = {
+        ANALYSIS_ROUTE_PARAM: REPORT_ROUTE,
+        COMMIT_PARAM: commit_id,
+        PROFILE_REQUEST_PARAM: "",
+        TRACE_INPUT_PARAM: str(trace),
+        **point_split_hints(point, root),
+    }
+    return ToolRequest(TRACELENS_TOOL, INTEGRATION_BRANCH, params)
+
+
+__all__ = [
+    "ANALYSIS_TOOLS",
+    "ROOT_PROFILE_JOB_PREFIX",
+    "AnalysisAsk",
+    "AnalysisStarter",
+    "analysis_request",
+    "root_profile_request",
+]
