@@ -1325,8 +1325,7 @@ class ProfileExecutor(BenchmarkRunExecutor):
             result["trace_input_ready"] = True
         return result
 
-    def _measurement_succeeded(self, measurement: dict[str, Any]) -> bool:
-        return round_succeeded(measurement)
+    _measurement_succeeded = staticmethod(round_succeeded)
 
     async def _run_native_profile(self, ctx) -> dict[str, Any]:
         """Collect Magpie-owned captures and certify each time window separately."""

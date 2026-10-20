@@ -39,9 +39,7 @@ from ..stop_attribution import (
     StoppedByTheRun,
 )
 from ._benchmark_runtime import apply_runtime_benchmark_overrides as apply_runtime_benchmark_overrides
-from ._benchmark_interpreter import (
-    _resolve_probe_python as _resolve_probe_python,
-)
+from ._benchmark_interpreter import _resolve_probe_python as _resolve_probe_python
 from ._recipe_script import launcher_overwritten_envs
 from ._subprocess_kill import (
     AGENTX_PREFLIGHT_ERROR_CLASS,
@@ -483,8 +481,9 @@ async def _settled_measurement(
             subprocess_started_unix=subprocess_started_unix,
         )
         attempts += 1
-        if round_succeeded(measurement) or time.monotonic() >= deadline:
-            if attempts > 1 and round_succeeded(measurement):
+        succeeded = round_succeeded(measurement)
+        if succeeded or time.monotonic() >= deadline:
+            if attempts > 1 and succeeded:
                 log.info(
                     "grid_runner: benchmark_report became valid after %d read(s); "
                     "the report was still being written when the subprocess was reaped",
