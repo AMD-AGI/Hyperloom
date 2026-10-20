@@ -22,7 +22,7 @@ import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any
 
 from hyperloom.common.io import JsonFormat, WriteOptions, atomic_write_json
 from hyperloom.common.deadline import Deadline, seconds_until
@@ -113,6 +113,24 @@ def _subprocess_call_outcome(result: SpecialistSubprocessResult) -> tuple[str, d
         attributes["error_message"] = (result.error or "timed out")[:500]
         return STATUS_FAILED, attributes
     return STATUS_COMPLETED, attributes
+
+
+def _subprocess_backend_error(result: SpecialistSubprocessResult) -> str:
+    """The backend error a reaped specialist subprocess reports; ``""`` when it ended cleanly.
+
+    The classifier keys off the leading token; the reaper's own text is kept
+    after it so the reader sees the elapsed/threshold numbers.
+    """
+    detail = (result.error or "").strip()
+    if result.timed_out:
+        return f"subprocess_timeout: {detail}" if detail else "subprocess_timeout"
+    if result.stale_heartbeat:
+        return f"subprocess_stale_heartbeat: {detail}" if detail else "subprocess_stale_heartbeat"
+    if detail:
+        return f"subprocess_error:{detail}"
+    if result.exit_code not in (None, 0) and result.done_payload is None:
+        return f"subprocess_exit_code:{result.exit_code}"
+    return ""
 
 
 def _ctx_deadline(ctx: RunnerContext) -> Deadline | None:
@@ -349,22 +367,6 @@ def _redact_transcript_value(value: Any) -> Any:
     if isinstance(value, tuple):
         return [_redact_transcript_value(v) for v in value]
     return value
-
-
-class RunOutcome(NamedTuple):
-    """How a specialist run went: turns consumed, intent types it must not emit, and its error."""
-
-    turns_used: int
-    tool_violations: list[str]
-    backend_error: str
-
-
-class RunHarvest(NamedTuple):
-    """What a specialist run left behind: notes for the result and the patches it wrote."""
-
-    extra_notes: list[str]
-    patches_written: list[str]
-    patch_roots: dict[str, str] | None = None
 
 
 @dataclass
@@ -923,7 +925,6 @@ class SpecialistRunner:
         assert domain is not None  # set by a prep that did not short-circuit
         gap = prep.gap
         workspace = prep.workspace
-        notes = list(prep.notes)
 
         if workspace is None:
             done = build_empty_specialist_done(
@@ -940,7 +941,7 @@ class SpecialistRunner:
                 turns_used=0,
                 workspace="",
                 error="no_workspace",
-                notes=notes + ["no_workspace"],
+                notes=prep.notes + ["no_workspace"],
             )
 
         self._write_heartbeat(
@@ -982,8 +983,20 @@ class SpecialistRunner:
             )
             call_status, call_attributes = _subprocess_call_outcome(sub_result)
             call_span.finish(call_status, **call_attributes)
+        self._record_subprocess_run(ctx, prep, sub_result, call_id, call_attributes.get("latency_ms"))
+        return await asyncio.to_thread(self._finalize, ctx=ctx, prep=prep, sub_result=sub_result)
+
+    def _record_subprocess_run(
+        self,
+        ctx: RunnerContext,
+        prep: "_PreparedRun",
+        sub_result: SpecialistSubprocessResult,
+        call_id: str,
+        latency_ms: int | None,
+    ) -> None:
+        """Record what a reaped subprocess left for the session's ledgers, then mark its heartbeat finished."""
         self._append_transcript(
-            workspace,
+            prep.workspace,
             1,
             {
                 "type": "subprocess_result",
@@ -997,85 +1010,44 @@ class SpecialistRunner:
                 "error": sub_result.error,
             },
         )
-        # Fold the production specialist's token spend into the unified ledger.
-        _sub_latency_ms = None
-        if sub_result.elapsed_seconds is not None:
-            try:
-                _sub_latency_ms = int(float(sub_result.elapsed_seconds) * 1000)
-            except (TypeError, ValueError):
-                _sub_latency_ms = None
-        _tick, _phase = self._ctx_tick_phase(ctx)
-        # Prefer per-turn token rows when available; whole-session latency lands
-        # on the final turn. Fall back to a single cumulative turn=1 row.
-        turn_usages = list(sub_result.turn_usages or [])
-        if len(turn_usages) > 1:
-            last_idx = len(turn_usages) - 1
-            for i, tu in enumerate(turn_usages):
-                md: dict[str, Any] = {**tu, "call_id": call_id}
-                if sub_result.usage and sub_result.usage.get("model"):
-                    md.setdefault("model", sub_result.usage.get("model"))
+        tick, phase = self._ctx_tick_phase(ctx)
+        # Fold the production specialist's token spend into the unified ledger: one row per turn
+        # when per-turn usage is available, else one cumulative row; the session latency lands on the last.
+        # Prefer per-turn token rows when available; whole-session latency lands on the final turn.
+        # Fall back to a single cumulative turn=1 row (None metadata when the subprocess reported no usage).
+        if len(sub_result.turn_usages) > 1:
+            model = (sub_result.usage or {}).get("model")
+            last_idx = len(sub_result.turn_usages)
+            for turn, usage in enumerate(sub_result.turn_usages, start=1):
+                metadata: dict[str, Any] = {**usage, "call_id": call_id}
+                if model:
+                    metadata.setdefault("model", model)
                 self._trace_specialist_llm_call(
-                    ctx, turn=i + 1, metadata=md, latency_ms=_sub_latency_ms if i == last_idx else None
+                    ctx, turn=turn, metadata=metadata, latency_ms=latency_ms if turn == last_idx else None
                 )
         else:
             self._trace_specialist_llm_call(
                 ctx,
                 turn=1,
                 metadata={**sub_result.usage, "call_id": call_id} if sub_result.usage else None,
-                latency_ms=_sub_latency_ms,
+                latency_ms=latency_ms,
             )
-        # Persist the tool/intel calls the specialist made, backfilled as spans.
-        self._record_specialist_intel(
-            task_id=ctx.task.task_id,
-            turn=1,
-            tool_calls=sub_result.tool_calls,
-        )
+        self._record_specialist_intel(task_id=ctx.task.task_id, turn=1, tool_calls=sub_result.tool_calls)
         # Pair the parent-held prompt with the recovered assistant reply so the
-        # production specialist turn lands in conversations.jsonl. No-op when no
-        # reply text was recovered.
+        # production specialist turn lands in conversations.jsonl.
         if sub_result.response:
             self._record_specialist_conversation(
                 task_id=ctx.task.task_id,
                 turn=1,
-                metadata={
-                    "prompt": (prep.system_prompt + "\n---\n" + prep.user_prompt),
-                    "response": sub_result.response,
-                },
-                tick=_tick,
-                phase=_phase,
+                metadata={"prompt": prep.system_prompt + "\n---\n" + prep.user_prompt, "response": sub_result.response},
+                tick=tick,
+                phase=phase,
             )
         self._write_heartbeat(
-            workspace,
+            prep.workspace,
             turn=1,
             max_turns=prep.max_turns,
             status="finished",
-        )
-
-        # Decode subprocess error: backend_error → 'stale', clean miss → empty_synthesised.
-        # The classifier keys off the leading token; the reaper's own text is kept
-        # after it so the reader sees the elapsed/threshold numbers.
-        detail = (sub_result.error or "").strip()
-        backend_error = ""
-        if sub_result.timed_out:
-            backend_error = f"subprocess_timeout: {detail}" if detail else "subprocess_timeout"
-        elif sub_result.stale_heartbeat:
-            backend_error = f"subprocess_stale_heartbeat: {detail}" if detail else "subprocess_stale_heartbeat"
-        elif detail:
-            backend_error = f"subprocess_error:{detail}"
-        elif sub_result.exit_code not in (None, 0) and sub_result.done_payload is None:
-            backend_error = f"subprocess_exit_code:{sub_result.exit_code}"
-
-        return await asyncio.to_thread(
-            self._finalize,
-            ctx=ctx,
-            prep=prep,
-            specialist_done_payload=sub_result.done_payload,
-            outcome=RunOutcome(turns_used=1, tool_violations=[], backend_error=backend_error),
-            harvest=RunHarvest(
-                extra_notes=notes,
-                patches_written=list(sub_result.patches),
-                patch_roots=dict(sub_result.patch_roots),
-            ),
         )
 
     # Finalize phase (shared)
@@ -1084,27 +1056,20 @@ class SpecialistRunner:
         *,
         ctx: RunnerContext,
         prep: "_PreparedRun",
-        specialist_done_payload: dict[str, Any] | None,
-        outcome: RunOutcome,
-        harvest: RunHarvest,
+        sub_result: SpecialistSubprocessResult,
     ) -> SpecialistRunResult:
         """Persist the ``specialist_done`` artifact and build the result.
 
         Blocking (``git apply --check`` per patch); call via ``asyncio.to_thread``.
 
-        Synthesises an empty payload when none was produced, sanitises the
-        proposal set, merges discovered patches and writes the on-disk
-        ``specialist_done.json``.
+        Synthesises an empty payload when none was produced, admits the
+        specialist's own through :meth:`_admit_done_payload` otherwise, and
+        writes the on-disk ``specialist_done.json``.
 
         Args:
             ctx (RunnerContext): Dispatch context carrying the task.
             prep (_PreparedRun): Setup bundle from :meth:`_prepare`.
-            specialist_done_payload (dict[str, Any] | None): Payload harvested
-                from the run, or ``None`` if the run produced none.
-            outcome (RunOutcome): Turns consumed, non-specialist intent types
-                seen, and the backend/subprocess error string, if any.
-            harvest (RunHarvest): Notes to carry into the result and the
-                patches the run left behind.
+            sub_result (SpecialistSubprocessResult): What the reaped subprocess left behind.
 
         Returns:
             SpecialistRunResult: The finalized run outcome record.
@@ -1112,16 +1077,13 @@ class SpecialistRunner:
         domain = prep.domain
         gap = prep.gap
         workspace = prep.workspace
-        notes = list(harvest.extra_notes)
+        notes = list(prep.notes)
+        backend_error = _subprocess_backend_error(sub_result)
         gpu_ids = [int(g) for g in (ctx.extra.get("gpu_ids") or [])]
 
-        if specialist_done_payload is None:
-            reason = outcome.backend_error or "no_specialist_done_emitted"
-            done_payload = build_empty_specialist_done(
-                gap_canonical_id=gap,
-                domain=domain.key,
-                reason=reason,
-            )
+        if sub_result.done_payload is None:
+            reason = backend_error or "no_specialist_done_emitted"
+            done_payload = build_empty_specialist_done(gap_canonical_id=gap, domain=domain.key, reason=reason)
             if gpu_ids:
                 done_payload["allocated_gpu_ids"] = list(gpu_ids)
             self._write_specialist_done(workspace, done_payload)
@@ -1129,32 +1091,65 @@ class SpecialistRunner:
                 task_id=ctx.task.task_id,
                 domain=domain.key,
                 gap_canonical_id=gap,
-                status="empty_synthesised" if not outcome.backend_error else "stale",
+                status="empty_synthesised" if not backend_error else "stale",
                 specialist_done=done_payload,
-                turns_used=outcome.turns_used,
+                turns_used=1,
                 workspace=str(workspace) if workspace else "",
-                error=outcome.backend_error or reason,
-                notes=notes + ([f"tool_violations:{outcome.tool_violations}"] if outcome.tool_violations else []),
+                error=reason,
+                notes=notes,
             )
 
-        # Have a specialist_done payload — sanitise and persist.
-        done_payload = dict(specialist_done_payload)
+        done_payload = dict(sub_result.done_payload)
         # Re-stamp gap_canonical_id/domain so the on-disk artifact is authoritative.
         done_payload["gap_canonical_id"] = gap or done_payload.get("gap_canonical_id", "")
         done_payload["domain"] = domain.key
         if gpu_ids:
             done_payload["allocated_gpu_ids"] = list(gpu_ids)
-        if "proposal_set" not in done_payload:
-            done_payload["proposal_set"] = []
-        if "summary" not in done_payload:
-            done_payload["summary"] = "specialist emitted done without summary"[:480]
+        done_payload.setdefault("proposal_set", [])
+        done_payload.setdefault("summary", "specialist emitted done without summary")
+        notes.extend(self._admit_done_payload(ctx, prep, sub_result, done_payload))
+        recovered = bool(done_payload.get("_recovered_from_partial"))
+        # ``partial`` keeps an infra failure visible without making the attempt
+        # retry-eligible, which would discard whatever was salvaged.
+        status = "partial" if backend_error or recovered else "succeeded"
+        if recovered:
+            notes.append("recovered_from_partial")
+        if notes:
+            done_payload["_specialist_notes"] = list(notes)
+        self._write_specialist_done(workspace, done_payload)
+        return SpecialistRunResult(
+            task_id=ctx.task.task_id,
+            domain=domain.key,
+            gap_canonical_id=gap,
+            status=status,
+            specialist_done=done_payload,
+            turns_used=1,
+            workspace=str(workspace) if workspace else "",
+            transcript_path=str(self._transcript_path(workspace)) if workspace else "",
+            done_path=str(self._done_path(workspace)) if workspace else "",
+            error=backend_error,
+            notes=notes,
+        )
+
+    def _admit_done_payload(
+        self,
+        ctx: RunnerContext,
+        prep: "_PreparedRun",
+        sub_result: SpecialistSubprocessResult,
+        done_payload: dict[str, Any],
+    ) -> list[str]:
+        """Admit the specialist's ``done_payload`` in place: reconcile its patches, stamp its proposals, gate it.
+
+        Returns the audit notes the admission leaves for the result.
+        """
+        notes: list[str] = []
         # Reconcile self-reported ``patches_written`` against the filesystem:
         # keep only claimed paths that exist on disk, then union with the scan.
         # A harvested diff is the whole round, so a claim only restates it.
-        claimed = [] if harvest.patch_roots else done_payload.get("patches_written") or []
-        if not isinstance(claimed, list):
+        claimed = done_payload.get("patches_written")
+        if sub_result.patch_roots or not isinstance(claimed, list):
             claimed = []
-        search_bases = [b for b in (prep.worktree, workspace) if b is not None]
+        search_bases = [b for b in (prep.worktree, prep.workspace) if b is not None]
         validated: list[str] = []
         missing: list[str] = []
         for p in claimed:
@@ -1164,9 +1159,9 @@ class SpecialistRunner:
             else:
                 missing.append(str(p))
         dropped_scanned_outside: list[str] = []
-        for p in harvest.patches_written:
-            if not _patch_path_within_bases(Path(str(p)), search_bases):
-                dropped_scanned_outside.append(str(p))
+        for p in sub_result.patches:
+            if not _patch_path_within_bases(Path(p), search_bases):
+                dropped_scanned_outside.append(p)
                 log.warning(
                     "specialist: scanned patch %r resolves outside the specialist worktree/workspace; dropping",
                     p,
@@ -1180,68 +1175,33 @@ class SpecialistRunner:
         if dropped_scanned_outside:
             notes.append("patches_scanned_outside_workspace:" + ",".join(dropped_scanned_outside[:8]))
 
-        # Stamp the dispatch scope onto every proposal for cross-domain Critic enrichment.
-        for _proposal in done_payload.get("proposal_set") or []:
-            if isinstance(_proposal, dict):
-                _proposal.setdefault("scope", prep.profile.scope)
         # A specialist may cite only the Experiences its dispatch read showed it.
         shown = shown_ids((ctx.task.params or {}).get("kb_rendered_refs"))
-        for _proposal in done_payload.get("proposal_set") or []:
-            if isinstance(_proposal, dict) and "experience_citations" in _proposal:
-                _proposal["experience_citations"] = normalize_citations(_proposal["experience_citations"], shown)
+        for proposal in done_payload.get("proposal_set") or []:
+            if not isinstance(proposal, dict):
+                continue
+            # The dispatch scope feeds the Critic's cross-domain enrichment.
+            proposal.setdefault("scope", prep.profile.scope)
+            if "experience_citations" in proposal:
+                proposal["experience_citations"] = normalize_citations(proposal["experience_citations"], shown)
         if "experience_citations" in done_payload:
             done_payload["experience_citations"] = normalize_citations(done_payload["experience_citations"], shown)
 
         # Universal patch-safety gate: drop non-diff/escaping patches, git-ground
         # the rest, and scan for smuggled claims. Grounding is per set, not per
         # patch, so the root below applies to all of them or to none.
-        collected_roots = dict(harvest.patch_roots or {})
         base_checkout = prep.worktree_base or prep.worktree
-        candidate_roots = _sibling_checkouts(
-            tuple(self.subprocess_config.framework_source_roots),
-            base_checkout,
-        )
-        explicit_root = _grounding_explicit_root(
-            declared=str((ctx.task.params or {}).get("framework_source_root") or "").strip(),
-            patches=deduped,
-            patch_roots=collected_roots,
-        )
         vetted = _patch_safety.vet_patches(
             deduped,
             base_checkout=base_checkout,
-            candidate_roots=candidate_roots,
-            explicit_root=explicit_root,
+            candidate_roots=_sibling_checkouts(tuple(self.subprocess_config.framework_source_roots), base_checkout),
+            explicit_root=_grounding_explicit_root(
+                declared=str((ctx.task.params or {}).get("framework_source_root") or "").strip(),
+                patches=deduped,
+                patch_roots=sub_result.patch_roots,
+            ),
         )
-        notes.extend(_patch_safety.admit_payload(done_payload, vetted, collected_roots).notes())
-        recovered = bool(done_payload.get("_recovered_from_partial"))
-        # ``partial`` keeps an infra failure visible without making the attempt
-        # retry-eligible, which would discard whatever was salvaged.
-        status = "succeeded"
-        if outcome.tool_violations:
-            status = "tool_violation"
-            notes.append(f"tool_violations:{outcome.tool_violations}")
-        elif outcome.backend_error or recovered:
-            status = "partial"
-        if recovered:
-            notes.append("recovered_from_partial")
-        if notes:
-            done_payload["_specialist_notes"] = list(notes)
-
-        self._write_specialist_done(workspace, done_payload)
-
-        return SpecialistRunResult(
-            task_id=ctx.task.task_id,
-            domain=domain.key,
-            gap_canonical_id=gap,
-            status=status,
-            specialist_done=done_payload,
-            turns_used=outcome.turns_used,
-            workspace=str(workspace) if workspace else "",
-            transcript_path=str(self._transcript_path(workspace)) if workspace else "",
-            done_path=str(self._done_path(workspace)) if workspace else "",
-            error=outcome.backend_error,
-            notes=notes,
-        )
+        return notes + _patch_safety.admit_payload(done_payload, vetted, sub_result.patch_roots).notes()
 
     # Worktree helpers
     def _maybe_setup_worktree(

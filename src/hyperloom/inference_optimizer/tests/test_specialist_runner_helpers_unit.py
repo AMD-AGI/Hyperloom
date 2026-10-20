@@ -246,13 +246,7 @@ def _finalize(r, tmp_path, payload, params=None):
         workspace=tmp_path,
     )
     ctx = SimpleNamespace(task=SimpleNamespace(task_id="t1", params=dict(params or {})), extra={})
-    result = r._finalize(
-        ctx=ctx,
-        prep=prep,
-        specialist_done_payload=payload,
-        outcome=sr.RunOutcome(turns_used=1, tool_violations=[], backend_error=""),
-        harvest=sr.RunHarvest(extra_notes=[], patches_written=[]),
-    )
+    result = r._finalize(ctx=ctx, prep=prep, sub_result=sr.SpecialistSubprocessResult(done_payload=payload))
     return result, json.loads((tmp_path / "specialist_done.json").read_text(encoding="utf-8"))
 
 
@@ -272,10 +266,10 @@ def test_a_harvested_diff_is_the_whole_round_and_the_specialists_copy_of_it_is_n
     _runner()._finalize(
         ctx=SimpleNamespace(task=SimpleNamespace(task_id="t1", params={}), extra={}),
         prep=sr._PreparedRun(domain=SimpleNamespace(key="serving_specialist"), gap="gap-1", workspace=tmp_path),
-        specialist_done_payload={"proposal_set": [], "summary": "s", "patches_written": [str(copy)]},
-        outcome=sr.RunOutcome(turns_used=1, tool_violations=[], backend_error=""),
-        harvest=sr.RunHarvest(
-            extra_notes=[], patches_written=[str(harvested)], patch_roots={str(harvested): str(tmp_path)}
+        sub_result=sr.SpecialistSubprocessResult(
+            done_payload={"proposal_set": [], "summary": "s", "patches_written": [str(copy)]},
+            patches=[str(harvested)],
+            patch_roots={str(harvested): str(tmp_path)},
         ),
     )
 
