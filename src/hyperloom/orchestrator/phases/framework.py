@@ -16,7 +16,7 @@ from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 from hyperloom.inference_optimizer import framework_registry
 
 from . import machine_state as _phase_state
-from ._payload import as_entries, as_mapping, as_text, as_texts, params_of, payload_of, task_id_of
+from hyperloom.common.coerce import first_str, to_list, to_mapping, to_str_list
 from ._framework_timeline import (
     AuthoredAttempt,
     ProposalStep,
@@ -60,7 +60,7 @@ _AUTHORED_LANE_MAX_ATTEMPTS: int = 3
 def _lever_envs(entry: Mapping[str, Any]) -> dict[str, str]:
     """The environment overrides a config lever carries, keyed by the names the launcher will export."""
     overrides: dict[str, str] = {}
-    for raw_key, value in as_mapping(entry.get("extra_envs")).items():
+    for raw_key, value in to_mapping(entry.get("extra_envs")).items():
         key = str(raw_key).strip()
         if key:
             overrides[key] = str(value)
@@ -124,7 +124,7 @@ def _framework_config_levers_from_done(
     """
     if not isinstance(done_payload, dict):
         return {}
-    proposals = as_entries(done_payload.get("proposal_set"))
+    proposals = to_list(done_payload.get("proposal_set"))
     # A patch deliverable otherwise takes precedence: a lever that merely
     # *accompanies* a patch is not a config-only outcome. ``atomic`` remains the
     # specialist's own way to say the two are inseparable, but it cannot be the
@@ -132,7 +132,7 @@ def _framework_config_levers_from_done(
     # emitted ``atomic: false`` on a lever whose own reason read "required to
     # boot at all once the patch lands". Enablement therefore decides this from
     # the lane it is running, not from the deliverable's self-description.
-    if as_entries(done_payload.get("patches_written")) and not levers_ride_with_patches:
+    if to_list(done_payload.get("patches_written")) and not levers_ride_with_patches:
         proposals = [e for e in proposals if isinstance(e, dict) and e.get("atomic") is True]
     for entry in proposals:
         if not isinstance(entry, dict):
@@ -202,16 +202,16 @@ def _critic_feedback_lines(critic_feedback: Mapping[str, Any] | None) -> list[st
     """The prompt lines that carry a Critic ruling into the re-author round it asked for."""
     if not critic_feedback:
         return []
-    required_evidence = as_texts(critic_feedback.get("required_evidence"))
+    required_evidence = to_str_list(critic_feedback.get("required_evidence"))
     lines = [
         "",
         "PRIOR CRITIC FEEDBACK (re-author round — supply the evidence below this round):",
         *(f"  • required evidence: {ev}" for ev in required_evidence[:10]),
     ]
-    advice = as_text(critic_feedback.get("advice_text")).strip()
+    advice = first_str(critic_feedback.get("advice_text")).strip()
     if advice:
         lines.append(f"- advice: {advice}")
-    risks = as_texts(critic_feedback.get("risks"))
+    risks = to_str_list(critic_feedback.get("risks"))
     if risks:
         lines.append("- risks: " + "; ".join(risks[:6]))
     return lines
@@ -219,7 +219,7 @@ def _critic_feedback_lines(critic_feedback: Mapping[str, Any] | None) -> list[st
 
 def _empty_outcome_status(audit: Mapping[str, Any]) -> str:
     """The terminal status a patchless authoring round earns, from the audit's reading of the upstream change."""
-    semantic = as_text(audit.get("semantic_status")).strip().lower()
+    semantic = first_str(audit.get("semantic_status")).strip().lower()
     if semantic in ("already_equivalent", "already_superset"):
         return "already_present"
     if semantic in ("not_present", "partially_present"):
@@ -233,7 +233,7 @@ def _asks_only_for_a_targeted_build(
 ) -> bool:
     """Whether a deliverable asks for a targeted build and carries nothing else a round could apply and bench."""
     return bool(
-        as_mapping(done_payload.get("needs_targeted_build"))
+        to_mapping(done_payload.get("needs_targeted_build"))
         and not config_levers
         and not done_payload.get("setup_commands")
         and not done_payload.get("artifacts_written")
@@ -909,11 +909,11 @@ class FrameworkPhase(ProposalBench):
         """Dispatch a write-capable specialist seeded with ``candidate`` (flows through autosubmit → Critic → integrate_patch → bench → KEEP/REVERT)."""
         state = self.shared_state
         cand_id = self._framework_candidate_key(candidate)
-        batch_id = as_text(candidate.get("batch_id"))
-        gap_cid = as_text(candidate.get("gap_canonical_id")).strip() or f"gap.framework.{cand_id}"
-        title = as_text(candidate.get("title")).strip()
-        pr_url = as_text(candidate.get("pr_url")).strip()
-        diff_url = as_text(candidate.get("diff_url")).strip()
+        batch_id = first_str(candidate.get("batch_id"))
+        gap_cid = first_str(candidate.get("gap_canonical_id")).strip() or f"gap.framework.{cand_id}"
+        title = first_str(candidate.get("title")).strip()
+        pr_url = first_str(candidate.get("pr_url")).strip()
+        diff_url = first_str(candidate.get("diff_url")).strip()
         notes_lines = [
             *self._framework_agent_audit_seed_lines(audit),
             *_critic_feedback_lines(critic_feedback),
@@ -924,7 +924,7 @@ class FrameworkPhase(ProposalBench):
             "gap_canonical_id": gap_cid,
             "gap_symptom": (title or f"Author a framework source patch inspired by {pr_url or cand_id}"),
             "gap_layer": "framework",
-            "framework": (as_text(candidate.get("framework")) or str(state.framework or "")).strip().lower(),
+            "framework": (first_str(candidate.get("framework")) or str(state.framework or "")).strip().lower(),
             "task_kind": "framework_authoring",
             "source_phase": "FRAMEWORK_AGENT",
             "pr_lead": {"title": title, "url": pr_url, "diff_url": diff_url},
@@ -963,7 +963,7 @@ class FrameworkPhase(ProposalBench):
             spec_tid,
             role="authoring",
             status="dispatched",
-            domain=as_text(params.get("domain")),
+            domain=first_str(params.get("domain")),
             gap_canonical_id=gap_cid,
             parallelism=len(lanes or ()),
         )
@@ -1005,20 +1005,20 @@ class FrameworkPhase(ProposalBench):
         """
         if not isinstance(res, dict):
             return
-        lane = as_text(res.get("lane"))
+        lane = first_str(res.get("lane"))
 
         if lane == "enablement" or res.get("enablement"):
             await self._coord.enablement_lane.maybe_rearm_enablement(res)
             return
 
-        if as_text(res.get("status")) != "apply_failed":
+        if first_str(res.get("status")) != "apply_failed":
             # Non-apply-failed perf-lane results go through the writeback path.
             return
         if lane not in ("perf_framework", "perf_explore"):
             return
 
-        candidate = as_mapping(res.get("candidate"))
-        cand_id = self._framework_candidate_key(candidate) or as_text(res.get("specialist_task_id")).strip()
+        candidate = to_mapping(res.get("candidate"))
+        cand_id = self._framework_candidate_key(candidate) or first_str(res.get("specialist_task_id")).strip()
         if not cand_id:
             return
 
@@ -1030,7 +1030,7 @@ class FrameworkPhase(ProposalBench):
             attempt,
             _AUTHORED_LANE_MAX_ATTEMPTS,
         )
-        batch_id = as_text(candidate.get("batch_id")) or as_text(res.get("batch_id"))
+        batch_id = first_str(candidate.get("batch_id")) or first_str(res.get("batch_id"))
         if attempt > _AUTHORED_LANE_MAX_ATTEMPTS:
             self._stamp_framework_progress(
                 ProgressStamp(
@@ -1071,13 +1071,13 @@ class FrameworkPhase(ProposalBench):
         retry_ctx: dict[str, Any] = {
             "cand_id": cand_id,
             "batch_id": batch_id,
-            "lane": as_text(res.get("lane")),
+            "lane": first_str(res.get("lane")),
             "attempt": attempt,
-            "retry_feedback": as_entries(res.get("retry_feedback")),
-            "candidate": as_mapping(res.get("candidate")),
-            "specialist_task_id": as_text(res.get("specialist_task_id")),
+            "retry_feedback": to_list(res.get("retry_feedback")),
+            "candidate": to_mapping(res.get("candidate")),
+            "specialist_task_id": first_str(res.get("specialist_task_id")),
         }
-        vetting_drops = as_entries(res.get("patches_ungrounded"))
+        vetting_drops = to_str_list(res.get("patches_ungrounded"))
         if vetting_drops:
             retry_ctx["vetting_drops"] = [str(d) for d in vetting_drops[:8]]
         pending = state.apply_fail_retry_pending
@@ -1115,7 +1115,7 @@ class FrameworkPhase(ProposalBench):
         if not specialist_task_id:
             return {}
         try:
-            return params_of(await self.tasks.get(specialist_task_id))
+            return to_mapping(getattr(await self.tasks.get(specialist_task_id), "params", None))
         except TaskNotFound:
             return {}
 
@@ -1139,7 +1139,7 @@ class FrameworkPhase(ProposalBench):
         spec_params = await self._specialist_params(specialist_task_id)
         new_task_id = await self._enqueue_framework_agent_authoring_specialist(
             candidate,
-            audit=as_mapping(spec_params.get("framework_audit")),
+            audit=to_mapping(spec_params.get("framework_audit")),
             reauthor_attempt=attempt,
             critic_feedback={"advice_text": "\n".join(feedback_lines)} if feedback_lines else None,
         )
@@ -1161,18 +1161,19 @@ class FrameworkPhase(ProposalBench):
         """Re-author an apply-failed explore patch from the worktree its first specialist left behind."""
         spec_params = await self._specialist_params(specialist_task_id)
         gap_cid = (
-            as_text(spec_params.get("gap_canonical_id")).strip()
+            first_str(spec_params.get("gap_canonical_id")).strip()
             or f"gap.explore.retry.{specialist_task_id or 'unknown'}"
         )
         framework_name = (
-            (as_text(spec_params.get("framework")) or str(self.shared_state.framework or "")).strip().lower()
+            (first_str(spec_params.get("framework")) or str(self.shared_state.framework or "")).strip().lower()
         )
         params: dict[str, Any] = {
             "domain": "serving_specialist",
             "source_phase": "FRAMEWORK_AGENT",
             "lever_kind": LEVER_SOURCE_PATCH,
             "gap_canonical_id": gap_cid,
-            "gap_symptom": as_text(spec_params.get("gap_symptom")).strip() or f"Retry apply-failed patch for {gap_cid}",
+            "gap_symptom": first_str(spec_params.get("gap_symptom")).strip()
+            or f"Retry apply-failed patch for {gap_cid}",
             "gap_layer": "perf_explore",
             "framework": framework_name,
             "task_kind": "explore_apply_retry",
@@ -1193,7 +1194,7 @@ class FrameworkPhase(ProposalBench):
             lease_ttl_sec=ttl,
             dispatch_class="coordinator",
         )
-        new_tid = task_id_of(spec_task)
+        new_tid = first_str(getattr(spec_task, "task_id", ""))
         log.info(
             "AUTHORED_LANE: dispatched perf_explore retry specialist gap=%s attempt=%d task=%s",
             gap_cid,
@@ -1214,15 +1215,15 @@ class FrameworkPhase(ProposalBench):
         for ctx in to_dispatch:
             if not isinstance(ctx, dict):
                 continue
-            vetting_drops = as_entries(ctx.get("vetting_drops"))
+            vetting_drops = to_str_list(ctx.get("vetting_drops"))
             await self._enqueue_author_specialist(
                 AuthoringRetry(
-                    lane=as_text(ctx.get("lane")),
-                    candidate=as_mapping(ctx.get("candidate")),
-                    batch_id=as_text(ctx.get("batch_id")),
-                    specialist_task_id=as_text(ctx.get("specialist_task_id")),
+                    lane=first_str(ctx.get("lane")),
+                    candidate=to_mapping(ctx.get("candidate")),
+                    batch_id=first_str(ctx.get("batch_id")),
+                    specialist_task_id=first_str(ctx.get("specialist_task_id")),
                     attempt=int(ctx.get("attempt") or 1),
-                    retry_feedback=as_entries(ctx.get("retry_feedback")),
+                    retry_feedback=to_list(ctx.get("retry_feedback")),
                     vetting_drops=vetting_drops or None,
                 )
             )
@@ -1357,8 +1358,8 @@ class FrameworkPhase(ProposalBench):
         """Dispatch a candidate-free authoring specialist (no upstream PR lead)."""
         state = self.shared_state
         cand_id = self._framework_candidate_key(candidate) or self._next_local_explore_candidate_id()
-        gap = as_text(candidate.get("gap_description")).strip()
-        gap_cid = as_text(candidate.get("gap_canonical_id")).strip() or f"gap.framework.local_explore.{cand_id}"
+        gap = first_str(candidate.get("gap_description")).strip()
+        gap_cid = first_str(candidate.get("gap_canonical_id")).strip() or f"gap.framework.local_explore.{cand_id}"
         domain = self._authoring_specialist_domain()
         notes = ""
         if domain == "framework_rewrite_specialist":
@@ -1380,7 +1381,7 @@ class FrameworkPhase(ProposalBench):
             # No ``lever_kind``: this arm names a gap, not a lever, and its specialist returns either.
             "gap_symptom": (gap or "Author a framework source patch from live source + profile evidence"),
             "gap_layer": "framework",
-            "framework": (as_text(candidate.get("framework")) or str(state.framework or "")).strip().lower(),
+            "framework": (first_str(candidate.get("framework")) or str(state.framework or "")).strip().lower(),
             "task_kind": "framework_local_explore",
             "prior_attempts": self._prior_framework_attempts(),
             "notes": notes,
@@ -1396,7 +1397,7 @@ class FrameworkPhase(ProposalBench):
         self._record_local_explore_proposal(
             cand_id,
             params,
-            title=as_text(candidate.get("title")) or cand_id,
+            title=first_str(candidate.get("title")) or cand_id,
             reason=reason,
         )
         await self._coord.specialist_dispatch.warm_specialist_params(params)
@@ -1404,7 +1405,7 @@ class FrameworkPhase(ProposalBench):
         if spec_task is None:
             return ""
         if spec_existing and await self._settle_finished_authoring_specialist(
-            spec_task, cand_id=cand_id, batch_id=as_text(candidate.get("batch_id")), label="local-explore"
+            spec_task, cand_id=cand_id, batch_id=first_str(candidate.get("batch_id")), label="local-explore"
         ):
             return ""
         spec_tid = self._map_authoring_specialist(spec_task, cand_id=cand_id, label="local-explore")
@@ -1422,7 +1423,7 @@ class FrameworkPhase(ProposalBench):
         settled = sum(
             1
             for row in rows
-            if isinstance(row, dict) and as_text(row.get("candidate_id")).startswith(LOCAL_EXPLORE_CANDIDATE_PREFIX)
+            if isinstance(row, dict) and first_str(row.get("candidate_id")).startswith(LOCAL_EXPLORE_CANDIDATE_PREFIX)
         )
         return f"{LOCAL_EXPLORE_CANDIDATE_PREFIX}{settled}"
 
@@ -1431,8 +1432,8 @@ class FrameworkPhase(ProposalBench):
         memory = self._build_framework_working_memory()
         return [
             row
-            for row in as_entries(memory.get("tried_and_why"))
-            if isinstance(row, dict) and as_text(row.get("ref")).strip()
+            for row in to_list(memory.get("tried_and_why"))
+            if isinstance(row, dict) and first_str(row.get("ref")).strip()
         ]
 
     def _record_local_explore_proposal(
@@ -1709,7 +1710,7 @@ class FrameworkPhase(ProposalBench):
     ) -> None:
         """Submit a FRAMEWORK candidate as a normal ``proposal`` for async Critic review."""
         cand_id = self._framework_candidate_key(candidate)
-        batch_id = as_text(candidate.get("batch_id"))
+        batch_id = first_str(candidate.get("batch_id"))
         if self._review_already_pending(cand_id):
             return
         if cand_id and not self._charge_review_submission(cand_id, batch_id):
@@ -1774,7 +1775,7 @@ class FrameworkPhase(ProposalBench):
         for proposal in self.state.pending_proposals.values():
             if getattr(proposal, "action_name", "") != "integrate_patch":
                 continue
-            if as_text(payload_of(proposal).get("framework_agent_candidate_id")) == cand_id:
+            if first_str(to_mapping(getattr(proposal, "payload", None)).get("framework_agent_candidate_id")) == cand_id:
                 return True
         return False
 
@@ -1946,8 +1947,10 @@ class FrameworkPhase(ProposalBench):
         cand_id = self._framework_candidate_key(target.candidate)
         if not cand_id:
             return
-        batch_id = as_text(target.candidate.get("batch_id")) or as_text(payload_of(pending).get("batch_id"))
-        required_evidence = as_texts(advisory.get("required_evidence"))
+        batch_id = first_str(target.candidate.get("batch_id")) or first_str(
+            to_mapping(getattr(pending, "payload", None)).get("batch_id")
+        )
+        required_evidence = to_str_list(advisory.get("required_evidence"))
         if not required_evidence:
             # needs_review with nothing to act on: no re-author is possible, so this is terminal for the candidate.
             self._stamp_framework_progress(
@@ -1955,7 +1958,7 @@ class FrameworkPhase(ProposalBench):
                     candidate_id=cand_id,
                     batch_id=batch_id,
                     status="needs_review_no_evidence",
-                    rationale=as_text(advisory.get("advice_text"))[:500],
+                    rationale=first_str(advisory.get("advice_text"))[:500],
                     provenance="critic",
                 )
             )
@@ -1978,8 +1981,8 @@ class FrameworkPhase(ProposalBench):
             reauthor_attempt=attempt,
             critic_feedback={
                 "required_evidence": required_evidence,
-                "advice_text": as_text(advisory.get("advice_text")),
-                "risks": as_texts(advisory.get("risks")),
+                "advice_text": first_str(advisory.get("advice_text")),
+                "risks": to_str_list(advisory.get("risks")),
             },
         )
         try:
@@ -2008,27 +2011,28 @@ class FrameworkPhase(ProposalBench):
         """The candidate a needs_review ruling sends back, rebuilt from its authoring specialist when the proposal carries only a reference."""
         if str(getattr(pending, "action_name", "") or "") != "integrate_patch":
             return None
-        payload = payload_of(pending)
+        payload = to_mapping(getattr(pending, "payload", None))
         if payload.get("framework_agent_candidate_id"):
             return ReauthorTarget(
-                candidate=as_mapping(payload.get("candidate")),
-                audit=as_mapping(payload.get("audit")),
+                candidate=to_mapping(payload.get("candidate")),
+                audit=to_mapping(payload.get("audit")),
             )
-        params = as_mapping(payload.get("params"))
+        params = to_mapping(payload.get("params"))
         if not bool(params.get("framework_agent_authoring")):
             return None
-        sid = as_text(params.get("specialist_task_id")).strip()
+        sid = first_str(params.get("specialist_task_id")).strip()
         spec_params = await self._specialist_params(sid)
         return ReauthorTarget(
             candidate={
-                "candidate_id": as_text(params.get("framework_agent_candidate_id"))
-                or as_text(spec_params.get("framework_agent_candidate_id")),
-                "batch_id": as_text(params.get("framework_batch_id")) or as_text(spec_params.get("framework_batch_id")),
-                "title": as_text(spec_params.get("gap_symptom")),
-                "framework": as_text(spec_params.get("framework")),
-                "gap_canonical_id": as_text(spec_params.get("gap_canonical_id")),
+                "candidate_id": first_str(params.get("framework_agent_candidate_id"))
+                or first_str(spec_params.get("framework_agent_candidate_id")),
+                "batch_id": first_str(params.get("framework_batch_id"))
+                or first_str(spec_params.get("framework_batch_id")),
+                "title": first_str(spec_params.get("gap_symptom")),
+                "framework": first_str(spec_params.get("framework")),
+                "gap_canonical_id": first_str(spec_params.get("gap_canonical_id")),
             },
-            audit=as_mapping(spec_params.get("framework_audit")),
+            audit=to_mapping(spec_params.get("framework_audit")),
             specialist_task_id=sid,
         )
 
@@ -2037,7 +2041,7 @@ class FrameworkPhase(ProposalBench):
         for task in (*await self.tasks.queued(), *await self.tasks.running()):
             if getattr(task, "kind", "") != "integrate_patch":
                 continue
-            if as_text(params_of(task).get("framework_agent_candidate_id")) == cand_id:
+            if first_str(to_mapping(getattr(task, "params", None)).get("framework_agent_candidate_id")) == cand_id:
                 return True
         return False
 
@@ -2113,13 +2117,13 @@ class FrameworkPhase(ProposalBench):
         statuses and lane-owned ``apply_failed`` retries are skipped). The row is ``kept``
         only when the patch was adopted.
         """
-        params = params_of(task)
+        params = to_mapping(getattr(task, "params", None))
         if not bool(params.get("framework_agent_authoring")):
             return
         res = result if isinstance(result, dict) else getattr(result, "result", None)
         if not isinstance(res, dict):
             return
-        status = as_text(res.get("status"))
+        status = first_str(res.get("status"))
         # Record EVERY terminal integrate_patch outcome — not just keep/revert.
         if not status:
             return
@@ -2127,9 +2131,9 @@ class FrameworkPhase(ProposalBench):
         # stamp a terminal row at the cap).
         if status == "apply_failed" and res.get("lane") in ("perf_framework", "perf_explore"):
             return
-        spec_tid = as_text(params.get("specialist_task_id"))
+        spec_tid = first_str(params.get("specialist_task_id"))
         cand_id = self._authored_candidate_id(task, params)
-        batch_id = as_text(params.get("framework_batch_id")) or self._latest_batch_id()
+        batch_id = first_str(params.get("framework_batch_id")) or self._latest_batch_id()
         delta_pct = res.get("delta_pct")
         new_tput = res.get("output_throughput")
         gain = float(delta_pct) if isinstance(delta_pct, (int, float)) else 0.0
@@ -2141,7 +2145,7 @@ class FrameworkPhase(ProposalBench):
                 batch_id=batch_id,
                 status=status,
                 kept=adopted,
-                rationale=as_text(res.get("reason")),
+                rationale=first_str(res.get("reason")),
                 provenance="authored",
                 gain_pct=gain,
                 extra={
@@ -2151,7 +2155,7 @@ class FrameworkPhase(ProposalBench):
                     "post_tput": float(new_tput) if isinstance(new_tput, (int, float)) else 0.0,
                     "accuracy_pass": res.get("accuracy_pass"),
                     "specialist_task_id": spec_tid,
-                    "integrate_task_id": task_id_of(task),
+                    "integrate_task_id": first_str(getattr(task, "task_id", "")),
                     "reauthor_attempt": res.get("reauthor_attempt", params.get("reauthor_attempt")),
                 },
             )
@@ -2161,15 +2165,15 @@ class FrameworkPhase(ProposalBench):
         evidence = {**res, **params}  # A lever the dispatch named outranks the one the deliverable names.
         row = AttemptRow(
             lever_kind=patch_lever_kind(evidence),
-            task_id=task_id_of(task),
-            candidate_id=as_text(evidence.get("framework_agent_candidate_id")),
+            task_id=first_str(getattr(task, "task_id", "")),
+            candidate_id=first_str(evidence.get("framework_agent_candidate_id")),
             specialist_task_id=spec_tid,
             outcome=status,
             adopted=adopted,
             gain_pct=delta_pct,
             before_tput=res.get("base_tput") if res.get("base_tput") is not None else params.get("base_tput"),
             after_tput=new_tput,
-            error_class=as_text(res.get("error_class")),
+            error_class=first_str(res.get("error_class")),
         )
         record_attempt_row(self.shared_state, row)
         _record_source_attempt(
@@ -2190,10 +2194,15 @@ class FrameworkPhase(ProposalBench):
 
     def _authored_candidate_id(self, task: "Task", params: Mapping[str, Any]) -> str:
         """The FRAMEWORK candidate (a PR URL) an authored patch belongs to, through whichever marker survived dispatch."""
-        spec_tid = as_text(params.get("specialist_task_id"))
+        spec_tid = first_str(params.get("specialist_task_id"))
         cand_map = self.shared_state.framework_agent_specialist_candidate_map
-        mapped = as_text(cand_map.get(spec_tid)) if isinstance(cand_map, dict) else ""
-        return as_text(params.get("framework_agent_candidate_id")) or mapped or spec_tid or task_id_of(task)
+        mapped = first_str(cand_map.get(spec_tid)) if isinstance(cand_map, dict) else ""
+        return (
+            first_str(params.get("framework_agent_candidate_id"))
+            or mapped
+            or spec_tid
+            or first_str(getattr(task, "task_id", ""))
+        )
 
     def _latest_batch_id(self) -> str:
         """The id of the most recent discovery batch, which an outcome with no batch of its own is attributed to."""
@@ -2201,7 +2210,7 @@ class FrameworkPhase(ProposalBench):
         if not isinstance(batches, list) or not batches:
             return ""
         latest = batches[-1]
-        return as_text(latest.get("batch_id")) if isinstance(latest, dict) else ""
+        return first_str(latest.get("batch_id")) if isinstance(latest, dict) else ""
 
     def _clear_superseded_progress(self, cand_id: str) -> bool:
         """Drop this candidate's non-adopted rows; ``False`` once an adoption has already had the last word.
@@ -2228,8 +2237,8 @@ class FrameworkPhase(ProposalBench):
         specialist_task: "Task",
     ) -> bool:
         """Recover a missed authoring outcome from persisted delegated results."""
-        specialist_task_id = task_id_of(specialist_task)
-        cand_id = as_text(params_of(specialist_task).get("framework_agent_candidate_id"))
+        specialist_task_id = first_str(getattr(specialist_task, "task_id", ""))
+        cand_id = first_str(to_mapping(getattr(specialist_task, "params", None)).get("framework_agent_candidate_id"))
         if not specialist_task_id or not cand_id:
             return False
         messages = await self.bus.tail(n=10000, topic="delegated_result")
@@ -2240,15 +2249,18 @@ class FrameworkPhase(ProposalBench):
 
     def _replay_specialist_deliverable(self, specialist_task: "Task", messages: Iterable[Any]) -> None:
         """Record the authoring round's own deliverable from the first bus entry that carries it."""
-        specialist_task_id = task_id_of(specialist_task)
+        specialist_task_id = first_str(getattr(specialist_task, "task_id", ""))
         for message in messages:
-            payload = payload_of(message)
-            if as_text(payload.get("task_id")) != specialist_task_id or as_text(payload.get("kind")) != "specialist":
+            payload = to_mapping(getattr(message, "payload", None))
+            if (
+                first_str(payload.get("task_id")) != specialist_task_id
+                or first_str(payload.get("kind")) != "specialist"
+            ):
                 continue
-            done_payload = as_mapping(payload.get("result")).get("specialist_done")
+            done_payload = to_mapping(payload.get("result")).get("specialist_done")
             # A run that failed before delivering carries its error on the bus entry rather than in the result, and
             # must reach the recorder for the same reason it does on the live path.
-            run_error = as_text(payload.get("error"))
+            run_error = first_str(payload.get("error"))
             if isinstance(done_payload, dict) or run_error:
                 self._record_framework_agent_authoring_empty_outcome(
                     task=specialist_task,
@@ -2265,18 +2277,18 @@ class FrameworkPhase(ProposalBench):
     ) -> bool:
         """Record the authored patches this specialist's integrate rounds produced; ``True`` once the candidate settles."""
         for message in messages:
-            payload = payload_of(message)
-            if as_text(payload.get("kind")) != "integrate_patch":
+            payload = to_mapping(getattr(message, "payload", None))
+            if first_str(payload.get("kind")) != "integrate_patch":
                 continue
-            task_id = as_text(payload.get("task_id"))
+            task_id = first_str(payload.get("task_id"))
             if not task_id:
                 continue
             try:
                 integrate_task = await self.tasks.get(task_id)
             except TaskNotFound:
                 continue
-            integrate_params = params_of(integrate_task)
-            if as_text(integrate_params.get("specialist_task_id")) != specialist_task_id or not bool(
+            integrate_params = to_mapping(getattr(integrate_task, "params", None))
+            if first_str(integrate_params.get("specialist_task_id")) != specialist_task_id or not bool(
                 integrate_params.get("framework_agent_authoring")
             ):
                 continue
@@ -2284,7 +2296,7 @@ class FrameworkPhase(ProposalBench):
             # lift wrote for this task is the durable record of the adoption.
             self._record_framework_agent_authored_outcome(
                 task=integrate_task,
-                result=as_mapping(payload.get("result")),
+                result=to_mapping(payload.get("result")),
                 adopted=self._stack_holds_task(task_id),
             )
             if cand_id in self._framework_processed_candidate_keys():
@@ -2294,7 +2306,7 @@ class FrameworkPhase(ProposalBench):
     def _stack_holds_task(self, task_id: str) -> bool:
         """Whether the optimization stack carries an entry this task's lift wrote, the durable record of an adoption."""
         return any(
-            isinstance(entry, dict) and as_text(entry.get("task_id")) == task_id
+            isinstance(entry, dict) and first_str(entry.get("task_id")) == task_id
             for entry in (self.shared_state.optimization_stack or [])
         )
 
@@ -2339,7 +2351,7 @@ class FrameworkPhase(ProposalBench):
         run_error: str = "",
     ) -> None:
         """Record a terminal FRAMEWORK row when an authoring specialist finishes WITHOUT a patch."""
-        params = params_of(task)
+        params = to_mapping(getattr(task, "params", None))
         if not bool(params.get("framework_agent_authoring")):
             return
         payload = done_payload if isinstance(done_payload, dict) else {}
@@ -2352,21 +2364,21 @@ class FrameworkPhase(ProposalBench):
         inner = nested if isinstance(nested, dict) else payload
         if self._routes_to_integrate_patch(task, inner):
             return
-        cand_id = as_text(params.get("framework_agent_candidate_id"))
+        cand_id = first_str(params.get("framework_agent_candidate_id"))
         if not cand_id:
             return
-        batch_id = as_text(params.get("framework_batch_id"))
-        status = _empty_outcome_status(as_mapping(params.get("framework_audit")))
+        batch_id = first_str(params.get("framework_batch_id"))
+        status = _empty_outcome_status(to_mapping(params.get("framework_audit")))
         recorded = self._stamp_framework_progress(
             ProgressStamp(
                 candidate_id=cand_id,
                 batch_id=batch_id,
                 status=status,
-                rationale=as_text(inner.get("summary")).strip()[:500],
+                rationale=first_str(inner.get("summary")).strip()[:500],
                 provenance="authored_empty",
                 gain_pct=0.0,
                 extra={
-                    "specialist_task_id": task_id_of(task),
+                    "specialist_task_id": first_str(getattr(task, "task_id", "")),
                     "reauthor_attempt": params.get("reauthor_attempt"),
                 },
             )
@@ -2387,14 +2399,14 @@ class FrameworkPhase(ProposalBench):
         ones: ``patches_written`` surviving safety vetting, a config-lever
         ``proposal_set``, and a non-diff tuned artifact whose source file exists.
         """
-        if as_entries(deliverable.get("patches_written")):
+        if to_list(deliverable.get("patches_written")):
             return True
         if _framework_config_levers_from_done(deliverable):
             return True
         try:
             from hyperloom.inference_optimizer.session.session_paths import runs_dir
 
-            specialist_id = task_id_of(task)
+            specialist_id = first_str(getattr(task, "task_id", ""))
             if self.session_dir is None or not specialist_id:
                 return False
             spec_root = runs_dir(Path(self.session_dir), "specialist", specialist_id)
@@ -2535,14 +2547,14 @@ class FrameworkPhase(ProposalBench):
         for entry in proposals:
             if not isinstance(entry, dict):
                 continue
-            verdict = as_text(entry.get("verdict")).strip().lower()
+            verdict = first_str(entry.get("verdict")).strip().lower()
             if verdict in {"already_present", "not_applicable"}:
                 continue
-            pr_url = as_text(entry.get("pr_url"), entry.get("url")).strip()
-            head_sha = as_text(entry.get("head_sha")).strip()
+            pr_url = first_str(entry.get("pr_url"), entry.get("url")).strip()
+            head_sha = first_str(entry.get("head_sha")).strip()
             if not pr_url and not head_sha:
                 continue
-            framework = as_text(entry.get("framework")).strip().lower()
+            framework = first_str(entry.get("framework")).strip().lower()
             if framework and not framework_registry.is_supported(framework):
                 log.warning(
                     "FRAMEWORK: dropping discovery proposal %s: framework=%r is not registered",
@@ -2554,21 +2566,21 @@ class FrameworkPhase(ProposalBench):
                 "pr_url": pr_url,
                 "url": pr_url,
                 "head_sha": head_sha,
-                "title": as_text(entry.get("title")).strip(),
-                "diff_url": as_text(entry.get("diff_url")).strip(),
-                "repo": as_text(entry.get("repo")).strip(),
+                "title": first_str(entry.get("title")).strip(),
+                "diff_url": first_str(entry.get("diff_url")).strip(),
+                "repo": first_str(entry.get("repo")).strip(),
                 "pr_number": entry.get("pr_number"),
-                "ref": as_text(entry.get("ref")).strip(),
+                "ref": first_str(entry.get("ref")).strip(),
                 "framework": framework,
-                "changed_files": as_entries(entry.get("changed_files")),
-                "gap_canonical_id": as_text(entry.get("gap_canonical_id")).strip(),
-                "gap_keywords": as_entries(entry.get("gap_keywords")),
-                "reasoning": as_text(entry.get("reasoning"), entry.get("rationale"), entry.get("why")).strip(),
-                "route": (as_text(entry.get("route")) or "author_via_specialist").strip(),
+                "changed_files": to_str_list(entry.get("changed_files")),
+                "gap_canonical_id": first_str(entry.get("gap_canonical_id")).strip(),
+                "gap_keywords": to_str_list(entry.get("gap_keywords")),
+                "reasoning": first_str(entry.get("reasoning"), entry.get("rationale"), entry.get("why")).strip(),
+                "route": (first_str(entry.get("route")) or "author_via_specialist").strip(),
                 "audit": {
                     "verdict": verdict,
-                    "reason": as_text(entry.get("reason")).strip(),
-                    "recommended_next_step": as_text(entry.get("route")).strip(),
+                    "reason": first_str(entry.get("reason")).strip(),
+                    "recommended_next_step": first_str(entry.get("route")).strip(),
                 },
             }
             key = self._framework_candidate_key(cand)
@@ -2667,8 +2679,8 @@ class FrameworkPhase(ProposalBench):
             done_payload: The specialist done payload carrying
                 ``patches_written`` and proposal metadata.
         """
-        patches = as_entries(done_payload.get("patches_written"))
-        sid = task_id_of(task).strip()
+        patches = to_list(done_payload.get("patches_written"))
+        sid = first_str(getattr(task, "task_id", "")).strip()
         if not sid:
             return
         resolve_bases = self._specialist_file_bases(sid)
@@ -2687,7 +2699,7 @@ class FrameworkPhase(ProposalBench):
                     },
                 )
             return
-        spec_params = params_of(task)
+        spec_params = to_mapping(getattr(task, "params", None))
         deliverable = self._round_deliverable(done_payload, spec_params)
         await self._submit_integrate_review(
             sid,
@@ -2732,8 +2744,8 @@ class FrameworkPhase(ProposalBench):
             done_payload,
             levers_ride_with_patches=is_enablement_round,
         )
-        round_args = as_text(companion_levers.get("extra_server_args"))
-        round_envs = as_mapping(companion_levers.get("extra_envs"))
+        round_args = first_str(companion_levers.get("extra_server_args"))
+        round_envs = to_mapping(companion_levers.get("extra_envs"))
         if is_enablement_round:
             round_args, round_envs = self._with_established_enablement_config(round_args, round_envs)
         deliverable: dict[str, Any] = {}
@@ -2759,10 +2771,10 @@ class FrameworkPhase(ProposalBench):
         round that omits it goes back to a wall an earlier round already cleared.
         """
         established = dict(getattr(self.shared_state.enablement, "accepted_config", None) or {})
-        inherited_envs = {str(k): str(v) for k, v in as_mapping(established.get("extra_envs")).items()}
+        inherited_envs = {str(k): str(v) for k, v in to_mapping(established.get("extra_envs")).items()}
         # This round last, so it overrides an inherited value for the same flag.
         merged_args = dedupe_extra_server_args(
-            merge_server_args(as_text(established.get("extra_server_args")), round_args)
+            merge_server_args(first_str(established.get("extra_server_args")), round_args)
         )
         return merged_args, {**inherited_envs, **round_envs}
 
@@ -2785,11 +2797,11 @@ class FrameworkPhase(ProposalBench):
             task: The completed authoring specialist task.
             done_payload: Its ``specialist_done`` payload.
         """
-        spec_params = params_of(task)
+        spec_params = to_mapping(getattr(task, "params", None))
         if not is_authoring_specialist(spec_params):
             return
         # A patch deliverable is handled by the patch autosubmit bridge.
-        if as_entries(done_payload.get("patches_written")):
+        if to_list(done_payload.get("patches_written")):
             return
         config_levers = _framework_config_levers_from_done(done_payload)
         is_enablement = bool(spec_params.get("enablement"))
@@ -2800,14 +2812,14 @@ class FrameworkPhase(ProposalBench):
         # integrate_patch never reports what its boot did.
         if not config_levers and not is_enablement:
             return
-        sid = task_id_of(task).strip()
+        sid = first_str(getattr(task, "task_id", "")).strip()
         if not sid:
             return
         if config_levers and self._config_lever_known_bad(config_levers):
             return
-        extra_server_args = as_text(config_levers.get("extra_server_args"))
-        extra_envs = as_mapping(config_levers.get("extra_envs"))
-        candidate_id = as_text(spec_params.get("framework_agent_candidate_id"))
+        extra_server_args = first_str(config_levers.get("extra_server_args"))
+        extra_envs = to_mapping(config_levers.get("extra_envs"))
+        candidate_id = first_str(spec_params.get("framework_agent_candidate_id"))
         pending = await self._submit_integrate_review(
             sid,
             spec_params,

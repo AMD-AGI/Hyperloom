@@ -17,8 +17,7 @@ from typing import Any, NamedTuple
 
 from hyperloom.common.env_safety import redact_secret_values
 
-from ._payload import as_entries, as_mapping, as_text, params_of, task_id_of
-from ..actions.executors.integrate_patch import RESULT_BENCHED
+from hyperloom.common.coerce import first_str, to_list, to_mapping, to_str_list
 from ..state.failure_evidence import UNMEASURED_OUTCOMES, classify_failure_attribution
 
 log = _logging.getLogger(__name__)
@@ -51,7 +50,7 @@ def _record_run(coord: Any, task: Any, *, role: str, status: str, **fields: Any)
         ROLE_CONFIG,
     )
 
-    task_id = task if isinstance(task, str) else task_id_of(task)
+    task_id = task if isinstance(task, str) else first_str(getattr(task, "task_id", ""))
     if not task_id:
         return
     fields.setdefault("dispatched_at" if status == "dispatched" else "completed_at", now_iso("seconds"))
@@ -186,8 +185,8 @@ def _record_kb_exposure(recorder: Any, proposal_id: str, params: Mapping[str, An
     The proposal row is an upsert whose lists merge, so a candidate shaped by
     both a discovery and an authoring specialist keeps both reads' refs.
     """
-    read_id = as_text(params.get("kb_read_id"))
-    refs = as_entries(params.get("kb_rendered_refs"))
+    read_id = first_str(params.get("kb_read_id"))
+    refs = to_list(params.get("kb_rendered_refs"))
     if read_id or refs:
         recorder.record_proposal(proposal_id, kb_read_id=read_id, rendered_refs=refs)
 
@@ -202,9 +201,9 @@ class PatchTrail(NamedTuple):
 
 def _patch_trail(result: Mapping[str, Any]) -> PatchTrail:
     """The patches an attempt touched, falling back to the first file it moved when no patch is named."""
-    applied = [str(path) for path in as_entries(result.get("patches_applied")) if str(path)]
-    reverted = [str(path) for path in as_entries(result.get("patches_reverted")) if str(path)]
-    lead = as_text(result.get("source_realized_patch"), result.get("patch_path"))
+    applied = [str(path) for path in to_list(result.get("patches_applied")) if str(path)]
+    reverted = [str(path) for path in to_list(result.get("patches_reverted")) if str(path)]
+    lead = first_str(result.get("source_realized_patch"), result.get("patch_path"))
     if not lead:
         lead = next(iter(applied or reverted), "")
     return PatchTrail(lead=lead, applied=applied, reverted=reverted)
@@ -233,8 +232,8 @@ def _attempt_accuracy(result: Mapping[str, Any]) -> dict[str, Any]:
 
 def _attempt_failure(result: Mapping[str, Any], status: str) -> dict[str, str]:
     """How an attempt failed, and whom the failure is attributed to once it never reached a measurement."""
-    error_class = as_text(result.get("error_class"))
-    error_excerpt = as_text(result.get("error"))[:600]
+    error_class = first_str(result.get("error_class"))
+    error_excerpt = first_str(result.get("error"))[:600]
     attribution = ""
     if status.upper() in UNMEASURED_OUTCOMES:
         attribution = classify_failure_attribution(
@@ -244,6 +243,14 @@ def _attempt_failure(result: Mapping[str, Any], status: str) -> dict[str, str]:
             explicit=result.get("failure_attribution"),
         )
     return {"error_class": error_class, "error_excerpt": error_excerpt, "attribution": attribution}
+
+
+def _attempt_artifacts(result: Mapping[str, Any]) -> dict[str, str]:
+    """Where the attempt's run left what a reader can open: its workspace and its server log."""
+    return {
+        "workspace": first_str(result.get("workspace")),
+        "server_log_path": first_str(result.get("server_log_path")),
+    }
 
 
 def _adoption_basis(accuracy_pass: Any) -> str:
@@ -285,11 +292,13 @@ def _record_attempt_gates(recorder: Any, task_id: str, result: Mapping[str, Any]
                 threshold=result.get("accuracy_reference"),
             ),
         )
-    parity = as_mapping(result.get("switch_off_parity"))
+    parity = to_mapping(result.get("switch_off_parity"))
     if parity.get("ran"):
         recorder.record_attempt_gate(
             task_id,
-            GateVerdict(gate="switch_off_parity", passed=bool(parity.get("ok")), reason=as_text(parity.get("reason"))),
+            GateVerdict(
+                gate="switch_off_parity", passed=bool(parity.get("ok")), reason=first_str(parity.get("reason"))
+            ),
         )
 
 
@@ -321,7 +330,10 @@ def _record_source_attempt(
         return
     from hyperloom.inference_optimizer.breakdown.recorder.framework_event import ARM_SOURCE
 
-    task_id = task_id_of(attempt.task)
+    # Deferred: the executor that writes this key imports the phase layer back.
+    from ..actions.executors.integrate_patch import RESULT_BENCHED
+
+    task_id = first_str(getattr(attempt.task, "task_id", ""))
     if not task_id:
         return
     base = result.get("base_tput") if result.get("base_tput") is not None else params.get("base_tput")
@@ -329,12 +341,12 @@ def _record_source_attempt(
     # Only the executor knows the stack the patch was measured on, since it
     # rebinds onto the live stack top before running; the task's params are the
     # stack as of dispatch. Absent on a row that never reached a measurement.
-    stack = as_mapping(result.get("measured_against"))
+    stack = to_mapping(result.get("measured_against"))
     measured_against = {"measured_against": stack} if stack else {}
     # The levers the deliverable layered onto that stack: the whole change when the specialist returned no patch.
     levers = {"extra_server_args": params.get("extra_server_args"), "extra_envs": params.get("extra_envs")}
     config_delta = {"config_delta": levers} if any(levers.values()) else {}
-    reasoning, reasoning_origin = _source_action_reasoning(params, as_mapping(params.get("candidate")), result)
+    reasoning, reasoning_origin = _source_action_reasoning(params, to_mapping(params.get("candidate")), result)
     trail = _patch_trail(result)
     recorder.record_attempt(
         task_id,
@@ -342,36 +354,31 @@ def _record_source_attempt(
         task_id=task_id,
         proposal_ref=attempt.candidate_id,
         candidate_id=attempt.candidate_id,
-        provenance=as_text(params.get("lever_kind")),
+        provenance=first_str(params.get("lever_kind")),
         outcome=attempt.status,
-        reason=as_text(result.get("reason")),
+        reason=first_str(result.get("reason")),
         reasoning=reasoning,
         reasoning_origin=reasoning_origin,
-        experience_citations=as_entries(params.get("experience_citations")),
-        stage=as_text(result.get("stage")),
-        route=as_text(params.get("audit_step")),
+        experience_citations=to_list(params.get("experience_citations")),
+        stage=first_str(result.get("stage")),
+        route=first_str(params.get("audit_step")),
         patch_source=attempt.specialist_task_id,
         patch_path=trail.lead,
-        fingerprint=as_text(result.get("patch_sha256"), result.get("fingerprint")),
+        fingerprint=first_str(result.get("patch_sha256"), result.get("fingerprint")),
         # An attempt can apply several patches, and which ones landed is
         # not recoverable from the single primary path.
         patches_applied=trail.applied,
         patches_reverted=trail.reverted,
         patch_material=_patch_material(Path(coord._coord.session_dir), [trail.lead, *trail.applied, *trail.reverted]),
-        target_files=as_entries(result.get("target_files")),
-        source_ref=as_text(params.get("framework_agent_candidate_id")) or attempt.candidate_id,
+        target_files=to_list(result.get("target_files")),
+        source_ref=first_str(params.get("framework_agent_candidate_id")) or attempt.candidate_id,
         measurement=_attempt_measurement(result, base),
         accuracy=_attempt_accuracy(result),
         failure=_attempt_failure(result, attempt.status),
-        artifacts={
-            "workspace": as_text(result.get("workspace")),
-            "server_log_path": as_text(result.get("server_log_path")),
-        },
+        artifacts=_attempt_artifacts(result),
         decision=attempt.status,
         adopted=attempt.adopted,
-        # Only the bench-and-gate stage sets this, so an attempt that stopped
-        # earlier -- a patch that would not apply -- is told apart from one that
-        # ran and lost, which no outcome spelling distinguishes.
+        # Only the bench-and-gate stage sets this, so an attempt that stopped earlier tells apart from one that ran.
         benched=bool(result.get(RESULT_BENCHED)),
         validation_basis=_adoption_basis(accuracy_pass) if attempt.adopted else "",
         attribution_eligible=(attempt.adopted and base is not None and result.get("output_throughput") is not None),
@@ -405,9 +412,9 @@ def _record_discovered(coord: Any, task: Any, *, raw: Any, candidates: list[dict
         STEP_PROPOSED,
     )
 
-    run_id = task_id_of(task)
-    discovery_params = params_of(task)
-    domain = as_text(discovery_params.get("domain"))
+    run_id = first_str(getattr(task, "task_id", ""))
+    discovery_params = to_mapping(getattr(task, "params", None))
+    domain = first_str(discovery_params.get("domain"))
     kept = {coord._framework_candidate_key(cand): cand for cand in candidates}
     for cand_id, cand in kept.items():
         if not cand_id:
@@ -419,23 +426,23 @@ def _record_discovered(coord: Any, task: Any, *, raw: Any, candidates: list[dict
             producer=PRODUCER_SPECIALIST,
             producer_ref=domain,
             run_ref=run_id,
-            source_ref=as_text(cand.get("pr_url"), cand.get("head_sha")),
-            repo=as_text(cand.get("repo")),
-            title=as_text(cand.get("title")),
-            reasoning=as_text(cand.get("reasoning"), cand.get("rationale"), cand.get("why")),
-            changed_files=as_entries(cand.get("changed_files")),
-            gap_canonical_id=as_text(cand.get("gap_canonical_id")),
-            route=as_text(cand.get("route")),
-            verdict=as_text(as_mapping(cand.get("audit")).get("verdict")),
+            source_ref=first_str(cand.get("pr_url"), cand.get("head_sha")),
+            repo=first_str(cand.get("repo")),
+            title=first_str(cand.get("title")),
+            reasoning=first_str(cand.get("reasoning"), cand.get("rationale"), cand.get("why")),
+            changed_files=to_str_list(cand.get("changed_files")),
+            gap_canonical_id=first_str(cand.get("gap_canonical_id")),
+            route=first_str(cand.get("route")),
+            verdict=first_str(to_mapping(cand.get("audit")).get("verdict")),
         )
         recorder.record_proposal_step(cand_id, step=STEP_PROPOSED, run_ref=run_id)
     for entry in raw if isinstance(raw, list) else []:
         if not isinstance(entry, dict):
             continue
-        verdict = as_text(entry.get("verdict")).strip().lower()
+        verdict = first_str(entry.get("verdict")).strip().lower()
         if verdict not in {"already_present", "not_applicable"}:
             continue
-        ref = as_text(entry.get("pr_url"), entry.get("url"), entry.get("head_sha")).strip()
+        ref = first_str(entry.get("pr_url"), entry.get("url"), entry.get("head_sha")).strip()
         if not ref or ref in kept:
             continue
         recorder.record_proposal(
@@ -445,8 +452,8 @@ def _record_discovered(coord: Any, task: Any, *, raw: Any, candidates: list[dict
             producer_ref=domain,
             run_ref=run_id,
             source_ref=ref,
-            repo=as_text(entry.get("repo")),
-            title=as_text(entry.get("title")),
+            repo=first_str(entry.get("repo")),
+            title=first_str(entry.get("title")),
             verdict=verdict,
         )
         recorder.settle_proposal(ref, disposition=DISPOSITION_DROPPED, reason=verdict)
