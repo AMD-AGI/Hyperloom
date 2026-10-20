@@ -120,3 +120,37 @@ def test_resolve_quantized_dir_pyyaml_missing(tmp_path: Path, monkeypatch) -> No
     monkeypatch.setattr(builtins, "__import__", fake_import)
     path, present, err = rc._resolve_quantized_dir(tmp_path)
     assert (path, present, err) == (None, True, "pyyaml_missing")
+
+
+async def test_an_attempt_runs_on_the_harness_when_the_platform_names_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hyperloom.common import llm_config
+    from hyperloom.common.agent_sdk_runner import AgentSdkTurnResult
+
+    skill = tmp_path / "SKILL.md"
+    skill.write_text("contract", encoding="utf-8")
+    seen: dict[str, object] = {}
+
+    async def _drive(request, owed=None):
+        seen["request"] = request
+        return AgentSdkTurnResult(text="quantized", error="")
+
+    monkeypatch.setattr(llm_config, "resolve_agent_backend", lambda: llm_config.AGENT_BACKEND_DEEPSEEK)
+    monkeypatch.setattr(runner, "drive_agent_session", _drive)
+    logs: list[str] = []
+
+    result = await runner.run_one_attempt(
+        runner.AttemptContext(user_prompt="quantize", workspace=tmp_path / "ws", quark_root=tmp_path, attempt_number=2),
+        skill_path=skill,
+        model="deepseek-v4-flash",
+        log=logs.append,
+    )
+
+    request = seen["request"]
+    assert request.backend == llm_config.AGENT_BACKEND_DEEPSEEK
+    assert request.cwd == tmp_path / "ws" and request.model == "deepseek-v4-flash"
+    assert request.allowed_tools == runner.DEFAULT_ALLOWED_TOOLS
+    assert request.child_env is not None
+    assert result.raw_text == "quantized" and result.sdk_error == ""
+    assert any("DeepSeek runner" in line and "attempt=2" in line for line in logs)

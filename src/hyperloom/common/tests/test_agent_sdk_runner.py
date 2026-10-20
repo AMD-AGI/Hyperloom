@@ -5,13 +5,15 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from hyperloom.common import agent_sdk_runner
-from hyperloom.common.deepseek_session import DeepSeekSessionResult
+from hyperloom.common.deepseek_session import DeepSeekSessionError, DeepSeekSessionResult
 
 
 class _FakeSession:
@@ -120,3 +122,83 @@ async def test_a_spent_budget_stops_the_continuations(tmp_path: Path, monkeypatc
 
     assert len(_FakeSession.instances[0].prompts) == 1
     assert "budget" in result.error
+
+
+class _ClaudeOptions:
+    """Stand-in for ``ClaudeAgentOptions`` from an SDK build that predates ``cwd``."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        if "cwd" in kwargs:
+            raise TypeError("unexpected keyword argument 'cwd'")
+        self.kwargs = kwargs
+
+
+def _install_claude_sdk(monkeypatch: pytest.MonkeyPatch, replies: list[Any], seen: dict[str, Any]) -> None:
+    async def _query(*, prompt: str, options: _ClaudeOptions):
+        seen["prompt"], seen["options"] = prompt, options
+        for reply in replies:
+            if isinstance(reply, Exception):
+                raise reply
+            yield reply
+
+    monkeypatch.setitem(
+        sys.modules, "claude_agent_sdk", SimpleNamespace(query=_query, ClaudeAgentOptions=_ClaudeOptions)
+    )
+
+
+async def test_a_claude_session_returns_its_text_and_passes_the_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, Any] = {}
+    _install_claude_sdk(monkeypatch, ["first", SimpleNamespace(content=[{"text": "second"}])], seen)
+    logs: list[str] = []
+    request = agent_sdk_runner.AgentSessionRequest(
+        prompt="quantize",
+        system_prompt="sys",
+        cwd=tmp_path,
+        model="claude-opus-5",
+        max_turns=7,
+        allowed_tools=["Read"],
+        child_env={"A": "1"},
+        log=logs.append,
+        backend="claude",
+    )
+
+    result = await agent_sdk_runner.drive_agent_session(request)
+
+    assert result.text == "first\nsecond" and result.error == ""
+    assert seen["prompt"] == "quantize"
+    options = seen["options"].kwargs
+    assert options["model"] == "claude-opus-5" and options["max_turns"] == 7 and options["env"] == {"A": "1"}
+    assert "cwd" not in options
+    assert any("second" in line for line in logs)
+
+
+async def test_a_claude_stream_error_is_the_result_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_claude_sdk(monkeypatch, ["partial", RuntimeError("stream cut")], {})
+    request = agent_sdk_runner.AgentSessionRequest(prompt="p", system_prompt="", cwd=tmp_path, backend="claude")
+
+    result = await agent_sdk_runner.drive_agent_session(request)
+
+    assert result.text == "partial"
+    assert result.error == "RuntimeError: stream cut"
+
+
+async def test_a_missing_claude_sdk_is_named(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(sys.modules, "claude_agent_sdk", SimpleNamespace())
+    request = agent_sdk_runner.AgentSessionRequest(prompt="p", system_prompt="", cwd=tmp_path, backend="claude")
+
+    with pytest.raises(RuntimeError, match="missing query"):
+        await agent_sdk_runner.drive_agent_session(request)
+
+
+async def test_a_harness_session_error_is_the_result_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FailingSession(_FakeSession):
+        async def start(self) -> None:
+            raise DeepSeekSessionError("gateway refused")
+
+    monkeypatch.setattr(agent_sdk_runner, "DeepSeekSession", lambda **kw: _FailingSession(effects=[], **kw))
+
+    result = await _drive(tmp_path, tmp_path / "analysis.md")
+
+    assert result.error == "DeepSeekSessionError: gateway refused"

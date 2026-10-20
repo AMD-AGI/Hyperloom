@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -202,15 +201,9 @@ def _iter_message_text(message: Any) -> Iterable[str]:
     yield from (fragment for fragment in message_text(message) if fragment)
 
 
-def run_agent_session_sync(request: AgentSessionRequest, owed: OwedArtifact | None = None) -> AgentSdkTurnResult:
-    """Synchronous wrapper around :func:`drive_agent_session`."""
-    return asyncio.run(drive_agent_session(request, owed))
-
-
 __all__ = [
     "AgentSdkTurnResult",
     "AgentSessionRequest",
     "OwedArtifact",
     "drive_agent_session",
-    "run_agent_session_sync",
 ]
