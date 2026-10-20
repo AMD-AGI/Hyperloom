@@ -74,14 +74,11 @@ def _dist_teardown(op=None, *, healthy: bool = True) -> None:
     # SIGABRT.
     had_op = op is not None
     if op is not None:
-        try:
-            del op
-        except Exception:  # noqa: BLE001 - best-effort cleanup
-            pass
+        del op
     if healthy and dist.is_initialized():
         try:
             dist.barrier()
-        except Exception:  # noqa: BLE001
+        except RuntimeError:
             pass
     if had_op:
         try:
@@ -93,7 +90,7 @@ def _dist_teardown(op=None, *, healthy: bool = True) -> None:
     if dist.is_initialized():
         try:
             dist.destroy_process_group()
-        except Exception:  # noqa: BLE001
+        except RuntimeError:
             pass
 
 
