@@ -441,13 +441,6 @@ class SpecialistSubprocessConfig:
     model: str = ""
     """Model id for the selected agent CLI. Empty = that CLI's own default."""
 
-    permission_mode: str = "bypassPermissions"
-    """claude-cli ``--permission-mode``.
-
-    A Claude runtime policy only. Worktrees and the tool denylist scope task
-    behavior but are not filesystem containment.
-    """
-
     framework_source_roots: tuple[str, ...] = ()
     """Roots used to seed ``git worktree add`` and as ``--add-dir`` parents.
 
@@ -1339,8 +1332,10 @@ class SpecialistSubprocessDispatcher:
             "--output-format",
             cfg.output_format,
             "--verbose",
+            # Unattended: any mode that prompts stops the Bash heartbeat, and the run is reaped as stale.
+            # Worktrees and the tool denylist scope behaviour but are not filesystem containment.
             "--permission-mode",
-            cfg.permission_mode,
+            "bypassPermissions",
             "--system-prompt-file",
             str(system_prompt_file),
         ]

@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
@@ -129,21 +128,15 @@ def _build_specialist_executor(
         )
         if generated is not None:
             mcp_config_path = str(generated)
-    # This setting controls the Claude runtime only. Codex containment is
-    # resolved independently through the canonical sandbox policy.
-    specialist_permission_mode = os.environ.get("HYPERLOOM_SPECIALIST_PERMISSION_MODE", "").strip()
-    sub_config_kwargs: dict[str, Any] = {
-        "agent_backend": agent_backend,
-        "claude_executable": claude_bin or "claude",
-        "codex_executable": codex_bin,
-        "model": selected_model,
-        "framework_source_roots": framework_source_roots,
-        "mcp_config_path": mcp_config_path,
-    }
-    if specialist_permission_mode:
-        sub_config_kwargs["permission_mode"] = specialist_permission_mode
     runner = SpecialistRunner(
-        subprocess_config=SpecialistSubprocessConfig(**sub_config_kwargs),
+        subprocess_config=SpecialistSubprocessConfig(
+            agent_backend=agent_backend,
+            claude_executable=claude_bin or "claude",
+            codex_executable=codex_bin,
+            model=selected_model,
+            framework_source_roots=framework_source_roots,
+            mcp_config_path=mcp_config_path,
+        ),
         session_dir=session_dir,
         default_max_turns=max_turns,
     )
