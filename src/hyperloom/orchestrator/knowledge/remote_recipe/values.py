@@ -1175,12 +1175,9 @@ def knowledge_to_warm_recipe(document: Mapping[str, Any]) -> dict[str, Any]:
     for ref in raw_patches:
         validate_relative_path(ref)
     session_id = str(document.get("session_id") or "")
-    interactivity_gain = _number(knowledge.get("interactivity_gain_pct"))
-    validated_gain = (
-        interactivity_gain if "interactivity_gain_pct" in knowledge else _number(knowledge.get("validated_e2e_gain"))
-    )
+    validated_gain = _number(knowledge.get("interactivity_gain_pct", knowledge.get("validated_e2e_gain")))
     view = _mapping(document.get("view"))
-    replayable = bool(view.get("replayable")) if isinstance(view.get("replayable"), bool) else True
+    replayable = view.get("replayable") is not False
     row = {
         "canonical_id": str(document.get("canonical_id") or ""),
         "best_throughput": _number(knowledge.get("optimized_throughput")),
