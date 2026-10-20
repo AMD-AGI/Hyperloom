@@ -19,4 +19,4 @@ The following table lists each component with its role, source repository, and d
 | [TraceLens](tracelens.md) | Agentic trace analysis and roofline targets | [AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens) | [TraceLens Docs](https://rocm.docs.amd.com/projects/tracelens/en/latest/) |
 | [GEAK](geak.md) | GPU kernel generation and optimization (Triton, HIP, or FlyDSL) | [AMD-AGI/GEAK](https://github.com/AMD-AGI/GEAK) | [GEAK Docs](https://rocm.docs.amd.com/projects/geak/en/latest/) |
 | [AgentKernelArena](agentkernelarena.md) | Optional standardized evaluation arena for agent benchmarking | [AMD-AGI/AgentKernelArena](https://github.com/AMD-AGI/AgentKernelArena) | [AgentKernelArena Docs](https://rocm.docs.amd.com/projects/agent-kernel-arena/en/latest/) |
-| [SIKL](sikl.md) | Kernel definitions and submitted solutions; the source of `hyperloom sikl` problems | [AMD-AGI/SIKL](https://github.com/AMD-AGI/SIKL) | `harness/` in the SIKL repository |
+| [SIKL](sikl.md) | Kernels served in front of AITER, one schema each; the source of `hyperloom sikl` problems | [AMD-AGI/SIKL](https://github.com/AMD-AGI/SIKL) | `sikl/ops/README.md` in the SIKL repository |

@@ -17,7 +17,7 @@ _COMMANDS: dict[str, tuple[str, tuple[str, ...], str]] = {
     "optimize": (f"{_IO}.cli", ("optimize",), "Run a multi-agent optimization session"),
     "recover": (f"{_IO}.cli", ("recover",), "Rebuild the artifacts of a crashed session"),
     "quantize": ("hyperloom.agents.quantization.cli", (), "Quantize a model with AMD Quark"),
-    "sikl": ("hyperloom.sikl.cli", (), "Optimize one SIKL definition with KernelForge"),
+    "sikl": ("hyperloom.sikl.cli", (), "Optimize the kernel of one SIKL schema with KernelForge"),
     "multi-node": (f"{_IO}.multi_node.cli", (), "Operate the multi-node cluster of a session"),
 }
 
