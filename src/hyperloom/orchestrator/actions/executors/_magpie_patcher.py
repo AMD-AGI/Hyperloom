@@ -344,9 +344,10 @@ def _apply_eval_concurrency_fixes(
 
 
 def client_tokenizer_hook_installed(
+    script_name: str,
+    *,
     magpie_dir: Path | str | None = None,
     inferencex_dir: Path | str | None = None,
-    script_name: str | None = None,
 ) -> bool:
     """Whether the client script this round will run carries the tokenizer-mode hook.
 
@@ -355,16 +356,12 @@ def client_tokenizer_hook_installed(
     live flag survives), and reusing it here would let a missing tokenizer hook
     report success while the client still dies in HF AutoConfig.
 
-    ``script_name`` narrows the question to the one script that matters. Asking
-    it of every sibling instead makes an unrelated shape veto the round: the
-    multimodal variants carry the same ``--result-dir`` marker with a different
-    client call, and judging them would refuse a workload whose own script is
-    fine.
+    Only ``script_name`` is judged. Its siblings -- the multimodal ``*_mm.sh``
+    carry the same ``--result-dir`` marker with a different client call and no
+    hook -- must not veto a workload whose own script is fine.
     """
     for script in _client_scripts(magpie_dir, inferencex_dir):
-        if script_name is not None and script.name != script_name:
-            continue
-        if not _is_client_tokenizer_mode_patched(script):
+        if script.name == script_name and not _is_client_tokenizer_mode_patched(script):
             return False
     # A named script that exists nowhere is not this check's to judge -- the
     # launcher fails on the missing script with a clearer message than this one.
@@ -618,14 +615,6 @@ class MagpiePatchStatus:
     # Whether the redundant ``--concurrent-requests`` eval flag was stripped from every generic benchmark script (or
     # none needed it).
     eval_flag_ok: bool = True
-    # Whether every client script can be told which tokenizer to load. Reported, and
-    # deliberately NOT part of ``ok``: the hook is workload-specific, and a Magpie layout carries
-    # sibling scripts -- the multimodal ``*_mm.sh`` among them -- that lack it. Folding it in failed
-    # install for a layout the run would never touch, over a script the run would never execute. The
-    # hard failure lives where the materialized config names both the model that needs the hook and
-    # the one script that will run it (``BaselineExecutor`` -> ``client_tokenizer_unpatchable``),
-    # which is the only place the two facts are known together.
-    client_tokenizer_ok: bool = True
 
     @property
     def ok(self) -> bool:
@@ -689,7 +678,6 @@ def magpie_scripts_patch_status(
         return MagpiePatchStatus(
             remote_trust_ok=remote_trust_ok,
             eval_flag_ok=eval_flag_ok,
-            client_tokenizer_ok=client_tokenizer_hook_installed(magpie_dir, inferencex_dir),
         )
 
 

@@ -898,8 +898,7 @@ def test_a_native_client_reports_installed(tmp_path):
     scripts = tmp_path / "benchmarks"
     scripts.mkdir()
     (scripts / "vllm_mi355x.sh").write_text(_NATIVE_CLIENT, encoding="utf-8")
-    assert mp.client_tokenizer_hook_installed(None, scripts.parent)
-    assert mp.magpie_scripts_patch_status(None, scripts.parent).client_tokenizer_ok
+    assert mp.client_tokenizer_hook_installed("vllm_mi355x.sh", inferencex_dir=scripts.parent)
 
 
 def test_a_client_without_the_hook_is_reported(tmp_path):
@@ -915,7 +914,7 @@ def test_a_client_without_the_hook_is_reported(tmp_path):
     scripts.mkdir()
     (scripts / "vllm_mi300x.sh").write_text(_GENERIC_CLIENT, encoding="utf-8")
     assert mp.ensure_eval_concurrency_compat(None, scripts.parent)
-    assert not mp.client_tokenizer_hook_installed(None, scripts.parent)
+    assert not mp.client_tokenizer_hook_installed("vllm_mi300x.sh", inferencex_dir=scripts.parent)
 
 
 def _deepseek_v4_config_without_hook(tmp_path):
@@ -957,6 +956,7 @@ def test_a_model_needing_a_named_tokenizer_refuses_an_unpatchable_checkout(tmp_p
     monkeypatch.setattr(bl, "_client_tokenizer_mode", lambda _model: "deepseek_v4")
     res = ex._after_materialize_config(cfg, tmp_path / "out")
     assert res is not None and res.get("error_class") == "client_tokenizer_unpatchable", res
+    assert "1eb3df69de" in res["error"], res
 
 
 def test_the_hook_is_required_even_with_evaluation_disabled(tmp_path, monkeypatch):
@@ -998,9 +998,7 @@ def test_an_unrelated_client_shape_does_not_veto_the_round(tmp_path):
         encoding="utf-8",
     )
 
-    assert mp.client_tokenizer_hook_installed(None, scripts.parent, script_name="vllm_mi300x.sh")
-    # Unscoped, the sibling still vetoes - that is the behaviour being narrowed.
-    assert not mp.client_tokenizer_hook_installed(None, scripts.parent)
+    assert mp.client_tokenizer_hook_installed("vllm_mi300x.sh", inferencex_dir=scripts.parent)
 
 
 def test_naming_an_unpatchable_script_still_refuses(tmp_path):
@@ -1013,7 +1011,7 @@ def test_naming_an_unpatchable_script_still_refuses(tmp_path):
         '#!/usr/bin/env bash\nrun_benchmark_serving --result-dir "$WORKSPACE_DIR/" --drifted\n',
         encoding="utf-8",
     )
-    assert not mp.client_tokenizer_hook_installed(None, scripts.parent, script_name="vllm_mi300x.sh")
+    assert not mp.client_tokenizer_hook_installed("vllm_mi300x.sh", inferencex_dir=scripts.parent)
 
 
 def test_baseline_names_the_script_from_the_config(tmp_path):
@@ -1033,25 +1031,3 @@ def test_baseline_names_the_script_from_the_config(tmp_path):
 
     cfg.write_text(yaml.safe_dump({"benchmark": {}}), encoding="utf-8")
     assert bl.BaselineExecutor._client_script_from_config(cfg) is None
-
-
-def test_an_unfittable_sibling_script_does_not_fail_the_install():
-    """The hook is workload-specific; the install contract is not.
-
-    A Magpie layout carries sibling scripts -- the multimodal ``*_mm.sh`` among
-    them -- whose client shape this hook does not fit and was never meant to.
-    Folding ``client_tokenizer_ok`` into ``ok`` failed installation over a
-    script the run would never execute, on a layout the run would never touch.
-    The status still reports it; the hard failure lives where the config names
-    both the model that needs the hook and the one script that will run it.
-    """
-    from hyperloom.orchestrator.actions.executors._magpie_patcher import MagpiePatchStatus
-
-    status = MagpiePatchStatus(
-        remote_trust_ok=True,
-        eval_flag_ok=True,
-        client_tokenizer_ok=False,
-    )
-
-    assert status.ok is True, "an unfittable sibling must not fail the install"
-    assert status.client_tokenizer_ok is False, "it must still be reported"
