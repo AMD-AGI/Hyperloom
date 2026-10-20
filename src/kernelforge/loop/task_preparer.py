@@ -24,7 +24,7 @@ from kernelforge.llm.git import ensure_commit_identity, git
 from kernelforge.config import Config
 from kernelforge.loop.external_artifacts import ExternalArtifactError, ExternalArtifactTransaction
 from kernelforge.resources import resource_path
-from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
 from kernelforge.loop.task_preflight import DriverContract, PreflightResult, _preflight_async
 from kernelforge.loop.task_preparer_prompts import (
     DRIVER_CONTRACT_SPEC,

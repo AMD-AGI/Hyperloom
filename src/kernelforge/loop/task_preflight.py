@@ -21,11 +21,11 @@ import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from kernelforge.loop.aiter_cache import cleanup_current_owned_aiter_locks
-from kernelforge.loop.profile_contract import PROFILE_RUN_FLAG
-from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
-from kernelforge.mcp_server.tools.bench import BenchRun, bench_wallclock
-from kernelforge.mcp_server.tools.test import test_correctness
+from kernelforge.evaluation.benchmark.runner import BenchRun, bench_wallclock
+from kernelforge.evaluation.correctness.driver import test_correctness
+from kernelforge.evaluation.profiling.contracts import PROFILE_RUN_FLAG
+from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.tools.aiter_cache import cleanup_current_owned_aiter_locks
 
 log = logging.getLogger(__name__)
 

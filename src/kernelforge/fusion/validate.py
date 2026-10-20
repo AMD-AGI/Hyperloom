@@ -53,7 +53,7 @@ from dataclasses import KW_ONLY, dataclass, field
 from pathlib import Path
 from typing import Any, Optional, Protocol, Sequence, runtime_checkable
 
-from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
 
 from .models import Recipe, ValidationResult
 

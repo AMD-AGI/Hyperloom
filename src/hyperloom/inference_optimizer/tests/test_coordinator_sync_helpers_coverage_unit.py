@@ -828,10 +828,10 @@ def test_first_present() -> None:
 
 
 def test_lifecycle_paths() -> None:
-    from hyperloom.orchestrator.loop.intent_router import _lifecycle_paths
+    from hyperloom.orchestrator.loop.kernel_request import lifecycle_paths
 
-    assert _lifecycle_paths("not-a-dict") == {}
-    out = _lifecycle_paths({"patch_path": "/a/p.diff", "workspace": "", "other": "x"})
+    assert lifecycle_paths("not-a-dict") == {}
+    out = lifecycle_paths({"patch_path": "/a/p.diff", "workspace": "", "other": "x"})
     assert out == {"patch_path": "/a/p.diff"}
 
 

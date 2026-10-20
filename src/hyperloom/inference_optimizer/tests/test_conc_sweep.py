@@ -2314,12 +2314,24 @@ def test_single_server_option_a_boot_and_reuse(
     assert last["server_lifecycle"]["cleanup"] is True
 
 
+@pytest.mark.parametrize(
+    ("backend", "boot_envs"),
+    [
+        # Magpie keeps the boot round's envs as the persistent server's reuse identity, so a boot round that sent the
+        # phase would make every round that measures on that server fail its reuse check.
+        ("magpie", {}),
+        ("bypass", {"MAGPIE_RUN_PHASE": "server"}),
+    ],
+)
 def test_single_server_boot_only_is_measured_by_reuse_round(
     session_dir: Path,
     baseline_yaml: Path,
     monkeypatch: pytest.MonkeyPatch,
+    backend: str,
+    boot_envs: dict[str, str],
 ):
     """Booting the persistent server is not a data point; the same CONC must still run as a client round."""
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", backend)
     state = _make_state(baseline_config_path=str(baseline_yaml))
     teardown_log: list[tuple] = []
     _patch_lifecycle_eligible(monkeypatch, teardown_log)
@@ -2361,8 +2373,9 @@ def test_single_server_boot_only_is_measured_by_reuse_round(
     ]
     boot, measured_boot = calls[0], calls[1]
     assert boot["server_already_ready"] is False
-    assert boot["base_extra_envs"] == {"MAGPIE_RUN_PHASE": "server"}
+    assert boot["base_extra_envs"] == boot_envs
     assert measured_boot["server_already_ready"] is True
+    assert measured_boot["base_extra_envs"] == {}
     assert payload["summary"]["successful_pairs"] == 2
 
 

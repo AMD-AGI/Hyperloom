@@ -17,7 +17,7 @@ from typing import Awaitable, Callable
 from kernelforge.agent_backends import AgentRunSpec, watchdog_timeout_sec
 from kernelforge.agent_backends.session_resume import is_api_failure
 from kernelforge.config import Config, resolve_agent_model
-from kernelforge.durable_io import atomic_write_text
+from kernelforge.tools.durable_io import atomic_write_text
 
 log = logging.getLogger(__name__)
 

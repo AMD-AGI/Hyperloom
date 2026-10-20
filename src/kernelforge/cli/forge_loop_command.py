@@ -70,7 +70,7 @@ from kernelforge.loop.recovery import (
     publish_warm_start_recovery,
     rollback_unpublished_warm_start,
 )
-from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB, aggregate_regression_detail
+from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB, aggregate_regression_detail
 from kernelforge.tracker.schema import ExperimentSubject
 
 if TYPE_CHECKING:
@@ -126,7 +126,7 @@ def _make_ceiling_estimator(
     """
 
     async def estimate(*, case_ids: Sequence[str], case_ms: dict[str, float]):
-        from kernelforge.mcp_server.tools.bench import BenchRun, bench_command
+        from kernelforge.evaluation.benchmark.runner import BenchRun, bench_command
         from kernelforge.roofline_ceiling.analyst import AnalystSession, CeilingTask
         from kernelforge.roofline_ceiling.command import resolve_analyst_backend
         from kernelforge.roofline_ceiling.estimate import estimate_ceiling
@@ -1686,7 +1686,7 @@ def forge_loop(request: ForgeLoopRequest):
 
     # AITER cache isolation: give this attempt its own runtime-build cache so parallel forge processes never
     # share/evict each other's kernels.
-    from kernelforge.loop.aiter_cache import (
+    from kernelforge.tools.aiter_cache import (
         activate_aiter_cache_for_sources,
         configure_aiter_cache_isolation,
         seed_prebuilt_modules,

@@ -586,7 +586,6 @@ async def test_revalidation_enqueues_genuine_baseline(tmp_path):
     created = await fake.tasks.get(tid)
     assert created.kind == "baseline"
     assert created.params["config_path"] == "/runs/baseline/materialized.yaml"
-    assert created.params["disable_run_eval"] is False
     assert created.params["enablement_origin"] == "eval"
 
 

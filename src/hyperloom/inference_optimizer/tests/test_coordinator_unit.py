@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.orchestrator.loop.conversation import _first_present, _format_inbox_event
-from hyperloom.orchestrator.loop.intent_router import _lifecycle_paths
+from hyperloom.orchestrator.loop.kernel_request import lifecycle_paths
 from hyperloom.orchestrator.bus.message_bus import Message
 from hyperloom.orchestrator.state.gaps import GapRefreshCollaborator
 
@@ -22,10 +22,10 @@ def test_first_present_non_dict_and_branches():
 
 
 def test_lifecycle_paths_filters_and_types():
-    """``_lifecycle_paths`` only keeps non-empty string values for known keys."""
-    assert _lifecycle_paths(None) == {}
-    assert _lifecycle_paths({"workspace": "  "}) == {}
-    assert _lifecycle_paths({"workspace": "/data/ws", "report_path": "/r.md"}) == {
+    """``lifecycle_paths`` only keeps non-empty string values for known keys."""
+    assert lifecycle_paths(None) == {}
+    assert lifecycle_paths({"workspace": "  "}) == {}
+    assert lifecycle_paths({"workspace": "/data/ws", "report_path": "/r.md"}) == {
         "workspace": "/data/ws",
         "report_path": "/r.md",
     }

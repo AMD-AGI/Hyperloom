@@ -36,6 +36,12 @@ log = _logging.getLogger(__name__)
 __all__ = ["SpecialistDispatchCollaborator"]
 
 _SOURCE_PATCH_FAMILY = "source_patch"
+#: ``(specialist_done key, failure class)`` for what the patch-safety gate dropped at admission: each reaches the
+#: durable failure log, which every SEED turn renders.
+_ADMISSION_DROPS: tuple[tuple[str, str], ...] = (
+    ("patches_ungrounded", "patch_targets_ungrounded"),
+    ("proposals_env_ungrounded", "proposal_env_file_missing"),
+)
 
 #: ``(SharedState field, param key, conversion)`` for the values a specialist is warmed with. The converted value
 #: decides: an empty string, an empty container and a zero are not exported, because an absent key is how the
@@ -875,16 +881,14 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         )
         # Specialist notes reach the prompt only through this task's one inbox
         # line; ``last_action_failures`` is rendered every SEED turn.
-        ungrounded = done_payload.get("patches_ungrounded")
-        if isinstance(ungrounded, list) and ungrounded:
-            self.shared_state.record_action_failure(
-                action="specialist",
-                task_id=task.task_id,
-                result={
-                    "error_class": "patch_targets_ungrounded",
-                    "error": "; ".join(str(d) for d in ungrounded[:4]),
-                },
-            )
+        for dropped_key, error_class in _ADMISSION_DROPS:
+            dropped = done_payload.get(dropped_key)
+            if isinstance(dropped, list) and dropped:
+                self.shared_state.record_action_failure(
+                    action="specialist",
+                    task_id=task.task_id,
+                    result={"error_class": error_class, "error": "; ".join(str(d) for d in dropped[:4])},
+                )
         # Advisory multi-model scoring of the proposal_set; informational only, gates nothing.
         if self._proposal_scorer is not None and proposals:
             scores = await self._proposal_scorer.score(

@@ -25,7 +25,7 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
 # Marker text identifying each phase-scoped prompt module.
 KERNEL_REQUEST_REF = "## 6. KERNEL-OPT REQUEST REFERENCE"
 IDEA_GENERATION = "### IDEA GENERATION"
-BASELINE_FINGERPRINT = "eight params fields"  # now in the reference doc, not in the prompt
+BASELINE_FINGERPRINT = "seven params fields"  # now in the reference doc, not in the prompt
 SPECIALIST_DIALS = "### One specialist, three dials"
 SPECIALIST_WATCH = "### Watching a running specialist"
 SPECIALIST_DOMAIN = "### Choosing specialist domain"
@@ -513,7 +513,7 @@ def test_judge_bundle_to_dict_carries_phase():
 
 
 def test_inject_phase_constraints_delivers_only_the_active_phase():
-    from hyperloom.orchestrator.roles.critic_agent import (
+    from hyperloom.orchestrator.roles._review_constraints import (
         _PHASE_ORIENTATION,
         _inject_phase_constraints,
     )
@@ -529,7 +529,7 @@ def test_inject_phase_constraints_delivers_only_the_active_phase():
 
 def test_inject_phase_constraints_is_a_noop_without_a_phase():
     """Never assert a phase that was not delivered."""
-    from hyperloom.orchestrator.roles.critic_agent import _inject_phase_constraints
+    from hyperloom.orchestrator.roles._review_constraints import _inject_phase_constraints
 
     bundle: dict = {"proposals": []}
     _inject_phase_constraints(bundle, "")

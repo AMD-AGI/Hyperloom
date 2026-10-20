@@ -34,7 +34,7 @@ from kernelforge.rewrite_by_flydsl.budget import DEFAULT_REWRITE_BUDGET
 from kernelforge.rewrite_by_flydsl.measurement import FlydslMeasurement
 from kernelforge.rewrite_by_flydsl.protocol import validate_applyback_manifest
 from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
-from kernelforge.durable_io import atomic_write_text
+from kernelforge.tools.durable_io import atomic_write_text
 from kernelforge.tracker import UsageAccumulator
 
 log = logging.getLogger(__name__)
