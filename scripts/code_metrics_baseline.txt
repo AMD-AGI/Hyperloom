@@ -915,9 +915,9 @@ function-lines src/kernelforge/orchestrator/specialists.py::SpecialistAgent.run 
 function-lines src/kernelforge/rewrite_by_flydsl/applyback.py::_publish_patch 115
 function-lines src/kernelforge/rewrite_by_flydsl/applyback.py::generate_applyback_patch 209
 function-lines src/kernelforge/rewrite_by_flydsl/flydsl_rewrite_driver_preparation.py::prepare_rewrite_driver 231
-function-lines src/kernelforge/rewrite_by_flydsl/kb.py::try_flydsl_kb_warmstart 169
+function-lines src/kernelforge/rewrite_by_flydsl/kb.py::try_flydsl_kb_warmstart 166
 function-lines src/kernelforge/rewrite_by_flydsl/kb.py::write_flydsl_kb_solution 85
-function-lines src/kernelforge/rewrite_by_flydsl/optimize.py::run_optimize 126
+function-lines src/kernelforge/rewrite_by_flydsl/optimize.py::run_optimize 125
 function-lines src/kernelforge/rewrite_by_flydsl/port_loop.py::run_port_loop 166
 function-lines src/kernelforge/rewrite_by_flydsl/runner.py::run_rewrite 303
 module-lines src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py 2168
@@ -948,7 +948,7 @@ module-lines src/hyperloom/orchestrator/loop/intent_router.py 1423
 module-lines src/hyperloom/orchestrator/loop/writeback.py 4748
 module-lines src/hyperloom/orchestrator/phases/framework.py 3139
 module-lines src/hyperloom/orchestrator/phases/kernel.py 4227
-module-lines src/hyperloom/orchestrator/phases/machine_state.py 2131
+module-lines src/hyperloom/orchestrator/phases/machine_state.py 2128
 module-lines src/hyperloom/orchestrator/phases/prelude.py 2640
 module-lines src/hyperloom/orchestrator/policy/gate.py 1588
 module-lines src/hyperloom/orchestrator/prompts/prompt_builder.py 1205
@@ -969,7 +969,7 @@ module-lines src/kernelforge/loop/knowledge_integration.py 1457
 module-lines src/kernelforge/loop/runner.py 6051
 module-lines src/kernelforge/loop/task_preparer.py 1299
 module-lines src/kernelforge/orchestrator/analysis.py 2080
-module-lines src/kernelforge/orchestrator/orchestration.py 1828
+module-lines src/kernelforge/orchestrator/orchestration.py 1831
 nested-blocks src/hyperloom/inference_optimizer/framework_paths.py::_discover_installed_framework_roots 6
 nested-blocks src/hyperloom/inference_optimizer/trace/tool_events.py::stream_json_tool_events 6
 nested-blocks src/hyperloom/orchestrator/actions/executors/_kv_metrics.py::_read_aiperf_aggregate_json 6

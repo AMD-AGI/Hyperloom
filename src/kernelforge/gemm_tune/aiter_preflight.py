@@ -15,7 +15,8 @@ def serve_aiter_path() -> str | None:
         import importlib.util
 
         spec = importlib.util.find_spec("aiter")
-    except Exception:  # noqa: BLE001 - unresolvable / broken package means "no serving aiter"
+    except ValueError:
+        # A sys.modules entry without a usable __spec__ cannot be resolved to a location.
         return None
     if spec is None or not spec.origin:
         return None

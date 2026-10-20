@@ -6,7 +6,10 @@ from __future__ import annotations
 
 import importlib.util
 import os
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
+
+import pytest
 
 from kernelforge.gemm_tune.aiter_preflight import classify, collect, is_aligned, serve_aiter_path
 
@@ -154,12 +157,19 @@ def test_serve_aiter_path_none_for_namespace_spec(monkeypatch):
     assert serve_aiter_path() is None
 
 
-def test_serve_aiter_path_none_when_find_spec_raises(monkeypatch):
+def test_serve_aiter_path_none_when_loaded_module_has_no_spec(monkeypatch):
+    # find_spec raises ValueError for a sys.modules entry whose __spec__ is None.
+    monkeypatch.setitem(sys.modules, "aiter", ModuleType("aiter"))
+    assert serve_aiter_path() is None
+
+
+def test_serve_aiter_path_propagates_unexpected_find_spec_errors(monkeypatch):
     def boom(name):
-        raise ImportError("broken parent package")
+        raise RuntimeError("meta path finder exploded")
 
     monkeypatch.setattr(importlib.util, "find_spec", boom)
-    assert serve_aiter_path() is None
+    with pytest.raises(RuntimeError, match="meta path finder exploded"):
+        serve_aiter_path()
 
 
 def test_serve_aiter_path_returns_package_dir(monkeypatch, tmp_path):

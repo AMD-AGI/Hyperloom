@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+import httpx
 import pytest
 
 from hyperloom.inference_optimizer.multi_node._internal import gpu_probe
@@ -174,6 +175,36 @@ def test_probe_failure_falls_back_to_none(monkeypatch):
     monkeypatch.setattr(gpu_probe.ray_dashboard, "RayDashboardClient", _boom)
 
     assert gpu_probe.remote_autodetect_gpu_type(timeout_s=1) is None
+
+
+_BACKENDS = [_infera_state(), {"backend": "rayjob", "head_pod_ip": "10.0.0.1"}]
+
+
+def _probe_failing_with(monkeypatch, tmp_path, failure, state):
+    _track_scratch_dirs(monkeypatch, tmp_path)
+
+    def _fail(*_a, **_k):
+        raise failure
+
+    monkeypatch.setattr(gpu_probe.ssh_client, "ssh_run", _fail)
+    monkeypatch.setattr(gpu_probe.ray_dashboard, "RayDashboardClient", _fail)
+    monkeypatch.setattr(gpu_probe, "build_external_state_from_env", lambda: state)
+    return gpu_probe.remote_autodetect_gpu_type(timeout_s=1)
+
+
+@pytest.mark.parametrize("state", _BACKENDS)
+@pytest.mark.parametrize(
+    "failure",
+    [httpx.ConnectError("dashboard unreachable"), OSError("no route to host"), subprocess.TimeoutExpired(["ssh"], 1)],
+)
+def test_expected_probe_failures_fall_back_to_none(monkeypatch, tmp_path, failure, state):
+    assert _probe_failing_with(monkeypatch, tmp_path, failure, state) is None
+
+
+@pytest.mark.parametrize("state", _BACKENDS)
+def test_an_unexpected_probe_error_propagates(monkeypatch, tmp_path, state):
+    with pytest.raises(KeyError, match="status"):
+        _probe_failing_with(monkeypatch, tmp_path, KeyError("status"), state)
 
 
 def test_no_handoff_returns_none(monkeypatch):

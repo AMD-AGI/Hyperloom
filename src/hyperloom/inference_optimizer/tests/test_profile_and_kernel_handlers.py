@@ -1955,7 +1955,7 @@ async def test_roofline_executor_skips_when_framework_atom(monkeypatch):
     )
 
     monkeypatch.setenv("FRAMEWORK", "atom")
-    rexec = RooflineExecutor(shared_state=SimpleNamespace())
+    rexec = RooflineExecutor(shared_state=SimpleNamespace(lifecycle=None, phase=""))
 
     # Sentinel: prove the lazy import / sub-step orchestration is reached.
     from hyperloom.orchestrator.actions.executors import profile as profile_mod
