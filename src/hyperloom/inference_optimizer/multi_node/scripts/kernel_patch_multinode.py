@@ -287,13 +287,8 @@ def _do_apply(args: argparse.Namespace) -> int:
             try:
                 rollback.append({"node_id": node_id[:16], **ray.get(ref, timeout=args.timeout_sec)})
             except Exception as exc:  # noqa: BLE001
-                rollback.append(
-                    {
-                        "node_id": node_id[:16],
-                        "status": "failed",
-                        "error": str(exc),
-                    }
-                )
+                _log(f"node {node_id[:16]}: rollback FAILED: {type(exc).__name__}: {exc}")
+                rollback.append({"node_id": node_id[:16], "status": "failed", "error": str(exc)})
     payload = {
         "command": "apply",
         "target_path": args.target_path,
@@ -455,6 +450,7 @@ def _do_finalize(args: argparse.Namespace) -> int:
         try:
             per_node.append({"host": host, **ray.get(ref, timeout=args.timeout_sec)})
         except Exception as exc:  # noqa: BLE001
+            _log(f"host {host}: finalize FAILED: {type(exc).__name__}: {exc}")
             failures.append({"host": host, "error": str(exc)})
     payload = {
         "command": "finalize",
