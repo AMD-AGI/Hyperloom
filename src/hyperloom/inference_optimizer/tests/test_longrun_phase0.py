@@ -106,6 +106,20 @@ async def test_prune_events_respects_recent_window(conn):
     assert [r["seq"] for r in remaining] == list(range(91, 101))
 
 
+@pytest.mark.asyncio
+async def test_append_rejects_a_non_string_recipient(conn):
+    """``to_agent`` becomes a column: a list must be refused, not bound.
+
+    Binding an unsupported type raises sqlite3.ProgrammingError from inside
+    the INSERT, which faults the caller's open phase event.
+    """
+    bus = MessageBus(conn)
+    with pytest.raises(ValueError, match="to_agent"):
+        await bus.append_and_seq(Message.new("orchestration", ["critic", "kernel_agent"], "observation", {"x": 1}))
+    rows = await conn.fetchall("SELECT COUNT(*) AS n FROM events")
+    assert rows[0]["n"] == 0
+
+
 # pruning must not delete a still-pending proposal
 @pytest.mark.asyncio
 async def test_prune_events_protects_pending_proposal(conn):

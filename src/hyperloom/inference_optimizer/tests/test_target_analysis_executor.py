@@ -384,7 +384,7 @@ async def test_agentx_no_gpu_persists_mode_and_clears_previous_target(native_ben
 @pytest.mark.asyncio
 @pytest.mark.parametrize("gpu", ["b300", ""])
 @pytest.mark.parametrize("error", [ValueError("schema mismatch"), OSError("read-only filesystem")])
-async def test_analyzer_exception_clears_target_without_replacing_summary(
+async def test_analyzer_exception_propagates_and_clears_target_without_replacing_summary(
     native_benchmark, session_dir, monkeypatch, gpu, error
 ):
     from hyperloom.inference_optimizer.session import session_paths
@@ -401,10 +401,8 @@ async def test_analyzer_exception_clears_target_without_replacing_summary(
         raise error
 
     monkeypatch.setattr(ta, "analyze", fail)
-    result = await TargetAnalysisExecutor(compare_against_gpu=gpu)(_ctx(session_dir, {"model_path": "GLM-5.2"}))
-    assert result["status"] == "succeeded"
-    assert result["baseline_status"] == "fetch_error"
-    assert result["reason"] == "analyzer_crash"
+    with pytest.raises(type(error), match=str(error)):
+        await TargetAnalysisExecutor(compare_against_gpu=gpu)(_ctx(session_dir, {"model_path": "GLM-5.2"}))
     assert not stale.exists()
     assert baseline.read_bytes() == previous
 
@@ -637,8 +635,9 @@ class TestExecutor:
         assert result["best_tput_per_gpu"] == 10.0
 
     @pytest.mark.asyncio
-    async def test_analyzer_crash_is_swallowed(self, tmp_path, monkeypatch):
-        ex = ta.TargetAnalysisExecutor(compare_against_gpu="MI300X")
+    @pytest.mark.parametrize("gpu", ["MI300X", ""])
+    async def test_analyzer_crash_propagates(self, tmp_path, monkeypatch, gpu):
+        ex = ta.TargetAnalysisExecutor(compare_against_gpu=gpu)
         monkeypatch.setattr(ex, "_resolve_session_dir", lambda ctx: tmp_path)
 
         def boom(**_):
@@ -648,29 +647,8 @@ class TestExecutor:
             "hyperloom.orchestrator.actions.executors.target_analysis.analyze",
             boom,
         )
-        result = await ex(_unit_ctx())
-        assert result["status"] == "succeeded"
-        assert result["baseline_status"] == "fetch_error"
-        assert "analyzer crashed" in result["note"]
-
-    @pytest.mark.asyncio
-    async def test_analyzer_crash_in_no_gpu_branch_is_swallowed(
-        self,
-        tmp_path,
-        monkeypatch,
-    ):
-        ex = ta.TargetAnalysisExecutor(compare_against_gpu="")
-        monkeypatch.setattr(ex, "_resolve_session_dir", lambda ctx: tmp_path)
-
-        def boom(**_):
-            raise RuntimeError("nope")
-
-        monkeypatch.setattr(
-            "hyperloom.orchestrator.actions.executors.target_analysis.analyze",
-            boom,
-        )
-        result = await ex(_unit_ctx())
-        assert result["baseline_status"] == "fetch_error"
+        with pytest.raises(RuntimeError, match="InferenceX 500"):
+            await ex(_unit_ctx())
 
     @pytest.mark.asyncio
     async def test_format_result_uses_summary_without_best(
