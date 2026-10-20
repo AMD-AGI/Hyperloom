@@ -52,6 +52,7 @@ from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import DecisionKind, DecisionLog
 from hyperloom_multibranch.scheduling.integrator import (
+    ALREADY_ON_HEAD,
     FOUNDATION_FIX_VERDICTS,
     RESOLVER_SYSTEM_PROMPT,
     SUPERSEDED,
@@ -479,6 +480,28 @@ async def test_a_round_tests_k_candidates_at_once_and_merges_the_first_improveme
     head = await bench.repo.read_recipe(await bench.repo.head(INTEGRATION_BRANCH))
     assert TAG_FLAG + "c1" in head.launch.server_args and TAG_FLAG + "c2" in head.launch.server_args
     assert await bench.integrator.integrate_next(2) == ()
+
+
+async def test_a_merge_that_leaves_the_head_s_recipe_unchanged_is_skipped_untested(bench: Bench) -> None:
+    await _one(bench)
+    head = await bench.repo.head(INTEGRATION_BRANCH)
+    scheduler, toolbox, gate = (bench.handle(role) for role in (Role.SCHEDULER, Role.TOOLBOX, Role.GATE))
+    await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, "s2", from_commit=bench.root, reason="refill"))
+    await bench.repo.create_branch("s2", bench.root)
+    same = RecipeDelta(config=bench.deltas["c1"].config)
+    again = await bench.repo.commit("s2", bench.root, apply(await bench.repo.read_recipe(bench.root), same), "d1")
+    test = request("rd1", intent("s2", bench.root, mechanism="d1"), same)
+    await toolbox.write_request(test)
+    await toolbox.write_result(result(test.request_id))
+    await gate.write_judgement(test.request_id, judgement(5.0, (test.request_id,)), Conclusion.COMMITTED, again)
+
+    reports = await bench.integrator.integrate_next(2)
+
+    [skipped] = [report for report in reports if report.candidate == again]
+    assert (skipped.onto, skipped.outcome, skipped.reason) == (head, MergeOutcome.CONFLICT_SKIPPED, ALREADY_ON_HEAD)
+    assert skipped.request_id is None
+    assert [test.parent_commit for test in bench.merge_tests().values()] == [bench.root, head]
+    assert [report.candidate for report in reports] == [again, bench.commits["c2"]]
 
 
 async def test_commits_of_a_stopped_branch_stay_eligible(bench: Bench) -> None:

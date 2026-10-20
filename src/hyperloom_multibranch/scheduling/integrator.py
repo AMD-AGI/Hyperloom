@@ -8,7 +8,8 @@ by their own gain), whatever became of the branch that made them. Each is tried 
 tests up to the integration branch's K candidates at once on the same head; the first of them, in that order, that
 may be merged is merged, and every other one that may is superseded: it gets no judgement and is tried again on the
 new head. A merge the experiment repository cannot combine, or whose test the toolbox refuses, is skipped and recorded
-like an unresolved conflict.
+like an unresolved conflict, and so is one that leaves the head's recipe as it is, untested: another branch's commit
+already brought the same change.
 
 The experiment repository carries the candidate's own change onto the integration head and reports what conflicts:
 where the two set a server argument or environment variable differently the candidate's value wins, and the
@@ -48,6 +49,7 @@ logger = logging.getLogger(__name__)
 
 SUPERSEDED = "superseded: another candidate of the round was merged onto this head first"
 EXPLORATION_ENDED = "exploration ended"
+ALREADY_ON_HEAD = "its change is already on the integration head"
 #: The JSON key the resolver's reply carries the rewritten patch under; ``null`` means it cannot be combined.
 PATCH_KEY = "patch"
 RESOLVER_SYSTEM_PROMPT = (
@@ -249,6 +251,9 @@ class Integrator:
         try:
             merge = await self._repo.merge(candidate, head)
             delta = await self._resolved(merge, candidate)
+            onto = await self._repo.read_recipe(head)
+            if apply(onto, delta).digest() == onto.digest():
+                return await self._skip(commit, head, ALREADY_ON_HEAD)
             request = integration_test_request(TestKind.TEST, Purpose.INTEGRATION, head, delta)
             return await self._tests.judged(request, partial(self._judge, merge, delta, commit))
         except RecipeError as exc:
