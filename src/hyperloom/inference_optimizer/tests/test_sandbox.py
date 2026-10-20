@@ -22,6 +22,7 @@ from hyperloom.common.sandbox import (
     probe_sandbox_capability,
     reexec_if_required,
     resolve_sandbox_mode,
+    verify_sandbox_bindings,
     writable_roots_from_env,
 )
 
@@ -211,6 +212,55 @@ def test_probe_survives_a_missing_executable():
         raise OSError("no such file")
 
     assert probe_sandbox_capability("/nope/bwrap", runner=runner) is False
+
+
+# --- the binds are verified from inside -------------------------------------
+
+
+def test_verify_accepts_a_root_that_is_really_writable(tmp_path):
+    verify_sandbox_bindings([tmp_path])
+
+
+def test_verify_rejects_a_root_the_bind_never_created(tmp_path):
+    """A dropped bind leaves no trace; bwrap still exits 0."""
+    with pytest.raises(SandboxError, match="does not exist inside"):
+        verify_sandbox_bindings([tmp_path / "never-bound"])
+
+
+def test_verify_rejects_a_root_bound_read_only(tmp_path, monkeypatch):
+    """Patched rather than chmod'd: uid 0 may write through a mode of 0o500."""
+
+    def refuse(*args, **kwargs):
+        raise OSError("Read-only file system")
+
+    monkeypatch.setattr("hyperloom.common.sandbox.tempfile.NamedTemporaryFile", refuse)
+    with pytest.raises(SandboxError, match="not writable inside"):
+        verify_sandbox_bindings([tmp_path])
+
+
+def test_verify_leaves_nothing_behind(tmp_path):
+    verify_sandbox_bindings([tmp_path])
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_verify_names_the_shim_as_the_likely_cause(tmp_path):
+    """The failure this exists to catch is an argument rewriter on PATH."""
+    with pytest.raises(SandboxError, match="which -a bwrap"):
+        verify_sandbox_bindings([tmp_path / "never-bound"])
+
+
+def test_being_inside_the_sandbox_triggers_verification(monkeypatch, tmp_path):
+    monkeypatch.setenv(SANDBOX_MODE_ENV, "bwrap")
+    monkeypatch.setenv(SANDBOX_ACTIVE_ENV, "1")
+    monkeypatch.setenv(SANDBOX_WRITABLE_ENV, str(tmp_path / "never-bound"))
+    with pytest.raises(SandboxError, match="does not exist inside"):
+        reexec_if_required([])
+
+
+def test_mode_off_skips_verification_entirely(monkeypatch, tmp_path):
+    """An unsandboxed run declares nothing and must not be second-guessed."""
+    monkeypatch.setenv(SANDBOX_WRITABLE_ENV, str(tmp_path / "never-bound"))
+    reexec_if_required([])
 
 
 def test_mode_off_does_not_reexec(monkeypatch):

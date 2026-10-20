@@ -27,6 +27,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
 
 #: Selects the sandbox. ``off`` (default) keeps today's behaviour exactly.
 SANDBOX_MODE_ENV = "HYPERLOOM_SANDBOX_MODE"
@@ -239,11 +240,55 @@ def probe_sandbox_capability(bwrap: str, *, runner=subprocess.run) -> bool:
     return completed.returncode == 0
 
 
+def verify_sandbox_bindings(writable_roots: Sequence[Path] | None = None) -> None:
+    """Assert, from inside the sandbox, that the declared writable binds took.
+
+    bwrap exits 0 for a mount it never performed if something rewrote its
+    arguments on the way in -- a shim earlier on ``PATH``, a site wrapper, a
+    policy filter. The bind is then simply absent, with no error anywhere, and
+    the first thing to touch the directory reports a missing file. That reads
+    as a mistyped workspace or a skipped install step, not as a sandbox that
+    dropped the mount, which is an expensive thing to debug from the wrong end.
+
+    Writable roots are checked because they are the silent ones. A missing venv
+    stops the interpreter; a missing output directory just looks like user
+    error.
+
+    Verified by writing rather than with :func:`os.access`, which cannot tell a
+    read-only mount from a permission bit and, for uid 0, reports success on
+    both.
+
+    Args:
+        writable_roots: Paths to check; defaults to the declared set.
+
+    Raises:
+        SandboxError: A declared root is absent or not writable here.
+    """
+    roots = writable_roots_from_env() if writable_roots is None else writable_roots
+    hint = "check for a bwrap wrapper or shim ahead of it on PATH (`which -a bwrap`)"
+    for root in roots:
+        if not root.is_dir():
+            raise SandboxError(
+                f"{SANDBOX_WRITABLE_ENV} declared {root}, but it does not exist inside "
+                f"the sandbox -- the bind was not performed. bwrap reported no error, so {hint}."
+            )
+        try:
+            with tempfile.NamedTemporaryFile(dir=root, prefix=".hyperloom-sandbox-"):
+                pass
+        except OSError as exc:
+            raise SandboxError(
+                f"{SANDBOX_WRITABLE_ENV} declared {root}, but it is not writable inside "
+                f"the sandbox ({exc}). It was bound read-only or not at all, so {hint}."
+            ) from exc
+
+
 def reexec_if_required(argv: Sequence[str] | None = None) -> None:
     """Re-execute this process inside the sandbox when one was asked for.
 
-    Returns immediately when the mode is ``off`` or the process is already
-    sandboxed. Otherwise this call does not return: the process is replaced.
+    Returns immediately when the mode is ``off``. When the process is already
+    sandboxed it returns too, after :func:`verify_sandbox_bindings` confirms
+    the binds took. Otherwise this call does not return: the process is
+    replaced.
 
     Args:
         argv: The ``hyperloom`` sub-command and its arguments -- what
@@ -260,7 +305,12 @@ def reexec_if_required(argv: Sequence[str] | None = None) -> None:
             and silently not providing it is the one outcome worse than failing.
     """
     mode = resolve_sandbox_mode()
-    if mode == MODE_OFF or is_sandboxed():
+    if mode == MODE_OFF:
+        return
+    if is_sandboxed():
+        # Second pass, now inside the sandbox: confirm what was asked for is
+        # actually here before any command relies on it.
+        verify_sandbox_bindings()
         return
     bwrap = shutil.which("bwrap")
     if bwrap is None:
