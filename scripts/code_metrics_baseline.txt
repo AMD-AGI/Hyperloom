@@ -579,7 +579,7 @@ function-lines src/hyperloom/orchestrator/actions/executors/_multi_node_server_l
 function-lines src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::_wait_for_server_health_async 188
 function-lines src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::_wait_for_workers_ready_async 97
 function-lines src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::restart_server_for_round 251
-function-lines src/hyperloom/orchestrator/actions/executors/_nogit_patch.py::_apply_patch_no_git 121
+function-lines src/hyperloom/orchestrator/actions/executors/_nogit_patch.py::_apply_patch_no_git 141
 function-lines src/hyperloom/orchestrator/actions/executors/_partition_shape.py::validate_session_shape 127
 function-lines src/hyperloom/orchestrator/actions/executors/_patch_snapshot.py::replayed_stack_ops 81
 function-lines src/hyperloom/orchestrator/actions/executors/_patch_source_pr.py::materialize_candidate_patches 94

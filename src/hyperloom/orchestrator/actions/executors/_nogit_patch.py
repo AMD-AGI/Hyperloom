@@ -196,25 +196,6 @@ def _bak_name(patch_stem: str, rel_target: Path, seq: int) -> str:
     return f"{safe_stem}__{flat}__{seq:04d}.bak"
 
 
-class _BackupSite(NamedTuple):
-    """Where one no-git apply keeps its backups and how it names them."""
-
-    #: The patch's target tree, already resolved, so a target can be tested against it.
-    framework_root: Path
-    backup_root: Path
-    patch_stem: str
-    seq_offset: int
-
-
-class _BackupPlan(NamedTuple):
-    """The backup records a target walk wrote, and why it stopped."""
-
-    #: Records already persisted; on a failure these are the ones a revert still owns.
-    records: list[dict[str, Any]]
-    #: Empty when every target was backed up.
-    error: str
-
-
 def _resolve_patch_target(raw: str, framework_root: Path, strip_level: int) -> tuple[Path, Path] | None:
     """The ``(relative, absolute)`` target a diff header names, or ``None`` when it escapes ``framework_root``."""
     rel = Path(strip_path_components(raw, strip_level))
@@ -239,35 +220,6 @@ def _back_up_existing_file(abs_path: Path, bak: Path) -> tuple[dict[str, Any] | 
         "mode": mode,
         "pre_image_sha256": _file_digest(abs_path),
     }, ""
-
-
-def _back_up_patch_targets(manifest: list[Any], site: _BackupSite, strip_level: int) -> _BackupPlan:
-    """Back up every file ``manifest`` touches, stopping at the first target that cannot be recorded.
-
-    A record is appended only once the ledger has it, so a file is never mutated without a persisted way back.
-    """
-    records: list[dict[str, Any]] = []
-    for entry in manifest:
-        target = _resolve_patch_target(entry.path, site.framework_root, strip_level)
-        if target is None:
-            return _BackupPlan(records, f"patch target escapes framework root: {entry.path}")
-        rel, abs_path = target
-        if entry.is_new or not abs_path.exists():
-            record: dict[str, Any] | None = {
-                "target": str(abs_path),
-                "existed": False,
-                "backup_path": None,
-                "revert_action": "delete",
-            }
-        else:
-            bak = site.backup_root / _bak_name(site.patch_stem, rel, site.seq_offset + len(records))
-            record, err = _back_up_existing_file(abs_path, bak)
-            if err:
-                return _BackupPlan(records, err)
-        if not append_record(site.backup_root, record):
-            return _BackupPlan(records, f"backup ledger write failed for {(record or {}).get('target')}")
-        records.append(record)
-    return _BackupPlan(records, "")
 
 
 def _rejected_hunks(reject_path: Path) -> str:
@@ -350,19 +302,39 @@ def _apply_patch_no_git(
         )
         return False, err_msg, [], feedback
 
+    framework_root_resolved = framework_root.resolve()
     backup_root.mkdir(parents=True, exist_ok=True)
     patch_stem = patch_path.stem
-    site = _BackupSite(framework_root.resolve(), backup_root, patch_stem, seq_offset)
 
     try:
         manifest = parse_patch_manifest(patch_text)
     except ValueError as exc:
         return _nogit_failure(patch_path, f"unparseable patch: {exc}", tried_levels=tried_levels)
 
-    plan = _back_up_patch_targets(manifest, site, detected_level)
-    backups = plan.records
-    if plan.error:
-        return _nogit_failure(patch_path, plan.error, tried_levels=tried_levels, records=backups)
+    # A record is appended only once the ledger holds it, so no file is mutated without a persisted way back.
+    backups: list[dict[str, Any]] = []
+    for entry in manifest:
+        resolved = _resolve_patch_target(entry.path, framework_root_resolved, detected_level)
+        if resolved is None:
+            message = f"patch target escapes framework root: {entry.path}"
+            return _nogit_failure(patch_path, message, tried_levels=tried_levels, records=backups)
+        rel, abs_path = resolved
+        if entry.is_new or not abs_path.exists():
+            record: dict[str, Any] | None = {
+                "target": str(abs_path),
+                "existed": False,
+                "backup_path": None,
+                "revert_action": "delete",
+            }
+        else:
+            bak = backup_root / _bak_name(patch_stem, rel, seq_offset + len(backups))
+            record, err = _back_up_existing_file(abs_path, bak)
+            if err:
+                return _nogit_failure(patch_path, err, tried_levels=tried_levels, records=backups)
+        if not append_record(backup_root, record):
+            message = f"backup ledger write failed for {(record or {}).get('target')}"
+            return _nogit_failure(patch_path, message, tried_levels=tried_levels, records=backups)
+        backups.append(record)
 
     if not mark_prepared(backup_root):
         return _nogit_failure(
