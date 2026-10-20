@@ -288,7 +288,13 @@ def _do_apply(args: argparse.Namespace) -> int:
                 rollback.append({"node_id": node_id[:16], **ray.get(ref, timeout=args.timeout_sec)})
             except Exception as exc:  # noqa: BLE001
                 _log(f"node {node_id[:16]}: rollback FAILED: {type(exc).__name__}: {exc}")
-                rollback.append({"node_id": node_id[:16], "status": "failed", "error": str(exc)})
+                rollback.append(
+                    {
+                        "node_id": node_id[:16],
+                        "status": "failed",
+                        "error": str(exc),
+                    }
+                )
     payload = {
         "command": "apply",
         "target_path": args.target_path,

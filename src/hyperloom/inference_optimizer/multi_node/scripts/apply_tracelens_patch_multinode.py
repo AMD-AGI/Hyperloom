@@ -385,7 +385,8 @@ def _apply_on_pod(
         result["status"] = "applied"
         return result
     except Exception as e:  # noqa: BLE001 - actor must never raise
-        result.update(status="failed", error=f"unexpected: {type(e).__name__}: {e}")
+        result["status"] = "failed"
+        result["error"] = f"unexpected: {type(e).__name__}: {e}"
         _log(result["error"])
         return result
     finally:
