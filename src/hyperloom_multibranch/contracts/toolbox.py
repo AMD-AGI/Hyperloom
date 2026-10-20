@@ -84,6 +84,7 @@ REJECTION_CODES = (
     "speculative_decoding_pinned",  # an AgentX candidate changes the draft or simulated acceptance its parent pins
     "unsupported_kind",  # the toolbox's backend does not run this kind of test (a local backend: profile, repro)
     "profile_exists",  # a PROFILE of this commit and recipe is already queued, running or measured: ``existing_request_id``
+    "empty_delta",  # an explore test whose delta changes nothing
     "attachment_too_large",  # ``put_attachment``: the data, or what a directory archive expands to, passes the cap
     "attachment_unreadable",  # ``put_attachment``: a ``dir`` attachment is not a tar archive
     "attachment_unsafe",  # ``put_attachment``: a ``dir`` archive has a path that escapes, a link, or too many entries

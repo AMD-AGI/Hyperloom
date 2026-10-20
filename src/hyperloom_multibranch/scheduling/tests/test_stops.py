@@ -15,7 +15,7 @@ import pytest
 
 from hyperloom.common.proctree import descendants, running
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
-from hyperloom.contracts.recipe import Recipe
+from hyperloom.contracts.recipe import ConfigDelta, Recipe, RecipeDelta
 from hyperloom.hosted.mcp_server import MIN_TOKEN_LENGTH, McpServer, McpServerConfig
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkRequest
@@ -59,6 +59,8 @@ HARD_STOP = NOW + 60.0
 #: Real seconds the clock in these tests lets a stop run before the hard stop passes.
 SHORT_GRACE = 0.3
 JUDGE_STOP = BranchStop(StopCause.JUDGE, "no headroom", NOW - 1)
+
+_CHANGE = RecipeDelta(config=ConfigDelta(server_args="--max-num-seqs 256"))  # an explore must change something
 
 
 class KeepingToolbox(DownToolbox):
@@ -283,7 +285,9 @@ async def test_a_test_of_a_stopped_branch_is_refused(tmp_path: Path) -> None:
     session = await Stage(tmp_path).opened()
 
     with pytest.raises(RequestRejected) as refused:
-        await session.toolbox.submit_test(TestRequest(TestKind.TEST, Purpose.EXPLORE, "b02", session.root))
+        await session.toolbox.submit_test(
+            TestRequest(TestKind.TEST, Purpose.EXPLORE, "b02", session.root, delta=_CHANGE)
+        )
 
     assert refused.value.code == BRANCH_STOPPED
 
@@ -291,7 +295,9 @@ async def test_a_test_of_a_stopped_branch_is_refused(tmp_path: Path) -> None:
 async def test_every_test_is_withdrawn_whatever_branch_it_is_of(tmp_path: Path) -> None:
     session = await Stage(tmp_path).opened()
     session.toolbox.executor.gate.clear()
-    held = await session.toolbox.submit_test(TestRequest(TestKind.TEST, Purpose.EXPLORE, "b01", session.root))
+    held = await session.toolbox.submit_test(
+        TestRequest(TestKind.TEST, Purpose.EXPLORE, "b01", session.root, delta=_CHANGE)
+    )
     session.sessions.hanging = frozenset({"b01"})
 
     report = await session.stopper.stop_everything(SessionStopReason.GLOBAL_CONVERGED, NOW + SHORT_GRACE)
@@ -303,7 +309,7 @@ async def test_every_test_is_withdrawn_whatever_branch_it_is_of(tmp_path: Path) 
 async def test_a_test_the_toolbox_still_holds_makes_the_report_unclean(tmp_path: Path) -> None:
     session = await Stage(tmp_path, toolbox_type=KeepingToolbox).opened()
     session.toolbox.executor.gate.clear()
-    await session.toolbox.submit_test(TestRequest(TestKind.TEST, Purpose.EXPLORE, "b01", session.root))
+    await session.toolbox.submit_test(TestRequest(TestKind.TEST, Purpose.EXPLORE, "b01", session.root, delta=_CHANGE))
 
     report = await session.stopper.stop_everything(SessionStopReason.GLOBAL_CONVERGED, HARD_STOP)
 

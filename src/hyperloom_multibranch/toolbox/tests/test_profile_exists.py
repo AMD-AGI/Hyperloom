@@ -145,7 +145,7 @@ async def test_another_commit_another_recipe_and_other_kinds_are_accepted(tmp_pa
     accepted = [
         await rig.toolbox.submit_test(profile("b2", commit=OTHER_COMMIT)),
         await rig.toolbox.submit_test(profile("b2", change=delta("--other"))),
-        await rig.toolbox.submit_test(req("b2", change=RecipeDelta())),  # a test of the same commit is no profile
+        await rig.toolbox.submit_test(req("b2")),  # a test of the same commit is no profile
     ]
 
     assert len({first, *accepted}) == 4
@@ -316,7 +316,14 @@ async def test_the_refused_branch_can_wait_for_the_existing_profile_but_not_canc
 
 
 async def test_another_branchs_other_tests_stay_unreadable(stack: Stack) -> None:
-    _, submitted = await stack.tool("b1", "submit_test", kind="test", purpose="explore", parent_commit=PARENT)
+    _, submitted = await stack.tool(
+        "b1",
+        "submit_test",
+        kind="test",
+        purpose="explore",
+        parent_commit=PARENT,
+        delta={"config": {"extra_server_args": "--max-num-seqs 256"}},
+    )
     test_id = json.loads(submitted)["request_id"]
 
     for tool in ("wait_test", "test_result"):

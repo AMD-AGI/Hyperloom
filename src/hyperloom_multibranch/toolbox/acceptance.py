@@ -16,7 +16,7 @@ from dataclasses import dataclass, replace
 from typing import Protocol
 
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
-from hyperloom.contracts.recipe import Recipe, RecipeError, apply
+from hyperloom.contracts.recipe import Recipe, RecipeDelta, RecipeError, apply
 from hyperloom.measure.compile import BaseImageMismatchError
 from hyperloom.measure.fake_gain import (
     CONTEXT_COPY_REFUSAL,
@@ -52,6 +52,12 @@ def _check_unmeasured(request: TestRequest) -> None:
     concurrencies, and a repro test with no attachment)."""
     if request.kind in (TestKind.PROFILE, TestKind.REPRO) and request.accuracy:
         raise RequestRejected(f"a {request.kind.value} test does not evaluate accuracy")
+
+
+def _check_explore_changes_something(request: TestRequest) -> None:
+    """An explore measures a change; with an empty delta it would re-measure the parent and record the intent as tried."""
+    if request.purpose is Purpose.EXPLORE and request.delta.fingerprint() == RecipeDelta().fingerprint():
+        raise RequestRejected("an explore test must change something, and its delta is empty", "empty_delta")
 
 
 def _no_live_profile(request: TestRequest) -> str | None:
@@ -114,6 +120,7 @@ class Acceptance:
         if not replay and request.request_id:
             raise RequestRejected("request_id is assigned by the toolbox; submit the request without one")
         _check_unmeasured(request)
+        _check_explore_changes_something(request)
         if not replay and request.retest_of is not None and not self._is_accepted(request.retest_of):
             raise RequestRejected(f"retest_of {request.retest_of!r} names no accepted request", "unknown_retest")
         if not replay:

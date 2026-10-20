@@ -162,3 +162,16 @@ async def test_an_agentx_explore_is_left_as_submitted(tmp_path: Path) -> None:
     rig = build(tmp_path, workload_kind=WorkloadKind.AGENTX)
     assert await _accepted_accuracy(rig, req(purpose=Purpose.EXPLORE)) == (False, False)
     assert await _accepted_accuracy(rig, req(purpose=Purpose.EXPLORE, accuracy=True)) == (True, True)
+
+
+async def test_an_explore_with_an_empty_delta_is_refused(tmp_path: Path) -> None:
+    rig = build(tmp_path)
+    await _rejected(rig, req(change=RecipeDelta()), "empty_delta")
+
+
+@pytest.mark.parametrize("purpose", [Purpose.BASELINE, Purpose.CONFIRM])
+async def test_a_baseline_or_a_confirm_may_carry_an_empty_delta(tmp_path: Path, purpose: Purpose) -> None:
+    rig = build(tmp_path)
+    first = await rig.toolbox.submit_test(req())
+    request = req(purpose=purpose, change=RecipeDelta(), **({"retest_of": first} if purpose is Purpose.CONFIRM else {}))
+    assert await rig.toolbox.submit_test(request)
