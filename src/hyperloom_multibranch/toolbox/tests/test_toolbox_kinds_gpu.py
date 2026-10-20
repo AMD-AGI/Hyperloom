@@ -23,6 +23,7 @@ import os
 import re
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -44,6 +45,7 @@ from hyperloom.measure.tests._recipes import IMAGE, git_patch, put_patch, recipe
 from hyperloom.orchestrator.actions.executors._workload_envs import default_baseline_config
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import ToolResultPointer
+from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.toolbox.local_hosted import (
     LocalHostedToolbox,
@@ -96,7 +98,18 @@ def _run_root(name: str) -> Path:
     return root
 
 
-def _toolbox(root: Path, name: str, tp: int = 1) -> tuple[LocalHostedToolbox, LocalNotebook, LocalBlobStore]:
+def _toolbox(
+    root: Path,
+    name: str,
+    tp: int = 1,
+    *,
+    config_path: Path | None = None,
+    primary: int = LEVELS[0],
+    timeout_sec: int = 2400,
+    workload_kind: WorkloadKind = WorkloadKind.INFERENCEX,
+    **materialize: Any,
+) -> tuple[LocalHostedToolbox, LocalNotebook, LocalBlobStore]:
+    """The toolbox of one test; ``config_path`` names another workload than the shipped baseline (an AgentX one)."""
     session = root / "session"
     commit = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=INFERENCEX, capture_output=True, text=True, check=True
@@ -105,10 +118,11 @@ def _toolbox(root: Path, name: str, tp: int = 1) -> tuple[LocalHostedToolbox, Lo
     compiler = EnvironmentCompiler(blobs, IMAGE)
     canonical = default_canonical(
         root / "canonical",
-        primary_concurrency=LEVELS[0],
-        config_path=default_baseline_config(),
+        primary_concurrency=primary,
+        config_path=config_path or default_baseline_config(),
         model_path=MODEL,
         **CANONICAL_OPTIONS,
+        **materialize,
     )
     notebook = LocalNotebook(root / "notebook", Writer(Role.TOOLBOX, "toolbox"))
     spec = SpecContext(
@@ -126,28 +140,34 @@ def _toolbox(root: Path, name: str, tp: int = 1) -> tuple[LocalHostedToolbox, Lo
     toolbox = build_local_toolbox(
         LocalSession(session, name, CARDS, tp=tp),
         notebook,
-        AcceptanceSetup(FakeRepo(recipe_with()), HostedPlanner(compiler, canonical, root / "points"), IMAGE),
+        AcceptanceSetup(
+            FakeRepo(recipe_with()),
+            HostedPlanner(compiler, canonical, root / "points"),
+            IMAGE,
+            workload_kind=workload_kind,
+        ),
         spec,
         options=LocalOptions(
             runner_envs={"INFERENCEX_REPO": INFERENCEX, "INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC": "900"},
-            timeout_sec=2400,
+            timeout_sec=timeout_sec,
         ),
     )
     return toolbox, notebook, blobs
 
 
-async def _submit(toolbox: LocalHostedToolbox, notebook: LocalNotebook, request, root: Path):
+async def _submit(toolbox: LocalHostedToolbox, notebook: LocalNotebook, request, root: Path, wait_sec: int = 3300):
     await toolbox.start()
     request_id = await toolbox.submit_test(request)
-    await asyncio.wait_for(toolbox.drain(), 3300)
+    await asyncio.wait_for(toolbox.drain(), wait_sec)
     entry = toolbox._log.get(request_id)
     assert entry is not None and entry.outcome is not None and "result" in entry.outcome, entry and entry.outcome
     result = TestResult.from_document(entry.outcome["result"])
     record = await notebook.record(request_id)
     assert record.result is not None and record.result.manifest_sha256 == result.manifest_sha256
     assert record.result.accuracy == result.accuracy and record.result.rounds == result.rounds
+    assert result.validity is Validity.SUCCEEDED, (result.validity, result.failure_class, result.failure_reason)
     journal = toolbox.backend.journal.latest(request_id)
-    assert journal.extra["verified"] is True and result.validity is Validity.SUCCEEDED
+    assert journal.extra["verified"] is True
     return request_id, result, root / "session" / result.output_dir
 
 
