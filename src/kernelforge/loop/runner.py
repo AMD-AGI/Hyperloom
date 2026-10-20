@@ -4095,30 +4095,6 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             ),
         )
 
-    def _emit_validation_stages(self, report) -> None:
-        """Print each correctness-suite stage the pipeline just ran."""
-        for result in report.results:
-            status = "PASS" if result.passed else _VALIDATE_FAIL_STATUS.get(str(result.outcome or ""), "FAIL")
-            snr_str = f" SNR={result.snr_db:.1f}dB" if result.snr_db is not None else ""
-            print(f"  [validate] Stage {result.stage} {result.stage_name}: {status}{snr_str}")
-
-    async def _iteration_bench_result(self, benchmark_measurement: dict | None) -> dict:
-        """Return the three-measurement bench, reusing an in-session result when it still matches."""
-        if benchmark_measurement is not None and self._can_reuse_insession_benchmark(
-            benchmark_measurement,
-            attempt_diff=self._working_tree_diff(),
-        ):
-            print("  [bench] Reusing in-session three-measurement result...")
-            bench_result = dict(benchmark_measurement)
-            bench_result["reused_from_insession"] = True
-            return bench_result
-        print("  [bench] Running three independent benchmark suites...")
-        return await measure_wallclock(
-            BenchRun(self.ic.driver_script, driver_args=[], repeat=self.ic.bench_repeat),
-            measurements=KEEP_MEASUREMENT_COUNT,
-            timeout_sec=self.ic.bench_timeout_sec,
-        )
-
     def _emit_bench_scores(
         self,
         bench_result: dict,
@@ -4170,7 +4146,6 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         snr_db = report.results[-1].snr_db if report.results else None
         sigma = sigma_resolution.sigma
 
-        vgpr = None
         reg_result = await check_registers(build_dir=self.ic.build_dir)
         vgpr = reg_result.get("vgpr") if reg_result.get("success") else None
         if vgpr:
@@ -4270,7 +4245,10 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             snr_threshold=self.ic.snr_threshold,
             timeout_per_stage=self.ic.validate_stage_timeout_sec,
         )
-        self._emit_validation_stages(report)
+        for result in report.results:
+            status = "PASS" if result.passed else _VALIDATE_FAIL_STATUS.get(str(result.outcome or ""), "FAIL")
+            snr_str = f" SNR={result.snr_db:.1f}dB" if result.snr_db is not None else ""
+            print(f"  [validate] Stage {result.stage} {result.stage_name}: {status}{snr_str}")
         if not report.all_passed:
             print(f"  [validate] FAILED at stage {report.failed_stage} — skipping bench")
             self._observe_measurement(measurement_started)
@@ -4284,7 +4262,20 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                 kept=False,
             )
 
-        bench_result = await self._iteration_bench_result(benchmark_measurement)
+        if benchmark_measurement is not None and self._can_reuse_insession_benchmark(
+            benchmark_measurement,
+            attempt_diff=self._working_tree_diff(),
+        ):
+            print("  [bench] Reusing in-session three-measurement result...")
+            bench_result = dict(benchmark_measurement)
+            bench_result["reused_from_insession"] = True
+        else:
+            print("  [bench] Running three independent benchmark suites...")
+            bench_result = await measure_wallclock(
+                BenchRun(self.ic.driver_script, driver_args=[], repeat=self.ic.bench_repeat),
+                measurements=KEEP_MEASUREMENT_COUNT,
+                timeout_sec=self.ic.bench_timeout_sec,
+            )
         self._observe_measurement(measurement_started)
         self.last_case_bandwidth = dict(bench_result.get("case_bandwidth") or {})
         return await self._decide_iteration_keep(iteration, iter_start, report, bench_result)

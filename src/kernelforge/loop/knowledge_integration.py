@@ -1123,18 +1123,6 @@ class _WarmStartAttempt:
     applied_idx: int | None = None
     measured_writebacks: list[dict] = field(default_factory=list)
 
-    @property
-    def workspace_dir(self):
-        return self.kernel.workspace
-
-    @property
-    def applied(self) -> bool:
-        return self.applied_idx is not None
-
-    @property
-    def applied_rank(self) -> int | None:
-        return None if self.applied_idx is None else self.applied_idx + 1
-
     def load_solutions(self) -> None:
         """Read and filter the ranked field; clear references when the reader raises."""
         from kernelforge.knowledge.kb_store.reader import read_top_solutions
@@ -1150,7 +1138,7 @@ class _WarmStartAttempt:
                 read_status=self.read_status,
             )
         except Exception:
-            _clear_kb_references(self.workspace_dir)
+            _clear_kb_references(self.kernel.workspace)
             raise
         admissible = [sol for sol in sols if not warmstart_policy.below_floor(_ranked_speedup(sol))]
         if len(admissible) != len(sols):
@@ -1161,37 +1149,6 @@ class _WarmStartAttempt:
             )
         self.sols = admissible
 
-    def empty_result(self) -> dict:
-        _clear_kb_references(self.workspace_dir)
-        return {
-            "candidate": False,
-            "read_reason": self.read_status["read_reason"],
-            "read_error": self.read_status["read_error"],
-        }
-
-    def dirty_result(self) -> dict:
-        reason = "workspace_dirty"
-        self.statuses = [f"rejected:{reason}" for _ in self.sols]
-        _persist_kb_references(self.workspace_dir, self.sols, self.statuses)
-        reference = kb_reference_program_md(self.workspace_dir)
-        best = self.sols[0]
-        return {
-            "candidate": True,
-            **self.read_status,
-            "applied": False,
-            "match_mode": str(best.get("match_mode") or "reference"),
-            "reference_reason": reason,
-            "pristine_ms": None,
-            "keep_baseline_ms": None,
-            "applied_commit": "",
-            "program_md_addition": reference,
-            "reference_program_md_addition": reference,
-            "solution_slug": str(best.get("solution_slug") or ""),
-            "speedup": best.get("speedup", 0.0),
-            "num_references": len(self.sols),
-            "applied_rank": None,
-        }
-
     def measure_and_adopt(self) -> None:
         """Bench the pristine tree, measure the field, and adopt the best surviving candidate."""
         pristine_runs = [
@@ -1200,18 +1157,18 @@ class _WarmStartAttempt:
         self.pristine_bench = aggregate_benchmark_measurements(pristine_runs)
         self.pristine_ms = self.pristine_bench.get("median_ms")
         self.keep_baseline_ms = self.pristine_ms
-        self.mean_case_speedup = 1.0 if self.pristine_ms is not None else None
         if self.pristine_ms is None:
             self.reference_reason = "baseline_unavailable"
             self.statuses = [f"rejected:{self.reference_reason}" for _ in self.sols]
-            _persist_kb_references(self.workspace_dir, self.sols, self.statuses)
+            _persist_kb_references(self.kernel.workspace, self.sols, self.statuses)
             print(
                 "  [kb] warm-start reference-only: baseline_unavailable; injecting top solutions as reference",
                 flush=True,
             )
             return
+        self.mean_case_speedup = 1.0
         allowed_paths = _editable_workspace_paths(
-            self.workspace_dir,
+            self.kernel.workspace,
             self.kernel.kernel_path,
             self.kernel.source_files,
             self.harness.driver,
@@ -1233,7 +1190,7 @@ class _WarmStartAttempt:
             self.applied_commit, reject_reason = _adopt_measured_candidate(
                 sol,
                 kernel=self.kernel.kernel_path,
-                workspace_dir=self.workspace_dir,
+                workspace_dir=self.kernel.workspace,
                 source_files=self.kernel.source_files,
                 allowed_paths=allowed_paths,
             )
@@ -1256,7 +1213,7 @@ class _WarmStartAttempt:
                 flush=True,
             )
             break
-        if self.applied:
+        if self.applied_idx is not None:
             for measurement in field.measurements:
                 other = measurement["index"]
                 if other != self.applied_idx and self.statuses[other] == "not_attempted":
@@ -1270,19 +1227,19 @@ class _WarmStartAttempt:
             )
 
     def final_result(self) -> dict:
-        _persist_kb_references(self.workspace_dir, self.sols, self.statuses)
-        chosen = self.sols[self.applied_idx] if self.applied else self.sols[0]
+        _persist_kb_references(self.kernel.workspace, self.sols, self.statuses)
+        chosen = self.sols[self.applied_idx] if (self.applied_idx is not None) else self.sols[0]
         prompt_pointer = kb_reference_program_md(
-            self.workspace_dir,
-            applied_rank=self.applied_rank,
-            solution_slug=str(chosen.get("solution_slug") or "") if self.applied else "",
+            self.kernel.workspace,
+            applied_rank=(None if self.applied_idx is None else self.applied_idx + 1),
+            solution_slug=str(chosen.get("solution_slug") or "") if (self.applied_idx is not None) else "",
         )
         return {
             "candidate": True,
             **self.read_status,
-            "applied": self.applied,
+            "applied": (self.applied_idx is not None),
             "match_mode": str(chosen.get("match_mode") or "reference"),
-            "reference_reason": "" if self.applied else self.reference_reason,
+            "reference_reason": "" if (self.applied_idx is not None) else self.reference_reason,
             "pristine_ms": self.pristine_ms,
             "baseline_case_times": dict(self.pristine_bench.get("case_times") or {}),
             "baseline_unscored_cases": list(self.pristine_bench.get("unscored_cases") or []),
@@ -1293,13 +1250,13 @@ class _WarmStartAttempt:
             "applied_commit": self.applied_commit,
             "program_md_addition": prompt_pointer,
             "reference_program_md_addition": kb_reference_program_md(
-                self.workspace_dir,
+                self.kernel.workspace,
                 detect_applied=False,
             ),
             "solution_slug": str(chosen.get("solution_slug") or ""),
             "speedup": chosen.get("speedup", 0.0),
             "num_references": len(self.sols),
-            "applied_rank": self.applied_rank,
+            "applied_rank": (None if self.applied_idx is None else self.applied_idx + 1),
             "measured_writebacks": self.measured_writebacks,
         }
 
@@ -1322,15 +1279,40 @@ def kb_warmstart(
         attempt = _WarmStartAttempt(config, kernel, harness)
         attempt.load_solutions()
         if not attempt.sols:
-            return attempt.empty_result()
+            _clear_kb_references(kernel.workspace)
+            return {
+                "candidate": False,
+                "read_reason": attempt.read_status["read_reason"],
+                "read_error": attempt.read_status["read_error"],
+            }
         # Keep identity-match metadata populated by the reader (for example a
         # fuzzy donor's requested/selected canonical ids) while normalizing the
         # final read verdict.
         attempt.read_status.update(read_reason="hit", read_error="")
         attempt.statuses = ["not_attempted" for _ in attempt.sols]
-        _persist_kb_references(attempt.workspace_dir, attempt.sols, attempt.statuses)
-        if not _tracked_workspace_clean(attempt.workspace_dir):
-            return attempt.dirty_result()
+        _persist_kb_references(kernel.workspace, attempt.sols, attempt.statuses)
+        if not _tracked_workspace_clean(kernel.workspace):
+            reason = "workspace_dirty"
+            attempt.statuses = [f"rejected:{reason}" for _ in attempt.sols]
+            _persist_kb_references(kernel.workspace, attempt.sols, attempt.statuses)
+            reference = kb_reference_program_md(kernel.workspace)
+            best = attempt.sols[0]
+            return {
+                "candidate": True,
+                **attempt.read_status,
+                "applied": False,
+                "match_mode": str(best.get("match_mode") or "reference"),
+                "reference_reason": reason,
+                "pristine_ms": None,
+                "keep_baseline_ms": None,
+                "applied_commit": "",
+                "program_md_addition": reference,
+                "reference_program_md_addition": reference,
+                "solution_slug": str(best.get("solution_slug") or ""),
+                "speedup": best.get("speedup", 0.0),
+                "num_references": len(attempt.sols),
+                "applied_rank": None,
+            }
         attempt.measure_and_adopt()
         return attempt.final_result()
     except WarmStartRestoreError:
