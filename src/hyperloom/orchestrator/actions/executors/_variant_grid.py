@@ -4,9 +4,9 @@
 """The variant grid one explore round measures.
 
 Where a round's variants come from -- the action payload, the framework-rewrite
-levers, the framework's own seed grid -- and which of them are worth launching:
-a variant whose settings the server already runs changes nothing, so measuring
-it spends a benchmark pass to re-measure the stack.
+levers, the framework's own seed grid -- which of them are worth launching, and
+what identifies each one. A variant whose settings the server already runs
+changes nothing, so measuring it spends a benchmark pass to re-measure the stack.
 """
 
 from __future__ import annotations
