@@ -15,7 +15,10 @@ the price sheet, cached tokens at cache rates: a specialist launch's calls from 
 cut short, lost or stopped included, so the stop can come up to one launch late, and each call of the scheduler's own
 judge and patch resolver as it returns. The rule gate's fix critic is not counted. A cap is a usage error when the
 price sheet has no rate for the model the specialists run on or the one the judge and the patch resolver ask, whose
-calls would record tokens only. A session whose toolbox has fewer
+calls would record tokens only. ``--reuse-prelude DIR`` roots the session on the child session the PRELUDE of the
+earlier session in ``DIR`` rooted on instead of starting a child, and still measures the baseline; it is a usage error
+unless that session committed its root on the same workload and on the image ``HYPERLOOM_ACTIVE_IMAGE_DIGEST`` names.
+A session whose toolbox has fewer
 usable cards left than one test needs ends EXPLORE with ``no_measurement_cards`` and skips FINAL. Exit codes: 0 when
 the session ran its course, its wall-clock, GPU-hour or LLM budget spent included, 1 when it failed or was stopped,
 ``no_measurement_cards`` included, 2 on a usage error. The environment and the peers a session needs are checked before
@@ -39,12 +42,14 @@ import math
 import os
 import sys
 from collections.abc import Mapping, MutableMapping
+from dataclasses import replace
 from pathlib import Path
 
 from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV, benchmark_config_path
 from hyperloom.common.env import EnvValueError
 from hyperloom.common.perf_metric import agentx_enabled
 from hyperloom.inference_optimizer.session.paths import workspace_root
+from hyperloom.measure.pins import IMAGE_DIGEST_VAR
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient, RemoteRecipeConfigurationError
 from hyperloom_multibranch.contracts.llm_prices import price_of
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
@@ -62,6 +67,7 @@ from hyperloom_multibranch.scheduling.local_peers import (
     specialist_model,
 )
 from hyperloom_multibranch.scheduling.peers import PeerFactory, PeersUnavailable
+from hyperloom_multibranch.scheduling.prelude import reused_prelude
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry, adopting_orphans
 from hyperloom_multibranch.scheduling.roster import RosterCaps
 from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, RunSettings, Workload
@@ -135,6 +141,13 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--max-k-per-branch", type=int, default=DEFAULT_MAX_K_PER_BRANCH, help="Highest K of a branch.")
     run.add_argument(
         "--judge-interval-sec", type=float, default=DEFAULT_JUDGE_INTERVAL_SECONDS, help="Seconds between judge calls."
+    )
+    run.add_argument(
+        "--reuse-prelude",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help="An earlier session of this workload and image whose PRELUDE child to root on instead of starting one.",
     )
     run.add_argument("-v", "--verbose", action="store_true", help="Log at debug level.")
     return parser
@@ -291,6 +304,10 @@ def main(argv: list[str] | None = None) -> int:
         settings = settings_from(args)
         require_workload_switch(settings.workload, os.environ)
         require_priced_models(settings.max_llm_usd, os.environ)
+        if args.reuse_prelude is not None:
+            image_digest = os.environ.get(IMAGE_DIGEST_VAR, "")
+            reused = reused_prelude(args.reuse_prelude, settings.workload, image_digest)
+            settings = replace(settings, reuse_prelude=reused)
     except ValueError as exc:
         parser.print_usage(sys.stderr)
         print(f"{parser.prog}: error: {exc}", file=sys.stderr)

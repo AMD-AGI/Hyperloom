@@ -82,10 +82,21 @@ class Workload:
 
 
 @dataclass(frozen=True)
+class ReusedPrelude:
+    """The completed PRELUDE of an earlier session that a run roots on instead of starting a child of its own: that
+    session's directory, the child session its root was read from, and the digest of the root recipe it committed."""
+
+    session: str
+    child_session: str
+    root_recipe_digest: str
+
+
+@dataclass(frozen=True)
 class RunSettings:
     """``max_hours`` is the whole session's wall-clock budget, PRELUDE included, ``max_gpu_hours`` the GPU hours
     the session's tests may use and ``max_llm_usd`` the dollars the session's recorded LLM calls, the specialists'
-    and the judge's and patch resolver's, may cost; 0 means no limit for any of them."""
+    and the judge's and patch resolver's, may cost; 0 means no limit for any of them. ``reuse_prelude`` is the earlier
+    PRELUDE the run roots on, ``None`` when it runs a child of its own."""
 
     workload: Workload
     max_hours: float
@@ -93,6 +104,15 @@ class RunSettings:
     max_llm_usd: float
     caps: RosterCaps
     judge_interval_seconds: float
+    reuse_prelude: ReusedPrelude | None = None
 
 
-__all__ = ["SWEEP_FACTORS", "InferenceXShape", "KernelOptimizer", "RunSettings", "Workload", "sweep_concs"]
+__all__ = [
+    "SWEEP_FACTORS",
+    "InferenceXShape",
+    "KernelOptimizer",
+    "ReusedPrelude",
+    "RunSettings",
+    "Workload",
+    "sweep_concs",
+]

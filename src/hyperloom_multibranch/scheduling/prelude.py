@@ -16,6 +16,10 @@ second step, once the caller has put the integration branch on the roster and gi
 of the root as the rule gate asks for, from which the gate writes the baseline and its bar. The longest of those
 tests, start to finish, is how long one test of this workload takes; FINAL's reserve is never shorter.
 
+A session given the PRELUDE of an earlier one (:func:`reused_prelude`) starts no child: it roots on the child session
+that PRELUDE rooted on, which it only reads, the same way. The warm-start leads are read again, as their replays' files
+go to this session's blob store, and the baseline is measured as ever.
+
 The child's own measurements never reach the notebook, and nothing records the card time they took, so the session
 keeps an upper bound of it under its own name: the child's wall time from spawn to exit times the workload's TP,
 which counts the child's time off the cards as well.
@@ -24,14 +28,16 @@ which counts the child's time off the cards as well.
 from __future__ import annotations
 
 import asyncio
+import json
 import shutil
 import sys
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 from hyperloom.common.io import atomic_write_json
+from hyperloom.common.jsonio import read_json_strict
 from hyperloom.contracts.measurement import Purpose, TestKind, TestResult
 from hyperloom.contracts.recipe import PatchRef, Recipe
 from hyperloom.inference_optimizer.model_config_utils import summarize_model_config
@@ -50,9 +56,11 @@ from hyperloom_multibranch.notebook.knowledge.warm_start import (
     replay_leads,
     warm_leads,
 )
+from hyperloom_multibranch.notebook.codec import decode
 from hyperloom_multibranch.scheduling.budget import BudgetExhausted, HardStop, SessionBudget
 from hyperloom_multibranch.scheduling.context import SchedulerContext
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind
+from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.prelude_reader import (
     PreludeArtifacts,
     PreludeReadError,
@@ -63,7 +71,7 @@ from hyperloom_multibranch.scheduling.prelude_reader import (
 )
 from hyperloom_multibranch.scheduling.processes import RegisteredProcess
 from hyperloom_multibranch.scheduling.requests import SessionTests, integration_test_request
-from hyperloom_multibranch.scheduling.settings import Workload
+from hyperloom_multibranch.scheduling.settings import ReusedPrelude, Workload
 
 #: The ``hyperloom`` console script, run as a module so the child runs on the same install as the scheduler.
 HYPERLOOM_COMMAND = ("-m", "hyperloom", "optimize")
@@ -84,6 +92,10 @@ PRELUDE_BRANCH = "prelude"
 #: keeps the other half.
 PRELUDE_TERMINATE_GRACE_SECONDS = 120.0
 BASELINE_REFUSED = "another baseline test was refused"
+ROOT_COMMITTED = "root committed"
+CHILD_REUSED = "child reused"
+#: What :func:`prelude_argv` hands the child of a workload; the kernel optimizer only scopes the session's recipes.
+CHILD_WORKLOAD_FIELDS = ("model", "framework", "gpu_type", "tp", "conc", "precision", "inferencex")
 
 
 class PreludeFailed(RuntimeError):
@@ -126,6 +138,44 @@ def prelude_argv(workload: Workload, max_hours: float, launch_info: Path) -> tup
     )
 
 
+def reused_prelude(session: Path, workload: Workload, image_digest: str) -> ReusedPrelude:
+    """The PRELUDE of the earlier session in ``session``, for a session of ``workload`` on the image
+    ``image_digest``; raises ValueError naming what keeps it from being reused: no such directory, no root committed,
+    another workload, another image or a child session that is gone. Blocks."""
+
+    if not session.is_dir():
+        raise ValueError(f"{session} is not a directory")
+    earlier = SessionLayout(session)
+    try:
+        child = _rooted_child(earlier.decisions)
+        ran = decode(Workload, read_json_strict(earlier.manifest)["settings"]["workload"])
+        root = Recipe.from_document(read_json_strict(earlier.root_recipe))
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise ValueError(f"{session} holds no completed PRELUDE: {exc}") from exc
+    differing = [
+        f"{name} {getattr(ran, name)!r}, not {getattr(workload, name)!r}"
+        for name in CHILD_WORKLOAD_FIELDS
+        if getattr(ran, name) != getattr(workload, name)
+    ]
+    if differing:
+        raise ValueError(f"the PRELUDE of {session} ran another workload: {'; '.join(differing)}")
+    if root.base_image_digest != image_digest:
+        raise ValueError(
+            f"the PRELUDE of {session} ran on image {root.base_image_digest}, this session on {image_digest!r}"
+        )
+    if not child.is_dir():
+        raise ValueError(f"the child session the PRELUDE of {session} rooted on, {child}, is gone")
+    return ReusedPrelude(str(session), str(child), root.digest())
+
+
+def _rooted_child(decisions: Path) -> Path:
+    for line in decisions.read_text(encoding="utf-8").splitlines():
+        row = json.loads(line)
+        if DecisionKind(row["kind"]) is DecisionKind.PRELUDE and row["reason"] == ROOT_COMMITTED:
+            return Path(row["detail"]["child_session"])
+    raise ValueError(f"{decisions} records no {ROOT_COMMITTED!r}")
+
+
 class Prelude:
     """Runs PRELUDE for one session; ``warm_start`` is ``None`` when no Recipe KB is configured."""
 
@@ -159,7 +209,18 @@ class Prelude:
 
         spawned = self._clock.now()
         child = await self._run_child(workload, budget, hard_stop)
-        child_gpu_seconds = (self._clock.now() - spawned) * workload.tp
+        return await self._root_on(child, workload, base_image_digest, (self._clock.now() - spawned) * workload.tp)
+
+    async def reuse(self, earlier: ReusedPrelude, workload: Workload, base_image_digest: str) -> PreludeResult:
+        """Root the session as :meth:`root` does, on the child session of ``earlier``, without starting a child: the
+        GPU time that child used is the earlier session's. The child session is only read."""
+
+        self._decisions.record(Decision(DecisionKind.PRELUDE, CHILD_REUSED, PRELUDE_BRANCH, asdict(earlier)))
+        return await self._root_on(Path(earlier.child_session), workload, base_image_digest, 0.0)
+
+    async def _root_on(
+        self, child: Path, workload: Workload, base_image_digest: str, child_gpu_seconds: float
+    ) -> PreludeResult:
         try:
             artifacts = _succeeded(await asyncio.to_thread(read_prelude, child))
             recipe = await self._root_recipe(artifacts, workload.framework, base_image_digest)
@@ -177,7 +238,7 @@ class Prelude:
         self._decisions.record(
             Decision(
                 DecisionKind.PRELUDE,
-                "root committed",
+                ROOT_COMMITTED,
                 INTEGRATION_BRANCH,
                 {
                     "root_commit": root,
@@ -343,4 +404,4 @@ def _session_profile(
     )
 
 
-__all__ = ["PreludeFailed", "Prelude", "PreludeResult", "WarmStartSource", "prelude_argv"]
+__all__ = ["PreludeFailed", "Prelude", "PreludeResult", "WarmStartSource", "prelude_argv", "reused_prelude"]

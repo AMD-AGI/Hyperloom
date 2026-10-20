@@ -3,8 +3,9 @@
 
 """One multi-branch session, PRELUDE -> EXPLORE -> FINAL -> CLOSE, on the peers a factory builds for it.
 
-PRELUDE gets the whole remaining budget; whatever it leaves is split into the EXPLORE, FINAL and CLOSE windows, FINAL's
-no shorter than the longest baseline test. The
+PRELUDE gets the whole remaining budget, and spends none of it on a child when it reuses an earlier session's PRELUDE;
+whatever it leaves is split into the EXPLORE, FINAL and CLOSE windows, FINAL's no shorter than the
+longest baseline test. The
 FINAL candidates are fixed while every branch still stands, then exploration ends and FINAL validates them. A
 failed PRELUDE, an EXPLORE that ran out of cards to measure on, a stop signal, the session deadline or an unhandled error skip straight to CLOSE, which always runs
 and kills every process the session started. The deadline plus the CLOSE grace bounds CLOSE itself; a stop signal
@@ -314,9 +315,13 @@ class Session:
 
     async def _root_session(self, budget: SessionBudget, hard_stop: HardStop) -> PreludeResult:
         """PRELUDE's first step: the root commit and the warm-start leads every specialist is briefed on, and the
-        integration branch with its K that the baseline is then measured under."""
+        integration branch with its K that the baseline is then measured under. A reused PRELUDE starts no child."""
 
-        prelude = await self._prelude.root(self._settings.workload, budget, hard_stop, self._base_image_digest)
+        workload, reused = self._settings.workload, self._settings.reuse_prelude
+        if reused is None:
+            prelude = await self._prelude.root(workload, budget, hard_stop, self._base_image_digest)
+        else:
+            prelude = await self._prelude.reuse(reused, workload, self._base_image_digest)
         self._briefs.warm = prelude.warm_leads
         self._roster.add_integration(prelude.root_commit, k=1)
         await self._branches.push_quota()
