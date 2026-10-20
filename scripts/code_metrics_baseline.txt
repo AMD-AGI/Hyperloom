@@ -248,7 +248,6 @@ cognitive-complexity src/kernelforge/orchestrator/analysis.py::AnalysisAgentServ
 cognitive-complexity src/kernelforge/orchestrator/orchestration.py::OrchestrationAgent._bind_dispatch 39
 cognitive-complexity src/kernelforge/orchestrator/orchestration.py::OrchestrationService.run 33
 cognitive-complexity src/kernelforge/orchestrator/specialist_probe.py::probe_variant 34
-cognitive-complexity src/kernelforge/rewrite_by_flydsl/flydsl_rewrite_driver_preparation.py::prepare_rewrite_driver 37
 cognitive-complexity src/kernelforge/rewrite_by_flydsl/ingest.py::discover_source_entry 31
 cognitive-complexity src/kernelforge/rewrite_by_flydsl/port_loop.py::check_flydsl_port 35
 cognitive-complexity src/kernelforge/rewrite_by_flydsl/port_loop.py::run_port_loop 52
@@ -897,7 +896,6 @@ function-lines src/kernelforge/orchestrator/orchestration.py::OrchestrationServi
 function-lines src/kernelforge/orchestrator/specialist_probe.py::probe_variant 247
 function-lines src/kernelforge/orchestrator/specialists.py::SpecialistAgent.run 104
 function-lines src/kernelforge/rewrite_by_flydsl/applyback.py::_publish_patch 115
-function-lines src/kernelforge/rewrite_by_flydsl/flydsl_rewrite_driver_preparation.py::prepare_rewrite_driver 231
 function-lines src/kernelforge/rewrite_by_flydsl/kb.py::write_flydsl_kb_solution 85
 function-lines src/kernelforge/rewrite_by_flydsl/optimize.py::run_optimize 126
 function-lines src/kernelforge/rewrite_by_flydsl/port_loop.py::run_port_loop 166

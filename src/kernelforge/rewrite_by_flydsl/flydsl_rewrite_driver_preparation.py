@@ -280,29 +280,26 @@ def _restore_evidence(snapshots: dict[Path, tuple[bytes, int]]) -> None:
         path.chmod(mode)
 
 
-def _unexpected_stage_outputs(
-    stage: Path,
-    stage_driver: Path,
-    evidence_paths: set[Path],
-) -> list[Path]:
-    allowed = {stage_driver.resolve(), *(path.resolve() for path in evidence_paths)}
-    unexpected: list[Path] = []
-    for path in stage.rglob("*"):
-        if ".git" in path.parts:
-            continue
-        if not path.is_file() and not path.is_symlink():
-            continue
-        if path.resolve() not in allowed:
-            unexpected.append(path)
-    return unexpected
-
-
-def _clean_unexpected_outputs(paths: list[Path]) -> None:
-    for path in paths:
+def _restore_write_boundary(stage: Path, stage_driver: Path, evidence: dict[Path, tuple[bytes, int]]) -> list[str]:
+    """Put the evidence back and remove stray outputs; what crossed the boundary, as sorted stage-relative paths."""
+    allowed = {stage_driver.resolve(), *(path.resolve() for path in evidence)}
+    unexpected = [
+        path
+        for path in stage.rglob("*")
+        if ".git" not in path.parts and (path.is_file() or path.is_symlink()) and path.resolve() not in allowed
+    ]
+    evidence_changed = [
+        path
+        for path, (content, _mode) in evidence.items()
+        if not path.is_file() or path.is_symlink() or path.parent.is_symlink() or path.read_bytes() != content
+    ]
+    _restore_evidence(evidence)
+    for path in unexpected:
         try:
             path.unlink()
         except OSError:
             continue
+    return sorted({path.relative_to(stage).as_posix() for path in [*unexpected, *evidence_changed]})
 
 
 def _ensure_agent_git_workspace(stage: Path) -> None:
@@ -515,6 +512,141 @@ inside an isolated staging repository: edit only the requested driver file.
 """
 
 
+@dataclass
+class _DriverAuthoring:
+    """The authoring turns of one preparation, the caller's driver they may replace, and what they have run into."""
+
+    spec: RewriteSpec
+    config: Config
+    usage: UsageAccumulator | None
+    preparation: DriverPreparation
+    destination: Path
+    original: bytes | None
+    original_mode: int
+    audit: Path
+    last_preflight: DriverPreflight | None
+    prior_failure: str = ""
+    attempts_run: int = 0
+
+    async def run(self, invocation_spec: bytes) -> DriverPreparationResult:
+        """Stage the driver in an isolated repository and give each authoring turn its chance to make it conform."""
+        deadline_unix = self.preparation.deadline_unix
+        self.prior_failure = self.last_preflight.detail if self.last_preflight is not None else ""
+        try:
+            with tempfile.TemporaryDirectory(prefix="kernel_forge_rewrite_driver_") as temporary:
+                stage = Path(temporary)
+                stage_driver = stage / self.destination.name
+                evidence = self._seed_stage(stage, stage_driver, invocation_spec)
+
+                for attempt in range(1, self.preparation.max_attempts + 1):
+                    remaining = _remaining(deadline_unix)
+                    preflight_reserve = DEFAULT_REWRITE_BUDGET.driver_preflight_reserve_sec
+                    if remaining <= preflight_reserve:
+                        break
+                    self.attempts_run = attempt
+                    timeout_sec = max(1, int(min(float(self.config.agent_timeout_sec), remaining - preflight_reserve)))
+                    prompt = _build_prompt(
+                        spec=self.spec,
+                        stage_driver=stage_driver,
+                        invocation_spec_available=bool(invocation_spec),
+                        prior_failure=self.prior_failure,
+                    )
+                    turn = _AuthoringTurn(stage, stage_driver, set(evidence), prompt, timeout_sec, [])
+                    record = self.audit / f"attempt_{attempt:02d}"
+                    await self._author(turn, record)
+                    crossed = _restore_write_boundary(stage, stage_driver, evidence)
+                    if crossed:
+                        self.prior_failure = (
+                            "the previous attempt violated the write boundary: "
+                            + ", ".join(crossed)
+                            + "; modify only the driver"
+                        )
+                        continue
+                    if not stage_driver.is_file() or stage_driver.is_symlink():
+                        self.prior_failure = "the previous attempt deleted the required driver"
+                        continue
+
+                    candidate_bytes = stage_driver.read_bytes()
+                    try:
+                        compile(candidate_bytes, str(self.destination), "exec", dont_inherit=True)
+                    except (SyntaxError, ValueError) as error:
+                        self.prior_failure = f"the generated driver is not valid Python: {error}"
+                        continue
+
+                    atomic_write_bytes(self.destination, candidate_bytes)
+                    try:
+                        self.last_preflight = preflight_rewrite_driver(
+                            self.spec, str(self.destination), deadline_unix=deadline_unix
+                        )
+                    except Exception as error:  # noqa: BLE001
+                        _restore_driver(self.destination, self.original)
+                        self.prior_failure = f"deterministic preflight raised {type(error).__name__}: {error}"
+                        continue
+                    _audit_driver(record, "driver_at_preflight.py", self.destination)
+                    _audit_json(record, "preflight.json", _preflight_payload(self.last_preflight))
+                    if self.last_preflight.ok:
+                        return DriverPreparationResult(
+                            ok=True,
+                            attempts=attempt,
+                            preflight=self.last_preflight,
+                            audit_dir=str(self.audit),
+                            wrote_driver=True,
+                        )
+                    _restore_driver(self.destination, self.original)
+                    self.prior_failure = f"[{self.last_preflight.failure_class}] {self.last_preflight.detail}"
+        except (OSError, RuntimeError, ValueError) as error:
+            _restore_driver(self.destination, self.original)
+            return self._failure(DRIVER_PREPARATION_FAILED, f"could not prepare the isolated driver workspace: {error}")
+
+        _restore_driver(self.destination, self.original)
+        deadline_reached = _remaining(deadline_unix) <= DEFAULT_REWRITE_BUDGET.driver_preflight_reserve_sec
+        detail = self.prior_failure or "the preparation agent produced no conforming driver"
+        if deadline_reached:
+            return self._failure(
+                DRIVER_PREPARATION_DEADLINE, f"driver preparation reached its deadline; last failure: {detail}"
+            )
+        return self._failure(DRIVER_PREPARATION_FAILED, detail)
+
+    def _seed_stage(self, stage: Path, stage_driver: Path, invocation_spec: bytes) -> dict[Path, tuple[bytes, int]]:
+        """Lay out the isolated repository: the driver to edit, the read-only evidence, and a git baseline."""
+        if self.original is None:
+            stage_driver.write_text('"""Rewrite measurement driver; prepared by KernelForge."""\n', encoding="utf-8")
+        else:
+            stage_driver.write_bytes(self.original)
+            stage_driver.chmod(self.original_mode)
+        evidence = _write_evidence(stage, self.spec, invocation_spec)
+        _ensure_agent_git_workspace(stage)
+        return evidence
+
+    async def _author(self, turn: _AuthoringTurn, record: Path) -> None:
+        """Run one authoring session, recording its prompt, the driver before and after it, and how the agent ended."""
+        _audit_text(record, "prompt.md", turn.prompt)
+        _audit_text(record, "system_prompt.md", _SYSTEM_PROMPT)
+        _audit_driver(record, "driver_before.py", turn.stage_driver)
+        try:
+            output = await _run_agent(config=self.config, turn=turn, usage=self.usage)
+            _audit_text(record, "agent_output.txt", output)
+        except asyncio.TimeoutError:
+            _audit_json(record, "agent_event.json", {"status": "timeout", "timeout_sec": turn.timeout_sec})
+        except Exception as error:  # noqa: BLE001
+            _audit_json(
+                record, "agent_event.json", {"status": "error", "type": type(error).__name__, "error": str(error)}
+            )
+        finally:
+            _audit_text(record, "agent_progress.txt", "\n".join(turn.progress_log))
+            _audit_driver(record, "driver_after_agent.py", turn.stage_driver)
+
+    def _failure(self, failure_class: str, error: str) -> DriverPreparationResult:
+        return DriverPreparationResult(
+            ok=False,
+            attempts=self.attempts_run,
+            preflight=self.last_preflight,
+            failure_class=failure_class,
+            error=error,
+            audit_dir=str(self.audit),
+        )
+
+
 async def prepare_rewrite_driver(
     *,
     spec: RewriteSpec,
@@ -525,12 +657,8 @@ async def prepare_rewrite_driver(
 ) -> DriverPreparationResult:
     """Author or repair one driver without exposing the caller's tree to writes."""
 
-    deadline_unix = preparation.deadline_unix
     destination = Path(preparation.driver_path).resolve()
-    if destination in {
-        Path(spec.source_kernel).resolve(),
-        Path(spec.flydsl_kernel).resolve(),
-    }:
+    if destination in {Path(spec.source_kernel).resolve(), Path(spec.flydsl_kernel).resolve()}:
         return DriverPreparationResult(
             ok=False,
             failure_class=driver_contract.DRIVER_NOT_INDEPENDENT,
@@ -540,16 +668,12 @@ async def prepare_rewrite_driver(
         return DriverPreparationResult(
             ok=False,
             failure_class=driver_contract.DRIVER_NOT_INDEPENDENT,
-            error=("the driver destination is producer-owned experiment state and cannot own the correctness gate"),
+            error="the driver destination is producer-owned experiment state and cannot own the correctness gate",
         )
     try:
         invocation_spec = _load_invocation_spec(preparation.invocation_spec_file)
     except (OSError, ValueError) as error:
-        return DriverPreparationResult(
-            ok=False,
-            failure_class=INVOCATION_SPEC_INVALID,
-            error=str(error),
-        )
+        return DriverPreparationResult(ok=False, failure_class=INVOCATION_SPEC_INVALID, error=str(error))
 
     try:
         audit = _audit_root(preparation.experiments_dir, spec.operator_slug)
@@ -561,188 +685,9 @@ async def prepare_rewrite_driver(
             failure_class=DRIVER_PREPARATION_FAILED,
             error=f"could not initialize rewrite driver preparation: {error}",
         )
-    last_preflight = initial_preflight
-    prior_failure = initial_preflight.detail if initial_preflight is not None and not initial_preflight.ok else ""
     if initial_preflight is not None:
         _audit_json(audit, "initial_preflight.json", _preflight_payload(initial_preflight))
-
-    attempts_run = 0
-    try:
-        with tempfile.TemporaryDirectory(prefix="kernel_forge_rewrite_driver_") as temporary:
-            stage = Path(temporary)
-            stage_driver = stage / destination.name
-            if original is None:
-                stage_driver.write_text(
-                    '"""Rewrite measurement driver; prepared by KernelForge."""\n',
-                    encoding="utf-8",
-                )
-            else:
-                stage_driver.write_bytes(original)
-                stage_driver.chmod(original_mode)
-            evidence = _write_evidence(stage, spec, invocation_spec)
-            _ensure_agent_git_workspace(stage)
-
-            for attempt in range(1, max(1, preparation.max_attempts) + 1):
-                remaining = _remaining(deadline_unix)
-                preflight_reserve = DEFAULT_REWRITE_BUDGET.driver_preflight_reserve_sec
-                if remaining <= preflight_reserve:
-                    break
-                attempts_run = attempt
-                timeout_sec = max(
-                    1,
-                    int(
-                        min(
-                            float(config.agent_timeout_sec),
-                            remaining - preflight_reserve,
-                        )
-                    ),
-                )
-                prompt = _build_prompt(
-                    spec=spec,
-                    stage_driver=stage_driver,
-                    invocation_spec_available=bool(invocation_spec),
-                    prior_failure=prior_failure,
-                )
-                attempt_dir = f"attempt_{attempt:02d}"
-                _audit_text(audit, f"{attempt_dir}/prompt.md", prompt)
-                _audit_text(audit, f"{attempt_dir}/system_prompt.md", _SYSTEM_PROMPT)
-                _audit_driver(audit, f"{attempt_dir}/driver_before.py", stage_driver)
-                progress_log: list[str] = []
-                try:
-                    output = await _run_agent(
-                        config=config,
-                        turn=_AuthoringTurn(stage, stage_driver, set(evidence), prompt, timeout_sec, progress_log),
-                        usage=usage,
-                    )
-                    _audit_text(audit, f"{attempt_dir}/agent_output.txt", output)
-                except asyncio.TimeoutError:
-                    prior_failure = (
-                        f"the previous authoring session timed out after {timeout_sec}s; save a complete driver earlier"
-                    )
-                    _audit_json(
-                        audit,
-                        f"{attempt_dir}/agent_event.json",
-                        {"status": "timeout", "timeout_sec": timeout_sec},
-                    )
-                except Exception as error:  # noqa: BLE001
-                    prior_failure = f"agent invocation failed: {type(error).__name__}: {error}"
-                    _audit_json(
-                        audit,
-                        f"{attempt_dir}/agent_event.json",
-                        {
-                            "status": "error",
-                            "type": type(error).__name__,
-                            "error": str(error),
-                        },
-                    )
-                finally:
-                    _audit_text(
-                        audit,
-                        f"{attempt_dir}/agent_progress.txt",
-                        "\n".join(progress_log),
-                    )
-                    _audit_driver(
-                        audit,
-                        f"{attempt_dir}/driver_after_agent.py",
-                        stage_driver,
-                    )
-
-                unexpected = _unexpected_stage_outputs(
-                    stage,
-                    stage_driver,
-                    set(evidence),
-                )
-                evidence_changed = [
-                    path
-                    for path, (content, _mode) in evidence.items()
-                    if (
-                        not path.is_file()
-                        or path.is_symlink()
-                        or path.parent.is_symlink()
-                        or path.read_bytes() != content
-                    )
-                ]
-                _restore_evidence(evidence)
-                _clean_unexpected_outputs(unexpected)
-                if unexpected or evidence_changed:
-                    changed = [
-                        *(path.relative_to(stage).as_posix() for path in unexpected),
-                        *(path.relative_to(stage).as_posix() for path in evidence_changed),
-                    ]
-                    prior_failure = (
-                        "the previous attempt violated the write boundary: "
-                        + ", ".join(sorted(set(changed)))
-                        + "; modify only the driver"
-                    )
-                    continue
-                if not stage_driver.is_file() or stage_driver.is_symlink():
-                    prior_failure = "the previous attempt deleted the required driver"
-                    continue
-
-                candidate_bytes = stage_driver.read_bytes()
-                try:
-                    compile(
-                        candidate_bytes,
-                        str(destination),
-                        "exec",
-                        dont_inherit=True,
-                    )
-                except (SyntaxError, ValueError) as error:
-                    prior_failure = f"the generated driver is not valid Python: {error}"
-                    continue
-
-                atomic_write_bytes(destination, candidate_bytes)
-                try:
-                    last_preflight = preflight_rewrite_driver(
-                        spec,
-                        str(destination),
-                        deadline_unix=deadline_unix,
-                    )
-                except Exception as error:  # noqa: BLE001
-                    _restore_driver(destination, original)
-                    prior_failure = f"deterministic preflight raised {type(error).__name__}: {error}"
-                    continue
-                _audit_driver(
-                    audit,
-                    f"{attempt_dir}/driver_at_preflight.py",
-                    destination,
-                )
-                _audit_json(
-                    audit,
-                    f"{attempt_dir}/preflight.json",
-                    _preflight_payload(last_preflight),
-                )
-                if last_preflight.ok:
-                    return DriverPreparationResult(
-                        ok=True,
-                        attempts=attempt,
-                        preflight=last_preflight,
-                        audit_dir=str(audit),
-                        wrote_driver=True,
-                    )
-                _restore_driver(destination, original)
-                prior_failure = f"[{last_preflight.failure_class}] {last_preflight.detail}"
-    except (OSError, RuntimeError, ValueError) as error:
-        _restore_driver(destination, original)
-        return DriverPreparationResult(
-            ok=False,
-            attempts=attempts_run,
-            preflight=last_preflight,
-            failure_class=DRIVER_PREPARATION_FAILED,
-            error=f"could not prepare the isolated driver workspace: {error}",
-            audit_dir=str(audit),
-        )
-
-    _restore_driver(destination, original)
-    deadline_reached = _remaining(deadline_unix) <= DEFAULT_REWRITE_BUDGET.driver_preflight_reserve_sec
-    detail = prior_failure or "the preparation agent produced no conforming driver"
-    if deadline_reached:
-        detail = f"driver preparation reached its deadline; last failure: {detail}"
-    return DriverPreparationResult(
-        ok=False,
-        attempts=attempts_run,
-        preflight=last_preflight,
-        failure_class=(DRIVER_PREPARATION_DEADLINE if deadline_reached else DRIVER_PREPARATION_FAILED),
-        error=detail,
-        audit_dir=str(audit),
+    authoring = _DriverAuthoring(
+        spec, config, usage, preparation, destination, original, original_mode, audit, initial_preflight
     )
+    return await authoring.run(invocation_spec)
