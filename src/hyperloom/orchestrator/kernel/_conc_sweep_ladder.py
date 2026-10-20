@@ -557,6 +557,7 @@ async def _sweep_arm_option_b(
         try:
             sub = await run.run_rung(variant, _RungServer(serving_lease=serving_lease))
         except Exception as exc:  # noqa: BLE001
+            log.warning("conc_sweep option B: arm=%s variant=%s raised %r", arm_name, variant.name, exc)
             sub = [_failed_rung_result(variant, f"option_b: {exc}", type(exc).__name__)]
         rung_elapsed = round(time.time() - rung_started_at, 3)
         for r in sub:

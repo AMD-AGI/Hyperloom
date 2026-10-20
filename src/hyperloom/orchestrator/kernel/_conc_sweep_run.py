@@ -595,7 +595,7 @@ def _flush_conc_sweep_report(payload: dict[str, Any], session_dir: Path) -> Exce
             (payload.get("optimized") or {}).get("points") or []
         )
         _write_csv(csv_path, all_points)
-    except Exception as exc:
+    except (OSError, ValueError, csv.Error) as exc:
         log.warning("conc_sweep: _flush_conc_sweep_report failed", exc_info=True)
         return exc
     return None

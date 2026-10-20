@@ -36,12 +36,8 @@ class ContextProvider:
     reference_reader: Callable[[str], str] | None = None
 
     def _safe(self, fn: Callable[[], str], label: str) -> str:
-        """Invoke a projection callable, never letting it crash the reactor."""
-        try:
-            out = fn()
-        except Exception as exc:
-            log.exception("context tool %s failed", label)
-            return f"(context tool {label} unavailable: {exc!r})"
+        """Invoke a projection callable; an empty result reads as empty."""
+        out = fn()
         return out if isinstance(out, str) and out else f"({label}: empty)"
 
     def mission_status(self) -> str:
