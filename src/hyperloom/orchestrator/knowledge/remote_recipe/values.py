@@ -994,32 +994,24 @@ def _validate_patch_column(value: Mapping[str, Any]) -> None:
         seen.add(ref)
 
 
-def _is_ref_list(value: Any) -> bool:
-    """Whether ``value`` is a flat list of refs, so two producers can be unioned."""
-    return isinstance(value, list) and all(isinstance(item, str) for item in value)
-
-
 def merge_staged_sections(
-    value: dict[str, Any],
     sections: Any,
     files: "_Files",
     *,
-    only: Collection[str] | None = None,
-    required: Collection[str] | None = None,
-) -> list[str]:
-    """Merge each staged column into ``value``, adopting the files it names."""
-    merged: list[str] = []
-    required_names = set(required or ())
+    only: Collection[str],
+    required: Collection[str],
+) -> dict[str, dict[str, Any]]:
+    """Return each staged column's knowledge in draft order, adopting the files it names."""
+    merged: dict[str, dict[str, Any]] = {}
     for name in sections.sections():
-        if only is not None and name not in only:
+        if name not in only:
             continue
+        qualifier = "required " if name in required else ""
         try:
             staged = sections.staged(name)
             if staged is None:
-                qualifier = "required " if name in required_names else ""
                 raise RemoteRecipeValidationError(f"{qualifier}staged section {name!r} cannot be read")
             if not staged.knowledge:
-                qualifier = "required " if name in required_names else ""
                 raise RemoteRecipeValidationError(f"{qualifier}staged section {name!r} is empty")
             staged_files = [
                 (
@@ -1041,21 +1033,30 @@ def merge_staged_sections(
                 files.validate_adoption(source, rel)
             for source, rel in staged_files:
                 files.adopt(source, rel)
-            current = value.get(name) if isinstance(value.get(name), Mapping) else {}
-            combined = dict(staged.knowledge)
-            for ref_key, before in current.items():
-                after = combined.get(ref_key, [])
-                if not _is_ref_list(before) or not _is_ref_list(after):
-                    continue
-                combined[ref_key] = list(dict.fromkeys(str(ref) for ref in [*before, *after] if str(ref)))
-            value[name] = combined
-            merged.append(name)
+            merged[name] = dict(staged.knowledge)
+        except RemoteRecipeValidationError:
+            raise
         except Exception as exc:
-            if isinstance(exc, RemoteRecipeValidationError):
-                raise
-            qualifier = "required " if name in required_names else ""
             raise RemoteRecipeValidationError(f"{qualifier}staged section {name!r} is invalid: {exc}") from exc
     return merged
+
+
+def _dropped_staged_sections(state: Any) -> list[Mapping[str, Any]]:
+    """Fail while section staging is still owed, else return the stagings dropped for missing patch sources."""
+    pending_sections = list(getattr(state, "kb_stage_outbox", []) or [])
+    blocking_sections = [
+        row for row in pending_sections if not (isinstance(row, Mapping) and row.get("missing_patch_sources"))
+    ]
+    if blocking_sections:
+        raise RemoteRecipeValidationError(
+            "required section staging is incomplete: "
+            f"{[row.get('id') for row in blocking_sections if isinstance(row, Mapping)]!r}"
+        )
+    dead_letter = getattr(state, "kb_stage_dead_letter", []) or []
+    return [
+        *pending_sections,
+        *(row for row in dead_letter if isinstance(row, Mapping) and row.get("missing_patch_sources")),
+    ]
 
 
 def build_remote_knowledge(
@@ -1069,45 +1070,20 @@ def build_remote_knowledge(
     if sections is None:
         raise RemoteRecipeValidationError("a Recipe can only be built from a staged draft")
     scope = RecipeScope.from_state(state)
-    pending_sections = list(getattr(state, "kb_stage_outbox", []) or [])
-    blocking_sections = [
-        row for row in pending_sections if not (isinstance(row, Mapping) and row.get("missing_patch_sources"))
-    ]
-    dropped_sections = [
-        row
-        for row in [
-            *pending_sections,
-            *(getattr(state, "kb_stage_dead_letter", []) or []),
-        ]
-        if isinstance(row, Mapping) and row.get("missing_patch_sources")
-    ]
-    if blocking_sections:
-        raise RemoteRecipeValidationError(
-            "required section staging is incomplete: "
-            f"{[row.get('id') for row in blocking_sections if isinstance(row, Mapping)]!r}"
-        )
+    dropped_sections = _dropped_staged_sections(state)
     root = Path(files_dir)
     root.mkdir(parents=True, exist_ok=True)
     files = _Files(root)
-    stack = [
-        {**dict(item), "__stack_index": index}
-        for index, item in enumerate(getattr(state, "optimization_stack", []) or [])
-        if isinstance(item, Mapping)
-    ]
-    dropped_entries: set[tuple[str, int]] = set()
-    for row in dropped_sections:
-        try:
-            stack_index = int(row.get("stack_index") or 0)
-        except (TypeError, ValueError):
-            continue
-        dropped_entries.add((str(row.get("owner") or "").upper(), stack_index))
+    stack = [dict(item) for item in (getattr(state, "optimization_stack", []) or []) if isinstance(item, Mapping)]
+    dropped_entries = {
+        (str(row.get("owner") or "").upper(), int(row.get("stack_index") or 0)) for row in dropped_sections
+    }
     # ``config`` and ``kernel`` are staged unconditionally just below, so only ``patch`` is conditional: a KEEP that
     # harvested overlays demands it, and a record published without them would replay a weaker stack than measured.
     required_columns = {CONFIG_SECTION, KERNEL_SECTION}
     if any(
-        (owner := str(item.get("kb_required_owner") or "").strip().upper())
-        and (owner, int(item["__stack_index"])) not in dropped_entries
-        for item in stack
+        (owner := str(item.get("kb_required_owner") or "").strip().upper()) and (owner, index) not in dropped_entries
+        for index, item in enumerate(stack)
     ):
         required_columns.add(PATCH_SECTION)
     gains = list(getattr(state, "gain_per_stack_entry", []) or [])
@@ -1118,17 +1094,11 @@ def build_remote_knowledge(
     ConfigKB(sections).stage(build_publishable_recipe_config(state))
     KernelAgentKB(sections).stage_from_state(state, kernel_optimizer=scope.kernel_optimizer)
 
-    value: dict[str, Any] = {name: {} for name in RECIPE_SECTIONS}
-    staged_sections = merge_staged_sections(
-        value,
-        sections,
-        files,
-        only=RECIPE_SECTIONS,
-        required=required_columns,
-    )
-    missing_columns = required_columns - set(staged_sections)
+    merged = merge_staged_sections(sections, files, only=RECIPE_SECTIONS, required=required_columns)
+    missing_columns = required_columns - merged.keys()
     if missing_columns:
         raise RemoteRecipeValidationError(f"required staged columns are missing: {sorted(missing_columns)!r}")
+    value: dict[str, Any] = {name: merged.get(name, {}) for name in RECIPE_SECTIONS}
     # Carrying the prior record forward runs last: it unions rows and refs into the assembled columns, so it must see
     # what staging already contributed.
     _adopt_replayed_prior(state, sections, value, files, stack)
@@ -1154,7 +1124,7 @@ def build_remote_knowledge(
                 "session_id": str(getattr(state, "recipe_kb_session_id", "") or getattr(state, "session_id", "")),
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "optimization_stack_length": len(stack),
-                "staged_sections": staged_sections,
+                "staged_sections": list(merged),
                 "dropped_staged_sections": list(
                     dict.fromkeys(str(row.get("id") or "") for row in dropped_sections if str(row.get("id") or ""))
                 ),
