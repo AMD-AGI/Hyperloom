@@ -990,12 +990,7 @@ class IntentRouter(CoordinatorCollaborator):
             )
         denied = self._coord.dispatcher.admission_denial_for_action(action_name, params=intent.payload.get("params"))
         if denied is not None:
-            await self.record_policy_denied(
-                source,
-                intent,
-                denied,
-                action_name=action_name,
-            )
+            await self.record_policy_denied(source, intent, denied, action_name=action_name)
             return
         # delegate explore runs variants directly (no Critic pre-review).
         payload = dict(intent.payload)
@@ -1016,6 +1011,7 @@ class IntentRouter(CoordinatorCollaborator):
                     },
                 )
                 return
+            self._coord.proposals.floor_keep_threshold(params)
         if action_name == "specialist" and not await self._admit_specialist(source, intent, params):
             return
         # idempotency_key is top-level per schema; strip a nested compat alias.
