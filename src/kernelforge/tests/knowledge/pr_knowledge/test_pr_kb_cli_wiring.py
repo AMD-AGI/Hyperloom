@@ -10,6 +10,7 @@ from click.testing import CliRunner
 
 from hyperloom.common.env import EnvValueError
 from kernelforge.cli import forge_loop
+from kernelforge.cli.relay import SearchActorBuildContext
 from kernelforge.knowledge.pr_knowledge.context import PrReferenceQuery
 from kernelforge.cli.pr_references import (
     _collect_pr_references,
@@ -80,20 +81,20 @@ def test_pr_context_is_wired_only_to_the_implementer():
         source.index("implementer_setup = ImplementerSetup(") : source.index("effective_implementer =")
     ]
     analysis = source[source.index("analysis_service = make_analysis_agent_service(") : source.index("analysis_mode =")]
-    orchestration = source[
-        source.index("orchestration_service = make_orchestration_service(") : source.index(
-            "supervisor_fn = make_supervisor_fn("
+    # Each Agent profile builds its own planning chain and supervisor; only its implementer receives the setup.
+    actor_source = inspect.getsource(SearchActorBuildContext.build)
+    orchestration = actor_source[
+        actor_source.index("orchestration = make_orchestration_service(") : actor_source.index(
+            "supervisor = make_supervisor_fn("
         )
     ]
-    supervisor = source[
-        source.index("supervisor_fn = make_supervisor_fn(") : source.index("loop_runner = IterationLoop(")
-    ]
+    supervisor = actor_source[actor_source.index("supervisor = make_supervisor_fn(") :]
 
     assert "pre_task_context=pr_task_context" in implementer
     assert "pr_kb_repo=pr_kb_repo" in implementer
     assert "pr_task_context" not in analysis
-    assert "pr_task_context" not in orchestration
-    assert "pr_task_context" not in supervisor
+    assert "setup" not in orchestration
+    assert "setup" not in supervisor
 
 
 def test_help_text_mentions_the_default_being_off():

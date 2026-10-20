@@ -21,7 +21,7 @@ from hyperloom.orchestrator.roles import (
     MockBackend,
     ScriptedPlan,
 )
-from hyperloom.orchestrator.roles.mcp_context_tools import ContextProvider
+from hyperloom.orchestrator.roles.mcp_context_tools import ContextProvider, _make_handler
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 from hyperloom.orchestrator.actions.executors.explore import STACK_REVALIDATE_SOURCE
 from hyperloom.orchestrator.loop.coordinator import Coordinator
@@ -202,6 +202,7 @@ def test_recent_outcomes_reader_clamps_top_k(coord: Coordinator) -> None:
 
 
 # -- context reader failure surface -----------------------------------------
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("owner", "source", "tool"),
     [
@@ -210,7 +211,7 @@ def test_recent_outcomes_reader_clamps_top_k(coord: Coordinator) -> None:
         ("tasks", "running_context_sync", "running_tasks"),
     ],
 )
-def test_context_reader_failure_carries_traceback_to_the_log(
+async def test_context_reader_failure_carries_traceback_to_the_log(
     coord: Coordinator,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -230,10 +231,10 @@ def test_context_reader_failure_carries_traceback_to_the_log(
     )
 
     with caplog.at_level(logging.ERROR, logger="hyperloom.orchestrator.roles.mcp_context_tools"):
-        out = getattr(provider, tool)()
+        out = await _make_handler(provider, tool)({})
 
-    assert f"context tool {tool} unavailable" in out
-    assert "projection read exploded" in out
+    assert out["is_error"] is True
+    assert "projection read exploded" in out["content"][0]["text"]
     assert "Traceback (most recent call last)" in caplog.text
 
 
