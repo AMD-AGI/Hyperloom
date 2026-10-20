@@ -254,7 +254,8 @@ def build_handoff(
     recipe_path = str(state.baseline_config_path or "")
     recipe_envs = read_recipe_bench_envs(recipe_path)
     devices = device_pin(recipe_envs)
-    handoff = _handoff_payload(state, reference, devices, session_dir=session_dir, agentx=agentx, e2e_metric=e2e_metric)
+    handoff = _handoff_payload(state, reference, devices, session_dir=session_dir, agentx=agentx)
+    handoff["e2e_metric"] = e2e_metric
     if devices.pin:
         # ABSOLUTE ids + the var they came from, so a consumer that writes
         # ROCR_VISIBLE_DEVICES itself re-applies the same pin instead of
@@ -298,7 +299,6 @@ def _handoff_payload(
     *,
     session_dir: Path,
     agentx: bool,
-    e2e_metric: str,
 ) -> dict[str, Any]:
     """The fields every handoff carries, whatever the recipe adds to them."""
     measurement = reference.measurement
@@ -336,7 +336,6 @@ def _handoff_payload(
         "eval_dir": str(geak_dir(session_dir) / f"e2e_cycle{int(state.macro_cycle or 0)}"),
         # GEAK owns client selection; AgentX results are proposal proxies.
         "bench_client": "auto",
-        "e2e_metric": e2e_metric,
         "inferencex_path": str(os.environ.get("INFERENCEX_PATH", "")),
         # The serving/optimization device set, as HIP-level ids (what the
         # consumer exports as HIP_VISIBLE_DEVICES). Logical positions inside
