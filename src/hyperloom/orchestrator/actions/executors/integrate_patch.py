@@ -574,6 +574,18 @@ def _sole_patch_root(
     return roots.pop() if covered == selected and len(roots) == 1 else None
 
 
+def _edited_framework_tree() -> Path | None:
+    """The tree the session's framework is edited at: the session's root, else its checkout or pip install root."""
+    session_root = resolve_session_framework_root()
+    if session_root and Path(session_root).is_dir():
+        return Path(session_root)
+    framework = os.environ.get("FRAMEWORK", "")
+    if not framework:
+        return None
+    tree = framework_apply_tree(resolve_framework_tree(framework))
+    return tree.root if tree is not None else None
+
+
 def _resolve_framework_root(
     explicit: str | None,
     patch_paths: list[Path] | None = None,
@@ -638,16 +650,7 @@ def _resolve_framework_root(
             )
         return resolution.root
 
-    if explicit_path is not None:
-        return explicit_path
-    session_root = resolve_session_framework_root()
-    if session_root and Path(session_root).is_dir():
-        return Path(session_root)
-    framework = os.environ.get("FRAMEWORK", "")
-    if not framework:
-        return None
-    tree = framework_apply_tree(resolve_framework_tree(framework))
-    return tree.root if tree is not None else None
+    return explicit_path if explicit_path is not None else _edited_framework_tree()
 
 
 def _run_git_apply(
@@ -1286,6 +1289,17 @@ def _resolve_artifact_target(rel_target: str) -> tuple[Path, str, Path] | None:
     return None
 
 
+def _declared_artifacts(
+    explicit_artifacts: list[dict[str, Any]] | None,
+    done_payload: dict[str, Any] | None,
+) -> list[Any]:
+    """The artifact entries this attempt installs: the params override, else what the specialist wrote."""
+    if explicit_artifacts:
+        return list(explicit_artifacts)
+    written = (done_payload or {}).get("artifacts_written")
+    return list(written) if isinstance(written, list) else []
+
+
 def _resolve_artifact_specs(
     *,
     specialist_workspace: Path,
@@ -1309,12 +1323,7 @@ def _resolve_artifact_specs(
         A ``(specs, errors)`` tuple: resolved specs, plus per-entry error
         records (``{artifact, error}``) for entries that could not be resolved.
     """
-    raw: list[Any] = []
-    if explicit_artifacts:
-        raw = list(explicit_artifacts)
-    elif done_payload and isinstance(done_payload.get("artifacts_written"), list):
-        raw = list(done_payload["artifacts_written"])
-
+    raw = _declared_artifacts(explicit_artifacts, done_payload)
     allowed_roots = [
         (specialist_workspace / "worktree").resolve(),
         specialist_workspace.resolve(),
@@ -1372,6 +1381,24 @@ def _is_aiter_gemm_model_config(spec: _ArtifactSpec) -> bool:
     filename = spec.target.name.lower()
     is_aiter_model_config = "/aiter/configs/model_configs/" in target
     return is_aiter_model_config and (kind == "model_config" or "_tuned_gemm" in filename)
+
+
+def _rows_not_runtime_ready(rows: list[dict[str, Any]]) -> int:
+    """How many tuned rows name no kernel the runtime can dispatch.
+
+    A placeholder name or a non-positive runtime is what an untuned seed row
+    looks like: the entry exists, but AITER falls back to its own heuristic.
+    """
+    unusable = 0
+    for row in rows:
+        kernel_name = str(row.get("kernelName") or "").strip().lower()
+        try:
+            runtime_us = float(str(row.get("us") or "0").strip())
+        except ValueError:
+            runtime_us = 0.0
+        if not math.isfinite(runtime_us) or runtime_us <= 0.0 or "placeholder" in kernel_name:
+            unusable += 1
+    return unusable
 
 
 def _validate_aiter_gemm_artifacts(
@@ -1434,15 +1461,7 @@ def _validate_aiter_gemm_artifacts(
             errors.append({**base_error, "error": "no_target_gpu_rows"})
             continue
 
-        invalid_target_rows = 0
-        for row in target_rows:
-            kernel_name = str(row.get("kernelName") or "").strip().lower()
-            try:
-                runtime_us = float(str(row.get("us") or "0").strip())
-            except ValueError:
-                runtime_us = 0.0
-            if not math.isfinite(runtime_us) or runtime_us <= 0.0 or "placeholder" in kernel_name:
-                invalid_target_rows += 1
+        invalid_target_rows = _rows_not_runtime_ready(target_rows)
         if invalid_target_rows:
             errors.append(
                 {
