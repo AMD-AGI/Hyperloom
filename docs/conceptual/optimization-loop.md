@@ -267,19 +267,20 @@ lifetime, boot and idle tail included.
 The sampler also reports how the cards ran under their power cap. Each card in
 `gpu_power.json` carries its mean graphics clock over the measured phase while
 busy (`sclk_mean_mhz`; an XCD in deep sleep, below its `min_clk`, is idle time
-and left out), its clock limit (`sclk_max_mhz`, unread when the XCDs report
-different limits), and the share of the measured phase it spent held back by its
+and left out), its clock limit (`sclk_max_mhz`, unread when the limit changed
+during the phase), and the share of the measured phase it spent held back by its
 power limit (`power_throttle_fraction`, from the `amd-smi metric --violation`
 accumulators read as each measured window opens and closes; idle stretches in
 the phase count toward that share's whole). A window whose counters could not be
 read leaves the share unread rather than counting only the windows that were:
 every card's when the read failed (counted in `throttle_query_errors`, apart
 from the power reads' `query_errors`), one card's when it was missing from
-either end or its counters went back or stopped advancing. A serving card power
-throttled for at least 10% of the phase is listed in `power_throttled_gpus`, and
-the round logs a warning naming each such card's throttled share and mean clock:
-its throughput was set by the power cap, not by its clock limit. This is only
-reported; nothing changes the cards.
+either end or both, or its counters went back or stopped advancing, and every
+card's when the sampler was still blocked in `amd-smi` as the round closed. A
+serving card power throttled for at least 10% of the phase is listed in
+`power_throttled_gpus`, and the round logs a warning naming each such card's
+throttled share and mean clock: its throughput was set by the power cap, not by
+its clock limit. This is only reported; nothing changes the cards.
 
 The optimizer never changes power settings. The power cap and DPM performance
 level decide how much of the card's throughput is available at what power, so

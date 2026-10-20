@@ -9,6 +9,7 @@ import json
 import subprocess
 import time
 from collections.abc import Callable
+from types import SimpleNamespace
 
 import pytest
 
@@ -508,9 +509,6 @@ def test_parse_clock_sample_averages_the_xcds_and_reads_the_limit():
 
     parsed = parse_clock_sample({"gpu_data": [_clocked(4, 700.0, 250_000, [1700, 1800], limit=2000)]})
     assert parsed[4] == (1750.0, frozenset({2000.0}))
-    split = _clocked(5, 700.0, 250_000, [1700, 1800])
-    split["clock"]["gfx_1"]["max_clk"]["value"] = 2100
-    assert parse_clock_sample({"gpu_data": [split]})[5] == (1750.0, frozenset({2100.0, 2400.0}))
 
 
 def _partitioned(gpu: int, watts: float, filled: int, mhz: float = 1700.0) -> dict:
@@ -540,11 +538,11 @@ def test_a_sample_with_an_unread_xcd_does_not_unread_the_rounds_clock_limit(tmp_
     assert out["per_gpu"]["4"]["sclk_max_mhz"] == 2400.0
 
 
-def test_xcds_that_disagree_in_one_sample_leave_the_rounds_clock_limit_unread(tmp_path):
-    agree = [_partitioned(g, 700.0, filled=8) for g in (4, 5)]
-    disagree = [_partitioned(g, 700.0, filled=8) for g in (4, 5)]
-    disagree[0]["clock"]["gfx_3"]["max_clk"]["value"] = 2100
-    query = _Replay(agree, disagree, agree)
+def test_a_clock_limit_that_changed_during_the_round_is_left_unread(tmp_path):
+    """amd-smi copies one limit into every filled slot, so a second value means the limit itself moved mid-round."""
+    steady = [_clocked(g, 700.0, 250_000, [1700.0] * 8) for g in (4, 5)]
+    changed = [_clocked(4, 700.0, 250_000, [1700.0] * 8, limit=2100), _clocked(5, 700.0, 250_000, [1700.0] * 8)]
+    query = _Replay(steady, changed, steady)
     recorder = GpuPowerRecorder(output_path=None, query=query, interval_sec=0.5)
     recorder._interval = 0.01
     _run_measured(recorder, query, samples=3)
@@ -559,8 +557,8 @@ def test_parse_throttle_sample_needs_both_counters():
     assert parse_throttle_sample({"gpu_data": [{"gpu": 4, "throttle": {"accumulation_counter": "N/A"}}]}) == {}
 
 
-def _throttled_round(tmp_path, *, end_ppt: float, caplog=None) -> dict:
-    rows = [_clocked(g, 700.0, 250_000, [1730.0] * 8) for g in (4, 5)] + [_clocked(6, 225.0, 284, [38.0] * 8)]
+def _throttled_round(tmp_path, *, end_ppt: float, sclk: float = 1730.0) -> dict:
+    rows = [_clocked(g, 700.0, 250_000, [sclk] * 8) for g in (4, 5)] + [_clocked(6, 225.0, 284, [38.0] * 8)]
     query = _Replay(rows)
     counters = _Replay(_throttle(10_000, 1_000), _throttle(20_000, end_ppt))
     recorder = GpuPowerRecorder(
@@ -581,10 +579,18 @@ def test_a_power_throttled_round_names_the_cards_and_their_clock(tmp_path, caplo
     assert out["power_throttled_gpus"] == [4, 5]
     assert "suggested_sclk_max_mhz" not in out
     assert (
-        "GPU(s) 4, 5 were power throttled for 30%, 30% of the measured phase, at a mean clock of 1730.0" in caplog.text
+        "GPU(s) 4, 5 were power throttled for 30%, 30% of the measured phase, at a mean clock of 1730.0 MHz"
+        in caplog.text
     )
     written = json.loads((tmp_path / GPU_POWER_ARTIFACT_NAME).read_text())
     assert written["power_throttled_gpus"] == [4, 5]
+
+
+def test_a_throttled_card_whose_clock_was_never_read_awake_is_named_unread(tmp_path, caplog):
+    with caplog.at_level("WARNING", logger="hyperloom.orchestrator.actions.executors._gpu_power"):
+        out = _throttled_round(tmp_path, end_ppt=4_000, sclk=38.0)
+    assert out["per_gpu"]["4"]["sclk_mean_mhz"] is None
+    assert "at a mean clock of unread, unread" in caplog.text
 
 
 def test_an_unthrottled_round_reports_no_throttling(tmp_path, caplog):
@@ -648,6 +654,32 @@ def test_a_failed_counter_read_in_any_window_leaves_every_cards_share_unread():
     assert both_ends["per_gpu"]["4"]["power_throttle_fraction"] is None, "a window unread at both ends still counts"
 
 
+def test_a_card_unread_at_both_ends_of_a_window_is_left_unread():
+    """amd-smi prints a card's whole throttle block as N/A when it cannot read it; that window is still unread."""
+    out = _two_windows(
+        _throttle(1_000, 0),
+        _throttle(2_000, 900),
+        _throttle(2_000, 900, gpus=(5,)),
+        _throttle(100_000, 1_000, gpus=(5,)),
+    )
+    assert out["per_gpu"]["4"]["power_throttle_fraction"] is None, "not the first window's 90% alone"
+    assert out["per_gpu"]["5"]["power_throttle_fraction"] == pytest.approx(1_000 / 99_000, abs=1e-4)
+    assert out["power_throttled_gpus"] == []
+
+
+def test_a_sampler_still_blocked_in_amd_smi_at_close_leaves_every_share_unread():
+    reads = iter([_throttle(1_000, 0), _throttle(2_000, 900)])
+    rows = [_clocked(g, 700.0, 250_000, [1000.0] * 8) for g in (4, 5)]
+    recorder = GpuPowerRecorder(output_path=None, query=_with_counters(_Replay(rows), lambda: next(reads)))
+    recorder._phase = "measured"
+    recorder._sample_once()
+    recorder._window_open = recorder._read_throttle()
+    recorder._close_window()
+    assert recorder.summary()["per_gpu"]["4"]["power_throttle_fraction"] == pytest.approx(0.9)
+    recorder._thread = SimpleNamespace(join=lambda timeout=None: None, is_alive=lambda: True)
+    assert recorder.close()["per_gpu"]["4"]["power_throttle_fraction"] is None
+
+
 def test_a_card_unread_at_one_end_of_a_window_or_whose_counters_went_back_is_left_unread():
     from hyperloom.orchestrator.actions.executors import _gpu_power
 
@@ -657,8 +689,7 @@ def test_a_card_unread_at_one_end_of_a_window_or_whose_counters_went_back_is_lef
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(_gpu_power, "parse_throttle_sample", lambda payload: closed)
         recorder._close_window()
-    assert recorder._throttle_unread == {5, 6, 7}
-    assert recorder._throttle_deltas == {4: [1_000.0, 300.0]}
+    assert recorder._complete_throttle_totals() == {4: (1_000.0, 300.0)}
 
 
 def test_throttle_counters_sum_over_every_measured_window(tmp_path):
@@ -668,7 +699,7 @@ def test_throttle_counters_sum_over_every_measured_window(tmp_path):
     for _ in range(2):
         recorder._window_open = recorder._read_throttle()
         recorder._close_window()
-    assert recorder._throttle_deltas[4] == [2_000.0, 1_000.0], "8,000 ticks of boot between the windows are excluded"
+    assert recorder._throttle_totals[4] == [2_000.0, 1_000.0, 2], "8,000 ticks of boot between the windows are excluded"
 
 
 def test_deep_sleep_clocks_do_not_pull_the_sustained_clock_down():
@@ -704,5 +735,5 @@ def test_the_sampler_closes_a_window_when_the_round_leaves_the_measured_phase(tm
     deadline = time.monotonic() + 5.0
     while counters.calls < 2 and time.monotonic() < deadline:
         time.sleep(0.01)
-    assert recorder._window_open is None and recorder._throttle_deltas[4] == [10_000.0, 3_000.0]
+    assert recorder._window_open is None and recorder._throttle_totals[4] == [10_000.0, 3_000.0, 1]
     recorder.close()
