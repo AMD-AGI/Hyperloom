@@ -437,21 +437,18 @@ class ServerLogPhaseDriver:
         recorder: Any,
         find_logs: Callable[[], list[str]],
         *,
-        scan: Callable[..., Any],
+        cursor: Any,
         interval_sec: float = _DEFAULT_INTERVAL_SEC,
     ) -> None:
         """Prepare a driver; nothing is read until :meth:`start`.
 
-        ``scan`` is the watchdog's own log scanner, passed in rather than imported: the watchdog module builds this
+        ``cursor`` is the watchdog's own log cursor, passed in rather than imported: the watchdog module builds this
         module's recorder, so importing it back from here would close a cycle.
         """
         self._recorder = recorder
         self._find_logs = find_logs
-        self._scan = scan
+        self._cursor = cursor
         self._interval = max(_MIN_INTERVAL_SEC, float(interval_sec))
-        self._offsets: dict[str, int] = {}
-        self._residuals: dict[str, str] = {}
-        self._identities: dict[str, tuple[int, int]] = {}
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._read_failed = False
@@ -459,10 +456,9 @@ class ServerLogPhaseDriver:
     def poll(self) -> None:
         """Read what every log appended since the last poll and move the recorder's phase on."""
         for path in self._find_logs():
-            if path not in self._offsets:
-                self._offsets[path] = 0
+            if self._cursor.open_log(path):
                 self._recorder.note_phase(_BOOT, time.monotonic())
-            scan = self._scan(path, self._offsets, self._residuals, self._identities)
+            scan = self._cursor.advance(path)
             now = time.monotonic()
             if scan.saw_ready:
                 self._recorder.note_phase("measured", now)

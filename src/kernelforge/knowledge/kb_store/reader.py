@@ -21,6 +21,7 @@ from kernelforge.knowledge.kb_store.identity.implementation import (
     implementation_signature,
 )
 from kernelforge.knowledge.kb_store.identity.run import PATCH_ARTIFACT, LoopKernel
+from kernelforge.knowledge.kb_store.record_store import KBStoreError, RewriteRecordError
 
 #: Workspace-relative home for the candidates a warm start materialized.
 _CANDIDATE_REL = "forge_experiments/kb_candidates"
@@ -75,7 +76,7 @@ def read_best_solution(*, config, kernel: LoopKernel) -> dict[str, Any] | None:
     try:
         top = _read_top_solutions_impl(config=config, kernel=kernel, top_k=1)
         return top[0] if top else None
-    except Exception as exc:  # noqa: BLE001 - warm-start read must never break a run
+    except (KBStoreError, RewriteRecordError, OSError, ValueError) as exc:
         log.warning("experience read failed (cold start): %r", exc)
         return None
 
@@ -96,7 +97,7 @@ def read_top_solutions(
             top_k=max(1, int(top_k)),
             read_status=read_status,
         )
-    except Exception as exc:  # noqa: BLE001 - warm-start read must never break a run
+    except (KBStoreError, RewriteRecordError, OSError, ValueError) as exc:
         error = sanitize_read_error(exc, secrets=kb_store_secrets(config))
         log.warning("experience top-k read failed (cold start): %s", error)
         _set_read_status(

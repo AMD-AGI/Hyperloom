@@ -1245,7 +1245,7 @@ class RooflineExecutor:
             record_lifecycle_event(self.shared_state, step="roofline", **event)
             if session_dir.name and session_dir.is_dir() and (session_dir / "state.json").exists():
                 self.shared_state.save(session_dir)
-        except Exception:
+        except OSError:
             log.debug("roofline: lifecycle %s emit failed", event.get("status"), exc_info=True)
 
     # Helpers (instance methods so tests can subclass / monkeypatch)
