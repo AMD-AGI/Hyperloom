@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from hyperloom.common.env_safety import ungrounded_env_file_reason
 from hyperloom.common.unified_diff import strip_diff_path, strip_path_components
 
 
@@ -753,6 +754,7 @@ class PatchSafetyReport:
     grounding: dict[str, str] = field(default_factory=dict)
     numeric_warnings: list[str] = field(default_factory=list)
     forbidden_fields: list[str] = field(default_factory=list)
+    env_ungrounded: list[str] = field(default_factory=list)
 
     def notes(self) -> list[str]:
         """Render audit notes for SpecialistRunResult / session_breakdown.
@@ -790,6 +792,8 @@ class PatchSafetyReport:
             out.append("patch_safety_numeric:" + ",".join(self.numeric_warnings[:8]))
         if self.forbidden_fields:
             out.append("patch_safety_forbidden_fields:" + ",".join(self.forbidden_fields[:8]))
+        if self.env_ungrounded:
+            out.append("proposal_env_file_missing:" + "; ".join(self.env_ungrounded[:4]))
         return out
 
 
@@ -1068,6 +1072,67 @@ def vet_patches(
     return kept, ungrounded, grounding, len(resolved_roots) > 1
 
 
+def drop_env_ungrounded_proposals(payload: dict[str, Any]) -> list[str]:
+    """Remove the ``proposal_set`` entries whose ``extra_envs`` name a config file that is not on disk; why, per entry.
+
+    The patch gate grounds what a proposal changes; this grounds the files its envs make the server read. A proposal
+    premised on an artifact some later step would write ("author the CSV, then point the env at it") is refused here,
+    where the orchestrator hears why, rather than benched as a config arm whose server dies at config load.
+    ``run_grid`` keeps the same check as the backstop.
+    """
+    proposals = payload.get("proposal_set")
+    if not isinstance(proposals, list):
+        return []
+    kept: list[Any] = []
+    dropped: list[str] = []
+    for proposal in proposals:
+        reason = ungrounded_env_file_reason(proposal.get("extra_envs")) if isinstance(proposal, dict) else None
+        if reason is None:
+            kept.append(proposal)
+            continue
+        dropped.append(f"proposal {str(proposal.get('name') or '').strip() or '<unnamed>'!r}: {reason}")
+    if dropped:
+        payload["proposal_set"] = kept
+    return dropped
+
+
+def admit_payload(
+    payload: dict[str, Any],
+    vetted: tuple[list[str], list[dict[str, str]], dict[str, str], bool],
+    patch_roots: dict[str, str],
+) -> PatchSafetyReport:
+    """Apply the patch-safety gate to a specialist_done ``payload`` in place; the report of what it found.
+
+    It books what :func:`vet_patches` kept, scans the numeric claims, strips the forbidden fields and drops the
+    proposals whose env files are missing.
+    """
+    kept, ungrounded, grounding, spans_roots = vetted
+    numeric_warnings = scan_numeric_claims(payload)
+    # Strip, do not forward: the Critic is instructed to reject the whole
+    # proposal_set over these fields, which costs the round every idea the
+    # specialist produced. The audit note records what the strip took.
+    forbidden_fields = strip_forbidden_proposal_fields(payload)
+    env_ungrounded = drop_env_ungrounded_proposals(payload)
+    payload["patches_written"] = kept
+    payload["patch_grounding"] = grounding
+    if patch_roots:
+        payload["patch_roots"] = {p: r for p, r in patch_roots.items() if p in kept}
+    if ungrounded:
+        payload["patches_ungrounded"] = [d["detail"] for d in ungrounded[:8]]
+    if env_ungrounded:
+        payload["proposals_env_ungrounded"] = env_ungrounded[:8]
+    if spans_roots:
+        payload["patches_span_multiple_roots"] = True
+    return PatchSafetyReport(
+        kept_patches=kept,
+        ungrounded=ungrounded,
+        grounding=grounding,
+        numeric_warnings=numeric_warnings,
+        forbidden_fields=forbidden_fields,
+        env_ungrounded=env_ungrounded,
+    )
+
+
 __all__ = [
     "ADVISE_VERDICT",
     "ADVISORY_RULE_PROPOSAL_KINDS",
@@ -1089,9 +1154,11 @@ __all__ = [
     "QUANTITATIVE_CLAIM_REASON_CODE",
     "SCOPE_DOMAINS_LITERAL",
     "SPECIALIST_WORK_ARTIFACT_PATHSPECS",
+    "admit_payload",
     "advisory_only_reason_codes",
     "advisory_rules_govern",
     "cross_domain_rule_descriptors",
+    "drop_env_ungrounded_proposals",
     "ground_patch_text",
     "is_unified_diff",
     "numeric_claims",

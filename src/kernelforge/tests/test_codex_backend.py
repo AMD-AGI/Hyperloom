@@ -542,7 +542,7 @@ def test_codex_backend_materializes_custom_agent_roles(
                 command=sys.executable,
                 args=(
                     "-m",
-                    "kernelforge.mcp_server.pr_stdio_server",
+                    "kernelforge.knowledge.pr_knowledge.mcp_server",
                 ),
                 env={"PR_KB_REPO": "ROCm/aiter"},
                 startup_timeout_sec=15,
@@ -562,7 +562,7 @@ def test_codex_backend_materializes_custom_agent_roles(
     assert 'sandbox_mode = "read-only"' in role_text
     assert "Review only. Never edit files." in role_text
     assert f'mcp_servers.gpu.command="{sys.executable}"' in overrides
-    assert ('mcp_servers.gpu.args=["-m", "kernelforge.mcp_server.pr_stdio_server"]') in overrides
+    assert ('mcp_servers.gpu.args=["-m", "kernelforge.knowledge.pr_knowledge.mcp_server"]') in overrides
     assert 'mcp_servers.gpu.env={PR_KB_REPO="ROCm/aiter"}' in overrides
     assert "mcp_servers.gpu.startup_timeout_sec=15" in overrides
 

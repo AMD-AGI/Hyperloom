@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from kernelforge.llm.git import git
-from kernelforge.durable_io import atomic_write_text
+from kernelforge.tools.durable_io import atomic_write_text
 from kernelforge.loop.reporting import (
     BestResultPublisher,
     KeepBundle,
@@ -19,7 +19,7 @@ from kernelforge.loop.reporting import (
     KeepScore,
     is_best_manifest,
 )
-from kernelforge.loop.scoring import warm_start_improvement_flags
+from kernelforge.evaluation.scoring import warm_start_improvement_flags
 
 
 def atomic_write_json(path: str | Path, payload: dict) -> None:
@@ -241,7 +241,7 @@ def publish_warm_start_recovery(
     if caller.caller_experiment_id:
         try:
             tracker.set_checkpoint(caller.caller_experiment_id, checkpoint)
-        except Exception as error:  # noqa: BLE001 - collected into persistence_errors
+        except (OSError, TypeError, ValueError) as error:
             persistence_errors.append(f"checkpoint: {error}")
     if persistence_errors:
         result["persistence_degraded"] = True
@@ -249,7 +249,7 @@ def publish_warm_start_recovery(
     if caller.result_json:
         try:
             atomic_write_json(caller.result_json, result)
-        except Exception as error:  # noqa: BLE001 - collected into persistence_errors
+        except (OSError, TypeError, ValueError) as error:
             persistence_errors.append(f"result-json: {error}")
     if persistence_errors:
         result["persistence_degraded"] = True

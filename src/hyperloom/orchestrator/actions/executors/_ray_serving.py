@@ -812,18 +812,18 @@ class ServingLease:
                 )
 
     def _abandon_ref(self, ref: Any) -> None:
-        """Drop a round this lease will never collect. Never raises."""
-        try:
-            import ray
+        """Drop a round this lease will never collect; Ray and OS errors are swallowed."""
+        import ray
 
+        try:
             # Recoverable cancels only: a task still queued for an actor we are about to kill has nothing to
             # interrupt, and ``force=True`` is rejected for actor tasks.
             ray.cancel(ref)
-        except Exception as exc:  # noqa: BLE001 — the actor kill below is what actually frees the resources
+        except (ray.exceptions.RayError, OSError) as exc:  # the actor kill below is what frees the resources
             log.warning("ServingLease: could not cancel the abandoned round: %r", exc)
 
     def _ask_actor_to_cancel(self, reason: str) -> bool:
-        """Tell the actor to stop the round it is running. Never raises."""
+        """Tell the actor to stop the round it is running; Ray and OS errors are swallowed."""
         import ray
 
         actor = self._actor
@@ -831,7 +831,7 @@ class ServingLease:
             return False
         try:
             return bool(ray.get(actor.cancel_round.remote(reason), timeout=_LEASE_PROBE_TIMEOUT_SEC))
-        except Exception as exc:  # noqa: BLE001 — an unreachable actor gets killed instead
+        except (ray.exceptions.RayError, OSError) as exc:  # an unreachable actor gets killed instead
             log.warning("ServingLease: could not reach the actor to cancel its round: %r", exc)
             return False
 
@@ -855,11 +855,11 @@ class ServingLease:
             return
         if self._actor is None:
             return
-        try:
-            import ray
+        import ray
 
+        try:
             ray.get(self._actor.stop.remote(), timeout=CLOSE_STOP_TIMEOUT_SEC)
-        except Exception as exc:  # noqa: BLE001 — the kill below is the backstop
+        except (ray.exceptions.RayError, OSError) as exc:  # the kill below is the backstop
             log.warning("ServingLease.close: the actor did not stop its server: %r", exc)
         self._kill_actor()
 
@@ -879,14 +879,14 @@ class ServingLease:
             )
 
     def _kill_actor(self) -> None:
-        """Kill the actor handle without waiting for it. Idempotent, never raises."""
+        """Kill the actor handle without waiting for it. Idempotent; Ray and OS errors are swallowed."""
         if self._actor is None:
             return
-        try:
-            import ray
+        import ray
 
+        try:
             ray.kill(self._actor)
-        except Exception:  # noqa: BLE001 — teardown must not raise
+        except (ray.exceptions.RayError, OSError):
             pass
         self._actor = None
 
@@ -991,7 +991,7 @@ class GpuSpecialistLease:
             return bool(ray.get(self._actor.is_alive.remote(), timeout=_LEASE_PROBE_TIMEOUT_SEC))
         except ray.exceptions.GetTimeoutError:
             return True  # still-alive assumption on timeout (avoid premature kill)
-        except Exception:  # noqa: BLE001 — dead actor reads as not-alive
+        except (ray.exceptions.RayError, OSError):  # a dead actor reads as not alive
             return False
 
     def exit_code(self) -> int | None:
@@ -1002,7 +1002,7 @@ class GpuSpecialistLease:
 
         try:
             return ray.get(self._actor.exit_code.remote(), timeout=_LEASE_PROBE_TIMEOUT_SEC)
-        except Exception:  # noqa: BLE001
+        except (ray.exceptions.RayError, OSError):
             return None
 
     def stop(self) -> bool:
