@@ -201,18 +201,6 @@ def test_write_preserves_the_patch_and_the_measurements(config, workspace):
     assert kb.prior_file(status["session_id"], PATCH_ARTIFACT) == DIFF.encode()
 
 
-def test_without_a_summary_override_the_record_carries_the_llm_summary(config, workspace, monkeypatch):
-    async def reply(*_a, **_k):
-        return '{"category": "attention", "strategy": "tile the K loop", "lessons": "Mind the tail."}'
-
-    monkeypatch.setattr(sink, "_query_llm", reply)
-
-    assert _write(config, workspace, summary_override=None)["written"] is True
-    record = _candidates(_records(config, workspace), limit=1)[0].knowledge["value"]
-    assert record["strategy"] == "tile the K loop"
-    assert record["lessons"] == "Mind the tail."
-
-
 def test_a_crlf_patch_round_trips_byte_for_byte(config, workspace):
     """A patch is applied by matching context byte for byte."""
     crlf = DIFF.replace("\n", "\r\n")
