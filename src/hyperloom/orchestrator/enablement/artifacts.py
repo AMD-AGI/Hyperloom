@@ -41,13 +41,13 @@ _SERVER_LOG_TAIL_LIMIT = 1024 * 1024
 _LOG_TRUNCATION_NOTE = "[hyperloom] truncated: the first {dropped} bytes are missing; the tail follows.\n"
 
 
-def _copy(src: Path, dest: Path) -> bool:
-    """Copy ``src`` to ``dest`` when it exists and is under the size limit."""
+def _archive_copy(archive: RoundArchive, role: str, src: Path, dest: Path) -> None:
+    """Copy ``src`` to ``dest`` and record it as ``role`` when it exists and is under the size limit."""
     if not src.is_file() or src.stat().st_size > _FILE_SIZE_LIMIT:
-        return False
+        return
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(src.read_bytes())
-    return True
+    archive.record(role, dest)
 
 
 def _artifact_archive_name(idx: int, target: str) -> str:
@@ -101,31 +101,23 @@ def snapshot_round(session_dir: str | Path, res: dict[str, Any]) -> RoundArchive
     round_dir = enablement_round_dir(root, task_id)
     round_dir.mkdir(parents=True, exist_ok=True)
 
-    patches_dir = round_dir / "patches"
     copied: set[str] = set()
     for applied in res.get("patches_applied") or []:
         src = Path(str(applied))
-        dest = patches_dir / src.name
-        if _copy(src, dest):
-            archive.record(ROLE_PATCH, dest)
+        _archive_copy(archive, ROLE_PATCH, src, round_dir / "patches" / src.name)
         # Marked seen even when refused, so the sweep below does not retry it.
         copied.add(src.name)
 
     workspace = runs_dir(root, "specialist", task_id)
     for name, role in (("specialist_done.json", ROLE_SPECIALIST_RESULT), ("prompt.md", ROLE_PROMPT)):
-        dest = round_dir / name
-        if _copy(workspace / name, dest):
-            archive.record(role, dest)
+        _archive_copy(archive, role, workspace / name, round_dir / name)
 
     # Disk scans include rejected output: preserve evidence, not accepted patches.
     for base in (workspace, workspace / "worktree"):
-        for pattern in ("*.patch", "*.diff"):
-            for src in sorted((base / "patches").glob(pattern)):
-                if src.name in copied:
-                    continue
-                dest = round_dir / "attempted_patches" / src.name
-                if _copy(src, dest):
-                    archive.record(ROLE_PATCH_EVIDENCE, dest)
+        patches = base / "patches"
+        for src in sorted(patches.glob("*.patch")) + sorted(patches.glob("*.diff")):
+            if src.name not in copied:
+                _archive_copy(archive, ROLE_PATCH_EVIDENCE, src, round_dir / "attempted_patches" / src.name)
                 copied.add(src.name)
 
     artifacts_dir = round_dir / "artifacts"
@@ -133,25 +125,21 @@ def snapshot_round(session_dir: str | Path, res: dict[str, Any]) -> RoundArchive
         name = _artifact_archive_name(idx, str(art.get("target") or ""))
         source = str(art.get("source") or "").strip()
         backup = str(art.get("backup") or "").strip()
-        if source and _copy(Path(source), artifacts_dir / name):
-            archive.record(ROLE_ARTIFACT_SOURCE, artifacts_dir / name)
-        if backup and _copy(Path(backup), artifacts_dir / f"{name}.orig"):
-            archive.record(ROLE_ARTIFACT_PREIMAGE, artifacts_dir / f"{name}.orig")
+        if source:
+            _archive_copy(archive, ROLE_ARTIFACT_SOURCE, Path(source), artifacts_dir / name)
+        if backup:
+            _archive_copy(archive, ROLE_ARTIFACT_PREIMAGE, Path(backup), artifacts_dir / f"{name}.orig")
 
     accepted_config = str(res.get("enablement_accepted_config_path") or "").strip()
     if accepted_config:
-        dest = round_dir / "launch_config.yaml"
-        if _copy(Path(accepted_config), dest):
-            archive.record(ROLE_LAUNCH_CONFIG, dest)
+        _archive_copy(archive, ROLE_LAUNCH_CONFIG, Path(accepted_config), round_dir / "launch_config.yaml")
 
     # Only a round that reached a bench has one: a rejected patch or a broken build never started a server, so an
     # absent log is normal.
     bench = res.get("bench_result")
     server_log = str(bench.get("server_log_path") or "").strip() if isinstance(bench, dict) else ""
-    if server_log:
-        dest = round_dir / "server.log"
-        if _copy_log_tail(Path(server_log), dest):
-            archive.record(ROLE_SERVER_LOG, dest)
+    if server_log and _copy_log_tail(Path(server_log), round_dir / "server.log"):
+        archive.record(ROLE_SERVER_LOG, round_dir / "server.log")
 
     return archive
 
