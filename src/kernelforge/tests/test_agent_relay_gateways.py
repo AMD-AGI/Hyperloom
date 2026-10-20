@@ -9,8 +9,9 @@ from types import SimpleNamespace
 import pytest
 
 import kernelforge.agent_backends.claude as claude_module
+import kernelforge.agent_backends.registry as registry
 from kernelforge.agent_backends.base import AgentRuntimeConfig
-from kernelforge.cli.relay import config_for_profile
+from kernelforge.cli.relay import config_for_profile, probe_agent_profile
 from kernelforge.config import Config
 from kernelforge.llm.gateway import anthropic_environment_from_openai, openai_gateway_from_anthropic
 from kernelforge.loop.agent_relay import AgentProfile, AgentRelayConfig
@@ -56,7 +57,7 @@ def test_openai_gateway_borrows_the_anthropic_line_without_its_auth_headers(clea
 
     gateway = openai_gateway_from_anthropic()
 
-    assert gateway.base_url == "https://gw.example/llm-proxy"
+    assert gateway.base_url == "https://gw.example/llm-proxy/v1"
     assert gateway.key_env == "ANTHROPIC_AUTH_TOKEN"
     assert gateway.headers == {"user": "jiaqliu"}
 
@@ -69,6 +70,51 @@ def test_anthropic_environment_borrows_the_openai_line(clean_env):
         "ANTHROPIC_AUTH_TOKEN": "openai-secret",
         "ANTHROPIC_CUSTOM_HEADERS": "user: jiaqliu",
     }
+
+
+@pytest.mark.parametrize(
+    ("anthropic_base_url", "openai_base_url"),
+    [
+        ("https://gw.example/llm-proxy", "https://gw.example/llm-proxy/v1"),
+        ("https://gw.example/llm-proxy/", "https://gw.example/llm-proxy/v1"),
+        ("https://gw.example/llm-proxy/v1", "https://gw.example/llm-proxy/v1"),
+    ],
+)
+def test_the_borrowed_openai_route_is_one_v1_segment_from_the_anthropic_route(
+    clean_env, anthropic_base_url, openai_base_url
+):
+    _anthropic_line(clean_env)
+    clean_env.setenv("ANTHROPIC_BASE_URL", anthropic_base_url)
+
+    assert openai_gateway_from_anthropic().base_url == openai_base_url
+
+
+def test_a_failed_borrowed_line_names_its_address_and_the_providers_own_variables(clean_env, monkeypatch, tmp_path):
+    _anthropic_line(clean_env)
+    monkeypatch.setattr(
+        registry, "get_agent_provider", lambda name: SimpleNamespace(name=name, availability=lambda: True)
+    )
+
+    def create(runtime, **_kwargs):
+        if runtime.provider == "codex":
+            raise RuntimeError("404 Not Found")
+        return SimpleNamespace(runtime=runtime)
+
+    monkeypatch.setattr(registry, "create_registered_backend", create)
+    relay = AgentRelayConfig(primary_profile_id="claude", profiles=(_CLAUDE, _CODEX))
+
+    status = probe_agent_profile(
+        _CODEX,
+        relay_config=relay,
+        config=Config(workspace=str(tmp_path), agent_backend="claude"),
+        workspace=str(tmp_path),
+    )
+
+    assert status.available is False
+    assert "at https://gw.example/llm-proxy/v1" in status.reason
+    assert "set OPENAI_BASE_URL and OPENAI_API_KEY" in status.reason
+    assert "404 Not Found" in status.reason
+    assert "anthropic-secret" not in status.reason
 
 
 def test_no_line_configured_borrows_nothing(clean_env):
@@ -84,7 +130,7 @@ def test_codex_relay_profile_borrows_the_anthropic_line_only_when_openai_is_unse
 
     assert borrowed == {
         "gateway": {
-            "base_url": "https://gw.example/llm-proxy",
+            "base_url": "https://gw.example/llm-proxy/v1",
             "key_env": "ANTHROPIC_AUTH_TOKEN",
             "headers": {"user": "jiaqliu"},
         }

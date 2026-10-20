@@ -16,6 +16,7 @@ __all__ = [
     "LlmGateway",
     "anthropic_environment_from_openai",
     "normalize_anthropic_base_url",
+    "normalize_openai_base_url",
     "openai_gateway_from_anthropic",
     "resolve_anthropic_gateway",
     "resolve_openai_gateway",
@@ -70,6 +71,12 @@ def normalize_anthropic_base_url(base_url: str) -> str:
         if base.endswith(suffix):
             return base[: -len(suffix)].rstrip("/")
     return base
+
+
+def normalize_openai_base_url(base_url: str) -> str:
+    """Address a gateway's OpenAI route: its Anthropic route plus the ``/v1`` segment OpenAI clients expect."""
+    base = base_url.strip().rstrip("/")
+    return base if base.endswith("/v1") else f"{base}/v1"
 
 
 def resolve_anthropic_gateway() -> LlmGateway:
@@ -149,14 +156,14 @@ def resolve_openai_gateway() -> LlmGateway:
 def openai_gateway_from_anthropic() -> LlmGateway:
     """Address the configured Anthropic endpoint and credential on the OpenAI protocol.
 
-    Only a gateway serving both protocols at one base URL answers this; the caller
-    must verify it with a live probe rather than assume it.
+    Only a gateway serving both protocols, one ``/v1`` segment apart, answers this;
+    the caller must verify it with a live probe rather than assume it.
     """
     anthropic = resolve_anthropic_gateway()
     if not anthropic.has_endpoint or not anthropic.has_key:
         return LlmGateway()
     return LlmGateway(
-        base_url=anthropic.base_url,
+        base_url=normalize_openai_base_url(anthropic.base_url),
         key_env=anthropic.key_env,
         headers=_without_line_auth(anthropic.headers),
     )

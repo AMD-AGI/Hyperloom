@@ -167,8 +167,10 @@ failed request is eligible for the next iteration while the service still has
 an attempt available. PARTIAL evidence may use the second attempt; an exhausted
 commit continues with its published or checkpoint evidence.
 
-The campaign is TIME-driven (`--max-hours`). When the search stalls, a
-supervisor injects fresh directions rather than self-terminating on plateau.
+The campaign is TIME-driven (`--max-hours`). When the search stalls, the loop
+hands it to another Agent profile (see *Model relay* below), and the
+supervisor injects fresh directions once no untried profile is left, rather
+than self-terminating on plateau.
 
 ## Round admission
 
@@ -271,16 +273,68 @@ from expected skips or misses (`not_configured`, `missing_arch`,
 empty for non-error outcomes; failures contain a bounded, credential-redacted
 exception summary. Apply decisions remain separate in `reference_reason`.
 
+## Model relay
+
+Every new campaign relays its search between Agent profiles: one profile per
+registered provider (`claude` runs Claude Code, `codex` runs Codex), the
+`--agent-backend` provider first as the primary. The campaign records only the
+members, the primary and the blockage threshold. Each session resolves every
+member's model: the primary takes `--model`; every member without one takes its
+provider's `CLAUDE_MODEL` / `CODEX_MODEL`, else the provider's default model.
+`--model`, `--agent-reasoning-effort` and the model variables therefore apply on
+`--resume` as well. An `--agent-backend` (or `FORGE_AGENT_BACKEND`) that differs
+from the campaign's primary is refused on resume; leave it unset to keep the
+campaign's primary.
+
+Before the first iteration, every profile's exact provider and model is checked
+once. A profile that fails the check stays unavailable for the session, and the
+startup log gives the reason. When only one profile passes, the log warns that
+model relay is disabled for the session.
+
+A blockage is three consecutive non-improving search iterations produced by the
+active profile. Infrastructure, API, device-contention and integrity failures,
+and outcomes no profile produced (such as a stacked merge), do not count; a
+KEEP ends the blockage. At a blockage the loop switches the complete search
+actor (orchestration, specialists, Plan Critic and Implementer) at the next clean
+iteration boundary to the first available profile not tried since the last
+KEEP, preferring a different harness, and forces the next round to diversify.
+When every profile has been tried, the supervisor below is the last
+intervention.
+
+A session starts on the profile a resumed campaign was running, else the
+primary, else the `--agent-fallback-provider` member, else any available member.
+With `--agent-fallback-provider none`, a session that has no profile to resume
+does not start on a member other than the primary.
+
+When a profile's API retries run out, its startup check runs again at the next
+iteration boundary: the search keeps the profile if the check passes and
+switches to an available one if it fails.
+
+A profile without a gateway of its own borrows the other configured one: Codex
+uses the `ANTHROPIC_*` line with `/v1` appended, and Claude uses the `OPENAI_*`
+line without its trailing `/v1`. This works only on a gateway that serves both
+protocols, and the startup check decides. Set the provider's own variables when
+your gateway routes them differently.
+
+The result's `agent_relay` field and the `relay_*` events in
+`forge_experiments/events.jsonl` record the active profile, the availability of
+every profile and each switch.
+
 ## Stalled-search supervisor
 
-When the search plateaus, `forge-loop` escalates to a supervisor backend:
+When the search plateaus and no untried Agent profile is left (see
+*Model relay* above), `forge-loop` escalates to a supervisor backend.
+A campaign without relay escalates after three stalled iterations instead, at
+most once every three iterations; the startup log states which schedule
+applies.
 
 ```bash
 kernelforge forge-loop --workspace /work/aiter-amd --resume \
     --supervisor-backend codex
 ```
 
-`--supervisor-backend` can override the Implementer backend used for this review.
+`--supervisor-backend` can override the provider of the active Agent profile
+for this review; under relay it runs on that provider's profile.
 The Supervisor inspects the stalled run and writes a free-form ruling for the
 next fresh orchestration plan. Every interaction is archived under
 `forge_experiments/supervisor/intervention_iter_NNN.md`; the latest non-empty

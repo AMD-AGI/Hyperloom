@@ -414,6 +414,42 @@ def test_resume_clears_reconciled_pending_keep(
     assert archived["decision"] == "KEEP"
 
 
+def test_resume_ends_the_relay_blockage_epoch_of_a_recovered_keep(tmp_path, monkeypatch):
+    """A KEEP adopted from its pending journal resets relay state exactly as a KEEP the loop decided would."""
+    workspace, kernel, driver = _initialize_workspace(tmp_path, monkeypatch)
+    tracker = ExperimentTracker(workspace / "forge_experiments")
+    monkeypatch.setattr(IterationLoop, "run_one_iteration", _successful_iteration)
+
+    async def editing_agent(kernel_path, _history, session_sink):
+        session_sink["plan"] = "recover committed candidate"
+        path = runner_module.Path(kernel_path)
+        path.write_text(path.read_text() + "\n# candidate\n")
+        return "verified candidate"
+
+    first = _make_loop(workspace, kernel, driver, tracker, session_count=1)
+
+    def interrupt_before_checkpoint(*_args, **_kwargs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(first, "_finalize_keep_checkpoint", interrupt_before_checkpoint)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(first.run(runner_module.LoopAgents(agent_fn=editing_agent)))
+    store = LoopStateStore(str(workspace))
+    interrupted = store.load()
+    interrupted.agent_relay.active_profile_id = "claude"
+    interrupted.agent_relay.active_no_improvement_streak = 2
+    interrupted.agent_relay.profiles_tried_since_keep = ["codex"]
+    store.save(interrupted)
+
+    resumed = _make_loop(workspace, kernel, driver, tracker, session_count=0, resume=True)
+    asyncio.run(resumed.run(runner_module.LoopAgents(agent_fn=None)))
+
+    recovered = LoopStateStore(str(workspace)).load()
+    assert recovered.best.iteration == 1
+    assert recovered.agent_relay.active_no_improvement_streak == 0
+    assert recovered.agent_relay.profiles_tried_since_keep == []
+
+
 def test_resume_repairs_publication_after_state_advanced_once(tmp_path, monkeypatch):
     workspace, kernel, driver = _initialize_workspace(tmp_path, monkeypatch)
     tracker = ExperimentTracker(workspace / "forge_experiments")

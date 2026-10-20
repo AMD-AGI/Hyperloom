@@ -267,7 +267,7 @@ def probe_agent_profile(
         except Exception as error:  # noqa: BLE001 - isolate optional profiles
             failure = f"{type(error).__name__}: {error}"
             if borrowed:
-                failure = f"the other configured gateway does not serve this protocol: {failure}"
+                failure = _borrowed_line_failure(profile.provider, strict_config.agent_options, failure)
     return ProfileAvailability(
         provider=profile.provider,
         model=profile.model,
@@ -443,6 +443,18 @@ def agent_relay_summary(run_state) -> dict:
             for profile_id, status in snapshot.profiles.items()
         },
     }
+
+
+def _borrowed_line_failure(provider: str, options: dict, failure: str) -> str:
+    """Name the borrowed address that failed and the variables that give the provider a line of its own."""
+    if provider == "codex":
+        address, own_line = options["gateway"]["base_url"], "OPENAI_BASE_URL and OPENAI_API_KEY"
+    else:
+        address, own_line = options["env"]["ANTHROPIC_BASE_URL"], "ANTHROPIC_BASE_URL and an Anthropic key"
+    return (
+        f"the other configured gateway did not answer on this protocol at {address}; "
+        f"set {own_line} if it routes this protocol elsewhere: {failure}"
+    )
 
 
 def _provider_is_available(registration) -> tuple[bool, str]:

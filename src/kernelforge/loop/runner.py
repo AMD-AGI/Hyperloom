@@ -60,6 +60,7 @@ from kernelforge.loop.jit_rebuild import (
     force_jit_rebuild,
     tracked_source_changes,
 )
+from kernelforge.loop.agent_relay import apply_relay_keep, apply_relay_search_outcome
 from kernelforge.loop.analysis_runtime import AnalysisRuntimeMixin
 from kernelforge.loop.relay_runtime import RelayRuntimeMixin
 from kernelforge.loop.search_policy import (
@@ -2232,6 +2233,11 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             self._stall_policy(),
         )
         state.diversification_cycle_completed = event.get("diversification_cycle_completed") is True
+        apply_relay_search_outcome(
+            state.agent_relay,
+            decision=decision,
+            producer_profile_id=str(event.get("agent_profile_id") or ""),
+        )
         self._record_direction_verdict(
             state,
             iteration=iteration,
@@ -2336,6 +2342,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             control = pending.get("search_control")
             if isinstance(control, dict):
                 planned.diversification_cycle_completed = control.get("diversification_cycle_completed") is True
+            apply_relay_keep(planned.agent_relay)
         elif (
             planned.best.iteration != result.iteration
             or planned.best.commit_hash != result.commit_hash

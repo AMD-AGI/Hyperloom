@@ -131,13 +131,13 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 
 | Option | Default | Meaning |
 |:--|:--|:--|
-| `--agent-backend <name>` | provider default | Registered local Agent provider for the Implementer. |
-| `--supervisor-backend <name>` | follows Implementer | Registered provider for the stalled-search (AVO) supervisor. Omit it so one `--agent-backend` controls every local agent. |
+| `--agent-backend <name>` | provider default | Registered local Agent provider; the model-relay primary of a new campaign. A resumed campaign refuses a different provider. |
+| `--supervisor-backend <name>` | follows the active Agent profile | Registered provider for the AVO supervisor, the last intervention of a model-relay blockage. Omit it so one `--agent-backend` controls every local agent. |
 | `--agent-cli <path>` | provider default | Provider executable path or command. |
-| `--model <name>` | provider default | Selected provider model. |
+| `--model <name>` | provider default | Model of the primary Agent profile for this session, on resume as well. |
 | `--agent-reasoning-effort <v>` | provider default | Provider reasoning effort value. |
 | `--agent-sandbox-mode <v>` | provider default | Provider sandbox mode. |
-| `--agent-fallback-provider <name>` | provider default | Fallback provider name, or `none` to refuse a fallback. |
+| `--agent-fallback-provider <name>` | provider default | Fallback provider name, or `none`. Under model relay it is the member a session prefers when the primary cannot run, and `none` refuses to start a session that has no profile to resume on any other member. |
 | `--agent-precheck` / `--no-agent-precheck` | on | Provider preflight and capability probe. |
 | `--agent-options-json <json>` | none | Provider extension options as a JSON object. |
 | `--permission-mode <v>` | provider default | Provider permission mode, where the provider supports one. |
