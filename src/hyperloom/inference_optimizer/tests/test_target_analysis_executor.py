@@ -672,3 +672,15 @@ class TestExecutor:
         result = await ex(_unit_ctx(params={"model_path": "/m"}))
         assert result["baseline_status"] == "no_data"
         assert "best_tput_per_gpu" not in result
+
+
+def test_cleanup_session_dir_resolution_error_propagates(monkeypatch):
+    def _boom():
+        raise RuntimeError("session root unresolved")
+
+    monkeypatch.setattr("hyperloom.inference_optimizer.session.paths.session_dir", _boom)
+    ex = ta.TargetAnalysisExecutor(compare_against_gpu="MI300X")
+    monkeypatch.setattr(ex, "_resolve_session_dir", lambda ctx: None)
+
+    with pytest.raises(RuntimeError, match="session root unresolved"):
+        ex._resolve_session_dir_for_cleanup(_unit_ctx())

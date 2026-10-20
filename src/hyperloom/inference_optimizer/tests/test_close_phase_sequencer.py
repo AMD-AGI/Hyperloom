@@ -738,6 +738,97 @@ async def test_close_sequencer_records_degraded_when_a_step_fails(
     ]
 
 
+async def _record_step(coord) -> None:
+    await coord.phase_close._record_close_step("report", status="done")
+
+
+async def _enqueue_report(coord) -> None:
+    await coord.phase_close._enqueue_internal_report_task(reason="close_phase_entry")
+
+
+async def _enter_close(coord) -> None:
+    await coord.phase_close.on_enter_close(Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}))
+
+
+_CLOSE_SAVE_SITES = {
+    "record_step": (_record_step, lambda state: True),
+    "enqueue_report": (_enqueue_report, lambda state: True),
+    "done_flag": (_enter_close, lambda state: state.close_sequence_done),
+}
+
+
+@pytest.fixture
+def fail_close_save(coord, tmp_path, monkeypatch):
+    """Return an async runner that makes the first matching ``state.save`` inside a close site raise ``exc``."""
+    monkeypatch.setenv("HYPERLOOM_SESSION_PACKAGE_DEST", str(tmp_path / "session-packages"))
+    coord.shared_state.phase_history = [_close_phase_history_row()]
+    state = coord.shared_state
+
+    async def _run(site: str, exc: BaseException) -> None:
+        call, when = _CLOSE_SAVE_SITES[site]
+        raised: list[bool] = []
+
+        def _save(session_dir=None) -> None:
+            if not raised and when(state):
+                raised.append(True)
+                raise exc
+
+        monkeypatch.setattr(state, "save", _save)
+        await call(coord)
+
+    return _run
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("site", _CLOSE_SAVE_SITES)
+async def test_close_save_os_error_is_logged_and_the_sequence_continues(coord, fail_close_save, caplog, site):
+    err = OSError("disk full")
+
+    with caplog.at_level("ERROR", logger="hyperloom.orchestrator.phases.close"):
+        await fail_close_save(site, err)
+
+    assert [r.exc_info[1] for r in caplog.records if r.exc_info] == [err]
+    steps = [row["step"] for row in coord.shared_state.phase_history[-1]["evidence"].get("close_steps", [])]
+    assert ("done" in steps) == (site == "done_flag")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("site", _CLOSE_SAVE_SITES)
+async def test_close_save_serialization_defect_propagates(fail_close_save, site):
+    with pytest.raises(TypeError, match="not JSON serializable"):
+        await fail_close_save(site, TypeError("not JSON serializable"))
+
+
+_RECORDER = "hyperloom.inference_optimizer.breakdown.recorder"
+_CLOSE_RECORD_STEPS = [
+    ("roofline_progress", "close_out.record_roofline_progress"),
+    ("baseline_progress", "close_out.record_baseline_progress"),
+    ("stack_ledger", "stack_event.finish"),
+    ("final_recipe", "close_out.record_final_recipe"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("step", "target"), _CLOSE_RECORD_STEPS)
+async def test_close_sequencer_records_a_failed_record_step_and_carries_on(coord, tmp_path, monkeypatch, step, target):
+    monkeypatch.setenv("HYPERLOOM_SESSION_PACKAGE_DEST", str(tmp_path / "session-packages"))
+    coord.shared_state.phase_history = [_close_phase_history_row()]
+    boom = RuntimeError(f"{target} boom")
+
+    def _fail(*_args, **_kwargs):
+        raise boom
+
+    monkeypatch.setattr(f"{_RECORDER}.{target}", _fail)
+
+    await _enter_close(coord)
+
+    rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
+    failed = [(row["step"], row["detail"]) for row in rows if row["status"] == "failed"]
+    assert failed == [(step, repr(boom))]
+    assert rows[-1]["step"] == "done"
+    assert coord.shared_state.close_sequence_done is True
+
+
 @pytest.mark.asyncio
 async def test_close_sequencer_surfaces_remote_finalize_failure(
     coord,
@@ -1240,6 +1331,28 @@ async def test_recipe_kb_t4_hook_remote_runs_without_recipe_kb_or_sid(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
+    coord, save_calls = _remote_t4_coordinator(tmp_path, monkeypatch, {})
+
+    finalize_calls: list[str] = []
+
+    def _finalize(*, source: str) -> dict:
+        finalize_calls.append(source)
+        return {"status": "written"}
+
+    coord.recipe_journal.finalize_recipe_and_journal = _finalize  # type: ignore[method-assign]
+
+    await coord._recipe_kb_t4_hook()
+
+    assert finalize_calls == ["t4_fallback"]
+    assert save_calls
+    assert all(path == tmp_path / "session" for path in save_calls)
+
+
+def _remote_t4_coordinator(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, save_failures: dict[int, Exception]):
+    """A remote-mode coordinator whose Nth ``SharedState.save`` call raises the exception mapped to N.
+
+    Returns the coordinator and the list of session directories each save call received.
+    """
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
@@ -1258,22 +1371,54 @@ async def test_recipe_kb_t4_hook_remote_runs_without_recipe_kb_or_sid(
     )
     coord.shared_state.recipe_kb_session_id = ""
     coord.shared_state.close_sequence_done = False
+    coord.recipe_journal.finalize_recipe_and_journal = lambda *, source: {"status": "written"}  # type: ignore[method-assign]
+    saves: list[Path] = []
 
-    finalize_calls: list[str] = []
-    save_calls: list[Path] = []
+    def _save(path: Path) -> None:
+        saves.append(path)
+        failure = save_failures.get(len(saves))
+        if failure is not None:
+            raise failure
 
-    def _finalize(*, source: str) -> dict:
-        finalize_calls.append(source)
-        return {"status": "written"}
+    coord.shared_state.save = _save  # type: ignore[method-assign]
+    return coord, saves
 
-    coord.recipe_journal.finalize_recipe_and_journal = _finalize  # type: ignore[method-assign]
-    coord.shared_state.save = lambda path: save_calls.append(path)  # type: ignore[method-assign]
 
-    await coord._recipe_kb_t4_hook()
+def _ensure_finalized(coord) -> None:
+    coord.recipe_journal.ensure_recipe_finalized(source="t4_fallback")
 
-    assert finalize_calls == ["t4_fallback"]
-    assert save_calls
-    assert all(path == session_dir for path in save_calls)
+
+_FINALIZE_SAVE_SITES = {
+    "pending_state": (1, _ensure_finalized, "Recipe finalize pending-state save failed"),
+    "outcome": (2, _ensure_finalized, "Recipe finalize outcome save failed"),
+    "t4_hook": (3, lambda coord: coord._recipe_kb_t4_hook(), "recipe KB T4 SharedState.save failed"),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("site", _FINALIZE_SAVE_SITES)
+async def test_recipe_finalize_save_os_error_is_logged_and_continues(tmp_path, monkeypatch, caplog, site):
+    index, call, logged = _FINALIZE_SAVE_SITES[site]
+    coord, _calls = _remote_t4_coordinator(tmp_path, monkeypatch, {index: OSError("no space left on device")})
+
+    with caplog.at_level("ERROR"):
+        outcome = call(coord)
+        if asyncio.iscoroutine(outcome):
+            await outcome
+
+    assert [r.getMessage() for r in caplog.records if r.levelname == "ERROR"] == [logged]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("site", _FINALIZE_SAVE_SITES)
+async def test_recipe_finalize_save_serialization_defect_propagates(tmp_path, monkeypatch, site):
+    index, call, _logged = _FINALIZE_SAVE_SITES[site]
+    coord, _calls = _remote_t4_coordinator(tmp_path, monkeypatch, {index: TypeError("not JSON serializable")})
+
+    with pytest.raises(TypeError, match="not JSON serializable"):
+        outcome = call(coord)
+        if asyncio.iscoroutine(outcome):
+            await outcome
 
 
 @pytest.mark.asyncio

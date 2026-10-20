@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.common.perf_metric import GRADED_INTVTY
+from hyperloom.common.perf_metric import GRADED_INTVTY, perf_snapshot_from_mapping
 from hyperloom.inference_optimizer.breakdown.recorder import stack_event
 from hyperloom.inference_optimizer.breakdown.recorder.assembler import stack_event_parts
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
@@ -220,6 +220,81 @@ def test_an_agentx_lift_keeps_a_winner_with_comparability_axes(session_dir, monk
         assert coord.shared_state.current_best["e2e_norm_intvty_p50"] == 93.2
         assert coord.shared_state.current_best["duration_seconds"] == 3600.0
         assert coord.shared_state.current_best["request_error_rate"] == 0.0
+
+
+def _agentx_coord(session_dir: Path, *, with_baseline_axes: bool) -> Coordinator:
+    """A coordinator graded on p50 whose session baseline is an output rate on a different scale."""
+    coord = _coord(session_dir, baseline=1000.0, anchor=1000.0)
+    coord.shared_state.benchmark_mode = "agentx"
+    coord.shared_state.grading = {"objective": GRADED_INTVTY, "noise_pct": 5.0}
+    axes = {
+        "output_throughput": 1000.0,
+        "total_throughput": 20000.0,
+        "e2e_norm_intvty_p50": 87.9,
+        "e2e_norm_intvty_p90": 33.7,
+        "duration_seconds": 3600.0,
+        "request_error_rate": 0.0,
+    }
+    coord.shared_state.current_best = {
+        "action": "baseline",
+        "tput": 1000.0,
+        **axes,
+        "extra_server_args": "",
+        "extra_envs": {},
+    }
+    if with_baseline_axes:
+        coord.shared_state.baseline_perf = perf_snapshot_from_mapping(axes) or {}
+    return coord
+
+
+def _agentx_winner(name: str, *, output: float, p50: float, p90: float) -> dict[str, Any]:
+    return {
+        "name": name,
+        "output_throughput": output,
+        "total_throughput": 20000.0,
+        "e2e_norm_intvty_p50": p50,
+        "e2e_norm_intvty_p90": p90,
+        "duration_seconds": 3600.0,
+        "request_error_rate": 0.0,
+    }
+
+
+def test_an_agentx_chain_is_attributed_on_the_graded_axis(session_dir, monkeypatch):
+    """Both sides of every contribution are p50; the output baseline is not the denominator."""
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    with session_scope(session_dir):
+        coord = _agentx_coord(session_dir, with_baseline_axes=True)
+        assert coord.writeback.lift_to_current_best(
+            "explore", 1100.0, _agentx_winner("first", output=1100.0, p50=93.2, p90=38.3)
+        )
+        assert coord.writeback.lift_to_current_best(
+            "explore", 1150.0, _agentx_winner("second", output=1150.0, p50=99.0, p90=41.0)
+        )
+
+        rows = _rows()
+        assert [row["baseline_tput"] for row in rows] == [87.9, 87.9]
+        assert rows[0]["contribution_pct"] == pytest.approx((93.2 - 87.9) / 87.9 * 100, abs=1e-5)
+        assert rows[1]["contribution_pct"] == pytest.approx((99.0 - 93.2) / 87.9 * 100, abs=1e-5)
+        ext, _status = stack_event.assemble_stack_ext(stack_event_parts(), event=stack_event.stack_event_id())
+        assert ext["baseline_tput"] == 87.9
+        assert ext["chain_total_gain_pct"] == pytest.approx((99.0 - 87.9) / 87.9 * 100, abs=1e-5)
+        assert ext["unattributed_gain_pct"] == pytest.approx(0.0, abs=1e-5)
+
+
+def test_an_agentx_adoption_without_a_graded_baseline_is_unmeasured(session_dir, monkeypatch):
+    """No p50 baseline to divide by means no contribution, not one divided by the output baseline."""
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    with session_scope(session_dir):
+        coord = _agentx_coord(session_dir, with_baseline_axes=False)
+        assert coord.writeback.lift_to_current_best(
+            "explore", 1100.0, _agentx_winner("first", output=1100.0, p50=93.2, p90=38.3)
+        )
+
+        rows = _rows()
+        assert rows[0]["baseline_tput"] is None
+        assert rows[0]["contribution_pct"] is None
+        ext, _status = stack_event.assemble_stack_ext(stack_event_parts(), event=stack_event.stack_event_id())
+        assert ext["guards"][stack_event.GUARD_UNMEASURED] == 1
 
 
 def test_a_refused_lift_records_nothing(session_dir):

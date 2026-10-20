@@ -38,7 +38,7 @@ from kernelforge.orchestrator.analysis_session import (
     AnalysisSessionJournal,
     MAX_ANALYSIS_SESSION_ATTEMPTS,
 )
-from kernelforge.durable_io import atomic_write_text, fsync_directory, fsync_tree
+from kernelforge.tools.durable_io import atomic_write_text, fsync_directory, fsync_tree
 from kernelforge.resources import assert_sandbox_grant
 
 
