@@ -1957,6 +1957,13 @@ async def test_delegate_sweep_seeds_the_stack_too(tmp_path: Path):
     created: list[dict[str, Any]] = []
 
     class _TaskRegistry:
+        # The enqueue gate narrows a proposed grid against what the queue already holds.
+        async def queued(self):
+            return []
+
+        async def running(self):
+            return []
+
         async def create_or_return_existing(self, **kwargs: Any):
             created.append(dict(kwargs["params"]))
             from hyperloom.orchestrator.state.task_registry import Task

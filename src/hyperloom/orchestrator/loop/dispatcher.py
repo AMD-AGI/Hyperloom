@@ -1444,6 +1444,44 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             total += self.expected_cost_minutes_for(kind)
         return total
 
+    async def queued_grid_variants(self) -> set[str]:
+        """Content fingerprints of the variants every queued or running explore grid already holds."""
+        from ..actions.executors._proposal_identity import content_fingerprint
+
+        return {
+            content_fingerprint(variant)
+            for task in (*await self.tasks.queued(), *await self.tasks.running())
+            if task.kind == "explore"
+            for variant in (task.params or {}).get("grid") or ()
+            if isinstance(variant, dict)
+        }
+
+    async def variants_not_already_queued(self, grid: Any) -> list[dict[str, Any]]:
+        """``grid`` without the variants the queue is already going to measure.
+
+        The explore idempotency key names a whole grid, so ``{A, B}`` and
+        ``{A, C}`` are two keys and A is measured twice. One observed
+        FRAMEWORK_AGENT queue held 34 variants under 21 distinct
+        configurations: five copies of one lever, and every copy a full server
+        launch and benchmark on the one serving lane the reviewed patches were
+        waiting for.
+        """
+        from ..actions.executors._proposal_identity import content_fingerprint
+
+        if not isinstance(grid, list):
+            return []
+        already = await self.queued_grid_variants()
+        kept: list[dict[str, Any]] = []
+        for variant in grid:
+            if not isinstance(variant, dict):
+                continue
+            fingerprint = content_fingerprint(variant)
+            if fingerprint in already:
+                continue
+            already.add(fingerprint)
+            kept.append(variant)
+        return kept
+
     def _lanes_for_action(self, action_name: str) -> tuple[str, ...]:
         """The lanes one action holds while it runs."""
         meta = self.action_registry.get(str(action_name or "").strip())

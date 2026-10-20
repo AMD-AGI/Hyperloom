@@ -490,16 +490,13 @@ class ConversationCollaborator(CoordinatorCollaborator):
         append_conversation(session_dir=self.session_dir, record=record)
 
     async def _explore_grid_fingerprints(self) -> set[str]:
-        """Content fingerprints of the variants in every queued or running explore grid."""
-        from ..actions.executors._proposal_identity import content_fingerprint
+        """Content fingerprints of the variants in every queued or running explore grid.
 
-        return {
-            content_fingerprint(variant)
-            for task in (*await self.tasks.queued(), *await self.tasks.running())
-            if task.kind == "explore"
-            for variant in (task.params or {}).get("grid") or ()
-            if isinstance(variant, dict)
-        }
+        The dispatcher owns this reading: it is the same set the enqueue gate
+        narrows a proposed grid against, and two copies would drift into the
+        prompt promising one thing while admission did another.
+        """
+        return await self._coord.dispatcher.queued_grid_variants()
 
     async def _affordable_actions_line(self) -> str:
         """Which of this phase's actions the budget can still pay for, after what is already queued.
