@@ -4,12 +4,14 @@
 """The MB1 integrator: carries specialist commits onto the integration branch, in rounds of up to K merge tests.
 
 Candidates are the notebook's committed specialist commits, in the order it gives them (foundation fixes first, then
-by their own gain), whatever became of the branch that made them. Each is tried once per integration head. A round
+by their own gain), whatever became of the branch that made them. Each is tried once per integration head, until it
+is merged or found already on the head. A round
 tests up to the integration branch's K candidates at once on the same head; the first of them, in that order, that
 may be merged is merged, and every other one that may is superseded: it gets no judgement and is tried again on the
 new head. A merge the experiment repository cannot combine, or whose test the toolbox refuses, is skipped and recorded
-like an unresolved conflict, and so is one that leaves the head's recipe as it is, untested: another branch's commit
-already brought the same change.
+like an unresolved conflict. One that leaves the head's recipe as it is is skipped untested as already on the head:
+another branch's commit already brought the same change, and the head keeps it, so it is not tried again, as a merged
+commit is not.
 
 The experiment repository carries the candidate's own change onto the integration head and reports what conflicts:
 where the two set a server argument or environment variable differently the candidate's value wins, and the
@@ -145,7 +147,9 @@ class LlmPatchResolver:
 
 def _untried(commit: CommittedCommit, head: str) -> bool:
     last = commit.last_merge
-    return commit.merged_into is None and (last is None or last.integration_head != head)
+    if commit.merged_into is not None or (last is not None and last.outcome is MergeOutcome.ALREADY_ON_HEAD):
+        return False
+    return last is None or last.integration_head != head
 
 
 #: The verdicts a foundation fix that passed the accuracy gate merges on: a settled measurement, whatever its gain.
@@ -253,15 +257,17 @@ class Integrator:
             delta = await self._resolved(merge, candidate)
             onto = await self._repo.read_recipe(head)
             if apply(onto, delta).digest() == onto.digest():
-                return await self._skip(commit, head, ALREADY_ON_HEAD)
+                return await self._skip(commit, head, ALREADY_ON_HEAD, MergeOutcome.ALREADY_ON_HEAD)
             request = integration_test_request(TestKind.TEST, Purpose.INTEGRATION, head, delta)
             return await self._tests.judged(request, partial(self._judge, merge, delta, commit))
         except RecipeError as exc:
-            return await self._skip(commit, head, f"the merge does not combine: {exc}")
+            return await self._skip(commit, head, f"the merge does not combine: {exc}", MergeOutcome.CONFLICT_SKIPPED)
         except RequestRejected as exc:
-            return await self._skip(commit, head, f"the toolbox refused the merge test: {exc}")
+            return await self._skip(
+                commit, head, f"the toolbox refused the merge test: {exc}", MergeOutcome.CONFLICT_SKIPPED
+            )
         except _Skipped as exc:
-            return await self._skip(commit, head, exc.reason)
+            return await self._skip(commit, head, exc.reason, MergeOutcome.CONFLICT_SKIPPED)
 
     async def _judge(
         self, merge: RepoMerge, delta: RecipeDelta, commit: CommittedCommit, request_id: str
@@ -298,11 +304,10 @@ class Integrator:
             raise _Skipped(f"unresolved patch conflict: {conflicts}")
         return delta
 
-    async def _skip(self, commit: CommittedCommit, head: str, reason: str) -> MergeReport:
-        await self._notebook.record_merge_attempt(MergeAttempt((commit.commit_id,), head, skipped_reason=reason))
-        return MergeReport(
-            commit.commit_id, head, MergeOutcome.CONFLICT_SKIPPED, reason, foundation_fix=commit.foundation_fix
-        )
+    async def _skip(self, commit: CommittedCommit, head: str, reason: str, outcome: MergeOutcome) -> MergeReport:
+        attempt = MergeAttempt((commit.commit_id,), head, skipped_reason=reason, skipped_outcome=outcome)
+        await self._notebook.record_merge_attempt(attempt)
+        return MergeReport(commit.commit_id, head, outcome, reason, foundation_fix=commit.foundation_fix)
 
     async def _conclude(self, tested: _TestedMerge, superseded: bool) -> MergeReport:
         """A superseded candidate gets no integration judgement and runs no regression set: it stays pending and is

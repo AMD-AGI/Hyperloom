@@ -482,9 +482,9 @@ async def test_a_round_tests_k_candidates_at_once_and_merges_the_first_improveme
     assert await bench.integrator.integrate_next(2) == ()
 
 
-async def test_a_merge_that_leaves_the_head_s_recipe_unchanged_is_skipped_untested(bench: Bench) -> None:
-    await _one(bench)
-    head = await bench.repo.head(INTEGRATION_BRANCH)
+async def _committed_again(bench: Bench) -> str:
+    """A commit of a new branch ``s2`` that makes ``c1``'s change again, committed on the root."""
+
     scheduler, toolbox, gate = (bench.handle(role) for role in (Role.SCHEDULER, Role.TOOLBOX, Role.GATE))
     await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, "s2", from_commit=bench.root, reason="refill"))
     await bench.repo.create_branch("s2", bench.root)
@@ -494,14 +494,39 @@ async def test_a_merge_that_leaves_the_head_s_recipe_unchanged_is_skipped_untest
     await toolbox.write_request(test)
     await toolbox.write_result(result(test.request_id))
     await gate.write_judgement(test.request_id, judgement(5.0, (test.request_id,)), Conclusion.COMMITTED, again)
+    return again
+
+
+async def test_a_merge_that_leaves_the_head_s_recipe_unchanged_is_skipped_untested(bench: Bench) -> None:
+    await _one(bench)
+    head = await bench.repo.head(INTEGRATION_BRANCH)
+    again = await _committed_again(bench)
 
     reports = await bench.integrator.integrate_next(2)
 
     [skipped] = [report for report in reports if report.candidate == again]
-    assert (skipped.onto, skipped.outcome, skipped.reason) == (head, MergeOutcome.CONFLICT_SKIPPED, ALREADY_ON_HEAD)
+    assert (skipped.onto, skipped.outcome, skipped.reason) == (head, MergeOutcome.ALREADY_ON_HEAD, ALREADY_ON_HEAD)
     assert skipped.request_id is None
     assert [test.parent_commit for test in bench.merge_tests().values()] == [bench.root, head]
     assert [report.candidate for report in reports] == [again, bench.commits["c2"]]
+    [recorded] = [item for item in await bench.handle(Role.OBSERVER).committed() if item.commit_id == again]
+    assert recorded.last_merge is not None and recorded.last_merge.outcome is MergeOutcome.ALREADY_ON_HEAD
+    [logged] = [entry for entry in bench.logged() if entry["detail"]["candidate"] == again]
+    assert (logged["reason"], logged["detail"]["outcome"]) == (ALREADY_ON_HEAD, MergeOutcome.ALREADY_ON_HEAD.value)
+
+
+async def test_a_commit_already_on_the_head_is_not_tried_again_when_the_head_moves(bench: Bench) -> None:
+    await _one(bench)
+    again = await _committed_again(bench)
+    [skipped] = await bench.integrator.integrate_next(1)
+    head = await bench.repo.head(INTEGRATION_BRANCH)
+
+    moved = await bench.integrator.integrate_next(2)
+
+    assert (skipped.candidate, skipped.outcome) == (again, MergeOutcome.ALREADY_ON_HEAD)
+    assert await bench.repo.head(INTEGRATION_BRANCH) != head
+    assert again not in {report.candidate for report in moved}
+    assert await bench.integrator.integrate_next(2) == ()
 
 
 async def test_commits_of_a_stopped_branch_stay_eligible(bench: Bench) -> None:
