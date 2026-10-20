@@ -187,7 +187,9 @@ def _write_model(dir_path: Path, cfg: dict, *, weight_bytes: int = 4096) -> Path
     """Write a minimal local HF model dir: config.json + one weight shard."""
     dir_path.mkdir(parents=True, exist_ok=True)
     (dir_path / "config.json").write_text(json.dumps(cfg), encoding="utf-8")
-    (dir_path / "model.safetensors").write_bytes(b"\0" * weight_bytes)
+    # Sparse: the reader only stats the shard, and a checkpoint-sized one must not fill the runner's memory or disk.
+    with (dir_path / "model.safetensors").open("wb") as shard:
+        shard.truncate(weight_bytes)
     return dir_path
 
 
@@ -453,6 +455,16 @@ def test_perfmodel_sizes_the_moe_op_at_the_latent_expert_width(tmp_path):
     assert _breakdown(2048).bytes_moved < _breakdown(0).bytes_moved
     # 0 means "unset", which must behave exactly like the residual width.
     assert _breakdown(0).bytes_moved == _breakdown(4096).bytes_moved
+
+
+def test_a_checkpoint_sized_weight_shard_is_not_written_out(tmp_path):
+    """The reader only stats the shard, so a real checkpoint's size must cost neither memory nor disk."""
+    weight_bytes = int(4 * 512 * 3 * 512 * 2048 * 0.5 * 1.15)
+    shard = _write_model(tmp_path / "m", _DENSE_CFG, weight_bytes=weight_bytes) / "model.safetensors"
+
+    stat = shard.stat()
+    assert stat.st_size == weight_bytes
+    assert stat.st_blocks * 512 < 1024**2
 
 
 def test_load_model_meta_keeps_a_quark_moe_checkpoint_decomposed(tmp_path):
