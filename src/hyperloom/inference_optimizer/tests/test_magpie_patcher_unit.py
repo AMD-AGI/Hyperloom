@@ -918,10 +918,9 @@ def test_a_client_without_the_hook_is_reported(tmp_path):
     assert not mp.client_tokenizer_hook_installed(None, scripts.parent)
 
 
-def test_a_model_needing_a_named_tokenizer_refuses_an_unpatchable_checkout(tmp_path, monkeypatch):
-    """The runtime consequence: no hook, no round -- but only for such a model."""
+def _deepseek_v4_config_without_hook(tmp_path):
+    """A materialized config for a model that needs a named tokenizer, over a client script lacking the hook."""
     import yaml
-    from hyperloom.orchestrator.actions.executors import baseline as bl
 
     scripts = tmp_path / "ix" / "benchmarks"
     scripts.mkdir(parents=True)
@@ -938,6 +937,14 @@ def test_a_model_needing_a_named_tokenizer_refuses_an_unpatchable_checkout(tmp_p
         yaml.safe_dump({"benchmark": {"model": str(model), "inferencex_path": str(tmp_path / "ix")}}),
         encoding="utf-8",
     )
+    return cfg
+
+
+def test_a_model_needing_a_named_tokenizer_refuses_an_unpatchable_checkout(tmp_path, monkeypatch):
+    """The runtime consequence: no hook, no round -- but only for such a model."""
+    from hyperloom.orchestrator.actions.executors import baseline as bl
+
+    cfg = _deepseek_v4_config_without_hook(tmp_path)
 
     ex = bl.BaselineExecutor(session_dir=tmp_path)
     monkeypatch.setattr(bl, "materialized_run_eval_disabled", lambda _p: False)
@@ -958,24 +965,9 @@ def test_the_hook_is_required_even_with_evaluation_disabled(tmp_path, monkeypatc
     Gating it on eval would leave an eval-disabled DeepSeek-V4 run dying exactly
     as before, with correctness resting on a preflight side effect.
     """
-    import yaml
     from hyperloom.orchestrator.actions.executors import baseline as bl
 
-    scripts = tmp_path / "ix" / "benchmarks"
-    scripts.mkdir(parents=True)
-    (scripts / "benchmark_lib.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
-    (scripts / "vllm_mi300x.sh").write_text(
-        '#!/usr/bin/env bash\nrun_benchmark_serving --result-dir "$WORKSPACE_DIR/" --drifted\n',
-        encoding="utf-8",
-    )
-    model = tmp_path / "m"
-    model.mkdir()
-    (model / "config.json").write_text('{"model_type": "deepseek_v4"}', encoding="utf-8")
-    cfg = tmp_path / "bench.yaml"
-    cfg.write_text(
-        yaml.safe_dump({"benchmark": {"model": str(model), "inferencex_path": str(tmp_path / "ix")}}),
-        encoding="utf-8",
-    )
+    cfg = _deepseek_v4_config_without_hook(tmp_path)
 
     # Evaluation OFF: the eval probe and eval-concurrency checks must not run,
     # but the tokenizer hook still must.
