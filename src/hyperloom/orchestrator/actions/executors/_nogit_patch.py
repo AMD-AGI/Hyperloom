@@ -320,7 +320,7 @@ def _apply_patch_no_git(
             return _nogit_failure(patch_path, message, tried_levels=tried_levels, records=backups)
         rel, abs_path = resolved
         if entry.is_new or not abs_path.exists():
-            record: dict[str, Any] | None = {
+            record: dict[str, Any] = {
                 "target": str(abs_path),
                 "existed": False,
                 "backup_path": None,
@@ -328,11 +328,12 @@ def _apply_patch_no_git(
             }
         else:
             bak = backup_root / _bak_name(patch_stem, rel, seq_offset + len(backups))
-            record, err = _back_up_existing_file(abs_path, bak)
-            if err:
+            backed_up, err = _back_up_existing_file(abs_path, bak)
+            if backed_up is None:
                 return _nogit_failure(patch_path, err, tried_levels=tried_levels, records=backups)
+            record = backed_up
         if not append_record(backup_root, record):
-            message = f"backup ledger write failed for {(record or {}).get('target')}"
+            message = f"backup ledger write failed for {record.get('target')}"
             return _nogit_failure(patch_path, message, tried_levels=tried_levels, records=backups)
         backups.append(record)
 
