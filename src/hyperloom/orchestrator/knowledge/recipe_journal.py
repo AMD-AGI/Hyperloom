@@ -526,6 +526,23 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         """
         return str(self.shared_state.phase or "").strip().upper() or "UNKNOWN"
 
+    def _fact_provenance(self, fact: FactRecord, now_iso: str) -> dict[str, Any]:
+        """The provenance details stamped on the lesson or pitfall this fact writes."""
+        state = self.shared_state
+        workload_tags = workload_kb_tags(state)
+        provenance: dict[str, Any] = {
+            "source_session_id": fact.source_session_id,
+            "source_task_id": fact.task.task_id,
+            "evidence": list(fact.evidence_refs or []),
+            "applicable_models": [str(state.model_name)] if state.model_name else [],
+            "applicable_hardware": [str(state.gpu_type)] if state.gpu_type else [],
+            "extra": dict(workload_tags),
+            "now": now_iso,
+        }
+        if fact.variant_name is not None:
+            provenance["source_variant_name"] = fact.variant_name
+        return provenance
+
     def _record_fact_impl(self, fact: FactRecord) -> None:
         """Shared KB write for _record_fact_per_task and _record_fact_per_variant.
 
@@ -538,36 +555,31 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             fact: The completed task, its outcome and the evidence to stamp on
                 the provenance.
         """
-        models = [str(self.shared_state.model_name or "")] if self.shared_state.model_name else []
-        hardware = [str(self.shared_state.gpu_type or "")] if self.shared_state.gpu_type else []
-        workload_tags = workload_kb_tags(self.shared_state)
-        extra = workload_tags if workload_tags else None
         now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        provenance_base = self._fact_provenance(fact, now_iso)
 
-        provenance_base: dict[str, Any] = {
-            "source_session_id": fact.source_session_id,
-            "source_task_id": fact.task.task_id,
-            "evidence": list(fact.evidence_refs or []),
-            "applicable_models": list(models or []),
-            "applicable_hardware": list(hardware or []),
-            "extra": dict(extra or {}),
-            "now": now_iso,
-        }
-        if fact.variant_name is not None:
-            provenance_base["source_variant_name"] = fact.variant_name
-
-        try:
-            if fact.is_keep and fact.gain_pct is not None and fact.gain_pct > 0:
-                statement = self._build_statement(
-                    change=fact.change,
-                    kind="lesson",
-                )
-                impact = self._build_measured_impact(
+        lesson = None
+        pitfall = None
+        if fact.is_keep and fact.gain_pct is not None and fact.gain_pct > 0:
+            lesson = {
+                "statement": self._build_statement(change=fact.change, kind="lesson"),
+                "measured_impact": self._build_measured_impact(
                     gain_pct=fact.gain_pct,
                     throughput_after=fact.throughput_after,
                     stack_depth=len(self.shared_state.optimization_stack or []),
                     measured_at=now_iso,
-                )
+                ),
+            }
+        else:
+            severity = self._pitfall_severity_for(fact.pitfall_severity_dict)
+            if severity is not None:
+                pitfall = {
+                    "description": self._build_statement(change=fact.change, severity=severity, kind="pitfall"),
+                    "severity": severity,
+                }
+
+        try:
+            if lesson is not None:
                 live = self.read_local_recipe_row()
                 recipe_overrides = self.kb_best_config_overrides_for_keep(
                     live=live,
@@ -575,31 +587,20 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                     throughput_after=fact.throughput_after,
                 )
                 self.kb_amend_recipe(
-                    append_lesson={
-                        "statement": statement,
-                        "measured_impact": impact,
-                    },
+                    append_lesson=lesson,
                     recipe_overrides=recipe_overrides or None,
                     provenance_details=provenance_base,
                 )
-                return
-
-            severity = self._pitfall_severity_for(fact.pitfall_severity_dict)
-            if severity is not None:
-                description = self._build_statement(
-                    change=fact.change,
-                    severity=severity,
-                    kind="pitfall",
-                )
-                self.kb_amend_recipe(
-                    append_pitfall={
-                        "description": description,
-                        "severity": severity,
-                    },
-                    provenance_details=provenance_base,
-                )
+            elif pitfall is not None:
+                self.kb_amend_recipe(append_pitfall=pitfall, provenance_details=provenance_base)
         except (LocalRecipeStoreError, OSError, ValueError) as error:
-            log.warning("recipe KB write for task %s failed: %s", fact.task.task_id, error)
+            log.warning(
+                "recipe KB write for task %s%s failed: %s: %s",
+                fact.task.task_id,
+                f" variant {fact.variant_name}" if fact.variant_name is not None else "",
+                type(error).__name__,
+                error,
+            )
 
     def _record_fact_per_task(
         self,
@@ -894,7 +895,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         _close_out.record_write_back_opened(self.session_dir, attempt=attempts, source=source)
         try:
             state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.exception("Recipe finalize pending-state save failed")
 
         try:
@@ -923,7 +924,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         self._record_write_back_settled(outcome, attempt=attempts, source=source)
         try:
             state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.exception("Recipe finalize outcome save failed")
         return outcome
 
@@ -1070,12 +1071,12 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         state = self.shared_state
         session_id = str(state.recipe_kb_session_id or state.session_id or self.session_dir.name)
         canonical_id = ""
-        try:
-            from ..knowledge.remote_recipe import HyperloomRemoteKB
+        from ..knowledge.remote_recipe import HyperloomRemoteKB, KBStoreError
 
+        try:
             canonical_id = self.workload_canonical_id()
             written = HyperloomRemoteKB.from_env().write(canonical_id, state, session_id=session_id)
-        except Exception as exc:
+        except (KBStoreError, OSError, ValueError) as exc:
             self._record_remote_recipe_audit(
                 source,
                 RemoteRecipeAudit(

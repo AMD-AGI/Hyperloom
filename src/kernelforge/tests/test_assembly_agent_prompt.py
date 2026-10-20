@@ -154,3 +154,28 @@ def test_assembly_optimizer_enforces_only_selected_asm(tmp_path, monkeypatch, ga
         assert (tmp_path / changed).read_bytes() == before
     assert specs[0].target_files == [str(tmp_path / "kernel.s")]
     assert specs[0].commit_new_paths == []
+
+
+def test_backend_prompt_build_failure_surfaces_instead_of_a_generic_prompt(tmp_path, monkeypatch):
+    class _Backend:
+        name = "claude"
+        capabilities = AgentCapabilities(stop_hooks=True)
+
+        def __init__(self, runtime):
+            self.runtime = runtime
+
+    def _broken_prompt(*args, **kwargs):
+        raise RuntimeError("prompt module broken")
+
+    monkeypatch.setattr(agent, "create_registered_backend", lambda runtime, **kwargs: _Backend(runtime))
+    monkeypatch.setattr("kernelforge.kernel_backends.base.build_single_kernel_backend_prompt", _broken_prompt)
+
+    with pytest.raises(RuntimeError, match="^prompt module broken$"):
+        agent.make_agent_fn(
+            Config(workspace=str(tmp_path), gpu_target="gfx950", agent_backend="claude", agent_precheck=False),
+            agent.ImplementerSetup(
+                agent.ImplementerTask(program_md="Optimize.", kernel_backend_name="triton"),
+                measurement=agent.GateMeasurement(driver_script=str(tmp_path / "driver.py")),
+                session=agent.SessionOptions(insession_gate=True),
+            ),
+        )

@@ -743,6 +743,36 @@ def test_a_session_recorded_at_an_unknown_phase_refuses_to_resume(coordinator_wi
     assert c.shared_state.phase == "EXPLORE"
 
 
+def _fail_phase_init_save(monkeypatch, c, exc: BaseException) -> None:
+    c.shared_state.phase = ""
+    c.shared_state.phase_history = []
+
+    def _save(session_dir=None) -> None:
+        raise exc
+
+    monkeypatch.setattr(c.shared_state, "save", _save)
+
+
+def test_a_failed_save_after_phase_init_is_logged_and_the_phase_stands(coordinator_with_mocks, monkeypatch, caplog):
+    c = coordinator_with_mocks
+    err = OSError("disk full")
+    _fail_phase_init_save(monkeypatch, c, err)
+
+    with caplog.at_level("ERROR", logger="hyperloom.orchestrator.phases.machine"):
+        c.phase_machine.ensure_phase_initialised(None)
+
+    assert c.shared_state.phase == "PRELUDE"
+    assert [r.exc_info[1] for r in caplog.records if r.exc_info] == [err]
+
+
+def test_a_serialization_defect_on_the_phase_init_save_is_not_swallowed(coordinator_with_mocks, monkeypatch):
+    c = coordinator_with_mocks
+    _fail_phase_init_save(monkeypatch, c, TypeError("not JSON serializable"))
+
+    with pytest.raises(TypeError, match="not JSON serializable"):
+        c.phase_machine.ensure_phase_initialised(None)
+
+
 _NO_KERNEL_CYCLE_SEC = 600 * 60.0
 _NO_KERNEL_CLI_BUDGET_PCT = {phase_state.PHASE_FRAMEWORK_AGENT: 0.2}
 

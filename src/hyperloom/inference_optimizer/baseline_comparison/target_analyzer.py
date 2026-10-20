@@ -213,32 +213,29 @@ def _write_measured_competitor_target(
         per_conc.append(row)
     if not per_conc:
         return False
-    try:
-        from hyperloom.inference_optimizer.baseline_comparison import research_hints
+    from hyperloom.inference_optimizer.baseline_comparison import research_hints
 
-        target = {
-            "gpu": query.gpu,
-            "model": query.model,
-            "framework": query.framework,
-            "precision": query.precision,
-            "per_conc": per_conc,
-            "notes": f"InferenceX measured reference ({query.model} @ {query.gpu})",
-        }
-        if query.benchmark_mode == "agentx":
-            target.update(benchmark_mode="agentx", throughput_basis="total_token_throughput_per_gpu")
-        return research_hints.write_competitor_target(Path(session_dir), target)
-    except Exception:  # noqa: BLE001 — advisory feed is best-effort
-        return False
+    target = {
+        "gpu": query.gpu,
+        "model": query.model,
+        "framework": query.framework,
+        "precision": query.precision,
+        "per_conc": per_conc,
+        "notes": f"InferenceX measured reference ({query.model} @ {query.gpu})",
+    }
+    if query.benchmark_mode == "agentx":
+        target.update(benchmark_mode="agentx", throughput_basis="total_token_throughput_per_gpu")
+    return research_hints.write_competitor_target(Path(session_dir), target)
 
 
 def clear_competitor_target(session_dir: Path) -> None:
-    """Remove any existing ``competitor_target.json``. Best-effort, never raises."""
+    """Remove any existing ``competitor_target.json``; filesystem errors are ignored."""
     try:
         from ..session import session_paths
 
         path = session_paths.competitor_target_json(Path(session_dir))
         path.unlink(missing_ok=True)
-    except Exception:  # noqa: BLE001 — best-effort cleanup
+    except OSError:
         pass
 
 

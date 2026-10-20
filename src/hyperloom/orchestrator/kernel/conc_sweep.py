@@ -47,6 +47,7 @@ from ..actions.executors._grid_runner import (
     variant_conc,
 )
 from ..actions.executors._subprocess_kill import resolve_benchmark_timeouts, session_deadline_to_remaining_sec
+from ..actions.executors.benchmark_backend import resolve_backend
 from ..actions.cancel_channel import current_cancel_scope
 from ..actions.stop_attribution import (
     ORCHESTRATOR_CANCELLED_CLASS,
@@ -839,7 +840,7 @@ async def _sweep_one_arm_single_server(run: _SweepRun, arm: _Arm) -> None:
                 boot_variant,
                 _RungServer(
                     serving_lease=arm_lease,
-                    base_extra_envs={"MAGPIE_RUN_PHASE": "server"},
+                    base_extra_envs=dict(resolve_backend().boot_phase_envs),
                     server_lifecycle=server_lifecycle_boot,
                     server_already_ready=False,
                     warmup_before_measure=False,

@@ -722,7 +722,7 @@ class InSessionGate:
         errors: list[str] = []
         try:
             paths = set(self._iter_snapshot_paths())
-        except Exception as error:  # noqa: BLE001 - an incomplete scan is a verdict
+        except (OSError, RuntimeError, ValueError) as error:  # an incomplete scan is a verdict
             paths = set()
             errors.append(f"protected inventory scan failed: {type(error).__name__}: {error}")
         if include_baseline:
