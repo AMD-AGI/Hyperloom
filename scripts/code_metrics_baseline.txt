@@ -599,7 +599,6 @@ function-lines src/hyperloom/orchestrator/actions/executors/report.py::_build_su
 function-lines src/hyperloom/orchestrator/actions/executors/report.py::_format_external_baseline_section 82
 function-lines src/hyperloom/orchestrator/actions/executors/report.py::_format_md 150
 function-lines src/hyperloom/orchestrator/actions/executors/report.py::_format_roofline_comparison_section 102
-function-lines src/hyperloom/orchestrator/actions/executors/trace_analyze.py::_build_trace_analyze_cmd 81
 function-lines src/hyperloom/orchestrator/actions/executors/trace_analyze.py::trace_analyze_handler 232
 function-lines src/hyperloom/orchestrator/bringup/argv_preflight.py::check_server_argv 107
 function-lines src/hyperloom/orchestrator/bus/resource_lock.py::SqliteLeaseBackend.acquire_many 95
