@@ -352,8 +352,8 @@ class _ReportPaths(NamedTuple):
     csv_path: Path
 
     @classmethod
-    def under(cls, session_dir: Path) -> _ReportPaths:
-        """Pre-create the reports dir so incremental checkpoints can carry these paths."""
+    def create_reports_dir(cls, session_dir: Path) -> _ReportPaths:
+        """Create the reports dir and name the two files in it, so a checkpoint written mid-sweep lands."""
         rdir = reports_dir(session_dir)
         rdir.mkdir(parents=True, exist_ok=True)
         return cls(json_path=rdir / "conc_sweep_summary.json", csv_path=rdir / "conc_sweep_raw.csv")
@@ -603,7 +603,7 @@ async def run_conc_sweep(
         workspace=workspace,
         workload=workload,
         launch=launch,
-        reports=_ReportPaths.under(session_dir),
+        reports=_ReportPaths.create_reports_dir(session_dir),
     )
     _record_sweep_preflight(recorder, state, setup)
     run = _sweep_run(state, setup, request, recorder)
