@@ -536,7 +536,8 @@ def test_a_sample_with_an_unread_xcd_does_not_unread_the_rounds_clock_limit(tmp_
     recorder = GpuPowerRecorder(output_path=None, query=query, interval_sec=0.5)
     recorder._interval = 0.01
     _run_measured(recorder, query, samples=4)
-    assert recorder.close()["per_gpu"]["4"]["sclk_max_mhz"] == 2400.0
+    out = recorder.close()
+    assert out["per_gpu"]["4"]["sclk_max_mhz"] == 2400.0
 
 
 def test_xcds_that_disagree_in_one_sample_leave_the_rounds_clock_limit_unread(tmp_path):
