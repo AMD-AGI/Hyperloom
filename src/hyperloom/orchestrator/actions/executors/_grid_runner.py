@@ -13,7 +13,6 @@ import re
 import shutil
 import subprocess
 import time
-from collections.abc import Sequence
 from enum import Enum, auto
 from pathlib import Path
 from typing import Any, Callable, NamedTuple, NoReturn
@@ -132,12 +131,12 @@ class _VariantAborted(Exception):
     """A variant ended before its result was assembled, carrying what the grid records for it."""
 
     def __init__(
-        self, result: VariantResult, *, halt: _Halt = _Halt.ON_FAILURE, trailing: Sequence[VariantResult] = ()
+        self, result: VariantResult, *, halt: _Halt = _Halt.ON_FAILURE, abandoned: StoppedByTheRun | None = None
     ) -> None:
         super().__init__(result.error_class)
         self.result = result
         self.halt = halt
-        self.trailing = tuple(trailing)
+        self.abandoned = abandoned
 
 
 def _resolve_session_dir() -> Path:
@@ -633,6 +632,16 @@ def _invalid_measurement_error(
     )
 
 
+# A preflight abort is an environment fault: the AgentX client is missing for the whole grid, so every
+# variant after it is recorded as never started rather than dropped from the returned points.
+_AGENTX_PREFLIGHT_ABANDONED = StoppedByTheRun(
+    error_class=AGENTX_PREFLIGHT_ERROR_CLASS,
+    interrupted="AgentX preflight aborted the grid while this round was running",
+    never_started="AgentX preflight aborted the grid before this variant ran",
+    ends_the_batch=True,
+)
+
+
 def _preflight_abort_error(proc: _RoundProcess) -> _RoundError:
     """Say what AgentX's preflight reported when it aborted the round."""
     return _RoundError(
@@ -680,14 +689,15 @@ class _VariantFailure(NamedTuple):
     """Why one variant ended, and what its ending means for the rest of the grid.
 
     ``error`` is the row's own message when it says more than the marker's ``recorded``
-    summary; ``trailing`` carries the rows for the variants a halted grid will not reach.
+    summary; ``abandoned`` is why the variants a halted grid will not reach never started,
+    and is set exactly when ``halt`` is ``STOP``.
     """
 
     error_class: str
     recorded: str
     error: str | None = None
     halt: _Halt = _Halt.ON_FAILURE
-    trailing: tuple[VariantResult, ...] = ()
+    abandoned: StoppedByTheRun | None = None
 
 
 class _RoundAttempt(NamedTuple):
@@ -700,7 +710,7 @@ class _RoundAttempt(NamedTuple):
     returncode: int | None
     started_unix: float
     server_log: Path
-    server_survivors: list[int]
+    server_survivors: tuple[int, ...]
 
 
 class _WatchdogStop(NamedTuple):
@@ -772,13 +782,17 @@ class _VariantRounds(NamedTuple):
     mn_effective_args: str
 
 
-class _MeasuredRound(NamedTuple):
-    """The benchmark pass one variant is measured on, and what it left behind."""
+class _BenchmarkPass(NamedTuple):
+    """One benchmark pass of one variant, and what it left behind.
+
+    ``server_survivors`` are the servers the pass booted that outlived the teardown that
+    followed it; a pass whose servers the next round still needs leaves it empty.
+    """
 
     proc: _RoundProcess
     started_unix: float
     workspaces_before: Any
-    server_survivors: list[int]
+    server_survivors: tuple[int, ...] = ()
 
 
 class _RoundHarvest(NamedTuple):
@@ -792,7 +806,7 @@ class _MeasuredVariant(NamedTuple):
     """One variant's measured round, what it left on disk, and the warmup it discarded."""
 
     rounds: _VariantRounds
-    round: _MeasuredRound
+    round: _BenchmarkPass
     harvest: _RoundHarvest
     warmup_tput: float | None
 
@@ -832,7 +846,7 @@ def _abort_variant(at: _VariantSlot, failure: _VariantFailure, **fields: Any) ->
             **fields,
         ),
         halt=failure.halt,
-        trailing=failure.trailing,
+        abandoned=failure.abandoned,
     )
 
 
@@ -881,9 +895,7 @@ def _abort_on_round_stop(
             nonfatal_warnings=[f"server_survived_teardown:{pid}" for pid in attempt.server_survivors],
         ),
         halt=_Halt.STOP if ends_the_batch else _Halt.ON_FAILURE,
-        trailing=tuple(_not_run_skip_result(rest, stopped) for rest in run.grid[at.idx + 1 :])
-        if ends_the_batch
-        else (),
+        abandoned=stopped if ends_the_batch else None,
     )
 
 
@@ -893,7 +905,7 @@ def _abandon_rest_of_grid(run: _GridRun, at: _VariantSlot) -> NoReturn:
     raise _VariantAborted(
         _not_run_skip_result(at.variant, stop),
         halt=_Halt.STOP,
-        trailing=tuple(_not_run_skip_result(rest, stop) for rest in run.grid[at.idx + 1 :]),
+        abandoned=stop,
     )
 
 
@@ -998,6 +1010,26 @@ def _refuse_unsupported_capability(run: _GridRun, at: _VariantSlot) -> None:
     _abort_variant(at, _VariantFailure("capability_unsupported", reason))
 
 
+async def _variant_yaml(run: _GridRun, at: _VariantSlot, *, into: Path, lifecycle: dict[str, Any] | None) -> Path:
+    """Materialize this variant's Magpie YAML under ``into``, against the server ``lifecycle`` names."""
+    recipe = run.recipe
+    return await asyncio.to_thread(
+        _build_variant_yaml,
+        recipe.base_yaml_path,
+        recipe.base_extra_args,
+        at.variant,
+        output_subdir=into,
+        model_path=recipe.model_path,
+        gpu_type=recipe.gpu_type,
+        benchmark_script=recipe.benchmark_script,
+        server_lifecycle=lifecycle,
+        base_args_mode=recipe.base_args_mode,
+        base_extra_envs=recipe.base_extra_envs,
+        base_remove_args=recipe.base_remove_args,
+        base_unset_envs=recipe.base_unset_envs,
+    )
+
+
 async def _variant_yaml_or_abort(
     run: _GridRun,
     at: _VariantSlot,
@@ -1011,23 +1043,8 @@ async def _variant_yaml_or_abort(
     ``failure_class`` names the class a build failure is recorded under; when it is None
     the exception names its own.
     """
-    recipe = run.recipe
     try:
-        return await asyncio.to_thread(
-            _build_variant_yaml,
-            recipe.base_yaml_path,
-            recipe.base_extra_args,
-            at.variant,
-            output_subdir=into,
-            model_path=recipe.model_path,
-            gpu_type=recipe.gpu_type,
-            benchmark_script=recipe.benchmark_script,
-            server_lifecycle=lifecycle,
-            base_args_mode=recipe.base_args_mode,
-            base_extra_envs=recipe.base_extra_envs,
-            base_remove_args=recipe.base_remove_args,
-            base_unset_envs=recipe.base_unset_envs,
-        )
+        return await _variant_yaml(run, at, into=into, lifecycle=lifecycle)
     except Exception as exc:  # noqa: BLE001
         error_class = failure_class or getattr(exc, "error_class", "yaml_build_error")
         log.warning(
@@ -1063,20 +1080,11 @@ async def _prepare_variant_rounds(run: _GridRun, at: _VariantSlot) -> _VariantRo
                 lifecycle.get("reason") or "unknown",
             )
             return cold._replace(lifecycle=lifecycle)
-        warmed_cfg_path = await asyncio.to_thread(
-            _build_variant_yaml,
-            recipe.base_yaml_path,
-            recipe.base_extra_args,
-            at.variant,
-            output_subdir=at.path,
-            model_path=recipe.model_path,
-            gpu_type=recipe.gpu_type,
-            benchmark_script=recipe.benchmark_script,
-            server_lifecycle={"cleanup": True, "pid_dir": str(at.path), "port": int(lifecycle.get("port") or 0)},
-            base_args_mode=recipe.base_args_mode,
-            base_extra_envs=recipe.base_extra_envs,
-            base_remove_args=recipe.base_remove_args,
-            base_unset_envs=recipe.base_unset_envs,
+        warmed_cfg_path = await _variant_yaml(
+            run,
+            at,
+            into=at.path,
+            lifecycle={"cleanup": True, "pid_dir": str(at.path), "port": int(lifecycle.get("port") or 0)},
         )
     except Exception as exc:  # noqa: BLE001
         log.warning(
@@ -1141,9 +1149,9 @@ async def _run_warmup_round(run: _GridRun, at: _VariantSlot, rounds: _VariantRou
     stopped = stopped_by_the_run(proc.returncode)
     if stopped is not None:
         survivors = _teardown_variant_server(at.path, rounds.lifecycle)
-        attempt = _RoundAttempt(at, proc.returncode, started_unix, warmup_server_log, survivors)
+        attempt = _RoundAttempt(at, proc.returncode, started_unix, warmup_server_log, tuple(survivors))
         _abort_on_round_stop(run, stopped, attempt, round_label="warmup")
-    pass_ = _MeasuredRound(proc, started_unix, workspaces_before, [])
+    pass_ = _BenchmarkPass(proc, started_unix, workspaces_before)
     return await _warmup_throughput(run, at, rounds, pass_)
 
 
@@ -1151,7 +1159,7 @@ async def _warmup_throughput(
     run: _GridRun,
     at: _VariantSlot,
     rounds: _VariantRounds,
-    pass_: _MeasuredRound,
+    pass_: _BenchmarkPass,
 ) -> float | None:
     """The throughput the warmup pass measured, or end the variant when it measured none."""
     warmup_slot = at.path / _WARMUP_ROUND_DIR
@@ -1291,11 +1299,11 @@ async def _run_multi_node_warmup(run: _GridRun, at: _VariantSlot, rounds: _Varia
     stopped = stopped_by_the_run(proc.returncode)
     if stopped is not None:
         survivors = _teardown_variant_server(at.path, rounds.lifecycle if rounds.auto_warmup else None)
-        attempt = _RoundAttempt(at, proc.returncode, started_unix, warm_slot / "server.log", survivors)
+        attempt = _RoundAttempt(at, proc.returncode, started_unix, warm_slot / "server.log", tuple(survivors))
         _abort_on_round_stop(run, stopped, attempt, round_label="mn_warmup")
 
 
-async def _run_measured_round(run: _GridRun, at: _VariantSlot, rounds: _VariantRounds) -> _MeasuredRound:
+async def _run_measured_round(run: _GridRun, at: _VariantSlot, rounds: _VariantRounds) -> _BenchmarkPass:
     """Run the pass this variant is measured on and reap the servers it booted."""
     from ._multi_node_env import is_multi_node
 
@@ -1339,7 +1347,7 @@ async def _run_measured_round(run: _GridRun, at: _VariantSlot, rounds: _VariantR
         )
     finally:
         round_survivors = _teardown_variant_server(at.path, rounds.lifecycle if rounds.auto_warmup else None)
-    return _MeasuredRound(proc, started_unix, workspaces_before, round_survivors)
+    return _BenchmarkPass(proc, started_unix, workspaces_before, tuple(round_survivors))
 
 
 def _watchdog_stop(returncode: Any, server_log: Path) -> _WatchdogStop:
@@ -1360,7 +1368,7 @@ def _watchdog_stop(returncode: Any, server_log: Path) -> _WatchdogStop:
     )
 
 
-def _abort_on_watchdog(run: _GridRun, at: _VariantSlot, round_: _MeasuredRound) -> NoReturn:
+def _abort_on_watchdog(run: _GridRun, at: _VariantSlot, round_: _BenchmarkPass) -> NoReturn:
     """End the variant on a measured round a liveness watchdog reaped."""
     runtime_sec = round(max(0.0, time.time() - round_.started_unix), 2)
     destination = select_run_workspace(at.path, known_before=round_.workspaces_before) or at.path
@@ -1384,7 +1392,7 @@ def _abort_on_watchdog(run: _GridRun, at: _VariantSlot, round_: _MeasuredRound) 
     )
 
 
-def _refuse_reaped_round(run: _GridRun, at: _VariantSlot, round_: _MeasuredRound) -> None:
+def _refuse_reaped_round(run: _GridRun, at: _VariantSlot, round_: _BenchmarkPass) -> None:
     """End the variant when a watchdog, the eval probe or the run itself stopped its measured round."""
     returncode = round_.proc.returncode
     if returncode == EVAL_PROBE_UNPATCHABLE_RETURNCODE:
@@ -1408,7 +1416,7 @@ def _refuse_reaped_round(run: _GridRun, at: _VariantSlot, round_: _MeasuredRound
         _abort_on_round_stop(run, stopped, attempt, round_label="measured")
 
 
-def _harvest_round_workspace(run: _GridRun, at: _VariantSlot, round_: _MeasuredRound) -> _RoundHarvest:
+def _harvest_round_workspace(run: _GridRun, at: _VariantSlot, round_: _BenchmarkPass) -> _RoundHarvest:
     """Salvage the round's leaked artifacts into the workspace it produced.
 
     Always on, so each slot keeps its server.log / gpu_metrics / profile relay for Robustness RCA.
@@ -1433,7 +1441,7 @@ def _harvest_round_workspace(run: _GridRun, at: _VariantSlot, round_: _MeasuredR
 def _abort_without_workspace(
     run: _GridRun,
     at: _VariantSlot,
-    round_: _MeasuredRound,
+    round_: _BenchmarkPass,
     artifacts: list[Any],
 ) -> NoReturn:
     """End the variant on a round that ran to the end and produced no benchmark workspace."""
@@ -1450,9 +1458,9 @@ def _abort_without_workspace(
         returncode,
     )
     halt = _Halt.ON_FAILURE if returncode != 0 else _Halt.CONTINUE
-    trailing: tuple[VariantResult, ...] = ()
+    abandoned: StoppedByTheRun | None = None
     if preflight_abort:
-        halt, trailing = _Halt.STOP, _preflight_abandoned_results(run, at)
+        halt, abandoned = _Halt.STOP, _AGENTX_PREFLIGHT_ABANDONED
         # Environment, not variant.
         log.error(
             "grid_runner: variant %s aborted on the AgentX preflight; "
@@ -1464,30 +1472,10 @@ def _abort_without_workspace(
         )
     _abort_variant(
         at,
-        _VariantFailure(found.error_class, found.summary, halt=halt, trailing=trailing),
+        _VariantFailure(found.error_class, found.summary, halt=halt, abandoned=abandoned),
         returncode=returncode,
         server_log_path=_existing_log_path(server_log),
         nonfatal_warnings=[f"harvested_leaked_artifact:{src}" for src, _ in artifacts],
-    )
-
-
-def _preflight_abandoned_results(run: _GridRun, at: _VariantSlot) -> tuple[VariantResult, ...]:
-    """The rows for the variants an AgentX preflight abort will never reach.
-
-    Recorded rather than dropped: a grid that just returns fewer points than it declared
-    reads as a grid that was that size.
-    """
-    return tuple(
-        VariantResult(
-            name=rest.name,
-            extra_server_args=rest.extra_server_args,
-            extra_envs=dict(rest.extra_envs),
-            status="skipped",
-            error="AgentX preflight aborted the grid before this variant ran",
-            error_class=AGENTX_PREFLIGHT_ERROR_CLASS,
-            note=rest.note,
-        )
-        for rest in run.grid[at.idx + 1 :]
     )
 
 
@@ -1771,7 +1759,8 @@ async def run_grid(
         except _VariantAborted as abort:
             results.append(abort.result)
             await _report_finished_variant(grid, results, i)
-            results.extend(abort.trailing)
+            if abort.abandoned is not None:
+                results.extend(_not_run_skip_result(rest, abort.abandoned) for rest in grid[i + 1 :])
             if abort.halt is _Halt.STOP or (abort.halt is _Halt.ON_FAILURE and not keep_going_on_failure):
                 break
         else:
