@@ -79,7 +79,8 @@ _QUOTA_REASON = "grant_quota_exceeded"
 
 #: Statuses that mean the request was not processed and may succeed if repeated; a 503 means the service has no room
 #: and is not retried on create. A 501 or 505 will not change on a retry.
-_SERVER_RETRY_STATUSES = frozenset({408, 500, 502, 504})
+_SERVER_ERROR = 500
+_SERVER_RETRY_STATUSES = frozenset({408, _SERVER_ERROR, 502, 504})
 _PERMANENT_SERVER_STATUSES = frozenset({501, 505})
 
 
@@ -163,7 +164,7 @@ def _classify(exc: Exception) -> _Failure | None:
         return None
     if status in (404, 410):  # 410: a create with an idempotency key whose sandbox has ended
         return _Failure.GONE
-    if status in (408, 429) or status >= 500:
+    if status in (408, 429) or status >= _SERVER_ERROR:
         return _Failure.UNAVAILABLE
     return _Failure.DENIED if status >= 400 else None
 
@@ -179,7 +180,9 @@ def _is_transient(exc: Exception, *, capacity: bool) -> bool:
     status = _status(exc)
     if status is None:
         return False
-    return status in _SERVER_RETRY_STATUSES or (capacity and status >= 500 and status not in _PERMANENT_SERVER_STATUSES)
+    return status in _SERVER_RETRY_STATUSES or (
+        capacity and status >= _SERVER_ERROR and status not in _PERMANENT_SERVER_STATUSES
+    )
 
 
 class _LineSink:
