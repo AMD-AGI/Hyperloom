@@ -187,11 +187,7 @@ def _queued_keep_record(snapshot: _KeepSnapshot, entry: dict[str, Any], integrat
 
 
 def _rebind_queued_routing(queued: Any, snapshot: _KeepSnapshot, entry: dict[str, Any]) -> None:
-    """Point a queued patch at the task it now belongs to.
-
-    The patch snapshot is immutable, but trace-local routing metadata must follow the task when ordinals are
-    reassigned on a later profile.
-    """
+    """Point a queued patch at the task it now belongs to."""
     if not isinstance(queued, dict):
         return
     queued["task_key"] = snapshot.task_key
@@ -307,10 +303,7 @@ def _nominated_patch(patch: Any, *, lane: str, keep_threshold_pct: float) -> _No
 
 
 def _warn_rewrite_lane_drops_env_flags(nominated: _NominatedPatch) -> None:
-    """Warn that the rewrite lane cannot activate a patch's env flags.
-
-    It lands as the generic action="integrate", which does not carry them into the re-baseline.
-    """
+    """Warn that the rewrite lane cannot activate a patch's env flags."""
     if nominated.is_fusion or not nominated.env_flags:
         return
     log.warning(
@@ -363,12 +356,7 @@ def _fusion_lane_fields(nominated: _NominatedPatch) -> dict[str, Any]:
 
 
 def _reopen_queued_nomination(queued: Any, nominated: _NominatedPatch) -> bool:
-    """Re-open a queued sibling for another integrate attempt; false when its settled verdict stands.
-
-    The patch snapshot identity is immutable, so only the mutable fields are refreshed and a re-run's env/threshold
-    win. A settled verdict is not re-litigated: reviving it to pending both misreports it and puts it beyond
-    ``evict_terminal``'s reach.
-    """
+    """Re-open a queued sibling for another integrate attempt; false when its settled verdict stands."""
     if not isinstance(queued, dict):
         return True
     if str(queued.get("status") or "") in VERDICT_STATUSES:
@@ -510,11 +498,7 @@ class _SettledIntegrations:
 
     @staticmethod
     def _attempt_matches(attempted: dict[str, Any], identity: _PendingPatchIdentity) -> bool:
-        """Whether a settled attempt was this patch's.
-
-        Matched only on a real patch_path: an attempted entry with a blank patch_path would match {"",
-        artifact_path}, and one empty-path attempt would drop the whole sibling family from the pending list.
-        """
+        """Whether a settled attempt was this patch's."""
         return record_matches_task(
             attempted,
             kernel_id=identity.kernel_id,
@@ -668,11 +652,7 @@ class _IntegrateSettlement:
 
 
 def _with_queued_paths(result: dict[str, Any], pending_record: Any) -> dict[str, Any]:
-    """The result with the paths its queued record owns filled in.
-
-    A sibling result may omit its own patch path -- resolving it from the bound record rather than from
-    last_kernel_opt is what keeps it from borrowing a different sibling's identity and keying the ledger wrong.
-    """
+    """The result with the paths its queued record owns filled in."""
     if not isinstance(pending_record, dict):
         return result
     if not str(result.get("patch_path") or result.get("best_artifact_path") or ""):
@@ -808,11 +788,7 @@ def _rejection_reason(
     max_attempts: int,
     max_fault_attempts: int,
 ) -> str:
-    """Why this patch is out of attempts, or ``""`` while it still has one.
-
-    A genuine REVERT retires the patch at once; otherwise it is too many non-fault attempts without a KEEP, and
-    faults draw on their own separate quota.
-    """
+    """Why this patch is out of attempts, or ``""`` while it still has one."""
     if entry.get("last_was_fault"):
         if int(entry.get("fault_count") or 0) < max_fault_attempts:
             return ""

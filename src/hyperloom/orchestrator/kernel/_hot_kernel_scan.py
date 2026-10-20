@@ -113,13 +113,7 @@ class HotKernelGate(NamedTuple):
         return cls(min_gpu_pct=min_gpu_pct, top_n=max(1, int(top_n)))
 
     def admits(self, hot_kernel: dict[str, Any]) -> bool:
-        """Whether a hot row is dispatchable and hot enough to owe a ``kernel_opt`` attempt.
-
-        A row whose shape is geometry-only (launch_grid/tile_name) is tagged non-dispatchable by the bypass path and
-        would fail the kernel-opt gate. Vendor-playbook groups (mori's dispatch+combine) are gated on the sum of the
-        group's members, not each member's own share, and may pin a per-playbook floor -- see
-        ``effective_hot_kernel_gpu_pct``.
-        """
+        """Whether a hot row is dispatchable and hot enough to owe a ``kernel_opt`` attempt."""
         return (
             hot_kernel.get("reusable_native_kernel") is True
             and hot_kernel.get("shape_dispatchable") is not False
@@ -152,12 +146,7 @@ def _hot_kernel_row(hot_kernel: Any, groups: TaskGroups, gate: HotKernelGate) ->
 
 
 def _one_row_per_task(rows: list[HotKernelRow]) -> list[HotKernelRow]:
-    """Keep the strongest row of each task group, and of each underlying kernel identity.
-
-    The identity pass is what a trace carrying no ``task_groups`` metadata relies on: every row there degenerates to
-    its own group, so the SAME kernel appearing under several synthetic ids (identical source_file+name+gpu_pct, e.g.
-    k001/k002) would otherwise be treated as several distinct hot kernels.
-    """
+    """Keep the strongest row of each task group, and of each underlying kernel identity."""
     seen_groups: set[str | tuple[str, ...]] = set()
     seen_identities: set[KernelIdentity] = set()
     kept: list[HotKernelRow] = []
@@ -269,12 +258,7 @@ class KernelAttemptLedger:
         )
 
     def _already_landed(self, row: HotKernelRow) -> bool:
-        """Whether an integrating row already retired this kernel.
-
-        A kernel-recipe lane (forge-loop/flydsl/fusion) lands under its own long-form recipe id, which never equals
-        this row's synthetic kNNN id or its trace source_file, so the operator name is the one identity left to
-        compare on.
-        """
+        """Whether an integrating row already retired this kernel."""
         if self.integrated.covers(
             kernel_ids=row.members,
             task_group_key=row.group_key,
@@ -286,11 +270,7 @@ class KernelAttemptLedger:
         return bool(operation) and normalize_operator_name(operation) in self.integrated_operators
 
     def _already_attempted(self, row: HotKernelRow) -> bool:
-        """Whether this row's task has already spent a ``kernel_opt`` attempt.
-
-        Members are resolved through ``attempt_for`` rather than compared inline: a row's own id is not the only id
-        it covers.
-        """
+        """Whether this row's task has already spent a ``kernel_opt`` attempt."""
         if row.group_key:
             attempt = self._first_group_attempt(row.group_key)
             return attempt is not None and int(attempt.get("attempts", 0)) > 0

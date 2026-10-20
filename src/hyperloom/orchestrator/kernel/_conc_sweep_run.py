@@ -179,14 +179,7 @@ def _build_arm_grid(
 
 
 def _grading_of(state: Any) -> tuple[str, float | None]:
-    """The axis this sweep draws its speedups on, and the noise band its guard reads.
-
-    Resolved through ``resolved_grading`` so the curve and the promotions in one session cannot end up on
-    different axes. The environment-derived ``graded_metric_key`` diverges two ways: it never sees the axis
-    recorded at seed, so a resume whose shell lost ``HYPERLOOM_PERF_METRIC`` redraws the curve on output; and it
-    has no scriptable carve-out, so an image framework -- which reports no interactivity axis at all -- would
-    compare every rung on a field it never measures and report the whole sweep as failed.
-    """
+    """The axis this sweep draws its speedups on, and the noise band its guard reads."""
     on_intvty, noise_pct = resolved_grading(state)
     return (GRADED_INTVTY if on_intvty else GRADED_OUTPUT), noise_pct
 
@@ -282,12 +275,7 @@ def _write_csv(csv_path: Path, points: list[dict[str, Any]]) -> None:
 
 
 def _arm_status(results: list[VariantResult]) -> str:
-    """The status an arm reports from the rungs it actually ran.
-
-    An arm that measured some rungs and lost others is ``degraded`` rather
-    than either extreme: the curve it produced is real and shorter than the
-    ladder it was asked for.
-    """
+    """The status an arm reports from the rungs it actually ran."""
     statuses = {str(result.status or "").lower() for result in results}
     if not statuses:
         return "skipped"
@@ -365,11 +353,7 @@ class _SweepRun:
         return bool(self.cancel_reason)
 
     def observe_cancel(self, results: Sequence[VariantResult] = ()) -> bool:
-        """Latch a cancel seen on the action's scope or on a rung it reaped; return whether the sweep is cancelled.
-
-        A cancelled scope stays cancelled, so every rung after it would be reaped the moment it started. Latching here
-        is what lets the ladder stop instead of reading each of those reaps as a rung that failed.
-        """
+        """Latch a cancel seen on the action's scope or on a rung it reaped; return whether the sweep is cancelled."""
         if self.cancelled:
             return True
         scope = current_cancel_scope()
@@ -408,11 +392,7 @@ class _SweepRun:
         return [result for result in self.results if result.name.startswith(prefix)]
 
     def record_rung(self, arm_name: str, result: VariantResult, note: _RungNote) -> None:
-        """Record one rung on the sweep's event, if the sweep is being recorded.
-
-        The result is flattened into the same point the report writes, so the
-        recorded curve and the written one cannot differ.
-        """
+        """Record one rung on the sweep's event, if the sweep is being recorded."""
         if self.recorder is None:
             return
         point = _point_from_variant(result, arm=arm_name)
@@ -444,13 +424,7 @@ class _SweepRun:
                 )
 
     def close_arm(self, arm_name: str, exc: BaseException | None) -> None:
-        """Close one arm's row, whichever of its ladder's paths it leaves by.
-
-        An arm leaves by three: the restart ladder it was delegated to, the restart
-        retry after every boot failed, and the reuse ladder. Closing here means an
-        arm that raised mid-ladder says so once, rather than each path reporting a
-        ladder it never finished as the status its own results happen to add up to.
-        """
+        """Close one arm's row, whichever of its ladder's paths it leaves by."""
         if self.recorder is None:
             return
         if exc is None:
@@ -504,10 +478,7 @@ class _SweepRun:
         return {"extra_server_args": arm.args, "extra_envs": arm.envs, "points": points}
 
     def payload(self, *, in_progress: bool) -> dict[str, Any]:
-        """The ``conc_sweep_summary.json`` body for every rung recorded so far.
-
-        An in-progress payload is the one rewritten between rungs; a final one settles its status from the pairs.
-        """
+        """The ``conc_sweep_summary.json`` body for every rung recorded so far."""
         state = self.state
         baseline = self._arm_section(self.baseline)
         optimized = self._arm_section(self.optimized)
@@ -577,11 +548,7 @@ class _SweepRun:
 
 
 def _flush_conc_sweep_report(payload: dict[str, Any], session_dir: Path) -> Exception | None:
-    """Atomically write the conc-sweep summary JSON + CSV to the reports dir.
-
-    Returns what stopped the write, so a caller that recorded the paths can say
-    they are where the report was meant to go rather than where it is.
-    """
+    """Atomically write the conc-sweep summary JSON + CSV to the reports dir."""
     try:
         rdir = reports_dir(session_dir)
         rdir.mkdir(parents=True, exist_ok=True)

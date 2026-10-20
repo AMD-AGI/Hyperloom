@@ -214,11 +214,7 @@ class _SweepRequest(NamedTuple):
 
     @classmethod
     def of(cls, state: SharedState, concs: list[int] | None, budget_sec: int | None) -> _SweepRequest:
-        """Resolve the ladder the sweep runs, keeping whether the caller named it.
-
-        Resolving the benchmark timeout here rejects an invalid override before the sweep
-        creates its workspace or records a preflight event.
-        """
+        """Resolve the ladder the sweep runs, keeping whether the caller named it."""
         _, benchmark_timeout_sec = resolve_benchmark_timeouts()
         return cls(
             # ``None`` → default ladder; an explicit empty list is refused below.
@@ -312,13 +308,7 @@ def _sweep_workspace(session_dir: Path) -> Path:
 
 
 def _materialize_sweep_config(state: SharedState, workspace: Path, base_config_path: str) -> _SweepLaunch:
-    """Materialize the benchmark config into the sweep's workspace and resolve what it launches with.
-
-    Idempotent, and re-run even when the session already named a materialized config, in case the sweep fell back to
-    the shipped asset. The GPU type mirrors the main flow (baseline/sweep/...): prefer $GPU_TYPE (cli.py
-    canonicalizes mi325x/mi308x -> mi300x), fall back to state.gpu_type, then canonicalize through _gpu_runner_type
-    so the selected Magpie script is a shipped runner (sglang_mi300x.sh), never the unshipped sglang_mi325x.sh.
-    """
+    """Materialize the benchmark config into the sweep's workspace and resolve what it launches with."""
     from hyperloom.inference_optimizer.gpu_types import _gpu_runner_type
 
     resolved_model = resolve_session_model_path(

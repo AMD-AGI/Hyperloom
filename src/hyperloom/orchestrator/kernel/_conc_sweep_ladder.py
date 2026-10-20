@@ -235,10 +235,7 @@ class _BootLadder:
         )
 
     def _stop_named_by(self, attempt: _BootAttempt) -> StoppedByTheRun | None:
-        """The run-side stop this boot names, if any.
-
-        A boot that failed under a cancel still ends the ladder: every lower rung would be reaped on start.
-        """
+        """The run-side stop this boot names, if any."""
         stop = self.run.stop_named_by(attempt.result)
         if stop is None and attempt.failed and self.run.cancelled:
             return _CANCEL_STOP
@@ -334,11 +331,7 @@ def _record_arm_grid(run: _SweepRun, arm_name: str, grid: list[GridVariant]) -> 
 
 
 def _record_all_boots_failed(run: _SweepRun, server: _ArmServer, grid: list[GridVariant], boot: _ArmBoot) -> None:
-    """Report that no CONC booted the persistent server and that the ladder is being retried per rung.
-
-    Those per-rung results supersede the boot attempts rather than adding to them -- which is why the attempts
-    stayed uncommitted.
-    """
+    """Report that no CONC booted the persistent server and that the ladder is being retried per rung."""
     log.warning(
         "conc_sweep single-server: arm=%s all boot attempts failed; "
         "falling back to Option B (per-variant restart) for the full ladder",
@@ -359,12 +352,7 @@ def _record_all_boots_failed(run: _SweepRun, server: _ArmServer, grid: list[Grid
 
 
 async def _sweep_ladder_by_restart(run: _SweepRun, server: _ArmServer, grid: list[GridVariant]) -> None:
-    """Run the whole ladder with a server restart per rung.
-
-    The arm whose framework cannot hold a server across rungs and the arm whose
-    every boot failed both run the ladder this way, and it is the same run for
-    both.
-    """
+    """Run the whole ladder with a server restart per rung."""
     arm_failure: BaseException | None = None
     try:
         await _sweep_arm_option_b(run, server.arm_name, grid, serving_lease=server.lease)
@@ -457,11 +445,7 @@ async def _run_reuse_rungs(run: _SweepRun, server: _ArmServer, reuse_grid: list[
 
 
 def _teardown_after_reuse(run: _SweepRun, server: _ArmServer) -> None:
-    """Safety teardown -- idempotent, no-op if already torn down.
-
-    The last word on this arm's server: a teardown that failed here leaves it
-    alive past the arm that owned it.
-    """
+    """Safety teardown -- idempotent, no-op if already torn down."""
     try:
         server.teardown()
     except Exception as exc:
@@ -490,13 +474,7 @@ async def _sweep_ladder_by_reuse(
 
 
 async def _sweep_one_arm_single_server(run: _SweepRun, arm: _Arm) -> None:
-    """Sweep one arm across all CONC values reusing a single persistent server.
-
-    Boots the server on the highest CONC (Option A), then reuses it for all
-    lower CONCs.  If boot fails, retries with the next lower CONC
-    (boot-retry-descend).  Falls back to the legacy per-variant server-restart
-    path (Option B) when all boot retries are exhausted.
-    """
+    """Sweep one arm across all CONC values reusing a single persistent server."""
     from ..actions.executors._grid_runner import _num_gpus_for_config
     from ..actions.executors._ray_serving import maybe_serving_lease
 
@@ -532,13 +510,7 @@ async def _sweep_arm_option_b(
     *,
     serving_lease: Any = None,
 ) -> None:
-    """Option B fallback: run each variant with its own server (legacy behaviour).
-
-    Used when ``_sweep_one_arm_single_server`` detects the framework is not
-    lifecycle-eligible or all boot retries are exhausted. The same monotonic
-    deadline covers both arms and all retries. ``serving_lease`` is ``None``
-    when the arm runs on the local (non-Ray) path.
-    """
+    """Option B fallback: run each variant with its own server (legacy behaviour)."""
     for variant in grid:
         _ob_rem = session_deadline_to_remaining_sec(run.session_deadline_sec)
         if run.observe_cancel():
