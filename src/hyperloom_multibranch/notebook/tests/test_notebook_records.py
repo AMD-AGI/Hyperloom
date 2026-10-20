@@ -531,6 +531,8 @@ async def test_a_specialist_records_its_own_llm_spend_and_the_scheduler_its_judg
         (Role.SCHEDULER, "", LlmUsage("s1", UsageSource.JUDGE, 1.0)),
         (Role.SCHEDULER, "", LlmUsage("", UsageSource.SPECIALIST, 1.0)),
         (Role.TOOLBOX, "", LlmUsage("", UsageSource.JUDGE, 1.0)),
+        (Role.SPECIALIST_RUNTIME, "s1", LlmUsage("s1", UsageSource.CRITIC, 1.0)),
+        (Role.SCHEDULER, "", LlmUsage("s1", UsageSource.CRITIC, 1.0)),
     ],
 )
 async def test_llm_spend_is_recorded_only_by_whoever_spent_it(
@@ -538,6 +540,15 @@ async def test_llm_spend_is_recorded_only_by_whoever_spent_it(
 ) -> None:
     with pytest.raises(WriterNotAllowed):
         await open_as(role, branch).record_llm_usage(usage)
+
+
+async def test_the_scheduler_records_the_rule_gates_fix_critic_with_its_own_spend(open_as: Open) -> None:
+    scheduler = open_as(Role.SCHEDULER)
+
+    await scheduler.record_llm_usage(LlmUsage("", UsageSource.CRITIC, 0.25))
+    snapshot = await scheduler.snapshot()
+
+    assert ([record.usage.source for record in snapshot.llm_usage], snapshot.llm_usd) == ([UsageSource.CRITIC], 0.25)
 
 
 @pytest.mark.parametrize("cost", [-0.01, float("nan"), float("inf")])
