@@ -30,13 +30,16 @@ from hyperloom.common.env_safety import (
     is_allowed_kernel_agent_env_key,
     is_python_package_root,
 )
+from hyperloom.common.agent_cli import resolve_claude_executable, resolve_codex_executable
 from hyperloom.common.llm_config import (
+    AGENT_BACKEND_CODEX,
     CLAUDE_OAUTH_TOKEN_ENV,
     DEFAULT_CLAUDE_MODEL,
     LEGACY_DEEPSEEK_ENV_KEYS,
     anthropic_synthesizable_key,
     deepseek_compat_env,
     has_anthropic_credential,
+    preferred_agent_backend,
     provider_model_defaults,
     with_synthesized_anthropic_keys,
 )
@@ -1654,15 +1657,17 @@ def _check_kernel_tuning_clis() -> dict[str, Any]:
     }
 
 
-def _check_node_claude_cli() -> None:
-    """WARN-only presence check for bundled agent CLIs (node/claude/codex)."""
-    missing = [t for t in ("node", "claude", "codex") if shutil.which(t) is None]
+def _check_agent_cli() -> None:
+    """WARN when the CLI this deployment's specialists run cannot be resolved; launching them will fail."""
+    if preferred_agent_backend() == AGENT_BACKEND_CODEX:
+        missing = "" if resolve_codex_executable() else "no codex runtime on PATH or bundled with the Codex SDK"
+        remedy = "install `codex` on PATH or pip install 'hyperloom-inference_optimizer[llm]'"
+    else:
+        found = resolve_claude_executable()
+        missing = "" if found else "no claude CLI in $HYPERLOOM_CLAUDE_CLI_PATH, $GEAK_CLAUDE_BIN or on PATH"
+        remedy = "src/hyperloom/inference_optimizer/assets/install.sh installs it"
     if missing:
-        print(
-            f"Preflight: WARNING — CLI(s) not on PATH: {missing}. "
-            f"ClaudeBackend / CodexBackend may fall back to direct HTTP. "
-            f"Run src/hyperloom/inference_optimizer/assets/install.sh to bring them in."
-        )
+        print(f"Preflight: WARNING — {missing}; specialists cannot start without it ({remedy}).")
 
 
 def _emit_preflight_diagnostics(
@@ -2557,8 +2562,7 @@ def _preflight(
 
     inferencex_path = _prepare_inferencex(install_event, magpie_active=_magpie_backend_active)
 
-    # --- node / claude / codex CLI presence (WARN-only) ---
-    _check_node_claude_cli()
+    _check_agent_cli()
 
     _check_kernel_and_tracelens_clis(install_event, args)
 
