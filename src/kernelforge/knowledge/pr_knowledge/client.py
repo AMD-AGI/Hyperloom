@@ -37,6 +37,25 @@ class PRContractError(PRMonitorError):
 
 
 @dataclass(frozen=True)
+class PRDetail:
+    """One PR's detail payload with every nested field checked against the service contract."""
+
+    summary: dict[str, Any]
+    distill: dict[str, Any]
+    files: list[dict[str, Any]]
+    commits: list[Any]
+
+
+def _object_field(payload: dict, name: str) -> dict[str, Any]:
+    value = payload.get(name)
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise PRContractError(f"PR response field '{name}' must be an object")
+    return value
+
+
+@dataclass(frozen=True)
 class FetchOutcome:
     """One completed request in a concurrent batch."""
 
@@ -225,6 +244,25 @@ class PRMonitorClient:
             raise PRContractError("PR detail must be an object")
         return payload
 
+    def get_pr_detail(self, repo: str, number: int) -> PRDetail | None:
+        """Fetch one PR and reject any nested field that breaks the service contract."""
+        payload = self.get_pr(repo, number)
+        if payload is None:
+            return None
+        summary = _object_field(payload, "summary")
+        distill = _object_field(payload, "distill")
+        files = payload.get("files")
+        if files is None:
+            files = []
+        if not isinstance(files, list) or not all(isinstance(item, dict) for item in files):
+            raise PRContractError("PR response field 'files' must be an array of objects")
+        commits = payload.get("commits")
+        if commits is None:
+            commits = []
+        if not isinstance(commits, list):
+            raise PRContractError("PR response field 'commits' must be an array")
+        return PRDetail(summary=summary, distill=distill, files=files, commits=commits)
+
     def get_file_patch(self, repo: str, number: int, file_path: str) -> dict | None:
         """Fetch the diff of one changed file."""
         payload = self.get(f"/repos/{repo}/prs/{number}/files/by-path", {"path": file_path})
@@ -232,6 +270,8 @@ class PRMonitorClient:
             return None
         if not isinstance(payload, dict):
             raise PRContractError("file patch must be an object")
+        if "patch" not in payload:
+            raise PRContractError("file-patch response must contain 'patch'")
         return payload
 
     def pr_request(self, repo: str, number: int) -> tuple[str, None]:
