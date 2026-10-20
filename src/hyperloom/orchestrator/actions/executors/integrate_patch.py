@@ -997,9 +997,9 @@ def _prepared_artifact_records(
 ) -> list[dict[str, Any]]:
     """The artifact preimages this attempt committed, proven to cover its whole mutation plan.
 
-    The artifact phase commits its whole plan's preimages and then records a
-    witness before it installs anything, so the witness tells "never started"
-    (nothing to undo) apart from "started, evidence now gone" (refuse loudly).
+    The artifact phase commits its whole plan's preimages before it installs
+    anything, so the witness tells "never started" apart from "started, evidence
+    now gone".
     """
     if not recovery.get("artifacts_prepared"):
         return []
@@ -1020,12 +1020,10 @@ def _patch_undo_plan(
 ) -> _PatchUndo:
     """How this attempt's patches come back out of the tree they were applied to.
 
-    A git attempt takes no backups, so the recorded base is its only way back and
-    a HEAD that has moved since means the tree is no longer the one it mutated. A
-    non-git attempt writes a preimage record before every mutation it makes, so an
-    absent ledger there is proof that no patch reached the tree -- the first patch
-    failing its dry-run leaves exactly that state, and refusing would stop the
-    session over an untouched tree.
+    A git attempt takes no backups, so a HEAD that has moved since means the tree
+    is no longer the one it mutated. A non-git attempt writes a preimage record
+    before every mutation, so an absent ledger there is proof that no patch
+    reached the tree.
     """
     if not pending.get("patches"):
         return _PatchUndo("", [])
@@ -1384,11 +1382,7 @@ def _is_aiter_gemm_model_config(spec: _ArtifactSpec) -> bool:
 
 
 def _rows_not_runtime_ready(rows: list[dict[str, Any]]) -> int:
-    """How many tuned rows name no kernel the runtime can dispatch.
-
-    A placeholder name or a non-positive runtime is what an untuned seed row
-    looks like: the entry exists, but AITER falls back to its own heuristic.
-    """
+    """How many tuned rows name no kernel the runtime can dispatch."""
     unusable = 0
     for row in rows:
         kernel_name = str(row.get("kernelName") or "").strip().lower()
@@ -1699,12 +1693,7 @@ def _uncommitted_revert(attempt: IntegrateAttempt, failure: str, what: str, **ev
 
 
 def _bringup_evidence(before: Any, after: Any) -> dict[str, Any]:
-    """Both boots of an enablement round as the verdict reports them.
-
-    These are the persisted observations read back by path; neither side
-    re-classifies a log. A half that could not be loaded is named on the verdict
-    rather than re-read.
-    """
+    """Both boots of an enablement round as the verdict reports them."""
     return {
         "before_observation": (observation_summary(before.observation) if before.observation is not None else None),
         "before_observation_path": before.path,
@@ -1716,12 +1705,7 @@ def _bringup_evidence(before: Any, after: Any) -> dict[str, Any]:
 
 
 def _kept_runtime_identity(stack_action: Any, provision_result: Any) -> dict[str, Any]:
-    """What a KEEP'd attempt runtime must carry so every later bench re-activates the stack it graded.
-
-    The action names a branch, a tag or an unpinned spec list; the resolved
-    identity beside it is what makes the acquisition a rebuild path rather than a
-    source that moves. A round that acquired no runtime records nothing.
-    """
+    """What a KEEP'd attempt runtime must carry so every later bench re-activates the stack it graded."""
     if stack_action is None or provision_result is None or not getattr(provision_result, "ok", False):
         return {}
     return {
@@ -1878,10 +1862,7 @@ def _materialized_bench_config(bench_leg: _PatchBench, default_config_path: Path
 
 
 def _patch_variant(params: dict[str, Any], specialist_task_id: str, overlay: _VariantOverlay) -> GridVariant:
-    """The single variant one integrate_patch bench leg measures.
-
-    It carries this round's own levers; run_grid composes the stack under them.
-    """
+    """The single variant one integrate_patch bench leg measures."""
     envs = dict(overlay.extra_envs)
     # Eval-origin enablement needs a raw accuracy for its runnable gate, so
     # RUN_EVAL=true must survive any variant overlay.
@@ -1906,11 +1887,8 @@ def _patch_variant(params: dict[str, Any], specialist_task_id: str, overlay: _Va
 def _admitted_grid(variant: GridVariant, params: dict[str, Any]) -> _AdmittedGrid:
     """Hold an authored variant to the explore grid's origin-independent guards.
 
-    An authored variant is no more exempt from a known-bad multi-node lever, an
-    operator's env pin or the operator's skip list than a proposed one. The
-    compatibility filter is deliberately absent -- it shells out to build the
-    framework's arg parser, and a single authored variant must not pay for that
-    probe.
+    The compatibility filter is deliberately absent: it shells out to build the
+    framework's arg parser, and a single authored variant must not pay for that probe.
     """
     grid, mn_dropped = apply_multi_node_invalid_variants([variant])
     grid, pin_dropped = apply_aiter_moe_pin_filter(grid)
@@ -1927,11 +1905,10 @@ async def _bench_grid_results(
 ) -> list[VariantResult]:
     """Run this leg's grid while holding the whole-machine serving lease.
 
-    Ray-managed GPU execution holds a serving lease (num_gpus=TP + serving_slot)
-    for the whole run_grid so the patch benchmark serializes against other
-    serving instead of colliding with a concurrently-running GPU specialist
-    server on the same card (the observed ``reverted_smoke_fail`` root cause).
-    ``None`` keeps the local path (multi-node / RAY_EXEC off / pytest default).
+    Ray-managed GPU execution holds the lease for the whole run_grid so the patch
+    benchmark serializes against other serving instead of colliding with a
+    concurrent GPU specialist server on the same card. ``None`` keeps the local
+    path (multi-node / RAY_EXEC off / pytest default).
     """
     from ._ray_serving import maybe_serving_lease
 
@@ -2135,9 +2112,7 @@ def _rewrite_switches(
     """The framework-rewrite switches this round benches with on.
 
     Every rewrite in such a patch sits behind a switch that defaults OFF, so the
-    applied patch is inert and benching it as-is would measure the baseline. The
-    manifest also carries the dependency edges the gate needs to decide between a
-    throughput KEEP and an inert one.
+    applied patch is inert and benching it as-is would measure the baseline.
     """
     manifest, problems = _parse_framework_switches(params=params, done_payload=done_payload)
     if manifest and not patch_paths:
@@ -2212,11 +2187,7 @@ def _resolve_deliverable(
 
 
 def _leaves_the_stack_untouched(attempt: IntegrateAttempt, deliverable: _Deliverable) -> bool:
-    """Whether this round would leave the tree, the launch configuration and the runtime as it found them.
-
-    A runtime this round acquired changes what the next boot executes; a
-    re-provisioned kept one is the stack the last KEEP was already graded on.
-    """
+    """Whether this round would leave the tree, the launch configuration and the runtime as it found them."""
     return not (
         deliverable.patch_paths
         or deliverable.extra_server_args
@@ -2353,9 +2324,9 @@ def _pending_sentinel(
 def _unvetted_patch_refusal(patch: Path) -> str:
     """Why this patch may not be let near a live tree, if it may not.
 
-    ``vet_patches`` runs at authoring time inside the specialist runner, so a
-    patch from anywhere else -- ``params.patches``, and every remotely-fetched
-    ``upstream_pr`` diff -- arrives unvetted.
+    ``vet_patches`` runs at authoring time inside the specialist runner, so a patch
+    from anywhere else -- ``params.patches``, every remotely-fetched ``upstream_pr``
+    diff -- arrives unvetted.
     """
     try:
         text = patch.read_text(encoding="utf-8", errors="replace")
@@ -2376,8 +2347,8 @@ def _apply_patch_series(
 ) -> _PatchApplyOutcome:
     """Apply each delivered patch to the attempt's tree, stopping at the first one that does not land.
 
-    ``attempt.applied`` is appended to in place, so a cancellation mid-series
-    still leaves the undo able to see what reached the tree.
+    ``attempt.applied`` is appended to in place, so a cancellation mid-series still
+    leaves the undo able to see what reached the tree.
     """
     framework_root = attempt.framework_root
     errors: list[dict[str, str]] = []
@@ -2494,10 +2465,9 @@ class _SourceLayer:
 def _snapshot_scope(framework_root: Path, applied: list[Path], artifacts: list[dict[str, Any]]) -> _SnapshotScope:
     """The files a KEEP changed under ``framework_root``, and how many of its artifacts landed outside it.
 
-    An artifact installed into a sibling tree is not addressable by a rel path
-    under this root, so it belongs to no snapshot here. The count travels so a
-    KEEP whose gain lives outside the tree reads as a known gap rather than as a
-    clean capture.
+    An artifact installed into a sibling tree is not addressable by a rel path under
+    this root, so the count travels and a KEEP whose gain lives outside the tree
+    reads as a known gap rather than as a clean capture.
     """
     from ._patch_snapshot import _patch_touched_paths_split
 
@@ -2518,12 +2488,7 @@ def _snapshot_scope(framework_root: Path, applied: list[Path], artifacts: list[d
 
 
 def _graded_delta_pct(graded: Any, new_tput: Any, *, base_tput: float) -> float | None:
-    """The promotable gain of this measurement on the axis the session grades.
-
-    Both sides come from one resolver; on the output axis the drift-resolved
-    ``base_tput`` is the reference. A REVERT has no promotable delta; the reason
-    travels to the ledger so the agent can tell it from a failed run.
-    """
+    """The promotable gain of this measurement on the axis the session grades."""
     if not graded.comparable:
         log.info("integrate_patch: performance comparison unavailable (%s)", graded.degrade_reason)
     if not graded.graded_on_intvty:
@@ -2868,12 +2833,7 @@ class IntegratePatchExecutor:
         params: dict[str, Any],
         shared_state: Any,
     ) -> dict[str, Any] | None:
-        """Give a launch-only round its own scratch workspace, or refuse a round that would mutate.
-
-        Launch-only benches a pre-built runtime: there is no specialist to look up
-        and nothing to apply, so any mutation field on the task contradicts the
-        mode rather than extending it.
-        """
+        """Give a launch-only round its own scratch workspace, or refuse a round that would mutate."""
         mutation_fields = [key for key in _LAUNCH_ONLY_MUTATION_FIELDS if params.get(key)]
         if mutation_fields:
             return {
@@ -3429,8 +3389,7 @@ class IntegratePatchExecutor:
         """Record every tree's HEAD, then replay this round's setup commands.
 
         The HEADs are recorded first because the setup commands are the round's
-        first mutation: an install writes into the same trees the patches and
-        artifacts land in. Returns the replay's refusal, or ``None`` to continue.
+        first mutation: an install writes into the same trees the patches land in.
         """
         is_enablement = bool(params.get("enablement"))
         for candidate in _candidate_mutation_roots(params=params, done_payload=attempt.done_payload):
@@ -3450,10 +3409,9 @@ class IntegratePatchExecutor:
     ) -> _ApplyRoot:
         """Bind this round's patches to the tree they will be applied to.
 
-        An acquired runtime is what the boot resolves, so the shared framework
-        tree is not what the server imports: this round's patches land in the
-        tree it runs, and the root the specialist authored against does not
-        describe that tree.
+        An acquired runtime is what the boot resolves, so the shared framework tree
+        is not what the server imports and the root the specialist authored against
+        does not describe the tree this round's patches land in.
         """
         patch_paths = deliverable.patch_paths
         runtime_source_root = attempt.runtime_source_root
@@ -3516,10 +3474,8 @@ class IntegratePatchExecutor:
     ) -> dict[str, Any] | None:
         """Open this attempt's workspace and recovery evidence, then bank the operator's work.
 
-        The sentinel and the recovery record are written before any framework
-        tree mutation; the Coordinator clears the sentinel after promoting the
-        final result. Returns a refusal when the operator's uncommitted work
-        could not be stashed, and ``None`` once the tree is safe to mutate.
+        The sentinel and the recovery record are written before any framework tree
+        mutation; the Coordinator clears the sentinel after promoting the final result.
         """
         shared_state = attempt.shared_state
         task_runs = runs_dir(self.session_dir, "integrate_patch", attempt.task_id)
@@ -4092,9 +4048,8 @@ class IntegratePatchExecutor:
     ) -> dict[str, Any]:
         """Take a rewrite patch back out because it did not prove inert with its switches unset.
 
-        An unmeasurable parity leg reverts under its own verdict: the patch was
-        never shown to break, so neither the log line nor the KB lesson may say
-        that it did.
+        An unmeasurable parity leg reverts under its own verdict: the patch was never
+        shown to break, so neither the log line nor the KB lesson may say that it did.
         """
         from ...knowledge import kb_writeback as _kb
 

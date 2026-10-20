@@ -56,10 +56,9 @@ class _Attribution:
     def dedup_keys(self) -> tuple[str, str]:
         """The upstream PR url and head sha the ledger dedups on, as this proposal claims them.
 
-        Unlike the descriptive fields, the identity is never taken from the
-        payload: a payload-level ``fa_pr_*`` belongs to whichever proposal put
-        it there, so standing it in for one this proposal omits would file the
-        lesson under another patch's PR.
+        Never taken from the payload: a payload-level ``fa_pr_*`` belongs to
+        whichever proposal put it there, so standing it in for one this proposal
+        omits would file the lesson under another patch's PR.
         """
         return (
             str(self.proposal.get("fa_pr_url") or "").strip(),
@@ -100,10 +99,10 @@ async def write_framework_lesson(
 ) -> None:
     """Append this attempt's outcome to the framework lesson ledger.
 
-    Discovery dedups on the ledger, so a lane that writes nothing is re-benched
-    forever; a proposal carrying neither dedup key cannot be deduped and is
-    skipped instead. A write that fails is logged and swallowed -- the lesson is
-    an optimisation for later rounds, not part of this round's verdict.
+    Discovery dedups on the ledger, so a proposal carrying neither dedup key is
+    skipped rather than re-benched forever. A failed write is logged and
+    swallowed: the lesson is an optimisation for later rounds, not this round's
+    verdict.
     """
     attribution = _Attribution(proposal, done_payload or {})
     pr_url, pr_sha = attribution.dedup_keys()

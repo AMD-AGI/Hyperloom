@@ -57,10 +57,8 @@ class _RootIdentity(NamedTuple):
 def _bind_roots(attempt: Attempt, patch_roots: dict[str, str], artifacts: Any) -> _RootIdentity:
     """Resolve every tree the accepted stack writes to and the base commit its capture is proven against.
 
-    Only what was captured before this round touched each tree, and only where no
-    earlier round already named the tree the stack applies to. A root left with no
-    sha either way keeps none, which the decision refuses rather than answering
-    with a HEAD that has moved since.
+    A root left with no sha keeps none, which the decision refuses rather than
+    answering with a HEAD that has moved since.
     """
     enablement = attempt.shared_state.enablement
     contributions = keep_records.collect_contributions(
@@ -86,16 +84,8 @@ def _bind_roots(attempt: Attempt, patch_roots: dict[str, str], artifacts: Any) -
 def _patch_stack_by_root(enablement: Any, patch_roots: dict[str, str], applied: list[Path]) -> dict[str, list[Path]]:
     """Group the accepted patch stack by the tree each patch applies to, in apply order.
 
-    Apply order, not dict order: ``patch_roots`` is keyed by patch path and its
-    iteration order follows how the mapping was assembled, while the operation a
-    later patch declares must override an earlier one's for the same file.
-
-    ``EnablementRound.accepted_patch_roots`` binds only patches that ARE in the
-    accepted stack, so the prefix normally adds nothing. It stays because the
-    durable mapping outlives the round that wrote it: an entry for a patch no
-    longer in ``kept_patches`` would otherwise contribute a root record with no
-    declared target, and be refused as an uncaptured root rather than classified.
-    First, because a position it does not have cannot override one that is known.
+    Apply order, not the mapping's: the operation a later patch declares must
+    override an earlier one's for the same file.
     """
     accepted = enablement.accepted_stack(applied)
     ordered = [patch for patch in patch_roots if patch not in set(accepted)] + accepted
@@ -111,9 +101,8 @@ def _declared_by_patch(patch_root: str, patches: list[Path], *, base_sha: str) -
     """The file operations each patch declares against ``patch_root``, per patch.
 
     Proven, not believed: the whole stack is replayed from its base in an isolated
-    tree and the result compared against what is about to be captured. Per root and
-    over the ORDERED stack, because a patch's preimage is the tree its predecessors
-    left behind, not this root's base and not the final tree.
+    tree, over the ORDERED stack, because a patch's preimage is the tree its
+    predecessors left behind rather than this root's base or the final tree.
     """
     replayed = _patch_snapshot.replayed_stack_ops(Path(patch_root), patches, base_sha=base_sha)
     if replayed is not None:
@@ -166,11 +155,8 @@ def _stack_targets(
 ) -> _StackTargets:
     """Classify the whole accepted stack's files once per root.
 
-    A rel path is only meaningful against the tree its patch was bound to, and
-    reading them all against this round's root would name files that root does not
-    have. The per-patch half exists because the decision cross-checks each patch
-    step against the snapshot of the files that step declares, and it cannot read
-    the diffs itself.
+    A rel path is only meaningful against the tree its patch was bound to, so
+    reading them all against this round's root would name files that root lacks.
     """
     by_root: dict[str, dict[str, str]] = {}
     by_patch: dict[str, dict[str, str]] = {}

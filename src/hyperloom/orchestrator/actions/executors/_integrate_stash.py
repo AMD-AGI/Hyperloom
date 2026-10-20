@@ -43,25 +43,13 @@ def _find_hyperloom_auto_stash(framework_root: Path) -> str:
 def _git_quarantine_unmerged(framework_root: Path, paths: list[str]) -> tuple[bool, str]:
     """Bank unresolved-merge paths in a stash entry that is never popped back.
 
-    ``git stash`` refuses to run at all while the index carries unmerged
-    entries, so they are staged first — staging is what marks a conflict
-    resolved — and the working-tree content, conflict markers and all, is what
-    gets banked. Recover it with ``git stash list | grep hyperloom-quarantine``.
-
-    Emptying the index is not the same as ending the merge: ``MERGE_HEAD``
-    outlives both the staging and the stash, and while it stands the next
-    ``git commit`` is a *merge* commit. A KEEP would then carry a second parent
-    and silently claim the whole of the other side as accepted work, which is
-    the one thing "every KEEP is a commit, so HEAD is the accepted stack"
-    cannot survive. ``git merge --quit`` forgets the merge without touching the
-    index or the working tree.
-
-    Args:
-        framework_root (Path): The framework repo.
-        paths (list[str]): Repo-relative paths in an unresolved merge state.
-
-    Returns:
-        tuple[bool, str]: ``(ok, error)``; ``error`` is empty on success.
+    ``git stash`` refuses to run while the index carries unmerged entries, so they
+    are staged first and the working-tree content, conflict markers and all, is
+    what gets banked; recover it with ``git stash list | grep hyperloom-quarantine``.
+    ``MERGE_HEAD`` outlives both the staging and the stash, and while it stands the
+    next ``git commit`` is a merge commit -- a KEEP would then claim the whole of
+    the other side as accepted work -- so ``git merge --quit`` forgets the merge
+    without touching the index or the working tree.
     """
     add = _run_git_cp(["-C", str(framework_root), "add", "--", *paths], timeout=60.0)
     if add is None:
@@ -114,13 +102,6 @@ def _git_restore_to_head(framework_root: Path, paths: list[str] | None = None) -
 
     Every KEEP is committed, so HEAD is the accepted stack: restoring to it drops
     candidate work and keeps everything the loop has accepted.
-
-    Args:
-        framework_root (Path): The git checkout to restore.
-        paths (list[str] | None): Repo-relative paths, or ``None`` for the tree.
-
-    Returns:
-        tuple[bool, str]: ``(ok, stderr)``.
     """
     target = paths if paths else ["."]
     # `checkout --force HEAD --` resolves an unmerged index, which plain
@@ -139,18 +120,9 @@ def _git_restore_to_head(framework_root: Path, paths: list[str] | None = None) -
 def _git_stash_if_dirty(framework_root: Path) -> tuple[str, str]:
     """Stash uncommitted user changes so destructive resets don't lose them.
 
-    Only stashes when the working tree is dirty (``git status --porcelain``
-    is non-empty). The stash message is tagged for easy retrieval via
-    ``git stash list | grep hyperloom-auto-stash``.
-
-    Returns:
-        ``(state, note)`` where ``state`` is one of:
-
-        - ``"clean"`` — working tree was already clean, safe to proceed.
-        - ``"stashed"`` — dirty tree was successfully stashed; ``note`` is the
-          stash ref to restore when the candidate finishes.
-        - ``"failed"`` — tree is dirty but stash command failed; callers
-          MUST NOT proceed with destructive operations.
+    The returned state is ``clean``, ``stashed`` (``note`` is the stash ref to
+    restore) or ``failed`` -- on ``failed`` the tree is dirty and callers must not
+    proceed with destructive operations.
     """
     cp = _run_git_cp(["-C", str(framework_root), "status", "--porcelain"], timeout=30.0)
     if cp is None:
@@ -249,17 +221,8 @@ def _git_restore_stash_if_needed(
 def _git_reset_clean(framework_root: Path, base: str, *, exclude: list[str] | None = None) -> tuple[bool, str]:
     """Return the tree to ``base`` exactly: tracked, staged and untracked candidate files all go.
 
-    This is the REVERT: ``base`` is the HEAD recorded before the candidate,
-    which is the accepted stack because every KEEP is committed. User changes
-    must already have been stashed before the candidate was applied.
-
-    Args:
-        framework_root: Directory to run ``git reset`` in.
-        base: The commit to restore.
-        exclude: Paths ``git clean`` must keep.
-
-    Returns:
-        ``(ok, stderr)`` where ``ok`` is ``True`` when both steps succeed.
+    ``base`` is the HEAD recorded before the candidate, which is the accepted stack
+    because every KEEP is committed. User changes must already have been stashed.
     """
     cp = _run_git_cp(["-C", str(framework_root), "reset", "--hard", base], timeout=60.0)
     if cp is None:
