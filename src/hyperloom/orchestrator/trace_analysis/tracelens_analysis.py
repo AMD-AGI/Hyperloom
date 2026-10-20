@@ -2029,6 +2029,30 @@ def _library_token(path: str) -> str:
     return ""
 
 
+_BENCHMARK_GREP_INCLUDES = tuple(f"--include=*.{ext}" for ext in ("py", "cpp", "cu", "cuh", "hip", "sh"))
+_MULTIGPU_PATH_TAGS = ("multigpu", "multi_gpu", "multinode", "/dist/", "_dist_")
+
+
+def _files_mentioning(keyword: str, root: Path) -> list[Path]:
+    """List the existing source and script files under ``root`` that contain ``keyword``.
+
+    A grep that cannot start, times out, or exits with an error finds nothing.
+    """
+    try:
+        proc = subprocess.run(
+            ["grep", "-rln", *_BENCHMARK_GREP_INCLUDES, "--", keyword, str(root)],
+            text=True,
+            capture_output=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if proc.returncode not in (0, 1):
+        return []
+    paths = [Path(line) for line in map(str.strip, proc.stdout.splitlines()) if line]
+    return [path for path in paths if path.exists()]
+
+
 def find_benchmark_files(name: str, repo_root: str, source_file: str = "") -> list[str]:
     """Find test/benchmark files matching a kernel under a repo's subdirs.
 
@@ -2048,13 +2072,12 @@ def find_benchmark_files(name: str, repo_root: str, source_file: str = "") -> li
         return [str(p) for p in known[:10]]
     keywords = _candidate_keywords(name)
     # Add the source stem (and no-underscore variant) for repos that name tests differently.
-    if source_file:
-        stem = Path(source_file).stem
-        if stem and stem not in keywords:
-            keywords.append(stem)
-        no_us = stem.replace("_", "")
-        if len(no_us) >= 6 and no_us not in keywords:
-            keywords.append(no_us)
+    stem = Path(source_file).stem
+    if stem and stem not in keywords:
+        keywords.append(stem)
+    no_us = stem.replace("_", "")
+    if len(no_us) >= 6 and no_us not in keywords:
+        keywords.append(no_us)
     if not keywords:
         return []
     root = Path(repo_root)
@@ -2064,71 +2087,18 @@ def find_benchmark_files(name: str, repo_root: str, source_file: str = "") -> li
         if not sub_root.exists():
             continue
         for keyword in keywords:
-            try:
-                proc = subprocess.run(
-                    [
-                        "grep",
-                        "-rln",
-                        "--include=*.py",
-                        "--include=*.cpp",
-                        "--include=*.cu",
-                        "--include=*.cuh",
-                        "--include=*.hip",
-                        "--include=*.sh",
-                        "--",
-                        keyword,
-                        str(sub_root),
-                    ],
-                    text=True,
-                    capture_output=True,
-                    timeout=15,
-                )
-            except (OSError, subprocess.SubprocessError):
-                continue
-            if proc.returncode not in (0, 1):
-                continue
-            for line in (proc.stdout or "").splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                p = Path(line)
-                if not p.exists():
-                    continue
-                found.append(p)
-    seen: set[str] = set()
-    unique: list[str] = []
-    for p in found:
-        s = str(p)
-        if s in seen:
-            continue
-        seen.add(s)
-        unique.append(s)
-
-    # Demote multi-GPU / distributed tests to the end: backends running on a
-    # single Ray worker can't satisfy them, and they tend to make agents bail.
-    def _is_multigpu(path_str: str) -> bool:
-        """Return whether a harness path looks multi-GPU / distributed.
-
-        Args:
-            path_str (str): Candidate harness file path.
-
-        Returns:
-            bool: ``True`` when the path contains a multi-GPU/distributed tag.
-        """
-        low = path_str.lower()
-        return any(tag in low for tag in ("multigpu", "multi_gpu", "multinode", "/dist/", "_dist_"))
-
-    # Same-library guard (RCA root cause 2): never pair a kernel from one library
-    # with a benchmark from another (e.g. a sglang sgl-kernel .cuh with an aiter
-    # op_test). Editing the kernel then "validating" against an unrelated lib's
-    # op always fails the smoke test -> REVERT. Drop cross-library candidates
-    # when the kernel's library is recognizable.
+            found.extend(_files_mentioning(keyword, sub_root))
+    unique = list(dict.fromkeys(str(p) for p in found))
+    # Never pair a kernel from one library with a benchmark from another (a sglang sgl-kernel .cuh with an aiter
+    # op_test): validating an edit against an unrelated library's op always fails the smoke test.
     src_lib = _library_token(source_file)
     if src_lib:
         same_lib = [s for s in unique if _library_token(s) in (src_lib, "")]
         if same_lib:
             unique = same_lib
-    unique.sort(key=_is_multigpu)
+    # Demote multi-GPU / distributed tests to the end: backends running on a
+    # single Ray worker can't satisfy them, and they tend to make agents bail.
+    unique.sort(key=lambda path: any(tag in path.lower() for tag in _MULTIGPU_PATH_TAGS))
     return unique[:10]
 
 
