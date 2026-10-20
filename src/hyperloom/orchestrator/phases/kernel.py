@@ -1571,6 +1571,8 @@ class KernelPhase(CoordinatorCollaborator):
             budget_known,
             " ".join(cmd),
         )
+        # Read before the spawn: raising after it would leave a tree nothing can signal.
+        term_grace = env_int("GEAK_TERM_GRACE_S", default=180)
         clock = _RunnerClock(
             started_at=datetime.now(timezone.utc).isoformat(),
             started_monotonic=time.monotonic(),
@@ -1578,7 +1580,7 @@ class KernelPhase(CoordinatorCollaborator):
             kill_timeout=kill_timeout,
         )
         try:
-            proc = await asyncio.to_thread(self._run_geak_runner, cmd, kill_timeout=kill_timeout)
+            proc = await asyncio.to_thread(self._run_geak_runner, cmd, kill_timeout=kill_timeout, term_grace=term_grace)
         except subprocess.TimeoutExpired:
             await self._keep_what_the_killed_geak_runner_flushed(
                 handoff, agentx=agentx, result_path=result_path, run=clock.observed()
@@ -1726,7 +1728,7 @@ class KernelPhase(CoordinatorCollaborator):
         )
         return True
 
-    def _run_geak_runner(self, cmd: list[str], *, kill_timeout: int) -> subprocess.CompletedProcess:
+    def _run_geak_runner(self, cmd: list[str], *, kill_timeout: int, term_grace: int) -> subprocess.CompletedProcess:
         """Run the GEAK runner to completion in a process group of its own.
 
         The group is what lets a timeout SIGTERM the whole runner -> run_e2e -> vllm/node
@@ -1741,9 +1743,7 @@ class KernelPhase(CoordinatorCollaborator):
             env=self._geak_runner_env(),
             start_new_session=True,
         )
-        return _communicate_or_kill_tree(
-            proc, cmd, kill_timeout=kill_timeout, term_grace=env_int("GEAK_TERM_GRACE_S", default=180)
-        )
+        return _communicate_or_kill_tree(proc, cmd, kill_timeout=kill_timeout, term_grace=term_grace)
 
     def _geak_runner_env(self) -> dict[str, str]:
         """The environment the whole GEAK chain inherits, on this session's metric and spend tag."""
