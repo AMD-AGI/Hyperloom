@@ -1298,18 +1298,15 @@ def _cross_domain_block(inp: SpecialistPromptInputs) -> list[str]:
 # Section 0 — Mandate (deliverable contract + run status)
 def _section_mandate(inp: SpecialistPromptInputs) -> list[str]:
     """Render §0: deliverable contract, run status, and task-kind brief."""
-    from hyperloom.inference_optimizer.framework_registry import format_primary_metric
-
     # Deliverable line based on scope × mode.
-    scope = (inp.scope or "domain").lower()
-    if scope == "freeform":
-        anchor = inp.task_description.split("\n")[0].strip()[:120] if inp.task_description else ""
+    if inp.scope == "freeform":
+        anchor = inp.task_description.split("\n")[0].strip()[:120]
         deliverable = "freeform investigation — see task description"
     else:
-        anchor = inp.gap_canonical_id or ""
+        anchor = inp.gap_canonical_id
         if not _authors_patches(inp):
             deliverable = "findings and up to 6 ranked config variants (read-only; no patch)"
-        elif scope == "domains":
+        elif inp.scope == "domains":
             deliverable = "a coupled patch spanning multiple domains + up to 6 ranked config variants"
         else:
             deliverable = "a source patch and/or up to 6 ranked config variants addressing the gap below"
@@ -1321,25 +1318,7 @@ def _section_mandate(inp: SpecialistPromptInputs) -> list[str]:
     ]
     if anchor:
         rows.append(f"- anchor: `{anchor}`")
-
-    has_status = inp.baseline_tput > 0 or inp.keep_threshold_pct > 0
-    if has_status:
-        rows.append("")
-        rows.append("Run status (read-only context; do NOT re-state these as your own measurements):")
-        fw = inp.framework or None
-        if inp.baseline_tput > 0:
-            rows.append(f"- baseline: {format_primary_metric(fw, inp.baseline_tput)}")
-        if inp.current_tput > 0:
-            rows.append(f"- current best: {format_primary_metric(fw, inp.current_tput)}")
-        if inp.cumulative_gain_validated != 0:
-            rows.append(f"- validated cumulative gain: {inp.cumulative_gain_validated:+.2f}%")
-        if inp.keep_threshold_pct > 0:
-            rows.append(f"- KEEP threshold this cycle: {inp.keep_threshold_pct:.2f}%")
-        if inp.applied_stack:
-            stack_items = ", ".join(
-                f"{e.get('variant_name', '?')} ({e.get('gain_pct', 0):+.2f}%)" for e in inp.applied_stack[:6]
-            )
-            rows.append(f"- applied stack: {stack_items}")
+    rows.extend(_mandate_run_status(inp))
 
     rows.extend(
         [
@@ -1350,8 +1329,7 @@ def _section_mandate(inp: SpecialistPromptInputs) -> list[str]:
         ]
     )
 
-    kind = (inp.task_kind or "").strip()
-    brief = _TASK_KIND_BRIEFS.get(kind, "")
+    brief = _TASK_KIND_BRIEFS.get(inp.task_kind.strip(), "")
     if brief:
         rows.extend(["", brief])
 
@@ -1375,8 +1353,6 @@ def _section_mandate(inp: SpecialistPromptInputs) -> list[str]:
             ]
         )
         for att in inp.prior_attempts[:20]:
-            if not isinstance(att, dict):
-                continue
             ref = str(att.get("ref") or "").strip()
             if not ref:
                 continue
@@ -1387,6 +1363,29 @@ def _section_mandate(inp: SpecialistPromptInputs) -> list[str]:
             why_str = f" — {why}" if why else ""
             rows.append(f"  - {ref} [{status}]{gain_str}{why_str}")
 
+    return rows
+
+
+def _mandate_run_status(inp: SpecialistPromptInputs) -> list[str]:
+    """Render §0's read-only run status; empty until a baseline or a KEEP threshold exists."""
+    from hyperloom.inference_optimizer.framework_registry import format_primary_metric
+
+    if not (inp.baseline_tput > 0 or inp.keep_threshold_pct > 0):
+        return []
+    rows = ["", "Run status (read-only context; do NOT re-state these as your own measurements):"]
+    if inp.baseline_tput > 0:
+        rows.append(f"- baseline: {format_primary_metric(inp.framework, inp.baseline_tput)}")
+    if inp.current_tput > 0:
+        rows.append(f"- current best: {format_primary_metric(inp.framework, inp.current_tput)}")
+    if inp.cumulative_gain_validated != 0:
+        rows.append(f"- validated cumulative gain: {inp.cumulative_gain_validated:+.2f}%")
+    if inp.keep_threshold_pct > 0:
+        rows.append(f"- KEEP threshold this cycle: {inp.keep_threshold_pct:.2f}%")
+    if inp.applied_stack:
+        stack_items = ", ".join(
+            f"{e.get('variant_name', '?')} ({e.get('gain_pct', 0):+.2f}%)" for e in inp.applied_stack[:6]
+        )
+        rows.append(f"- applied stack: {stack_items}")
     return rows
 
 
