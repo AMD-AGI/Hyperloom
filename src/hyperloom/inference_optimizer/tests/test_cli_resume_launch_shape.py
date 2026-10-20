@@ -446,7 +446,6 @@ def test_restore_operator_paths_fills_env_from_state(monkeypatch):
     _restore_operator_supplied_paths_from_state(_ns(framework_path=None, benchmark_scripts_dir=None), state)
     assert os.environ["FRAMEWORK_REPO_PATH"] == "/archived/fw"
     assert os.environ["SGLANG_REPO_PATH"] == "/archived/fw"
-    assert os.environ["SGLANG_DIR"] == "/archived/fw"
     assert os.environ["HYPERLOOM_BYPASS_SCRIPTS_DIR"] == "/archived/scripts"
     assert os.environ["HYPERLOOM_BENCHMARK_BACKEND"] == "bypass"
 

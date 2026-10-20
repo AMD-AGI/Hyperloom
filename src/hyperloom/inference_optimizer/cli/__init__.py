@@ -215,7 +215,7 @@ def _apply_operator_supplied_paths(args: Any, framework: str) -> None:
 
 
 def _restore_operator_supplied_paths_from_state(args: Any, state: SharedState) -> None:
-    """Re-export operator-supplied paths from ``state`` when this resume omitted them."""
+    """Re-export the session paths persisted on ``state`` when this resume omitted them."""
     from hyperloom.inference_optimizer.framework_paths import point_session_framework_root
     from hyperloom.orchestrator.actions.executors.benchmark_backend import (
         BENCHMARK_BACKEND_ENV,

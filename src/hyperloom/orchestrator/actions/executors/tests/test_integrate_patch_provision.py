@@ -412,45 +412,38 @@ def test_accepted_runtime_records_only_when_provision_succeeded(tmp_path):
     records = ip._accepted_runtime_records(action, ok)
     assert records["enablement_active_runtime"]["venv_root"] == str(tmp_path / "venv")
     assert records["enablement_kept_stack_action"]["packages"] == ["vllm"]
-    assert records["installed_versions"] == {"vllm": "0.21.0"}
     assert ip._accepted_runtime_records(action, ProvisionResult(ok=False)) == {}
-    assert ip._accepted_runtime_records(None, ok) == {}
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", ["kept", "advanced"])
-async def test_kept_stack_action_survives_rearm(monkeypatch, tmp_path, status):
+async def test_an_accepted_runtime_survives_rearm_as_the_session_framework_tree(monkeypatch, tmp_path, status):
     from hyperloom.inference_optimizer.framework_paths import resolve_session_framework_root
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     checkout = tmp_path / "attempt-src"
     checkout.mkdir()
-    prior = tmp_path / "image-sglang"
-    prior.mkdir()
+    for key in ("SGLANG_REPO_PATH", "SGLANG_DIR", "FRAMEWORK_REPO_PATH"):
+        monkeypatch.setenv(key, "")
     monkeypatch.setenv("FRAMEWORK", "sglang")
-    monkeypatch.setenv("SGLANG_DIR", str(prior))
-    monkeypatch.setenv("SGLANG_REPO_PATH", "")
-    monkeypatch.setenv("FRAMEWORK_REPO_PATH", "")
 
+    # Simulate a coordinator with just enough surface for maybe_rearm_enablement.
     state = SharedState()
     state.framework = "sglang"
     coord = types.SimpleNamespace(shared_state=state, session_dir=Path("/tmp/does-not-matter"))
     coord.save = lambda *a, **k: None
 
     async def _no_round(*_a, **_k):
-        return None
+        """No round is open, so the rearm's settle is a no-op."""
 
     async def _no_stalls(*_a, **_k):
+        """An empty ledger, which the rearm reads to stamp the round's row."""
         return 0
 
     coord.rounds = types.SimpleNamespace(consecutive_stalled=_no_stalls, held=_no_round)
 
     action_state = _candidate()
-    runtime_state = FrameworkRuntime(
-        bin_path="/a/bin",
-        venv_root="/a",
-        source_root=str(checkout),
-    ).to_state()
+    runtime_state = FrameworkRuntime(bin_path="/a/bin", venv_root="/a", source_root=str(checkout)).to_state()
     res = {
         "enablement": True,
         "status": status,

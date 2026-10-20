@@ -734,8 +734,7 @@ def test_invalidate_aiter_jit_build_ignores_orphaned_prior_backup(
 
 
 class TestPointSessionFrameworkRoot:
-    def test_points_generic_and_prefixed_aliases(self, monkeypatch, tmp_path):
-        """One write makes every resolver name the same tree, including a prior prefixed pin."""
+    def test_every_resolver_names_the_pointed_root_over_a_prior_pin(self, monkeypatch, tmp_path):
         prior = tmp_path / "image"
         prior.mkdir()
         checkout = tmp_path / "attempt-src"
