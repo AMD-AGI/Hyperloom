@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, NamedTuple, NoReturn
 
 from hyperloom.common import provenance
+from hyperloom.common.agent_runtime_requirements import agent_runtime_requirements
 from hyperloom.common.env_safety import (
     filter_untrusted_env_mapping,
     is_allowed_dotenv_key,
@@ -31,11 +32,9 @@ from hyperloom.common.env_safety import (
     is_python_package_root,
 )
 from hyperloom.common.llm_config import (
-    AGENT_BACKEND_DEEPSEEK,
     CLAUDE_OAUTH_TOKEN_ENV,
     DEFAULT_CLAUDE_MODEL,
     LEGACY_DEEPSEEK_ENV_KEYS,
-    ORCHESTRATION_BACKEND_ENV,
     anthropic_synthesizable_key,
     deepseek_compat_env,
     has_anthropic_credential,
@@ -495,31 +494,7 @@ def _load_kernel_agent_env_fallback() -> dict[str, Any]:
 
 def _ensure_python_sdks(python_exe: str, pip_extra: list[str]) -> dict[str, Any]:
     """Probe-then-install runtime-imported Python SDKs using the same interpreter that imports them."""
-    # Both agent runtimes ship by default: Hyperloom routes every LLM interaction through one of them, and a
-    # deployment may be Anthropic-only, OpenAI-only, or both.
-    candidates = (
-        ("claude_agent_sdk", "claude-agent-sdk>=0.2.110"),
-        ("openai_codex", "openai-codex>=0.144"),
-        ("openai", "openai>=1.50"),
-        ("httpx", "httpx>=0.27"),
-    )
-    # The third runtime does not ship by default: no role selects it on a
-    # credential shape, so only a launch that named it needs it installed.
-    from hyperloom.common.llm_config import (
-        AGENT_BACKEND_ENV,
-        DEEPSEEK_HARNESS_SDK_SPEC,
-        DEEPSEEK_SESSION_LOG_DECODER_SPEC,
-    )
-
-    harness_backend = (os.environ.get(ORCHESTRATION_BACKEND_ENV) or "").strip().lower() or (
-        os.environ.get(AGENT_BACKEND_ENV) or ""
-    ).strip().lower()
-    if harness_backend == AGENT_BACKEND_DEEPSEEK:
-        candidates = (
-            *candidates,
-            ("deepseek_harness", DEEPSEEK_HARNESS_SDK_SPEC),
-            ("zstandard", DEEPSEEK_SESSION_LOG_DECODER_SPEC),
-        )
+    candidates = agent_runtime_requirements()
     installed: list[str] = []
     already_present: list[str] = []
     for module_name, pip_spec in candidates:
