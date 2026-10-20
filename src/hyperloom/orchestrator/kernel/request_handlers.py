@@ -3578,15 +3578,15 @@ def _resolve_forge_agent(
         The canonical ``(agent_backend, llm_model)`` pair.
 
     Raises:
-        ValueError: If ``agent_backend`` is not ``"claude"`` or ``"codex"``.
+        ValueError: If ``agent_backend`` is not a known harness name.
     """
     source = env if env is not None else os.environ
-    known_backends = {llm_config.AGENT_BACKEND_CLAUDE, llm_config.AGENT_BACKEND_CODEX}
+    known_backends = set(llm_config.AGENT_BACKEND_CHOICES)
     explicit_backend = str(payload.get("agent_backend") or "").strip().lower()
     if explicit_backend and explicit_backend not in known_backends:
-        raise ValueError(f"agent_backend={payload.get('agent_backend')!r} is invalid; choose 'claude' or 'codex'")
+        raise ValueError(f"agent_backend={explicit_backend!r} is invalid; choose one of {sorted(known_backends)}")
 
-    agent_backend = explicit_backend or llm_config.preferred_agent_backend(source)
+    agent_backend = explicit_backend or llm_config.resolve_agent_backend(source)
     llm_model = llm_config.resolve_forge_llm_model(
         agent_backend,
         env=source,
