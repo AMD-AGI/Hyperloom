@@ -210,10 +210,16 @@ class _SweepRequest(NamedTuple):
     grid_source: str
     num_prompts_factor: int
     total_budget_sec: int | None
+    benchmark_timeout_sec: float
 
     @classmethod
     def of(cls, state: SharedState, concs: list[int] | None, budget_sec: int | None) -> _SweepRequest:
-        """Resolve the ladder the sweep runs, keeping whether the caller named it."""
+        """Resolve the ladder the sweep runs, keeping whether the caller named it.
+
+        Resolving the benchmark timeout here rejects an invalid override before the sweep
+        creates its workspace or records a preflight event.
+        """
+        _, benchmark_timeout_sec = resolve_benchmark_timeouts()
         return cls(
             # ``None`` → default ladder; an explicit empty list is refused below.
             concs=list(concs) if concs is not None else default_concs_for_mode(getattr(state, "benchmark_mode", "")),
@@ -222,6 +228,7 @@ class _SweepRequest(NamedTuple):
             grid_source=GRID_REQUESTED if concs is not None else GRID_MODE_DEFAULT,
             num_prompts_factor=DEFAULT_NUM_PROMPTS_FACTOR,
             total_budget_sec=budget_sec,
+            benchmark_timeout_sec=benchmark_timeout_sec,
         )
 
 
@@ -443,7 +450,6 @@ def _record_sweep_budget(recorder: Any, request: _SweepRequest, started_at: floa
 
 def _sweep_run(state: SharedState, setup: _SweepSetup, request: _SweepRequest, recorder: Any) -> _SweepRun:
     """Assemble the run both arms add their rungs to, and open its budget on the event."""
-    _, benchmark_timeout_sec = resolve_benchmark_timeouts()
     session_deadline_sec, variant_expected_sec = session_grid_bounds(state)
     deadline = _SweepDeadline.earlier_of(session_deadline_sec, request.total_budget_sec)
     started_at = time.time()
@@ -464,7 +470,7 @@ def _sweep_run(state: SharedState, setup: _SweepSetup, request: _SweepRequest, r
         num_prompts_factor=request.num_prompts_factor,
         optimized=workload.optimized,
         baseline=_Arm(name="baseline"),
-        benchmark_timeout_sec=benchmark_timeout_sec,
+        benchmark_timeout_sec=request.benchmark_timeout_sec,
         session_deadline_sec=deadline.at_monotonic_sec,
         variant_expected_sec=variant_expected_sec,
         deadline_stop=deadline.stop,
