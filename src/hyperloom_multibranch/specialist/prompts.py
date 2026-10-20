@@ -6,7 +6,8 @@
 The role says how a long-running specialist works through the session's tools, how its candidates are judged, how it
 declares a correctness fix with its repro case, and which gains the toolbox refuses as fake (main's ``FAKE_GAINS``
 catalog, so a new row reaches the role). The
-launch prompt opens with the repair a repair branch was opened for and the startup brief, right after the role, then
+launch prompt opens with the repair a repair branch was opened for, the direction a user wrote for the branch and the
+startup brief, right after the role, then
 the branch, its head, K and the branch's latest memory, so a new session goes on where the last one stopped. A
 session whose turn ended is woken by :func:`wake_message`, with what its inbox and the runtime's notices brought, or
 by :func:`nudge_message` when nothing came and it has nothing running.
@@ -34,6 +35,9 @@ ENTRY_CHARS = 400
 VERSION_HEX = 12
 
 _BRIEF = "Startup brief:\n{brief}"
+_DIRECTION = """\
+Your branch follows a direction the user wrote; work on it before any direction of your own choosing:
+{direction}"""
 _REPAIR = """\
 Your branch repairs {candidate}, a blocked candidate of {from_branch}: on {parent_commit} it measured \
 {gain_pct:+.2f}% and was held back by {held_back_by}. Your branch starts at that commit. Its intent: {target} / \
@@ -60,6 +64,7 @@ Your turn ended with no test of yours running and nothing new for your branch. T
 stops: choose your next direction from the profile, the learnings and what was tried, and test it."""
 _LAUNCH = (
     _REPAIR,
+    _DIRECTION,
     _BRIEF,
     _STANDING,
     _LOG,
@@ -179,8 +184,12 @@ def launch_prompt(
     start: SessionStart, *, head: str, worktree: str, recent: Sequence[BranchLogRecord], last_end: str = ""
 ) -> str:
     """The first message of one session of the specialist ``start`` runs; ``last_end`` says how the previous one ended."""
-    sections = [_repair(start.repair)] if start.repair is not None else []
-    brief = start.brief.strip()
+    task = start.task
+    sections = [_repair(task.repair)] if task.repair is not None else []
+    direction = task.direction.strip()
+    if direction:
+        sections.append(_DIRECTION.format(direction=direction))
+    brief = task.brief.strip()
     if brief:
         sections.append(_BRIEF.format(brief=brief))
     sections.append(

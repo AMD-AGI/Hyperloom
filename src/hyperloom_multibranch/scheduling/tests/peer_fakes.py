@@ -412,9 +412,9 @@ class RecordedSessions:
             policies = self._toolbox.policies
             self.quota_at_start[branch] = policies[-1].branch_k.get(branch) if policies else None
         self.started.setdefault(branch, start.start_commit)
-        self.briefs.setdefault(branch, start.brief)
-        if start.repair is not None:
-            self.repairs.setdefault(branch, start.repair)
+        self.briefs.setdefault(branch, start.task.brief)
+        if start.task.repair is not None:
+            self.repairs.setdefault(branch, start.task.repair)
         self.k[branch] = start.k
         self.running.add(branch)
         script = tuple(self._scripts.get(branch, ()))

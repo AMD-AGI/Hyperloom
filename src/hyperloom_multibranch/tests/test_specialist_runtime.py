@@ -9,7 +9,7 @@ import pytest
 from hyperloom.contracts.recipe import LaunchConfig, Recipe
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, RepairRequest
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
-from hyperloom_multibranch.contracts.lifecycle import SpecialistStatus
+from hyperloom_multibranch.contracts.lifecycle import BranchTask, SpecialistStatus
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, ClaimStatus, LineageKind
@@ -54,7 +54,7 @@ class _Runs:
 class _Run:
     def __init__(self, runs: _Runs, start: SessionStart) -> None:
         self._runs, self.start, self.stopped = runs, start, asyncio.Event()
-        self.k, self.brief = start.k, start.brief
+        self.k = start.k
 
     async def run(self) -> None:
         if self._runs.errors:
@@ -117,7 +117,7 @@ class _Session:
 
     def scripted(self, k: int) -> ScriptedSession:
         setup = ScriptedSetup(SCRIPT, self.toolbox, self.repo, self.reader, poll_seconds=0.01)
-        return ScriptedSession(SessionStart(BRANCH, start_commit="", brief="", k=k), setup)
+        return ScriptedSession(SessionStart(BRANCH, start_commit="", k=k), setup)
 
     async def notices(self) -> list[str]:
         return [
@@ -161,17 +161,18 @@ async def test_a_started_branch_runs_its_specialist_with_the_k_it_is_given(sessi
         await runtime.set_k(BRANCH, 2)
 
 
-async def test_a_crashed_specialist_is_restarted_with_its_brief_its_repair_and_a_notice_each_time(session):
+async def test_a_crashed_specialist_is_restarted_with_its_task_and_a_notice_each_time(session):
     runs = _Runs(crashes=2)
     runtime = session.runtime(runs)
     blocked = Judgement(Verdict.BLOCKED, 3.0, 2.0, ("s0-4", "s0-5"), {"output_throughput": 1030.0}, False)
     repair = RepairRequest(intent("s0", "c0"), delta(), blocked, "per-tensor KV scales; scale per head")
+    task = BranchTask("leads: fp8 kv cache", repair, "try a larger max_num_seqs first")
 
-    await runtime.start(BRANCH, await session.repo.head(BRANCH), brief="leads: fp8 kv cache", repair=repair)
+    await runtime.start(BRANCH, await session.repo.head(BRANCH), task)
     await _until(lambda: _true(len(runs.started) == 3), "two restarts")
 
     assert all(run.stopped.is_set() for run in runs.started[:2])
-    assert [(run.brief, run.start.repair) for run in runs.started] == [("leads: fp8 kv cache", repair)] * 3
+    assert [run.start.task for run in runs.started] == [task] * 3
     assert len([notice for notice in await session.notices() if "is restarted" in notice]) == 2
     await runtime.stop(BRANCH)
 

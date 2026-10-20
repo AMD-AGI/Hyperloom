@@ -16,6 +16,7 @@ from hyperloom.measure.compile import LocalBlobStore
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, RepairRequest
 from hyperloom_multibranch.contracts.intent import Intent, IntentLayer
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
+from hyperloom_multibranch.contracts.lifecycle import BranchTask
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent
 from hyperloom_multibranch.contracts.notebook.vocab import LineageKind
@@ -52,10 +53,10 @@ BASELINE = Recipe(BASE_IMAGE_DIGEST)
 class BrokenRuntime(RefusingRuntime):
     """A runtime that cannot start ``b01`` and cannot re-size any specialist; a failure double, not a placeholder."""
 
-    async def start(self, branch: str, start_commit: str, brief: str = "", repair: RepairRequest | None = None) -> None:
+    async def start(self, branch: str, start_commit: str, task: BranchTask = BranchTask()) -> None:
         if branch == "b01":
             raise RuntimeError(f"no GPU left for {branch}")
-        await super().start(branch, start_commit, brief, repair)
+        await super().start(branch, start_commit, task)
 
     async def set_k(self, branch: str, k: int) -> None:
         raise RuntimeError(f"{branch} did not take K {k}")
@@ -64,18 +65,18 @@ class BrokenRuntime(RefusingRuntime):
 class HangingStartRuntime(RefusingRuntime):
     """A runtime whose start of ``b01`` never returns; a failure double, not a placeholder."""
 
-    async def start(self, branch: str, start_commit: str, brief: str = "", repair: RepairRequest | None = None) -> None:
+    async def start(self, branch: str, start_commit: str, task: BranchTask = BranchTask()) -> None:
         if branch == "b01":
             await asyncio.Event().wait()
-        await super().start(branch, start_commit, brief, repair)
+        await super().start(branch, start_commit, task)
 
 
 class StartedThenHangingRuntime(RefusingRuntime):
     """A runtime whose start of ``b01`` brings the specialist up and then never returns; a failure double, not a
     placeholder."""
 
-    async def start(self, branch: str, start_commit: str, brief: str = "", repair: RepairRequest | None = None) -> None:
-        await super().start(branch, start_commit, brief, repair)
+    async def start(self, branch: str, start_commit: str, task: BranchTask = BranchTask()) -> None:
+        await super().start(branch, start_commit, task)
         if branch == "b01":
             await asyncio.Event().wait()
 
@@ -86,8 +87,8 @@ class CrowdingRuntime(RefusingRuntime):
 
     roster: Roster
 
-    async def start(self, branch: str, start_commit: str, brief: str = "", repair: RepairRequest | None = None) -> None:
-        await super().start(branch, start_commit, brief, repair)
+    async def start(self, branch: str, start_commit: str, task: BranchTask = BranchTask()) -> None:
+        await super().start(branch, start_commit, task)
         if branch == "b01":
             for _ in range(2):
                 self.roster.open(

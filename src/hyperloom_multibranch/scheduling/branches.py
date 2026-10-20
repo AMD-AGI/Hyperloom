@@ -38,7 +38,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from hyperloom_multibranch.contracts.fork import RepairRequest
-from hyperloom_multibranch.contracts.lifecycle import SpecialistLifecycle
+from hyperloom_multibranch.contracts.lifecycle import BranchTask, SpecialistLifecycle
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent
 from hyperloom_multibranch.contracts.notebook.vocab import LineageKind
@@ -307,7 +307,7 @@ class BranchControl:
             await self._repo.create_branch(entry.branch, start_commit)
         await self.push_quota()
         self._specialists.add(entry.branch)
-        started = await settled(self._lifecycle.start(entry.branch, start_commit, repair=repair))
+        started = await settled(self._lifecycle.start(entry.branch, start_commit, BranchTask(repair=repair)))
         if isinstance(started, BaseException):
             self._specialists.discard(entry.branch)
             raise started

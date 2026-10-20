@@ -4,7 +4,7 @@
 import pytest
 
 from hyperloom.contracts.recipe import ConfigDelta, LaunchConfig, Recipe, RecipeDelta, apply
-from hyperloom_multibranch.contracts.lifecycle import SpecialistLifecycle
+from hyperloom_multibranch.contracts.lifecycle import BranchTask, SpecialistLifecycle
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import BranchMoved, ExperimentRepo
 from hyperloom_multibranch.tests.fakes import InMemoryRepo, RecordingLifecycle
@@ -55,7 +55,7 @@ async def test_the_repo_refuses_unknown_commits_and_branches():
 async def test_the_lifecycle_tracks_running_branches_and_their_k():
     recording = RecordingLifecycle()
     lifecycle: SpecialistLifecycle = recording
-    await lifecycle.start("b1", "c0", brief="leads: fp8 kv cache")
+    await lifecycle.start("b1", "c0", BranchTask("leads: fp8 kv cache"))
     assert (recording.running, recording.briefs, recording.repairs, recording.k) == (
         {"b1": "c0"},
         {"b1": "leads: fp8 kv cache"},

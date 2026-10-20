@@ -319,7 +319,7 @@ class AgentSession:
                 exc_info=True,
             )
             return self._start
-        return replace(self._start, brief=brief)
+        return replace(self._start, task=replace(self._start.task, brief=brief))
 
     def _spec(self, grant: SpecialistGrant, prompt: str) -> AgentLaunchSpec:
         setup, workspace, worktree = self._setup, self._place.workspace, self._place.worktree.path

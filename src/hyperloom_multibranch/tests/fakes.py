@@ -12,6 +12,7 @@ from hyperloom.contracts.measurement import FailureClass, TestRequest, TestResul
 from hyperloom.contracts.recipe import Recipe
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission, ForkRequest, RepairRequest
 from hyperloom_multibranch.contracts.gate import ResultUnverified
+from hyperloom_multibranch.contracts.lifecycle import BranchTask
 from hyperloom_multibranch.contracts.notebook.interfaces import TestRecordSink
 from hyperloom_multibranch.contracts.notebook.records import Withdrawal
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
@@ -182,12 +183,12 @@ class RecordingLifecycle:
         self.repairs: dict[str, RepairRequest | None] = {}
         self.k: dict[str, int] = {}
 
-    async def start(self, branch: str, start_commit: str, brief: str = "", repair: RepairRequest | None = None) -> None:
+    async def start(self, branch: str, start_commit: str, task: BranchTask = BranchTask()) -> None:
         if branch in self.running:
             raise ValueError(f"branch {branch!r} already has a specialist")
         self.running[branch] = start_commit
-        self.briefs[branch] = brief
-        self.repairs[branch] = repair
+        self.briefs[branch] = task.brief
+        self.repairs[branch] = task.repair
         self.k[branch] = 1
 
     async def stop(self, branch: str) -> None:

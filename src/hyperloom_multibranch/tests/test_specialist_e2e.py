@@ -20,6 +20,7 @@ from hyperloom.measure.compile import LocalBlobStore, PackageBase
 from hyperloom.orchestrator.specialists.agent_runner import LocalAgentRunner
 from hyperloom_multibranch.contracts.fork import AdmissionStatus
 from hyperloom_multibranch.contracts.intent import IntentLayer, intent_fingerprint
+from hyperloom_multibranch.contracts.lifecycle import BranchTask
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, Conclusion, LineageKind
@@ -218,7 +219,7 @@ async def test_a_model_backed_specialist_lands_a_source_change_through_the_sessi
             return await repo.head(BRANCH) != root
 
         server.start()
-        await runtime.start(BRANCH, root, "leads: a larger max_num_seqs")
+        await runtime.start(BRANCH, root, BranchTask("leads: a larger max_num_seqs"))
         started = True
         await _until(landed, "the candidate to land", lambda: _read(workspace / "trace.jsonl"))
     finally:

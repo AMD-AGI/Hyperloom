@@ -13,6 +13,7 @@ from hyperloom.contracts.recipe import ComponentPatches, LaunchConfig, Recipe
 from hyperloom.measure.compile import LocalBlobStore, PackageBase
 from hyperloom.orchestrator.specialists.agent_runner import AgentEnded, AgentHandle, AgentStatus, LocalAgentRunner
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
+from hyperloom_multibranch.contracts.lifecycle import BranchTask
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent, LlmUsage
@@ -171,7 +172,7 @@ async def rig(tmp_path):
             **overrides,
         )
         place = BranchPlace(rig.worktree, notebook, rig.workspace)
-        return AgentSession(SessionStart(BRANCH, root, "leads: fp8 KV cache", 2), setup, place)
+        return AgentSession(SessionStart(BRANCH, root, 2, BranchTask("leads: fp8 KV cache")), setup, place)
 
     rig.session = session
     return rig

@@ -27,21 +27,30 @@ class SpecialistStatus:
     judge_failed: bool
 
 
+@dataclass(frozen=True)
+class BranchTask:
+    """What a branch's specialist is started on; see :class:`SpecialistLifecycle`."""
+
+    brief: str = ""
+    repair: RepairRequest | None = None
+    direction: str = ""
+
+
 class SpecialistLifecycle(Protocol):
     """Long-running specialists, one per branch; the runtime restarts a crashed one on the same branch by itself.
 
-    ``brief`` is the startup brief the scheduler hands a new specialist (the warm-start leads for the first batch, the
-    cross-session brief for a fill); the runtime puts it into the specialist's first prompt and every restart prompt.
-    ``repair`` is the request an admitted repair branch was opened for, started at its intent's parent commit; every
-    prompt of the branch's specialist shows it as the branch's task, whatever brief a launch is rebuilt with.
-    A started branch may have one test running until ``set_k`` says otherwise, and shrinking a branch to nothing is
-    ``stop``, not ``set_k(branch, 0)``. Every process the runtime starts goes through the session's process registry,
-    so the session stop kills it even when ``stop`` hangs.
+    A branch is started on its :class:`BranchTask`. Its ``brief`` is the startup brief the scheduler hands a new
+    specialist (the warm-start leads for the first batch, the cross-session brief for a fill); the runtime puts it into
+    the specialist's first prompt and every restart prompt. Its ``repair`` is the request an admitted repair branch was
+    opened for, started at its intent's parent commit; every prompt of the branch's specialist shows it as the
+    branch's task, whatever brief a launch is rebuilt with. Its ``direction`` is the text a user wrote for the branch;
+    every launch and restart prompt shows it as the branch's task, the way ``repair`` is shown. A started branch may
+    have one test running until ``set_k`` says otherwise, and shrinking a branch to nothing is ``stop``, not
+    ``set_k(branch, 0)``. Every process the runtime starts goes through the session's process registry, so the session
+    stop kills it even when ``stop`` hangs.
     """
 
-    async def start(
-        self, branch: str, start_commit: str, brief: str = "", repair: RepairRequest | None = None
-    ) -> None: ...
+    async def start(self, branch: str, start_commit: str, task: BranchTask = BranchTask()) -> None: ...
 
     async def stop(self, branch: str) -> None:
         """Stop the branch's specialist; returns once no process of it is left."""
@@ -54,4 +63,4 @@ class SpecialistLifecycle(Protocol):
         stopped)."""
 
 
-__all__ = ["SpecialistLifecycle", "SpecialistStatus"]
+__all__ = ["BranchTask", "SpecialistLifecycle", "SpecialistStatus"]

@@ -46,6 +46,7 @@ from hyperloom.measure.versions import socket_versions
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission, ForkRequest, RepairRequest
 from hyperloom_multibranch.contracts.intent import Intent, IntentLayer
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
+from hyperloom_multibranch.contracts.lifecycle import BranchTask
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import (
@@ -881,10 +882,8 @@ def _crowding(stage: Stage) -> type[RefusingRuntime]:
     onto the last free slots; a test double for the admissions that race the opening batch, not a placeholder."""
 
     class CrowdingRuntime(RefusingRuntime):
-        async def start(
-            self, branch: str, start_commit: str, brief: str = "", repair: RepairRequest | None = None
-        ) -> None:
-            await super().start(branch, start_commit, brief, repair)
+        async def start(self, branch: str, start_commit: str, task: BranchTask = BranchTask()) -> None:
+            await super().start(branch, start_commit, task)
             if branch == "b01":
                 for reason in (FIX_REASON, "fix f2 regresses"):
                     stage.forks.append(await stage.setup.desk.admit(ForkRequest(branch, start_commit, reason)))
@@ -1094,10 +1093,8 @@ def _admit_on_start(stage: Stage, admit: Callable[[str, str], Awaitable[ForkAdmi
     specialist's branch request, not a placeholder."""
 
     class AskingRuntime(RefusingRuntime):
-        async def start(
-            self, branch: str, start_commit: str, brief: str = "", repair: RepairRequest | None = None
-        ) -> None:
-            await super().start(branch, start_commit, brief, repair)
+        async def start(self, branch: str, start_commit: str, task: BranchTask = BranchTask()) -> None:
+            await super().start(branch, start_commit, task)
             if branch == "b01":
                 stage.forks.append(await admit(branch, start_commit))
 
@@ -1175,12 +1172,10 @@ def _queueing(stage: Stage, failing: str = "") -> type[RefusingRuntime]:
     requests, not a placeholder."""
 
     class QueueingRuntime(RefusingRuntime):
-        async def start(
-            self, branch: str, start_commit: str, brief: str = "", repair: RepairRequest | None = None
-        ) -> None:
+        async def start(self, branch: str, start_commit: str, task: BranchTask = BranchTask()) -> None:
             if branch == failing:
                 raise RuntimeError(f"no specialist CLI for {branch}")
-            await super().start(branch, start_commit, brief, repair)
+            await super().start(branch, start_commit, task)
             if branch == "b02":
                 for mechanism in ("fp8 kv cache", "bf16 kv cache"):
                     stage.forks.append(await stage.setup.desk.admit_repair(_repair(branch, start_commit, mechanism)))
@@ -1252,10 +1247,10 @@ async def test_a_dequeued_repair_that_fails_to_start_has_the_judge_asked_at_the_
 class NoRefillRuntime(RefusingRuntime):
     """A runtime that cannot start any branch past ``b01``; a failure double, not a placeholder."""
 
-    async def start(self, branch: str, start_commit: str, brief: str = "", repair: RepairRequest | None = None) -> None:
+    async def start(self, branch: str, start_commit: str, task: BranchTask = BranchTask()) -> None:
         if branch != "b01":
             raise RuntimeError(f"no specialist CLI for {branch}")
-        await super().start(branch, start_commit, brief, repair)
+        await super().start(branch, start_commit, task)
 
 
 async def test_a_branch_the_judge_opens_that_fails_to_start_does_not_have_the_judge_asked_early(
@@ -1283,10 +1278,8 @@ async def test_a_repair_admitted_while_a_refill_starts_cuts_the_refill_and_the_s
     stage.judge = ScriptedCompletion([_reply({"open": 1}), _reply({"open": 2})])
 
     class CrowdingRefill(RefusingRuntime):
-        async def start(
-            self, branch: str, start_commit: str, brief: str = "", repair: RepairRequest | None = None
-        ) -> None:
-            await super().start(branch, start_commit, brief, repair)
+        async def start(self, branch: str, start_commit: str, task: BranchTask = BranchTask()) -> None:
+            await super().start(branch, start_commit, task)
             if branch == "b02":
                 stage.forks.append(await stage.setup.desk.admit_repair(_repair("b01", start_commit)))
 

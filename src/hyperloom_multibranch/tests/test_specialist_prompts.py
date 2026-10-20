@@ -12,6 +12,7 @@ from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLog
 from hyperloom_multibranch.contracts.fork import RepairRequest
 from hyperloom_multibranch.contracts.intent import Intent, IntentLayer
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
+from hyperloom_multibranch.contracts.lifecycle import BranchTask
 from hyperloom_multibranch.contracts.notebook.records import BranchLogRecord, InboxItem
 from hyperloom_multibranch.contracts.notebook.vocab import InboxKind
 from hyperloom_multibranch.specialist import prompts
@@ -50,9 +51,9 @@ def _record(n: int, content: str = "", request_ids: tuple[str, ...] = ()) -> Bra
     return BranchLogRecord(f"e{n}", float(n), entry)
 
 
-def _launch(*, brief: str = "", **overrides) -> str:
+def _launch(*, brief: str = "", direction: str = "", **overrides) -> str:
     fields = {"head": "c7", "worktree": "/nfs/s1/worktree", "recent": ()}
-    return launch_prompt(SessionStart("s1", "c0", brief, 3), **{**fields, **overrides})
+    return launch_prompt(SessionStart("s1", "c0", 3, BranchTask(brief, direction=direction)), **{**fields, **overrides})
 
 
 def test_the_role_names_the_workload_every_step_s_tool_and_the_rules():
@@ -194,7 +195,7 @@ def test_every_launch_of_a_repair_branch_opens_with_the_candidate_s_change_and_i
     kv = Intent("s0", "c3", "kv cache", "fp8 kv cache", IntentLayer.CONFIG)
     change = RecipeDelta(config=ConfigDelta(server_args="--kv-cache-dtype fp8"))
     repair = RepairRequest(kv, change, blocked, "per-tensor KV scales; scale per head\n")
-    start = SessionStart("s1", "c3", "leads: fp8 KV cache measured +4% on this model", 3, repair)
+    start = SessionStart("s1", "c3", 3, BranchTask("leads: fp8 KV cache measured +4% on this model", repair))
 
     prompt = launch_prompt(start, head="c3", worktree="/nfs/s1/worktree", recent=(_record(1),))
 
@@ -206,6 +207,16 @@ def test_every_launch_of_a_repair_branch_opens_with_the_candidate_s_change_and_i
     assert "the root cause and the repair:\nper-tensor KV scales; scale per head\nStart from that change" in prompt
     assert prompt.index("fp8 kv cache (config)") < prompt.index("Startup brief:") < prompt.index("Your branch: s1,")
     assert "Your branch repairs" not in _launch(brief="leads: none")
+
+
+def test_every_launch_shows_the_user_s_direction_as_the_branch_s_task_before_the_brief():
+    prompt = _launch(brief="leads: fp8 KV cache", direction="  try a larger max_num_seqs first\n")
+
+    assert prompt.startswith(
+        "Your branch follows a direction the user wrote; work on it before any direction of your own choosing:\n"
+        "try a larger max_num_seqs first\n\nStartup brief:\nleads: fp8 KV cache"
+    )
+    assert "a direction the user wrote" not in _launch(brief="leads: none", direction=" \n")
 
 
 def test_each_prompt_is_versioned_by_its_own_text(monkeypatch):
