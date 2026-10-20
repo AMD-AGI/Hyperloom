@@ -31,7 +31,6 @@ from ..actions.executors._gpu_pin import (
     resolve_gpu_pin,
 )
 from ..actions.executors._recipe_script import resolve_launch_server_script
-from ..actions.executors._workload_envs import geak_metric_axis
 
 log = _logging.getLogger(__name__)
 
@@ -298,6 +297,8 @@ def _handoff_payload(
     state: Any, reference: SameConfigReference, devices: DevicePin, *, session_dir: Path, agentx: bool
 ) -> dict[str, Any]:
     """The fields every handoff carries, whatever the recipe adds to them."""
+    from ..actions.executors._workload_envs import geak_metric_axis
+
     # GEAK's E2E_METRIC and the workload spec's metric_basis are the same
     # decision, so they resolve through one helper: a handoff that named a
     # different axis than the one KEEP is decided on would have GEAK searching
