@@ -138,29 +138,24 @@ class TestLease:
     def test_a_lease_waits_out_the_brief_shared_lock_of_a_warning(self, tmp_path):
         """A launch without the flag reads the record under a shared lock; a concurrent flagged launch must not refuse."""
         PowerSettingsLease(tmp_path, {4}).release()
-        reader = os.open(tmp_path / "gpu4.json", os.O_RDONLY)
-        fcntl.flock(reader, fcntl.LOCK_SH)
-        timer = threading.Timer(0.3, lambda: os.close(reader))
-        timer.start()
-        try:
-            PowerSettingsLease(tmp_path, {4}).release()
-        finally:
-            timer.join()
+        with open(tmp_path / "gpu4.json", encoding="utf-8") as reader:
+            fcntl.flock(reader, fcntl.LOCK_SH)
+            timer = threading.Timer(0.3, lambda: fcntl.flock(reader, fcntl.LOCK_UN))
+            timer.start()
+            try:
+                PowerSettingsLease(tmp_path, {4}).release()
+            finally:
+                timer.join()
 
     def test_a_lock_error_other_than_held_closes_the_record(self, tmp_path, monkeypatch):
-        opened: list[int] = []
-        closed: list[int] = []
-        real_open, real_close = os.open, os.close
-        monkeypatch.setattr(
-            gpu_power_control.os, "open", lambda *a, **k: opened.append(real_open(*a, **k)) or opened[-1]
-        )
-        monkeypatch.setattr(gpu_power_control.os, "close", lambda fd: closed.append(fd) or real_close(fd))
-        monkeypatch.setattr(
-            gpu_power_control.fcntl, "flock", lambda fd, op: (_ for _ in ()).throw(OSError(37, "no locks"))
-        )
+        def _no_locks(fd, op):
+            raise OSError(37, "no locks")
+
+        monkeypatch.setattr(gpu_power_control.fcntl, "flock", _no_locks)
+        before = set(os.listdir("/proc/self/fd"))
         with pytest.raises(GpuPowerSettingsError, match="no locks"):
             PowerSettingsLease(tmp_path, {4})
-        assert opened and set(opened) <= set(closed)
+        assert set(os.listdir("/proc/self/fd")) <= before, "the record's descriptor is closed"
 
     def test_a_record_left_by_a_dead_holder_is_an_orphan(self, tmp_path):
         lease = PowerSettingsLease(tmp_path, {4})
