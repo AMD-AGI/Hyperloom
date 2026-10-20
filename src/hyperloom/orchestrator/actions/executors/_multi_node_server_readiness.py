@@ -194,8 +194,9 @@ class _ServingProbeRules:
     #: as ``completed=0`` → ``baseline_failed``.
     wait_model_ready: bool
 
-    #: Readiness is a streak of *served* probes, so this never drops below 1: at zero the server would be called
-    #: ready on a probe that failed, or on one that was never sent.
+    #: All three are counts of something the server has to actually produce, so none drops below 1: at zero each in
+    #: turn inverts the gate, calling a server ready on a probe that failed, that was never sent, or that came back
+    #: empty.
     required_streak: int
     max_tokens: int
     min_tokens: int
@@ -209,8 +210,8 @@ def _serving_probe_rules(backend: str) -> _ServingProbeRules:
         # Probe with >1 token + ignore_eos so the request must traverse the decode leg (prefill alone can serve the
         # first token): a PD run with an unready or KV-broken decode then fails the probe instead of passing on a
         # prefill-only 200.
-        max_tokens=int(os.environ.get("HYPERLOOM_MN_COMPLETION_PROBE_TOKENS", "8") or 8),
-        min_tokens=int(os.environ.get("HYPERLOOM_MN_COMPLETION_PROBE_MIN_TOKENS", "2") or 2),
+        max_tokens=_env_int("HYPERLOOM_MN_COMPLETION_PROBE_TOKENS", 8),
+        min_tokens=_env_int("HYPERLOOM_MN_COMPLETION_PROBE_MIN_TOKENS", 2),
     )
 
 

@@ -190,8 +190,12 @@ def test_serving_probe_rules_only_wait_for_model_registration_on_infera(monkeypa
 def test_no_configured_probe_streak_still_requires_one_served_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     """Readiness is a streak of served probes; at zero a server that never answered would count as ready."""
     monkeypatch.setenv("HYPERLOOM_MN_COMPLETION_PROBE_COUNT", "0")
+    monkeypatch.setenv("HYPERLOOM_MN_COMPLETION_PROBE_TOKENS", "0")
+    monkeypatch.setenv("HYPERLOOM_MN_COMPLETION_PROBE_MIN_TOKENS", "0")
 
-    assert readiness._serving_probe_rules("infera").required_streak == 1
+    rules = readiness._serving_probe_rules("infera")
+
+    assert (rules.required_streak, rules.max_tokens, rules.min_tokens) == (1, 1, 1)
 
 
 def test_the_models_empty_fast_fail_only_fires_after_health_came_up() -> None:
@@ -231,6 +235,7 @@ def test_infera_is_ready_only_after_consecutive_completions_produce_tokens(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A 200 from /v1/models is not traffic; the decode leg has to produce tokens, twice running."""
+    monkeypatch.delenv("HYPERLOOM_MN_COMPLETION_PROBE_COUNT", raising=False)
     _reachable(monkeypatch, "infera")
     _clock_advances_only_on_sleep(monkeypatch)
     client = _serve(
@@ -277,6 +282,26 @@ def test_a_probe_that_never_succeeds_is_not_ready_with_no_configured_streak(
             "/health": [_Reply(200)],
             "/v1/models": [_Reply(200, {"data": [{"id": "m"}]})],
             "/v1/completions": [_Reply(503)],
+        },
+    )
+
+    with pytest.raises(readiness.ServerRestartFailed, match="/v1/completions still"):
+        asyncio.run(readiness._wait_for_server_health_async(timeout_s=36000, poll_every_s=60))
+
+
+def test_an_empty_completion_is_not_ready_with_no_configured_token_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A token floor of 0 must not make a 200 that produced nothing count as served traffic."""
+    monkeypatch.setenv("HYPERLOOM_MN_COMPLETION_PROBE_MIN_TOKENS", "0")
+    _reachable(monkeypatch, "infera")
+    _clock_advances_only_on_sleep(monkeypatch)
+    _serve(
+        monkeypatch,
+        {
+            "/health": [_Reply(200)],
+            "/v1/models": [_Reply(200, {"data": [{"id": "m"}]})],
+            "/v1/completions": [_Reply(200, {"usage": {"completion_tokens": 0}})],
         },
     )
 
