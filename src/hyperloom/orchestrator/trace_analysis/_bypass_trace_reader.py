@@ -587,9 +587,13 @@ def select_steady_window(
     }
 
 
+# cpu_op ``args`` key -> op meta key.
+_OP_META_ARGS = (("Input Dims", "shapes"), ("Input type", "dtypes"), ("kernel_file", "kernel_file"))
+
+
 @dataclass
 class _TraceBuffers:
-    """Device events and attribution maps buffered in one pass over a trace.
+    """Device events, annotations and attribution maps buffered in one pass over a trace.
 
     One pass serves both full-trace and steady-window aggregation without re-reading the trace.
     """
@@ -608,6 +612,74 @@ class _TraceBuffers:
     # Correlations of CUDA/HIP graph-launch runtime events (no External id), so their replayed kernels are classified
     # graph-attributed, not (unlinked).
     graph_launch_corrs: set[int] = field(default_factory=set)
+    # GPU user-annotation windows, the candidates for the steady-state window.
+    annotation_windows: list[dict[str, Any]] = field(default_factory=list)
+    # (pid, tid) -> [(ts, end, name), ...] for the duration-sanity check.
+    stream_intervals: dict[Any, list[tuple[float, float, str]]] = field(default_factory=dict)
+    # The cap that stopped buffering ("annotation_windows" or "gpu_events"); empty while every cap holds.
+    truncation_reason: str = ""
+
+    def add(self, ev: dict[str, Any]) -> None:
+        """Buffer one trace event, or set ``truncation_reason`` instead when buffering it would pass a cap."""
+        cat = ev.get("cat", "")
+        if cat == "cuda_runtime":
+            args = ev.get("args") or {}
+            cid = args.get("correlation")
+            extid = args.get("External id")
+            if cid is not None and extid is not None:
+                self.corr_to_extid[cid] = extid
+            if cid is not None and "GraphLaunch" in (ev.get("name", "") or ""):
+                self.graph_launch_corrs.add(cid)
+        elif cat == "cpu_op":
+            self._add_cpu_op(ev)
+        elif cat == "gpu_user_annotation" and ev.get("ph") == "X":
+            if len(self.annotation_windows) >= _MAX_ANNOTATION_WINDOWS:
+                self.truncation_reason = "annotation_windows"
+                return
+            ts = ev.get("ts", 0) or 0
+            dur = ev.get("dur", 0) or 0
+            name = str(ev.get("name", "") or "")[:_MAX_EVENT_NAME_CHARS]
+            self.annotation_windows.append({"name": name, "ts": float(ts), "dur": float(dur)})
+        elif cat in _GPU_CATS and ev.get("ph") == "X":
+            self._add_device_event(ev)
+
+    def _add_cpu_op(self, ev: dict[str, Any]) -> None:
+        """Name the framework op behind one External id and keep its first-seen shape/dtype/Triton-source meta."""
+        args = ev.get("args") or {}
+        extid = args.get("External id")
+        if extid is None:
+            return
+        self.extid_to_opname[extid] = ev.get("name", "") or ""
+        if extid not in self.extid_to_opmeta:
+            meta = {key: args[arg] for arg, key in _OP_META_ARGS if args.get(arg)}
+            if "kernel_file" in meta:
+                meta["kernel_backend"] = args.get("kernel_backend") or ""
+            if meta:
+                self.extid_to_opmeta[extid] = meta
+
+    def _add_device_event(self, ev: dict[str, Any]) -> None:
+        """Buffer one GPU kernel or memcpy/memset with its stream interval, unless the GPU-event cap is reached."""
+        dur = float(ev.get("dur", 0) or 0)
+        ts = float(ev.get("ts", 0) or 0)
+        end = ts + dur
+        name = str(ev.get("name", "") or "")
+        stream_key = (ev.get("pid"), ev.get("tid"))
+        if len(self.k_events) + len(self.m_events) >= _MAX_BUFFERED_GPU_EVENTS:
+            self.truncation_reason = "gpu_events"
+            return
+        self.stream_intervals.setdefault(stream_key, []).append((ts, end, name[:_MAX_EVENT_NAME_CHARS]))
+        if ev.get("cat") != _GPU_KERNEL_CAT:
+            self.m_events.append((dur, ts, end))
+            return
+        kargs = ev.get("args") or {}
+        corr = kargs.get("correlation")
+        # Retain launch grid/block: for Triton (hipModuleLaunchKernel) and graph-replay kernels the correlation->cpu_op
+        # shape chain is broken, but the launch geometry is a shape fallback.
+        grid = kargs.get("grid")
+        block = kargs.get("block")
+        if grid is not None or block is not None:
+            self.corr_to_launch_geom[corr] = (grid, block)
+        self.k_events.append((name, dur, corr, ts, end))
 
     def launching_op(self, corr: Any) -> tuple[str, dict[str, Any]]:
         """Return the name and meta of the cpu_op that launched correlation ``corr``, both empty when unlinked."""
@@ -759,102 +831,22 @@ def analyze_trace(trace_input: str | Path, options: TraceAnalysisOptions = Trace
         }
 
     buffers = _TraceBuffers()
-    k_events = buffers.k_events
-    m_events = buffers.m_events
-    corr_to_extid = buffers.corr_to_extid
-    extid_to_opname = buffers.extid_to_opname
-    extid_to_opmeta = buffers.extid_to_opmeta
-    corr_to_launch_geom = buffers.corr_to_launch_geom
-    graph_launch_corrs = buffers.graph_launch_corrs
-    annotation_windows: list[dict[str, Any]] = []
-    # (pid, tid) -> [(ts, end, name), ...] for the duration-sanity check.
-    stream_intervals: dict[Any, list[tuple[float, float, str]]] = {}
-    stream_interval_count = 0
     event_total = 0
     stream_errors: list[str] = []
-    cap_exceeded = ""
-
-    fobj = _open_trace_binary(tf)
-    try:
+    with _open_trace_binary(tf) as fobj:
         for ev in stream_events(fobj, errors=stream_errors):
             event_total += 1
-            cat = ev.get("cat", "")
-            if cat == "cuda_runtime":
-                args = ev.get("args") or {}
-                cid = args.get("correlation")
-                extid = args.get("External id")
-                if cid is not None and extid is not None:
-                    corr_to_extid[cid] = extid
-                if cid is not None and "GraphLaunch" in (ev.get("name", "") or ""):
-                    graph_launch_corrs.add(cid)
-                continue
-            if cat == "cpu_op":
-                args = ev.get("args") or {}
-                extid = args.get("External id")
-                if extid is not None:
-                    extid_to_opname[extid] = ev.get("name", "") or ""
-                    if extid not in extid_to_opmeta:
-                        meta: dict[str, Any] = {}
-                        dims = args.get("Input Dims")
-                        if dims:
-                            meta["shapes"] = dims
-                        itype = args.get("Input type")
-                        if itype:
-                            meta["dtypes"] = itype
-                        kfile = args.get("kernel_file")
-                        if kfile:
-                            meta["kernel_file"] = kfile
-                            meta["kernel_backend"] = args.get("kernel_backend") or ""
-                        if meta:
-                            extid_to_opmeta[extid] = meta
-                continue
-            if cat == "gpu_user_annotation" and ev.get("ph") == "X":
-                if len(annotation_windows) >= _MAX_ANNOTATION_WINDOWS:
-                    cap_exceeded = "annotation_windows"
-                    break
-                ts = ev.get("ts", 0) or 0
-                dur = ev.get("dur", 0) or 0
-                name = str(ev.get("name", "") or "")[:_MAX_EVENT_NAME_CHARS]
-                annotation_windows.append({"name": name, "ts": float(ts), "dur": float(dur)})
-                continue
-            if cat in _GPU_CATS and ev.get("ph") == "X":
-                dur = float(ev.get("dur", 0) or 0)
-                ts = float(ev.get("ts", 0) or 0)
-                end = ts + dur
-                name = str(ev.get("name", "") or "")
-                stream_key = (ev.get("pid"), ev.get("tid"))
-                if stream_interval_count >= _MAX_BUFFERED_GPU_EVENTS:
-                    cap_exceeded = "gpu_events"
-                    break
-                stream_intervals.setdefault(stream_key, []).append((ts, end, name[:_MAX_EVENT_NAME_CHARS]))
-                stream_interval_count += 1
-                if cat == _GPU_KERNEL_CAT:
-                    kargs = ev.get("args") or {}
-                    corr = kargs.get("correlation")
-                    # Retain launch grid/block: for Triton (hipModuleLaunchKernel) and graph-replay kernels the
-                    # correlation->cpu_op shape chain is broken, but the launch geometry is a shape fallback.
-                    grid = kargs.get("grid")
-                    block = kargs.get("block")
-                    if grid is not None or block is not None:
-                        corr_to_launch_geom[corr] = (grid, block)
-                    k_events.append((name, dur, corr, ts, end))
-                else:
-                    m_events.append((dur, ts, end))
-    finally:
-        fobj.close()
+            buffers.add(ev)
+            if buffers.truncation_reason:
+                break
 
-    scope = "full_trace"
     steady_window: dict[str, Any] | None = None
-    window: tuple[float, float] | None = None
     if options.steady_state:
-        steady_window = select_steady_window(annotation_windows, framework=options.framework)
-        if steady_window is not None:
-            window = (steady_window["start_us"], steady_window["end_us"])
-            scope = "steady_state"
-
+        steady_window = select_steady_window(buffers.annotation_windows, framework=options.framework)
+    window = None if steady_window is None else (steady_window["start_us"], steady_window["end_us"])
     body = _finalize(buffers, window=window, top_k=options.top_k, emit_launches=options.emit_launches)
-    body["attribution"]["annotation_window_count"] = len(annotation_windows)
-    stream_overlap = _stream_overlap_health(stream_intervals)
+    body["attribution"]["annotation_window_count"] = len(buffers.annotation_windows)
+    stream_overlap = _stream_overlap_health(buffers.stream_intervals)
     if stream_overlap:
         body["timeline"]["stream_overlap"] = stream_overlap
 
@@ -867,19 +859,19 @@ def analyze_trace(trace_input: str | Path, options: TraceAnalysisOptions = Trace
         "status": "ok",
         "trace_file": str(tf),
         "event_total": event_total,
-        "truncated": bool(cap_exceeded),
+        "truncated": bool(buffers.truncation_reason),
         "stream_errors": stream_errors,
-        "aggregation_scope": scope,
+        "aggregation_scope": "full_trace" if window is None else "steady_state",
         "analyzed_rank": _rank_of(tf),
         "rank_count": _trace_rank_count(trace_input),
         "selected_capture_fragment": _is_capture_fragment(tf, _input_root),
-        "annotation_windows": annotation_windows,
+        "annotation_windows": buffers.annotation_windows,
         **body,
     }
     if steady_window is not None:
         result["steady_window"] = steady_window
     elif options.steady_state:
         result["steady_window_status"] = "no_repeating_window_fell_back_to_full_trace"
-    if cap_exceeded:
-        result["truncation_reason"] = cap_exceeded
+    if buffers.truncation_reason:
+        result["truncation_reason"] = buffers.truncation_reason
     return result
