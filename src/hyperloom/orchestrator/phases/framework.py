@@ -196,6 +196,26 @@ def _lever_controls(entry: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _framework_config_deliverable(config_levers: dict[str, Any]) -> dict[str, Any]:
+    """The ``integrate_patch`` params a config-lever round is proposed with.
+
+    The name has to come from the proposal the levers came from. Reading
+    ``proposal_set[0]`` instead launched one proposal's name against another's
+    arguments whenever the first proposal was ablation-only. A lever that only
+    drops a flag needs its ablation carried too, or it reaches the launcher as a
+    no-op.
+    """
+    return {
+        "patch_name": str(config_levers.get("name") or ""),
+        "extra_server_args": str(config_levers.get("extra_server_args") or ""),
+        "extra_envs": dict(config_levers.get("extra_envs") or {}),
+        "remove_args": list(config_levers.get("remove_args") or []),
+        "unset_envs": list(config_levers.get("unset_envs") or []),
+        "args_mode": str(config_levers.get("args_mode") or ARGS_MODE_APPEND),
+        "framework_agent_authoring": True,
+    }
+
+
 def _resolvable_artifacts_from_done(
     done_payload: dict[str, Any] | None,
     resolve_bases: list[Path],
@@ -420,6 +440,13 @@ class AuthoringRetry(NamedTuple):
     attempt: int = 1
     retry_feedback: list[dict[str, Any]] | None = None
     vetting_drops: list[str] | None = None
+
+
+class _IntegrateReview(NamedTuple):
+    """What accompanies a specialist deliverable to its synthetic ``integrate_patch`` review."""
+
+    observation: dict[str, Any]
+    overlaps_measured: list[dict[str, Any]] | None = None
 
 
 class ProgressStamp(NamedTuple):
@@ -3063,17 +3090,19 @@ class FrameworkPhase(ProposalBench):
             spec_params,
             done_payload,
             deliverable,
-            observation={
-                "kind": "specialist_patch_autosubmitted_for_review",
-                "patches": [str(x) for x in patches][:8],
-                # Artifact-only deliverables: record their install targets.
-                "artifacts_written": [
-                    str((a or {}).get("target") or "")
-                    for a in (done_payload.get("artifacts_written") or [])
-                    if isinstance(a, dict)
-                ][:8],
-            },
-            overlaps_measured=self._measured_patch_overlaps(patches),
+            review=_IntegrateReview(
+                observation={
+                    "kind": "specialist_patch_autosubmitted_for_review",
+                    "patches": [str(x) for x in patches][:8],
+                    # Artifact-only deliverables: record their install targets.
+                    "artifacts_written": [
+                        str((a or {}).get("target") or "")
+                        for a in (done_payload.get("artifacts_written") or [])
+                        if isinstance(a, dict)
+                    ][:8],
+                },
+                overlaps_measured=self._measured_patch_overlaps(patches),
+            ),
         )
 
     async def maybe_autosubmit_framework_config(
@@ -3127,30 +3156,19 @@ class FrameworkPhase(ProposalBench):
         extra_server_args = str(config_levers.get("extra_server_args") or "")
         extra_envs = dict(config_levers.get("extra_envs") or {})
         candidate_id = str(spec_params.get("framework_agent_candidate_id") or "")
-        # The name has to come from the proposal the levers came from. Reading
-        # ``proposal_set[0]`` instead launched one proposal's name against
-        # another's arguments whenever the first proposal was ablation-only.
-        # A lever that only drops a flag needs its ablation carried too, or it
-        # reaches the launcher as a no-op.
         pending = await self._submit_integrate_review(
             sid,
             spec_params,
             done_payload,
-            {
-                "patch_name": str(config_levers.get("name") or ""),
-                "extra_server_args": extra_server_args,
-                "extra_envs": extra_envs,
-                "remove_args": list(config_levers.get("remove_args") or []),
-                "unset_envs": list(config_levers.get("unset_envs") or []),
-                "args_mode": str(config_levers.get("args_mode") or ARGS_MODE_APPEND),
-                "framework_agent_authoring": True,
-            },
-            observation={
-                "kind": "framework_config_autosubmitted_for_review",
-                "candidate_id": candidate_id,
-                "extra_server_args": extra_server_args,
-                "extra_envs": dict(extra_envs),
-            },
+            _framework_config_deliverable(config_levers),
+            review=_IntegrateReview(
+                observation={
+                    "kind": "framework_config_autosubmitted_for_review",
+                    "candidate_id": candidate_id,
+                    "extra_server_args": extra_server_args,
+                    "extra_envs": dict(extra_envs),
+                },
+            ),
         )
         if pending is not None:
             log.info(
@@ -3167,8 +3185,7 @@ class FrameworkPhase(ProposalBench):
         done_payload: dict[str, Any],
         deliverable: dict[str, Any],
         *,
-        observation: dict[str, Any],
-        overlaps_measured: list[dict[str, Any]] | None = None,
+        review: "_IntegrateReview",
     ) -> PendingProposal | None:
         """Propose a specialist deliverable to the Critic as a synthetic integrate_patch; idempotent per specialist.
 
@@ -3178,10 +3195,10 @@ class FrameworkPhase(ProposalBench):
                 enablement context travel to integrate_patch.
             done_payload: The specialist's ``specialist_done`` payload.
             deliverable: The integrate_patch params that say what to apply.
-            observation: The bus observation recorded with the proposal.
-            overlaps_measured: Measured rounds this deliverable's patch repeats;
-                recorded on the proposal and the observation so the review can
-                weigh a re-measurement without anything being refused.
+            review: What accompanies the proposal to the review -- the bus
+                observation, and the measured rounds the deliverable's patch
+                repeats so the review can weigh a re-measurement without
+                anything being refused.
 
         Returns:
             The recorded proposal, or ``None`` when the Critic already ruled on
@@ -3198,8 +3215,8 @@ class FrameworkPhase(ProposalBench):
             "predicted_gain_pct": 0.0,
             "params": params,
         }
-        if overlaps_measured:
-            payload["overlaps_measured"] = overlaps_measured
+        if review.overlaps_measured:
+            payload["overlaps_measured"] = review.overlaps_measured
         pending = await record_proposal(
             self._coord,
             from_agent="coordinator",
@@ -3211,11 +3228,11 @@ class FrameworkPhase(ProposalBench):
             "coordinator",
             "observation",
             {
-                **observation,
+                **review.observation,
                 "specialist_task_id": sid,
                 "proposal_msg_id": pending.proposal_msg_id,
                 "patch_name": params["patch_name"],
-                **({"overlaps_measured": overlaps_measured} if overlaps_measured else {}),
+                **({"overlaps_measured": review.overlaps_measured} if review.overlaps_measured else {}),
             },
         )
         try:

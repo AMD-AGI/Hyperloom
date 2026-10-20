@@ -15,7 +15,7 @@ import pytest
 
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.proposals import PendingProposal
-from hyperloom.orchestrator.phases.framework import _AUTHORED_LANE_MAX_ATTEMPTS, ProgressStamp
+from hyperloom.orchestrator.phases.framework import _AUTHORED_LANE_MAX_ATTEMPTS, ProgressStamp, _IntegrateReview
 
 from .conftest import make_coordinator
 
@@ -83,7 +83,7 @@ async def _submit_integrate_review(coord: Coordinator) -> None:
         {},
         {"proposal_set": [{"name": "p"}]},
         {"extra_server_args": "--x"},
-        observation={"kind": "framework_config_autosubmitted_for_review"},
+        review=_IntegrateReview(observation={"kind": "framework_config_autosubmitted_for_review"}),
     )
 
 
