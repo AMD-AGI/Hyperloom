@@ -2468,9 +2468,6 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         best = self.run_state.best
         if not best.commit_hash or best.wall_ms is None or best.mean_case_speedup is None:
             return
-        # A resumed session recomputes session_index and experiment_id, which legitimately differ from what the stored
-        # manifest was written with, so republishing an already-current best tripped the same-iteration conflict guard
-        # and reported persistence_degraded over a bundle that was already correct.
         if self.best_publisher.describes_current_best(
             iteration=best.iteration,
             commit_hash=best.commit_hash,
@@ -2505,30 +2502,12 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         benchmark = dict(metadata.get("bench") or {})
         benchmark.setdefault("median_ms", best.wall_ms)
         benchmark.setdefault("mean_case_speedup", best.mean_case_speedup)
-        published_patch = ""
-        published_patch_path = str(published.get("patch_path") or "")
-        if published_patch_path:
-            try:
-                published_patch = (self.best_publisher.root / published_patch_path).read_text()
-            except OSError:
-                published_patch = ""
         pending = {
-            "session_index": published.get(
-                "session_index",
-                self.run_state.session_index,
-            ),
-            "experiment_id": published.get(
-                "experiment_id",
-                self.run_state.last_experiment_id,
-            ),
-            "baseline_wall_ms": published.get(
-                "baseline_wall_ms",
-                self.run_state.baseline_wall_ms,
-            ),
+            "session_index": published.get("session_index", self.run_state.session_index),
+            "experiment_id": published.get("experiment_id", self.run_state.last_experiment_id),
+            "baseline_wall_ms": published.get("baseline_wall_ms", self.run_state.baseline_wall_ms),
             "validation_text": validation_text,
             "benchmark": benchmark,
-            "changed_files": (published.get("changed_files") or self._publication_changed_files(best.commit_hash)),
-            "patch": (published_patch or self._publication_patch(best.commit_hash)),
         }
         result = IterationResult(
             iteration=best.iteration,
