@@ -727,7 +727,7 @@ def test_shared_model_option_is_provider_neutral() -> None:
         "agent_backend": "codex",
     }
     assert resolve_codex_model("provider-model") == "provider-model"
-    assert resolve_codex_model("") == "gpt-5.6-sol"
+    assert resolve_codex_model("") == "gpt-6-astra"
     assert resolve_codex_reasoning_effort("") == "high"
     assert resolve_codex_reasoning_effort("xhigh") == "xhigh"
     assert resolve_codex_reasoning_effort(" MEDIUM ") == "medium"
@@ -2306,3 +2306,48 @@ def test_a_protected_file_is_still_caught_once_git_is_excluded(tmp_path: Path) -
     with pytest.raises(WorkspaceSafetyError, match="read-only session changed the workspace"):
         guard.verify()
     assert driver.read_text() == "DRIVER = 'original'\n"
+
+
+def _fake_cli(path: Path, version_line: str) -> str:
+    path.write_text(f"#!/bin/sh\necho '{version_line}'\n")
+    path.chmod(0o755)
+    return str(path)
+
+
+def _gateway_backend(**kwargs) -> CodexBackend:
+    return CodexBackend(
+        gateway={"base_url": "https://gateway.example.invalid/v1", "key_env": "FAKE_CODEX_API_KEY"},
+        bypass_sandbox=True,
+        **kwargs,
+    )
+
+
+def test_agent_cli_variable_naming_another_providers_cli_is_ignored(tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv("FAKE_CODEX_API_KEY", "key")
+    monkeypatch.setenv("FORGE_AGENT_CLI", _fake_cli(tmp_path / "claude", "2.1.0 (Claude Code)"))
+    backend = _gateway_backend()
+
+    backend.preflight()
+
+    assert backend.codex_bin == ""
+    assert "ignoring FORGE_AGENT_CLI" in caplog.text
+
+
+def test_agent_cli_variable_naming_a_codex_runtime_is_used(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_CODEX_API_KEY", "key")
+    codex = _fake_cli(tmp_path / "codex", "codex-cli 0.9.0")
+    monkeypatch.setenv("FORGE_AGENT_CLI", codex)
+    backend = _gateway_backend()
+
+    backend.preflight()
+
+    assert backend.codex_bin == codex
+
+
+def test_an_explicit_pin_to_another_providers_cli_still_fails(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_CODEX_API_KEY", "key")
+    monkeypatch.delenv("FORGE_AGENT_CLI", raising=False)
+    backend = _gateway_backend(codex_bin=_fake_cli(tmp_path / "claude", "2.1.0 (Claude Code)"))
+
+    with pytest.raises(CodexUnavailableError, match="does not appear to be Codex"):
+        backend.preflight()

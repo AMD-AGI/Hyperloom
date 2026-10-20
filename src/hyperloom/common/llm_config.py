@@ -164,9 +164,7 @@ AGENT_BACKEND_CODEX = "codex"
 # The model each backend runs when neither the operator nor a known gateway host names one. This is the last rung of
 # every model ladder in both packages, so it lives beside the backend names it is keyed by.
 DEFAULT_CLAUDE_MODEL = "claude-opus-5-5"
-# The gateway publishes both ``gpt-5.6`` and ``gpt-5.6-sol`` in ``/v1/models``, but only the latter has a deployment
-# behind it: a bare ``gpt-5.6`` answers 400 "Deployment ... is not found" on both ChatCompletions and Responses.
-DEFAULT_CODEX_MODEL = "gpt-5.6-sol"
+DEFAULT_CODEX_MODEL = "gpt-6-astra"
 
 
 def has_anthropic_side(env: Mapping[str, str] | None = None) -> bool:
