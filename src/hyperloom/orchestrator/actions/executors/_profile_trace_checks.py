@@ -345,7 +345,7 @@ def _sample_trace_dir(trace_dir: Path, framework: str) -> _TraceSample:
     from hyperloom.inference_optimizer import framework_registry as _fw_reg
 
     scriptable = _fw_reg.is_scriptable(framework)
-    capture = _capture_dir(trace_dir)
+    capture = None if scriptable else _capture_dir(trace_dir)
     main_traces = sorted(
         (p for p in trace_dir.glob("*.trace.json.gz") if p.is_file()),
         key=lambda p: p.stat().st_size,
