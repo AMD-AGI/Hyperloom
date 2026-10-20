@@ -567,10 +567,8 @@ class DispatcherCollaborator(CoordinatorCollaborator):
     async def _admit_lanes(self, task: Task, holders: dict[str, int], capacities: dict[str, int]) -> LaneAdmission:
         """Take the lane lease a queued task needs, bumping ``holders`` for the rest of this pass.
 
-        SQLite lane gate. Under single-node Ray execution the authoritative GPU mutex is Ray's
-        custom resources (``serving_slot`` + ``num_gpus`` on the GPU leases), not this gate — but
-        it is kept as a cheap, resume-safe scheduling / observability view whose acquire/release
-        events feed the lane timeline. The two layers are redundant.
+        Under single-node Ray execution the authoritative GPU mutex is Ray's custom resources, not
+        this SQLite gate, which is kept as a resume-safe view feeding the lane timeline.
         """
         lanes_needed = list(task.requires_lanes or [])
         if not lanes_needed:

@@ -44,12 +44,7 @@ def gpu_pool_for_specialist(
     specialist_pool: Any,
     serving_tp: int,
 ) -> GpuPoolChoice:
-    """Pick the pool a GPU specialist leases from and the card count it defaults to.
-
-    Whole-machine, time-shared lane vs serving-disjoint pool: enablement and bench-capable
-    specialists lease the whole machine from the framework pool; every other GPU specialist
-    leases from the GPU-specialist pool. An explicit ``gpu_count`` always wins.
-    """
+    """Pick the pool a GPU specialist leases from and the card count it defaults to."""
     from ..specialists.profile import is_authoring_specialist, uses_whole_machine_gpu_lane
 
     if not uses_whole_machine_gpu_lane(params):
@@ -85,9 +80,7 @@ async def acquire_gpu_lease(gpu_pool: Any, task: Task, *, gpu_count: int, ttl_se
     """Take the pool lease for a GPU specialist, by Ray pending limit or by physical capacity.
 
     Under single-node Ray the physical GPU mutex is Ray's ``num_gpus``, not this SQLite pool, so
-    admission is a count-based pending limit and several specialists may queue on one physical GPU
-    (Ray time-multiplexes them). Off the Ray path (multi-node / RAY_EXEC off / pytest) the SQLite
-    pool stays the physical mutex.
+    admission there is a count-based pending limit and several specialists may share one GPU.
     """
     from ..actions.executors._ray_backend import ray_gpu_pending_limit, ray_gpu_specialist_exec_enabled
 

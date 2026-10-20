@@ -56,11 +56,7 @@ def settlement_payload(task: Task, result: SubAgentResult) -> dict[str, Any]:
 
 
 def unpromotable_payload(result: SubAgentResult) -> dict[str, Any]:
-    """The payload recorded for a result nothing promoted.
-
-    Runner-level failures (no executor, executor raised) carry their class on the result rather
-    than in the empty payload.
-    """
+    """The payload recorded for a result nothing promoted."""
     payload = dict(result.result or {})
     if result.error_class and not payload.get("error_class"):
         payload["error_class"] = result.error_class
