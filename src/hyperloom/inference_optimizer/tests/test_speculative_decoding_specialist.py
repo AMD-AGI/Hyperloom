@@ -79,7 +79,7 @@ def test_focus_looks_for_drafters_locally_before_downloading_one():
     text = _system_prompt(model_name="org/Target-7B", model_path="/models/Target-7B")
     assert "`org/Target-7B`, launched from `/models/Target-7B`" in text
     assert text.index("look locally first") < text.index("search Hugging Face and download")
-    for rule in ("HF_HUB_OFFLINE", "only public repos", "safetensors", "never enable `trust_remote_code`"):
+    for rule in ("HF_HUB_OFFLINE", "safetensors", "never enable `trust_remote_code`"):
         assert rule in text
 
 
@@ -102,7 +102,7 @@ def test_a_patch_mode_prompt_gets_no_coda_about_flags_it_never_listed():
     assert "Altitude —" not in _system_prompt()
 
 
-def test_focus_carries_the_constraints_the_runner_enforces():
+def test_focus_states_the_constraints_a_proposal_must_meet():
     text = _system_prompt()
     assert "**Never propose\n  these on the synthetic benchmark**" in text
     assert "the draft is pinned" in text
