@@ -5,9 +5,12 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
+    from pathlib import Path
+    from typing import Protocol
+
     from hyperloom.orchestrator.bus.message_bus import MessageBus
     from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager
     from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
@@ -17,7 +20,37 @@ if TYPE_CHECKING:
     from hyperloom.orchestrator.state.round_store import RoundStore
     from hyperloom.orchestrator.state.shared_state import SharedState
     from hyperloom.orchestrator.state.task_registry import TaskRegistry
-    from hyperloom.orchestrator.loop.coordinator import Coordinator, CoordinatorState
+
+    class CoordinatorServices(Protocol):
+        """The infrastructure a collaborator borrows, declared by the layer that borrows it.
+
+        Naming ``Coordinator`` here would point this module -- which every
+        collaborator in the orchestrator imports -- back up at
+        ``loop.coordinator``, closing an import cycle over the whole ``loop``
+        package. Structural typing states the same contract pointing down.
+        """
+
+        session_dir: Path
+        shared_state: SharedState
+        tasks: TaskRegistry
+        bus: MessageBus
+        locks: ResourceLockManager
+        db: SqliteConnection
+        sub: SubAgentRunner
+        rounds: RoundStore
+        policy: PolicyGate
+        gpu_specialist_pool: SpecialistGpuPool
+        framework_gpu_pool: SpecialistGpuPool
+        knowledge_plane: Any
+        backends: Any
+        state: Any
+        orch_prompt: "OrchestrationPrompt"
+        role_registry: Any
+        action_registry: Any
+        cursors: Any
+
+        @property
+        def recipe_kb(self) -> Any: ...
 
 
 class OrchestrationPrompt:
@@ -46,7 +79,7 @@ class OrchestrationPrompt:
 class CoordinatorCollaborator:
     """An object that borrows the Coordinator's infrastructure for its own methods."""
 
-    def __init__(self, coordinator: "Coordinator") -> None:
+    def __init__(self, coordinator: "CoordinatorServices") -> None:
         self._coord = coordinator
 
     # ------------------------------------------------------------------ #
@@ -106,7 +139,7 @@ class CoordinatorCollaborator:
         return self._coord.backends
 
     @property
-    def state(self) -> "CoordinatorState":
+    def state(self):
         return self._coord.state
 
     @property
