@@ -10,6 +10,7 @@ from typing import Any, Iterable
 
 from hyperloom.inference_optimizer.protocol.intent import (
     ALLOWED_VERDICTS,
+    DEFAULT_IDLE_BODY,
     IntentType,
     IntentValidationError,
 )
@@ -40,7 +41,6 @@ ALLOWED_VERDICT_SOURCES: frozenset[str] = frozenset(
     }
 )
 
-DEFAULT_IDLE_BODY = "ok (critic)"
 DEFAULT_ADVICE_TOPIC = "advice"
 
 

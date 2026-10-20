@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from hyperloom.agents.critic.runtime.intent_envelope import DEFAULT_IDLE_BODY
+from hyperloom.inference_optimizer.protocol.intent import DEFAULT_IDLE_BODY
 
 from ..base import (
     RenderedSection,
