@@ -13,9 +13,9 @@ FINAL's share is left, and FINAL still runs. ``--max-llm-usd`` caps the dollars 
 ends with ``llm_budget_exhausted`` once their recorded spend reaches it, and FINAL still runs. Each call is priced from
 the price sheet, cached tokens at cache rates: a specialist launch's calls from its log when the launch ends, a launch
 cut short, lost or stopped included, so the stop can come up to one launch late, and each call of the scheduler's own
-judge and patch resolver as it returns. The rule gate's fix critic is not counted. A cap is a usage error when the
-price sheet has no rate for the model the specialists run on or the one the judge and the patch resolver ask, whose
-calls would record tokens only. ``--reuse-prelude DIR`` roots the session on the child session the PRELUDE of the
+judge, patch resolver and the rule gate's fix critic as it returns. A cap is a usage error when the price sheet has no
+rate for the model the specialists run on or the one the judge, the patch resolver and the fix critic ask, whose calls
+would record tokens only. ``--reuse-prelude DIR`` roots the session on the child session the PRELUDE of the
 earlier session in ``DIR`` rooted on instead of starting a child, and still measures the baseline; it is a usage error
 unless that session committed its root on the same workload and on the image ``HYPERLOOM_ACTIVE_IMAGE_DIGEST`` names.
 A session whose toolbox has fewer
@@ -43,6 +43,7 @@ import os
 import sys
 from collections.abc import Mapping, MutableMapping
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 
 from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV, benchmark_config_path
@@ -125,7 +126,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.0,
         help=(
-            "Dollars the session's recorded LLM calls, all but the fix critic's, may cost; EXPLORE ends there; 0 = none."
+            "Dollars the session's recorded LLM calls may cost; EXPLORE ends there; 0 = none."
             " Refused when the price sheet lists no rate for the judge's or the specialists' model."
         ),
     )
@@ -223,8 +224,8 @@ def require_workload_switch(workload: Workload, env: Mapping[str, str]) -> None:
 
 def require_priced_models(max_llm_usd: float, env: Mapping[str, str]) -> None:
     """Raise ValueError when ``max_llm_usd`` caps the session's LLM dollars and the price sheet lists no rate for the
-    model the judge and the patch resolver ask or the one the specialists of ``env`` run on: their calls would record
-    tokens only, which the cap cannot count."""
+    model the judge, the patch resolver and the fix critic ask or the one the specialists of ``env`` run on: their
+    calls would record tokens only, which the cap cannot count."""
 
     if not max_llm_usd:
         return
@@ -266,7 +267,8 @@ def session_services(recipe_kb: RemoteRecipeClient | None) -> SessionServices:
     model = default_model()
     judge = anthropic_completion(model, component=PROG, operation="judge")
     resolver = anthropic_completion(model, component=PROG, operation="patch_resolve")
-    return SessionServices(judge, resolver, recipe_kb, LlmCritic(anthropic_critic(model, component=PROG)))
+    critic = partial(LlmCritic, anthropic_critic(model, component=PROG))
+    return SessionServices(judge, resolver, recipe_kb, critic)
 
 
 def run_session(settings: RunSettings, peer_factory: PeerFactory, services: SessionServices) -> int:

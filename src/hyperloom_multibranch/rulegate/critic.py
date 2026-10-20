@@ -5,7 +5,8 @@
 target workload, so the fix matters for what the session serves?
 
 The review only ever refuses by default: a critic that gives no usable answer after one retry, or no critic at all,
-refuses the fix with the reason, and the candidate is judged on its performance alone.
+refuses the fix with the reason, and the candidate is judged on its performance alone. What each reply cost, an
+unreadable one included, goes to the usage sink the critic is built on as the critic's spend, with no branch.
 """
 
 from __future__ import annotations
@@ -18,12 +19,26 @@ from typing import Protocol
 
 from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom_multibranch.contracts.judgement import Judgement
+from hyperloom_multibranch.contracts.llm_prices import TokenCounts, price_of
+from hyperloom_multibranch.contracts.notebook.interfaces import UsageSink
+from hyperloom_multibranch.contracts.notebook.records import LlmUsage
+from hyperloom_multibranch.contracts.notebook.vocab import UsageSource
 from hyperloom_multibranch.rulegate.fix_case import CASE_SCRIPT, DIAGNOSIS_FILE, FixCase
 
 logger = logging.getLogger(__name__)
 
-#: ``(system, user) -> reply text``; raises :class:`CriticUnavailable` when the call fails.
-CriticCompletion = Callable[[str, str], Awaitable[str]]
+
+@dataclass(frozen=True)
+class CriticReply:
+    """The reply text, its tokens and what they cost, ``None`` for a model the price sheet does not list."""
+
+    text: str
+    tokens: TokenCounts
+    cost_usd: float | None
+
+
+#: ``(system, user) -> reply``; raises :class:`CriticUnavailable` when the call fails.
+CriticCompletion = Callable[[str, str], Awaitable[CriticReply]]
 
 #: One call and one retry, for a failed call or an unreadable answer alike.
 CRITIC_ATTEMPTS = 2
@@ -107,8 +122,11 @@ class NoCritic:
 
 
 class LlmCritic:
-    def __init__(self, complete: CriticCompletion) -> None:
+    """The critic over ``complete``; ``usage`` is the scheduler's, as only it may record spend with no branch."""
+
+    def __init__(self, complete: CriticCompletion, usage: UsageSink) -> None:
         self._complete = complete
+        self._usage = usage
 
     async def review(self, review: FixReview) -> CriticVerdict:
         user = _prompt(review)
@@ -119,8 +137,9 @@ class LlmCritic:
             except CriticUnavailable as exc:
                 failure = str(exc)
             else:
+                await self._usage.record_llm_usage(LlmUsage("", UsageSource.CRITIC, reply.cost_usd, reply.tokens))
                 try:
-                    return _verdict(reply)
+                    return _verdict(reply.text)
                 except CriticAnswerError as exc:
                     failure = str(exc)
             logger.warning("fix critic attempt %d of %d failed: %s", attempt, CRITIC_ATTEMPTS, failure)
@@ -161,9 +180,12 @@ def _verdict(reply: str) -> CriticVerdict:
 
 
 def anthropic_critic(model: str, *, component: str) -> CriticCompletion:
-    """A :data:`CriticCompletion` over ``llm_config``'s Anthropic transport, tagged with ``component``."""
+    """A :data:`CriticCompletion` over ``llm_config``'s Anthropic transport, tagged with ``component``, each reply
+    priced at ``model``'s rates, or unpriced when the price sheet does not list it."""
 
-    async def complete(system: str, user: str) -> str:
+    price = price_of(model)
+
+    async def complete(system: str, user: str) -> CriticReply:
         # Imported when called: what the multi-branch command imports must not load the LLM stack with it.
         import httpx
         from claude_agent_sdk import ClaudeSDKError
@@ -184,7 +206,8 @@ def anthropic_critic(model: str, *, component: str) -> CriticCompletion:
             result = await aanthropic_completion(request=request, component=component, operation="fix_critic")
         except transport_errors as exc:
             raise CriticUnavailable(f"{type(exc).__name__}: {exc}") from exc
-        return result.text
+        tokens = TokenCounts.from_anthropic_usage(result.usage if isinstance(result.usage, Mapping) else {})
+        return CriticReply(result.text, tokens, None if price is None else price.cost_usd(tokens))
 
     return complete
 
@@ -195,6 +218,7 @@ __all__ = [
     "CRITIC_TIMEOUT_SECONDS",
     "CriticAnswerError",
     "CriticCompletion",
+    "CriticReply",
     "CriticUnavailable",
     "CriticVerdict",
     "FixReview",

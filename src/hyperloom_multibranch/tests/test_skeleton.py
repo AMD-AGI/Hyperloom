@@ -49,6 +49,7 @@ from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.lifecycle import BranchTask
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
+from hyperloom_multibranch.contracts.notebook.interfaces import UsageSink
 from hyperloom_multibranch.contracts.notebook.records import (
     LlmUsage,
     QuarantineEvent,
@@ -67,8 +68,15 @@ from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.notebook.rsi.briefing import SessionBriefs
 from hyperloom_multibranch.notebook.tests.factories import delta, intent, request
-from hyperloom_multibranch.rulegate.critic import NoCritic
-from hyperloom_multibranch.rulegate.fix_case import FIX_CASE_ID
+from hyperloom_multibranch.rulegate.critic import (
+    CriticReply,
+    FixReview,
+    FixReviewer,
+    LlmCritic,
+    NoCritic,
+    ReproVerdicts,
+)
+from hyperloom_multibranch.rulegate.fix_case import FIX_CASE_ID, FixCase
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.regression import FixProof, ReproRun
 from hyperloom_multibranch.rulegate.service import Polling
@@ -260,6 +268,7 @@ class Stage:
     toolbox_type: type[RecordingToolbox] = RecordingToolbox
     settings: RunSettings = SETTINGS
     repo_type: type[HeldGitRepo] = HeldGitRepo
+    critic: Callable[[UsageSink], FixReviewer] = lambda _usage: NoCritic()
     toolbox: RecordingToolbox = field(init=False)
     sessions: RecordedSessions = field(init=False)
     repo: HeldGitRepo = field(init=False)
@@ -371,7 +380,7 @@ class Stage:
             self.settings,
             self.factory,
             host,
-            SessionServices(self.judge, ScriptedCompletion(), self.recipe_kb, NoCritic()),
+            SessionServices(self.judge, ScriptedCompletion(), self.recipe_kb, self.critic),
         )
         return await session.run()
 
@@ -772,6 +781,33 @@ async def test_the_judge_s_own_llm_dollars_count_against_the_llm_budget(tmp_path
     snapshot = await stage.handle(Role.OBSERVER).snapshot()
     assert snapshot.llm_usd == LAUNCH_USD
     assert [record.usage.source for record in snapshot.llm_usage] == [UsageSource.JUDGE]
+
+
+async def test_the_fix_critic_s_llm_dollars_count_against_the_llm_budget_as_the_scheduler_s(tmp_path: Path) -> None:
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.settings = replace(SETTINGS, max_llm_usd=SMALL_LLM_USD)
+    stage.judge = ScriptedCompletion([OPENING])
+
+    async def critic_model(system: str, user: str) -> CriticReply:
+        return CriticReply(json.dumps({"reachable": True, "reason": "the workload sends it"}), JUDGE_TOKENS, LAUNCH_USD)
+
+    stage.critic = lambda usage: LlmCritic(critic_model, usage)
+    fixed = Judgement(Verdict.REGRESSED, -2.0, 2.0, ("fix-1",), {GRADED_OUTPUT: 980.0}, True, fixes_correctness=True)
+    review = FixReview(
+        delta(), {}, FixCase("exit 0\n", "a defect"), "the workload", fixed, ReproVerdicts(REPRODUCED, NOT_REPRODUCED)
+    )
+
+    async def review_a_fix(branch: str) -> None:
+        await stage.setup.critic.review(review)
+
+    stage.steps = {"b01": review_a_fix}
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error, outcome.exit_code) == (SessionStopReason.LLM_BUDGET_EXHAUSTED, "", 0)
+    snapshot = await stage.handle(Role.OBSERVER).snapshot()
+    critic = [record.usage for record in snapshot.llm_usage if record.usage.source is UsageSource.CRITIC]
+    assert critic == [LlmUsage("", UsageSource.CRITIC, LAUNCH_USD, JUDGE_TOKENS)]
 
 
 async def test_a_judge_soft_stop_ends_explore_early_and_still_runs_final(tmp_path: Path) -> None:

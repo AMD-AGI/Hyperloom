@@ -24,6 +24,7 @@ import importlib.metadata
 import logging
 import math
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -33,6 +34,7 @@ from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.measure.versions import socket_versions
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient
 from hyperloom_multibranch.contracts.notebook import Role, Writer
+from hyperloom_multibranch.contracts.notebook.interfaces import UsageSink
 from hyperloom_multibranch.contracts.notebook.records import ManifestFingerprint
 from hyperloom_multibranch.contracts.notebook.vocab import UsageSource
 from hyperloom_multibranch.notebook import LocalNotebook
@@ -136,12 +138,13 @@ class SessionHost:
 class SessionServices:
     """What the session calls out to besides its peers: the completions the judge and the patch resolver ask, the
     Recipe KB PRELUDE reads the warm-start leads from and CLOSE writes the final recipe back to (``None`` when none is
-    configured), and the critic the rule gate asks whether a proven correctness fix matters under the workload."""
+    configured), and what builds the critic the rule gate asks whether a proven correctness fix matters under the
+    workload, on the scheduler's notebook handle its spend is recorded through."""
 
     judge_completion: Completion
     resolver_completion: Completion
     recipe_kb: RemoteRecipeClient | None
-    critic: FixReviewer
+    critic: Callable[[UsageSink], FixReviewer]
 
 
 class Session:
@@ -161,7 +164,9 @@ class Session:
         self._decisions = DecisionLog(layout.decisions, clock)
         desk = ForkDesk(self._roster, self._decisions, clock)
         blobs = LocalBlobStore(layout.blobs)
-        peers = peer_factory(PeerSetup(layout, settings.workload, desk, processes, blobs, services.critic))
+        peers = peer_factory(
+            PeerSetup(layout, settings.workload, desk, processes, blobs, services.critic(self._notebook))
+        )
         context = SchedulerContext(
             layout, self._roster, self._notebook, self._decisions, processes, clock, desk, peers.reserved
         )
