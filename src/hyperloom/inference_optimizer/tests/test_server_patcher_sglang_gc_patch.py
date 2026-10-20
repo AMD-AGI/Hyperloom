@@ -141,3 +141,15 @@ def test_local_process_without_sglang_reports_failure(monkeypatch):
     monkeypatch.setattr(_server_patcher, "_gc_patch_deferred_to_pods", lambda: False)
 
     assert ensure_sglang_patched_for_tracelens() is False
+
+
+def test_node_scope_failure_propagates_instead_of_patching_the_controller(monkeypatch):
+    import pytest
+
+    def _boom():
+        raise RuntimeError("node scope unreadable")
+
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._multi_node_env.is_multi_node", _boom)
+
+    with pytest.raises(RuntimeError, match="node scope unreadable"):
+        _server_patcher._gc_patch_deferred_to_pods()

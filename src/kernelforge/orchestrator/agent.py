@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from dataclasses import dataclass, field, replace
@@ -31,6 +32,8 @@ from kernelforge.evaluation.scoring import (
     keep_t_critical,
 )
 from kernelforge.tracker.usage import UsageAccumulator
+
+log = logging.getLogger(__name__)
 
 # Repository / image_kernel tasks ship the correctness reference + tests INSIDE the repo tree (e.g. AITER's
 # op_tests/.../test_<op>.py), which the in-session gate's default protected globs do not catch.
@@ -123,7 +126,8 @@ def _resolve_implementer_backend(config: Config, agent_backend: str | None, usag
             # not to the one being switched to; carrying it across the switch
             # is how a Claude model id reaches the OpenAI-protocol gateway.
             model=resolve_agent_model(agent_backend),
-            settings=config.agent_runtime_settings(),
+            # The executable and provider options, like the model, belong to the resolved provider.
+            settings=replace(config.agent_runtime_settings(), executable="", options={}),
         )
     requested_backend = runtime.provider
     precheck_cwd = (
@@ -239,7 +243,8 @@ async def _run_outer_gate_turns(gate, backend, run_spec: AgentRunSpec, run_resul
                 feedback,
                 usage=usage,
             )
-        except Exception as exc:  # noqa: BLE001 - outer gate remains final
+        except Exception as exc:  # noqa: BLE001 - SDK errors are unbounded; the outer gate stays final
+            log.warning("outer-gate resume failed: %s", exc)
             if getattr(exc, "agent_safety_rejection", False):
                 integrity_error = exc
             gate.end_reason = "resume_error"

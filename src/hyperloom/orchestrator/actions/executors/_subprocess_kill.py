@@ -358,8 +358,8 @@ class _StreamCapture:
             return
         try:
             self._on_output()
-        except Exception:  # noqa: BLE001 - liveness reporting never breaks capture
-            pass
+        except Exception as exc:  # noqa: BLE001 - liveness reporting never breaks capture
+            log.debug("_subprocess_kill: liveness callback failed: %s", exc)
 
     def _join(self, chunks: list[str | bytes]) -> str | bytes:
         """Concatenate captured chunks using the appropriate empty separator."""
@@ -400,8 +400,8 @@ class _StreamCapture:
             else:
                 mirror.write(chunk)
             mirror.flush()
-        except Exception:  # noqa: BLE001 - logging must not break subprocess
-            pass
+        except (OSError, ValueError):
+            pass  # a closed or broken mirror stream must not stop the capture
 
 
 # Glob (relative to the watched path's directory) for nested per-run server logs Magpie writes when its wrapper
