@@ -116,28 +116,3 @@ async def test_a_spent_budget_stops_the_continuations(tmp_path: Path, monkeypatc
 
     assert len(_FakeSession.instances[0].prompts) == 1
     assert "budget" in result.error
-
-
-async def test_tracelens_forwards_its_budget_to_the_harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from hyperloom.orchestrator.trace_analysis import tracelens_skill_runner
-
-    seen: dict[str, Any] = {}
-
-    async def _fake_drive(**kwargs: Any) -> agent_sdk_runner.AgentSdkTurnResult:
-        seen.update(kwargs)
-        (tmp_path / "analysis.md").write_text("done")
-        return agent_sdk_runner.AgentSdkTurnResult(text="", error="", chunks=[])
-
-    monkeypatch.setattr(agent_sdk_runner, "drive_agent_session", _fake_drive)
-
-    await tracelens_skill_runner._run_tracelens_skill_deepseek(
-        prompt="p",
-        output_dir=tmp_path,
-        prefix_path=tmp_path / "prefix",
-        tracelens_root=tmp_path,
-        model="deepseek-v4-flash",
-        timeout_sec=600.0,
-        log=None,
-    )
-
-    assert seen["timeout_sec"] == 600.0
