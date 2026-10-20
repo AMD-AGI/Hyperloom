@@ -64,6 +64,7 @@ from .agent_cli_config import (
     _codex_provider_resolver_overlay,
     _write_private_codex_config,
 )
+from .dsh_launch import DshLaunchRequest, build_dsh_launch, harvest_dsh_trace, resolve_dsh_executable
 from ..actions.cancel_channel import cancel_scope_listener, current_cancel_scope
 from ..bringup.trees import head_commit
 from ..loop.sub_agent_runner import ExecutionCleanupUnconfirmed
@@ -850,9 +851,15 @@ class SpecialistSubprocessDispatcher:
         prompt_file.write_text(request.user_prompt, encoding="utf-8")
         prompt_file.chmod(0o600)
         if backend == AGENT_BACKEND_DEEPSEEK:
-            from .dsh_launch import build_dsh_launch
-
-            launch = build_dsh_launch(self.config, request, env)
+            dsh_request = DshLaunchRequest(
+                executable=resolve_dsh_executable(self.config.dsh_executable),
+                model=self.config.model,
+                mcp_config_path=self.config.mcp_config_path,
+                workspace=request.workspace,
+                system_prompt=request.system_prompt,
+                user_prompt=request.user_prompt,
+            )
+            launch = build_dsh_launch(dsh_request, env)
             env.update(launch.env_additions)
             return launch.cmd
         if backend == AGENT_BACKEND_CODEX:
@@ -888,8 +895,6 @@ class SpecialistSubprocessDispatcher:
         """
         process_log = workspace / _PROCESS_LOG_NAME
         if backend == AGENT_BACKEND_DEEPSEEK:
-            from .dsh_launch import harvest_dsh_trace
-
             return harvest_dsh_trace(workspace)
         if backend == AGENT_BACKEND_CODEX:
             structured_error = parse_codex_jsonl_error(process_log)

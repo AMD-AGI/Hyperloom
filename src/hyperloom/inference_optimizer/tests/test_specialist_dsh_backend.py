@@ -327,7 +327,7 @@ async def test_a_missing_dsh_cli_fails_the_task(
 ) -> None:
     _pin_provider_env(monkeypatch, _OPENAI_ENV)
     _select_deepseek(monkeypatch)
-    monkeypatch.setattr(dsh_launch, "resolve_dsh_executable", lambda explicit="": "")
+    monkeypatch.setattr(sp, "resolve_dsh_executable", lambda explicit="": "")
     monkeypatch.setattr(sp.subprocess, "Popen", lambda *_a, **_k: pytest.fail("no dsh means no spawn"))
 
     result = await _run(_dispatcher(""), tmp_path)
@@ -375,18 +375,16 @@ def test_mcp_servers_become_dsh_client_rows_without_their_secrets(
     )
     monkeypatch.setenv("PR_TOKEN", "pr-secret")
     monkeypatch.setenv("TOOL_KEY", "tool-secret")
-    config = SpecialistSubprocessConfig(dsh_executable="/usr/bin/dsh", mcp_config_path=str(mcp_config))
-    spawn = sp.SpecialistSpawn(
-        task_id="t-mcp",
+    request = dsh_launch.DshLaunchRequest(
+        executable="/usr/bin/dsh",
+        model="deepseek-v4-flash",
+        mcp_config_path=str(mcp_config),
         workspace=tmp_path / "workspace",
-        worktree=None,
-        worktree_base=None,
         system_prompt="sys",
         user_prompt="usr",
-        max_turns=1,
     )
 
-    launch = dsh_launch.build_dsh_launch(config, spawn, dict(_OPENAI_ENV))
+    launch = dsh_launch.build_dsh_launch(request, dict(_OPENAI_ENV))
     cmd, env_additions = launch.cmd, launch.env_additions
 
     patch = Path(cmd[cmd.index("--patch") + 1]).read_text(encoding="utf-8")
@@ -429,7 +427,7 @@ def test_the_specialist_executor_pins_the_dsh_cli_for_a_deepseek_selection(
 
     _pin_provider_env(monkeypatch, _OPENAI_ENV)
     _select_deepseek(monkeypatch)
-    monkeypatch.setattr(dsh_launch, "resolve_dsh_executable", lambda explicit="": "/opt/venv/bin/dsh")
+    monkeypatch.setattr(sp, "resolve_dsh_executable", lambda explicit="": "/opt/venv/bin/dsh")
     captured: dict[str, Any] = {}
 
     class _Runner:
@@ -461,7 +459,7 @@ def test_the_specialist_executor_refuses_to_start_without_a_dsh_cli(
 
     _pin_provider_env(monkeypatch, _OPENAI_ENV)
     _select_deepseek(monkeypatch)
-    monkeypatch.setattr(dsh_launch, "resolve_dsh_executable", lambda explicit="": "")
+    monkeypatch.setattr(sp, "resolve_dsh_executable", lambda explicit="": "")
     args = argparse.Namespace(
         claude_model="claude-opus-4-6",
         codex_model="gpt-5.5",

@@ -34,7 +34,6 @@ from .agent_cli_config import (
     _private_mcp_env_name,
     _resolve_env_references,
 )
-from .subprocess_ import SpecialistSpawn, SpecialistSubprocessConfig
 
 # ``dsh --profile headless`` reads its task from argv alone, and Linux caps one argument at MAX_ARG_STRLEN (32 pages).
 _TASK_ARG_LIMIT_BYTES = 32 * 4096
@@ -46,6 +45,27 @@ _DEFAULT_INSTRUCTION_BYTES = 65536
 _PRIVATE_DIR_MODE = 0o700
 _PRIVATE_FILE_MODE = 0o600
 _ENCODING = "utf-8"
+
+
+@dataclass(frozen=True)
+class DshLaunchRequest:
+    """What one specialist's headless ``dsh`` run is launched with.
+
+    Attributes:
+        executable: The resolved ``dsh`` CLI, ``""`` when none exists.
+        model: Harness model id; empty takes the harness default model.
+        mcp_config_path: Claude-style MCP config to translate, if any.
+        workspace: The task workspace; its ``.dsh`` is the run's ``DSH_HOME``.
+        system_prompt: Sent as the run's baseline instructions.
+        user_prompt: The headless task.
+    """
+
+    executable: str
+    model: str
+    mcp_config_path: str | None
+    workspace: Path
+    system_prompt: str
+    user_prompt: str
 
 
 @dataclass(frozen=True)
@@ -282,11 +302,7 @@ def _prepare_home(home: Path, *, instructions: str, patch: str) -> Path:
     return patch_path
 
 
-def build_dsh_launch(
-    config: SpecialistSubprocessConfig,
-    request: SpecialistSpawn,
-    base_env: Mapping[str, str],
-) -> DshLaunch:
+def build_dsh_launch(request: DshLaunchRequest, base_env: Mapping[str, str]) -> DshLaunch:
     """Build the ``dsh --profile headless`` argv of one specialist task and its child-only env values.
 
     Raises:
@@ -294,7 +310,7 @@ def build_dsh_launch(
             unset, the user prompt cannot travel as one argument, or the MCP
             config or the private home cannot be prepared.
     """
-    executable = resolve_dsh_executable(config.dsh_executable)
+    executable = request.executable
     if not executable:
         raise SpecialistAgentUnavailableError(
             "no dsh CLI found: set SpecialistSubprocessConfig.dsh_executable, install `dsh` on $PATH, "
@@ -312,7 +328,7 @@ def build_dsh_launch(
         "DSH_TELEMETRY_MODE": "DISABLED",
     }
     source = {**os.environ, **_codex_provider_resolver_overlay(base_env)}
-    mcp = _mcp_rows(config.mcp_config_path, source=source, protected_env_names=frozenset(env_additions))
+    mcp = _mcp_rows(request.mcp_config_path, source=source, protected_env_names=frozenset(env_additions))
     env_additions.update(mcp.env_additions)
     instructions = request.system_prompt or ""
     home = dsh_home(request.workspace)
@@ -320,7 +336,7 @@ def build_dsh_launch(
         home,
         instructions=instructions,
         patch=_render_patch(
-            model=config.model or DEFAULT_DEEPSEEK_HARNESS_MODEL,
+            model=request.model or DEFAULT_DEEPSEEK_HARNESS_MODEL,
             instruction_bytes=len(instructions.encode(_ENCODING)),
             mcp_rows=mcp.rows,
         ),

@@ -296,7 +296,7 @@ class DeepSeekSession:
         closer = getattr(harness, "close", None) or getattr(harness, "shutdown", None)
         if closer is None:
             return
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(OSError):
             await asyncio.to_thread(closer)
 
 

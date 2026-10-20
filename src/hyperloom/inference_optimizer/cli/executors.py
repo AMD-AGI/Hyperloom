@@ -76,8 +76,7 @@ def _specialist_agent_cli_config(args: argparse.Namespace) -> dict[str, Any]:
         resolve_forge_llm_model,
     )
     from hyperloom.orchestrator.roles.claude import resolve_claude_executable
-    from hyperloom.orchestrator.specialists.dsh_launch import resolve_dsh_executable
-    from hyperloom.orchestrator.specialists.subprocess_ import resolve_codex_executable
+    from hyperloom.orchestrator.specialists.subprocess_ import resolve_codex_executable, resolve_dsh_executable
 
     backend = resolve_agent_backend()
     config: dict[str, Any] = {"agent_backend": backend, "claude_executable": "claude"}

@@ -368,7 +368,7 @@ class DeepSeekHarnessBackend:
             )
             self._runtimes[key] = harness
         for runtime in stale:
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(OSError):
                 runtime.close()
         return harness
 
@@ -405,7 +405,7 @@ class DeepSeekHarnessBackend:
             for key in [k for k, runtime in self._runtimes.items() if runtime is harness]:
                 del self._runtimes[key]
             self._forget_sessions_of([harness])
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(OSError):
             harness.close()
 
     def _forget_sessions_of(self, runtimes: list[Any]) -> None:
@@ -425,7 +425,7 @@ class DeepSeekHarnessBackend:
             self._runtimes.clear()
             self._session_runtimes.clear()
         for harness in runtimes:
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(OSError):
                 harness.close()
 
     async def _execute(
@@ -479,7 +479,7 @@ class DeepSeekHarnessBackend:
         except Exception:
             # verify() restores the baseline itself before raising a rejection, so this second call only covers the
             # paths that fail before it gets there.
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(Exception):  # broad-suppress: rollback must not shadow the verify error
                 guard.rollback()
             raise
         result.file_changes = actual_changes
