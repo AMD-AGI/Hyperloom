@@ -431,18 +431,11 @@ def make_agent_fn(
 
     # Load the kernel backend's prompt as extra domain context; without it the agent gets only the generic
     # instructions below and misses backend discipline (e.g. ck's tile/pipeline tuning + stale-.cuda.o cleaning).
-    kernel_backend_context = ""
-    try:
-        from kernelforge.kernel_backends.base import build_single_kernel_backend_prompt
+    from kernelforge.kernel_backends.base import build_single_kernel_backend_prompt
 
-        kernel_backend_context = build_single_kernel_backend_prompt(
-            config, kernel_backend_name, task_type=task_type, source_paths=source_files
-        )
-    except Exception as e:  # noqa: BLE001
-        print(
-            f"  Warning: kernel_backend prompt load failed for {kernel_backend_name} ({e}); using generic prompt",
-            file=sys.stderr,
-        )
+    kernel_backend_context = build_single_kernel_backend_prompt(
+        config, kernel_backend_name, task_type=task_type, source_paths=source_files
+    )
 
     # The backend prompts name the STEPS (build, run the driver, profile) but not the mechanism, because only this
     # loop knows it: this agent has Bash and the driver documented above, and no build/test/bench/pmc tools. So this

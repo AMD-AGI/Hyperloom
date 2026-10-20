@@ -25,6 +25,8 @@ from kernelforge.rewrite_by_flydsl.identity import resolve_identity
 from kernelforge.rewrite_by_flydsl.measurement import FlydslMeasurement
 from kernelforge.rewrite_by_flydsl.port_loop import check_flydsl_port
 from kernelforge.knowledge.kb_store.record_store import (
+    KBStoreError,
+    RewriteRecordError,
     RewriteRecordStore,
     create_rewrite_record_store,
 )
@@ -90,7 +92,6 @@ class _ReadPlan:
     store: RewriteRecordStore | None
     candidates: list[dict[str, Any]]
     read_reason: str
-    read_error: str
 
 
 def _sha256(path: str | Path) -> str:
@@ -123,51 +124,38 @@ def _read_top_candidates(
 ) -> _ReadPlan:
     store = create_rewrite_record_store(config)
     if store is None:
-        return _ReadPlan(None, [], "not_configured", "")
+        return _ReadPlan(None, [], "not_configured")
     gpu_type = str(config.gpu_type or "").strip()
     if not gpu_type:
-        return _ReadPlan(None, [], "missing_gpu_type", "")
-    try:
-        identity, canonical_id, _signature, _implementation = resolve_identity(
-            spec,
-            gpu=gpu_type,
-            source_text=_source_text(spec),
+        return _ReadPlan(None, [], "missing_gpu_type")
+    identity, canonical_id, _signature, _implementation = resolve_identity(
+        spec,
+        gpu=gpu_type,
+        source_text=_source_text(spec),
+    )
+    resolved = [(canonical_id, candidate) for candidate in store.candidates(canonical_id, limit=top_k)]
+    if not resolved:
+        searched = store.search_identities(identity, limit=300)
+        for fallback_id in rank_fallback_identities(identity, searched):
+            fallback = store.candidates(fallback_id, limit=top_k)
+            if fallback:
+                resolved = [(fallback_id, candidate) for candidate in fallback]
+                break
+    candidates: list[dict[str, Any]] = []
+    for candidate_canonical_id, candidate in resolved:
+        value = candidate.knowledge.get("value")
+        if not isinstance(value, dict):
+            continue
+        candidates.append(
+            {
+                "canonical_id": candidate_canonical_id,
+                "session_id": candidate.session_id,
+                "solution_slug": f"{candidate_canonical_id}/{candidate.session_id}",
+                "speedup": candidate.speedup,
+                "attrs": value,
+            }
         )
-        resolved = [(canonical_id, candidate) for candidate in store.candidates(canonical_id, limit=top_k)]
-        if not resolved:
-            searched = store.search_identities(identity, limit=300)
-            for fallback_id in rank_fallback_identities(identity, searched):
-                fallback = store.candidates(fallback_id, limit=top_k)
-                if fallback:
-                    resolved = [(fallback_id, candidate) for candidate in fallback]
-                    break
-        candidates: list[dict[str, Any]] = []
-        for candidate_canonical_id, candidate in resolved:
-            value = candidate.knowledge.get("value")
-            if not isinstance(value, dict):
-                continue
-            candidates.append(
-                {
-                    "canonical_id": candidate_canonical_id,
-                    "session_id": candidate.session_id,
-                    "solution_slug": f"{candidate_canonical_id}/{candidate.session_id}",
-                    "speedup": candidate.speedup,
-                    "attrs": value,
-                }
-            )
-        return _ReadPlan(
-            store,
-            candidates,
-            "hit" if candidates else "no_candidates",
-            "",
-        )
-    except Exception as error:  # noqa: BLE001 - KB read must cold-start
-        return _ReadPlan(
-            None,
-            [],
-            "read_error",
-            sanitize_read_error(error, secrets=_secrets(config)),
-        )
+    return _ReadPlan(store, candidates, "hit" if candidates else "no_candidates")
 
 
 def _candidate_content(plan: _ReadPlan, candidate: dict[str, Any]) -> bytes:
@@ -183,7 +171,7 @@ def _candidate_content(plan: _ReadPlan, candidate: dict[str, Any]) -> bytes:
             candidate["session_id"],
             rel_path,
         )
-    except Exception:  # noqa: BLE001 - an unreadable artifact is just a miss
+    except (KBStoreError, RewriteRecordError, OSError):
         return b""
 
 
@@ -343,10 +331,7 @@ async def try_flydsl_kb_warmstart(
         target.config,
         top_k=warmstart_policy.top_k(),
     )
-    result = RewriteKbReadResult(
-        read_reason=plan.read_reason,
-        read_error=plan.read_error,
-    )
+    result = RewriteKbReadResult(read_reason=plan.read_reason)
     original = Path(spec.flydsl_kernel).read_bytes() if Path(spec.flydsl_kernel).is_file() else None
     trials = _Trials(target, source_case_ms, stop_at_unix, time.monotonic() + warmstart_policy.budget_sec())
 
@@ -460,7 +445,7 @@ def write_flydsl_kb_solution(
             "speedup": speedup,
             "champion": promoted,
         }
-    except Exception as error:  # noqa: BLE001 - KB write never breaks rewrite
+    except (KBStoreError, RewriteRecordError, OSError, ValueError) as error:
         return {
             "written": False,
             "reason": sanitize_read_error(error, secrets=_secrets(config)),

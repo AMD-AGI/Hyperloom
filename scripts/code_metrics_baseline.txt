@@ -241,7 +241,7 @@ cognitive-complexity src/kernelforge/loop/runner.py::IterationLoop._run_locked 3
 cognitive-complexity src/kernelforge/loop/runner.py::IterationLoop.run_one_iteration 39
 cognitive-complexity src/kernelforge/loop/task_preflight.py::_preflight_async 41
 cognitive-complexity src/kernelforge/loop/task_preparer.py::prepare_task 37
-cognitive-complexity src/kernelforge/orchestrator/agent.py::make_agent_fn 73
+cognitive-complexity src/kernelforge/orchestrator/agent.py::make_agent_fn 72
 cognitive-complexity src/kernelforge/orchestrator/analysis.py::AnalysisAgentService._write_artifact_catalog 32
 cognitive-complexity src/kernelforge/orchestrator/analysis.py::AnalysisAgentService.apply_checkpoint 39
 cognitive-complexity src/kernelforge/orchestrator/analysis.py::AnalysisAgentService.ensure_bundle 39
@@ -827,7 +827,7 @@ function-lines src/kernelforge/gemm_tune/tier3/dispatch.py::_Bf16DenseAdapter._b
 function-lines src/kernelforge/gemm_tune/tier3/generate.py::generate_tuner 81
 function-lines src/kernelforge/gemm_tune/tier3/runner.py::attempt_generated_tuner 122
 function-lines src/kernelforge/gemm_tune/tune_robustness.py::run_isolated 108
-function-lines src/kernelforge/gemm_tune/tuners/_aiter_dense_common.py::_cap_splitk_to_serve_safe 96
+function-lines src/kernelforge/gemm_tune/tuners/_aiter_dense_common.py::_cap_splitk_to_serve_safe 93
 function-lines src/kernelforge/gemm_tune/tuners/_aiter_dense_common.py::run_aiter_dense_tuner 165
 function-lines src/kernelforge/gemm_tune/tuners/fmoe_ck.py::FmoeCKTuner.run 137
 function-lines src/kernelforge/gemm_tune/tuners/sglang_dense_bf16.py::SglangDenseBf16Tuner.run 213
@@ -880,7 +880,7 @@ function-lines src/kernelforge/loop/runner.py::IterationLoop.run_one_iteration 2
 function-lines src/kernelforge/loop/task_preflight.py::_count_graph_replays 85
 function-lines src/kernelforge/loop/task_preflight.py::_preflight_async 195
 function-lines src/kernelforge/loop/task_preparer.py::prepare_task 340
-function-lines src/kernelforge/orchestrator/agent.py::make_agent_fn 319
+function-lines src/kernelforge/orchestrator/agent.py::make_agent_fn 312
 function-lines src/kernelforge/orchestrator/agent.py::make_agent_fn.agent_fn 194
 function-lines src/kernelforge/orchestrator/analysis.py::AnalysisAgentService._prompts 227
 function-lines src/kernelforge/orchestrator/analysis.py::AnalysisAgentService._run_analysis_session 101
@@ -897,7 +897,7 @@ function-lines src/kernelforge/orchestrator/specialist_probe.py::probe_variant 2
 function-lines src/kernelforge/orchestrator/specialists.py::SpecialistAgent.run 104
 function-lines src/kernelforge/rewrite_by_flydsl/applyback.py::_publish_patch 115
 function-lines src/kernelforge/rewrite_by_flydsl/kb.py::write_flydsl_kb_solution 85
-function-lines src/kernelforge/rewrite_by_flydsl/optimize.py::run_optimize 126
+function-lines src/kernelforge/rewrite_by_flydsl/optimize.py::run_optimize 125
 function-lines src/kernelforge/rewrite_by_flydsl/port_loop.py::run_port_loop 166
 function-lines src/kernelforge/rewrite_by_flydsl/runner.py::run_rewrite 303
 module-lines src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py 2168
@@ -928,7 +928,7 @@ module-lines src/hyperloom/orchestrator/loop/intent_router.py 1423
 module-lines src/hyperloom/orchestrator/loop/writeback.py 4748
 module-lines src/hyperloom/orchestrator/phases/framework.py 3139
 module-lines src/hyperloom/orchestrator/phases/kernel.py 4227
-module-lines src/hyperloom/orchestrator/phases/machine_state.py 2131
+module-lines src/hyperloom/orchestrator/phases/machine_state.py 2128
 module-lines src/hyperloom/orchestrator/phases/prelude.py 2640
 module-lines src/hyperloom/orchestrator/policy/gate.py 1588
 module-lines src/hyperloom/orchestrator/prompts/prompt_builder.py 1205
@@ -949,7 +949,7 @@ module-lines src/kernelforge/loop/knowledge_integration.py 1457
 module-lines src/kernelforge/loop/runner.py 6051
 module-lines src/kernelforge/loop/task_preparer.py 1299
 module-lines src/kernelforge/orchestrator/analysis.py 2080
-module-lines src/kernelforge/orchestrator/orchestration.py 1828
+module-lines src/kernelforge/orchestrator/orchestration.py 1831
 nested-blocks src/hyperloom/inference_optimizer/framework_paths.py::_discover_installed_framework_roots 6
 nested-blocks src/hyperloom/inference_optimizer/trace/tool_events.py::stream_json_tool_events 6
 nested-blocks src/hyperloom/orchestrator/actions/executors/_kv_metrics.py::_read_aiperf_aggregate_json 6

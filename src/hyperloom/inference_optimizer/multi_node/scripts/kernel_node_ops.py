@@ -61,7 +61,7 @@ def _do_apply(a: argparse.Namespace) -> int:
     shutil.copy2(target, backup_path)
     try:
         data = base64.b64decode(a.patch_b64.encode("ascii"))
-    except Exception as exc:  # noqa: BLE001
+    except ValueError as exc:
         return _emit({"status": "failed", "host": host, "error": f"patch_b64 not valid base64: {exc!r}"})
     jit_build_dir = str(getattr(a, "jit_build_dir", "") or "")
     jit_backup = invalidate_aiter_jit_build(
