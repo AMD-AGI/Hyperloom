@@ -69,51 +69,57 @@ class AnalysisRuntimeMixin(AnalysisEvidenceMixin):
         )
 
     def _record_analysis_result(self, iteration: int, **fields) -> None:
-        """Append one analysis_result event, or no-op when there is no state store."""
+        """Append one analysis_result event when a state store is attached."""
         if getattr(self, "state_store", None) is None:
             return
         self.state_store.append_event(make_event("analysis_result", iteration, **fields))
 
-    def _analysis_attempt_standing(self, *, profiling_enabled: bool) -> tuple[str, str]:
-        """``(evidence_status, last_attempt_status)`` for the bundle ``ensure_bundle`` just returned."""
-        outcome = self._analysis_bundle.outcome
-        if not profiling_enabled:
-            return outcome.available_tier or "static", "success"
-        if self._analysis_bundle.manifest["status"] == "PARTIAL" and not outcome.upgrade_exhausted:
-            return "partial", "partial"
-        if self._analysis_bundle.manifest["status"] == "PARTIAL":
-            return "partial_exhausted", "success"
-        return outcome.available_tier or "ready", "success"
-
-    def _adopt_analysis_bundle(self, context, decision, planning_iteration, *, profiling_enabled: bool) -> None:
-        """Publish the just-built bundle into run_state and one analysis_result event."""
-        evidence_status, attempt_status = self._analysis_attempt_standing(profiling_enabled=profiling_enabled)
+    def _finish_successful_refresh(self, context, decision, planning_iteration, analysis_service) -> None:
+        """Record the just-built bundle on run_state and emit its analysis_result event."""
+        outcome = getattr(self._analysis_bundle, "outcome", None)
+        published = (
+            outcome is not None and outcome.checkpoint_level == "published"
+        ) or self._published_analysis_bundle_root(context.analysis_commit) is not None
+        manifest = getattr(self._analysis_bundle, "manifest", {}) or {}
+        manifest_status = str(manifest.get("status") or "READY").upper()
+        available_tier = str(getattr(outcome, "available_tier", "") or "")
+        upgrade_exhausted = bool(getattr(outcome, "upgrade_exhausted", False))
+        if not getattr(analysis_service, "profiling_enabled", True):
+            evidence_status, attempt_status = available_tier or "static", "success"
+        elif manifest_status == "PARTIAL" and not upgrade_exhausted:
+            evidence_status, attempt_status = "partial", "partial"
+        elif manifest_status == "PARTIAL":
+            evidence_status, attempt_status = "partial_exhausted", "success"
+        else:
+            evidence_status, attempt_status = available_tier or "ready", "success"
         analysis_state = self.run_state.analysis
-        self._last_published_analysis_commit = context.analysis_commit
-        analysis_state.evidence_commit = context.analysis_commit
-        analysis_state.evidence_mean_case_speedup = self.best_mean_case_speedup or 1.0
-        analysis_state.evidence_status = evidence_status
+        if published:
+            self._last_published_analysis_commit = context.analysis_commit
+            analysis_state.evidence_commit = context.analysis_commit
+            analysis_state.evidence_mean_case_speedup = self.best_mean_case_speedup or 1.0
+            analysis_state.evidence_status = evidence_status
         analysis_state.last_attempt_status = attempt_status
         event_payload = {
-            "status": "published",
+            "status": "published" if published else "partial",
             "analysis_commit": context.analysis_commit,
             "artifact_path": str(self._analysis_bundle.root),
             "refresh_reasons": list(decision.reasons),
             "mean_case_speedup_at_collection": (self.best_mean_case_speedup or 1.0),
         }
-        event_payload.update(self._analysis_bundle.outcome.to_dict())
+        if outcome is not None:
+            event_payload.update(outcome.to_dict())
         self._record_analysis_result(planning_iteration, **event_payload)
         print(f"  [analysis] ready: {self._analysis_bundle.root}")
 
-    async def _refresh_analysis_bundle(self, analysis_service, context, decision, planning_iteration, incremental):
-        """Run ensure_bundle, adopt the result or record exhaustion/failure, and return the pre-refresh stale context."""
+    async def _run_analysis_refresh(self, analysis_service, context, decision, planning_iteration, incremental):
+        """ensure_bundle plus outcome recording; return the pre-refresh evidence context for failure fallback."""
         analysis_state = self.run_state.analysis
         analysis_state.last_attempt_commit = context.analysis_commit
         analysis_state.last_attempt_status = "running"
         analysis_state.last_attempt_iteration = planning_iteration
         stale_context = self._apply_last_analysis_evidence(context)
         self._analysis_bundle = None
-        requested_tier = "profiled" if analysis_service.profiling_enabled else "static"
+        requested_tier = "profiled" if getattr(analysis_service, "profiling_enabled", True) else "static"
         try:
             self._analysis_bundle = await analysis_service.ensure_bundle(
                 context,
@@ -122,9 +128,7 @@ class AnalysisRuntimeMixin(AnalysisEvidenceMixin):
                 deadline_unix=self._analysis_deadline_unix(),
                 incremental=incremental,
             )
-            self._adopt_analysis_bundle(
-                context, decision, planning_iteration, profiling_enabled=analysis_service.profiling_enabled
-            )
+            self._finish_successful_refresh(context, decision, planning_iteration, analysis_service)
         except AnalysisAttemptLimitError as error:
             analysis_state.last_attempt_status = "exhausted"
             print(f"  [analysis] attempt budget exhausted ({error})")
@@ -219,13 +223,14 @@ class AnalysisRuntimeMixin(AnalysisEvidenceMixin):
             )
         mode = "cumulative post-KEEP incremental" if incremental is not None else "commit-bound"
         print(f"  [analysis] building {mode} analysis bundle ({', '.join(decision.reasons)})...")
-        stale_context = await self._refresh_analysis_bundle(
+        stale_context = await self._run_analysis_refresh(
             analysis_service, context, decision, planning_iteration, incremental
         )
-        if self._analysis_bundle is not None:
+        if self._analysis_bundle is not None and self._analysis_bundle.analysis_commit == context.analysis_commit:
             # A published bundle, including PARTIAL, is the evidence view for its own commit.
             context = self._analysis_bundle.apply(context)
         else:
-            context = analysis_service.apply_checkpoint(stale_context)
+            context = stale_context
+            context = analysis_service.apply_checkpoint(context)
         self._active_analysis_context = self._with_evidence_standing(context)
         return self._active_analysis_context
