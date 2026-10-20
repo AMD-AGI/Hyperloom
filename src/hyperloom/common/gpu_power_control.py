@@ -23,7 +23,7 @@ import socket
 import stat
 import subprocess  # nosec B404 - fixed amd-smi invocations.
 from pathlib import Path
-from typing import Any, Callable, Mapping, TypeGuard
+from typing import Any, Mapping, TypeGuard
 
 from hyperloom.common.gpu_power_settings import (
     GpuPowerSettingsError,
@@ -50,6 +50,8 @@ GPU_POWER_LEDGER_DIR = Path("/var/tmp/hyperloom/gpu_power_settings")  # nosec B1
 _LEDGER_DIR_MODE = 0o755
 
 _BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
+_READ_TIMEOUT_SEC = 30.0
+_SET_TIMEOUT_SEC = 60.0
 _POWER_CAP_W = "power_cap_w"
 _PERF_LEVEL = "perf_level"
 _SET = "set"
@@ -57,17 +59,17 @@ _BOOT_ID = "boot_id"
 _UTF8 = "utf-8"
 
 
-def current_boot_id(path: Path = _BOOT_ID_PATH) -> str:
+def current_boot_id() -> str:
     """This boot's id, or ``""`` when the kernel does not expose one."""
     try:
-        return path.read_text(encoding=_UTF8).strip()
+        return _BOOT_ID_PATH.read_text(encoding=_UTF8).strip()
     except OSError:
         return ""
 
 
-def _run_amd_smi(run: Callable[..., subprocess.CompletedProcess], args: list[str], timeout: float) -> str:
+def _run_amd_smi(args: list[str], timeout: float) -> str:
     try:
-        done = run(["amd-smi", *args], capture_output=True, text=True, timeout=timeout, check=False)  # nosec B603 B607
+        done = subprocess.run(["amd-smi", *args], capture_output=True, text=True, timeout=timeout, check=False)  # nosec B603 B607
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise GpuPowerSettingsError(f"amd-smi {' '.join(args)} could not run: {exc}") from exc
     if done.returncode != 0:
@@ -78,14 +80,10 @@ def _run_amd_smi(run: Callable[..., subprocess.CompletedProcess], args: list[str
     return str(done.stdout or "")
 
 
-def read_resident_vram_mb(
-    *,
-    run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
-    timeout: float = 30.0,
-) -> dict[int, float]:
+def read_resident_vram_mb() -> dict[int, float]:
     """``{gpu: used VRAM in MB}``; how a launch tells a card someone else has a model resident on."""
     try:
-        payload = json.loads(_run_amd_smi(run, ["metric", "--mem-usage", "--json"], timeout))
+        payload = json.loads(_run_amd_smi(["metric", "--mem-usage", "--json"], _READ_TIMEOUT_SEC))
     except ValueError as exc:
         raise GpuPowerSettingsError("amd-smi metric --mem-usage printed no JSON") from exc
     out: dict[int, float] = {}
@@ -118,12 +116,7 @@ def _is_number(value: Any) -> TypeGuard[float]:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
-def restore_gpu_power_settings(
-    originals: Mapping[int, Mapping[str, Any]],
-    *,
-    run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
-    timeout: float = 60.0,
-) -> list[str]:
+def restore_gpu_power_settings(originals: Mapping[int, Mapping[str, Any]]) -> list[str]:
     """Put each card back to its recorded cap and perf level; the problems, empty when every set succeeded.
 
     Every command is attempted even after one fails: a card left un-restored because an earlier card's set failed is
@@ -132,25 +125,20 @@ def restore_gpu_power_settings(
     problems: list[str] = []
     for args in _set_commands(originals):
         try:
-            _run_amd_smi(run, args, timeout)
+            _run_amd_smi(args, _SET_TIMEOUT_SEC)
         except GpuPowerSettingsError as exc:
             problems.append(str(exc))
     return problems
 
 
-def apply_gpu_power_settings(
-    settings: Mapping[int, Mapping[str, Any]],
-    *,
-    run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
-    timeout: float = 60.0,
-) -> None:
+def apply_gpu_power_settings(settings: Mapping[int, Mapping[str, Any]]) -> None:
     """Set each card's cap and perf level: ``{gpu: {"power_cap_w": W, "perf_level": level}}``, either one optional.
 
     Raises:
         GpuPowerSettingsError: a set failed (typically not privileged). The caller restores from its record.
     """
     for args in _set_commands(settings):
-        _run_amd_smi(run, args, timeout)
+        _run_amd_smi(args, _SET_TIMEOUT_SEC)
 
 
 def _check_trusted(path: Path, st: os.stat_result) -> None:

@@ -19,8 +19,6 @@ import os
 import signal
 import sys
 from contextlib import contextmanager
-from dataclasses import dataclass, field
-from pathlib import Path
 from types import FrameType
 from typing import Any, Callable, Iterator, Mapping
 
@@ -42,7 +40,6 @@ from hyperloom.common.gpu_power_settings import (
 )
 
 __all__ = [
-    "AppliedPowerSettings",
     "apply_for_session",
     "gpu_power_restore_guard",
     "orphaned_power_settings_warning",
@@ -60,28 +57,6 @@ _LABELS = {_POWER_CAP_W: "power cap", _PERF_LEVEL: "perf level"}
 #: ``amd-smi set -d``, and manual carries clock limits an operator tuned by hand, which setting a level resets.
 _UNRESTORABLE_LEVELS = (_DETERMINISM, PERF_LEVEL_MANUAL)
 _RESTORE_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
-
-
-@dataclass
-class AppliedPowerSettings:
-    """What :func:`apply_declared_gpu_power_settings` set: the record to archive, and how to put it back."""
-
-    record: dict[str, Any]
-    restore: Callable[[], list[str]] = field(repr=False)
-
-
-@dataclass
-class _Hooks:
-    """The amd-smi reads and writes, and the lease, injectable for tests."""
-
-    read: Callable[[], Mapping[int, Mapping[str, Any]]] = read_gpu_power_settings
-    resident_vram: Callable[[], Mapping[int, float]] = read_resident_vram_mb
-    apply: Callable[[Mapping[int, Mapping[str, Any]]], None] = apply_gpu_power_settings
-    restore: Callable[[Mapping[int, Mapping[str, Any]]], list[str]] = restore_gpu_power_settings
-    lease: Callable[[Path, set[int]], Any] = PowerSettingsLease
-    mask: Callable[[], set[int] | None] = visible_gpu_indices
-    arm: Callable[[Callable[[], list[str]]], None] = field(default=lambda restore: _GUARD.arm(restore))
-    disarm: Callable[[], None] = field(default=lambda: _GUARD.disarm())
 
 
 def _session_gpus(observed: Mapping[int, Any], mask: set[int] | None) -> set[int]:
@@ -183,16 +158,16 @@ def _restore_mismatches(
     return problems
 
 
-def _restore_and_verify(hooks: _Hooks, originals: Mapping[int, Mapping[str, Any]]) -> dict[int, list[str]]:
+def _restore_and_verify(originals: Mapping[int, Mapping[str, Any]]) -> dict[int, list[str]]:
     """Put the originals back and judge each card by what it reads back, not by the commands' exit codes.
 
     Returns ``{gpu: problems}`` for the cards not back, empty when all are. An amd-smi set can exit 0 without the card
     taking the value, and fail on a card that never changed (an apply that was refused for lack of privilege); either
     way each card's state decides whether its record can go. A failed read counts against every card.
     """
-    failed_sets = hooks.restore(originals)
+    failed_sets = restore_gpu_power_settings(originals)
     try:
-        mismatches = _restore_mismatches(hooks.read(), originals)
+        mismatches = _restore_mismatches(read_gpu_power_settings(), originals)
     except GpuPowerSettingsError as exc:
         unread = f"the restored settings could not be read back: {exc}"
         return {gpu: [*failed_sets, unread] for gpu in originals}
@@ -232,7 +207,7 @@ def _unread_originals(record: Mapping[str, Any], now: Mapping[str, Any] | None) 
     return {key: original[key] for key in _unread(record, now)}
 
 
-def _recover_orphans(lease: Any, hooks: _Hooks) -> list[int]:
+def _recover_orphans(lease: PowerSettingsLease) -> list[int]:
     """Restore what a dead session left on these cards; the cards it recovered.
 
     The cards are read under the lease, so no other session can change them between the reading and the restore. A
@@ -241,7 +216,7 @@ def _recover_orphans(lease: Any, hooks: _Hooks) -> list[int]:
     orphans = lease.orphaned()
     if not orphans:
         return []
-    observed = hooks.read()
+    observed = read_gpu_power_settings()
     unread = sorted(gpu for gpu, rec in orphans.items() if _unread(rec, observed.get(gpu)))
     if unread:
         # Neither cleared nor restored: the record may still be the only way back to these cards' originals.
@@ -255,7 +230,7 @@ def _recover_orphans(lease: Any, hooks: _Hooks) -> list[int]:
     lease.clear(set(orphans) - set(live))
     if not live:
         return []
-    problems = _restore_and_verify(hooks, live)
+    problems = _restore_and_verify(live)
     lease.clear(set(live) - set(problems))
     if problems:
         raise GpuPowerSettingsError(
@@ -265,15 +240,10 @@ def _recover_orphans(lease: Any, hooks: _Hooks) -> list[int]:
     return sorted(live)
 
 
-def apply_declared_gpu_power_settings(
-    declared: DeclaredPowerSettings,
-    *,
-    nodes: int,
-    owner: str,
-    ledger_dir: Path = GPU_POWER_LEDGER_DIR,
-    hooks: _Hooks | None = None,
-) -> AppliedPowerSettings:
-    """Set the declared cap / perf level on the session's masked cards, recording the originals first.
+def apply_declared_gpu_power_settings(declared: DeclaredPowerSettings, *, nodes: int, owner: str) -> dict[str, Any]:
+    """Set the declared cap / perf level on the session's masked cards, recording the originals first; the record.
+
+    The restore is handed to the session's guard before the first set.
 
     The read-back check is still the caller's :func:`resolve_gpu_power_settings`, so an applied value is verified the
     same way an operator-set one is.
@@ -282,21 +252,20 @@ def apply_declared_gpu_power_settings(
         GpuPowerSettingsError: the launch must stop. Nothing was left changed, unless the message says that putting
             the originals back failed too; the record is then kept for the next launch.
     """
-    hooks = hooks or _Hooks()
     if not any(value for value in declared.as_row().values()):
         raise GpuPowerSettingsError("--apply-gpu-power-settings needs --gpu-power-cap-w and/or --gpu-perf-level")
     if nodes >= 2:
         raise GpuPowerSettingsError("--apply-gpu-power-settings cannot set the cards of a multi-node session")
-    gpus = _session_gpus(hooks.read(), hooks.mask())
-    lease = hooks.lease(ledger_dir, gpus)
+    gpus = _session_gpus(read_gpu_power_settings(), visible_gpu_indices())
+    lease = PowerSettingsLease(GPU_POWER_LEDGER_DIR, gpus)
     # Only what this session changes is recorded, so only that is put back: restoring a perf level nobody declared
     # would reset a card left in MANUAL clocks for reasons this session knows nothing about.
     wanted = declared.as_row()
     applied_keys = [key for key, value in wanted.items() if value]
     try:
-        recovered = _recover_orphans(lease, hooks)
-        _refuse_busy_cards(gpus, hooks.resident_vram())
-        observed = hooks.read()
+        recovered = _recover_orphans(lease)
+        _refuse_busy_cards(gpus, read_resident_vram_mb())
+        observed = read_gpu_power_settings()
         # A setting a card is already at is left alone: neither set nor put back. So a manual or determinism card
         # asked to stay where it is needs no refusal, and no record holds an applied value equal to its original.
         touched = {
@@ -318,7 +287,7 @@ def apply_declared_gpu_power_settings(
             if done:
                 return []
             done = True
-            problems = _restore_and_verify(hooks, originals)
+            problems = _restore_and_verify(originals)
             try:
                 lease.clear(set(originals) - set(problems))
             except GpuPowerSettingsError as exc:
@@ -328,12 +297,12 @@ def apply_declared_gpu_power_settings(
 
     # Armed before the first set: a card is changed from the moment its set returns, and a stop signal or an
     # interrupt from then on has to unwind through the session's restore.
-    hooks.arm(_restore)
+    _GUARD.arm(_restore)
     try:
-        hooks.apply({gpu: {key: wanted[key] for key in keys} for gpu, keys in touched.items()})
+        apply_gpu_power_settings({gpu: {key: wanted[key] for key in keys} for gpu, keys in touched.items()})
     except GpuPowerSettingsError as exc:
         leftover = _restore()
-        hooks.disarm()
+        _GUARD.disarm()
         suffix = f" (restoring the originals also failed: {'; '.join(leftover)})" if leftover else ""
         raise GpuPowerSettingsError(f"{exc}{suffix}") from exc
     record: dict[str, Any] = {
@@ -343,7 +312,7 @@ def apply_declared_gpu_power_settings(
     }
     if recovered:
         record["recovered_from_orphan"] = recovered
-    return AppliedPowerSettings(record=record, restore=_restore)
+    return record
 
 
 def _describe(values: Mapping[str, Any]) -> str:
@@ -352,10 +321,7 @@ def _describe(values: Mapping[str, Any]) -> str:
     return ", ".join(parts + ([f"perf level {level}"] if level else []))
 
 
-def orphaned_power_settings_warning(
-    ledger_dir: Path = GPU_POWER_LEDGER_DIR,
-    read: Callable[[], Mapping[int, Mapping[str, Any]]] = read_gpu_power_settings,
-) -> str:
+def orphaned_power_settings_warning() -> str:
     """A warning when a dead session left one of this session's cards at a value it applied; ``""`` otherwise.
 
     A setting a card no longer reads at was put back or reset since, and is not reported; one whose reading is
@@ -365,11 +331,11 @@ def orphaned_power_settings_warning(
         gpus = visible_gpu_indices()
     except GpuPowerSettingsError:
         gpus = None
-    orphans = orphaned_power_records(ledger_dir, gpus)
+    orphans = orphaned_power_records(GPU_POWER_LEDGER_DIR, gpus)
     if not orphans:
         return ""
     try:
-        observed = read()
+        observed = read_gpu_power_settings()
     except GpuPowerSettingsError:
         observed = None
     if observed is not None:
@@ -440,11 +406,11 @@ class _RestoreGuard:
             signal.signal(sig, handler)
         self._previous.clear()
 
-    def run(self) -> None:
-        """Put the cards back, once; a stop signal during the restore is ignored so it cannot cut it short."""
+    def run(self) -> list[str]:
+        """Put the cards back, once; the problems it reported. A stop signal during the restore cannot cut it short."""
         restore, self._restore = self._restore, None
         if restore is None:
-            return
+            return []
         held = {sig: signal.signal(sig, signal.SIG_IGN) for sig in (*_RESTORE_SIGNALS, signal.SIGINT)}
         try:
             problems = restore()
@@ -460,6 +426,7 @@ class _RestoreGuard:
             )
         else:
             print("GPU power settings restored to the values the session found.")
+        return problems
 
 
 _GUARD: _RestoreGuard = _RestoreGuard()
@@ -494,6 +461,6 @@ def apply_for_session(declared: DeclaredPowerSettings, *, nodes: int, owner: str
             "--apply-gpu-power-settings needs root, as amd-smi set does: relaunch as root, or drop the flag and set "
             "the cards with amd-smi set before launch"
         )
-    applied = apply_declared_gpu_power_settings(declared, nodes=nodes, owner=owner)
-    print(f"GPU power settings applied to GPU(s) {', '.join(map(str, applied.record['gpus']))}; restored at exit.")
-    return applied.record
+    record = apply_declared_gpu_power_settings(declared, nodes=nodes, owner=owner)
+    print(f"GPU power settings applied to GPU(s) {', '.join(map(str, record['gpus']))}; restored at exit.")
+    return record
