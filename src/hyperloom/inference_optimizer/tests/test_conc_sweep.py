@@ -432,6 +432,26 @@ def test_run_conc_sweep_skip_empty_conc_list(
     mock_run_grid.assert_not_called()
 
 
+def test_run_conc_sweep_rejects_invalid_timeout_before_writing_anything(
+    session_dir: Path,
+    baseline_yaml: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """An invalid benchmark-timeout override is refused before the sweep creates its workspace."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "-1")
+    state = _make_state(baseline_config_path=str(baseline_yaml))
+
+    with patch(
+        "hyperloom.orchestrator.kernel._conc_sweep_run.run_grid",
+    ) as mock_run_grid:
+        with pytest.raises(ValueError, match="INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC"):
+            asyncio.run(run_conc_sweep(state, session_dir))
+
+    mock_run_grid.assert_not_called()
+    assert not (session_dir / "runs" / "conc_sweep").exists()
+    assert not (session_dir / "reports" / "conc_sweep_summary.json").exists()
+
+
 def test_run_conc_sweep_skip_missing_config(
     session_dir: Path,
     tmp_path: Path,
