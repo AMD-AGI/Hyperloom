@@ -379,7 +379,7 @@ and the warning reports the card as possibly still changed. A record none of
 whose settings still reads as applied is stale: it is cleared, not restored, and
 not warned about. Give a scheduler's grace period enough time for the session to
 close. On resume the flag must be passed again, since the settings were restored
-when the previous leg exited. A resume with the flag first stops the serving
+when the previous leg exited. A resume first stops the serving
 processes its previous leg left running (a leg that was SIGKILLed leaves its
 server up), so the check for other tenants' models does not refuse on the
 session's own server.
