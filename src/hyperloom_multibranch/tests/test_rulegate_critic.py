@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
+import asyncio
 import json
 from types import SimpleNamespace
 
@@ -193,4 +194,12 @@ async def test_a_failed_anthropic_call_is_a_critic_unavailable(monkeypatch):
         raise RuntimeError("anthropic messages status=529")
 
     with pytest.raises(CriticUnavailable, match="RuntimeError: anthropic messages status=529"):
+        await _ask_anthropic(monkeypatch, transport)
+
+
+async def test_an_anthropic_call_that_times_out_in_asyncio_is_a_critic_unavailable(monkeypatch):
+    async def transport(*, request, env=None, component="", operation=""):
+        raise asyncio.TimeoutError
+
+    with pytest.raises(CriticUnavailable, match="TimeoutError"):
         await _ask_anthropic(monkeypatch, transport)

@@ -11,6 +11,7 @@ unreadable one included, goes to the usage sink the critic is built on as the cr
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable, Mapping
@@ -193,8 +194,9 @@ def anthropic_critic(model: str, *, component: str) -> CriticCompletion:
         from hyperloom.common.llm_config import AnthropicCompletionRequest, aanthropic_completion
 
         # The HTTP transport raises RuntimeError on a bad status or body (LLMConfigError is one) and httpx errors on
-        # the wire; the SDK transport raises the SDK's own errors and TimeoutError.
-        transport_errors = (RuntimeError, OSError, TimeoutError, httpx.HTTPError, ClaudeSDKError)
+        # the wire; the SDK transport raises the SDK's own errors and TimeoutError, which before Python 3.11 is not
+        # asyncio's.
+        transport_errors = (RuntimeError, OSError, TimeoutError, asyncio.TimeoutError, httpx.HTTPError, ClaudeSDKError)
         try:
             request = AnthropicCompletionRequest(
                 model=model,
