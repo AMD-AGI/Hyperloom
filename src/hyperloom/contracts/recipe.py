@@ -152,6 +152,18 @@ def _mapping(value: object, what: str) -> Mapping[str, object]:
     return value
 
 
+def _known(value: object, keys: tuple[str, ...], what: str) -> Mapping[str, object]:
+    """``value`` as a mapping of ``keys`` only: a key a writer misspelt would otherwise drop its change unseen."""
+
+    fields = _mapping(value, what)
+    unknown = sorted(str(key) for key in fields if key not in keys)
+    if unknown:
+        plural = "s" if len(unknown) > 1 else ""
+        named = ", ".join(repr(key) for key in unknown)
+        raise RecipeError(f"unknown key{plural} {named} in {what}; known: {', '.join(keys)}")
+    return fields
+
+
 def _unique(values: Sequence[object], what: str) -> None:
     duplicates = sorted({str(value) for value in values if values.count(value) > 1})
     if duplicates:
@@ -227,7 +239,7 @@ class PatchRef:
 
     @classmethod
     def from_document(cls, document: object) -> PatchRef:
-        fields = _mapping(document, "a patch")
+        fields = _known(document, ("path", "sha256"), "a patch")
         return cls(path=fields.get("path"), sha256=fields.get("sha256"))
 
 
@@ -307,7 +319,7 @@ class KernelArtifact:
 
     @classmethod
     def from_document(cls, document: object) -> KernelArtifact:
-        fields = _mapping(document, "a kernel artifact")
+        fields = _known(document, ("kind", "target", "ref", "sha256", "metadata"), "a kernel artifact")
         try:
             kind = KernelKind(fields.get("kind"))
         except ValueError as exc:
@@ -423,7 +435,8 @@ class ConfigDelta:
 
     @classmethod
     def from_document(cls, document: object) -> ConfigDelta:
-        fields = _mapping(document, "a config delta")
+        keys = ("extra_server_args", "args_mode", "remove_args", "extra_envs", "unset_envs")
+        fields = _known(document, keys, "a config delta")
         try:
             mode = ArgsMode(fields.get("args_mode", ArgsMode.APPEND.value))
         except ValueError as exc:
@@ -471,7 +484,8 @@ class ComponentChange:
 
     @classmethod
     def from_document(cls, document: object) -> ComponentChange:
-        fields = _mapping(document, "a component change")
+        keys = ("component", "upstream_ref", "upstream_repo", "add_patches", "remove_patches")
+        fields = _known(document, keys, "a component change")
         return cls(
             component=fields.get("component"),
             upstream_ref=fields.get("upstream_ref"),
@@ -506,7 +520,7 @@ class RecipeDelta:
 
     @classmethod
     def from_document(cls, document: object) -> RecipeDelta:
-        fields = _mapping(document, "a recipe delta")
+        fields = _known(document, ("config", "components", "add_kernels", "remove_kernels"), "a recipe delta")
         return cls(
             config=ConfigDelta.from_document(fields.get("config", {})),
             components=tuple(map(ComponentChange.from_document, _items(fields.get("components", ()), "components"))),

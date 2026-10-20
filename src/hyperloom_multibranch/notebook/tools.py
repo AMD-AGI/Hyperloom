@@ -58,6 +58,7 @@ from hyperloom_multibranch.contracts.notebook.records import (
     amdahl_ceiling_pct,
 )
 from hyperloom_multibranch.contracts.notebook.vocab import LearningKind
+from hyperloom_multibranch.notebook.changes import NO_CHANGE
 from hyperloom_multibranch.notebook.learning_search import (
     LearningFinder,
     RetrievalSource,
@@ -75,6 +76,8 @@ CLAIM_LEARNINGS = 3
 CEILING_OPS = 5
 ERROR = "error:"
 UNKNOWN = "unknown"
+#: A test a branch measured with an empty delta measured its parent, so its outcome says nothing about the direction.
+UNCHANGED = "measured without a change: its delta was empty"
 
 Arguments = Mapping[str, Any]
 Handler = Callable[[Arguments], Awaitable[str]]
@@ -186,7 +189,8 @@ def _tried(item: TriedDirection) -> str:
     state = item.conclusion or item.verdict
     gain = f" {item.gain_pct:+.2f}%" if item.gain_pct is not None else ""
     outcome = "not judged" if state is None else f"{state.value}{gain}"
-    change = f" ({item.change})" if item.change else ""
+    shown = UNCHANGED if item.change == NO_CHANGE else item.change
+    change = f" ({shown})" if shown else ""
     return f"{where}: {outcome}{change}"
 
 

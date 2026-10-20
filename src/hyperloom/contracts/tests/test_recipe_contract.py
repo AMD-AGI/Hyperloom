@@ -283,6 +283,41 @@ def test_malformed_deltas_and_documents_are_refused(build: Callable[[], object])
         build()
 
 
+@pytest.mark.parametrize(
+    ("document", "message"),
+    [
+        (
+            {"config": {"server_args": {"enable-torch-compile": True}}},
+            r"unknown key 'server_args' in a config delta; known: extra_server_args, args_mode, remove_args, "
+            r"extra_envs, unset_envs",
+        ),
+        ({"configs": {}}, r"unknown key 'configs' in a recipe delta; known: config, components,"),
+        ({"components": [{"component": "vllm", "add_patch": []}]}, r"unknown key 'add_patch' in a component change"),
+        (
+            {"components": [{"component": "vllm", "add_patches": [{**ATTN_PATCH.to_document(), "hash": "x"}]}]},
+            r"unknown key 'hash' in a patch",
+        ),
+        ({"add_kernels": [{**GEMM.to_document(), "speedup": 1.2}]}, r"unknown key 'speedup' in a kernel artifact"),
+    ],
+)
+def test_a_delta_document_with_a_key_its_part_does_not_know_is_refused(document: object, message: str) -> None:
+    with pytest.raises(RecipeError, match=message):
+        RecipeDelta.from_document(document)
+
+
+def test_every_part_of_a_delta_document_round_trips() -> None:
+    delta = RecipeDelta(
+        config=ConfigDelta(
+            server_args="--max-num-seqs 256", remove_args=("--enable-chunked-prefill",), envs={"A": "1"}
+        ),
+        components=(ComponentChange("vllm", VLLM_NEXT, add_patches=(ATTN_PATCH,), remove_patches=(MOE_PATCH.path,)),),
+        add_kernels=(GEMM,),
+        remove_kernels=("kernel/gemm/old.csv",),
+    )
+
+    assert RecipeDelta.from_document(delta.to_document()) == delta
+
+
 def test_diff_names_config_conflicts_moved_refs_and_patch_overlap() -> None:
     first = _recipe()
     second = apply(

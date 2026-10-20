@@ -16,8 +16,16 @@ import pytest
 from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.intent import Intent, IntentLayer, intent_fingerprint
-from hyperloom_multibranch.contracts.notebook.peers import Validity
-from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot, OpShares, StartupBrief, TestRecord
+from hyperloom_multibranch.contracts.notebook.peers import Validity, Verdict
+from hyperloom_multibranch.contracts.notebook.records import (
+    NotebookSnapshot,
+    OpShares,
+    StartupBrief,
+    TestRecord,
+    TriedDirection,
+)
+from hyperloom_multibranch.contracts.notebook.vocab import Conclusion
+from hyperloom_multibranch.notebook.changes import NO_CHANGE
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.contracts.notebook.records import REPLAY_TOOL, WarmReplay
 from hyperloom_multibranch.notebook.learning_search import LEARNINGS_LOG, RetrievalLog, SessionLearnings
@@ -131,6 +139,16 @@ async def test_a_claim_is_the_handles_and_a_taken_one_is_refused_with_who_holds_
     assert refused.startswith(f"{ERROR} refused, in_progress on c1, claimed by s1")
     assert released == "released the claim on c1"
     assert again.startswith(f"{ERROR} ClaimLost:")
+
+
+async def test_a_claim_whose_change_misspells_a_key_is_refused_and_holds_nothing(tools_of: Tools) -> None:
+    tools = tools_of("s1")
+
+    misspelt = await _call(tools, "claim", **FLASH_ON_C1, change={"config": {"server_args": "--max-num-seqs 256"}})
+    claimed = await _call(tools, "claim", **FLASH_ON_C1, change=TUNED)
+
+    assert misspelt.startswith(f"{ERROR} RecipeError: unknown key 'server_args' in a config delta")
+    assert claimed.startswith("claimed attention / flash decode on c1 for s1")
 
 
 async def test_a_claim_states_its_ceiling_and_one_that_cannot_reach_the_bar_is_refused(tools_of: Tools) -> None:
@@ -301,6 +319,40 @@ async def test_the_brief_comes_from_the_briefing_the_tools_are_given(tools_of: T
     ]
     assert "- scheduler / chunked prefill on c0: not judged" in local
     assert "Lessons:\n- lesson 0" in briefed and "... 5 more\nLeads:\n- recipe: try expert parallel" in briefed
+
+
+def test_a_test_tried_without_a_change_says_so_rather_than_reading_as_no_gain() -> None:
+    tried = (
+        TriedDirection(
+            "c0",
+            "r1",
+            "torch compile",
+            "inductor fusion",
+            IntentLayer.CONFIG,
+            Verdict.FLAT,
+            Conclusion.RECORDED_ONLY,
+            0.22,
+            NO_CHANGE,
+        ),
+        TriedDirection(
+            "c0",
+            "r2",
+            "decode batching",
+            "raise max-num-seqs",
+            IntentLayer.CONFIG,
+            Verdict.FLAT,
+            Conclusion.RECORDED_ONLY,
+            0.1,
+            "add args --max-num-seqs 256",
+        ),
+    )
+
+    lines = render_brief(StartupBrief("c1", tried)).splitlines()
+
+    assert lines[2:4] == [
+        "- torch compile / inductor fusion on c0: recorded_only +0.22% (measured without a change: its delta was empty)",
+        "- decode batching / raise max-num-seqs on c0: recorded_only +0.10% (add args --max-num-seqs 256)",
+    ]
 
 
 def test_the_brief_lists_the_start_commits_largest_ops_with_their_ceilings_before_what_was_tried() -> None:
