@@ -167,6 +167,7 @@ _TEXT_DECODER_CONFIG_KEYS = (
 _VERDICT_TEXT_COERCIBLE = "text_coercible"
 
 _VERDICT_VISION_ONLY = "vision_only"
+_UNKNOWN_MODEL_FIELD = "<unknown>"
 _UNSUPPORTED_ARCH_DEGRADED = (
     "DEGRADED MODE: model '{name}' carries a multimodal signal "
     "({signal}; architecture '{arch}', model_type '{mt}') but exposes a text-generation path. "
@@ -1658,8 +1659,8 @@ def _warn_text_coercible_arch(
 ) -> None:
     """Persist degraded mode and record a warned unsupported_model_arch check."""
     name = Path(model).name or model
-    arch = hit.get("architecture") or "<unknown>"
-    mt = hit.get("model_type") or "<unknown>"
+    arch = hit.get("architecture") or _UNKNOWN_MODEL_FIELD
+    mt = hit.get("model_type") or _UNKNOWN_MODEL_FIELD
     signal = str(hit.get("signal") or "")
     warning = _UNSUPPORTED_ARCH_DEGRADED.format(
         name=name, signal=hit.get("signal", "multimodal config"), arch=arch, mt=mt
@@ -1703,8 +1704,8 @@ def _reject_unsupported_arch(
 ) -> None:
     """Fail-fast: stop report, failed gate check, breakdown, Langfuse."""
     name = Path(model).name or model
-    arch = hit.get("architecture") or "<unknown>"
-    mt = hit.get("model_type") or "<unknown>"
+    arch = hit.get("architecture") or _UNKNOWN_MODEL_FIELD
+    mt = hit.get("model_type") or _UNKNOWN_MODEL_FIELD
     signal = str(hit.get("signal") or "")
     reason = _UNSUPPORTED_ARCH_REJECTED.format(
         name=name, arch=arch, mt=mt, signal=hit.get("signal", "unknown architecture")
