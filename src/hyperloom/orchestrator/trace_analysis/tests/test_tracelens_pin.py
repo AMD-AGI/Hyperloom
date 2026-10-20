@@ -20,7 +20,7 @@ from hyperloom.orchestrator.trace_analysis import tracelens_analysis
 REPO_ROOT = Path(__file__).resolve().parents[5]
 INSTALL_KERNEL_TOOLS = REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "assets" / "install_kernel_tools.sh"
 
-# TraceLens commit of PR #1120 ("Change colon to hyphen").
+# TraceLens commit that switched the split separator from a colon to a hyphen.
 TRACELENS_PIN = "c2e65473cdac421d2905b5960532f73cfcc94786"
 
 
