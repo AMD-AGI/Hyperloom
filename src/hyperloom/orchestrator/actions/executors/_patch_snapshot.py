@@ -588,7 +588,7 @@ def overlay_inventory_without_base(tree: Path, patch: Path) -> dict[str, str] | 
             ops[rel] = "upsert"
         else:
             return None
-    if not ops or all(op == "delete" for op in ops.values()):
+    if all(op == "delete" for op in ops.values()):
         return None
     return ops
 
