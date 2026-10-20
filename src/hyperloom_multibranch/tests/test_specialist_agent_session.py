@@ -11,7 +11,7 @@ import pytest
 
 from hyperloom.contracts.recipe import ComponentPatches, LaunchConfig, Recipe
 from hyperloom.measure.compile import LocalBlobStore, PackageBase
-from hyperloom.orchestrator.specialists.agent_runner import AgentHandle, AgentStatus, LocalAgentRunner
+from hyperloom.orchestrator.specialists.agent_runner import AgentEnded, AgentHandle, AgentStatus, LocalAgentRunner
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts
@@ -65,6 +65,7 @@ class _Runner:
         self.ends: dict[int, tuple[AgentStatus, float]] = {}
         self.sent: list[str] = []
         self.beats = 0
+        self.exits_before_send: dict[int, tuple[AgentStatus, float]] = {}
 
     def end(self, n: int, status: AgentStatus, seconds: float) -> None:
         self.ends[n] = (status, seconds)
@@ -79,6 +80,10 @@ class _Runner:
         self.beats += 1
 
     async def send(self, handle, data):
+        n = handle.pid - FIRST_PID
+        if n in self.exits_before_send:
+            self.ends[n] = self.exits_before_send.pop(n)
+            raise AgentEnded("its CLI has ended")
         self.sent.append(_text(data.decode()))
 
     async def close_stdin(self, handle):
@@ -237,6 +242,22 @@ async def test_a_claude_cli_lives_on_after_its_turn_and_what_arrives_for_its_bra
 
     assert len(rig.runner.specs) == 1
     assert "this arrived for your branch" in rig.runner.sent[0] and "result r1" in rig.runner.sent[0]
+
+
+async def test_a_cli_that_exits_as_it_is_woken_ends_its_launch_as_any_exit(rig):
+    await rig.toolbox_notebook.write_request(request("r1", intent(BRANCH, rig.root)))
+    session = rig.session()
+    running = asyncio.create_task(session.run())
+    await _until(lambda: len(rig.runner.specs) == 1, "the launch")
+    rig.runner.exits_before_send[1] = (EXITED_WELL, 3600.0)
+
+    _end_turn(rig)
+    await rig.toolbox_notebook.write_result(result("r1"))
+    await _until(lambda: len(rig.runner.specs) == 2, "a fresh launch after the CLI ended")
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+
+    assert rig.runner.sent == [] and "ended: its model finished its turn" in rig.runner.prompts[1]
 
 
 async def test_a_runtime_notice_written_while_the_turn_is_over_reaches_the_cli(rig):

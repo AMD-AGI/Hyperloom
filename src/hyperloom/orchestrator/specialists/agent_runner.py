@@ -64,6 +64,7 @@ __all__ = [
     "LONG_RUNNING_SESSION_SEC",
     "LOST_AFTER_SEC",
     "AgentConfigError",
+    "AgentEnded",
     "AgentHandle",
     "AgentLaunchSpec",
     "AgentRunner",
@@ -107,6 +108,10 @@ _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 class AgentConfigError(ValueError):
     """The launch spec cannot be turned into a safe session."""
+
+
+class AgentEnded(RuntimeError):
+    """A message was sent to a session whose CLI has already exited."""
 
 
 #: Refreshes a session's liveness; safe to call from any thread, a no-op once the session is over.
@@ -481,17 +486,23 @@ class LocalAgentRunner:
             await asyncio.to_thread(self._dispatcher._kill, session.proc)
 
     async def send(self, handle: AgentHandle, data: bytes) -> None:
-        """Write ``data`` to the stdin of a session launched with ``stdin_open``; an ended CLI raises ``OSError``."""
+        """Write ``data`` to the stdin of a session launched with ``stdin_open``; raises :class:`AgentEnded` once its
+        CLI has exited."""
         session: _Session = handle.session
         stdin = session.proc.stdin if session.spec.stdin_open else None
-        if stdin is None or stdin.closed:
+        if stdin is None:
             raise AgentConfigError(f"task {session.spec.task_id}: stdin is not open")
+        if stdin.closed or session.proc.poll() is not None:
+            raise AgentEnded(f"task {session.spec.task_id}: its CLI has ended")
 
         def write() -> None:
             stdin.write(data)
             stdin.flush()
 
-        await asyncio.to_thread(write)
+        try:
+            await asyncio.to_thread(write)
+        except (BrokenPipeError, ValueError) as exc:  # ValueError: the pipe was closed while this write waited
+            raise AgentEnded(f"task {session.spec.task_id}: its CLI ended while a message was sent") from exc
 
     async def close_stdin(self, handle: AgentHandle) -> None:
         """Close a ``stdin_open`` session's stdin: its CLI ends once it has read what was sent."""

@@ -20,7 +20,13 @@ import pytest
 from hyperloom.common.deadline import Deadline
 from hyperloom.orchestrator.specialists import agent_runner
 from hyperloom.orchestrator.specialists import subprocess_ as ss
-from hyperloom.orchestrator.specialists.agent_runner import LOST_AFTER_SEC, AgentConfigError, Liveness, McpEndpoint
+from hyperloom.orchestrator.specialists.agent_runner import (
+    LOST_AFTER_SEC,
+    AgentConfigError,
+    AgentEnded,
+    Liveness,
+    McpEndpoint,
+)
 from hyperloom.orchestrator.specialists.tests._agent_fixtures import (
     child_argv,
     make_runner,
@@ -507,6 +513,22 @@ async def test_a_session_launched_with_stdin_open_reads_each_message_until_its_s
     status = await wait_finished(runner, handle)
     assert (status.state, status.returncode) == ("exited", 0)
     await runner.collect(handle)
+
+
+async def test_send_after_the_cli_exited_raises_agent_ended(tmp_path: Path) -> None:
+    runner = make_runner(tmp_path / "session")
+    handle = await runner.launch(make_spec(tmp_path / "w", code="import sys; sys.stdin.readline()", stdin_open=True))
+    await wait_finished(runner, handle)
+    with pytest.raises(AgentEnded, match="its CLI has ended"):
+        await runner.send(handle, b"too late\n")
+    await runner.collect(handle)
+
+
+async def test_a_cancelled_session_closes_its_stdin_pipe(tmp_path: Path) -> None:
+    runner = make_runner(tmp_path / "session")
+    handle = await runner.launch(make_spec(tmp_path / "w", code=ECHO_LINES, stdin_open=True))
+    await stop_and_collect(runner, handle)
+    assert handle.session.proc.stdin.closed
 
 
 async def test_send_to_a_session_launched_without_stdin_open_is_refused(tmp_path: Path) -> None:

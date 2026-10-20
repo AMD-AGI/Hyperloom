@@ -36,6 +36,7 @@ from hyperloom.orchestrator.specialists.agent_runner import (
     LONG_RUNNING_SESSION_SEC,
     PROCESS_LOG,
     STATE_LOST,
+    AgentEnded,
     AgentHandle,
     AgentLaunchSpec,
     AgentStatus,
@@ -266,7 +267,10 @@ class AgentSession:
                 self._handle = None
                 await self._finish(handle, cancel=True)
                 raise SessionCrashed(f"its model ended {IDLE_TURNS} turns in a row with nothing to test", worked=True)
-            await self._setup.runner.send(handle, self._setup.command.message(message or nudge_message()).encode())
+            try:
+                await self._setup.runner.send(handle, self._setup.command.message(message or nudge_message()).encode())
+            except AgentEnded:
+                return await self._setup.runner.poll(handle)
             sent += 1
 
     async def _wake(self, handle: AgentHandle, seen: _Seen) -> str | None:
