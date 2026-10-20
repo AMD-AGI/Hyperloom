@@ -1128,7 +1128,7 @@ What this controls:
   back to when no `params.grid` is supplied. atom is the only
   framework with a programmatic seed today
   (`_default_grid_for_framework("atom", ...)` in
-  `src/hyperloom/orchestrator/actions/executors/explore.py`, populated by
+  `src/hyperloom/orchestrator/actions/executors/_variant_grid.py`, populated by
   `_atom_default_grid()`); sglang and vllm continue to rely on
   the orchestration LLM emitting `provenance='default_grid'`
   variants and will fail with `error_class="empty_grid"` on a

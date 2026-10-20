@@ -23,7 +23,7 @@ import yaml
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.launch_log_evidence import settings_the_engine_rewrote
 from hyperloom.inference_optimizer.grid_server_args import MULTI_VALUE_FLAGS
-from . import _framework_switch_manifest as _switch_manifest
+from ._framework_switch_manifest import additive_variants, leave_one_out_variants
 from ._grid_runner import GridVariant, _build_variant_yaml
 from ._launch_restatement import config_envs, named_settings, restates_the_baseline
 from ._proposal_identity import effective_fingerprint, normalize_proposal
@@ -91,10 +91,10 @@ def framework_lever_grid(shared_state: Any) -> list[dict[str, Any]]:
     active = [row for row in pending if row.get("default_on")]
     payload: list[dict[str, Any]] = []
     if dormant:
-        for variant in _switch_manifest.additive_variants(dormant):
+        for variant in additive_variants(dormant):
             payload.append({**variant, "framework_lever_source": "additive"})
     if active:
-        for variant in _switch_manifest.leave_one_out_variants(active):
+        for variant in leave_one_out_variants(active):
             payload.append({**variant, "framework_lever_source": "leave_one_out"})
     return payload
 

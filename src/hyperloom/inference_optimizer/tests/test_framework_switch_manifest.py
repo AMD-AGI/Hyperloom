@@ -386,7 +386,7 @@ def _entry_parsed(switch: str) -> dict[str, Any]:
 
 def test_dormant_levers_seed_additive_variants():
     """Code kept inert is turned on one dependency-closed bundle at a time."""
-    from hyperloom.orchestrator.actions.executors.explore import framework_lever_grid
+    from hyperloom.orchestrator.actions.executors._variant_grid import framework_lever_grid
 
     state = _state()
     state.record_authored_framework_levers(_chain(), default_on=False)
@@ -398,7 +398,7 @@ def test_dormant_levers_seed_additive_variants():
 
 def test_active_levers_seed_leave_one_out_variants():
     """A stack that already won is attributed by removing one lever at a time."""
-    from hyperloom.orchestrator.actions.executors.explore import framework_lever_grid
+    from hyperloom.orchestrator.actions.executors._variant_grid import framework_lever_grid
 
     state = _state()
     state.record_authored_framework_levers(_chain(), default_on=True)
@@ -410,7 +410,7 @@ def test_active_levers_seed_leave_one_out_variants():
 
 def test_already_attributed_levers_are_not_re_benched():
     """A lever with a number spends no further legs."""
-    from hyperloom.orchestrator.actions.executors.explore import framework_lever_grid
+    from hyperloom.orchestrator.actions.executors._variant_grid import framework_lever_grid
 
     state = _state()
     state.record_authored_framework_levers(_chain(), default_on=False)
@@ -421,7 +421,7 @@ def test_already_attributed_levers_are_not_re_benched():
 
 def test_no_levers_means_no_seeding():
     """The seeder is inert for every framework that has no authored rewrites."""
-    from hyperloom.orchestrator.actions.executors.explore import framework_lever_grid
+    from hyperloom.orchestrator.actions.executors._variant_grid import framework_lever_grid
 
     assert framework_lever_grid(None) == []
     assert framework_lever_grid(_state()) == []
@@ -429,7 +429,7 @@ def test_no_levers_means_no_seeding():
 
 def test_lever_variants_survive_the_payload_parser():
     """The parsed variant keeps the name attribution joins on and the unset the leg needs, or attribution is lost."""
-    from hyperloom.orchestrator.actions.executors.explore import (
+    from hyperloom.orchestrator.actions.executors._variant_grid import (
         _framework_lever_attributions,
         _grid_variants_from_payload,
         framework_lever_grid,
@@ -454,7 +454,7 @@ def test_lever_variants_survive_the_payload_parser():
 
 def test_additive_attribution_takes_the_measured_gain_directly():
     """Switching a lever on measures its contribution as-is."""
-    from hyperloom.orchestrator.actions.executors.explore import _framework_lever_attributions
+    from hyperloom.orchestrator.actions.executors._variant_grid import _framework_lever_attributions
 
     seeds = [{"name": "fwlever_hl_a", "framework_lever": "HL_A", "framework_lever_source": "additive"}]
     outcomes = [{"variant_name": "fwlever_hl_a", "outcome": "KEEP", "metrics": {"gain_pct": 6.2}}]
@@ -471,7 +471,7 @@ def test_additive_attribution_takes_the_measured_gain_directly():
 
 def test_leave_one_out_attribution_negates_the_measured_gain():
     """Removing a lever measures the negative of its contribution."""
-    from hyperloom.orchestrator.actions.executors.explore import _framework_lever_attributions
+    from hyperloom.orchestrator.actions.executors._variant_grid import _framework_lever_attributions
 
     seeds = [
         {
@@ -486,7 +486,7 @@ def test_leave_one_out_attribution_negates_the_measured_gain():
 
 def test_a_combination_variant_attributes_to_nothing():
     """The full-stack leg is a combination test, not one rewrite's number."""
-    from hyperloom.orchestrator.actions.executors.explore import _framework_lever_attributions
+    from hyperloom.orchestrator.actions.executors._variant_grid import _framework_lever_attributions
 
     seeds = [{"name": "fwlever_all", "framework_lever": "", "framework_lever_source": "additive"}]
     outcomes = [{"variant_name": "fwlever_all", "outcome": "KEEP", "metrics": {"gain_pct": 12.0}}]
@@ -495,7 +495,7 @@ def test_a_combination_variant_attributes_to_nothing():
 
 def test_an_unmeasured_variant_attributes_to_nothing():
     """A failed or killed leg produces no number, so it records none."""
-    from hyperloom.orchestrator.actions.executors.explore import _framework_lever_attributions
+    from hyperloom.orchestrator.actions.executors._variant_grid import _framework_lever_attributions
 
     seeds = [{"name": "fwlever_hl_a", "framework_lever": "HL_A", "framework_lever_source": "additive"}]
     outcomes = [{"variant_name": "fwlever_hl_a", "outcome": "FAILED", "metrics": {}}]
@@ -504,7 +504,7 @@ def test_an_unmeasured_variant_attributes_to_nothing():
 
 def test_non_lever_variants_are_ignored():
     """An ordinary config variant in the same round is not a lever attribution."""
-    from hyperloom.orchestrator.actions.executors.explore import _framework_lever_attributions
+    from hyperloom.orchestrator.actions.executors._variant_grid import _framework_lever_attributions
 
     seeds = [{"name": "fwlever_hl_a", "framework_lever": "HL_A", "framework_lever_source": "additive"}]
     outcomes = [{"variant_name": "myfw_hw_queues_2", "outcome": "KEEP", "metrics": {"gain_pct": 3.0}}]

@@ -952,7 +952,7 @@ class IntentRouter(CoordinatorCollaborator):
         """
         if action_name != "explore":
             return False
-        from ..actions.executors.explore import framework_lever_grid
+        from ..actions.executors._variant_grid import framework_lever_grid
         from ..actions.executors.measured_variants import explore_grid_already_covered
 
         if framework_lever_grid(self.shared_state):

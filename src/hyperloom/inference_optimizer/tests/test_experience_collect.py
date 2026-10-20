@@ -479,7 +479,9 @@ def test_recorded_framework_attempts_satisfy_the_packaged_mapping(session_dir: P
 def test_an_auto_benched_specialist_proposal_publishes_its_reasoning_citations_and_read(session_dir: Path) -> None:
     import asyncio
 
-    from hyperloom.orchestrator.actions.executors.explore import _decision_fields, _grid_variants_from_payload
+    from hyperloom.orchestrator.actions.executors.explore import _decision_fields
+
+    from hyperloom.orchestrator.actions.executors._variant_grid import _grid_variants_from_payload
 
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"

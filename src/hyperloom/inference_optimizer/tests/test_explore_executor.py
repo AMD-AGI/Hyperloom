@@ -3320,7 +3320,7 @@ def test_atom_default_grid_survives_compatibility_filter():
 
 def test_grid_variants_from_payload_coerces_list_extra_args():
     """A JSON-list ``extra_args`` must be space-joined into a shell-arg string, not stringified into a Python repr."""
-    from hyperloom.orchestrator.actions.executors.explore import (
+    from hyperloom.orchestrator.actions.executors._variant_grid import (
         _grid_variants_from_payload,
     )
 
@@ -3338,7 +3338,7 @@ def test_grid_variants_from_payload_coerces_list_extra_args():
 
 
 def test_grid_variants_from_payload_carries_removal_controls():
-    from hyperloom.orchestrator.actions.executors.explore import (
+    from hyperloom.orchestrator.actions.executors._variant_grid import (
         _grid_variants_from_payload,
     )
 
@@ -3360,7 +3360,7 @@ def test_grid_variants_from_payload_carries_removal_controls():
 
 
 def test_grid_variants_preserve_authored_reason_as_experience_reasoning():
-    from hyperloom.orchestrator.actions.executors.explore import (
+    from hyperloom.orchestrator.actions.executors._variant_grid import (
         _grid_variants_from_payload,
     )
 
@@ -3380,7 +3380,7 @@ def test_grid_variants_preserve_authored_reason_as_experience_reasoning():
 
 
 def test_grid_variants_do_not_treat_provenance_as_reasoning():
-    from hyperloom.orchestrator.actions.executors.explore import (
+    from hyperloom.orchestrator.actions.executors._variant_grid import (
         _grid_variants_from_payload,
     )
 
