@@ -770,7 +770,8 @@ async def test_close_sequencer_records_the_unsettled_geak_candidate_the_final_re
     close = collect_v6_close([], recorded=assemble_parts(tmp_path, warnings=[])["close"])
     assert close["geak_candidate"] == expected
     section = render({"outcome": {"final": {}, "baseline": {}, "validation": {}}, "close": close, "timeline": []})
-    assert any(warning_marker in fact for fact in section.key_facts)
+    assert [warning_marker in fact for fact in section.key_facts] == [True]
+    assert len(section.warnings) == 1
 
 
 @pytest.mark.asyncio

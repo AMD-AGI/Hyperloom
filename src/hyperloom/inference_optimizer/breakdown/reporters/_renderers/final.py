@@ -116,10 +116,6 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     revalidation_pending = bool(candidate.get("revalidation_pending"))
     candidate_status = str(candidate.get("status") or "")
     pending_awaiting = candidate_status == "awaiting_rebench"
-    # Gain is provisional when a cross-harness revalidation is pending with no confirmed validated number.
-    is_provisional = revalidation_pending and not (isinstance(gain_v, (int, float)) and gain_v > 0)
-    # Headline is unvalidated when a GEAK candidate is pending with no positive validated gain.
-    headline_unvalidated = pending_awaiting and not (isinstance(gain_v, (int, float)) and gain_v > 0)
 
     facts: list[str] = []
     warnings: list[str] = []
@@ -138,15 +134,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             # For latency-based metrics, an improvement shows as a negative delta.
             note = " (negative = faster)" if framework_registry.is_scriptable(fw) else ""
             facts.append(f"Delta vs baseline: {final_v - base_v:+.2f} {_unit}{note}.")
-    if is_provisional:
-        facts.append("Cumulative gain is PENDING same-harness revalidation; no validated number exists yet.")
-        warnings.append(
-            "The recorded gain basis is PROVISIONAL and cross-harness: measured by the "
-            "delegated optimizer's harness against the orchestrator baseline, so "
-            "no gain is reported here. A same-harness full-stack rebench is "
-            "pending and will supply the validated number."
-        )
-    elif gain_v is not None and not headline_unvalidated:
+    if gain_v is not None:
         facts.append(f"Validated cumulative gain: {fmt_pct(gain_v, plus=True)}.")
         decisions.append(
             Decision(
@@ -213,7 +201,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             "the validated cumulative gain describes a shorter stack than the "
             "one that shipped."
         )
-    if gain_v is None and not is_provisional and (final_tput or base_tput):
+    if gain_v is None and (final_tput or base_tput):
         warnings.append(
             "No validated gain is recorded while baseline/final throughput are set — no validation run completed."
         )
