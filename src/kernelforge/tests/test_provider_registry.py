@@ -223,7 +223,7 @@ def test_broken_entry_point_is_isolated(monkeypatch) -> None:
 
         @staticmethod
         def load():
-            raise RuntimeError("boom")
+            raise ImportError("boom")
 
     class _EntryPoints:
         @staticmethod
