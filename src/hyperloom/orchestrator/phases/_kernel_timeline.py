@@ -183,18 +183,7 @@ def _rewrite_row(row: Mapping[str, Any], *, run_id: str, attempt_id: str) -> dic
 
 
 def record_gemm_campaign(recorder: Any, session_dir: Path, result: Mapping[str, Any], *, macro_cycle: int) -> None:
-    """Record a settled GEMM campaign in the Forge lane -- one row per tuner that ran.
-
-    A campaign can run several tuners (e.g. ``fmoe_ck`` and ``a4w4_blockscale``) in one cycle;
-    each has its own status, shape coverage and failure. Collapsing them into one row joined
-    `tuner` names with a comma and let one tuner's `failure_reason` land on a row whose
-    `gain_pct` came from a different, successful tuner -- a row that read as both "complete"
-    and "failed" at once. The campaign's own validated gain (``result["e2e_gain_pct"]``, set by
-    ``_validate_gemm_tuning_e2e`` only after e2e validation of the winning candidate) is
-    attached to the tuner whose artifact was actually applied (``tuned_file``); a tuner's own
-    best micro speedup is never substituted for it, since a per-shape timing ratio is not the
-    axis the KEEP verdict was graded on.
-    """
+    """Record a settled GEMM campaign in the Forge lane -- one row per tuner that ran."""
     facts = _campaign_facts(result, macro_cycle=macro_cycle)
     tuners = result.get("tuners_run")
     rows = [row for row in tuners if isinstance(row, dict)] if isinstance(tuners, list) else []
@@ -318,12 +307,7 @@ def note_absent_backends(result: dict[str, Any], *, handoff: Mapping[str, Any]) 
 
 
 def geak_absent_backends(eval_dir: str) -> dict[str, str]:
-    """``{backend: probe}`` for the backends GEAK's environment report lists as absent.
-
-    GEAK records them in ``<eval_dir>/env_report.json`` and deep in its final
-    report; they are provisioning gaps, and nothing else carries them to the
-    optimizer's log or reports.
-    """
+    """``{backend: probe}`` for the backends GEAK's environment report lists as absent."""
     if not eval_dir:
         return {}
     try:

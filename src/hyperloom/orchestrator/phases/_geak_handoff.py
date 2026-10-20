@@ -133,12 +133,7 @@ def _best_measurement(state: Any, best: Mapping[str, Any]) -> Mapping[str, Any]:
 def _recipe_launch_spec(
     env_spec: dict[str, Any], config: Mapping[str, Any], *, writeback: Any, agentx: bool, measurement: Mapping[str, Any]
 ) -> LaunchSpec:
-    """Rebuild the launch spec from the recipe's own server log, where it has one.
-
-    An AgentX workload whose spec carries no launch flags has them only in
-    the log of the server that was actually started; reading them back is
-    what makes the identity check comparable.
-    """
+    """Rebuild the launch spec from the recipe's own server log, where it has one."""
     if not agentx or str(config.get("server_launch_flags") or "").strip():
         return LaunchSpec(env_spec, config)
     evidence = measurement.get("launch_evidence")
@@ -217,12 +212,7 @@ def reference_verification_status(
     observed_flags: Any,
     observed_server_identity: Any,
 ) -> str:
-    """Say how far the reference launch was verified against what was asked for.
-
-    Observed flags or an observed server identity verify it outright; a
-    matching identity with only the request on record verifies the
-    declaration alone, and anything less is unverified.
-    """
+    """Say how far the reference launch was verified against what was asked for."""
     if identity_matches and (observed_flags or observed_server_identity):
         return _VERIFIED_OBSERVED
     if identity_matches and (
@@ -418,18 +408,7 @@ def read_recipe_bench_envs(recipe_path: str) -> dict[str, Any]:
 
 
 def bench_protocol(recipe_path: str, *, envs: Mapping[str, Any] | None = None) -> dict[str, Any]:
-    """Extract Hyperloom's bench measurement protocol for the GEAK handoff.
-
-    Reads the materialized baseline recipe's ``benchmark.envs`` (falling back
-    to the process env) and returns only the keys that resolve, so absent
-    values leave GEAK on its standalone defaults. Never raises.
-
-    Args:
-        recipe_path: Path to the baseline recipe YAML.
-        envs: An already-parsed ``benchmark.envs`` for that path. Pass it
-            when the caller needs the envs too, so the YAML is read once and
-            both consumers see the same snapshot.
-    """
+    """Extract Hyperloom's bench measurement protocol for the GEAK handoff."""
     envs = read_recipe_bench_envs(recipe_path) if envs is None else envs
     protocol: dict[str, Any] = {}
     for proto_key, env_key, cast in _BENCH_PROTOCOL_KEYS:
@@ -454,15 +433,7 @@ def _cast_env(envs: Mapping[str, Any], key: str, cast: Callable[[str], Any]) -> 
 
 
 def recipe_benchmark(recipe_path: str) -> dict[str, Any]:
-    """Parse a materialized recipe once and hand back its ``benchmark`` mapping.
-
-    Both handoff resolvers need the same mapping out of the same file, so the
-    read, the YAML parse and the shape validation live here instead of being
-    repeated with their own fallbacks on each side.
-
-    Returns ``{}`` for a missing, unreadable or malformed recipe, which each
-    caller already treats as "nothing to advertise". Never raises.
-    """
+    """Parse a materialized recipe once and hand back its ``benchmark`` mapping."""
     try:
         import yaml
 
@@ -479,11 +450,7 @@ def recipe_benchmark(recipe_path: str) -> dict[str, Any]:
 
 
 def advertised_workload_spec(bench: Mapping[str, Any], *, session_dir: Path, baseline_tput: float) -> dict[str, Any]:
-    """The self-describing workload the recipe carries, refined by the shape the replay actually had.
-
-    Only AgentX materializations carry ``benchmark.workload_spec``; every other
-    recipe omits it so GEAK keeps today's synthetic path unchanged.
-    """
+    """The self-describing workload the recipe carries, refined by the shape the replay actually had."""
     spec = bench.get("workload_spec")
     if not isinstance(spec, dict) or not spec:
         return {}
@@ -503,33 +470,7 @@ def advertised_workload_spec(bench: Mapping[str, Any], *, session_dir: Path, bas
 
 
 def launch_server_script(bench: Mapping[str, Any]) -> str:
-    """Name the server-phase script GEAK should launch through Magpie.
-
-    GEAK infers its launcher from the recipe's ``benchmark_script``, which on
-    every non-AgentX run IS a server launcher. The AgentX switch replaces
-    that field with the aiperf client -- which boots a server, replays the
-    corpus for ``AGENTX_DURATION``, then tears the server down in its exit
-    trap. Run under ``MAGPIE_RUN_PHASE=server`` it therefore returns no pid,
-    and GEAK's bench aborts before it measures a single repeat.
-
-    Naming the builtin the client itself delegates to keeps GEAK on the
-    Magpie launch path -- the reason that launcher exists, since the platform
-    kernel preset, ``--trust-remote-code`` and the gpu-mem-util default are
-    not flags and so cannot be recovered from the accepted-flags handoff --
-    while letting its own bench repeats run again.
-
-    Resolution mirrors ``mlperf_agentic_client.sh``: the same ``AGENTX_SERVER_SCRIPT``
-    override, the same ``{framework}_{gpu}.sh`` fallback, the same
-    ``<checkout>/benchmarks/`` directory and deliberately no recursive
-    search, so what we advertise is the path that would have booted the
-    server rather than merely a plausible one. Recipe-recorded values beat
-    the ambient env because the recipe is the record of what actually ran.
-
-    Returns "" for any non-AgentX recipe -- there GEAK's own derivation names
-    the script that really launched the baseline, which is strictly better
-    than anything re-derived here -- and "" whenever the builtin cannot be
-    confirmed on disk, leaving current behaviour untouched. Never raises.
-    """
+    """Name the server-phase script GEAK should launch through Magpie."""
     try:
         from hyperloom.common.agentx_workload import is_agentx_client_script
 
@@ -554,25 +495,7 @@ class _ReplayResult(NamedTuple):
 
 
 def observed_replay_shape(session_dir: Path, target_tput: float) -> dict[str, Any]:
-    """Measure the trace replay's real sequence shape from OUR OWN baseline.
-
-    The AgentX handoff's ``workload.isl/osl`` are the CLI's synthetic
-    defaults (1024/1024) because a trace replay has no single ISL -- the
-    corpus spans roughly 89k at p50 past 500k at p99. GEAK does not measure
-    with them (the aiperf client ignores them outright), but the KERNEL
-    agents still read them as the analytic serving call model when they
-    synthesize GEMM/attention shapes. Left at 1024 they aim two orders of
-    magnitude below the load, so the search tunes a regime nobody serves.
-
-    Rather than hardcode corpus percentiles, derive the average shape from
-    the baseline result THIS run already measured: the canonical result
-    records ``total_input_tokens``/``total_output_tokens`` over ``completed``
-    requests. That keeps the number sourced from a measurement instead of a
-    constant that silently rots when the corpus is re-pinned.
-
-    Returns ``{}`` whenever no usable result is on disk, so an unmeasurable
-    run degrades to today's behavior rather than to a fabricated shape.
-    """
+    """Measure the trace replay's real sequence shape from OUR OWN baseline."""
     try:
         best = _closest_replay_result(session_dir, target_tput)
     except Exception:
@@ -628,15 +551,7 @@ def _served_replay_results(session_dir: Path) -> Iterator[_ReplayResult]:
 
 
 def _is_served_baseline(root: Any, path: str) -> bool:
-    """Whether a result under ``root`` is one the orchestrator itself served.
-
-    GEAK's own results are not the orchestrator's baseline, and the overlay
-    probe is not a served measurement. Match path COMPONENTS below the runs
-    root, never the whole string: a substring test excludes every result the
-    moment an ancestor directory happens to contain "geak" (a campaign rooted
-    at .../hlgeak_24h_run/ hits this), which silently degrades the shape to
-    the 1024 default this search exists to replace.
-    """
+    """Whether a result under ``root`` is one the orchestrator itself served."""
     try:
         parts = Path(path).relative_to(root).parts
     except ValueError:

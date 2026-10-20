@@ -161,13 +161,7 @@ def _controller_produced_nothing(status: str, reason: str, output_dir: Path) -> 
 
 
 def _reclaim_borrowed_repositories(result: dict[str, Any], baselines: Mapping[str, object]) -> None:
-    """Return every borrowed campaign repository to the HEAD integration will read.
-
-    This runs before integration reads any HEAD. A hard timeout kills the process tree,
-    so a borrowed repository can still be sitting on a campaign branch, and integration
-    refuses a publication whose base commit is not the HEAD it finds -- which would
-    discard exactly the patches incremental publication saved from the kill.
-    """
+    """Return every borrowed campaign repository to the HEAD integration will read."""
     try:
         from ..kernel.campaign_baseline import reclaim_campaign_repositories
 
@@ -435,11 +429,7 @@ def _merged_launch_controls(
 
 
 def _removals_the_accepted_flags_keep(remove_args: list[str], accepted_flags: str) -> list[str]:
-    """Drop the removals that would prune a flag the accepted launch itself carries.
-
-    A legacy delta can re-enable a removed flag. The retained snapshot is complete, so
-    stale removals would prune it again.
-    """
+    """Drop the removals that would prune a flag the accepted launch itself carries."""
     from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
     from hyperloom.inference_optimizer.grid_server_args import remove_server_args
 
@@ -483,11 +473,7 @@ def _fusion_awaits_e2e(fusion: Mapping[str, Any]) -> bool:
 
 
 def _fail_unreadable_fusion_envelope(fusion: dict[str, Any]) -> None:
-    """Report a KEEP whose nomination envelope the contract cannot read as infrastructure.
-
-    Such a run judged nothing, so reporting it as a result would be wrong and it has to
-    stay retryable rather than latching the lane.
-    """
+    """Report a KEEP whose nomination envelope the contract cannot read as infrastructure."""
     if not _fusion_awaits_e2e(fusion):
         return
     from ..kernel.nomination_result import parse_outcome
@@ -521,16 +507,7 @@ def _applicable_envs(raw: object) -> dict[str, str]:
 
 
 def _tuner_left_a_deployable_artifact(row: Mapping[str, Any]) -> bool:
-    """Whether a tuner run wrote rows an e2e validation could apply.
-
-    ``partial_output`` is a real artifact: the tuner wrote fewer rows than shapes it was
-    given (the grouped batch budget ran out), but the rows it did write are deployable.
-
-    ``improved_shapes`` can never exceed 0 for tuners with no comparable baseline --
-    TunableOp never times the untuned dispatch, the candidate-CSV fallback has no
-    per-shape Pre/Post table, and a hipblaslt-only bf16 run has no torch candidate to
-    measure against.
-    """
+    """Whether a tuner run wrote rows an e2e validation could apply."""
     if row.get("status") not in ("ok", "partial_output"):
         return False
     return (
@@ -585,12 +562,7 @@ def _assumed_blockscale_candidates(result: Mapping[str, Any]) -> list[dict[str, 
 
 
 def _charge_fusion_retry_caps(state: Any, fusion: Mapping[str, Any]) -> None:
-    """Charge this fusion run against the session's abort and withheld-target retry caps.
-
-    Counted on the session, not on the record: ``last_fusion`` is replaced by every
-    run, so a timeout or a handler crash landing between two aborts would carry no
-    count forward and hand the cap back a clean slate on every other entry.
-    """
+    """Charge this fusion run against the session's abort and withheld-target retry caps."""
     if fusion.get("infrastructure_abort"):
         state.fusion_infra_aborts = _as_int(state.fusion_infra_aborts) + 1
     if not fusion.get("kept") and _withheld_targets(fusion) > 0:
@@ -1694,11 +1666,7 @@ class KernelPhase(CoordinatorCollaborator):
         return _GeakDelegation(payload=payload, path=path)
 
     def _wind_down_geak_to_sweep(self, result: dict[str, Any]) -> None:
-        """Carry a (failed/skipped) GEAK outcome into the phase exit toward SWEEP.
-
-        A settled verdict is left standing: a later failure records
-        itself without retiring the candidate that already adjudicated.
-        """
+        """Carry a (failed/skipped) GEAK outcome into the phase exit toward SWEEP."""
         state = self.shared_state
         prev = state.geak_result if isinstance(state.geak_result, dict) else {}
         if not _geak_rebench.geak_verdict_is_terminal(prev):
@@ -1752,12 +1720,7 @@ class KernelPhase(CoordinatorCollaborator):
         return True
 
     def _run_geak_runner(self, cmd: list[str], *, kill_timeout: int, term_grace: int) -> subprocess.CompletedProcess:
-        """Run the GEAK runner to completion in a process group of its own.
-
-        The group is what lets a timeout SIGTERM the whole runner -> run_e2e -> vllm/node
-        tree (grace to flush result.json) and then SIGKILL it, instead of orphaning
-        run_e2e and its servers.
-        """
+        """Run the GEAK runner to completion in a process group of its own."""
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -1788,12 +1751,7 @@ class KernelPhase(CoordinatorCollaborator):
     async def _promote_geak_result_left_on_disk(
         self, handoff: Mapping[str, Any], *, agentx: bool, result_path: Path
     ) -> bool:
-        """Adopt a validated result.json a crashed coordinator left behind; report whether it did.
-
-        ``_geak_win_already_recorded`` guards it so a prior cycle's result.json does not
-        short-circuit a fresh entry, and a settled result is never recovered -- new
-        candidate evidence remains eligible.
-        """
+        """Adopt a validated result.json a crashed coordinator left behind; report whether it did."""
         recovered = _read_geak_result(result_path)
         if recovered.get("status") != "ok" or self._geak_win_already_recorded():
             return False
@@ -1809,11 +1767,7 @@ class KernelPhase(CoordinatorCollaborator):
     async def _keep_what_the_killed_geak_runner_flushed(
         self, handoff: Mapping[str, Any], *, agentx: bool, result_path: Path, run: RunnerRun, cards: list[int] | None
     ) -> None:
-        """Keep a win the killed runner still flushed, or record the timeout.
-
-        The graceful SIGTERM gives run_e2e a window to flush result.json, so a real win
-        is kept instead of the phase being discarded as a timeout.
-        """
+        """Keep a win the killed runner still flushed, or record the timeout."""
         log.warning(
             "GEAK runner exceeded kill_timeout=%ds; SIGTERM'd to let it flush, then reclaimed the closing window",
             run.kill_timeout_sec,
@@ -1938,11 +1892,7 @@ class KernelPhase(CoordinatorCollaborator):
         state.save(self.session_dir)
 
     def _refuse_phantom_baseline_gain(self, result: Mapping[str, Any]) -> None:
-        """Refuse a run whose baseline ref never reproduced the configuration it was given.
-
-        Such a run optimized against a phantom baseline, so its gain is non-comparable and
-        can never be promoted.
-        """
+        """Refuse a run whose baseline ref never reproduced the configuration it was given."""
         log.warning(
             "GEAK baseline_reproduction_failed: ref did not match "
             "orchestrator best (%s); refusing to promote a phantom-baseline gain",
@@ -2075,14 +2025,7 @@ class KernelPhase(CoordinatorCollaborator):
     def _geak_claim(
         self, result: Mapping[str, Any], *, accepted_flags: str, accepted_envs: dict[str, str], tput: float
     ) -> _GeakClaim:
-        """What this GEAK run reported about the configuration it accepted.
-
-        The gain is left unstated whenever GEAK measured its baseline on another
-        workload: synthetic isl/osl taken at face value read as roughly +175%
-        with nothing optimized, and although the downstream rebench would reject
-        that, the number would already have been recorded. An ABSENT verdict means
-        an older GEAK that only ever ran the synthetic path, which stays comparable.
-        """
+        """What this GEAK run reported about the configuration it accepted."""
         basis = str(result.get("metric_basis") or GEAK_METRIC_OUTPUT[1])
         base = (
             float(self.shared_state.baseline_tput or 0.0)
@@ -3208,11 +3151,7 @@ class KernelPhase(CoordinatorCollaborator):
         return ""
 
     def _merged_candidate_envs(self, cand: Mapping[str, Any]) -> _MergedCandidateEnvs:
-        """Merge every tuned table a candidate names into the runtime config it has to join.
-
-        Shapes the candidate does not name keep the tuned entries the runtime already had,
-        so a partial table cannot silently un-tune the rest.
-        """
+        """Merge every tuned table a candidate names into the runtime config it has to join."""
         env = dict(cand["envs"])
         for env_var, env_value in list(env.items()):
             if not env_var.startswith("AITER_CONFIG"):
@@ -3306,12 +3245,7 @@ class KernelPhase(CoordinatorCollaborator):
         return _IntegrateOutcome(verdict=None, run_stopped=False)
 
     async def _gemm_apply_blockers(self, cand: dict[str, Any], env: dict[str, str], gain_pct: float) -> _ApplyCheck:
-        """Check whether the tuned table actually reached the runtime, by both checks that can see it.
-
-        Two independent ways the artifact can fail to take effect, neither of which the
-        throughput delta can see: the keys are unreachable (coverage), and the table
-        never reached the server (apply verdict).
-        """
+        """Check whether the tuned table actually reached the runtime, by both checks that can see it."""
         tuner = cand["tuner"]
         blockers: list[str] = []
         # Off the event loop for the same reason: this reads the integrate run's server.log in full and parses
@@ -3358,11 +3292,7 @@ class KernelPhase(CoordinatorCollaborator):
         )
 
     async def _settle_gemm_tuning(self, result: dict[str, Any], run: _GemmE2ERun, ledger: _GemmE2ELedger) -> None:
-        """Rewrite the stored result to the E2E-validated outcome.
-
-        Orchestration must never see the raw combined ``recommended_env`` and issue a
-        bundled integrate, so only the stack this run actually adopted is left standing.
-        """
+        """Rewrite the stored result to the E2E-validated outcome."""
         # The watermark covers the whole run, so it waits for the last KEEP.
         result["graded_objective"] = None
         if ledger.kept:
