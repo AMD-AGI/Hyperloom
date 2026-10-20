@@ -2519,7 +2519,6 @@ async def test_trace_analyze_handler_xdit_state_overrides_stale_payload_framewor
     cmd = captured["cmd"]
     assert "--framework" in cmd and cmd[cmd.index("--framework") + 1] == "xdit"
     assert "--steady-state-mode" in cmd and cmd[cmd.index("--steady-state-mode") + 1] == "generic"
-    assert "--analysis-mode" not in cmd
     warnings = res["trace_health_warnings"]
     assert warnings[0]["code"] == "stale_framework_overridden"
     assert warnings[0]["payload_framework"] == "sglang"
@@ -2598,7 +2597,6 @@ async def test_trace_analyze_handler_payload_framework_overrides_serving_state(
     assert res["status"] == "ok"
     cmd = captured["cmd"]
     assert "--framework" in cmd and cmd[cmd.index("--framework") + 1] == "sglang"
-    assert "--analysis-mode" in cmd and cmd[cmd.index("--analysis-mode") + 1] == "inference"
 
 
 @pytest.mark.asyncio
@@ -3033,7 +3031,6 @@ async def test_trace_analyze_handler_backfills_workload_context_from_state(
     assert "--framework" in cmd and "vllm" in cmd
     assert "--target-platform" in cmd and "mi300x" in cmd
     assert "--model-name" in cmd and "Qwen3-30B-A3B" in cmd
-    assert "--analysis-mode" in cmd and "inference" in cmd
 
 
 @pytest.mark.asyncio

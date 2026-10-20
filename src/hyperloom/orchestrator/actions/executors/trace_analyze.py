@@ -394,6 +394,15 @@ class _AnalysisRun:
     analysis_mode: str
 
 
+def _bypass_flags(state: Any, analysis_mode: str) -> list[str]:
+    """Flags only the bypass route reads; the analysis-mode hint retires with the bypass route."""
+    flags = _optional_flags(("--analysis-mode", analysis_mode))
+    if str(getattr(state, "benchmark_mode", "") or "").strip().lower() == "agentx":
+        flags += ["--require-single-rank"]
+        flags += _optional_flags(("--tensor-parallel-size", optional_positive_int(getattr(state, "tp", None))))
+    return flags
+
+
 def _analysis_tool_argv(payload: dict, run: _AnalysisRun, *, session_dir: Path, state: Any) -> list[str]:
     """Invoke the reader this route uses, with the flags only that one takes.
 
@@ -416,9 +425,8 @@ def _analysis_tool_argv(payload: dict, run: _AnalysisRun, *, session_dir: Path, 
         # The tool's SDK run books its model requests onto this session's trajectory ledger.
         for key, value in inherited_scope_fields().items():
             cmd += [f"--trajectory-{key.replace('_', '-')}", str(value)]
-    elif str(getattr(state, "benchmark_mode", "") or "").strip().lower() == "agentx":
-        cmd += ["--require-single-rank"]
-        cmd += _optional_flags(("--tensor-parallel-size", optional_positive_int(getattr(state, "tp", None))))
+    else:
+        cmd += _bypass_flags(state, run.analysis_mode)
     return cmd
 
 
@@ -434,7 +442,6 @@ def _workload_identity_flags(payload: dict, run: _AnalysisRun, *, state: Any, wo
         ("--model-name", run.model_name),
         ("--framework", run.framework),
         ("--target-platform", run.target_platform),
-        ("--analysis-mode", run.analysis_mode),
         ("--model-path", model_path),
         ("--precision", precision),
     )
