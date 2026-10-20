@@ -58,34 +58,6 @@ def tunableop_untuned_line(m: int, n: int, k: int, op: str) -> str:
     return f"{op},tn_{n}_{m}_{k}_ld_{k}_{k}_{n}"
 
 
-def _demand_records(shapes: list[dict[str, Any]], precision: str) -> tuple[list[str], dict[str, int]]:
-    """Untuned records for the demand shapes, up to the budget, and how many shapes each unsupported dtype lost."""
-    # Per-shape dtype first, ``precision`` only as a fallback for shapes the demand parser recorded without one.
-    fallback_op = _TUNABLEOP_OP_BY_PRECISION.get(precision)
-
-    lines = []
-    unsupported: dict[str, int] = {}
-    for shape in shapes:
-        # Budget reached.
-        if len(lines) >= _DEMAND_SHAPE_LIMIT:
-            break
-        try:
-            m, n, k = int(shape["M"]), int(shape["N"]), int(shape["K"])
-        except (KeyError, TypeError, ValueError):
-            continue
-        # The fallback applies only to shapes the demand parser recorded WITHOUT a dtype.
-        raw_dtype = shape.get("dtype") or shape.get("otype")
-        op = _tunableop_op_for_dtype(raw_dtype)
-        if op is None and not str(raw_dtype or "").strip():
-            op = fallback_op
-        if op is None:
-            label = str(raw_dtype or "").strip() or f"precision={precision}"
-            unsupported[label] = unsupported.get(label, 0) + 1
-            continue
-        lines.append(tunableop_untuned_line(m, n, k, op))
-    return lines, unsupported
-
-
 def _is_tunableop_result_line(line: str) -> bool:
     stripped = line.strip()
     if not stripped or stripped.startswith(("#", "Validator")):
@@ -294,31 +266,61 @@ class VllmDenseTunableopTuner(BaseTuner):
 
     def _input_from_demand(self) -> Path | None:
         """Write an untuned record file from the keys the runtime missed."""
-        path = getattr(self.ctx, "demand_json", None)
+        path = self.ctx.demand_json
         if not path:
             return None
-        from ..evidence import (
-            demand_for_tuner,
-            demand_shapes,
-            load_demand,
-        )
+        from ..evidence import TABLE_KEY_SCHEMA, demand_for_tuner, demand_shapes, load_demand
 
         report = load_demand(path)
-        entry = demand_for_tuner(report, self.name) if report else None
         if report is None:
             return None
+        entry = demand_for_tuner(report, self.name)
 
         # bucket=False: the padded-M cover that the aiter tuners want is wrong here.
         shapes = demand_shapes(entry, limit=_DEMAND_FETCH_LIMIT, bucket=False) if entry else []
         if not shapes:
             # No demand names this tuner, which is the normal case: the runtime logs lookups against aiter's tables,
             # and TunableOp has no table of its own to miss.
-            shapes = self._borrowed_dense_shapes(report)
+            borrowed: list[dict] = []
+            for other in report.get("demands") or []:
+                table = str(other.get("table") or "")
+                if table not in TABLE_KEY_SCHEMA:
+                    continue  # MoE and anything else that is not a dense GEMM
+                # bucket=False for the same reason as the direct path above: borrowing another table's misses does not
+                # borrow aiter's padded-M retry along with them.
+                borrowed.extend(demand_shapes(other, limit=_DEMAND_FETCH_LIMIT, bucket=False))
+            shapes = borrowed[:_DEMAND_FETCH_LIMIT]
+            if shapes:
+                log.info(
+                    "%s: no demand of its own; taking %d dense shape(s) the runtime missed on other dense tables",
+                    self.name,
+                    len(shapes),
+                )
         if not shapes:
             return None
 
-        precision = str(getattr(self.ctx, "precision", "") or "bf16").lower()
-        lines, unsupported = _demand_records(shapes, precision)
+        # Per-shape dtype first, ctx.precision only as a fallback for shapes the demand parser recorded without one.
+        precision = (self.ctx.precision or "bf16").lower()
+        fallback_op = _TUNABLEOP_OP_BY_PRECISION.get(precision)
+
+        lines = []
+        unsupported: dict[str, int] = {}
+        for shape in shapes:
+            # Budget reached.
+            if len(lines) >= _DEMAND_SHAPE_LIMIT:
+                break
+            try:
+                m, n, k = int(shape["M"]), int(shape["N"]), int(shape["K"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            # The fallback applies only to shapes the demand parser recorded WITHOUT a dtype.
+            dtype_text = str(shape.get("dtype") or shape.get("otype") or "").strip()
+            op = _tunableop_op_for_dtype(dtype_text) if dtype_text else fallback_op
+            if op is None:
+                label = dtype_text or f"precision={precision}"
+                unsupported[label] = unsupported.get(label, 0) + 1
+                continue
+            lines.append(tunableop_untuned_line(m, n, k, op))
         if unsupported:
             detail = ", ".join(f"{k} x{v}" for k, v in sorted(unsupported.items()))
             log.warning(
@@ -336,33 +338,8 @@ class VllmDenseTunableopTuner(BaseTuner):
         out = self.work_dir / "untuned_from_demand.csv"
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        log.info(
-            "%s: %d demand shape(s) written as TunableOp records -> %s",
-            self.name,
-            len(lines),
-            out,
-        )
+        log.info("%s: %d demand shape(s) written as TunableOp records -> %s", self.name, len(lines), out)
         return out
-
-    def _borrowed_dense_shapes(self, report: dict[str, Any]) -> list[dict[str, Any]]:
-        """The shapes the runtime missed on the other dense tables, for a demand file naming none for this tuner."""
-        from ..evidence import TABLE_KEY_SCHEMA, demand_shapes
-
-        borrowed: list[dict] = []
-        for other in report.get("demands") or []:
-            table = str(other.get("table") or "")
-            if table not in TABLE_KEY_SCHEMA:
-                continue  # MoE and anything else that is not a dense GEMM
-            # bucket=False for the same reason as the direct path above: borrowing another table's misses does not
-            # borrow aiter's padded-M retry along with them.
-            borrowed.extend(demand_shapes(other, limit=_DEMAND_FETCH_LIMIT, bucket=False))
-        if borrowed:
-            log.info(
-                "%s: no demand of its own; taking %d dense shape(s) the runtime missed on other dense tables",
-                self.name,
-                len(borrowed[:_DEMAND_FETCH_LIMIT]),
-            )
-        return borrowed[:_DEMAND_FETCH_LIMIT]
 
     def _resolve_input(self) -> Path | None:
         """Get the TunableOp input file."""
