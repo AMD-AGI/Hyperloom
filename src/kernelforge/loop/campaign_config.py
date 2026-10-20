@@ -26,8 +26,8 @@ from kernelforge.knowledge.kb_store.identity.implementation import (
     hash_implementation_identity,
     implementation_signature,
 )
+from kernelforge.knowledge.kb_store.identity.kernel_names import derive_kernel_names
 from kernelforge.loop.new_path_allowlist import normalize_commit_new_paths
-from kernelforge.mcp_server.tools.pmc import derive_kernel_names
 from kernelforge.durable_io import atomic_write_text
 from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
 

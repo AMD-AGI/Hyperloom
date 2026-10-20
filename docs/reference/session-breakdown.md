@@ -301,12 +301,14 @@ construction — a comparison that could not supply the configured axis pair
 failed instead of being graded on another one.
 
 `outcome.variants` counts what the framework phase benched: `bench_runs`
-configuration variants and source patches that were `kept`, `reverted`, or
-`failed` without a measurement, the `distinct` changes among them, and
-`keep_rate_pct`, kept per bench run. A change benched again on a later stack is
-one distinct change and two bench runs, and an attempt that never reached the
-bench is not counted. Kernel candidates are not variants: the kernel lane
-reports its own funnel.
+configuration variants and source patches, of which `kept` were adopted into
+the stack, `reverted` were measured and not adopted, and `failed` reached the
+bench without a measurement; the `distinct` changes among them; and
+`keep_rate_pct`, kept per bench run. Each attempt row says whether it reached
+the bench (`benched`), so a patch that never applied is not counted, and a
+change benched again on a later stack is one distinct change and two bench
+runs. Kernel candidates are not variants: the kernel lane reports its own
+funnel.
 
 `timeline` is the run itself — one event per stage, oldest first. An event
 carries its `type`, its identity (`event_id`, `phase`, `macro_cycle`), its

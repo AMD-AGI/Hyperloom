@@ -79,6 +79,7 @@ def coord(tmp_path: Path, monkeypatch) -> Coordinator:
     c.shared_state = SharedState(
         baseline_tput=100.0,
         kernel_optimizer="forge",
+        phase="PRELUDE",
     )
     c.tasks = _StubTaskRegistry()
     c.knowledge_plane = None

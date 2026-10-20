@@ -18,19 +18,76 @@ from . import machine_state as _phase_state
 log = _logging.getLogger(__name__)
 
 
+def _bridge_symptom(cand: dict[str, Any], predicate_file: str, why: str) -> str:
+    """The operator-readable account of one un-bridged switch."""
+    predicate_name = str(cand.get("predicate_name") or "").strip()
+    parts = [
+        f"Un-bridged switch in {predicate_file}" + (f" ({predicate_name})" if predicate_name else "") + f": {why}",
+    ]
+    consequence = str(cand.get("consequence") or "").strip()
+    if consequence:
+        parts.append(f"Consequence: {consequence}")
+    bridge_sketch = str(cand.get("bridge_sketch") or "").strip()
+    if bridge_sketch:
+        parts.append(f"Bridge: {bridge_sketch}")
+    return " ".join(parts)[:1200]
+
+
+def _bridge_candidate_gap(cand: dict[str, Any], idx: int) -> dict[str, Any] | None:
+    """The gap row a static-recon bridge candidate seeds, or None when it is not actionable."""
+    predicate_file = str(cand.get("predicate_file") or "").strip()
+    why = str(cand.get("why_disabled_here") or "").strip()
+    # A candidate without a source anchor + explanation is not actionable.
+    if not predicate_file or not why:
+        return None
+    raw_id = str(cand.get("id") or f"cand{idx}").strip() or f"cand{idx}"
+    slug = "".join(c if (c.isalnum() or c in "._-") else "_" for c in raw_id)[:80]
+    return {
+        "canonical_id": f"gap.static_recon.{slug}",
+        "symptom": _bridge_symptom(cand, predicate_file, why),
+        "layer": "static_recon",
+        "severity": "medium",
+        "domain_hint": str(cand.get("domain_hint") or "freeform").strip() or "freeform",
+        "source": "static_recon",
+        "provenance": predicate_file,
+    }
+
+
 class InternalTasksPhase(CoordinatorCollaborator):
     """Handles internal task execution: report, session breakdown, and internal bookkeeping tasks."""
 
-    async def _enqueue_internal_research_scout_task(
-        self,
-        *,
-        reason: str,
-        round_id: int,
-    ) -> "Task | None":
-        """Enqueue a Coordinator-owned read-only research-scout specialist task; idempotency keyed by round, returns None when the scout is disabled."""
-        if not bool(self.shared_state.research_scout_enabled):
-            return None
-        idempotency_key = f"internal-research-scout-round{int(round_id)}"
+    def _research_scout_already_proven(self) -> list[dict[str, str]]:
+        """Priors this session has already validated, so the scout does not re-propose them."""
+        proven = list(self._coord.phase_prelude.warm_recipe_proven_items())
+        search = self.shared_state.explore_search or {}
+        accepted = search.get("accepted") if isinstance(search, dict) else []
+        if not isinstance(accepted, list):
+            return proven
+        for variant in accepted:
+            if not isinstance(variant, dict):
+                continue
+            name = str(variant.get("name") or variant.get("fingerprint") or "").strip()
+            if not name:
+                continue
+            sources = variant.get("source_evidence") or variant.get("pr_evidence") or []
+            source = str(sources[0]).strip() if isinstance(sources, list) and sources else ""
+            proven.append({"name": name, "source": source})
+        return proven
+
+    def _research_scout_residual_questions(self) -> str:
+        """The open questions the latest scout round left behind, as a note block."""
+        rounds = self.shared_state.specialist_rounds or []
+        if not isinstance(rounds, list):
+            return ""
+        for row in reversed(rounds):
+            if not isinstance(row, dict) or row.get("domain") != "research_scout_specialist":
+                continue
+            questions = [str(item).strip() for item in (row.get("residual_questions") or []) if str(item).strip()]
+            return "\n".join(f"- {question}" for question in questions)
+        return ""
+
+    def _research_scout_params(self, *, reason: str, round_id: int) -> dict[str, Any]:
+        """The specialist params for one research-scout round."""
         seen = sorted(
             {str(item).strip() for item in (self.shared_state.research_scout_seen_pr_ids or []) if str(item).strip()}
         )
@@ -51,18 +108,7 @@ class InternalTasksPhase(CoordinatorCollaborator):
             "seen_pr_ids": seen,
             "mode": "research",
         }
-        proven = list(self._coord.phase_prelude.warm_recipe_proven_items())
-        search = self.shared_state.explore_search or {}
-        accepted = search.get("accepted") if isinstance(search, dict) else []
-        if isinstance(accepted, list):
-            for variant in accepted:
-                if not isinstance(variant, dict):
-                    continue
-                name = str(variant.get("name") or variant.get("fingerprint") or "").strip()
-                if name:
-                    sources = variant.get("source_evidence") or variant.get("pr_evidence") or []
-                    source = str(sources[0]).strip() if isinstance(sources, list) and sources else ""
-                    proven.append({"name": name, "source": source})
+        proven = self._research_scout_already_proven()
         if proven:
             params["already_proven"] = proven
         recipe_sites = [
@@ -70,21 +116,27 @@ class InternalTasksPhase(CoordinatorCollaborator):
         ]
         if recipe_sites:
             params["recipe_sites"] = recipe_sites
-        rounds = self.shared_state.specialist_rounds or []
-        if isinstance(rounds, list):
-            for row in reversed(rounds):
-                if not isinstance(row, dict) or row.get("domain") != "research_scout_specialist":
-                    continue
-                questions = [str(item).strip() for item in (row.get("residual_questions") or []) if str(item).strip()]
-                if questions:
-                    params["notes"] = "\n".join(f"- {question}" for question in questions)
-                break
+        notes = self._research_scout_residual_questions()
+        if notes:
+            params["notes"] = notes
+        return params
+
+    async def _enqueue_internal_research_scout_task(
+        self,
+        *,
+        reason: str,
+        round_id: int,
+    ) -> "Task | None":
+        """Enqueue a Coordinator-owned read-only research-scout specialist task; idempotency keyed by round, returns None when the scout is disabled."""
+        if not bool(self.shared_state.research_scout_enabled):
+            return None
+        params = self._research_scout_params(reason=reason, round_id=round_id)
         await self._coord.specialist_dispatch.warm_specialist_params(params)
         lanes, ttl = self._coord.gpu_lanes.framework_authoring_lanes_ttl(params, base_ttl_sec=1800)
         task, was_existing = await self.tasks.create_or_return_existing(
             kind="specialist",
             params=params,
-            idempotency_key=idempotency_key,
+            idempotency_key=f"internal-research-scout-round{int(round_id)}",
             requires_lanes=lanes,
             side_effects=["writes_results"],
             lease_ttl_sec=ttl,
@@ -301,41 +353,10 @@ class InternalTasksPhase(CoordinatorCollaborator):
             return
         seeded = 0
         for idx, cand in enumerate(candidates):
-            if not isinstance(cand, dict):
+            gap = _bridge_candidate_gap(cand, idx) if isinstance(cand, dict) else None
+            if gap is None:
                 continue
-            predicate_file = str(cand.get("predicate_file") or "").strip()
-            why = str(cand.get("why_disabled_here") or "").strip()
-            # A candidate without a source anchor + explanation is not actionable.
-            if not predicate_file or not why:
-                continue
-            raw_id = str(cand.get("id") or f"cand{idx}").strip() or f"cand{idx}"
-            slug = "".join(c if (c.isalnum() or c in "._-") else "_" for c in raw_id)[:80]
-            cid = f"gap.static_recon.{slug}"
-            predicate_name = str(cand.get("predicate_name") or "").strip()
-            consequence = str(cand.get("consequence") or "").strip()
-            bridge_sketch = str(cand.get("bridge_sketch") or "").strip()
-            domain_hint = str(cand.get("domain_hint") or "freeform").strip() or "freeform"
-            symptom_parts = [
-                f"Un-bridged switch in {predicate_file}"
-                + (f" ({predicate_name})" if predicate_name else "")
-                + f": {why}",
-            ]
-            if consequence:
-                symptom_parts.append(f"Consequence: {consequence}")
-            if bridge_sketch:
-                symptom_parts.append(f"Bridge: {bridge_sketch}")
-            symptom = " ".join(symptom_parts)[:1200]
-            self.shared_state.upsert_gap(
-                {
-                    "canonical_id": cid,
-                    "symptom": symptom,
-                    "layer": "static_recon",
-                    "severity": "medium",
-                    "domain_hint": domain_hint,
-                    "source": "static_recon",
-                    "provenance": predicate_file,
-                }
-            )
+            self.shared_state.upsert_gap(gap)
             seeded += 1
         if seeded:
             try:
