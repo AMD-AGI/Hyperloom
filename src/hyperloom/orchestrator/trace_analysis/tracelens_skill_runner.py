@@ -635,7 +635,7 @@ async def _drive_sdk_stream(
                     try:
                         await asyncio.wait_for(aclose(), timeout=10.0)
                     except (asyncio.TimeoutError, Exception):  # noqa: BLE001
-                        pass
+                        _log.debug("tracelens: stream aclose failed", exc_info=True)
                 break
             observe(message)
             in_flight.observe(message)
@@ -646,6 +646,7 @@ async def _drive_sdk_stream(
     except Exception as exc:  # noqa: BLE001
         # SDK may error after writing artifacts; treat artifact presence as truth.
         sdk_error = f"{type(exc).__name__}: {exc}"
+        _log.warning("tracelens: claude SDK stream failed: %s", sdk_error)
         if log:
             log(f"[claude-sdk] WARNING: {sdk_error}")
     return sdk_error

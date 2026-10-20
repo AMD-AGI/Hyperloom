@@ -182,13 +182,9 @@ def _build_failure_summary(
         server_log_abs = _resolve_attempt_server_log(attempt)
         # Only the benign WARN (or nothing) survived: dig the real terminal marker out of server.log when available.
         if not error_text and server_log_abs is not None:
-            try:
-                from ._subprocess_kill import server_log_death_excerpt
+            from ._subprocess_kill import server_log_death_excerpt
 
-                excerpt = server_log_death_excerpt(str(server_log_abs))
-            except Exception:
-                log.debug("server_log_death_excerpt failed", exc_info=True)
-                excerpt = None
+            excerpt = server_log_death_excerpt(str(server_log_abs))
             if excerpt:
                 error_text = excerpt.strip()
                 if error_class in ("", "unknown"):
@@ -355,13 +351,10 @@ def _explain_conc_sweep_skip(state) -> str:
 
 def _platform_fingerprint(gpu_type: str | None = None) -> dict[str, Any]:
     """Platform record for the run report, scoped to this session's node count."""
-    try:  # local import keeps this free of executor import order
-        from ._multi_node_env import is_multi_node
+    # Local import keeps this free of executor import order.
+    from ._multi_node_env import is_multi_node
 
-        multi_node: bool | None = bool(is_multi_node())
-    except Exception:  # noqa: BLE001 - scope marker only; unknown is not False
-        multi_node = None
-    return platform_fingerprint(gpu_type, multi_node=multi_node)
+    return platform_fingerprint(gpu_type, multi_node=is_multi_node())
 
 
 def _format_composite_perf_section(summary: dict[str, Any]) -> list[str]:
@@ -1103,7 +1096,7 @@ def _load_external_baseline(session_dir: Path) -> dict[str, Any] | None:
         if not path.exists():
             return None
         return json.loads(path.read_text(encoding="utf-8"))
-    except Exception as exc:  # noqa: BLE001
+    except (OSError, ValueError) as exc:
         log.warning(
             "report_executor: failed to load external baseline from %s: %s",
             session_dir,

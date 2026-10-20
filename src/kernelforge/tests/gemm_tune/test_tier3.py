@@ -374,6 +374,19 @@ class TestReferee:
         t = time_paired(clock.call(1e-6), boom, repeats=3)
         assert not t.usable and "RuntimeError" in t.reason
 
+    def test_a_candidate_that_fails_after_warmup_is_data_not_a_crash(self, clock):
+        from kernelforge.gemm_tune.tier3 import referee
+
+        calls = {"n": 0}
+
+        def flaky():
+            calls["n"] += 1
+            if calls["n"] > referee.WARMUP_CALLS:
+                raise RuntimeError("kernel faulted mid-timing")
+
+        t = time_paired(clock.call(1e-6), flaky, repeats=3)
+        assert (t.usable, t.reason) == (False, "RuntimeError: kernel faulted mid-timing")
+
     def test_the_generated_tuners_own_numbers_are_never_consulted(self, clock):
         # Its claim is 100x; ours is what the clock says.
         cands = [{"config": "a", "tuned_us": 0.01, "self_reported_speedup": 100.0}]

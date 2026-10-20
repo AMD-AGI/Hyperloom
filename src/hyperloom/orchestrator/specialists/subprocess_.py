@@ -665,6 +665,7 @@ class SpecialistSubprocessDispatcher:
                             stdin_path=str(prompt_file),
                         )
                     except Exception as exc:  # noqa: BLE001 — surface a submit failure as a result
+                        log.warning("specialist GPU actor submit failed: %s", exc)
                         return SpecialistSubprocessResult(
                             done_payload=None,
                             exit_code=None,
@@ -681,6 +682,7 @@ class SpecialistSubprocessDispatcher:
                         try:
                             pid = request.gpu_lease.poll_started()
                         except Exception as exc:  # noqa: BLE001 — dead actor / ray error mid-schedule
+                            log.warning("specialist GPU actor start failed: %s", exc)
                             request.gpu_lease.close()
                             return SpecialistSubprocessResult(
                                 done_payload=None,

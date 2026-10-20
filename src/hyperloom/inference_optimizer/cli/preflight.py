@@ -1713,7 +1713,7 @@ def _emit_preflight_diagnostics(
     diagnostics_message: str | None = None
     try:
         queue_status = _print_recipe_kb_queue_status()
-    except Exception as exc:  # noqa: BLE001 — defensive
+    except (OSError, ValueError) as exc:
         print(f"  recipe_kb_queue     = <probe_failed: {exc!r}>")
         queue_status = {
             "pending": None,

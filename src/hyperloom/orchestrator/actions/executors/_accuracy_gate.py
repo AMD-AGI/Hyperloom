@@ -163,13 +163,11 @@ def _extract_eval_contract_fields(config_path: str | Path | None) -> dict[str, s
     if not config_path:
         return {}
     try:
-        import yaml as _yaml
-
         p = Path(config_path)
         if not p.is_file():
             return {}
-        data = _yaml.safe_load(p.read_text(encoding="utf-8")) or {}
-    except Exception:  # noqa: BLE001 — best-effort
+        data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    except (OSError, ValueError, yaml.YAMLError):
         return {}
 
     bench = data.get("benchmark") or {}

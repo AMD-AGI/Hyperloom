@@ -256,6 +256,18 @@ class Config:
         model = self.agent_model or resolve_agent_model(provider)
         return resolve_agent_runtime(provider, model=model, settings=self.agent_runtime_settings())
 
+    def agent_runtime_for(self, provider: str, model: str = "", *, executable: str = ""):
+        """Resolve one explicit provider/model with this run's settings and that provider's own executable."""
+        from dataclasses import replace
+
+        from kernelforge.agent_backends.registry import resolve_agent_runtime
+
+        return resolve_agent_runtime(
+            provider,
+            model=model,
+            settings=replace(self.agent_runtime_settings(), executable=executable),
+        )
+
     @classmethod
     def from_env(cls, **overrides) -> Config:
         """Load config from environment variables with optional overrides."""

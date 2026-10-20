@@ -855,6 +855,7 @@ def _probe_critic_review_model(
                     max_completion_tokens=16,
                 )
         except Exception as exc:  # noqa: BLE001 — any failure means the review path is unusable
+            log.warning("critic model %r probe failed over the %s protocol: %s", model, protocol, exc)
             last_error = exc
             continue
         print(f"Preflight: critic model {model!r} answered over the {protocol} protocol")
@@ -1645,15 +1646,9 @@ def _persist_preflight_failure_artifacts(
 
         record_close_safety_net(session_dir)
         record_stage_reached(session_dir, "install")
-        try:
-            from ..breakdown import write_breakdown_json
+        from ..breakdown import write_breakdown_json
 
-            write_breakdown_json(session_dir)
-        except Exception as write_exc:
-            log.warning("failed to write SBD V6 preflight failure breakdown", exc_info=True)
-            from ..session.sbd_v6 import record_write_warning
-
-            record_write_warning(session_dir, component="preflight_failure.breakdown", exc=write_exc)
+        write_breakdown_json(session_dir)
     finally:
         session_lock.release()
     print(f"Preflight failure artifacts: {session_dir}", file=sys.stderr)

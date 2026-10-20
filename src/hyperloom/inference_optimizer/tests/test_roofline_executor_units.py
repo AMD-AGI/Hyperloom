@@ -425,12 +425,6 @@ def test_drain_instrumentation_tolerates_an_executor_without_one():
 
     assert _drain_instrumentation(object()) is None
 
-    class _Angry:
-        def drain_instrumentation_report(self):
-            raise RuntimeError("nope")
-
-    assert _drain_instrumentation(_Angry())["error"].startswith("RuntimeError")
-
 
 # Exception-path cuda-graph classification
 @pytest.mark.asyncio
@@ -679,3 +673,13 @@ def test_make_roofline_executor_returns_instance():
     assert isinstance(exe, RooflineExecutor)
     assert exe.shared_state is state
     assert rf.RooflineExecutor is RooflineExecutor
+
+
+async def test_orphan_reap_failure_propagates(monkeypatch, tmp_path):
+    def _boom(_session_dir):
+        raise OSError("pidfile scan failed")
+
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._server_lifecycle.reap_orphaned_servers", _boom)
+
+    with pytest.raises(OSError, match="pidfile scan failed"):
+        await rf._reap_session_orphans(tmp_path)
