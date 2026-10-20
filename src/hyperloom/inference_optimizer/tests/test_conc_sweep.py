@@ -982,7 +982,7 @@ def test_conc_sweep_executor_missing_session_dir_yields_failure():
     assert result["error_class"] == "missing_session_dir"
 
 
-def test_conc_sweep_executor_state_load_failure_yields_failure(monkeypatch):
+def test_conc_sweep_executor_state_load_failure_propagates(monkeypatch):
     from hyperloom.orchestrator.actions.executors.conc_sweep import (
         ConcSweepExecutor,
     )
@@ -1002,10 +1002,8 @@ def test_conc_sweep_executor_state_load_failure_yields_failure(monkeypatch):
         _boom,
     )
 
-    result = asyncio.run(ConcSweepExecutor()(_Ctx()))
-    assert result["status"] == "failed"
-    assert result["error_class"] == "shared_state_load_failed"
-    assert "state is unreadable" in result["error"]
+    with pytest.raises(RuntimeError, match="state is unreadable"):
+        asyncio.run(ConcSweepExecutor()(_Ctx()))
 
 
 def test_conc_sweep_executor_task_params_override_state(
