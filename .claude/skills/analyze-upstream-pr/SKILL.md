@@ -25,7 +25,7 @@ others leave. The reader acts on the whole row.
 | Recommendation | When | Next step |
 |---|---|---|
 | `NOT-APPLICABLE -- reverted by <ref>` | a merged revert of the PR survived Step 9; add `, relanded in <ref>` for a merged reland | do not take it; analyze the reland, if any. When Step 4 found the PR and not its revert, the tree carries a change upstream backed out: analyze the revert next |
-| `NOT-APPLICABLE -- already in tree` | Step 4 found the PR, or Step 6's verdict is `EXISTS-MERGED -- in your tree` or `EXISTS-OPEN -- in your tree` (then `-- already in tree via <ref>`) | nothing to take: name the commit that carries the change |
+| `NOT-APPLICABLE -- already in tree` | Step 4 found the PR (then `-- already in tree via <patch>` when it was a `local:<patch> REVERSE` line), or Step 6's verdict is `EXISTS-MERGED -- in your tree` or `EXISTS-OPEN -- in your tree` (then `-- already in tree via <ref>`) | nothing to take: name the commit or patch that carries the change |
 | `NOT-APPLICABLE -- merged as <ref>` | the PR is not merged, and Step 6's verdict is `EXISTS-MERGED -- inclusion unchecked` | analyze `<ref>` instead |
 | `NOT-APPLICABLE -- superseded by <ref>` | the PR is not merged, and an open or merged successor survived Step 9, or the PR closed unmerged and Step 6's verdict is `EXISTS-OPEN -- inclusion unchecked` | analyze `<ref>` instead |
 | `NOT-APPLICABLE -- off path: <condition>` | every Step 3 line is `OFF-PATH` | nothing to take: name the condition that excludes the target |
@@ -192,15 +192,15 @@ git -C "$WORK/scratch" apply --check $BIN "$PR/diff.txt"
 ```
 
 Write `apply@<commit> APPLIES`, or `FAILS -- <the first failing hunk>`: drift between the PR's base
-and `commit`, or a path the tree lays out elsewhere (G7), which qualifies the recommendation. When
-it fails, check again with `--reverse`; `REVERSE`, a diff that applies only backwards, means the
-tree already has the change, so a Step 4 `unknown` becomes `included` by that check. Then, per
-local patch: `local:<patch> OVERLAP` when its `git apply --numstat` lists a path in `files.txt`;
-apply it in the worktree and check the diff again, where a failure only after it is `CONFLICT`,
-with the hunk, else `CLEAR`. Every check passes `$BIN`: GitHub abbreviates a binary file's index,
-so its stanza never applies, and each such path gets `SKIPPED: apply -- <path>: binary`. Remove
-the worktree with `git -C "$TREE" worktree remove --force "$WORK/scratch"`. With no tree, or a
-`SKIPPED: diff`, write `SKIPPED: apply -- <why>`.
+and `commit`, or a path the tree lays out elsewhere (G7), which qualifies the recommendation. A
+failing check runs again with `--reverse`; `REVERSE`, a diff that applies only backwards, means the
+tree already has the change, so a Step 4 `unknown` becomes `included`. Then, per local patch:
+`local:<patch> OVERLAP` when its `git apply --numstat` lists a path in `files.txt`; apply it in the
+worktree and check the diff again. A failure only after it is `local:<patch> REVERSE` when the
+reverse check applies (the patch carries the PR), else `CONFLICT` with the hunk; none is `CLEAR`.
+Every check passes `$BIN`: GitHub abbreviates a binary file's index, so its stanza never applies;
+each such path gets `SKIPPED: apply -- <path>: binary`. With no tree, or a `SKIPPED: diff`, write
+`SKIPPED: apply -- <why>`. Last, `git -C "$TREE" worktree remove --force "$WORK/scratch"`.
 
 ## Step 7 — Risks
 
