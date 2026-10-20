@@ -191,13 +191,9 @@ cognitive-complexity src/hyperloom/orchestrator/trace_analysis/tracelens_skill_r
 cognitive-complexity src/hyperloom_kb/collect/engine.py::collect 31
 cognitive-complexity src/hyperloom_kb/collect/expressions.py::_compile_call 34
 cognitive-complexity src/kernelforge/agent_backends/claude.py::ClaudeBackend._query_once 31
-cognitive-complexity src/kernelforge/agent_backends/codex.py::_normalize_sdk_result 46
-cognitive-complexity src/kernelforge/agent_backends/workspace_guard.py::WorkspaceGuard.prepare 39
-cognitive-complexity src/kernelforge/assembly/capture.py::bind_compile 60
 cognitive-complexity src/kernelforge/evaluation/benchmark/runner.py::aggregate_benchmark_measurements 38
 cognitive-complexity src/kernelforge/evaluation/benchmark/runner.py::sweep_case 51
 cognitive-complexity src/kernelforge/evaluation/correctness/canonical.py::_run_canonical_suite 31
-cognitive-complexity src/kernelforge/evaluation/correctness/numerical.py::judge_evidence 42
 cognitive-complexity src/kernelforge/fusion/author.py::_AuthorWorkspaceGuard.__init__ 37
 cognitive-complexity src/kernelforge/fusion/author.py::_AuthorWorkspaceGuard.enforce 39
 cognitive-complexity src/kernelforge/fusion/command.py::_run_fusion_autoloop 33
@@ -217,7 +213,6 @@ cognitive-complexity src/kernelforge/gemm_tune/tier3/contract.py::validate_outpu
 cognitive-complexity src/kernelforge/gemm_tune/tune_robustness.py::run_isolated 34
 cognitive-complexity src/kernelforge/gemm_tune/tuners/_aiter_dense_common.py::_augment_with_config_m_values 33
 cognitive-complexity src/kernelforge/gemm_tune/tuners/vllm_dense_tunableop.py::VllmDenseTunableopTuner._input_from_demand 33
-cognitive-complexity src/kernelforge/kernel_rewrite_controller/opportunity_agent.py::OpportunityAnalysisAgent.run 34
 cognitive-complexity src/kernelforge/knowledge/pr_knowledge/references.py::collect_references 39
 cognitive-complexity src/kernelforge/loop/analysis_evidence.py::AnalysisEvidenceMixin._apply_last_analysis_evidence 46
 cognitive-complexity src/kernelforge/loop/analysis_runtime.py::AnalysisRuntimeMixin._resolve_analysis_context 41
@@ -780,9 +775,7 @@ function-lines src/hyperloom_kb/knowledge_read.py::QueryExecutor.execute 111
 function-lines src/kernelforge/agent_backends/claude.py::ClaudeBackend._query_once 121
 function-lines src/kernelforge/agent_backends/codex.py::CodexBackend._execute 105
 function-lines src/kernelforge/agent_backends/codex.py::CodexBackend.probe 83
-function-lines src/kernelforge/agent_backends/codex.py::_normalize_sdk_result 89
 function-lines src/kernelforge/agent_backends/session_resume.py::run_session_with_api_resume 98
-function-lines src/kernelforge/assembly/prepare.py::prepare_assembly 110
 function-lines src/kernelforge/cli/forge_loop_command.py::forge_loop 503
 function-lines src/kernelforge/evaluation/benchmark/runner.py::aggregate_benchmark_measurements 97
 function-lines src/kernelforge/evaluation/benchmark/runner.py::bench_wallclock 110
@@ -831,11 +824,9 @@ function-lines src/kernelforge/kernel_backends/hipblaslt/prompts.py::build_syste
 function-lines src/kernelforge/kernel_backends/triton/prompts.py::build_system_prompt 125
 function-lines src/kernelforge/kernel_rewrite_controller/controller.py::run_controller 128
 function-lines src/kernelforge/kernel_rewrite_controller/dispatcher.py::dispatch_single_task 127
-function-lines src/kernelforge/kernel_rewrite_controller/opportunity_agent.py::OpportunityAnalysisAgent.run 137
 function-lines src/kernelforge/kernel_rewrite_controller/opportunity_agent.py::_system_prompt 190
 function-lines src/kernelforge/kernel_rewrite_controller/recovery.py::recover_task_result 101
 function-lines src/kernelforge/kernel_rewrite_controller/scheduler.py::dispatch_prepared_tasks 101
-function-lines src/kernelforge/kernel_rewrite_controller/task.py::parse_task_payload 113
 function-lines src/kernelforge/knowledge/kb_store/reader.py::_read_top_solutions_impl 113
 function-lines src/kernelforge/knowledge/kb_store/writer.py::_write_run_experience_impl 166
 function-lines src/kernelforge/knowledge/pr_knowledge/references.py::collect_references 143
