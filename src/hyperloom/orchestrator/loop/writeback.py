@@ -907,7 +907,6 @@ _BASELINE_FINGERPRINT_KEYS: tuple[str, ...] = (
     "model_path",
     "gpu_type",
     "config_path",
-    "disable_run_eval",
 )
 
 
@@ -2381,7 +2380,7 @@ class WritebackCollaborator(GeakRevalidation, GeakHarnessReplay, LaunchIdentity)
         accuracy = result.get("accuracy")
         floor = float(getattr(enablement, "accuracy_floor", 0.0) or 0.0)
         generation = int(getattr(enablement, "revalidation_generation", 0) or 0)
-        if accuracy_meets_floor(accuracy, floor) or bool(self.shared_state.eval_disabled):
+        if accuracy_meets_floor(accuracy, floor):
             await self._close_enablement_lane(generation, accuracy, floor, promoting_tid)
             return
         await self._rearm_enablement_after_subfloor(generation, accuracy, floor, promoting_tid)

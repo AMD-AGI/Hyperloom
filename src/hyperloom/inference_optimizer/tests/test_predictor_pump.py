@@ -210,11 +210,9 @@ async def test_the_queue_offers_predictor_rows_to_orchestrations_own_grid(servic
     assert "grid verbatim" not in specialists_only
 
 
-@pytest.mark.parametrize(
-    ("accuracy", "eval_disabled", "stated"), [(0.938, False, True), (0.938, True, False), (0.0, False, False)]
-)
-async def test_the_predictor_block_states_the_accuracy_gate_a_keep_passes(service, accuracy, eval_disabled, stated):
-    state = _state(baseline_accuracy=accuracy, eval_disabled=eval_disabled)
+@pytest.mark.parametrize(("accuracy", "stated"), [(0.938, True), (0.0, False)])
+async def test_the_predictor_block_states_the_accuracy_gate_a_keep_passes(service, accuracy, stated):
+    state = _state(baseline_accuracy=accuracy)
     service.answer = _answer(Action(server_args={"--kv-cache-dtype": "fp8"}), votes={0: 1})
     await _ask_and_file(_pump(), state)
 

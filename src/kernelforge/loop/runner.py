@@ -2572,31 +2572,28 @@ class IterationLoop(AnalysisRuntimeMixin):
         if started_at is None or planning_sec <= 0:
             return
         total_sec = max(planning_sec, time.time() - started_at)
-        try:
-            apply_round_cost(
-                self.run_state,
-                RoundCost(
-                    iteration=self._round_iteration,
-                    lanes=self._round_lanes,
-                    planning_sec=planning_sec,
-                    total_sec=total_sec,
-                    measurement_sec=measurement_sec,
-                ),
-                campaign_sec=self._advance_campaign_clock(),
+        apply_round_cost(
+            self.run_state,
+            RoundCost(
+                iteration=self._round_iteration,
+                lanes=self._round_lanes,
+                planning_sec=planning_sec,
+                total_sec=total_sec,
+                measurement_sec=measurement_sec,
+            ),
+            campaign_sec=self._advance_campaign_clock(),
+        )
+        self.state_store.append_event(
+            make_event(
+                "round_cost",
+                self._round_iteration,
+                lanes=self._round_lanes,
+                planning_sec=round(planning_sec, 3),
+                total_sec=round(total_sec, 3),
+                measurement_sec=round(measurement_sec, 3),
             )
-            self.state_store.append_event(
-                make_event(
-                    "round_cost",
-                    self._round_iteration,
-                    lanes=self._round_lanes,
-                    planning_sec=round(planning_sec, 3),
-                    total_sec=round(total_sec, 3),
-                    measurement_sec=round(measurement_sec, 3),
-                )
-            )
-            self.state_store.save(self.run_state)
-        except Exception:
-            log.debug("run_state: round cost record failed", exc_info=True)
+        )
+        self.state_store.save(self.run_state)
 
     def _round_budget_summary(self) -> dict:
         """What the campaign's rounds have cost, for the published report."""
@@ -2868,32 +2865,17 @@ class IterationLoop(AnalysisRuntimeMixin):
         if not case_times or self._baseline_case_times:
             return
         self._baseline_case_times = dict(case_times)
-        try:
-            self.run_state.baseline_case_times = dict(case_times)
-            self.state_store.save(self.run_state)
-        except Exception:
-            self.persistence_degraded = True
-            self.persistence_errors.append("persist pristine baseline case timings")
-            self.persistence_errors = self.persistence_errors[-10:]
-            log.warning(
-                "run_state: failed to persist pristine baseline case timings",
-                exc_info=True,
-            )
+        self.run_state.baseline_case_times = dict(case_times)
+        self.state_store.save(self.run_state)
 
     def _persist_scoring_state(self) -> None:
         """Checkpoint the state that decides keep/revert."""
-        try:
-            self.run_state.baseline_case_times = dict(self._baseline_case_times)
-            self.run_state.best_case_times = dict(self._best_case_times)
-            self.run_state.unscored_cases = sorted(self._unscored_cases)
-            if self.search_start_mean_case_speedup is not None:
-                self.run_state.search_start_mean_case_speedup = self.search_start_mean_case_speedup
-            self.state_store.save(self.run_state)
-        except Exception:
-            self.persistence_degraded = True
-            self.persistence_errors.append("persist scoring state")
-            self.persistence_errors = self.persistence_errors[-10:]
-            log.warning("run_state: failed to persist scoring state", exc_info=True)
+        self.run_state.baseline_case_times = dict(self._baseline_case_times)
+        self.run_state.best_case_times = dict(self._best_case_times)
+        self.run_state.unscored_cases = sorted(self._unscored_cases)
+        if self.search_start_mean_case_speedup is not None:
+            self.run_state.search_start_mean_case_speedup = self.search_start_mean_case_speedup
+        self.state_store.save(self.run_state)
 
     def _incumbent_mean_case_speedup(self) -> float:
         """Score the kernel currently in hand against the anchor every ratio divides by.
@@ -3446,47 +3428,44 @@ class IterationLoop(AnalysisRuntimeMixin):
 
     def _seed_and_hydrate_run_state(self) -> None:
         """Seed a fresh session or hydrate an explicitly validated resume."""
-        try:
-            head_out = self._git("rev-parse", "HEAD").strip()
-            head = head_out.splitlines()[0] if head_out else ""
-            if self.resume and self.run_state.baseline_case_times:
-                self._baseline_case_times = dict(self.run_state.baseline_case_times)
-            if self.resume and should_resume(self.run_state, head):
-                self.best_wall_ms = self.run_state.best.wall_ms
-                self.best_mean_case_speedup = self.run_state.best.mean_case_speedup
-                print(
-                    f"  [run-state] resumed best from {self.run_state.best.commit_hash[:8]}: "
-                    f"mean case speedup={self.run_state.best.mean_case_speedup:.6f}x, "
-                    f"raw mean={self.run_state.best.wall_ms} ms "
-                    f"(iter {self.run_state.best.iteration})"
+        head_out = self._git("rev-parse", "HEAD").strip()
+        head = head_out.splitlines()[0] if head_out else ""
+        if self.resume and self.run_state.baseline_case_times:
+            self._baseline_case_times = dict(self.run_state.baseline_case_times)
+        if self.resume and should_resume(self.run_state, head):
+            self.best_wall_ms = self.run_state.best.wall_ms
+            self.best_mean_case_speedup = self.run_state.best.mean_case_speedup
+            print(
+                f"  [run-state] resumed best from {self.run_state.best.commit_hash[:8]}: "
+                f"mean case speedup={self.run_state.best.mean_case_speedup:.6f}x, "
+                f"raw mean={self.run_state.best.wall_ms} ms "
+                f"(iter {self.run_state.best.iteration})"
+            )
+        if self.monitor is not None:
+            self.monitor.no_improve_streak = self.run_state.stall.no_improvement_iters
+            self.monitor.last_attempt_iter = self.run_state.stall.last_supervisor_attempt_iter or -10_000
+            self.monitor.intervention_count = self.run_state.intervention_count
+        if self.resume:
+            # Without this the resumed session re-derives its own noise floor, incumbents and SNR reference, so it
+            # judges candidates by different rules than the session it continues.
+            if not self._scoring_state_restored:
+                self._restore_scoring_state()
+        if self.ic.baseline_wall_ms is not None:
+            self.run_state.baseline_wall_ms = self.ic.baseline_wall_ms
+        if self._baseline_case_times:
+            self.run_state.baseline_case_times = dict(self._baseline_case_times)
+        if self.ic.pristine_baseline_wall_ms is not None:
+            self.run_state.pristine_baseline_wall_ms = self.ic.pristine_baseline_wall_ms
+        if not self.resume:
+            self.state_store.append_event(
+                make_event(
+                    "baseline_measured",
+                    0,
+                    baseline_wall_ms=self.ic.baseline_wall_ms,
+                    mean_case_speedup=1.0,
                 )
-            if self.monitor is not None:
-                self.monitor.no_improve_streak = self.run_state.stall.no_improvement_iters
-                self.monitor.last_attempt_iter = self.run_state.stall.last_supervisor_attempt_iter or -10_000
-                self.monitor.intervention_count = self.run_state.intervention_count
-            if self.resume:
-                # Without this the resumed session re-derives its own noise floor, incumbents and SNR reference, so it
-                # judges candidates by different rules than the session it continues.
-                if not self._scoring_state_restored:
-                    self._restore_scoring_state()
-            if self.ic.baseline_wall_ms is not None:
-                self.run_state.baseline_wall_ms = self.ic.baseline_wall_ms
-            if self._baseline_case_times:
-                self.run_state.baseline_case_times = dict(self._baseline_case_times)
-            if self.ic.pristine_baseline_wall_ms is not None:
-                self.run_state.pristine_baseline_wall_ms = self.ic.pristine_baseline_wall_ms
-            if not self.resume:
-                self.state_store.append_event(
-                    make_event(
-                        "baseline_measured",
-                        0,
-                        baseline_wall_ms=self.ic.baseline_wall_ms,
-                        mean_case_speedup=1.0,
-                    )
-                )
-            self.state_store.save(self.run_state)
-        except Exception:
-            log.debug("run_state: seed/hydrate failed", exc_info=True)
+            )
+        self.state_store.save(self.run_state)
 
     def _validate_pre_published_warm_start(
         self,
@@ -4290,25 +4269,22 @@ class IterationLoop(AnalysisRuntimeMixin):
         self.run_state.search_mode_residence_remaining = decision.residence_iterations_remaining
         self.run_state.diversification_cycle_completed = False
         self._search_policy_decision = decision
-        try:
-            self.state_store.append_event(
-                make_event(
-                    "search_policy_decision",
-                    iteration,
-                    mode=decision.mode,
-                    reason_codes=list(decision.reason_codes),
-                    objective_kind=decision.objective_kind,
-                    residence_iterations_remaining=(decision.residence_iterations_remaining),
-                    # ``make_event`` drops empty fields, so a ratio of None on its own would leave the event silent
-                    # about a trigger that could not be evaluated at all -- indistinguishable from a young campaign.
-                    window_gain_ratio=window_gain.ratio,
-                    window_gain_unavailable=window_gain.unavailable,
-                    mode_changed=(decision.mode != previous_mode),
-                )
+        self.state_store.append_event(
+            make_event(
+                "search_policy_decision",
+                iteration,
+                mode=decision.mode,
+                reason_codes=list(decision.reason_codes),
+                objective_kind=decision.objective_kind,
+                residence_iterations_remaining=(decision.residence_iterations_remaining),
+                # ``make_event`` drops empty fields, so a ratio of None on its own would leave the event silent
+                # about a trigger that could not be evaluated at all -- indistinguishable from a young campaign.
+                window_gain_ratio=window_gain.ratio,
+                window_gain_unavailable=window_gain.unavailable,
+                mode_changed=(decision.mode != previous_mode),
             )
-            self.state_store.save(self.run_state)
-        except Exception:
-            log.debug("search policy persistence failed", exc_info=True)
+        )
+        self.state_store.save(self.run_state)
         # A window that has not filled yet is the ordinary state of a young campaign.
         fault = window_gain.unavailable
         if fault is not None and fault != "short_window" and fault not in self._reported_window_gain_faults:
@@ -4754,43 +4730,34 @@ class IterationLoop(AnalysisRuntimeMixin):
                     )
                     self._supervisor_ruling = memo
                     print(f"  [supervisor] injected free-form ruling: {len(self._supervisor_ruling)} chars")
-                    try:
-                        self.state_store.append_event(
-                            make_event(
-                                "supervisor_ruling",
-                                iteration,
-                                reason=supervisor_reason,
-                                ruling_len=len(self._supervisor_ruling),
-                                interaction_path=(
-                                    str(interaction_path.relative_to(Path(self.ic.workspace_dir)))
-                                    if interaction_path is not None
-                                    else None
-                                ),
-                                ruling_path=(
-                                    str(ruling_path.relative_to(Path(self.ic.workspace_dir)))
-                                    if ruling_path is not None
-                                    else None
-                                ),
-                            )
+                    self.state_store.append_event(
+                        make_event(
+                            "supervisor_ruling",
+                            iteration,
+                            reason=supervisor_reason,
+                            ruling_len=len(self._supervisor_ruling),
+                            interaction_path=(
+                                str(interaction_path.relative_to(Path(self.ic.workspace_dir)))
+                                if interaction_path is not None
+                                else None
+                            ),
+                            ruling_path=(
+                                str(ruling_path.relative_to(Path(self.ic.workspace_dir)))
+                                if ruling_path is not None
+                                else None
+                            ),
                         )
-                    except Exception:
-                        log.debug("run_state: supervisor event append failed", exc_info=True)
+                    )
                 else:
                     print("  [supervisor] no new ruling returned; continuing without an active ruling")
                 if memo.strip():
                     self.monitor.mark_intervened(iteration)
-                    try:
-                        apply_supervisor_intervention(
-                            self.run_state,
-                            iteration=iteration,
-                            stall_threshold=self.ic.supervise_after,
-                        )
-                        self.state_store.save(self.run_state)
-                    except Exception:
-                        log.debug(
-                            "run_state: supervisor reset/save failed",
-                            exc_info=True,
-                        )
+                    apply_supervisor_intervention(
+                        self.run_state,
+                        iteration=iteration,
+                        stall_threshold=self.ic.supervise_after,
+                    )
+                    self.state_store.save(self.run_state)
 
     def _record_ledger_iteration(
         self, result, frame: _IterationFrame, *, iteration_diff_summary, commit_hash, attempt_diff

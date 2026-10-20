@@ -17,7 +17,6 @@ from typing import Any
 import yaml
 
 from hyperloom.common.coerce import to_str_list
-from hyperloom.common.env import is_truthy
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.launch_log_evidence import settings_the_engine_rewrote
 from hyperloom.common.model_paths import resolve_session_model_path
@@ -98,7 +97,7 @@ from hyperloom.inference_optimizer.grid_server_args import (
 from ._ray_serving import maybe_serving_lease
 from ._spec_decode_context_copy import CONTEXT_COPY_REFUSAL, context_copy_refusal
 
-from ._launch_restatement import config_envs, named_settings, restates_the_baseline
+from ._launch_restatement import config_envs, named_settings, observed_launch_after, restates_the_baseline
 from ._server_argv import ConfigUnreadable, config_server_argv
 from ._server_lifecycle import (
     resolve_lifecycle_params,
@@ -145,23 +144,11 @@ def _decision_fields(gv: Any) -> dict[str, Any]:
     }
 
 
-def _explore_eval_disabled(shared_state: Any, params: dict[str, Any]) -> bool:
-    """Whether Magpie lm_eval is opted out for this explore run.
-
-    ``--no-eval`` persists on ``SharedState.eval_disabled``. Task param
-    ``disable_run_eval`` is the same opt-out for internally queued explores.
-    """
-    if is_truthy(params.get("disable_run_eval")):
-        return True
-    return bool(getattr(shared_state, "eval_disabled", False))
-
-
 def _variant_with_eval_off(gv: Any) -> Any:
     """Return a copy of ``gv`` with ``RUN_EVAL`` forced off.
 
     The variant layer is the last one :func:`run_grid` applies over the
-    accumulated stack, so forcing the key here is what makes a session-level
-    ``--no-eval`` hold whatever the stack carries.
+    accumulated stack, so forcing the key here holds whatever the stack carries.
     """
     envs = dict(gv.extra_envs)
     envs["RUN_EVAL"] = "false"
@@ -696,6 +683,12 @@ def filter_baseline_noop_variants(
     return kept, dropped
 
 
+def _skip_baseline_noop(name: str, reason: str, skipped: list[dict[str, Any]]) -> None:
+    """Record a variant skipped because it launches the server the stack is already running."""
+    log.info("explore: skipping baseline-noop variant %s (%s)", name, reason)
+    skipped.append({"name": name, "reason": "baseline_noop", "detail": reason})
+
+
 def filter_operator_pinned_envs(
     grid: list[GridVariant],
     baseline_envs: dict[str, Any] | None,
@@ -811,7 +804,6 @@ class ExploreExecutor:
             }
         extra = getattr(ctx, "extra", None) or {}
         shared_state = extra.get("shared_state") or extra.get("state")
-        eval_disabled = _explore_eval_disabled(shared_state, params)
         output_root = Path(
             params.get("output_dir")
             or extra.get("workspace")
@@ -845,7 +837,6 @@ class ExploreExecutor:
                 model_path=resolved_model or None,
                 gpu_type=resolved_gpu or None,
                 benchmark_script=override_script,
-                extra_envs={"RUN_EVAL": "false"} if eval_disabled else None,
                 out_name="explore_base.with_envs.yaml",
                 grading=getattr(shared_state, "grading", None),
             )
@@ -1013,32 +1004,12 @@ class ExploreExecutor:
         # Attach the per-variant fingerprint as an attribute so the result loop needn't recompute.
         ws_sig = workload_signature()
 
-        # Drop variants that already match the current stack's observed launch.
-        _pre_noop_grid_len = len(grid)
-        observed_config, observed_env = observed_launch_from_state(ss)
-        grid, _noop_dropped = filter_baseline_noop_variants(
-            grid,
-            framework=framework,
-            base_yaml_path=config_path,
-            base_extra_args=base_extra_args,
-            base_extra_envs=base_extra_envs,
-            base_remove_args=base_remove_args,
-            base_unset_envs=base_unset_envs,
-            base_args_mode=base_args_mode,
-            model_path=resolved_model,
-            gpu_type=resolved_gpu,
-            benchmark_script=override_script,
-            observed_server_config=observed_config,
-            observed_server_env=observed_env,
-        )
-
-        unique_in_round: dict[str, GridVariant] = {}
+        # Every variant carries its fingerprint, so the result loop needn't recompute it. In-round duplicates are
+        # judged at their turn, against what this round has actually launched: a twin that was only skipped (a
+        # restatement of the stack) has not claimed the launch.
         skipped_dup: list[dict[str, Any]] = []
-        for _nm, _reason in _noop_dropped:
-            log.info("explore: skipping baseline-noop variant %s (%s)", _nm, _reason)
-            skipped_dup.append({"name": _nm, "reason": "baseline_noop", "detail": _reason})
         for gv in grid:
-            fp = effective_fingerprint(
+            gv.canonical_fp = effective_fingerprint(  # type: ignore[attr-defined]
                 gv.extra_server_args,
                 gv.extra_envs,
                 controls=_variant_control_fields(gv),
@@ -1046,28 +1017,8 @@ class ExploreExecutor:
                 base_unset_envs=base_unset_envs,
                 base_args_mode=base_args_mode,
             )
-            gv.canonical_fp = fp  # type: ignore[attr-defined]
-            if fp in unique_in_round:
-                # In-round duplicate — keep the first occurrence.
-                skipped_dup.append(
-                    {
-                        "name": gv.name,
-                        "fingerprint": fp,
-                        "reason": "round_dup",
-                    }
-                )
-                continue
-            unique_in_round[fp] = gv
-
-        runnable: list[GridVariant] = list(unique_in_round.values())
-
-        log.info(
-            "explore dedup: payload=%d → runnable=%d (round_dup=%d baseline_noop=%d)",
-            _pre_noop_grid_len,
-            len(runnable),
-            sum(1 for sd in skipped_dup if sd.get("reason") == "round_dup"),
-            len(_noop_dropped),
-        )
+        runnable: list[GridVariant] = list(grid)
+        observed_config, observed_env = observed_launch_from_state(ss)
 
         # Multi-node grid shaping.
         if runnable:
@@ -1106,6 +1057,38 @@ class ExploreExecutor:
                 runnable,
                 priority_tags=_MN_PARAMS_PRIORITY + _MN_BACKENDS_PRIORITY,
             )
+
+        # A variant that restates the stack's observed launch changes nothing while the stack stays as observed. The
+        # ones ahead of every other variant left by the grid-shaping filters can only launch on it, and are dropped here
+        # before a serving lease is taken; any other is judged at its turn, against the stack a KEEP has moved.
+        _pre_noop_len = len(runnable)
+        if runnable:
+            _noop_kept, _noop_dropped = filter_baseline_noop_variants(
+                runnable,
+                framework=framework,
+                base_yaml_path=config_path,
+                base_extra_args=base_extra_args,
+                base_extra_envs=base_extra_envs,
+                base_remove_args=base_remove_args,
+                base_unset_envs=base_unset_envs,
+                base_args_mode=base_args_mode,
+                model_path=resolved_model,
+                gpu_type=resolved_gpu,
+                benchmark_script=override_script,
+                observed_server_config=observed_config,
+                observed_server_env=observed_env,
+            )
+            _kept_ids = {id(gv) for gv in _noop_kept}
+            _leading = next((i for i, gv in enumerate(runnable) if id(gv) in _kept_ids), len(runnable))
+            for _nm, _reason in _noop_dropped[:_leading]:
+                _skip_baseline_noop(_nm, _reason, skipped_dup)
+            runnable = runnable[_leading:]
+        log.info(
+            "explore grid: payload=%d → runnable=%d (leading baseline_noop=%d)",
+            len(grid),
+            len(runnable),
+            _pre_noop_len - len(runnable),
+        )
 
         # Seeded by the Coordinator from the durable cursor: this executor holds no
         # history of its own, so it cannot count the rounds before this one.
@@ -1154,6 +1137,49 @@ class ExploreExecutor:
                 "unset_envs": list(stack_unset_envs),
                 "args_mode": stack_base_args_mode,
             }
+
+        def _launched_stack() -> dict[str, Any]:
+            """The stack as it launches: its args with the recipe's inherited ones and the removals applied.
+
+            A KEEP can switch the stack to ``replace`` mode, which carries those inherited args in its own, so only
+            the composed args say which settings a KEEP changed.
+            """
+            stack = stack_of_measured(_measured_against())
+            stack["extra_server_args"] = compose_server_args(
+                inherited_args=_effective_inherited_args,
+                base_extra_args=stack_extra_args,
+                remove_args=stack_remove_args,
+                args_mode=stack_base_args_mode,
+            )
+            return stack
+
+        opening_stack = _launched_stack()
+
+        def _restates_stack(gv: GridVariant) -> str:
+            """Why ``gv`` only restates the launch the stack runs as it stands now, or ``""`` when it changes it.
+
+            The observed launch is what the server ran when the round opened; a KEEP since then has made the observed
+            value of whatever it changed stale, and ``observed_launch_after`` leaves that out.
+            """
+            config, env = observed_launch_after(
+                observed_config, observed_env, opening_stack, _launched_stack(), framework
+            )
+            _, restated = filter_baseline_noop_variants(
+                [gv],
+                framework=framework,
+                base_yaml_path=config_path,
+                base_extra_args=stack_extra_args,
+                base_extra_envs=dict(stack_extra_envs),
+                base_remove_args=list(stack_remove_args),
+                base_unset_envs=list(stack_unset_envs),
+                base_args_mode=stack_base_args_mode,
+                model_path=resolved_model,
+                gpu_type=resolved_gpu,
+                benchmark_script=override_script,
+                observed_server_config=config,
+                observed_server_env=env,
+            )
+            return restated[0][1] if restated else ""
 
         # Round-local grading anchor. Variants stack within a round, so a KEEP
         # advances the figure the next variant is graded against; the session
@@ -1215,8 +1241,22 @@ class ExploreExecutor:
             )
             return True
 
+        # Fingerprints this round launched, and the variants that reached the measured check and were answered by the
+        # stack or the ledger instead (a restatement of the stack, or a verdict the session already holds).
+        launched_fps: set[str] = set()
+        judged_without_measuring = 0
+
         try:
             for idx, gv in enumerate(runnable):
+                if getattr(gv, "canonical_fp", "") in launched_fps:
+                    skipped_dup.append(
+                        {"name": gv.name, "fingerprint": gv.canonical_fp, "reason": "round_dup"}  # type: ignore[attr-defined]
+                    )
+                    continue
+                if restated := _restates_stack(gv):
+                    _skip_baseline_noop(gv.name, restated, skipped_dup)
+                    judged_without_measuring += 1
+                    continue
                 if self._already_measured(
                     gv,
                     ss,
@@ -1224,6 +1264,7 @@ class ExploreExecutor:
                     MeasuredOn(stack_of_measured(_measured_against()), ws_sig, keep_threshold_pct),
                     skipped_dup,
                 ):
+                    judged_without_measuring += 1
                     continue
                 # A warm-decision variant pays for both rounds, so admitting it on the decision round alone would let
                 # it in and then strand it mid-variant with a discarded warmup and no measurement.
@@ -1268,6 +1309,7 @@ class ExploreExecutor:
                         )
                         continue
                 fp = getattr(gv, "canonical_fp", "")
+                launched_fps.add(fp)
                 provenance = getattr(gv, "provenance", "llm_direct")
                 scope = str(getattr(gv, "scope", "") or "")
                 control_fields = _variant_control_fields(gv)
@@ -1292,14 +1334,11 @@ class ExploreExecutor:
                     args_mode=str(getattr(gv, "args_mode", "append") or "append"),
                 )
                 _carry_variant_metadata(gv, run_gv)
-                # ``--no-eval`` opted the session out of accuracy entirely, so it
-                # holds for every round. The decision round additionally skips
-                # eval when a warmup preceded it: it is timed against a
+                # The decision round skips eval when a warmup preceded it: it is timed against a
                 # throughput-only anchor, and ``parse_eval_results`` falls back
                 # to the score the warmup took. Without a warmup there is nothing
                 # to fall back to, so the decision round keeps its own eval.
-                warmup_gv = _variant_with_eval_off(run_gv) if eval_disabled else run_gv
-                decision_gv = _variant_with_eval_off(run_gv) if (use_warm_decision or eval_disabled) else run_gv
+                decision_gv = _variant_with_eval_off(run_gv) if use_warm_decision else run_gv
                 slot = output_root / f"v{idx:02d}_{_safe(gv.name)}"
                 slot.mkdir(parents=True, exist_ok=True)
                 # The warmup and decision rounds share this slot as the lifecycle pid_dir so the decision round
@@ -1318,7 +1357,7 @@ class ExploreExecutor:
                         warmup_results = await run_grid(
                             base_yaml_path=config_path,
                             base_extra_args=stack_extra_args,
-                            grid=[warmup_gv],
+                            grid=[run_gv],
                             output_root=warmup_slot,
                             model_path=resolved_model,
                             gpu_type=resolved_gpu,
@@ -1948,8 +1987,8 @@ class ExploreExecutor:
         produced_measurement = any(
             t.get("outcome") in ("KEEP", "REVERT", TS_KILLED_OVERTIME) for t in tested_update.values()
         )
-        # A round whose every variant already had its verdict is answered, as if measured again.
-        answered = bool(runnable) and sum(sd.get("reason") == ALREADY_MEASURED for sd in skipped_dup) == len(runnable)
+        # A round whose every variant already had its verdict, or only restated the stack, is answered, as if measured again.
+        answered = bool(runnable) and judged_without_measuring == len(runnable)
         status = "succeeded" if produced_measurement or winners or answered else "failed"
         # A round that measured nothing because the run stopped it is not the same as one whose variants failed. As a
         # bare ``failed`` with no error_class nothing downstream could tell the two apart, and the KB would learn that
