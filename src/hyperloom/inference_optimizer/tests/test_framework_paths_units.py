@@ -742,9 +742,10 @@ class TestPointSessionFrameworkRoot:
         checkout.mkdir()
         monkeypatch.setenv("FRAMEWORK", "sglang")
         monkeypatch.setenv("SGLANG_DIR", str(prior))
-        monkeypatch.delenv("FRAMEWORK_REPO_PATH", raising=False)
+        monkeypatch.setenv("SGLANG_REPO_PATH", "")
+        monkeypatch.setenv("FRAMEWORK_REPO_PATH", "")
 
-        assert fp.point_session_framework_root(str(checkout), framework="sglang") == str(checkout)
+        fp.point_session_framework_root(str(checkout), "sglang")
         assert fp.resolve_session_framework_root() == f"{checkout}/"
         assert fp.resolve_framework_tree("sglang") == f"{checkout}/"
 

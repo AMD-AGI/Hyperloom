@@ -411,25 +411,16 @@ def _env_source_roots() -> tuple[str, ...]:
     return tuple(kept)
 
 
-def point_session_framework_root(root: str, *, framework: str = "") -> str:
-    """Make ``root`` this session's explicit framework checkout.
+def point_session_framework_root(root: str, framework: str) -> None:
+    """Make ``root`` this session's explicit ``framework`` checkout.
 
-    Writes :data:`GENERIC_FRAMEWORK_ROOT_ENV` and, when ``framework`` (or
-    ``$FRAMEWORK``) is set, the prefixed ``_REPO_PATH`` / ``_DIR`` aliases so
-    every resolver names the same tree.
-
-    Returns:
-        The stored path, or ``""`` when ``root`` is blank.
+    Writes the prefixed ``_REPO_PATH`` / ``_DIR`` aliases, which outrank any
+    earlier pin, and :data:`GENERIC_FRAMEWORK_ROOT_ENV`, so every resolver
+    names ``root``.
     """
-    candidate = str(root or "").strip().rstrip("/")
-    if not candidate:
-        return ""
-    os.environ[GENERIC_FRAMEWORK_ROOT_ENV] = candidate
-    name = str(framework or os.environ.get("FRAMEWORK", "") or "").strip().upper()
-    if name:
-        os.environ[f"{name}_REPO_PATH"] = candidate
-        os.environ[f"{name}_DIR"] = candidate
-    return candidate
+    name = framework.strip().upper()
+    for key in (f"{name}_REPO_PATH", f"{name}_DIR", GENERIC_FRAMEWORK_ROOT_ENV):
+        os.environ[key] = root
 
 
 def resolve_session_framework_root() -> str:

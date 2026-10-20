@@ -429,7 +429,8 @@ async def test_kept_stack_action_survives_rearm(monkeypatch, tmp_path, status):
     prior.mkdir()
     monkeypatch.setenv("FRAMEWORK", "sglang")
     monkeypatch.setenv("SGLANG_DIR", str(prior))
-    monkeypatch.delenv("FRAMEWORK_REPO_PATH", raising=False)
+    monkeypatch.setenv("SGLANG_REPO_PATH", "")
+    monkeypatch.setenv("FRAMEWORK_REPO_PATH", "")
 
     state = SharedState()
     state.framework = "sglang"

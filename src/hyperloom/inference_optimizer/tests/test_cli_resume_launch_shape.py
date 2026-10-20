@@ -434,8 +434,8 @@ def test_restore_operator_paths_fills_env_from_state(monkeypatch):
     monkeypatch.setenv("FRAMEWORK_REPO_PATH", "")
     monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", "")
     monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "")
-    monkeypatch.delenv("SGLANG_REPO_PATH", raising=False)
-    monkeypatch.delenv("SGLANG_DIR", raising=False)
+    monkeypatch.setenv("SGLANG_REPO_PATH", "")
+    monkeypatch.setenv("SGLANG_DIR", "")
     state = SharedState(
         session_id="s",
         framework="sglang",

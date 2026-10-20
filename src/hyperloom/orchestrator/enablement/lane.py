@@ -677,12 +677,10 @@ def _stack_kept_runtime(state: Any, res: dict[str, Any]) -> None:
         records = list(state.enablement.attempt_runtimes or [])
         records.append(runtime)
         state.enablement.attempt_runtimes = records[-5:]
-        pointed = point_session_framework_root(
-            str(runtime.get("source_root") or ""),
-            framework=str(getattr(state, "framework", "") or ""),
-        )
-        if pointed:
-            state.framework_repo_path = pointed
+        source_root = str(runtime.get("source_root") or "")
+        if source_root:
+            point_session_framework_root(source_root, state.framework)
+            state.framework_repo_path = source_root
     # Record the localized closure manifest so it is not re-fetched on the next round.
     manifest = res.get("enablement_localization_manifest")
     if isinstance(manifest, dict) and manifest:
