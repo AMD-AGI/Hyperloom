@@ -526,7 +526,6 @@ function-lines src/hyperloom/inference_optimizer/breakdown/session_package.py::p
 function-lines src/hyperloom/inference_optimizer/cli/__init__.py::_export_partition_shape 101
 function-lines src/hyperloom/inference_optimizer/cli/__init__.py::_run_optimize 273
 function-lines src/hyperloom/inference_optimizer/cli/bootstrap.py::_seed_shared_state 155
-function-lines src/hyperloom/inference_optimizer/cli/executors.py::_build_specialist_executor 99
 function-lines src/hyperloom/inference_optimizer/cli/kb.py::_bootstrap_recipe_kb 91
 function-lines src/hyperloom/inference_optimizer/cli/model_gate.py::_detect_unsupported_model 95
 function-lines src/hyperloom/inference_optimizer/cli/model_gate.py::_preflight_context_window 123

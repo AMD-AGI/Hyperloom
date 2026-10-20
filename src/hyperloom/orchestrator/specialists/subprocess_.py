@@ -42,28 +42,27 @@ from hyperloom.common.codex_session import (
     resolve_codex_sandbox_mode,
 )
 from hyperloom.common.deadline import Deadline
-from hyperloom.common.env import env_bool
 from hyperloom.common.llm_attribution import inject_env as inject_attribution_env
 from hyperloom.common.llm_config import (
     AGENT_BACKEND_CLAUDE,
     AGENT_BACKEND_CODEX,
-    preferred_agent_backend,
+    AGENT_BACKEND_DEEPSEEK,
+    resolve_agent_backend,
 )
 from hyperloom.common.env_safety import (
     redact_file_in_place,
-    scrub_child_process_env,
 )
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 from hyperloom.common.proctree import collect_tree, kill_tree
 
 from .agent_cli_config import (
-    _SPECIALIST_ENV_ALLOWLIST,
-    _SPECIALIST_SECRET_ENV_ALLOWLIST,
+    _build_specialist_env,
     SpecialistAgentUnavailableError,
     _codex_mcp_config,
     _codex_provider_resolver_overlay,
     _write_private_codex_config,
 )
+from .dsh_launch import DshLaunchRequest, build_dsh_launch, harvest_dsh_trace, resolve_dsh_executable
 from ..actions.cancel_channel import cancel_scope_listener, current_cancel_scope
 from ..bringup.trees import head_commit
 from ..loop.sub_agent_runner import ExecutionCleanupUnconfirmed
@@ -122,30 +121,14 @@ def resolve_codex_executable(explicit: str = "") -> str:
     return str(bundled) if bundled.exists() else ""
 
 
-def _build_specialist_env() -> dict[str, str]:
-    """Build a minimal env for Bash-enabled specialist subprocesses."""
-    inherit_secrets = env_bool("HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV", True)
-    allowed = set(_SPECIALIST_ENV_ALLOWLIST)
-    if inherit_secrets:
-        allowed.update(_SPECIALIST_SECRET_ENV_ALLOWLIST)
-    env = {key: value for key, value in os.environ.items() if key in allowed}
-    env = scrub_child_process_env(env)
-    # claude's bypassPermissions/--dangerously-skip-permissions refuses to start
-    # under root unless IS_SANDBOX=1 (SWSPLAT-42390). Mirror the kernel-agent
-    # forge tools (forge_fusion) so specialist authoring
-    # subprocesses run on bare-root pods (non-Claw hosts) instead of crashing
-    # immediately. setdefault only under root keeps the guard intact elsewhere.
-    if hasattr(os, "geteuid") and os.geteuid() == 0:
-        env.setdefault("IS_SANDBOX", "1")
-    return env
-
-
 #: How long the reaper waits on a specialist nobody bounded, matching the
 #: largest deadline the dispatcher hands down.
 UNBOUNDED_REAP_CAP_SEC: float = 4 * 60 * 60.0
 
 
 # Configuration
+
+
 @dataclass(frozen=True)
 class SpecialistSubprocessConfig:
     """Static config for spawning agent-CLI subprocesses per specialist.
@@ -155,7 +138,7 @@ class SpecialistSubprocessConfig:
     """
 
     agent_backend: str = ""
-    """Which agent CLI to spawn: ``"claude"``, ``"codex"``, or ``""``.
+    """Which agent CLI to spawn: ``"claude"``, ``"codex"``, ``"deepseek"``, or ``""``.
 
     Empty resolves the deployment's credential shape per dispatch via
     :func:`preferred_agent_backend`. The CLI pins it explicitly at boot
@@ -169,6 +152,10 @@ class SpecialistSubprocessConfig:
     codex_executable: str = ""
     """Path / name of the codex CLI binary. Empty resolves it per
     :func:`resolve_codex_executable`."""
+
+    dsh_executable: str = ""
+    """Path / name of the DeepSeek Harness ``dsh`` CLI. Empty resolves it per
+    :func:`resolve_dsh_executable`."""
 
     model: str = ""
     """Model id for the selected agent CLI. Empty = that CLI's own default."""
@@ -459,8 +446,8 @@ class SpecialistSpawn:
             the specialist only as advisory prompt text baked into
             ``system_prompt``.
         disallowed_tools: Tool names to deny in the agent CLI subprocess.
-            Passed as ``--disallowedTools`` to the Claude CLI; has no Codex
-            equivalent (Codex containment uses ``--sandbox``).
+            Passed as ``--disallowedTools`` to the Claude CLI; has no Codex or
+            dsh equivalent (Codex containment uses ``--sandbox``).
         gpu_ids: GPU ids to expose to the subprocess.
         deadline: Absolute instant the reaper kills at. ``None`` means the
             caller set no bound and the reaper falls back to
@@ -840,11 +827,23 @@ class SpecialistSubprocessDispatcher:
     def _build_launch(self, backend: str, request: SpecialistSpawn, env: dict[str, str]) -> list[str]:
         """Write ``prompt.md``, then build the CLI argv for ``backend``; child-only values go into ``env``.
 
-        Both CLIs read the user turn from ``prompt.md`` on stdin.
+        Codex and Claude read the user turn from ``prompt.md`` on stdin; dsh takes it as argv.
         """
         prompt_file = request.workspace / "prompt.md"
         prompt_file.write_text(request.user_prompt, encoding="utf-8")
         prompt_file.chmod(0o600)
+        if backend == AGENT_BACKEND_DEEPSEEK:
+            dsh_request = DshLaunchRequest(
+                executable=resolve_dsh_executable(self.config.dsh_executable),
+                model=self.config.model,
+                mcp_config_path=self.config.mcp_config_path,
+                workspace=request.workspace,
+                system_prompt=request.system_prompt,
+                user_prompt=request.user_prompt,
+            )
+            launch = build_dsh_launch(dsh_request, env)
+            env.update(launch.env_additions)
+            return launch.cmd
         if backend == AGENT_BACKEND_CODEX:
             # Codex's higher-priority developer instructions live in private task-local config.
             cmd, launch_env_additions = self._build_codex_launch(
@@ -877,6 +876,8 @@ class SpecialistSubprocessDispatcher:
         fine-grained tracing (which falls back to ``usage`` when absent).
         """
         process_log = workspace / _PROCESS_LOG_NAME
+        if backend == AGENT_BACKEND_DEEPSEEK:
+            return harvest_dsh_trace(workspace)
         if backend == AGENT_BACKEND_CODEX:
             structured_error = parse_codex_jsonl_error(process_log)
             return AgentTrace(
@@ -900,24 +901,23 @@ class SpecialistSubprocessDispatcher:
         """Return the agent CLI this dispatch should spawn.
 
         An explicitly configured backend wins; otherwise the deployment's
-        credential shape decides (:func:`preferred_agent_backend`).
+        selection decides (:func:`resolve_agent_backend`).
 
         Returns:
-            str: :data:`AGENT_BACKEND_CLAUDE` or :data:`AGENT_BACKEND_CODEX`.
+            str: :data:`AGENT_BACKEND_CLAUDE`, :data:`AGENT_BACKEND_CODEX` or :data:`AGENT_BACKEND_DEEPSEEK`.
 
         Raises:
-            SpecialistAgentUnavailableError: If the configured backend is not
+            SpecialistAgentUnavailableError: If the selected backend is not
                 one this dispatcher can spawn.
         """
         pinned = (self.config.agent_backend or "").strip().lower()
-        if not pinned:
-            return preferred_agent_backend()
-        if pinned not in (AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX):
+        backend = pinned or resolve_agent_backend()
+        if backend not in (AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX, AGENT_BACKEND_DEEPSEEK):
             raise SpecialistAgentUnavailableError(
                 f"agent_backend={self.config.agent_backend!r} is not one of "
-                f"{AGENT_BACKEND_CLAUDE!r} / {AGENT_BACKEND_CODEX!r}"
+                f"{AGENT_BACKEND_CLAUDE!r} / {AGENT_BACKEND_CODEX!r} / {AGENT_BACKEND_DEEPSEEK!r}"
             )
-        return pinned
+        return backend
 
     def _writable_dirs(self, workspace: Path, worktree: Path | None) -> list[str]:
         """Return the dirs an agent CLI may write, in precedence order.

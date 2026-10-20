@@ -37,7 +37,10 @@ def test_the_shared_pin_admits_the_published_release() -> None:
 def test_the_deepseek_extra_uses_the_shared_pin() -> None:
     """pip reads the extra and preflight reads the constants; both must install the same thing."""
     extras = tomllib.loads(_PYPROJECT.read_text(encoding="utf-8"))["project"]["optional-dependencies"]
-    assert extras["deepseek"] == [agent_runtime_requirements.DEEPSEEK_HARNESS_SDK_SPEC]
+    assert extras["deepseek"] == [
+        agent_runtime_requirements.DEEPSEEK_HARNESS_SDK_SPEC,
+        agent_runtime_requirements.DEEPSEEK_SESSION_LOG_DECODER_SPEC,
+    ]
 
 
 @pytest.mark.parametrize(
@@ -53,4 +56,4 @@ def test_the_deepseek_extra_uses_the_shared_pin() -> None:
 )
 def test_a_launch_that_names_the_harness_for_any_role_installs_it(env: dict[str, str], needed: bool) -> None:
     modules = [module for module, _spec in agent_runtime_requirements.harness_runtime_requirements(env)]
-    assert modules == (["deepseek_harness"] if needed else [])
+    assert modules == (["deepseek_harness", "zstandard"] if needed else [])

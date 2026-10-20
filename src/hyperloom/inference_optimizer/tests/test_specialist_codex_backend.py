@@ -278,7 +278,7 @@ def _build_cmd(tmp_path: Path, **cfg_overrides: object) -> list[str]:
         base_env = {
             k: v
             for k, v in _os.environ.items()
-            if k in sp._SPECIALIST_ENV_ALLOWLIST | sp._SPECIALIST_SECRET_ENV_ALLOWLIST
+            if k in agent_cli_config._SPECIALIST_ENV_ALLOWLIST | agent_cli_config._SPECIALIST_SECRET_ENV_ALLOWLIST
         }
         cmd, _ = dispatcher._build_codex_launch(
             workspace=workspace,

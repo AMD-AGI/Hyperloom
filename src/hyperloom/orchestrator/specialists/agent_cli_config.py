@@ -3,8 +3,9 @@
 
 """Private per-task configuration the specialist agent CLIs read.
 
-Codex's ``config.toml``: its developer instructions and the MCP servers translated from the
-Claude-style MCP JSON, with secret values kept in child-only environment variables.
+Codex's ``config.toml`` (developer instructions and MCP servers translated from
+the Claude-style MCP JSON), and the environment-reference helpers both the Codex
+and the dsh MCP translations use to keep secret values out of the files they write.
 """
 
 from __future__ import annotations
@@ -16,7 +17,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from hyperloom.common.env_safety import BLOCKED_CHILD_ENV_NAMES, valid_env_key
+from hyperloom.common.env import env_bool
+from hyperloom.common.env_safety import BLOCKED_CHILD_ENV_NAMES, scrub_child_process_env, valid_env_key
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 
 
@@ -130,9 +132,10 @@ def _private_mcp_env_name(
     source: Mapping[str, str],
     additions: Mapping[str, str],
     protected_env_names: frozenset[str],
+    prefix: str = _CODEX_MCP_ENV_PREFIX,
 ) -> str:
     """Return a collision-free child-only variable name for one MCP header."""
-    base = f"{_CODEX_MCP_ENV_PREFIX}{index}"
+    base = f"{prefix}{index}"
     candidate = base
     suffix = 1
     while candidate in source or candidate in additions or candidate in protected_env_names:
@@ -329,3 +332,21 @@ def _write_private_codex_config(
     os.replace(temporary, config_path)
     config_path.chmod(0o600)
     return config_path
+
+
+def _build_specialist_env() -> dict[str, str]:
+    """Build a minimal env for Bash-enabled specialist subprocesses."""
+    inherit_secrets = env_bool("HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV", True)
+    allowed = set(_SPECIALIST_ENV_ALLOWLIST)
+    if inherit_secrets:
+        allowed.update(_SPECIALIST_SECRET_ENV_ALLOWLIST)
+    env = {key: value for key, value in os.environ.items() if key in allowed}
+    env = scrub_child_process_env(env)
+    # claude's bypassPermissions/--dangerously-skip-permissions refuses to start
+    # under root unless IS_SANDBOX=1 (SWSPLAT-42390). Mirror the kernel-agent
+    # forge tools (forge_fusion) so specialist authoring
+    # subprocesses run on bare-root pods (non-Claw hosts) instead of crashing
+    # immediately. setdefault only under root keeps the guard intact elsewhere.
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        env.setdefault("IS_SANDBOX", "1")
+    return env
