@@ -48,15 +48,9 @@ _COMPOSERS = (
 _WRITERS = frozenset(
     {
         "materialize_config_with_envs",
-        "_apply_profile_config",
-        "_shape_profile_trace",
         "_bound_vllm_profiler_capture",
         "_publish_patched_shape_discovery",
-        "_apply_framework_envs",
         "_drop_redundant_graph_capture_flag",
-        "_apply_eval_envs",
-        "_tokenized_requests_env",
-        "_resolve_tensor_parallel",
         "add_server_arg_unless_pinned",
         "_seed_reference_server_args",
         "_merge_caller_server_args",
