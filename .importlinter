@@ -359,9 +359,6 @@ ignore_imports =
     kernelforge.kernel_backends.fusion.prompts -> kernelforge.fusion.harness_contract
     kernelforge.kernel_backends.fusion.prompts -> kernelforge.fusion.validate
     kernelforge.knowledge.kb_store.recipe -> kernelforge.config
-    kernelforge.mcp_server.pr_stdio_server -> kernelforge.knowledge.pr_knowledge.client
-    kernelforge.mcp_server.pr_stdio_server -> kernelforge.knowledge.pr_knowledge.context
-    kernelforge.mcp_server.pr_stdio_server -> kernelforge.knowledge.pr_knowledge.search
     kernelforge.mcp_server.tools._subprocess -> kernelforge.loop.aiter_cache
     kernelforge.mcp_server.tools.test -> kernelforge.loop.scoring
     kernelforge.orchestrator.agent -> kernelforge.loop.insession_gate
