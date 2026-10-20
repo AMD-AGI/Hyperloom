@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 from pathlib import Path
 
 import pytest
@@ -31,6 +32,7 @@ from hyperloom_multibranch.scheduling.tests.child_sessions import (
 
 from hyperloom_multibranch.scheduling.prelude_reader import (
     MB_LATEST_STATE_SCHEMA_VERSION,
+    MB_TRACE_FILE_GLOB,
     ChildProfile,
     PreludeArtifacts,
     PreludeReadError,
@@ -40,6 +42,7 @@ from hyperloom_multibranch.scheduling.prelude_reader import (
     read_prelude,
     root_recipe,
 )
+from hyperloom_multibranch.toolbox.analysis import TRACE_GLOB
 
 #: The image the toolbox measures on, which the root recipe carries.
 IMAGE = "sha256:" + "1" * 64
@@ -50,6 +53,10 @@ def test_pinned_schema_version_matches_the_main_flow() -> None:
     match = re.search(r"^LATEST_STATE_SCHEMA_VERSION: int = (\d+)$", source.read_text(), re.MULTILINE)
     assert match is not None
     assert int(match.group(1)) == MB_LATEST_STATE_SCHEMA_VERSION
+
+
+def test_a_profile_holds_the_trace_the_toolbox_accepts() -> None:
+    assert MB_TRACE_FILE_GLOB == TRACE_GLOB
 
 
 def test_child_session_comes_from_launch_info(tmp_path: Path) -> None:
@@ -106,6 +113,31 @@ def test_the_childs_latest_roofline_profile_is_located_beside_the_point_config_i
     profile = read_prelude(session).profile
 
     assert profile == ChildProfile("b" * 32, latest, latest.parents[1] / "baseline_config.with_envs.yaml")
+
+
+def test_a_later_roofline_run_whose_capture_failed_does_not_hide_the_earlier_profile(tmp_path: Path) -> None:
+    session = child_with_patch(tmp_path)
+    profiled = with_roofline_profile(session, "a" * 32)
+    os.utime(profiled, (1.0, 1.0))
+    failed = with_roofline_profile(session, "b" * 32)
+    shutil.rmtree(failed)
+    failed.mkdir()
+    dangling = session / "runs" / "roofline" / ("c" * 32) / "benchmark_vllm_20261015_064331" / "torch_trace"
+    dangling.parent.mkdir(parents=True)
+    dangling.symlink_to(tmp_path / "gone")
+
+    assert read_prelude(session).profile == ChildProfile(
+        "a" * 32, profiled, profiled.parents[1] / "baseline_config.with_envs.yaml"
+    )
+
+
+def test_a_child_whose_roofline_captures_all_failed_left_no_profile(tmp_path: Path) -> None:
+    session = child_with_patch(tmp_path)
+    failed = with_roofline_profile(session)
+    shutil.rmtree(failed)
+    failed.mkdir()
+
+    assert read_prelude(session).profile is None
 
 
 def test_without_a_roofline_snapshot_the_baseline_arm_ceiling_is_read(tmp_path: Path) -> None:

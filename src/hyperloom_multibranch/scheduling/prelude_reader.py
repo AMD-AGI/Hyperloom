@@ -46,6 +46,9 @@ MB_ROOFLINE_PEAK_KEY = "theoretical_peak_tok_per_sec"
 #: (src/hyperloom/orchestrator/actions/executors/roofline.py), and the point config that run measured beside it.
 MB_ROOFLINE_TRACE_GLOB = "runs/roofline/*/benchmark_*/torch_trace"
 MB_POINT_CONFIG_FILE = "baseline_config.with_envs.yaml"
+#: ``TRACE_GLOB`` of hyperloom_multibranch/toolbox/analysis.py, the trace a profile must hold for the toolbox to accept
+#: it; importing that module would load the main flow's runtime, so a test compares the two.
+MB_TRACE_FILE_GLOB = "*.trace.json*"
 #: The ``outcome_status`` of a run that measured a baseline (src/hyperloom/inference_optimizer/breakdown/stop_reasons.py).
 MB_OUTCOME_COMPLETED = "completed"
 #: src/hyperloom/orchestrator/enablement/lane.py: an accepted config without ``args_mode`` appends its server args.
@@ -179,13 +182,30 @@ def read_prelude(session_dir: Path) -> PreludeArtifacts:
 
 
 def _latest_profile(session_dir: Path) -> ChildProfile | None:
-    """The roofline profile whose trace directory was written last; ``None`` when the child left none."""
+    """The roofline profile holding a trace whose directory was written last; ``None`` when the child left none.
 
-    traces = sorted(session_dir.glob(MB_ROOFLINE_TRACE_GLOB), key=lambda trace: trace.stat().st_mtime)
-    if not traces:
+    A failed capture leaves its trace directory empty, so a later failed run never hides an earlier profile.
+    """
+
+    traces = session_dir.glob(MB_ROOFLINE_TRACE_GLOB)
+    written = [(mtime, trace) for trace in traces if (mtime := _trace_mtime(trace)) is not None]
+    if not written:
         return None
-    run = traces[-1].parents[1]
-    return ChildProfile(run_id=run.name, trace_dir=traces[-1], point_config=run / MB_POINT_CONFIG_FILE)
+    trace_dir = max(written)[1]
+    run = trace_dir.parents[1]
+    return ChildProfile(run_id=run.name, trace_dir=trace_dir, point_config=run / MB_POINT_CONFIG_FILE)
+
+
+def _trace_mtime(trace_dir: Path) -> float | None:
+    """When ``trace_dir`` was written, ``None`` when it holds no trace or cannot be read: locating the profile never
+    fails reading the PRELUDE."""
+
+    try:
+        if next(trace_dir.rglob(MB_TRACE_FILE_GLOB), None) is None:
+            return None
+        return trace_dir.stat().st_mtime
+    except OSError:
+        return None
 
 
 def framework_pin(artifacts: PreludeArtifacts) -> UpstreamPin | None:
