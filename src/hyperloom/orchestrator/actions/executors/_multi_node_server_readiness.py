@@ -27,6 +27,11 @@ class ServerRestartFailed(RuntimeError):
     """Raised when the per-round multi-node server restart did not succeed."""
 
 
+def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
+    """Read a poll-count knob whose smallest meaningful value is *minimum*, not zero."""
+    return max(minimum, env_int(name, default))
+
+
 def _probe_generated_tokens(data: object) -> int:
     """Best-effort count of tokens a /v1/completions probe actually generated."""
     from hyperloom.inference_optimizer.multi_node._internal.serving_probe import generated_tokens
@@ -194,6 +199,9 @@ class _ServingProbeRules:
     #: readiness: the first benchmark would get 503 "Model temporarily unavailable" for every request, surfacing
     #: as ``completed=0`` → ``baseline_failed``.
     wait_model_ready: bool
+
+    #: Readiness is a streak of *served* probes, so this never drops below 1: at zero the server would be called
+    #: ready on a probe that failed, or on one that was never sent.
     required_streak: int
     max_tokens: int
     min_tokens: int
@@ -203,7 +211,7 @@ def _serving_probe_rules(backend: str) -> _ServingProbeRules:
     """Resolve what ``backend`` has to prove, and how often, from the environment."""
     return _ServingProbeRules(
         wait_model_ready=backend == "infera",
-        required_streak=int(os.environ.get("HYPERLOOM_MN_COMPLETION_PROBE_COUNT", "2") or 2),
+        required_streak=_env_int("HYPERLOOM_MN_COMPLETION_PROBE_COUNT", 2),
         # Probe with >1 token + ignore_eos so the request must traverse the decode leg (prefill alone can serve the
         # first token): a PD run with an unready or KV-broken decode then fails the probe instead of passing on a
         # prefill-only 200.
@@ -491,11 +499,6 @@ def _is_name_resolution_error(exc: BaseException) -> bool:
 def _published_ready_timeout_s() -> int:
     """Resolve the published-service gate budget from the environment."""
     return env_int("HYPERLOOM_MN_PUBLISHED_READY_S", 300)
-
-
-def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
-    """Read a poll-count knob whose smallest meaningful value is *minimum*, not zero."""
-    return max(minimum, env_int(name, default))
 
 
 def _rewritten_published_url(state: Mapping[str, Any]) -> str:

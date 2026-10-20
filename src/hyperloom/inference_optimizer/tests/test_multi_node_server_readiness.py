@@ -187,6 +187,13 @@ def test_serving_probe_rules_only_wait_for_model_registration_on_infera(monkeypa
     assert readiness._serving_probe_rules("infera").required_streak == 5
 
 
+def test_no_configured_probe_streak_still_requires_one_served_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Readiness is a streak of served probes; at zero a server that never answered would count as ready."""
+    monkeypatch.setenv("HYPERLOOM_MN_COMPLETION_PROBE_COUNT", "0")
+
+    assert readiness._serving_probe_rules("infera").required_streak == 1
+
+
 def test_the_models_empty_fast_fail_only_fires_after_health_came_up() -> None:
     """Before /health there is nothing to be late for, and once models registered the window is closed."""
     assert readiness._models_empty_too_long(elapsed=900, health_ok_at=None, models_ready_at=None, grace_s=600) is False
@@ -250,6 +257,26 @@ def test_a_completion_that_returns_no_tokens_does_not_count_as_serving(monkeypat
             "/health": [_Reply(200)],
             "/v1/models": [_Reply(200, {"data": [{"id": "m"}]})],
             "/v1/completions": [_Reply(200, {"usage": {"completion_tokens": 0}})],
+        },
+    )
+
+    with pytest.raises(readiness.ServerRestartFailed, match="/v1/completions still"):
+        asyncio.run(readiness._wait_for_server_health_async(timeout_s=36000, poll_every_s=60))
+
+
+def test_a_probe_that_never_succeeds_is_not_ready_with_no_configured_streak(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the streak configured to 0 a 503 from /v1/completions must still fail the gate, never pass it."""
+    monkeypatch.setenv("HYPERLOOM_MN_COMPLETION_PROBE_COUNT", "0")
+    _reachable(monkeypatch, "infera")
+    _clock_advances_only_on_sleep(monkeypatch)
+    _serve(
+        monkeypatch,
+        {
+            "/health": [_Reply(200)],
+            "/v1/models": [_Reply(200, {"data": [{"id": "m"}]})],
+            "/v1/completions": [_Reply(503)],
         },
     )
 
