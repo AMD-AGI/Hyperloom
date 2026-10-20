@@ -363,7 +363,6 @@ duplicated-lines src/hyperloom/inference_optimizer/tests/test_kv_metrics_wiring.
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_lifecycle_wiring.py 173
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_longrun_phase1.py 24
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_longrun_phase2.py 24
-duplicated-lines src/hyperloom/inference_optimizer/tests/test_magpie_patcher_unit.py 34
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_moe_runner_backend_injection.py 21
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_profile_and_kernel_handlers.py 171
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_promote_shared_state_lock.py 21
