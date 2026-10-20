@@ -21,6 +21,7 @@ from kernelforge.agent_backends.claude import ClaudeBackend
 from kernelforge.agent_backends.codex import CodexBackend
 from kernelforge.cli import lanes as cli_lanes
 from kernelforge.config import Config
+from kernelforge.orchestrator.agent import ImplementerSetup, ImplementerTask
 from kernelforge.loop import aiter_cache
 from kernelforge.loop.fanout import SERIALIZED_DRIVER_NAME
 from kernelforge.llm.git import git
@@ -84,7 +85,7 @@ def _recording_claude_backend(spawned: list[dict[str, str]]) -> ClaudeBackend:
 def _implementer_through(backend):
     """Stand in for make_agent_fn, running one real backend session per call."""
 
-    def make_agent(**_kwargs):
+    def make_agent(*_args, **_kwargs):
         async def agent(kernel_path: str, plan: str) -> str:
             await backend.run(
                 AgentRunSpec(
@@ -114,10 +115,12 @@ def _lane_factory(config: Config, workspace: Path, make_agent):
     return cli_lanes._make_lane_agent_factory(
         make_agent=make_agent,
         config=config,
-        workspace_dir=str(workspace),
-        driver=str(workspace / "forge_driver.py"),
-        source_files=[str(workspace / "src" / "kernel.py")],
-        session_kwargs={},
+        binding=cli_lanes.LaneBinding(
+            workspace_dir=str(workspace),
+            driver=str(workspace / "forge_driver.py"),
+            source_files=[str(workspace / "src" / "kernel.py")],
+        ),
+        setup=ImplementerSetup(ImplementerTask(program_md="")),
     )
 
 

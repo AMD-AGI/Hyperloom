@@ -107,5 +107,4 @@ python -m hyperloom.agents.critic.runtime.cli prepare-review --request req.json 
 python -m hyperloom.agents.critic.runtime.cli commit-review --request req.json --review review.json --out emit.json
 ```
 
-Tests for the runtime live under `runtime/tests/`; the SKILL fixtures
-under `tests/`.
+Tests for the runtime live under `runtime/tests/`.

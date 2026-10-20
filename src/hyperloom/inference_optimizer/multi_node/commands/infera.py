@@ -11,6 +11,7 @@ import json
 import os
 import shlex
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,7 @@ from .._internal import infera_support
 from .._internal.env_safety import filter_forward_env
 from .._internal.log import info, warn, err
 from .._internal.server_args_safety import ServerArgsRejected, validate_server_args
+from .._internal.ssh_client import RemoteScript
 
 import logging
 
@@ -126,16 +128,24 @@ def _collect_forward_env() -> dict[str, str]:
     return filter_forward_env(fwd, warn_on_drop=True)
 
 
+@dataclass(frozen=True)
+class _FanoutOptions:
+    """How one infera command runs its SSH fan-outs: the per-pod timeout and whether pod output is echoed."""
+
+    poll_timeout: int
+    print_logs: bool
+
+
 def _infera_fanout_launch(
     state: dict[str, Any],
     launch_args: str,
     targets: list[dict[str, Any]],
     *,
     label: str,
-    poll_timeout: int,
-    print_logs: bool,
+    options: _FanoutOptions,
 ) -> tuple[int, list[dict]]:
     """Ship + run launch_infera_node.py on each GPU pod over SSH."""
+    poll_timeout = options.poll_timeout
     script = _mn_cli._read_bundled_pod_python_script("launch_infera_node.py", _mn_cli._LAUNCHER_DEPS)
     forward_env = _collect_forward_env()
     if forward_env:
@@ -152,11 +162,8 @@ def _infera_fanout_launch(
             cp = _mn_cli._infera_ssh_run_script(
                 state,
                 ip,
-                script,
-                "python3",
-                launch_args,
+                RemoteScript(script, "python3", launch_args, env=forward_env),
                 timeout=poll_timeout,
-                env=forward_env,
                 port=port,
             )
         except subprocess.TimeoutExpired:
@@ -172,7 +179,7 @@ def _infera_fanout_launch(
             rec["stderr"] = (cp.stderr or "")[-1500:]
             rc_total = 1
         results.append(rec)
-        if print_logs:
+        if options.print_logs:
             print(f"--- {ip}:{port} stdout ---\n{cp.stdout}\n--- {ip}:{port} stderr ---\n{cp.stderr}")
     return rc_total, results
 
@@ -280,7 +287,7 @@ def _infera_servers_alive(
             return False
         port = int(target.get("sshPort") or _mn_cli._infera_default_ssh_port(state))
         try:
-            cp = _mn_cli._infera_ssh_bash_with_env(state, ip, _INFERA_PID_PROBE, None, timeout=timeout, port=port)
+            cp = _mn_cli._infera_ssh_bash_with_env(state, ip, _INFERA_PID_PROBE, timeout=timeout, port=port)
         except subprocess.TimeoutExpired:
             return False
         if cp.returncode != 0 or "MN_ALIVE" not in (cp.stdout or ""):
@@ -320,8 +327,7 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
     # Empty is a valid answer: it leaves the flag off so sglang picks its own default, which is the backend preferred
     # on this fabric anyway.
     kv = getattr(args, "pd_transfer_backend", "") or ""
-    poll_timeout = _mn_cli._poll_timeout_from_args(args)
-    print_logs = getattr(args, "print_logs", False)
+    fanout = _FanoutOptions(_mn_cli._poll_timeout_from_args(args), getattr(args, "print_logs", False))
     rc_total = 0
     all_results: dict[str, Any] = {}
     pd_prefill_nodes = 0
@@ -337,7 +343,7 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
         "off",
     )
     if resume_enabled and _infera_restart_config_matches(state, args, framework, pd_mode, kv):
-        probe_timeout = min(30, max(10, int(poll_timeout)))
+        probe_timeout = min(30, max(10, int(fanout.poll_timeout)))
         if _infera_servers_alive(state, _infera_all_gpu_targets(state), timeout=probe_timeout):
             info(
                 f"infera resume: same config (framework={framework} model={args.model} "
@@ -398,15 +404,16 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
             ("decode", decode_targets, dn, dtp, dep, decode_extra),
         ):
             launch_args = infera_support.build_node_launch_args(
-                framework=framework,
-                model=args.model,
-                tp=rtp,
-                nnodes=max(1, rnnodes),
-                ep=rep,
-                extra_args=rextra,
-                health_wait_sec=0,
-                disagg_mode=role,
-                kv_transfer_backend=kv,
+                infera_support.NodeLaunch(
+                    framework=framework,
+                    model=args.model,
+                    tp=rtp,
+                    nnodes=max(1, rnnodes),
+                    ep=rep,
+                    extra_args=rextra,
+                    disagg_mode=role,
+                    kv_transfer_backend=kv,
+                )
             )
             info(
                 f"infera restart-server PD {role}: tp={rtp} ep={rep} "
@@ -417,8 +424,7 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
                 launch_args,
                 list(targets),
                 label=f"restart-{role}",
-                poll_timeout=poll_timeout,
-                print_logs=print_logs,
+                options=fanout,
             )
             rc_total = rc_total or rc
             all_results[role] = results
@@ -431,13 +437,14 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
             default_role="worker",
         )
         launch_args = infera_support.build_node_launch_args(
-            framework=framework,
-            model=args.model,
-            tp=args.tp,
-            nnodes=nnodes,
-            ep=int(getattr(args, "ep", 1) or 1),
-            extra_args=getattr(args, "extra_args", "") or "",
-            health_wait_sec=0,
+            infera_support.NodeLaunch(
+                framework=framework,
+                model=args.model,
+                tp=args.tp,
+                nnodes=nnodes,
+                ep=int(getattr(args, "ep", 1) or 1),
+                extra_args=getattr(args, "extra_args", "") or "",
+            )
         )
         info(
             f"infera restart-server: framework={framework} model={args.model} "
@@ -448,8 +455,7 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
             launch_args,
             list(worker_targets),
             label="restart",
-            poll_timeout=poll_timeout,
-            print_logs=print_logs,
+            options=fanout,
         )
         all_results["worker"] = results
 
@@ -495,21 +501,14 @@ def _infera_kill_inference(args: argparse.Namespace) -> int:
     state = _infera_require_state()
     framework = (state.get("last_restart_framework") or state.get("framework") or "sglang").lower()
     gpu_targets = _infera_all_gpu_targets(state)
-    launch_args = infera_support.build_node_launch_args(
-        framework=framework,
-        model="",
-        tp=0,
-        nnodes=int(state.get("nodes") or 1),
-        kill_only=True,
-    )
+    launch_args = infera_support.build_node_kill_args(framework)
     info(f"infera kill-inference: framework={framework} pods={len(gpu_targets)}")
     rc, results = _infera_fanout_launch(
         state,
         launch_args,
         gpu_targets,
         label="kill",
-        poll_timeout=_mn_cli._poll_timeout_from_args(args),
-        print_logs=getattr(args, "print_logs", False),
+        options=_FanoutOptions(_mn_cli._poll_timeout_from_args(args), getattr(args, "print_logs", False)),
     )
     state["last_kill_results"] = results
     _mn_cli._save_state(state)
@@ -537,9 +536,7 @@ def _infera_ssh_node_op(
         cp = _mn_cli._infera_ssh_run_script(
             state,
             ip,
-            script,
-            "python3",
-            op_args,
+            RemoteScript(script, "python3", op_args),
             timeout=timeout,
             port=port,
         )
@@ -589,9 +586,7 @@ def _infera_apply_tracelens_patch(args: argparse.Namespace) -> int:
             cp = _mn_cli._infera_ssh_run_script(
                 state,
                 ip,
-                script,
-                pod_python,
-                op_args,
+                RemoteScript(script, pod_python, op_args),
                 timeout=timeout,
                 port=port,
             )
@@ -784,46 +779,6 @@ def _infera_finalize_patch(args: argparse.Namespace) -> int:
     return 0 if not failures else 1
 
 
-def _infera_kernel_bench(args: argparse.Namespace) -> int:
-    """Infera kernel-bench: run the micro-benchmark on ONE GPU pod over SSH."""
-    state = _infera_require_state()
-    gpu_targets = _infera_all_gpu_targets(state)
-    if not gpu_targets:
-        err("kernel-bench (infera): no GPU pod IPs in state")
-        return EXIT_CONFIG_ERROR
-    target = gpu_targets[0]
-    ip = str(target.get("podIP") or "").strip()
-    port = int(target.get("sshPort") or _mn_cli._infera_default_ssh_port(state))
-    if args.files_b64_json:
-        try:
-            json.loads(args.files_b64_json)
-        except json.JSONDecodeError as exc:
-            err(f"--files-b64-json not valid JSON: {exc}")
-            return EXIT_CONFIG_ERROR
-    op_args = (
-        f"bench --workspace {shlex.quote(str(args.workspace))} "
-        f"--bench-command {shlex.quote(str(args.bench_command))} "
-        f"--files-b64-json {shlex.quote(str(args.files_b64_json or '{}'))} "
-        f"--result-glob {shlex.quote(str(args.result_glob))} "
-        f"--timeout-sec {int(args.timeout_sec)}"
-    )
-    info(f"kernel-bench (infera): ssh -> {ip}:{port}")
-    parsed, tx = _infera_ssh_node_op(
-        state,
-        target,
-        op_args,
-        timeout=args.timeout_sec + 60,
-    )
-    if parsed is None:
-        err(f"kernel-bench (infera): no JSON from pod (ssh rc={tx.get('rc')})")
-        if getattr(args, "print_logs", False):
-            print(tx.get("stderr", ""))
-        return EXIT_TRANSIENT
-    payload = {"command": "bench", "status": "ok" if str(parsed.get("status")) == "ok" else "failed", "result": parsed}
-    print(json.dumps(payload, indent=2, sort_keys=True))
-    return 0 if payload["status"] == "ok" else 1
-
-
 def _resolve_geak_src(explicit: str | None) -> str:
     """Resolve the shared-FS GEAK source dir the sandbox install.sh cloned."""
     if explicit and explicit.strip():
@@ -860,9 +815,7 @@ def cmd_install_geak(args: argparse.Namespace) -> int:
             cp = _mn_cli._infera_ssh_run_script(
                 state,
                 ip,
-                script,
-                "bash",
-                shlex.quote(str(geak_src)),
+                RemoteScript(script, "bash", shlex.quote(str(geak_src))),
                 timeout=_mn_cli._poll_timeout_from_args(args),
                 port=port,
             )

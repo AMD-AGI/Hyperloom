@@ -334,7 +334,9 @@ class TestBuildSnapshotCeilingFields:
         assert snap["gap_to_roofline_pct"] is None
 
     def test_peak_plus_achieved_yields_within_and_gap(self, tmp_path):
+        from hyperloom.inference_optimizer.roofline_ceiling import RooflineBreakdown
         from hyperloom.inference_optimizer.roofline_snapshot import (
+            RooflineReading,
             build_roofline_snapshot,
         )
 
@@ -344,8 +346,12 @@ class TestBuildSnapshotCeilingFields:
             snapshot_id=1,
             ts="ts",
             analysis_md_path=str(p),
-            theoretical_peak_tok_per_sec=1000.0,
-            achieved_tok_per_sec=527.5,
+            reading=RooflineReading(
+                ceiling=RooflineBreakdown(
+                    mem_tok_per_sec=0.0, cmp_tok_per_sec=0.0, peak_tok_per_sec=1000.0, bound_kind="unknown"
+                ),
+                achieved_tok_per_sec=527.5,
+            ),
         )
         assert snap["theoretical_peak_tok_per_sec"] == 1000.0
         assert snap["achieved_tok_per_sec"] == 527.5
@@ -353,7 +359,9 @@ class TestBuildSnapshotCeilingFields:
         assert snap["gap_to_roofline_pct"] == pytest.approx(47.25, abs=0.01)
 
     def test_zero_peak_keeps_within_gap_none(self, tmp_path):
+        from hyperloom.inference_optimizer.roofline_ceiling import RooflineBreakdown
         from hyperloom.inference_optimizer.roofline_snapshot import (
+            RooflineReading,
             build_roofline_snapshot,
         )
 
@@ -363,8 +371,12 @@ class TestBuildSnapshotCeilingFields:
             snapshot_id=1,
             ts="ts",
             analysis_md_path=str(p),
-            theoretical_peak_tok_per_sec=0.0,
-            achieved_tok_per_sec=527.5,
+            reading=RooflineReading(
+                ceiling=RooflineBreakdown(
+                    mem_tok_per_sec=0.0, cmp_tok_per_sec=0.0, peak_tok_per_sec=0.0, bound_kind="unknown"
+                ),
+                achieved_tok_per_sec=527.5,
+            ),
         )
         assert snap["theoretical_peak_tok_per_sec"] is None
         assert snap["within_roofline_pct"] is None
@@ -829,7 +841,9 @@ class TestBuildSnapshotTwoSidedRoofline:
     """``build_roofline_snapshot`` carries T_mem / T_cmp / bound_kind alongside the legacy peak field."""
 
     def test_two_sided_fields_default_to_unknown_for_legacy_callers(self):
+        from hyperloom.inference_optimizer.roofline_ceiling import RooflineBreakdown
         from hyperloom.inference_optimizer.roofline_snapshot import (
+            RooflineReading,
             build_roofline_snapshot,
         )
 
@@ -837,8 +851,12 @@ class TestBuildSnapshotTwoSidedRoofline:
             snapshot_id=1,
             ts="2026-05-30T07:00:00Z",
             analysis_md_path="",
-            theoretical_peak_tok_per_sec=1000.0,
-            achieved_tok_per_sec=500.0,
+            reading=RooflineReading(
+                ceiling=RooflineBreakdown(
+                    mem_tok_per_sec=0.0, cmp_tok_per_sec=0.0, peak_tok_per_sec=1000.0, bound_kind="unknown"
+                ),
+                achieved_tok_per_sec=500.0,
+            ),
         )
         assert snap["theoretical_peak_tok_per_sec"] == 1000.0
         assert snap["roofline_mem_ceiling_tok_per_sec"] is None
@@ -846,7 +864,9 @@ class TestBuildSnapshotTwoSidedRoofline:
         assert snap["roofline_bound_kind"] == "unknown"
 
     def test_two_sided_fields_populated_when_provided(self):
+        from hyperloom.inference_optimizer.roofline_ceiling import RooflineBreakdown
         from hyperloom.inference_optimizer.roofline_snapshot import (
+            RooflineReading,
             build_roofline_snapshot,
         )
 
@@ -854,11 +874,12 @@ class TestBuildSnapshotTwoSidedRoofline:
             snapshot_id=1,
             ts="2026-05-30T07:00:00Z",
             analysis_md_path="",
-            theoretical_peak_tok_per_sec=8000.0,
-            achieved_tok_per_sec=6244.0,
-            mem_ceiling_tok_per_sec=8000.0,
-            cmp_ceiling_tok_per_sec=40_000.0,
-            bound_kind="memory",
+            reading=RooflineReading(
+                ceiling=RooflineBreakdown(
+                    mem_tok_per_sec=8000.0, cmp_tok_per_sec=40_000.0, peak_tok_per_sec=8000.0, bound_kind="memory"
+                ),
+                achieved_tok_per_sec=6244.0,
+            ),
         )
         assert snap["roofline_mem_ceiling_tok_per_sec"] == 8000.0
         assert snap["roofline_cmp_ceiling_tok_per_sec"] == 40_000.0
@@ -867,7 +888,9 @@ class TestBuildSnapshotTwoSidedRoofline:
         assert snap["theoretical_peak_tok_per_sec"] == 8000.0
 
     def test_zero_mem_cmp_serialize_as_none(self):
+        from hyperloom.inference_optimizer.roofline_ceiling import RooflineBreakdown
         from hyperloom.inference_optimizer.roofline_snapshot import (
+            RooflineReading,
             build_roofline_snapshot,
         )
 
@@ -875,11 +898,12 @@ class TestBuildSnapshotTwoSidedRoofline:
             snapshot_id=1,
             ts="t",
             analysis_md_path="",
-            theoretical_peak_tok_per_sec=0.0,
-            achieved_tok_per_sec=0.0,
-            mem_ceiling_tok_per_sec=0.0,
-            cmp_ceiling_tok_per_sec=0.0,
-            bound_kind="unknown",
+            reading=RooflineReading(
+                ceiling=RooflineBreakdown(
+                    mem_tok_per_sec=0.0, cmp_tok_per_sec=0.0, peak_tok_per_sec=0.0, bound_kind="unknown"
+                ),
+                achieved_tok_per_sec=0.0,
+            ),
         )
         assert snap["roofline_mem_ceiling_tok_per_sec"] is None
         assert snap["roofline_cmp_ceiling_tok_per_sec"] is None
@@ -1024,3 +1048,18 @@ class TestRecordTraceAnalyzeStampsTwoSidedRoofline:
         assert perf["decode_mem_tok_per_s"] == 8000.0
         assert perf["decode_cmp_tok_per_s"] == 40_000.0
         assert perf["bound_kind"] == "memory"
+
+
+def test_attach_perfmodel_breakdown_propagates_perfmodel_failure(monkeypatch):
+    from hyperloom.inference_optimizer import roofline_ceiling, roofline_snapshot
+
+    def perfmodel_fails(*_args, **_kwargs):
+        raise RuntimeError("perfmodel bug")
+
+    monkeypatch.setattr(roofline_ceiling, "resolve_runtime_workload", perfmodel_fails)
+    snapshot: dict[str, Any] = {"snapshot_id": 1}
+
+    with pytest.raises(RuntimeError):
+        roofline_snapshot.attach_perfmodel_breakdown(snapshot, SimpleNamespace(), arm="baseline")
+
+    assert snapshot == {"snapshot_id": 1}

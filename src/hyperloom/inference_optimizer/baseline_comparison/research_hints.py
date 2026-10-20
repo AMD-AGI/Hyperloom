@@ -9,6 +9,7 @@ import json
 import logging
 import re
 import time
+from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, Literal
@@ -260,27 +261,37 @@ def _match_target_row(
     return max(rows, key=lambda r: _to_num(r.get("tput_per_gpu")) or 0.0)
 
 
+@dataclass(frozen=True)
+class AcceptedMetrics:
+    """Our accepted run on the axes a competitor target is compared on.
+
+    ``tput_per_gpu`` is output/GPU (synthetic) or total/GPU (AgentX); ``tpot_ms`` is the synthetic mean time per
+    output token; ``e2e_norm_intvty_p90`` is the accepted AgentX summary-rate P10, never recomputed.
+    """
+
+    tput_per_gpu: float | None
+    tpot_ms: float | None = None
+    e2e_norm_intvty_p90: float | None = None
+
+
 def gap_analysis(
     target: dict[str, Any] | None,
+    ours: AcceptedMetrics,
     *,
-    our_tput_per_gpu: float | None,
-    our_tpot_ms: float | None,
     conc: int | None = None,
     benchmark_mode: str = "synthetic",
-    our_e2e_norm_intvty_p90: float | None = None,
 ) -> dict[str, Any] | None:
     """Compute advisory gaps; synthetic uses nearest concurrency, AgentX requires an exact match.
 
     Args:
         target: Source-backed competitor target.
-        our_tput_per_gpu: Accepted output/GPU (synthetic) or total/GPU (AgentX).
-        our_tpot_ms: Synthetic mean time per output token, in milliseconds.
+        ours: Our accepted metrics.
         conc: Requested concurrency; AgentX cannot compare without it.
         benchmark_mode: Select synthetic throughput/TPOT or AgentX axes.
-        our_e2e_norm_intvty_p90: Accepted AgentX summary-rate P10; never recomputed.
     """
     if not target or target.get("benchmark_mode", "synthetic") != benchmark_mode:
         return None
+    our_tput_per_gpu, our_tpot_ms = ours.tput_per_gpu, ours.tpot_ms
     agentx = benchmark_mode == "agentx"
     row = _match_target_row(target, conc)
     if row is None and not agentx:
@@ -293,7 +304,7 @@ def gap_analysis(
     if agentx:
         tgt_tput, tgt_inter, our_tput_per_gpu, our_inter = [
             value if value is not None and value > 0 else None
-            for value in (tgt_tput, tgt_inter, to_float(our_tput_per_gpu), to_float(our_e2e_norm_intvty_p90))
+            for value in (tgt_tput, tgt_inter, to_float(our_tput_per_gpu), to_float(ours.e2e_norm_intvty_p90))
         ]
         our_tpot_ms = None
 
@@ -358,13 +369,16 @@ def gap_for_state(target: dict[str, Any] | None, state: Any) -> dict[str, Any] |
     tput = to_float(tput) if agentx else tput
     tpot = None if agentx else best.get("tpot_mean_ms")
     tp = to_float(getattr(state, "tp", None)) if agentx else int(getattr(state, "tp", 0) or 0)
+    ours = AcceptedMetrics(
+        tput_per_gpu=float(tput) / tp if isinstance(tput, (int, float)) and tput > 0 and tp and tp > 0 else None,
+        tpot_ms=float(tpot) if isinstance(tpot, (int, float)) and tpot > 0 else None,
+        e2e_norm_intvty_p90=best.get("e2e_norm_intvty_p90") if agentx else None,
+    )
     return gap_analysis(
         target,
-        our_tput_per_gpu=float(tput) / tp if isinstance(tput, (int, float)) and tput > 0 and tp and tp > 0 else None,
-        our_tpot_ms=float(tpot) if isinstance(tpot, (int, float)) and tpot > 0 else None,
+        ours,
         conc=getattr(state, "conc", None) if agentx else int(getattr(state, "conc", 0) or 0) or None,
         benchmark_mode="agentx" if agentx else "synthetic",
-        our_e2e_norm_intvty_p90=best.get("e2e_norm_intvty_p90") if agentx else None,
     )
 
 
@@ -579,6 +593,7 @@ def summarise_for_prompt(
 
 
 __all__ = [
+    "AcceptedMetrics",
     "ComparisonReason",
     "append_hints",
     "full_gap_summary",

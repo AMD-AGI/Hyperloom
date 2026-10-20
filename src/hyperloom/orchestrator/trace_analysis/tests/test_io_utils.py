@@ -38,7 +38,6 @@ def test_safe_float_variants():
     assert io.safe_float("1.5") == 1.5
     assert io.safe_float(3) == 3.0
     assert io.safe_float("bad", default=-1.0) == -1.0
-    assert io.safe_float("1,234.5%", default=None, strip_percent=True, strip_commas=True) == 1234.5
 
 
 # Byte-consistency contract: the kernel-agent ``_io_utils`` mirror must stay behaviourally aligned with

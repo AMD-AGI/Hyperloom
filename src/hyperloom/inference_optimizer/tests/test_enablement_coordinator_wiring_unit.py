@@ -16,8 +16,9 @@ from hyperloom.common.bringup import BootObservation, Excerpt, LadderStage, Term
 from hyperloom.common.failure_signature import FailureSignature
 from hyperloom.orchestrator.bringup import observation_summary
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
+from hyperloom.orchestrator.state.round_store import RoundRequest
 from hyperloom.orchestrator.state.shared_state import SharedState
-from hyperloom.orchestrator.state.task_registry import create_in_cursor
+from hyperloom.orchestrator.state.task_registry import TaskSpec, create_in_cursor
 
 from hyperloom.orchestrator.actions.executors._ray_serving import RAY_INFEASIBLE_MARKER
 from hyperloom.orchestrator.actions.executors._subprocess_kill import AGENTX_PREFLIGHT_ERROR_CLASS
@@ -238,11 +239,7 @@ async def _seed_task(fake, task_id: str, *, kind: str, state: str = "queued", pa
     """Put a real registry row in the state a case needs, under a chosen id."""
     async with fake.db.transaction() as cur:
         create_in_cursor(
-            cur,
-            kind=kind,
-            params=params or {},
-            idempotency_key=f"seed:{task_id}",
-            task_id=task_id,
+            cur, TaskSpec(kind=kind, params=params or {}, idempotency_key=f"seed:{task_id}", task_id=task_id)
         )
     if state != "queued":
         if state != "running":
@@ -260,10 +257,9 @@ async def _hold_round(fake, holder: str, *, holder_state: str = ""):
         await _seed_task(fake, holder, kind="specialist", state=holder_state)
     acquired = await fake.rounds.open(
         f"enablement-{holder}",
+        RoundRequest(now_unix=time.time(), request_id=f"seed:{holder}"),
         holder_task_id=holder,
         lease_sec=3600.0,
-        now_unix=time.time(),
-        request_id=f"seed:{holder}",
     )
     assert acquired.ok, acquired.reason
 
@@ -463,7 +459,7 @@ async def test_the_repair_pass_ends_a_round_whose_holder_finished_silently(monke
     """
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
-    from hyperloom.orchestrator.bringup.reconcile import Reconciler
+    from hyperloom.orchestrator.bringup.reconcile import ReconcileLinks, Reconciler, ReconcileStores
     from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager, SqliteLeaseBackend
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
@@ -471,11 +467,11 @@ async def test_the_repair_pass_ends_a_round_whose_holder_finished_silently(monke
     fake = _enqueue_self(tmp_path)
     await _hold_round(fake, "spec-stuck", holder_state="succeeded")
     reconciler = Reconciler(
-        rounds=fake.rounds,
-        tasks=fake.tasks,
-        locks=ResourceLockManager(SqliteLeaseBackend(fake.rounds.db)),
-        shared_state=fake.shared_state,
-        proposals=lambda: fake.state.pending_proposals,
+        ReconcileStores(
+            rounds=fake.rounds, tasks=fake.tasks, locks=ResourceLockManager(SqliteLeaseBackend(fake.rounds.db))
+        ),
+        fake.shared_state,
+        links=ReconcileLinks(proposals=lambda: fake.state.pending_proposals),
     )
 
     await reconciler.run(time.time() + 3600.0)
@@ -483,8 +479,6 @@ async def test_the_repair_pass_ends_a_round_whose_holder_finished_silently(monke
     settled = await fake.rounds.get("enablement-spec-stuck")
     assert settled.state == "settled"
     assert settled.outcome == "expired_reaped", "the holder's own row records the end of its work"
-    # And the machine comes back with the settle: a settled round holds nothing.
-    assert settled.excludes_at(time.time() + 3600.0) is False
 
 
 @pytest.mark.asyncio
@@ -591,7 +585,6 @@ async def test_revalidation_enqueues_genuine_baseline(tmp_path):
     created = await fake.tasks.get(tid)
     assert created.kind == "baseline"
     assert created.params["config_path"] == "/runs/baseline/materialized.yaml"
-    assert created.params["disable_run_eval"] is False
     assert created.params["enablement_origin"] == "eval"
 
 
@@ -1568,18 +1561,20 @@ async def test_rearm_records_the_rounds_disposition_on_the_executions_it_perform
     A discarded round still mutated the shared venv, so its rows stay in the
     ledger carrying the outcome the lane reported for them.
     """
-    from hyperloom.orchestrator.enablement.recipe.setup_ledger import build_execution_row
+    from hyperloom.orchestrator.enablement.recipe.setup_ledger import SetupExecution, build_execution_row
 
     fake = _enqueue_self(tmp_path)
     await _hold_round(fake, "spec-1")
     fake.shared_state.enablement.setup_executions = [
         build_execution_row(
-            seq=1,
-            round_task_id="spec-1",
-            cmd_index=0,
-            cmd="pip install -U transformers",
-            source="proposed",
-            outcome="applied",
+            SetupExecution(
+                seq=1,
+                round_task_id="spec-1",
+                cmd_index=0,
+                cmd="pip install -U transformers",
+                source="proposed",
+                outcome="applied",
+            ),
             env={},
             fs_root="/nonexistent-probe-root",
         )

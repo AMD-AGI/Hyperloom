@@ -705,7 +705,7 @@ async def test_a_lift_refused_integrate_patch_is_not_journalled_keep(session_dir
     from hyperloom.inference_optimizer.breakdown.recorder import phase_event
 
     settled: list[dict] = []
-    monkeypatch.setattr(phase_event, "record_settle", lambda **kwargs: settled.append(kwargs))
+    monkeypatch.setattr(phase_event, "record_settle", lambda settlement: settled.append(vars(settlement)))
     coord = _coord(session_dir)
     s = coord.shared_state
     s.baseline_tput = 100.0

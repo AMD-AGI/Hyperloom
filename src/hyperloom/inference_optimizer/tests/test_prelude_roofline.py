@@ -79,6 +79,7 @@ def coord(tmp_path: Path, monkeypatch) -> Coordinator:
     c.shared_state = SharedState(
         baseline_tput=100.0,
         kernel_optimizer="forge",
+        phase="PRELUDE",
     )
     c.tasks = _StubTaskRegistry()
     c.knowledge_plane = None
@@ -783,3 +784,139 @@ def test_roofline_watermark_ratio():
     from hyperloom.orchestrator.phases.kernel import ROOFLINE_WATERMARK_RATIO
 
     assert ROOFLINE_WATERMARK_RATIO == 1.10
+
+
+_TRACE = "/runs/roofline/t/torch_trace/rank0.trace.json.gz"
+_PROFILED = {"status": "succeeded", "main_trace_path": _TRACE, "workspace": "/runs/roofline/t"}
+_ANALYSED = {"status": "ok", "hot_kernels": [], "trace_health_warnings": []}
+_SPLIT_FAILED = {
+    "status": "failed",
+    "error": "RuntimeError: trace_split_no_steady_state: TraceLens splitter produced no steady-state chunks; "
+    "refusing to run TraceLens analysis on the raw trace",
+}
+_ANALYSIS_TIMED_OUT = {
+    "status": "failed",
+    "error_class": "subprocess_timeout",
+    "error": "TimeoutExpired after 3600s: python tracelens_analysis.py",
+}
+_NO_TRACE_FILES = {
+    "status": "failed",
+    "error_class": "no_trace_files",
+    "error": "no .trace.json.gz or capture sidecar under /runs/roofline/t",
+}
+_TRANSIENT = {
+    "status": "failed",
+    "error_class": "tool_output_unparseable",
+    "error": "tool exited rc=1 but its stdout held no JSON object",
+}
+
+#: (profile result, trace analysis result) of a roofline whose failure recurs on the same configuration.
+_DETERMINISTIC_FAILURES = {
+    "trace_split_no_steady_state": (_PROFILED, _SPLIT_FAILED),
+    "analysis_timeout": (_PROFILED, _ANALYSIS_TIMED_OUT),
+}
+
+
+async def _run_roofline(coord: Coordinator, task: Any, profiled: dict, analysed: dict) -> dict:
+    """Run the real roofline executor on ``task`` with its profile and trace-analysis sub-steps stubbed."""
+    from unittest.mock import patch
+
+    from hyperloom.orchestrator.actions.executors.roofline import RooflineExecutor
+    from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
+
+    async def _profile(_ctx: Any) -> dict:
+        return dict(profiled)
+
+    async def _analyse(_payload: dict, *, session_dir: Path) -> dict:
+        return dict(analysed)
+
+    ctx = RunnerContext(task=task, lease=None, extra={"session_dir": str(coord.session_dir)})
+    with (
+        patch("hyperloom.orchestrator.actions.executors.profile.profile_executor", new=_profile),
+        patch("hyperloom.orchestrator.actions.executors.trace_analyze.trace_analyze_handler", new=_analyse),
+    ):
+        return await RooflineExecutor(shared_state=coord.shared_state)(ctx)
+
+
+def _past_the_watermark(state: SharedState) -> None:
+    """Arm the watermark gate the way a failed first roofline leaves it."""
+    state.baseline_tput = 100.0
+    state.cumulative_gain_validated = 50.0
+    state.last_roofline_tput = 0.0
+    state.auto_roofline_pending_task_id = ""
+    state.roofline_failure_streak = 1
+
+
+async def _fail_prelude_roofline(coord: Coordinator, profiled: dict, analysed: dict) -> None:
+    task = await coord.phase_prelude.enqueue_internal_analysis_task(reason="prelude_initial")
+    result = await _run_roofline(coord, task, profiled, analysed)
+    assert result["status"] == "failed"
+
+
+@pytest.mark.parametrize("failure", sorted(_DETERMINISTIC_FAILURES))
+@pytest.mark.asyncio
+async def test_a_deterministic_roofline_failure_is_not_re_run_on_the_same_recipe(coord: Coordinator, failure: str):
+    """The cycle-start re-arm re-ran a roofline that had failed on the same launch configuration, holding the GPU
+    lanes for another hour to fail the same way.
+    """
+    state = coord.shared_state
+    state.current_best = {"action": "baseline", "tput": 100.0}
+    await _fail_prelude_roofline(coord, *_DETERMINISTIC_FAILURES[failure])
+
+    for reason in ("cycle_start", "close_post_opt", "kernel_entry_g0_abc"):
+        assert await coord.phase_prelude.enqueue_internal_analysis_task(reason=reason) is None, reason
+    _past_the_watermark(state)
+    assert await coord.phase_kernel.maybe_enqueue_watermark_roofline(reason="integrate_keep_watermark") is False
+
+    dropped = state.phase_history[-1]["evidence"]
+    assert dropped["arm"] == "internal_analysis"
+    assert dropped["repeated_failure"]["failure"] == failure
+
+
+@pytest.mark.asyncio
+async def test_a_keep_re_arms_the_roofline_that_failed(coord: Coordinator):
+    """A new recipe is a new input: the failure on the old one says nothing about it."""
+    state = coord.shared_state
+    state.current_best = {"action": "baseline", "tput": 100.0}
+    await _fail_prelude_roofline(coord, _PROFILED, _SPLIT_FAILED)
+
+    state.current_best = {"action": "explore", "tput": 110.0, "extra_server_args": "--chunked-prefill-size 8192"}
+    state.working_recipe_generation += 1
+
+    task = await coord.phase_prelude.enqueue_internal_analysis_task(reason="cycle_start")
+    assert task is not None
+    assert task.params["base_extra_args"] == "--chunked-prefill-size 8192"
+
+
+@pytest.mark.parametrize(
+    ("profiled", "analysed"),
+    [(_PROFILED, _TRANSIENT), (_NO_TRACE_FILES, _ANALYSED)],
+    ids=["analysis-tool-error", "no-trace-files"],
+)
+@pytest.mark.asyncio
+async def test_a_transient_roofline_failure_keeps_the_streak_retry(coord: Coordinator, profiled: dict, analysed: dict):
+    """Only a failure that recurs on the same input is remembered; anything else retries within the existing cap.
+
+    A profile with no trace files is not proof of a recurring failure: a server that failed to boot reports the same
+    ``no_trace_files``.
+    """
+    state = coord.shared_state
+    state.current_best = {"action": "baseline", "tput": 100.0}
+    await _fail_prelude_roofline(coord, profiled, analysed)
+
+    assert await coord.phase_prelude.enqueue_internal_analysis_task(reason="cycle_start") is not None
+    _past_the_watermark(state)
+    assert await coord.phase_kernel.maybe_enqueue_watermark_roofline(reason="integrate_keep_watermark") is True
+
+
+@pytest.mark.asyncio
+async def test_a_failed_baseline_arm_does_not_block_a_current_best_that_moved_off_it(coord: Coordinator):
+    """PRELUDE profiles the baseline's own arguments; once a warm-replay KEEP moved current_best, its failure is not
+    the failure of the configuration the later re-arms profile.
+    """
+    state = coord.shared_state
+    state.current_best = {"action": "replay_warm_recipe", "tput": 120.0, "extra_server_args": "--enable-dp-attention"}
+    state.working_recipe_generation = 1
+    await _fail_prelude_roofline(coord, _PROFILED, _SPLIT_FAILED)
+
+    assert await coord.phase_prelude.enqueue_internal_analysis_task(reason="cycle_start") is not None

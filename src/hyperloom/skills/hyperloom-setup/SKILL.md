@@ -68,7 +68,7 @@ directory. Tell the user to open the intended dedicated workspace in the agent
 and install Hyperloom into that current directory:
 
 ```bash
-pip install hyperloom-inference-optimizer==1.1.3 --target .
+pip install hyperloom-inference-optimizer==1.1.4 --target .
 ```
 
 Then stop and ask the user to rerun `/hyperloom-setup` from that workspace.
@@ -81,7 +81,32 @@ custom model id) present two options — `Use default (<value>)` and `Custom` �
 and only when the user picks `Custom` ask a plain-text follow-up for the exact
 value.
 
-1. Ask the Anthropic base URL with the structured UI.
+1. Ask how Hyperloom authenticates to Claude with the structured UI. Present
+   exactly these two option labels in this order:
+   1. `Anthropic API key` — API-credit billing; the official endpoint, the AMD
+      gateway, or a custom gateway.
+   2. `Claude subscription (Pro/Max)` — the user's own Claude plan, through a
+      long-lived token from `claude setup-token`; no API key.
+
+   With `Claude subscription (Pro/Max)`:
+   - Do not ask the base URL: a subscription token is only valid against
+     `https://api.anthropic.com`, so write that value. Never pair it with the AMD
+     gateway or a custom URL.
+   - Tell the user to run `claude setup-token` themselves, in their own
+     terminal. It opens a browser sign-in and prints a token starting with
+     `sk-ant-oat01-`; it waits for that round-trip, so do not run it for them from
+     a non-interactive shell. They paste the token into `.env` (question 2), never
+     into chat.
+   - Write `CLAUDE_CODE_OAUTH_TOKEN=<PLEASE_FILL_IN>` instead of the
+     `ANTHROPIC_API_KEY` placeholder.
+   - An `ANTHROPIC_API_KEY` (or `ANTHROPIC_AUTH_TOKEN`) outranks the subscription
+     token, so the run would bill API credits instead. If `.env` or the shell
+     already holds one, tell the user and ask whether to remove it; do not
+     delete a non-placeholder secret without their answer.
+
+   With `Anthropic API key`, ask the base URL next (below).
+
+   Ask the Anthropic base URL with the structured UI (API-key path only).
    - Present exactly these three option labels in this order:
      - `Use default (https://api.anthropic.com)` — this remains the recommended
        default.
@@ -101,11 +126,14 @@ value.
    options — `Use default (<value>)` and `Custom` — and only ask a plain-text
    follow-up for the exact value when the user picks `Custom`.
 
-   - Write `ANTHROPIC_API_KEY=<PLEASE_FILL_IN>` unless already set to a non-placeholder value.
-   - Ask `ANTHROPIC_BASE_URL` with exactly these option labels in this order:
+   - API-key path: write `ANTHROPIC_API_KEY=<PLEASE_FILL_IN>` unless already set
+     to a non-placeholder value. Subscription path: write
+     `CLAUDE_CODE_OAUTH_TOKEN=<PLEASE_FILL_IN>` unless already set to a
+     non-placeholder value, and no `ANTHROPIC_API_KEY` placeholder.
+   - API-key path only: ask `ANTHROPIC_BASE_URL` with exactly these option labels in this order:
      `Use default (https://api.anthropic.com)` /
      `Use AMD gateway (https://llm-api.amd.com/anthropic)` / `Custom`.
-   - Ask `CLAUDE_MODEL`: options `Use default (claude-opus-5)` / `Custom`.
+   - Ask `CLAUDE_MODEL`: options `Use default (claude-opus-5-5)` / `Custom`.
 4. Explain `USER_DATA_PATH`:
    - It is the writable root for Hyperloom runtime files, dependency checkouts, logs, optimizer runs, and generated env files.
    - Offer `<workspace>/session` (the current workspace directory plus a
@@ -227,7 +255,9 @@ Before writing, explicitly tell the user:
 
 Write the Anthropic keys plus the common keys:
 
-- `Anthropic`: `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `CLAUDE_MODEL`.
+- `Anthropic`, API-key path: `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `CLAUDE_MODEL`.
+- `Anthropic`, subscription path: `CLAUDE_CODE_OAUTH_TOKEN`,
+  `ANTHROPIC_BASE_URL=https://api.anthropic.com`, `CLAUDE_MODEL`.
 - `Experience KB`: do not write `HYPERLOOM_KB_URL` or `HYPERLOOM_KB_TOKEN` by
   hand. After writing the other keys, run:
 
@@ -290,6 +320,9 @@ Then read `.env` back and confirm:
 - non-secret values are correct;
 - secret values are `set` or `missing`;
 - no secret key still equals `<PLEASE_FILL_IN>`.
+- subscription path: `CLAUDE_CODE_OAUTH_TOKEN` is set, and neither
+  `ANTHROPIC_API_KEY` nor `ANTHROPIC_AUTH_TOKEN` is set in `.env` or the shell
+  (either would take precedence over the subscription).
 - `HYPERLOOM_KB_URL` and `HYPERLOOM_KB_TOKEN` are both set.
 
 If any required secret is missing or still a placeholder, stop and ask the user

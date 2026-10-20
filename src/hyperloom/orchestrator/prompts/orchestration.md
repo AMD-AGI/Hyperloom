@@ -371,6 +371,17 @@ the code actually is; SESSION CONTEXT names the tree this session optimises
   Re-proposing with the SAME `idempotency_key` (or omitting it while
   the previous identical task is still pending) is rejected as
   duplicate, NOT as a "wait 3 ticks" violation.
+* **`explore` does not re-measure a launch this session already judged.**
+  A `delegate{action_name='explore'}` whose every variant already has a KEEP
+  or REVERT in `explore_search` on the current stack (same base launch and
+  anchor throughput, same workload), or is already in a queued or running
+  explore grid on that stack, is denied as `explore_grid_already_covered`,
+  naming the variants. Add a variant that changes the launch, or wait until a
+  KEEP has moved the stack. A grid with one new variant is admitted and the
+  executor skips the rest as `already_measured`. A REVERT on throughput
+  stands only while its gain is below the current KEEP bar, so a variant
+  that missed an earlier cycle's higher bar may be proposed again; an
+  accuracy or tail-latency REVERT stands regardless.
 * **`explore` validates its own KEEPs.**
   An `explore` KEEP is measured on the full `optimization_stack` and
   advances `cumulative_gain_validated` as a side effect; there is no
@@ -394,12 +405,19 @@ the code actually is; SESSION CONTEXT names the tree this session optimises
   fixed for the session, so look for levers that buy throughput per watt.
 * **Config vs source patch.** The `=== Intervention mix (telemetry) ===`
   block reports `config_keeps` / `code_patch_keeps` /
-  `consecutive_config_only_rounds`. Config tuning tends to plateau; when
-  the ledger shows many consecutive config-only rounds with no code_patch
-  keeps, a `serving_specialist`-authored framework SOURCE patch
-  (scheduler / kv_cache / chunked-prefill), promoted via
-  `integrate_patch`, is one route worth weighing against another config
-  round. A `code_patch` KEEP resets the consecutive counter.
+  `consecutive_config_only_rounds`. The arms differ in ceiling, not in
+  order: a flag is cheap to validate and bounded by whatever upstream
+  already wired up, while a source change moves the ceiling and keeps
+  paying in later rounds and cycles. A KEEP-less config round is
+  therefore not an argument for another config round. On consecutive
+  config-only rounds, dispatch a `mode='patch'` specialist at a
+  high-ceiling move: bridge a predicate that takes this model / GPU /
+  precision off a faster path (the `[static_recon/...]` rows in
+  `=== Current gaps ===`),
+  restore a path the runtime findings report disabled or falling back,
+  fix the framework bug behind the symptom, or re-sequence how
+  this architecture drives its components. Promote via
+  `integrate_patch`. A `code_patch` KEEP resets the counter.
 * **You CANNOT** delegate kernel_agent-owned actions; write a state field;
   read or write KB directly (Critic owns it). You **CAN** emit
   `escalate_strategy_change` with a `skip_to_kernel` / `skip_to_close` hint —

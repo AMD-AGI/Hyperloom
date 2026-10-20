@@ -99,17 +99,6 @@ class ReadLeaseManager:
             self._leases[lease.lease_id] = lease
         return lease
 
-    def renew(self, lease_id: str, ttl_seconds: float | None = None) -> ReadLease:
-        with self._lock:
-            current = self.require(lease_id)
-            lease = ReadLease(
-                lease_id=current.lease_id,
-                view=current.view,
-                expires_at_monotonic=time.monotonic() + self._ttl(ttl_seconds),
-            )
-            self._leases[lease_id] = lease
-            return lease
-
     def release(self, lease_id: str) -> None:
         with self._lock:
             self._leases.pop(lease_id, None)

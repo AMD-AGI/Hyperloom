@@ -15,7 +15,7 @@ from hyperloom.orchestrator.actions.executors.roofline import (
 )
 from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.loop.intent_router import _lifecycle_paths
+from hyperloom.orchestrator.loop.kernel_request import lifecycle_paths
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.state.task_registry import Task
@@ -52,7 +52,7 @@ def test_lifecycle_paths_extracts_present_path_keys():
         "not_a_path_key": "ignored",
         "best_artifact_path": "/tmp/best.py",
     }
-    out = _lifecycle_paths(payload)
+    out = lifecycle_paths(payload)
     assert out == {
         "trace_input": "/tmp/trace.json.gz",
         "candidates_path": "/tmp/kc.json",
@@ -70,14 +70,14 @@ def test_lifecycle_paths_surfaces_tracelens_report_keys():
         "cli_log_path": "/tmp/run/cli.log",
         "candidates_path": "/tmp/run/kernel_candidates.json",
     }
-    out = _lifecycle_paths(payload)
+    out = lifecycle_paths(payload)
     assert out == payload
 
 
 def test_lifecycle_paths_handles_non_dict():
-    assert _lifecycle_paths(None) == {}
-    assert _lifecycle_paths("nope") == {}
-    assert _lifecycle_paths([1, 2]) == {}
+    assert lifecycle_paths(None) == {}
+    assert lifecycle_paths("nope") == {}
+    assert lifecycle_paths([1, 2]) == {}
 
 
 @pytest.mark.asyncio
@@ -492,9 +492,7 @@ async def test_on_enter_close_emits_report_end(session_dir, monkeypatch):
             lambda: None,
         )
 
-        await c.phase_close.on_enter_close(
-            Transition(from_phase="SWEEP", to_phase="CLOSE", reason="stop", evidence={}, loopback=False)
-        )
+        await c.phase_close.on_enter_close(Transition(from_phase="SWEEP", to_phase="CLOSE", reason="stop", evidence={}))
 
         rpt = [e for e in c.shared_state.lifecycle if e["step"] == "report"]
         statuses = [e["status"] for e in rpt]
@@ -565,9 +563,7 @@ async def test_on_enter_close_emits_report_error_for_failed_task(
             lambda: None,
         )
 
-        await c.phase_close.on_enter_close(
-            Transition(from_phase="SWEEP", to_phase="CLOSE", reason="stop", evidence={}, loopback=False)
-        )
+        await c.phase_close.on_enter_close(Transition(from_phase="SWEEP", to_phase="CLOSE", reason="stop", evidence={}))
 
         rpt = [e for e in c.shared_state.lifecycle if e["step"] == "report"]
         assert [e["status"] for e in rpt] == ["START", "ERROR"]
@@ -637,9 +633,7 @@ async def test_on_enter_close_emits_report_error_for_exception(
             lambda: None,
         )
 
-        await c.phase_close.on_enter_close(
-            Transition(from_phase="SWEEP", to_phase="CLOSE", reason="stop", evidence={}, loopback=False)
-        )
+        await c.phase_close.on_enter_close(Transition(from_phase="SWEEP", to_phase="CLOSE", reason="stop", evidence={}))
 
         rpt = [e for e in c.shared_state.lifecycle if e["step"] == "report"]
         assert [e["status"] for e in rpt] == ["START", "ERROR"]

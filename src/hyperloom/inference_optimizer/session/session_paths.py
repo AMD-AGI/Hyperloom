@@ -116,12 +116,6 @@ def kernel_agent_runs_root(session_dir: Path) -> Path:
     return Path(session_dir) / "kernel-agent" / "runs"
 
 
-def kernel_agent_runs_dir(session_dir: Path, session_id: str) -> Path:
-    """``<sd>/kernel-agent/runs/<session_id>/`` — per-tool-invocation kernel-agent output (logs, status JSON, optimization_attempts.jsonl, TraceLens analysis)."""
-    sid = _validate_id_component(session_id, field="kernel_agent_runs_dir.session_id")
-    return kernel_agent_runs_root(session_dir) / sid
-
-
 def patches_dir(session_dir: Path, kernel_id: str) -> Path:
     """``<sd>/patches/<kernel_id>/`` — KEEP-promoted on-disk changes: the original source backup + applied patch (REVERT restores from backup)."""
     kid = _validate_id_component(kernel_id, field="patches_dir.kernel_id")
@@ -169,11 +163,6 @@ def enablement_round_dir(session_dir: Path, task_id: str) -> Path:
     """``<sd>/reports/enablement/<task_id>/`` — one directory per round."""
     tid = _validate_id_component(task_id, field="enablement_round_dir.task_id")
     return enablement_dir(session_dir) / tid
-
-
-def bringup_dir(session_dir: Path) -> Path:
-    """``<sd>/reports/bringup/`` — bring-up observation artifacts."""
-    return reports_dir(session_dir) / BRINGUP_SEGMENT
 
 
 def enablement_builds_dir(session_dir: Path, task_id: str) -> Path:
@@ -333,7 +322,7 @@ def recipe_kb_dir(session_dir: Path) -> Path:
     """Compute ``<sd>/runtime/recipe_kb/``, the Recipe KB per-session bookkeeping root.
 
     This directory holds only *derived* bookkeeping — the authoritative recipe
-    store is the local KB root (``$HYPERLOOM_LOCAL_KB_ROOT`` / ``workspace_root()/kb``,
+    store is the local KB root (``$KNOWLEDGE_LOCAL_ROOT``,
     mirrored to gbrain), which lives outside the session tree. The snapshots
     here (``.kb_pitfalls.json`` / ``.kb_lessons.json``) are rewritten by every
     T0 anchor, so a session that predates the ``runtime/cortex`` ->
@@ -373,11 +362,6 @@ def recipe_kb_dead_letter_ndjson(session_dir: Path) -> Path:
     return recipe_kb_dir(session_dir) / ".kb_dead_letter.ndjson"
 
 
-def recipe_kb_audit_jsonl(session_dir: Path) -> Path:
-    """``<sd>/runtime/recipe_kb/.kb_audit.jsonl`` — reserved append-only audit slot for Recipe KB CLI invocations; no producer writes it today and no breakdown section reads it (the former ``kb_provenance`` audit counts were dropped in the V5→V6 migration)."""
-    return recipe_kb_dir(session_dir) / ".kb_audit.jsonl"
-
-
 # recipe-snapshot per-session bookkeeping.
 def recipe_snapshot_dir(session_dir: Path) -> Path:
     """Compute ``<sd>/runtime/recipe_snapshot/``, the dispatcher bookkeeping root."""
@@ -392,16 +376,6 @@ def recipe_snapshot_audit_jsonl(session_dir: Path) -> Path:
 def pr_monitor_status_json(session_dir: Path) -> Path:
     """``<sd>/runtime/recipe_kb/.pr_monitor_status.json`` — boot-time PR Monitor reachability snapshot."""
     return recipe_kb_dir(session_dir) / ".pr_monitor_status.json"
-
-
-def recipe_kb_flusher_pid(session_dir: Path) -> Path:
-    """Compute the path to ``.kb_flusher.pid``, the flusher daemon pid file."""
-    return recipe_kb_dir(session_dir) / ".kb_flusher.pid"
-
-
-def recipe_kb_flusher_status_json(session_dir: Path) -> Path:
-    """``<sd>/runtime/recipe_kb/.kb_flusher_status.json`` — boot-time flusher spawn decision."""
-    return recipe_kb_dir(session_dir) / ".kb_flusher_status.json"
 
 
 def _prune_old_workdirs(root: Path, *, keep: int) -> None:
@@ -458,12 +432,9 @@ __all__ = [
     "breakdown_parts_dir",
     "competitor_target_json",
     "conversations_path",
-    "recipe_kb_audit_jsonl",
     "recipe_kb_dead_letter_ndjson",
     "recipe_kb_dir",
     "recipe_kb_flushed_ndjson",
-    "recipe_kb_flusher_pid",
-    "recipe_kb_flusher_status_json",
     "recipe_kb_lessons_json",
     "recipe_kb_pending_ndjson",
     "recipe_kb_pitfalls_json",
@@ -471,7 +442,6 @@ __all__ = [
     "proposal_task_map_path",
     "forge_steps_path",
     "gemm_tuning_steps_path",
-    "kernel_agent_runs_dir",
     "kernel_agent_runs_root",
     "llm_calls_path",
     "manifest_path",
@@ -481,7 +451,6 @@ __all__ = [
     "forge_handoff_dir",
     "BRINGUP_SEGMENT",
     "ENABLEMENT_SEGMENT",
-    "bringup_dir",
     "enablement_builds_dir",
     "enablement_dir",
     "enablement_round_dir",

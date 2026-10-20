@@ -10,6 +10,7 @@ import os
 import sqlite3
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -18,6 +19,7 @@ from hyperloom.common.deadline import Deadline
 from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
 
 from hyperloom.inference_optimizer.grid_server_args import merge_server_args
+from hyperloom.inference_optimizer.reference_script import ServingTarget
 from ..bringup import ARGV_INVALID, ENV_FAULT, is_argv_invalid, is_env_fault, load_boot_observation, observation_summary
 from ..collaborator import CoordinatorCollaborator
 from hyperloom.inference_optimizer.breakdown.round_archive import ROLE_LAUNCH_CONFIG, RoundArchive
@@ -26,8 +28,8 @@ from ..loop.offload import offload
 from .params import ENABLEMENT_PARAMS_BUDGET_SEC, _round_carriers
 from .artifacts import snapshot_round, write_setting_script
 from ..bringup import recorded_verdict, session_root
-from ..state.round_store import ADVANCED, BOOTED, FAILED, Round
-from ..state.task_registry import create_in_cursor, task_dispatch_origin
+from ..state.round_store import ADVANCED, BOOTED, FAILED, Round, RoundRequest
+from ..state.task_registry import TaskSpec, create_in_cursor, task_dispatch_origin
 from .recipe.section import recipe_for
 
 if TYPE_CHECKING:
@@ -162,13 +164,15 @@ class EnablementLane(CoordinatorCollaborator):
         # kind exists only in the params this dispatch built, and the log the
         # round was pointed at is replaced by the next advance.
         enablement_event.record_dispatch(
-            task_id=spec_tid,
-            attempt=stalled + 1,
-            failure_kind=str(params.get("enablement_failure_kind") or ""),
-            launch_log=launch_log,
-            candidate_refs=params.get("enablement_candidate_refs"),
-            mode=str(state.enablement_mode or ""),
-            origin=state.enablement.origin or enablement_event.ORIGIN_BOOT,
+            enablement_event.AuthoringDispatch(
+                task_id=spec_tid,
+                attempt=stalled + 1,
+                failure_kind=str(params.get("enablement_failure_kind") or ""),
+                launch_log=launch_log,
+                candidate_refs=params.get("enablement_candidate_refs"),
+                mode=str(state.enablement_mode or ""),
+                origin=state.enablement.origin or enablement_event.ORIGIN_BOOT,
+            )
         )
         state.save(self.session_dir)
         log.info(
@@ -289,23 +293,24 @@ class EnablementLane(CoordinatorCollaborator):
         def _join(cur: sqlite3.Cursor) -> None:
             create_in_cursor(
                 cur,
-                kind="specialist",
-                params=params,
-                idempotency_key=holder,
-                requires_lanes=lanes,
-                side_effects=["writes_results", "writes_patches"],
-                lease_ttl_sec=lease_ttl_sec,
-                task_id=holder,
-                dispatch_class="coordinator",
-                dispatch_origin=task_dispatch_origin(self.shared_state),
+                TaskSpec(
+                    kind="specialist",
+                    params=params,
+                    idempotency_key=holder,
+                    requires_lanes=lanes,
+                    side_effects=["writes_results", "writes_patches"],
+                    lease_ttl_sec=lease_ttl_sec,
+                    task_id=holder,
+                    dispatch_class="coordinator",
+                    dispatch_origin=task_dispatch_origin(self.shared_state),
+                ),
             )
 
         acquired = await self.rounds.open(
             _authoring_round_id(holder),
+            RoundRequest(now_unix=time.time(), request_id=holder),
             holder_task_id=holder,
             lease_sec=float(lease_ttl_sec),
-            now_unix=time.time(),
-            request_id=holder,
             join=_join,
         )
         if not acquired.ok:
@@ -363,9 +368,8 @@ class EnablementLane(CoordinatorCollaborator):
         now = time.time()
         await self.rounds.renew(
             round_row,
+            RoundRequest(now_unix=now, request_id=f"renew:{round_row.round_id}:{round_row.fence}:{now:.0f}"),
             lease_sec=lease,
-            now_unix=now,
-            request_id=f"renew:{round_row.round_id}:{round_row.fence}:{now:.0f}",
         )
 
     async def handoff_enablement_round(self, task: "Task") -> None:
@@ -390,10 +394,9 @@ class EnablementLane(CoordinatorCollaborator):
             lease = max(_MIN_LEASE_SEC, float(round_row.expires_unix) - float(round_row.renewed_unix))
         moved = await self.rounds.handoff(
             round_row,
+            RoundRequest(now_unix=time.time(), request_id=f"handoff:{task.task_id}"),
             new_holder_task_id=task.task_id,
             lease_sec=lease,
-            now_unix=time.time(),
-            request_id=f"handoff:{task.task_id}",
         )
         if not moved.ok:
             log.warning(
@@ -420,10 +423,12 @@ class EnablementLane(CoordinatorCollaborator):
             return
         await self.rounds.settle(
             round_row,
+            RoundRequest(
+                now_unix=time.time(),
+                request_id=f"settle:{round_row.round_id}:{round_row.fence}",
+                evidence={"reason": reason} if reason else {},
+            ),
             outcome=outcome,
-            now_unix=time.time(),
-            request_id=f"settle:{round_row.round_id}:{round_row.fence}",
-            evidence={"reason": reason} if reason else {},
         )
         holder = round_row.holder_task_id
         if await self.tasks.cancel_if_queued(holder, kind="specialist", reason="enablement_round_settled"):
@@ -436,15 +441,10 @@ class EnablementLane(CoordinatorCollaborator):
             outcome: One of the ``enablement_event.OUTCOME_*`` constants.
             reason: Why the lane ended, recorded on the event.
         """
-        state = self.shared_state
-        lane = state.enablement
         _finish_lane_event(
-            lane,
-            state,
-            outcome=outcome,
-            reason=reason,
-            session_dir=str(self.session_dir or ""),
-            stall_streak=await self.rounds.consecutive_stalled(),
+            self.shared_state,
+            LaneEnd(outcome=outcome, reason=reason, stall_streak=await self.rounds.consecutive_stalled()),
+            str(self.session_dir or ""),
         )
 
     async def _maybe_record_enablement_human_review(self, launch_log: str) -> None:
@@ -579,10 +579,12 @@ class EnablementLane(CoordinatorCollaborator):
                     self.session_dir,
                     state.enablement,
                     framework=state.framework or os.environ.get("FRAMEWORK") or "sglang",
-                    model=os.environ.get("MODEL_PATH") or state.model_path or state.reference_model,
-                    tp=state.tp or None,
-                    max_model_len=state.max_model_len or None,
-                    gpu_type=state.gpu_type or os.environ.get("GPU_TYPE") or None,
+                    target=ServingTarget(
+                        model=os.environ.get("MODEL_PATH") or state.model_path or state.reference_model,
+                        tp=state.tp or None,
+                        max_model_len=state.max_model_len or None,
+                        gpu_type=state.gpu_type or os.environ.get("GPU_TYPE") or None,
+                    ),
                 )
         except Exception:
             log.warning("enablement: artifact write failed", exc_info=True)
@@ -602,11 +604,13 @@ class EnablementLane(CoordinatorCollaborator):
         _record_enablement_round(
             state,
             res,
-            setting_script=setting_script,
-            stop_reason=stop_set,
-            attempt=attempt,
-            stall_streak=await self.rounds.consecutive_stalled(),
-            session_dir=str(self.session_dir or ""),
+            RoundSettlement(
+                setting_script=setting_script,
+                stop_reason=stop_set,
+                attempt=attempt,
+                stall_streak=await self.rounds.consecutive_stalled(),
+            ),
+            str(self.session_dir or ""),
         )
         state.save(self.session_dir)
         log.info(
@@ -737,35 +741,63 @@ def _rearm_on_advanced(state: Any, res: dict[str, Any]) -> None:
     _reset_baseline_failure_backstop(state)
 
 
-def _finish_lane_event(
-    lane: Any,
-    state: Any,
-    *,
-    outcome: str,
-    reason: str,
-    session_dir: str,
-    stall_streak: int,
-    setting_script: str = "",
-) -> None:
+@dataclass(frozen=True)
+class LaneEnd:
+    """How the enablement lane ended.
+
+    Attributes:
+        outcome: One of the ``enablement_event.OUTCOME_*`` constants.
+        reason: Why the lane ended, recorded on the event.
+        stall_streak: Consecutive stalled rounds when it ended.
+        setting_script: Session-relative path of the exported setting script.
+    """
+
+    outcome: str
+    reason: str
+    stall_streak: int
+    setting_script: str = ""
+
+
+@dataclass(frozen=True)
+class RoundSettlement:
+    """What the rearm knows about the authoring round it records.
+
+    Attributes:
+        setting_script: Session-relative path of the exported setting script.
+        stop_reason: Set only when this round hit the stall cap.
+        attempt: The ordinal the dispatch filed the round under.
+        stall_streak: Consecutive stalled rounds after this one settled.
+    """
+
+    setting_script: str
+    stop_reason: str
+    attempt: int
+    stall_streak: int
+
+
+def _finish_lane_event(state: Any, end: LaneEnd, session_dir: str) -> None:
     """Assemble and emit the terminal enablement_event.finish call."""
+    lane = state.enablement
     enablement_event.finish(
-        outcome=outcome,
-        reason=reason,
-        recipe=recipe_for(
-            lane,
-            session_dir=str(session_dir or ""),
-            mode=str(state.enablement_mode or ""),
-        ),
-        kept_patches=lane.kept_patches,
-        kept_artifacts=lane.kept_artifacts,
-        setup_commands=lane.setup_commands,
-        accepted_config=lane.accepted_config,
-        accepted_config_path=str(lane.accepted_config_path or ""),
-        setting_script=setting_script,
-        active_runtime=lane.active_runtime,
-        attempt_runtimes=lane.attempt_runtimes,
-        framework_root=str(lane.framework_root or ""),
-        stall_streak=stall_streak,
+        enablement_event.LaneTerminal(
+            outcome=end.outcome,
+            reason=end.reason,
+            recipe=recipe_for(
+                lane,
+                session_dir=str(session_dir or ""),
+                mode=str(state.enablement_mode or ""),
+            ),
+            kept_patches=lane.kept_patches,
+            kept_artifacts=lane.kept_artifacts,
+            setup_commands=lane.setup_commands,
+            accepted_config=lane.accepted_config,
+            accepted_config_path=str(lane.accepted_config_path or ""),
+            setting_script=end.setting_script,
+            active_runtime=lane.active_runtime,
+            attempt_runtimes=lane.attempt_runtimes,
+            framework_root=str(lane.framework_root or ""),
+            stall_streak=end.stall_streak,
+        )
     )
 
 
@@ -815,11 +847,7 @@ def _round_task_id(state: Any, res: dict[str, Any]) -> str:
 def _record_enablement_round(
     state: Any,
     res: dict[str, Any],
-    *,
-    setting_script: str,
-    stop_reason: str,
-    attempt: int,
-    stall_streak: int,
+    settlement: RoundSettlement,
     session_dir: str = "",
 ) -> None:
     """Record how one authoring round settled, and close a lane that ended.
@@ -830,15 +858,19 @@ def _record_enablement_round(
     only when this round hit the stall cap, and ``attempt`` is the ordinal the
     dispatch filed it under.
     """
+    stop_reason = settlement.stop_reason
+    stall_streak = settlement.stall_streak
     lane = state.enablement
     succeeded = bool(lane.succeeded)
     enablement_event.record_round(
-        task_id=_round_task_id(state, res),
-        attempt=int(attempt or 0),
-        result=res,
-        stall_streak=int(stall_streak or 0),
-        succeeded=succeeded,
-        validation_pending=bool(lane.validation_pending),
+        enablement_event.AuthoringRound(
+            task_id=_round_task_id(state, res),
+            attempt=int(settlement.attempt or 0),
+            result=res,
+            stall_streak=int(stall_streak or 0),
+            succeeded=succeeded,
+            validation_pending=bool(lane.validation_pending),
+        )
     )
     # A KEEP opens a revalidation window, so succeeded is only set by the
     # promote path, not here. This branch fires only after the stall cap.
@@ -849,11 +881,12 @@ def _record_enablement_round(
     else:
         return
     _finish_lane_event(
-        lane,
         state,
-        outcome=outcome,
-        reason=reason,
-        session_dir=str(session_dir or ""),
-        stall_streak=int(stall_streak or 0),
-        setting_script=setting_script,
+        LaneEnd(
+            outcome=outcome,
+            reason=reason,
+            stall_streak=int(stall_streak or 0),
+            setting_script=settlement.setting_script,
+        ),
+        str(session_dir or ""),
     )

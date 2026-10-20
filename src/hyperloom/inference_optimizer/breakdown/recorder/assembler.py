@@ -147,7 +147,6 @@ def assemble_parts(
 
     _compose_versions(out)
     _compose_critic(out)
-    _compose_robustness(out)
     _compose_close(out)
     if not keep_event_rows:
         _drop_event_rows(out)
@@ -267,26 +266,6 @@ def _compose_critic(out: dict[str, Any]) -> None:
         key=lambda r: (_iter_of(r), str(r.get("ts") or "")),
     )
     out["critic"] = {"iterations": iterations}
-
-
-def _compose_robustness(out: dict[str, Any]) -> None:
-    """Fold the ``robustness_turn`` substream into ``robustness``, ordered by
-    turn, mutating ``out`` and popping the raw substream."""
-    rows = out.pop("robustness_turn", None)
-    if not isinstance(rows, list):
-        return
-
-    def _turn_of(row: dict[str, Any]) -> int:
-        try:
-            return int(row.get("turn_idx") or 0)
-        except (TypeError, ValueError):
-            return 0
-
-    turns = sorted(
-        (r for r in rows if isinstance(r, dict)),
-        key=lambda r: (_turn_of(r), str(r.get("ts") or "")),
-    )
-    out["robustness"] = {"turns": turns}
 
 
 def event_parts(sections: tuple[str, ...], *, event: str = "") -> dict[str, list[dict[str, Any]]]:

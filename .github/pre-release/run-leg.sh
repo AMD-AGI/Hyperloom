@@ -71,7 +71,7 @@ PROMPTS_DIR="$SCRIPT_DIR/prompts/pre-release"
 
 LEG_ID_RE='^(baremetal|docker)-(sglang|vllm|atom)(-forge)?-(3h|12h)$'
 # Mirrors SUCCESS_STOP_REASONS in hyperloom/inference_optimizer/breakdown/stop_reasons.py.
-CLEAN_STOP_REASONS="target_reached global_converged time_exhausted max_ticks sweep_done robustness_escalated"
+CLEAN_STOP_REASONS="target_reached global_converged time_exhausted max_ticks sweep_done"
 # Keys copied from the caller's env into .env when set; secret ones are scrubbed on exit.
 PASSTHROUGH_KEYS="ANTHROPIC_CUSTOM_HEADERS GEAK_CLAUDE_MODEL FORGE_CLAUDE_MODEL OPENAI_BASE_URL OPENAI_API_KEY CODEX_MODEL INFERENCE_OPTIMIZER_SESSION_LAYOUT"
 SECRET_KEYS="ANTHROPIC_API_KEY ANTHROPIC_CUSTOM_HEADERS OPENAI_API_KEY"

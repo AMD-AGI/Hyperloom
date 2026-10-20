@@ -8,14 +8,12 @@ from pathlib import Path
 import pytest
 import yaml
 
-from hyperloom.orchestrator.actions.executors._grid_runner import (
+from hyperloom.inference_optimizer.grid_server_args import (
     DEFAULT_SGLANG_CONTEXT_FLOOR_TOKENS,
     DEFAULT_SGLANG_CONTEXT_HEADROOM_TOKENS,
     inject_sglang_attention_backend,
     inject_sglang_context_length,
     resolve_sglang_context_cap,
-)
-from hyperloom.inference_optimizer.grid_server_args import (
     validate_warm_replay_context_length,
 )
 from hyperloom.orchestrator.actions.executors._workload_envs import (

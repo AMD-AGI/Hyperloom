@@ -794,7 +794,7 @@ def test_wrap_profile_ctx_creates_child_task():
     assert child.task.task_id == "t-roofline-1-profile"
     assert child.task.idempotency_key == "roofline:t-1-profile"
     assert child.task.state == "running"
-    assert child.task.params == {"base_extra_args": "--mem-fraction-static=0.92", "disable_run_eval": True}
+    assert child.task.params == {"base_extra_args": "--mem-fraction-static=0.92"}
     assert child.extra["session_dir"] == "/sess"
     assert child.lease is parent.lease
 
@@ -1074,32 +1074,6 @@ def test_strip_preserves_empty_alt_text():
     assert "image" in out
 
 
-def test_strip_reduces_real_r1_report_by_90pct_plus():
-    import os
-
-    p = "/shared/user1/sessions/kernel-agent/runs/sessions/tracelens/analysis.md"
-    if not os.path.exists(p):
-        pytest.skip(f"sample analysis.md not present at {p}")
-    with open(p, encoding="utf-8") as f:
-        md = f.read()
-    if "data:image/" not in md:
-        pytest.skip(
-            "sample analysis.md no longer contains base64 data URLs "
-            "(file overwritten by a later session); can't validate "
-            "the ≥80% reduction claim without the original artefact"
-        )
-    before = len(md)
-    stripped = SharedState._strip_base64_data_urls(md)
-    after = len(stripped)
-    reduction_pct = (1 - after / before) * 100
-    assert reduction_pct > 80, (
-        f"N11 must reduce real R1 analysis.md by ≥80%; got before={before} after={after} reduction={reduction_pct:.1f}%"
-    )
-    assert "Executive Summary" in stripped
-    assert "Idle %" in stripped
-    assert "fmoe_fp8_blockscale_g1u1" in stripped or "MoE" in stripped
-
-
 def test_format_analysis_md_full_strips_base64_before_injection(monkeypatch):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE", "1")
     s = SharedState()
@@ -1210,13 +1184,13 @@ def _ta_empty_chunk_failure(
     return {
         "status": "failed",
         "error": (
-            f"RuntimeError: steady_state_chunk_empty: requested "
+            f"RuntimeError: steady_state_chunk_low_quality: requested "
             f"--steady-state-mode={requested} but the selected chunk has "
             "zero GPU events"
         ),
         "trace_health_warnings": [
             {
-                "code": "steady_state_chunk_empty",
+                "code": "steady_state_chunk_low_quality",
                 "severity": "blocking",
                 "requested_mode": requested,
                 "selected_chunk": f"/tmp/{requested}.json.gz",
@@ -1342,7 +1316,7 @@ def test_extract_picks_first_non_empty_mode():
     assert out is not None
     mode, w = out
     assert mode == "prefilldecode"
-    assert w["code"] == "steady_state_chunk_empty"
+    assert w["code"] == "steady_state_chunk_low_quality"
 
 
 def test_extract_handles_missing_chunk_warning():
@@ -1478,7 +1452,7 @@ async def test_no_retry_when_no_alternate_modes(tmp_path):
 
     assert result["status"] == "failed"
     assert result.get("phase") == "trace_analyze"
-    assert "steady_state_chunk_empty" in str(result.get("error") or "")
+    assert "steady_state_chunk_low_quality" in str(result.get("error") or "")
     assert calls["n"] == 1
     assert state.last_trace_analyze == {}
 
@@ -1512,13 +1486,13 @@ async def test_retry_failure_propagates_without_third_attempt(tmp_path):
     fail2 = {
         "status": "failed",
         "error": (
-            "RuntimeError: steady_state_chunk_empty: requested "
+            "RuntimeError: steady_state_chunk_low_quality: requested "
             "--steady-state-mode=prefilldecode but the selected chunk has "
             "zero GPU events"
         ),
         "trace_health_warnings": [
             {
-                "code": "steady_state_chunk_empty",
+                "code": "steady_state_chunk_low_quality",
                 "requested_mode": "prefilldecode",
                 "non_empty_modes": ["decode_only"],
             },
@@ -1621,7 +1595,7 @@ async def test_retry_success_stamps_n26_metadata(tmp_path):
     assert stamp.get("applied") is True
     assert stamp.get("from_mode") == "mixed"
     assert stamp.get("to_mode") == "prefilldecode"
-    assert stamp.get("source_warning_code") == "steady_state_chunk_empty"
+    assert stamp.get("source_warning_code") == "steady_state_chunk_low_quality"
 
 
 @pytest.mark.asyncio
@@ -1675,7 +1649,7 @@ async def test_431_zero_hot_with_degraded_trace_appends_warning(tmp_path):
     assert "cuda_graph_attribution_degraded" in codes, warnings
     w = next(w for w in warnings if w.get("code") == "cuda_graph_attribution_degraded")
     assert w["capture_traces_present"] is True
-    assert "--enforce-eager" in w["message"]
+    assert "--compilation-config.cudagraph_mode NONE" in w["message"]
 
 
 @pytest.mark.asyncio

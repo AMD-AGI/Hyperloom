@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+# Run Hyperloom inside this serving image, with the model available locally.
+# Select a CONC supported by the pinned InferenceX recipe, or use a custom model.
+benchmark:
+  framework: sglang
+  model: deepseek-ai/DeepSeek-V4-Pro-0813
+  precision: fp4
+  runner_type: mi355x
+  run_mode: local
+  docker_image: lmsysorg/sglang-rocm:v0.5.20-rocm720-mi35x-20260926
+  agentx: enable
+  envs:
+    TP: 8
+    EP_SIZE: 8
+    CONC: 32
+  profiler:
+    torch_profiler:
+      enabled: false
+      num_steps: 20
+      num_profiles: 3
+      interval_seconds: 200
+      start_seconds: 0
+      detailed_annotations: false

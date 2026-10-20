@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from kernelforge.knowledge.kb_store.identity.source_resolution import (
+    KernelSources,
     infer_source_owner_framework,
     resolve_operation,
 )
@@ -28,7 +29,6 @@ REWRITE_PRODUCER = "flydsl"
 def resolve_identity(
     spec: RewriteSpec,
     *,
-    framework: str,
     gpu: str,
     source_text: str,
     producer: str = REWRITE_PRODUCER,
@@ -42,11 +42,9 @@ def resolve_identity(
     )
     operator = normalize_operator_name(spec.op_name or concrete_op)
     resolved_framework = infer_source_owner_framework(
-        kernel_path=spec.source_kernel,
-        kernel_source=source_text,
+        KernelSources(spec.source_kernel, source_text),
         target_functions=spec.target_functions,
-        source_files=None,
-        framework_override=framework,
+        framework_override=spec.framework,
         concrete_operation=concrete_op,
     )
     signature, implementation = implementation_signature(

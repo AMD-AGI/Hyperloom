@@ -85,6 +85,8 @@ async def coordinator(tmp_path, monkeypatch):
         (tmp_path / "fw").mkdir()
         coord.shared_state.framework, coord.shared_state.framework_repo_path = "sglang", str(tmp_path / "fw")
         coord.shared_state.specialist_rounds = _state_with_mandate().specialist_rounds
+        # Mandates are offered in FRAMEWORK_AGENT, where a specialist delegate is admitted.
+        coord.shared_state.phase = "FRAMEWORK_AGENT"
         yield coord
     finally:
         await coord.stop()

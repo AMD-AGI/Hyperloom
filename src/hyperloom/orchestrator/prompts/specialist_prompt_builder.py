@@ -177,7 +177,7 @@ def _focus_serving_specialist(inp: SpecialistPromptInputs) -> list[str]:
         "- `sglang/python/sglang/srt/scheduler/` and `sglang/python/sglang/srt/managers/`.",
         "- KB anchor `framework.*` (cuda_graph / batching / chunked_prefill / kv_cache).",
         "",
-        "**Config levers (cheap, try first — these are env/flag changes)**",
+        "**Config levers (cheap to validate — these are env/flag changes)**",
         "- `--enable-chunked-prefill` + matched `--max-num-batched-tokens`.",
         "- `--enforce-eager=false` + cuda graph capture for stable batch sizes.",
         "- `--kv-cache-dtype fp8_e4m3` when the gap is HBM-bound (gate accuracy!).",
@@ -186,12 +186,7 @@ def _focus_serving_specialist(inp: SpecialistPromptInputs) -> list[str]:
         "  `VLLM_ROCM_USE_AITER_RMSNORM=0` / `...PAGED_ATTN=1` are **NEVER_TOUCH**",
         "  (crash / dead var). Do NOT propose flags in the NEVER_TOUCH set.",
         "",
-        "**Source-patch playbook (the high-ceiling work — author real code)**",
-        "Config tuning has a low ceiling. When the gap persists after the cheap",
-        "levers (or the orchestrator escalates you for a code patch), modify the",
-        "framework **source** and write a unified diff into your worktree",
-        "`patches/` dir (see the patch protocol section). Map the profile gap to",
-        "the module:",
+        "**Source-patch targets — map the profile gap to the module**",
         "- **Scheduler / batch composition gap** (low batch occupancy, decode",
         "  starvation) → `scheduler.py` batch policy: prefill/decode interleave,",
         "  `max_num_batched_tokens` chunk split, waiting-queue admission order.",
@@ -202,9 +197,9 @@ def _focus_serving_specialist(inp: SpecialistPromptInputs) -> list[str]:
         "  capture-size set, inductor graph partition, eager-fallback conditions.",
         "- **Chunked-prefill granularity** → split-size heuristic in the",
         "  scheduler, not just the flag.",
-        "Keep patches small (target ≤5 files); preserve upstream call-order",
-        "contracts (e.g. vLLM `scheduler.add_seq_group` ordering) or you will",
-        "break chunked-prefill / spec-decode interactions.",
+        "Preserve upstream call-order contracts (e.g. vLLM",
+        "`scheduler.add_seq_group` ordering) or you will break",
+        "chunked-prefill / spec-decode interactions.",
         "",
         "**Pitfalls (historical REVERTs)**",
         "- Raising `--max-num-seqs` past 512 on MI300X → OOM on 671B MoE models.",
@@ -920,9 +915,6 @@ class SpecialistPromptInputs:
     warm_start_lessons: list[dict[str, Any]] = field(default_factory=list)
     pr_monitor_available: bool = True
 
-    # Generic sub_kind passthrough so ``_focus_*`` helpers can specialise.
-    sub_kind: str = ""
-
     # Extra knowledge-domain tags; each contributes a focus block to Section 1.
     extra_focus_tags: tuple[str, ...] = ()
 
@@ -1000,11 +992,66 @@ def _authors_patches(inp: SpecialistPromptInputs) -> bool:
     return inp.mode == MODE_PATCH
 
 
+#: Throughput domains whose focus block offers flags first, so the coda has
+#: something to raise the sights from. ``enablement_specialist`` is absent
+#: because its ladder book says climb only as far as runnability needs;
+#: ``framework_rewrite_specialist`` because it authors source rewrites and
+#: nothing else, and already carries its own "Where the wins are" taxonomy.
+_THROUGHPUT_AUTHORING_DOMAINS = frozenset(
+    {
+        "serving_specialist",
+        "kernel_switch_specialist",
+        "comm_specialist",
+        "compiler_specialist",
+        "system_specialist",
+    }
+)
+
+
+def _source_patch_altitude_block(inp: SpecialistPromptInputs) -> list[str]:
+    """Where the durable wins are, for a throughput dispatch that may author code."""
+    if not (_authors_patches(inp) and inp.domain.key in _THROUGHPUT_AUTHORING_DOMAINS):
+        return []
+    return [
+        "",
+        "### Altitude — where the durable wins are",
+        "",
+        "The flags above are cheap to validate and their ceiling is fixed by",
+        "whoever wired them up; a source change moves that ceiling and keeps",
+        "paying in later rounds. When the cheap levers do not close the gap, stop",
+        "permuting them and read the source for:",
+        "- **An un-bridged capability switch** — a `*_supported()` / `*_enabled()`",
+        "  / `is_*()` predicate that takes this model / GPU / precision off a",
+        "  faster path. Bridging it creates a lever nobody had.",
+        "- **A faster path already present** — reached never, or with arguments",
+        "  that disqualify it.",
+        "- **A real bug** — a wrong bound, a stale cache key, a fallback that",
+        "  fires when it should not. Fixing it is a KEEP like any other.",
+        "- **Component usage this architecture argues against** — the order,",
+        "  granularity or fusion of the pieces, not their settings.",
+        "Deliver a unified diff in your worktree `patches/` dir, small (target ≤5",
+        "files) and grounded: a patch you cannot point at a profile line or a",
+        "source predicate is budget spent for nothing.",
+    ]
+
+
+def _domain_focus_blocks(inp: SpecialistPromptInputs) -> list[str]:
+    """Render the focus block of the active domain, then of each extra tag on a multi-tag dispatch, closing on the altitude coda that spans them."""
+    body: list[str] = []
+    rendered: set[str] = set()
+    for key in (inp.domain.key, *(getattr(domain_for_tag(t), "key", "") for t in inp.extra_focus_tags)):
+        focus = _DOMAIN_FOCUS_TEMPLATES.get(key) if key and key not in rendered else None
+        lines = focus(inp) if focus is not None else []
+        if not lines:
+            continue
+        body.extend(["", f"### Domain focus — {key}", "", *lines])
+        rendered.add(key)
+    body.extend(_source_patch_altitude_block(inp))
+    return body
+
+
 def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
     """Render Section 1 (identity & autonomy) of the specialist prompt.
-
-    Appends the per-domain focus block from :data:`_DOMAIN_FOCUS_TEMPLATES`
-    when one is registered for the active domain.
 
     Args:
         inp (SpecialistPromptInputs): The assembled prompt inputs.
@@ -1063,28 +1110,7 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
         "",
         fanout_line,
     ]
-    rendered_focus_keys: set[str] = set()
-    focus = _DOMAIN_FOCUS_TEMPLATES.get(inp.domain.key)
-    if focus is not None:
-        body.append("")
-        body.append(f"### Domain focus — {inp.domain.key}")
-        body.append("")
-        body.extend(focus(inp))
-        rendered_focus_keys.add(inp.domain.key)
-    # Append each extra tag's focus block (multi-tag dispatch).
-    for tag in inp.extra_focus_tags:
-        tag_domain = domain_for_tag(tag)
-        if tag_domain is None or tag_domain.key in rendered_focus_keys:
-            continue
-        tag_focus = _DOMAIN_FOCUS_TEMPLATES.get(tag_domain.key)
-        tag_lines = tag_focus(inp) if tag_focus is not None else []
-        if not tag_lines:
-            continue
-        body.append("")
-        body.append(f"### Domain focus — {tag_domain.key}")
-        body.append("")
-        body.extend(tag_lines)
-        rendered_focus_keys.add(tag_domain.key)
+    body.extend(_domain_focus_blocks(inp))
     if inp.scope == "domains":
         body.extend(_cross_domain_block(inp))
     elif inp.scope == "freeform":

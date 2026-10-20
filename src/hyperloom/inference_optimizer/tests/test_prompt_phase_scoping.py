@@ -16,13 +16,16 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
     _filter_rules_fragment,
     build_orchestration_prompt,
     default_enabled_actions,
+    PromptAssets,
+    PromptCycle,
+    SessionContext,
 )
 
 
 # Marker text identifying each phase-scoped prompt module.
 KERNEL_REQUEST_REF = "## 6. KERNEL-OPT REQUEST REFERENCE"
 IDEA_GENERATION = "### IDEA GENERATION"
-BASELINE_FINGERPRINT = "eight params fields"  # now in the reference doc, not in the prompt
+BASELINE_FINGERPRINT = "seven params fields"  # now in the reference doc, not in the prompt
 SPECIALIST_DIALS = "### One specialist, three dials"
 SPECIALIST_WATCH = "### Watching a running specialist"
 SPECIALIST_DOMAIN = "### Choosing specialist domain"
@@ -80,14 +83,16 @@ def _build(registry: dict, phase: str) -> str:
     return build_orchestration_prompt(
         action_registry=registry,
         enabled_actions=default_enabled_actions(no_kernel=False),
-        framework="sglang",
-        kernel_enabled=True,
-        framework_agent_phase_enabled=True,
-        objective_kind="gain_pct",
-        objective_value=15.0,
-        max_minutes=480,
-        phase=phase,
-        rules_fragment_path=asset_system_prompts_dir() / "orchestration.md",
+        session=SessionContext(
+            framework="sglang",
+            kernel_enabled=True,
+            framework_agent_phase_enabled=True,
+            objective_kind="gain_pct",
+            objective_value=15.0,
+            max_minutes=480,
+        ),
+        cycle=PromptCycle(phase=phase),
+        assets=PromptAssets(rules_fragment_path=asset_system_prompts_dir() / "orchestration.md"),
     )
 
 
@@ -101,10 +106,8 @@ def test_cycle_strategy_is_rendered_in_place_of_the_default_arc(registry):
     prompt = build_orchestration_prompt(
         action_registry=registry,
         enabled_actions=default_enabled_actions(no_kernel=False),
-        macro_cycle=2,
-        cycle_strategy=strategy,
-        phase="FRAMEWORK_AGENT",
-        rules_fragment_path=asset_system_prompts_dir() / "orchestration.md",
+        cycle=PromptCycle(macro_cycle=2, cycle_strategy=strategy, phase="FRAMEWORK_AGENT"),
+        assets=PromptAssets(rules_fragment_path=asset_system_prompts_dir() / "orchestration.md"),
     )
 
     assert "focus=moe_dispatch" in prompt
@@ -152,6 +155,19 @@ def test_baseline_recovery_detail_only_in_prelude(registry):
     failure_ref = refs_dir / "failure_recovery.md"
     if failure_ref.exists():
         assert BASELINE_FINGERPRINT in failure_ref.read_text(encoding="utf-8")
+
+
+def test_the_stop_step_asks_for_report_only_where_the_phase_admits_it(registry):
+    """Outside CLOSE a proposed ``report`` is refused at admission, so the prompt must not ask for one."""
+    for phase in _ps.PHASE_NAMES:
+        asks = "propose `report` once" in _build(registry, phase)
+        assert asks == ("report" in _ps.allowed_actions_for(phase)), phase
+
+
+def test_the_report_catalogue_entry_names_the_only_phase_that_admits_it(registry):
+    """The catalogue entry renders in every phase, so it must not invite a ``report`` the phase refuses."""
+    assert [phase for phase in _ps.PHASE_NAMES if "report" in _ps.allowed_actions_for(phase)] == [_ps.PHASE_CLOSE]
+    assert "only in CLOSE" in registry["report"].description
 
 
 def test_specialist_dispatch_prose_only_in_explore(registry):
@@ -497,7 +513,7 @@ def test_judge_bundle_to_dict_carries_phase():
 
 
 def test_inject_phase_constraints_delivers_only_the_active_phase():
-    from hyperloom.orchestrator.roles.critic_agent import (
+    from hyperloom.orchestrator.roles._review_constraints import (
         _PHASE_ORIENTATION,
         _inject_phase_constraints,
     )
@@ -513,7 +529,7 @@ def test_inject_phase_constraints_delivers_only_the_active_phase():
 
 def test_inject_phase_constraints_is_a_noop_without_a_phase():
     """Never assert a phase that was not delivered."""
-    from hyperloom.orchestrator.roles.critic_agent import _inject_phase_constraints
+    from hyperloom.orchestrator.roles._review_constraints import _inject_phase_constraints
 
     bundle: dict = {"proposals": []}
     _inject_phase_constraints(bundle, "")
@@ -628,14 +644,16 @@ def test_an_unknown_transport_is_refused_not_rendered_empty(registry):
         build_orchestration_prompt(
             action_registry=registry,
             enabled_actions=default_enabled_actions(no_kernel=False),
-            framework="sglang",
-            kernel_enabled=True,
-            framework_agent_phase_enabled=True,
-            objective_kind="gain_pct",
-            objective_value=15.0,
-            max_minutes=480,
-            transport="carrier-pigeon",
-            rules_fragment_path=asset_system_prompts_dir() / "orchestration.md",
+            session=SessionContext(
+                framework="sglang",
+                kernel_enabled=True,
+                framework_agent_phase_enabled=True,
+                objective_kind="gain_pct",
+                objective_value=15.0,
+                max_minutes=480,
+                transport="carrier-pigeon",
+            ),
+            assets=PromptAssets(rules_fragment_path=asset_system_prompts_dir() / "orchestration.md"),
         )
 
     assert "carrier-pigeon" not in TRANSPORTS
@@ -647,14 +665,16 @@ def test_every_declared_transport_still_renders(registry, transport):
     prompt = build_orchestration_prompt(
         action_registry=registry,
         enabled_actions=default_enabled_actions(no_kernel=False),
-        framework="sglang",
-        kernel_enabled=True,
-        framework_agent_phase_enabled=True,
-        objective_kind="gain_pct",
-        objective_value=15.0,
-        max_minutes=480,
-        transport=transport,
-        rules_fragment_path=asset_system_prompts_dir() / "orchestration.md",
+        session=SessionContext(
+            framework="sglang",
+            kernel_enabled=True,
+            framework_agent_phase_enabled=True,
+            objective_kind="gain_pct",
+            objective_value=15.0,
+            max_minutes=480,
+            transport=transport,
+        ),
+        assets=PromptAssets(rules_fragment_path=asset_system_prompts_dir() / "orchestration.md"),
     )
 
     assert "Output protocol" in prompt

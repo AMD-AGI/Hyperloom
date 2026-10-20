@@ -113,7 +113,7 @@ honest measurement, not a guess.
 6. **Measurement rigor**: single-shot benchmark numbers on this box can be
    noisy. Before keeping a change, prefer re-running the benchmark at least
    once more to confirm the delta isn't noise, per the same logic as
-   `local_knowledge/common_methodology/profiling/benchmarking_methodology.md`
+   `local_knowledge/common_methodology/profiling/measure_protocol.md`
    (treat a <1% delta with suspicion).
 
 ## Off-limits

@@ -114,9 +114,7 @@ def test_tick_exception_round_trip(tmp_path):
         tick=7,
         stage="tick_body",
         agent="orchestration",
-        exc_type="RuntimeError",
-        message="boom",
-        traceback_text="Traceback...\nRuntimeError: boom",
+        exc=RuntimeError("boom"),
     )
     s.save(tmp_path)
 
@@ -267,7 +265,7 @@ async def test_pruned_family_survives_coordinator_restart(session_dir):
             "orchestration",
             Intent(
                 type=IntentType.PRUNE_BRANCH,
-                payload={"family": "long", "reason": "expensive"},
+                payload={"family": "target_analysis", "reason": "expensive"},
             ),
         )
     finally:
@@ -276,13 +274,13 @@ async def test_pruned_family_survives_coordinator_restart(session_dir):
     # Fresh Coordinator must still observe the prune after restart.
     c2 = Coordinator(session_dir, backends=_backends_full())
     try:
-        assert c2.shared_state.is_pruned("long")
-        # Prune is advisory: proposals still reach the pending queue.
+        assert c2.shared_state.is_pruned("target_analysis")
+        # Prune is advisory: a proposal the phase allows still reaches the pending queue.
         await c2.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.PROPOSE_ACTION,
-                payload={"action_name": "long", "predicted_gain_pct": 5.0},
+                payload={"action_name": "target_analysis", "predicted_gain_pct": 5.0},
             ),
         )
         assert c2.state.pending_proposals

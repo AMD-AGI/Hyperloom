@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Behavior-lock tests for ``materialize_config_with_envs``: golden snapshots of the real materialized YAML, plus RUN_EVAL warn-once and unset/extra_envs restore."""
+"""Behavior-lock tests for ``materialize_config_with_envs``: golden snapshots of the real materialized YAML, plus unset/extra_envs restore."""
 
 from __future__ import annotations
 
@@ -39,10 +39,11 @@ _LEAKY_ENV = (
 def _isolate(monkeypatch):
     for k in _LEAKY_ENV:
         monkeypatch.delenv(k, raising=False)
-    # Pin the two knobs that would otherwise depend on the host (GPU count and runtime patching), keeping the golden
-    # output byte-stable.
+    # Pin what would otherwise depend on the host (GPU count, runtime patching, and the reference recipe in the host's
+    # session state), keeping the golden output byte-stable.
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "0")
+    monkeypatch.setattr(we, "resolve_reference_launch", lambda: ("", {}, {}))
 
 
 def _write(path, bench):
@@ -144,35 +145,6 @@ def test_golden_profile_mode(monkeypatch, tmp_path):
     src = _write(tmp_path / "profile.yaml", {"framework": "sglang", "model": "/models/foo", "envs": {"PROFILE": "1"}})
     res = we.materialize_config_with_envs(src, tmp_path / "out")
     assert res.read_text(encoding="utf-8") == _GOLDEN_PROFILE
-
-
-# ── RUN_EVAL warn-once-per-process semantics ────────────────────────────────
-
-
-def test_run_eval_disabled_warns_only_once_per_process(monkeypatch, tmp_path, caplog):
-    _isolate(monkeypatch)
-    monkeypatch.setenv("RUN_EVAL", "false")
-    # Module-level global gates the warning; reset so this test owns the "once".
-    monkeypatch.setattr(we, "_RUN_EVAL_DISABLED_WARN_EMITTED", False)
-    src = _write(tmp_path / "cfg.yaml", {"framework": "sglang", "model": "/m", "envs": {}})
-    with caplog.at_level("WARNING", logger=we.log.name):
-        we.materialize_config_with_envs(src, tmp_path / "o1")
-        we.materialize_config_with_envs(src, tmp_path / "o2")
-    hits = [r for r in caplog.records if "RUN_EVAL is disabled" in r.message]
-    assert len(hits) == 1
-    assert we._RUN_EVAL_DISABLED_WARN_EMITTED is True
-
-
-def test_run_eval_disabled_no_warn_when_already_emitted(monkeypatch, tmp_path, caplog):
-    _isolate(monkeypatch)
-    monkeypatch.setenv("RUN_EVAL", "false")
-    # Simulate a process that already warned: the flag is set before the call.
-    monkeypatch.setattr(we, "_RUN_EVAL_DISABLED_WARN_EMITTED", True)
-    src = _write(tmp_path / "cfg.yaml", {"framework": "sglang", "model": "/m", "envs": {}})
-    with caplog.at_level("WARNING", logger=we.log.name):
-        we.materialize_config_with_envs(src, tmp_path / "o1")
-    hits = [r for r in caplog.records if "RUN_EVAL is disabled" in r.message]
-    assert hits == []
 
 
 # ── unset_envs then restore-from-extra_envs semantics ───────────────────────

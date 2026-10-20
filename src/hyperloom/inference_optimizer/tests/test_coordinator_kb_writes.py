@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.roles.mock_backend import (
@@ -15,13 +17,15 @@ from hyperloom.orchestrator.roles.mock_backend import (
     MockTurn,
     ScriptedPlan,
 )
-from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
 from hyperloom.orchestrator.knowledge.recipe_kb import (
     LocalRecipeStore,
+    LocalRecipeStoreError,
     RecipeKB,
     recipe_canonical_id,
 )
 from hyperloom.orchestrator.knowledge.config import KnowledgeConfig
+from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close_out
 
 
 _MODEL = "qwen3-30b-a3b"
@@ -45,7 +49,7 @@ def _make_coordinator(tmp_path: Path) -> Coordinator:
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        knowledge_plane=KnowledgePlane(recipe_kb=kb),
+        advisory=AdvisoryServices(knowledge_plane=KnowledgePlane(recipe_kb=kb)),
     )
     ss = coord.shared_state
     ss.model_name = _MODEL
@@ -683,8 +687,8 @@ def test_pitfall_description_uses_variant_name_not_bare_kind(
 # --- AgentX stays out of the cross-session KB ----------------------------------
 
 
-def test_kb_amend_recipe_is_noop_under_agentx(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+def test_kb_amend_recipe_is_noop_under_agentx(native_benchmark, tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(native_benchmark))
     coord = _make_coordinator(tmp_path)
 
     class _ForbiddenRecipeKB:
@@ -697,7 +701,7 @@ def test_kb_amend_recipe_is_noop_under_agentx(tmp_path: Path, monkeypatch) -> No
 
 def test_kb_amend_recipe_still_writes_without_agentx(tmp_path: Path, monkeypatch) -> None:
     """The gate must not cost the synthetic path its knowledge."""
-    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
     coord = _make_coordinator(tmp_path)
     coord.recipe_journal.kb_amend_recipe(
         append_lesson={"statement": "synthetic still recorded", "measured_impact": "+1%"}
@@ -709,9 +713,9 @@ def test_kb_amend_recipe_still_writes_without_agentx(tmp_path: Path, monkeypatch
     assert "synthetic still recorded" in statements
 
 
-def test_finalize_recipe_is_skipped_under_agentx(tmp_path, monkeypatch) -> None:
+def test_finalize_recipe_is_skipped_under_agentx(native_benchmark, tmp_path, monkeypatch) -> None:
     """The sink the kb_amend_recipe gate cannot reach."""
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(native_benchmark))
     coord = _make_coordinator(tmp_path)
 
     def _must_not_run(*_a, **_k):
@@ -726,11 +730,11 @@ def test_finalize_recipe_is_skipped_under_agentx(tmp_path, monkeypatch) -> None:
     assert out["reason"] == "agentx_local_store_unsupported"
 
 
-def test_finalize_recipe_reaches_agentx_remote_kb(tmp_path, monkeypatch) -> None:
+def test_finalize_recipe_reaches_agentx_remote_kb(native_benchmark, tmp_path, monkeypatch) -> None:
     """AgentX is isolated by its scheme and may now use the remote KB."""
     from types import SimpleNamespace
 
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(native_benchmark))
     coord = _make_coordinator(tmp_path)
     coord.knowledge_plane = SimpleNamespace(
         config=KnowledgeConfig.from_env(
@@ -774,10 +778,12 @@ def test_finalize_recipe_reaches_agentx_remote_kb(tmp_path, monkeypatch) -> None
     assert "best_throughput" not in audit["result"]
 
 
-def test_agentx_remote_kb_never_receives_a_gain_measured_for_an_older_recipe(tmp_path, monkeypatch) -> None:
+def test_agentx_remote_kb_never_receives_a_gain_measured_for_an_older_recipe(
+    native_benchmark, tmp_path, monkeypatch
+) -> None:
     from types import SimpleNamespace
 
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(native_benchmark))
     coord = _make_coordinator(tmp_path)
     coord.knowledge_plane = SimpleNamespace(
         config=KnowledgeConfig.from_env(
@@ -812,10 +818,10 @@ def test_agentx_remote_kb_never_receives_a_gain_measured_for_an_older_recipe(tmp
     assert out["result_type"] == "unvalidated_recipe"
 
 
-def test_agentx_remote_skip_audit_does_not_invent_throughput_metric(tmp_path, monkeypatch) -> None:
+def test_agentx_remote_skip_audit_does_not_invent_throughput_metric(native_benchmark, tmp_path, monkeypatch) -> None:
     from types import SimpleNamespace
 
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(native_benchmark))
     coord = _make_coordinator(tmp_path)
     coord.knowledge_plane = SimpleNamespace(
         config=KnowledgeConfig.from_env(
@@ -858,7 +864,7 @@ def test_agentx_remote_skip_audit_does_not_invent_throughput_metric(tmp_path, mo
 
 def test_finalize_gate_honours_persisted_mode_without_the_env_var(tmp_path, monkeypatch) -> None:
     """benchmark_mode is stamped so the mode survives a restart; the gate should trust it rather than the shell that happens to be running."""
-    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
     coord = _make_coordinator(tmp_path)
     coord.shared_state.benchmark_mode = "agentx"
     out = coord.recipe_journal.finalize_recipe_and_journal(source="close")
@@ -867,17 +873,17 @@ def test_finalize_gate_honours_persisted_mode_without_the_env_var(tmp_path, monk
 
 def test_finalize_recipe_still_runs_without_agentx(tmp_path, monkeypatch) -> None:
     """The gate must not cost the synthetic path its finalize."""
-    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
     coord = _make_coordinator(tmp_path)
     out = coord.recipe_journal.finalize_recipe_and_journal(source="close")
     assert out.get("reason") != "agentx"
 
 
-def test_t0_anchor_does_not_write_under_agentx(tmp_path, monkeypatch) -> None:
+def test_t0_anchor_does_not_write_under_agentx(native_benchmark, tmp_path, monkeypatch) -> None:
     """The third Recipe sink, and the one the first two gates never saw."""
     from hyperloom.orchestrator.knowledge.recipe_kb_t0 import run_t0_anchor
 
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(native_benchmark))
     coord = _make_coordinator(tmp_path)
 
     class _ForbiddenKB:
@@ -894,3 +900,145 @@ def test_t0_anchor_does_not_write_under_agentx(tmp_path, monkeypatch) -> None:
         session_dir=tmp_path,
         save_state=False,
     )
+
+
+def _seed_recipe_with_lesson(coord: Coordinator) -> dict:
+    coord.recipe_kb.put_recipe(
+        canonical_id=_expected_cid(),
+        model=_MODEL,
+        hardware=_HW,
+        framework_name=_FW,
+        framework_version=_FWV,
+        precision=_PREC,
+        lessons=[{"statement": "kept", "measured_impact": "+1%"}],
+    )
+    return coord.recipe_kb.get_recipe(canonical_id=_expected_cid())
+
+
+def _fail_authoritative_read(coord: Coordinator) -> None:
+    def _boom(**_kwargs):
+        raise RuntimeError("authority read down")
+
+    coord.recipe_kb.get_authoritative_recipe = _boom
+
+
+def test_read_local_recipe_row_propagates_read_failure(tmp_path: Path) -> None:
+    coord = _make_coordinator(tmp_path)
+    _fail_authoritative_read(coord)
+    with pytest.raises(RuntimeError, match="authority read down"):
+        coord.recipe_journal.read_local_recipe_row()
+
+
+def test_kb_amend_recipe_read_failure_leaves_recipe_untouched(tmp_path: Path) -> None:
+    coord = _make_coordinator(tmp_path)
+    before = _seed_recipe_with_lesson(coord)
+    _fail_authoritative_read(coord)
+    with pytest.raises(RuntimeError, match="authority read down"):
+        coord.recipe_journal.kb_amend_recipe(append_lesson={"statement": "new", "measured_impact": "+2%"})
+    assert coord.recipe_kb.get_recipe(canonical_id=_expected_cid()) == before
+
+
+def test_kb_amend_recipe_propagates_put_failure(tmp_path: Path) -> None:
+    coord = _make_coordinator(tmp_path)
+
+    def _boom(**_kwargs):
+        raise OSError("disk full")
+
+    coord.recipe_kb.put_recipe = _boom
+    with pytest.raises(OSError, match="disk full"):
+        coord.recipe_journal.kb_amend_recipe(append_lesson={"statement": "new", "measured_impact": "+2%"})
+
+
+def test_finalize_reports_error_when_authority_read_fails(tmp_path: Path) -> None:
+    coord = _make_coordinator(tmp_path)
+    before = _seed_recipe_with_lesson(coord)
+    _fail_authoritative_read(coord)
+    out = coord.recipe_journal.finalize_recipe_and_journal()
+    assert out == {
+        "status": "error",
+        "reason": "RuntimeError",
+        "backend": "local",
+        "result_type": _close_out.RESULT_TRANSPORT_FAILED,
+        "error_class": "RuntimeError",
+    }
+    assert coord.recipe_kb.get_recipe(canonical_id=_expected_cid()) == before
+
+
+def test_finalize_reports_error_when_put_recipe_fails(tmp_path: Path) -> None:
+    coord = _make_coordinator(tmp_path)
+
+    def _boom(**_kwargs):
+        raise OSError("disk full")
+
+    coord.recipe_kb.put_recipe = _boom
+    out = coord.recipe_journal.finalize_recipe_and_journal()
+    assert out == {
+        "status": "error",
+        "reason": "OSError",
+        "backend": "local",
+        "result_type": _close_out.RESULT_TRANSPORT_FAILED,
+        "error_class": "OSError",
+    }
+
+
+def _fact_write_for_three_kept_variants(coord) -> None:
+    import asyncio
+    from types import SimpleNamespace
+
+    from hyperloom.inference_optimizer.session.optimization_journal import Verdict
+
+    task = SimpleNamespace(kind="explore", task_id="t-ledger", params={})
+    variants = [
+        {
+            "variant_name": f"v{i}",
+            "outcome": "KEEP",
+            "fingerprint": f"fp{i}",
+            "variant": {"extra_server_args": f"--flag-{i}"},
+            "metrics": {"base_tput": 100.0, "tput": 110.0, "gain_pct": 10.0},
+        }
+        for i in range(3)
+    ]
+    asyncio.run(
+        coord.recipe_journal.fact_write_hook(
+            task=task,
+            result={"round_id": "explore-001", "per_variant_outcomes": variants},
+            verdict=Verdict.ADOPTED,
+            adopted_variants={"fp0", "fp1", "fp2"},
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("method", "failure"),
+    [
+        ("put_recipe", OSError("disk full")),
+        ("get_authoritative_recipe", LocalRecipeStoreError("recipe row is corrupt")),
+        ("get_authoritative_recipe", ValueError("not valid json")),
+    ],
+    ids=["write-os-error", "read-store-error", "read-value-error"],
+)
+def test_fact_write_hook_records_every_variant_when_the_recipe_store_fails(tmp_path: Path, method, failure) -> None:
+    """A cross-session KB failure must not cost the session its later variants' rows."""
+    coord = _make_coordinator(tmp_path)
+
+    def _boom(**_kwargs):
+        raise failure
+
+    setattr(coord.recipe_kb, method, _boom)
+
+    _fact_write_for_three_kept_variants(coord)
+
+    assert [row["variant_name"] for row in coord.shared_state.attempts] == ["v0", "v1", "v2"]
+    assert [entry.variant_name for entry in coord.recipe_journal.ensure_journal().entries] == ["v0", "v1", "v2"]
+
+
+def test_fact_write_hook_lets_an_unexpected_recipe_store_error_propagate(tmp_path: Path) -> None:
+    coord = _make_coordinator(tmp_path)
+
+    def _boom(**_kwargs):
+        raise TypeError("put_recipe signature drifted")
+
+    coord.recipe_kb.put_recipe = _boom
+
+    with pytest.raises(TypeError, match="put_recipe signature drifted"):
+        _fact_write_for_three_kept_variants(coord)

@@ -614,6 +614,48 @@ class TestRoundServerTeardown:
         [server] = client_servers
         assert server.wait(timeout=5) == -signal.SIGTERM
 
+    def test_timed_out_round_stops_its_server_before_the_next_round(self, tmp_path, monkeypatch, client_servers):
+        """A round killed at its cap leaves the server its client booted; the next round must not start beside it."""
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
+        base = tmp_path / "base.yaml"
+        _write_base_yaml(base)
+        out = tmp_path / "out"
+        alive_at_next_round: list[bool] = []
+
+        def _round(cmd, *a, **k):
+            if client_servers:
+                alive_at_next_round.append(client_servers[0].poll() is None)
+                return subprocess.CompletedProcess(cmd, 1, "", "")
+            slot = Path(cmd[cmd.index("--output-dir") + 1])
+            ws = slot / "benchmark_sglang_20260101_000000"
+            ws.mkdir(parents=True, exist_ok=True)
+            server = subprocess.Popen(
+                [sys.executable, "-c", "import time; _='sglang.launch_server'; time.sleep(120)"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            client_servers.append(server)
+            (ws / AGENTX_SERVER_PIDFILE).write_text(f"{server.pid}\n", encoding="utf-8")
+            raise subprocess.TimeoutExpired(cmd, 7800)
+
+        with patch("hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill", side_effect=_round):
+            results = asyncio.run(
+                run_grid(
+                    base_yaml_path=base,
+                    base_extra_args="",
+                    grid=[GridVariant(name="c28"), GridVariant(name="c20")],
+                    output_root=out,
+                    magpie_python=sys.executable,
+                    gpu_type="mi300x",
+                )
+            )
+
+        assert results[0].error_class == "magpie_timeout"
+        assert alive_at_next_round == [False]
+        [server] = client_servers
+        assert server.wait(timeout=5) == -signal.SIGTERM
+
 
 # _resolve_mn_effective_server_args: prefer the materialized variant YAML; fall back to recomposing from the base YAML
 # when the variant read fails.

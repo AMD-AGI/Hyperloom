@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -93,26 +94,37 @@ def _load_action_verdict_policy() -> dict[str, str]:
     return {a.name: a.verdict_class for a in ACTION_CATALOGUE.values()}
 
 
-def _build_backends(
-    *,
-    claude_model: str,
-    codex_model: str,
-    critic_choice: str,
-    session_dir: Path,
-    critic_agent_root: Path | None = None,
-    critic_kb_mode: str = "inmemory",
-    codex_follows_claude: bool = False,
-    claude_follows_codex: bool = False,
-    critic_protocol: str = "auto",
-) -> dict[str, Any]:
+@dataclass(frozen=True)
+class ModelRouting:
+    """The model ids a launch named for each CLI, and which side's id was rewritten into the other's."""
+
+    claude_model: str
+    codex_model: str
+    codex_follows_claude: bool = False
+    claude_follows_codex: bool = False
+
+
+@dataclass(frozen=True)
+class CriticSetup:
+    """Which critic the run uses (``mock`` or ``agent``), its runtime root and KB mode, and the review protocol."""
+
+    choice: str
+    agent_root: Path | None = None
+    kb_mode: str = "inmemory"
+    protocol: str = "auto"
+
+
+def _build_backends(models: ModelRouting, critic: CriticSetup, *, session_dir: Path) -> dict[str, Any]:
     """Construct all per-role backends."""
+    critic_choice, critic_agent_root = critic.choice, critic.agent_root
+    claude_model, codex_model = models.claude_model, models.codex_model
     if critic_choice not in ("mock", "agent"):
         raise ValueError(f"_build_backends: critic_choice={critic_choice!r} not in {{'mock','agent'}}")
 
     # Orchestration is an agentic role like any other, so which CLI runs it is the shared rule's answer rather than a
     # second reading of the endpoint shape.
     orchestration_on_codex = orchestration_runs_on_codex(
-        codex_follows_claude=codex_follows_claude, claude_follows_codex=claude_follows_codex
+        codex_follows_claude=models.codex_follows_claude, claude_follows_codex=models.claude_follows_codex
     )
 
     if critic_choice == "mock":
@@ -123,7 +135,7 @@ def _build_backends(
         if critic_agent_root is None:
             raise ValueError("_build_backends: critic_choice='agent' requires critic_agent_root")
         protocol = _resolve_critic_protocol(
-            critic_protocol,
+            critic.protocol,
             orchestration_on_codex=orchestration_on_codex,
         )
         _policy = _load_action_verdict_policy()
@@ -134,7 +146,7 @@ def _build_backends(
                 protocol="anthropic",
                 claude_model=claude_model,
                 codex_model=codex_model,
-                kb_mode=critic_kb_mode,
+                kb_mode=critic.kb_mode,
                 action_verdict_policy=_policy,
             )
         else:
@@ -143,7 +155,7 @@ def _build_backends(
                 session_dir=session_dir,
                 protocol="openai",
                 codex_model=codex_model,
-                kb_mode=critic_kb_mode,
+                kb_mode=critic.kb_mode,
                 action_verdict_policy=_policy,
             )
 

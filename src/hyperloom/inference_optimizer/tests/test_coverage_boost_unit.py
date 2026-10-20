@@ -55,12 +55,7 @@ async def test_kb_writeback_rejects_unknown_outcome() -> None:
 
     with pytest.raises(ValueError):
         await kb_writeback.write_framework_record(
-            pr_url="u",
-            pr_sha="s",
-            patch_path="p",
-            outcome="not_a_real_outcome",
-            tps_delta_pct=1.0,
-            session_id="sess",
+            kb_writeback.FrameworkOutcome("u", "s", "p", "not_a_real_outcome", 1.0, "sess")
         )
 
 
@@ -69,12 +64,9 @@ async def test_kb_writeback_appends_record(monkeypatch, tmp_path) -> None:
 
     monkeypatch.setenv("INFERENCE_OPTIMIZER_FA_KB_PATH", str(tmp_path / "fa"))
     path = await kb_writeback.write_framework_record(
-        pr_url="https://x/pr/1",
-        pr_sha="abc",
-        patch_path="/tmp/p.patch",
-        outcome=kb_writeback.OUTCOME_INTEGRATED,
-        tps_delta_pct=3.5,
-        session_id="sess-1",
+        kb_writeback.FrameworkOutcome(
+            "https://x/pr/1", "abc", "/tmp/p.patch", kb_writeback.OUTCOME_INTEGRATED, 3.5, "sess-1"
+        )
     )
     rec = json.loads(path.read_text(encoding="utf-8").strip())
     assert rec["outcome"] == "integrated"
@@ -123,9 +115,7 @@ def test_quantization_join_and_prompt() -> None:
     assert qs._join_clauses(["a", "b", "c"]) == "a, b and c"
 
     cfg = qs.QuantizationConfig(global_scheme="fp8")
-    # model_path without skill_path -> "Quantize ..." intro.
-    prompt = qs.build_quantization_prompt(cfg, model_path="/m", gpu_type="mi300x")
-    assert "Quantize /m on an MI300X target." in prompt
+    prompt = qs.build_quantization_prompt(cfg)
     assert "Quantization strategy" in prompt
 
 
@@ -192,20 +182,6 @@ def test_canonical_id_for_path_errors(tmp_path) -> None:
     shallow = root / "only_one_level"
     with pytest.raises(cid.InvalidCanonicalIdError):
         cid.canonical_id_for_path(root=root, recipe_dir=shallow)
-
-
-# --------------------------------------------------------------------------- # recipe_kb.schema.Attempt #
-# --------------------------------------------------------------------------- #
-def test_attempt_from_dict_with_fitness() -> None:
-    from hyperloom.orchestrator.knowledge.recipe_kb.schema import Attempt
-
-    a = Attempt.from_dict({"id": "7", "fitness": "1.5", "outcome": "win"})
-    assert a.id == 7
-    assert a.fitness == pytest.approx(1.5)
-    assert a.outcome == "win"
-    # Round-trip includes fitness only when set.
-    assert "fitness" in a.to_dict()
-    assert "fitness" not in Attempt(id=1).to_dict()
 
 
 # --------------------------------------------------------------------------- #

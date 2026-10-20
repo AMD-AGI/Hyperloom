@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -523,6 +524,20 @@ class SpecialistOutcome:
 
 
 @dataclass(frozen=True)
+class SpecialistRound:
+    """What one round's specialists produced: the dispatch they ran under, the cases covered and every outcome."""
+
+    dispatch_plan: DispatchPlan
+    outcomes: Sequence[SpecialistOutcome]
+    coverage: Mapping[str, object]
+
+    @property
+    def analyses(self) -> list[SpecialistOutcome]:
+        """The outcomes that carry an analysis."""
+        return [outcome for outcome in self.outcomes if outcome.content is not None]
+
+
+@dataclass(frozen=True)
 class LaneDrop:
     """One lane the review judged not worth its Implementer session."""
 
@@ -697,8 +712,3 @@ class OrchestrationRunResult:
             raise ValueError("orchestration optimization_plan_executable must be a boolean")
         if not isinstance(self.plan_revised, bool):
             raise ValueError("orchestration plan_revised must be a boolean")
-
-    @property
-    def optimization_plan(self) -> str:
-        """Lane 1's plan, which is the whole round on the single-lane path."""
-        return self.optimization_plans[0]

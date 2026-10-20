@@ -215,6 +215,46 @@ def test_json_serve_arg_survives_append_merge_as_valid_json(tmp_path):
         json.loads(blob)  # must parse: broken JSON was repaired, not passed through
 
 
+def test_unquoted_json_with_a_path_value_is_repaired_for_warm_replay(tmp_path):
+    """A stripped spec-decode blob whose draft model is an absolute path must still be repaired.
+
+    Warm replay re-launches a recorded config whose ``--speculative-config`` lost its double quotes upstream; the draft
+    model value is an absolute path (``/models/...``), which vLLM's ``json.loads`` rejected at boot when the repair left
+    it untouched. The replayed flag follows the correctly quoted operator flag, so it is the one vLLM uses.
+    """
+    src = tmp_path / "cfg.yaml"
+    _write_yaml_with_envs(
+        src,
+        "vllm",
+        {
+            "EXTRA_VLLM_ARGS": (
+                '--speculative-config {"model":"/models/Draft-DSpark","num_speculative_tokens":5,"method":"dspark"}'
+            )
+        },
+    )
+    out = materialize_config_with_envs(
+        src,
+        tmp_path / "out",
+        extra_server_args=(
+            "--speculative-config {model:/models/Draft-DSpark,num_speculative_tokens:5,method:dspark,"
+            "attention_backend:ROCM_AITER_MLA,kv_cache_dtype:fp8,disable_eagle_block_drop:true}"
+        ),
+        args_mode="append",
+    )
+    args = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+
+    # vLLM's argparse keeps the last occurrence, so that is the value it hands to ``json.loads``.
+    blob = args.rsplit("--speculative-config ", 1)[1].split(" --", 1)[0].strip()
+    assert json.loads(blob) == {
+        "model": "/models/Draft-DSpark",
+        "num_speculative_tokens": 5,
+        "method": "dspark",
+        "attention_backend": "ROCM_AITER_MLA",
+        "kv_cache_dtype": "fp8",
+        "disable_eagle_block_drop": True,
+    }
+
+
 def test_json_serve_arg_survives_shape_capture_port_removal(tmp_path):
     """The shape-capture materialization path must remove its inherited port without corrupting a sibling JSON-valued server flag."""
     src = tmp_path / "cfg.yaml"

@@ -45,9 +45,8 @@ an optimization plan.
 If the user provides `--dir <path>` or already has a `ui_output_agent_*_dispatch_*` directory:
 
 ```bash
-# Write hotspot_analyzer.py (see above), then:
-python /tmp/hotspot_analyzer.py <dispatch_dir> --topk 15 --mode both
-python /tmp/hotspot_analyzer.py <dispatch_dir> --topk 5 --mode src --detail --context 4
+python scripts/hotspot_analyzer.py <dispatch_dir> --topk 15 --mode both
+python scripts/hotspot_analyzer.py <dispatch_dir> --topk 5 --mode src --detail --context 4
 ```
 
 Skip to **Step 4: Interpret Results**.
@@ -142,17 +141,17 @@ ui_output_agent_<PID>_dispatch_<N>/
 
 ## Step 4: Run hotspot_analyzer.py
 
-Write the script (see above), then run:
+Run the bundled script:
 
 ```bash
 # Full report
-python /tmp/hotspot_analyzer.py <dispatch_dir> --topk 15 --mode both
+python scripts/hotspot_analyzer.py <dispatch_dir> --topk 15 --mode both
 
 # Source-level with code context (best for optimization)
-python /tmp/hotspot_analyzer.py <dispatch_dir> --topk 5 --mode src --detail --context 4
+python scripts/hotspot_analyzer.py <dispatch_dir> --topk 5 --mode src --detail --context 4
 
 # ASM-only for instruction-level detail
-python /tmp/hotspot_analyzer.py <dispatch_dir> --mode asm --topk 20
+python scripts/hotspot_analyzer.py <dispatch_dir> --mode asm --topk 20
 ```
 
 ---

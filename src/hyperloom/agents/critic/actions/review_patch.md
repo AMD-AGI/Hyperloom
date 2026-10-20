@@ -40,8 +40,8 @@ bar comes from the action class — see
 ## Review Steps
 
 1. Identify the claimed win.
-   - What metric improved: `tok/s/GPU`, latency, memory, compile time, or kernel
-     micro-benchmark?
+   - What metric improved: throughput (`tok/s`, the whole server), latency,
+     memory, compile time, or kernel micro-benchmark?
    - Which layer changed: serving, framework/runtime, compiler, kernel/operator,
      communication, or GPU runtime?
    - Does the diff actually touch the claimed layer?

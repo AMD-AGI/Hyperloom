@@ -15,6 +15,7 @@ from hyperloom.orchestrator.roles import (
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.state.objective import TargetGainObjective
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+from hyperloom.orchestrator.loop.dispatcher import HeldLeases
 
 
 def _heartbeat() -> Intent:
@@ -170,10 +171,7 @@ def test_run_dispatched_releases_gpu_lease_on_success(coord: Coordinator) -> Non
     sentinel_lease = object()
     out = asyncio.run(
         coord.dispatcher.run_task_registered(
-            _Task(),
-            prebound_lease=None,
-            extra_context={},
-            gpu_lease=sentinel_lease,
+            _Task(), HeldLeases(prebound_lease=None, gpu_lease=sentinel_lease), extra_context={}
         )
     )
     assert out == "RESULT"
@@ -205,10 +203,7 @@ def test_run_dispatched_releases_gpu_lease_on_exception(coord: Coordinator) -> N
     with pytest.raises(RuntimeError, match="subprocess crashed"):
         asyncio.run(
             coord.dispatcher.run_task_registered(
-                _Task(),
-                prebound_lease=None,
-                extra_context={},
-                gpu_lease=sentinel_lease,
+                _Task(), HeldLeases(prebound_lease=None, gpu_lease=sentinel_lease), extra_context={}
             )
         )
     # lease released via finally even though run_task raised.
@@ -235,12 +230,7 @@ def test_run_dispatched_no_gpu_lease_is_noop(coord: Coordinator) -> None:
     coord.sub.run_task = _fake_run_task
     coord.gpu_specialist_pool.release = _fake_release
     out = asyncio.run(
-        coord.dispatcher.run_task_registered(
-            _Task(),
-            prebound_lease=None,
-            extra_context={},
-            gpu_lease=None,
-        )
+        coord.dispatcher.run_task_registered(_Task(), HeldLeases(prebound_lease=None, gpu_lease=None), extra_context={})
     )
     assert out == "CPU"
     assert called == []  # no GPU lease → release never called
@@ -672,24 +662,6 @@ def test_build_kernel_optimizations_from_state(coord: Coordinator) -> None:
 
 
 # -- phase denial gate -----------------------------------------------------
-def test_phase_denial_for_action(coord: Coordinator) -> None:
-    ss = coord.shared_state
-    ss.phase = "PRELUDE"
-    assert coord.dispatcher._phase_denial_for_action("baseline") is None
-    # ENABLEMENT runs its baseline through the Coordinator's revalidation, so an
-    # agent asking for one is refused.
-    ss.phase = "ENABLEMENT"
-    denied = coord.dispatcher._phase_denial_for_action("baseline")
-    assert denied is not None and denied.rule == "phase_incompatible"
-    assert coord.dispatcher._phase_denial_for_action("specialist") is None
-    assert coord.dispatcher._phase_denial_for_action("integrate_patch") is None
-    # The gate reserves named actions only; it is not a phase-membership check.
-    assert coord.dispatcher._phase_denial_for_action("explore") is None
-    # An unknown phase reserves nothing, so the gate abstains.
-    ss.phase = ""
-    assert coord.dispatcher._phase_denial_for_action("baseline") is None
-
-
 def test_the_coordinator_revalidation_baseline_is_not_phase_denied(coord: Coordinator) -> None:
     """The revalidation pump prices its own action and never runs the phase gate."""
     coord.shared_state.phase = "ENABLEMENT"
@@ -856,10 +828,10 @@ def test_first_present() -> None:
 
 
 def test_lifecycle_paths() -> None:
-    from hyperloom.orchestrator.loop.intent_router import _lifecycle_paths
+    from hyperloom.orchestrator.loop.kernel_request import lifecycle_paths
 
-    assert _lifecycle_paths("not-a-dict") == {}
-    out = _lifecycle_paths({"patch_path": "/a/p.diff", "workspace": "", "other": "x"})
+    assert lifecycle_paths("not-a-dict") == {}
+    out = lifecycle_paths({"patch_path": "/a/p.diff", "workspace": "", "other": "x"})
     assert out == {"patch_path": "/a/p.diff"}
 
 

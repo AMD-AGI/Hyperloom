@@ -18,6 +18,8 @@ import json
 from pathlib import Path
 
 from hyperloom.orchestrator.trace_analysis.trace_selfcert import (
+    CoverageMeasures,
+    TraceHealth,
     build_verdict,
     certify_capture_sidecars,
     certify_trace_dir,
@@ -116,34 +118,31 @@ def test_metrics_state_the_terms_they_were_computed_from(tmp_path):
     assert rank["density"]["graph_under_recorded_threshold"] == effective_thresholds()["graph_launch_coverage_max"]
 
 
-def _verdict(**overrides):
-    kwargs = {
+def _verdict(coverage=CoverageMeasures(), **overrides):
+    health = {
         "parse_ok": True,
         "kernel_count": 12,
         "capture_fragment": False,
         "attributed_pct": 91.0,
-        "step_roots_sufficient": True,
-        "forecast_modelled": True,
-        "viable_modes": ["decode_only"],
-        "idle": {},
         "graph_under_recorded": False,
-        "thresholds": effective_thresholds(),
     }
-    kwargs.update(overrides)
-    return build_verdict(**kwargs)
+    health.update(overrides)
+    return build_verdict(TraceHealth(**health), thresholds=effective_thresholds(), coverage=coverage)
 
 
 def test_verdict_severity_ranks_a_wrong_answer_above_a_doubtful_one():
     """An analysis that runs clean and concludes wrongly is worse than one that announces its own doubt."""
     assert _verdict()["severity"] == "ok"
     assert _verdict(graph_under_recorded=True)["severity"] == "silently_wrong"
-    assert _verdict(graph_under_recorded=None, forecast_modelled=False)["severity"] == "warn"
+    assert _verdict(graph_under_recorded=None)["severity"] == "silently_wrong"
     assert _verdict(parse_ok=False)["severity"] == "blocked"
 
 
 def test_verdict_carries_the_numbers_behind_its_categorical_answer():
     """A boolean cannot tell a near miss from an order-of-magnitude miss; the measures block can."""
-    verdict = _verdict(graph_launch_coverage=0.12, op_meta_coverage=0.4, capture_op_meta_coverage=0.02)
+    verdict = _verdict(
+        CoverageMeasures(graph_launch_coverage=0.12, op_meta_coverage=0.4, capture_op_meta_coverage=0.02)
+    )
 
     measures = verdict["measures"]
     assert measures["graph_launch_coverage"] == 0.12
@@ -152,13 +151,14 @@ def test_verdict_carries_the_numbers_behind_its_categorical_answer():
     assert measures["capture_op_meta_coverage"] == 0.02
     assert measures["attributed_pct"] == 91.0
     assert measures["kernel_count"] == 12
-    assert measures["viable_mode_count"] == 1
 
 
 def test_measures_do_not_change_any_decision():
     """The continuous values are reported, never compared: the same inputs must still resolve the same way."""
     plain = _verdict()
-    annotated = _verdict(graph_launch_coverage=0.01, op_meta_coverage=0.0, capture_op_meta_coverage=0.0)
+    annotated = _verdict(
+        CoverageMeasures(graph_launch_coverage=0.01, op_meta_coverage=0.0, capture_op_meta_coverage=0.0)
+    )
 
     for key in ("usable_by", "decode_conclusions_valid", "silently_wrong", "blocking_reasons", "warnings"):
         assert plain[key] == annotated[key], key

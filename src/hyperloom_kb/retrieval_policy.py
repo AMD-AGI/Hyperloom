@@ -9,22 +9,16 @@ import hashlib
 import json
 import math
 import re
-import time
 from collections.abc import Mapping
 from collections.abc import Set as AbstractSet
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from difflib import SequenceMatcher
 from enum import Enum
-from typing import Any, Protocol, cast, runtime_checkable
+from typing import Any, cast
 
-from hyperloom_kb.query_view import QueryView, QueryViewRef, RetrievalCapability
+from hyperloom_kb.query_view import QueryView, RetrievalCapability
 from hyperloom_kb.retrieval import (
     CandidateHit,
-    CandidateProvider,
-    CapabilityUnavailable,
-    GroupCandidate,
-    LocalRetrievalService,
-    RetrievalResult,
 )
 from hyperloom_kb.schema import (
     Experience,
@@ -32,7 +26,6 @@ from hyperloom_kb.schema import (
     FieldRole,
     FieldValue,
     FileRef,
-    JsonScalar,
     JsonValue,
     default_search_weight,
 )
@@ -88,70 +81,6 @@ def _schema_ref(value: Any) -> str:
     if not text.startswith(_SCHEMA_REF_PREFIX) or len(text) != len(_SCHEMA_REF_PREFIX) + 64:
         raise RetrievalPolicyError("schema_ref is invalid")
     return text
-
-
-def _json_object(value: Any, name: str) -> dict[str, JsonValue]:
-    if not isinstance(value, dict):
-        raise RetrievalPolicyError(f"{name} must be an object")
-    try:
-        normalized = json.loads(_canonical(value))
-    except (TypeError, ValueError) as exc:
-        raise RetrievalPolicyError(f"{name} must contain JSON values") from exc
-    if not isinstance(normalized, dict):
-        raise RetrievalPolicyError(f"{name} must be an object")
-    return normalized
-
-
-def _scalar_object(value: Any, name: str) -> dict[str, JsonScalar]:
-    normalized = _json_object(value, name)
-    if any(isinstance(item, (dict, list)) for item in normalized.values()):
-        raise RetrievalPolicyError(f"{name} values must be scalar")
-    return normalized  # type: ignore[return-value]
-
-
-@dataclass(frozen=True)
-class QueryRequest:
-    schema_ref: str
-    exact_where: dict[str, JsonScalar] = field(default_factory=dict)
-    filter_where: dict[str, JsonScalar] = field(default_factory=dict)
-    intent: str = ""
-    context: dict[str, JsonValue] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "schema_ref", _schema_ref(self.schema_ref))
-        object.__setattr__(
-            self,
-            "exact_where",
-            _scalar_object(self.exact_where, "exact_where"),
-        )
-        object.__setattr__(
-            self,
-            "filter_where",
-            _scalar_object(self.filter_where, "filter_where"),
-        )
-        object.__setattr__(self, "intent", str(self.intent or "").strip())
-        object.__setattr__(self, "context", _json_object(self.context, "context"))
-
-    def to_dict(self) -> dict[str, JsonValue]:
-        return {
-            "schema_ref": self.schema_ref,
-            "exact_where": dict(self.exact_where),
-            "filter_where": dict(self.filter_where),
-            "intent": self.intent,
-            "context": dict(self.context),
-        }
-
-    @classmethod
-    def from_dict(cls, value: Any) -> QueryRequest:
-        if not isinstance(value, dict):
-            raise RetrievalPolicyError("QueryRequest must be an object")
-        return cls(
-            schema_ref=str(value.get("schema_ref") or ""),
-            exact_where=_scalar_object(value.get("exact_where", {}), "exact_where"),
-            filter_where=_scalar_object(value.get("filter_where", {}), "filter_where"),
-            intent=str(value.get("intent") or ""),
-            context=_json_object(value.get("context", {}), "context"),
-        )
 
 
 @dataclass(frozen=True)
@@ -317,218 +246,6 @@ class RetrievalConfiguration:
             render_budget_chars=None if raw_budget is None else int(raw_budget),
             version=int(value.get("version", 0)),
         )
-
-
-@dataclass(frozen=True)
-class QueryExecutionResult:
-    configuration_id: str
-    request: QueryRequest
-    retrieval: RetrievalResult
-    ranked_group_keys: tuple[str, ...]
-    representative_ids: tuple[str, ...]
-    candidate_count: int
-    latency_ms: float
-
-    def to_dict(self) -> dict[str, JsonValue]:
-        return {
-            "configuration_id": self.configuration_id,
-            "request": self.request.to_dict(),
-            "view": self.retrieval.view.to_dict(),
-            "groups": [
-                {
-                    "group_key": group.group_key,
-                    "member_ids": list(group.member_ids),
-                    "annotations": group.annotations.to_dict(),
-                    "hits": [
-                        {
-                            "experience_id": hit.experience_id,
-                            "capability": hit.capability.value,
-                            "score": hit.score,
-                            "details": dict(hit.details),
-                        }
-                        for hit in group.hits
-                    ],
-                }
-                for group in self.retrieval.groups
-            ],
-            "ranked_group_keys": list(self.ranked_group_keys),
-            "representative_ids": list(self.representative_ids),
-            "rendered": {
-                "text": self.retrieval.rendered.text,
-                "rendered_refs": [reference.to_dict() for reference in self.retrieval.rendered.rendered_refs],
-                "truncated": self.retrieval.rendered.truncated,
-            },
-            "executed_capabilities": [capability.value for capability in self.retrieval.executed_capabilities],
-            "unavailable_capabilities": [capability.value for capability in self.retrieval.unavailable_capabilities],
-            "candidate_count": self.candidate_count,
-            "latency_ms": self.latency_ms,
-        }
-
-
-class RetrievalRunner:
-    """Execute one explicit configuration without hiding policy in primitives."""
-
-    def __init__(
-        self,
-        service: LocalRetrievalService,
-        *,
-        provider_refs: Mapping[RetrievalCapability, str] | None = None,
-    ) -> None:
-        self._service = service
-        self._provider_refs = dict(provider_refs or {})
-
-    def execute(
-        self,
-        request: QueryRequest,
-        configuration: RetrievalConfiguration,
-        *,
-        view: QueryViewRef | None = None,
-    ) -> QueryExecutionResult:
-        if request.schema_ref != configuration.schema_ref:
-            raise RetrievalPolicyError("request and configuration schema_ref differ")
-        for capability, expected in configuration.provider_refs.items():
-            if self._provider_refs.get(capability) != expected:
-                raise RetrievalPolicyError(f"{capability.value} provider does not match pinned provider_ref")
-        started = time.perf_counter()
-        lease = self._service.acquire_view(request.schema_ref, view=view)
-        candidate_sets: list[tuple[CandidateHit, ...]] = []
-        executed: list[RetrievalCapability] = []
-        unavailable: list[RetrievalCapability] = []
-        provider_request: dict[str, JsonValue] = {
-            "text": request.intent,
-            "context": dict(request.context),
-            "exact_where": dict(request.exact_where),
-            "filter_where": dict(request.filter_where),
-        }
-        try:
-            for capability in configuration.capabilities:
-                limit = configuration.limits[capability]
-                try:
-                    if capability is RetrievalCapability.EXACT:
-                        hits = (
-                            self._service.exact(
-                                request.exact_where,
-                                view=lease.view,
-                                lease_id=lease.lease_id,
-                                limit=limit,
-                            )
-                            if request.exact_where
-                            else ()
-                        )
-                    elif capability is RetrievalCapability.FILTER:
-                        hits = (
-                            self._service.query(
-                                request.filter_where,
-                                view=lease.view,
-                                lease_id=lease.lease_id,
-                                limit=limit,
-                            )
-                            if request.filter_where
-                            else ()
-                        )
-                    else:
-                        hits = self._service.recall(
-                            capability,
-                            provider_request,
-                            view=lease.view,
-                            lease_id=lease.lease_id,
-                            limit=limit,
-                        )
-                except CapabilityUnavailable:
-                    unavailable.append(capability)
-                    continue
-                executed.append(capability)
-                candidate_sets.append(tuple(hits))
-            groups = self._service.organize(
-                tuple(candidate_sets),
-                view=lease.view,
-                lease_id=lease.lease_id,
-            )
-            ranked = _rank_groups(groups, configuration.ranking_policy_ref)[: configuration.max_groups]
-            representatives = _representatives(ranked, configuration.representative_policy)
-            rendered = self._service.render(
-                representatives,
-                view=lease.view,
-                lease_id=lease.lease_id,
-                budget_chars=configuration.render_budget_chars,
-            )
-            retrieval = self._service.result(
-                ranked,
-                rendered,
-                view=lease.view,
-                lease_id=lease.lease_id,
-                executed_capabilities=tuple(executed),
-                unavailable_capabilities=tuple(unavailable),
-            )
-        finally:
-            self._service.leases.release(lease.lease_id)
-        candidate_count = len({hit.experience_id for candidates in candidate_sets for hit in candidates})
-        return QueryExecutionResult(
-            configuration.configuration_id,
-            request,
-            retrieval,
-            tuple(group.group_key for group in retrieval.groups),
-            representatives,
-            candidate_count,
-            (time.perf_counter() - started) * 1000,
-        )
-
-
-def _rank_groups(
-    groups: tuple[GroupCandidate, ...],
-    policy_ref: str,
-) -> tuple[GroupCandidate, ...]:
-    if policy_ref == "group-key@v1":
-        return tuple(sorted(groups, key=lambda group: group.group_key))
-    if policy_ref == "max-hit-score@v1":
-        return tuple(
-            sorted(
-                groups,
-                key=lambda group: (
-                    -max((hit.score or 0.0 for hit in group.hits), default=0.0),
-                    group.group_key,
-                ),
-            )
-        )
-    if policy_ref == "capability-priority@v1":
-        priority = {
-            RetrievalCapability.EXACT: 0,
-            RetrievalCapability.FILTER: 1,
-            RetrievalCapability.FUZZY: 2,
-            RetrievalCapability.SEMANTIC: 3,
-        }
-        return tuple(
-            sorted(
-                groups,
-                key=lambda group: (
-                    min((priority[hit.capability] for hit in group.hits), default=4),
-                    -max((hit.score or 0.0 for hit in group.hits), default=0.0),
-                    group.group_key,
-                ),
-            )
-        )
-    raise RetrievalPolicyError(f"unsupported ranking policy {policy_ref!r}")
-
-
-def _representatives(
-    groups: tuple[GroupCandidate, ...],
-    policy: RepresentativePolicy,
-) -> tuple[str, ...]:
-    selected: list[str] = []
-    for group in groups:
-        if policy is RepresentativePolicy.FIRST_MEMBER:
-            selected.append(group.member_ids[0])
-            continue
-        hits = sorted(
-            group.hits,
-            key=lambda hit: (
-                -(hit.score or 0.0),
-                hit.experience_id,
-                hit.capability.value,
-            ),
-        )
-        selected.append(hits[0].experience_id if hits else group.member_ids[0])
-    return tuple(selected)
 
 
 class LexicalFuzzyProvider:
@@ -722,75 +439,11 @@ def _identity_compatibility(
     return 1.0
 
 
-@dataclass(frozen=True)
-class SemanticHit:
-    experience_id: str
-    score: float
-    details: dict[str, JsonValue] = field(default_factory=dict)
-
-
-@runtime_checkable
-class SemanticSearchBackend(Protocol):
-    provider_ref: str
-
-    def search(self, text: str, *, limit: int) -> tuple[SemanticHit, ...]:
-        """Return provider-ranked semantic hits by canonical Experience id."""
-
-
-class SemanticCandidateProvider:
-    """Adapt a versioned semantic backend to the CandidateProvider contract."""
-
-    capability = RetrievalCapability.SEMANTIC
-
-    def __init__(self, backend: SemanticSearchBackend) -> None:
-        self._backend = backend
-        self.provider_ref = _required_text(backend.provider_ref, "semantic provider_ref")
-
-    def recall(
-        self,
-        request: dict[str, JsonValue],
-        view: QueryView,
-        *,
-        limit: int,
-    ) -> tuple[CandidateHit, ...]:
-        text = str(request.get("text") or "").strip()
-        if not text:
-            return ()
-        return tuple(
-            CandidateHit(
-                hit.experience_id,
-                self.capability,
-                float(hit.score),
-                {"provider_ref": self.provider_ref, **hit.details},
-            )
-            for hit in self._backend.search(text, limit=limit)
-        )
-
-
-def provider_refs(
-    providers: tuple[CandidateProvider, ...],
-) -> dict[RetrievalCapability, str]:
-    """Return the version pins exposed by configured providers."""
-    refs: dict[RetrievalCapability, str] = {}
-    for provider in providers:
-        value = str(getattr(provider, "provider_ref", "") or "").strip()
-        if value:
-            refs[provider.capability] = value
-    return refs
-
-
 __all__ = [
     "LEXICAL_FUZZY_PROVIDER_REF",
     "RETRIEVAL_POLICY_VERSION",
     "LexicalFuzzyProvider",
-    "QueryExecutionResult",
-    "QueryRequest",
     "RepresentativePolicy",
     "RetrievalConfiguration",
     "RetrievalPolicyError",
-    "RetrievalRunner",
-    "SemanticCandidateProvider",
-    "SemanticHit",
-    "SemanticSearchBackend",
-    "provider_refs",
 ]

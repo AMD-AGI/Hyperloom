@@ -3,24 +3,13 @@
 
 """Unit coverage for the scriptable/diffusion (xDiT) latency-domain surfacing:
 
-* ``framework_registry.primary_metric_name`` (which field is the result).
 * the close-out's final recipe carrying e2el into ``outcome.final``.
 * ``SharedState._backfill_scriptable_latency`` deriving e2el from tput.
 """
 
 from __future__ import annotations
 
-from hyperloom.inference_optimizer import framework_registry as fr
-from hyperloom.inference_optimizer.breakdown.collectors.v6 import collect_v6_outcome
-
-
-class TestPrimaryMetricName:
-    def test_scriptable_uses_e2el(self):
-        assert fr.primary_metric_name("xdit") == "e2el_mean_ms"
-
-    def test_serving_uses_throughput(self):
-        assert fr.primary_metric_name("sglang") == "throughput_tok_s_per_gpu"
-        assert fr.primary_metric_name(None) == "throughput_tok_s_per_gpu"
+from hyperloom.inference_optimizer.breakdown.collectors.v6 import OutcomeSources, collect_v6_outcome
 
 
 class TestFinalRecipeCarriesLatency:
@@ -34,19 +23,21 @@ class TestFinalRecipeCarriesLatency:
     def _final(self, current_best: dict) -> dict:
         """``outcome.final`` for a session whose close settled ``current_best``."""
         outcome = collect_v6_outcome(
-            session={"stop_reason": "target_reached"},
-            close={
-                "final_recipe": {
-                    "throughput": current_best.get("tput"),
-                    "ttft_mean_ms": current_best.get("ttft_mean_ms"),
-                    "e2el_mean_ms": current_best.get("e2el_mean_ms"),
-                    "action_path": [str(current_best.get("action") or "")],
-                    "extra_server_args": "",
-                    "extra_envs": {},
-                }
-            },
-            state={},
-            timeline=[],
+            OutcomeSources(
+                session={"stop_reason": "target_reached"},
+                close={
+                    "final_recipe": {
+                        "throughput": current_best.get("tput"),
+                        "ttft_mean_ms": current_best.get("ttft_mean_ms"),
+                        "e2el_mean_ms": current_best.get("e2el_mean_ms"),
+                        "action_path": [str(current_best.get("action") or "")],
+                        "extra_server_args": "",
+                        "extra_envs": {},
+                    }
+                },
+                state={},
+                timeline=[],
+            )
         )
         return outcome["final"]
 

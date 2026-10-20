@@ -210,11 +210,9 @@ async def test_the_queue_offers_predictor_rows_to_orchestrations_own_grid(servic
     assert "grid verbatim" not in specialists_only
 
 
-@pytest.mark.parametrize(
-    ("accuracy", "eval_disabled", "stated"), [(0.938, False, True), (0.938, True, False), (0.0, False, False)]
-)
-async def test_the_predictor_block_states_the_accuracy_gate_a_keep_passes(service, accuracy, eval_disabled, stated):
-    state = _state(baseline_accuracy=accuracy, eval_disabled=eval_disabled)
+@pytest.mark.parametrize(("accuracy", "stated"), [(0.938, True), (0.0, False)])
+async def test_the_predictor_block_states_the_accuracy_gate_a_keep_passes(service, accuracy, stated):
+    state = _state(baseline_accuracy=accuracy)
     service.answer = _answer(Action(server_args={"--kv-cache-dtype": "fp8"}), votes={0: 1})
     await _ask_and_file(_pump(), state)
 
@@ -451,9 +449,12 @@ async def test_the_framework_tick_steps_the_predictor(service, monkeypatch):
     service.answer = _answer(Action(server_args={"--kv-cache-dtype": "fp8"}))
     coord = SimpleNamespace(
         shared_state=state,
-        phase_internal=SimpleNamespace(maybe_enqueue_explore_research_scout=_noop),
+        phase_internal=SimpleNamespace(
+            maybe_enqueue_explore_research_scout=_noop,
+            maybe_enqueue_config_plateau_static_recon=_noop,
+        ),
         specialist_dispatch=SimpleNamespace(
-            maybe_force_stalled_domain_specialist=_noop, maybe_ensure_custom_specialist=_noop
+            maybe_force_stalled_domain_specialist=_noop, ensure_custom_specialist=_noop
         ),
         record_exception=lambda **kwargs: pytest.fail(f"the tick raised: {kwargs}"),
     )
@@ -475,7 +476,11 @@ def _entering_phase(monkeypatch, state: SharedState) -> Any:
 
     monkeypatch.setattr(FrameworkPhase, "_pump_framework_agent_phase", _noop)
     monkeypatch.setattr(FrameworkPhase, "_open_framework_timeline", lambda self: None)
-    coord = SimpleNamespace(shared_state=state, phase_macro_cycle=SimpleNamespace(on_cycle_start_reprofile=_noop))
+    coord = SimpleNamespace(
+        shared_state=state,
+        phase_macro_cycle=SimpleNamespace(on_cycle_start_reprofile=_noop),
+        specialist_dispatch=SimpleNamespace(ensure_custom_specialist=_noop),
+    )
     return FrameworkPhase(coord)
 
 

@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, NamedTuple
 
 from hyperloom.common.timeutil import now_iso
 
@@ -75,6 +75,161 @@ def _merge_rejected(prior: Any, update: Any) -> list[dict[str, Any]]:
         if fingerprint:
             merged[fingerprint] = entry
     return list(merged.values())
+
+
+class _WinnerKey(NamedTuple):
+    """What makes a ``winners_history`` row distinct: the round, the variant, and when it landed."""
+
+    round_id: str
+    variant: str
+    ts: str
+
+
+def _winner_key(row: dict[str, Any]) -> _WinnerKey:
+    """The dedup identity of one winners_history row."""
+    return _WinnerKey(
+        round_id=str(row.get("round_id") or ""),
+        variant=str(row.get("fingerprint") or row.get("variant_name") or ""),
+        ts=str(row.get("ts") or ""),
+    )
+
+
+def _merge_winners_history(prior: Any, update: Any, cycle: int) -> list[dict[str, Any]]:
+    """Append a round's winners to the durable history, keeping the rows it already holds."""
+    merged = list(prior or [])
+    known = {_winner_key(row) for row in merged if isinstance(row, dict)}
+    for entry in update or []:
+        if not isinstance(entry, dict):
+            continue
+        row = dict(entry)
+        key = _winner_key(row)
+        if key in known:
+            continue
+        row.setdefault("cycle", cycle)
+        known.add(key)
+        merged.append(row)
+    return merged[-_WINNERS_HISTORY_CAP:]
+
+
+def _string_list(raw: Any) -> list[str]:
+    """Coerce a scalar-or-sequence variant field to a list of non-empty strings."""
+    if isinstance(raw, str):
+        return [raw.strip()] if raw.strip() else []
+    if isinstance(raw, (list, tuple, set)):
+        return [str(v).strip() for v in raw if str(v).strip()]
+    return []
+
+
+class _AcceptedConfig(NamedTuple):
+    """The configuration a promoted variant is replayed by, and the fingerprint it is keyed on."""
+
+    args: str
+    envs: dict[str, Any]
+    control_fields: dict[str, Any]
+    fingerprint: str
+
+
+def _control_fields(variant: dict[str, Any]) -> dict[str, Any]:
+    """The arg/env removal and replacement controls a variant carries, omitting the ones left at their default."""
+    fields: dict[str, Any] = {}
+    remove_args = _string_list(variant.get("remove_args"))
+    if remove_args:
+        fields["remove_args"] = remove_args
+    unset_envs = _string_list(variant.get("unset_envs"))
+    if unset_envs:
+        fields["unset_envs"] = unset_envs
+    if str(variant.get("args_mode") or "append").strip().lower() == "replace":
+        fields["args_mode"] = "replace"
+    return fields
+
+
+def _accepted_config(variant: dict[str, Any]) -> _AcceptedConfig:
+    """Read the config a promoted variant replays, fingerprinting it when the variant carries no fingerprint."""
+    from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
+
+    args = str(variant.get("candidate_extra_server_args") or variant.get("extra_server_args") or "")
+    envs = dict(variant.get("extra_envs") or {})
+    control_fields = _control_fields(variant)
+    fingerprint = str(
+        variant.get("fingerprint")
+        or canonical_fingerprint(
+            args,
+            envs,
+            **control_fields,
+        )
+    )
+    return _AcceptedConfig(args=args, envs=envs, control_fields=control_fields, fingerprint=fingerprint)
+
+
+def _accepted_entry(variant: dict[str, Any], config: _AcceptedConfig, cycle: int) -> dict[str, Any]:
+    """The ``explore_search.accepted`` row recording one promoted variant."""
+    return {
+        "fingerprint": config.fingerprint,
+        "name": str(variant.get("name") or ""),
+        "extra_server_args": config.args,
+        "extra_envs": config.envs,
+        **config.control_fields,
+        "note": str(variant.get("note") or ""),
+        "tput": variant.get("output_throughput") or variant.get("tput"),
+        "gain_pct": variant.get("gain_pct"),
+        # Carried through so the ledger records what the KEEP was judged on; ``None`` means the variant was never
+        # gated, not that it scored 0.
+        "accuracy": variant.get("accuracy"),
+        "stack_index": variant.get("stack_index"),
+        "accepted_at_round": str(variant.get("accepted_at_round") or ""),
+        "ts": str(variant.get("ts") or now_iso()),
+        "provenance": str(variant.get("provenance") or "llm_direct"),
+        # Attribute the win to the macro-cycle it landed in.
+        "cycle": cycle,
+    }
+
+
+def _winners_history_row(entry: dict[str, Any], config: _AcceptedConfig) -> dict[str, Any]:
+    """Mirror an accepted row into winners_history, so plateau judges needn't crawl optimization_stack."""
+    return {
+        "round_id": entry["accepted_at_round"],
+        "variant_name": entry["name"],
+        "fingerprint": config.fingerprint,
+        "gain_pct": entry["gain_pct"],
+        "extra_args": config.args,
+        "extra_envs": config.envs,
+        **config.control_fields,
+        "provenance": entry["provenance"],
+        "ts": entry["ts"],
+        "cycle": entry["cycle"],
+    }
+
+
+class _LeverRegistration(NamedTuple):
+    """The session-level facts one registration call stamps onto every lever it records."""
+
+    default_on: bool
+    specialist_task_id: str
+    stack_delta_pct: float | None
+    cycle: int
+
+
+def _lever_row(entry: dict[str, Any], registration: _LeverRegistration, now: str) -> dict[str, Any]:
+    """The ``authored_framework_levers`` row for one accepted framework-rewrite switch."""
+    return {
+        "switch": str(entry.get("switch") or "").strip().upper(),
+        "value": str(entry.get("value") or "1"),
+        "category": str(entry.get("category") or ""),
+        "target": str(entry.get("target") or ""),
+        "evidence": str(entry.get("evidence") or ""),
+        "depends_on": list(entry.get("depends_on") or []),
+        "enables": list(entry.get("enables") or []),
+        "enabler": bool(entry.get("enabler")),
+        "default_on": registration.default_on,
+        "specialist_task_id": registration.specialist_task_id,
+        "stack_delta_pct": registration.stack_delta_pct,
+        # Filled in by the explore phase once the lever has been measured on its own; ``None`` means
+        # "registered, not yet attributed".
+        "attributed_gain_pct": None,
+        "attribution_source": "",
+        "ts": now,
+        "cycle": registration.cycle,
+    }
 
 
 # Gap ``severity`` by urgency; an unknown severity ranks below ``low``.
@@ -348,94 +503,25 @@ class _PhaseStateMixin:
         merged["cursor"] = int(prior.get("cursor") or 0) + 1
         merged["last_round"] = dict(update.get("last_round") or {})
         # Append-only history fields — merge instead of overwrite.
-        wh = list(prior.get("winners_history") or [])
-        known = {
-            (
-                str(row.get("round_id") or ""),
-                str(row.get("fingerprint") or row.get("variant_name") or ""),
-                str(row.get("ts") or ""),
-            )
-            for row in wh
-            if isinstance(row, dict)
-        }
-        for entry in update.get("winners_history") or []:
-            if not isinstance(entry, dict):
-                continue
-            row = dict(entry)
-            key = (
-                str(row.get("round_id") or ""),
-                str(row.get("fingerprint") or row.get("variant_name") or ""),
-                str(row.get("ts") or ""),
-            )
-            if key in known:
-                continue
-            row.setdefault("cycle", cur_cycle)
-            known.add(key)
-            wh.append(row)
-        merged["winners_history"] = wh[-_WINNERS_HISTORY_CAP:]
+        merged["winners_history"] = _merge_winners_history(
+            prior.get("winners_history"),
+            update.get("winners_history"),
+            cur_cycle,
+        )
         merged["domains_round_summary"] = list(
             update.get("domains_round_summary") or prior.get("domains_round_summary") or []
         )
         # Preserve accepted bucket from prior runs (record_explore_accepted is its writer).
         merged["accepted"] = list(prior.get("accepted") or [])
-        # Drop so a later load re-runs the legacy union.
-        merged.pop("merged_from_legacy_sig", None)
         self.explore_search = merged
 
     def record_explore_accepted(self, variant: dict[str, Any]) -> None:
         """Append one promoted variant to ``explore_search.accepted``; dedupes by ``fingerprint`` and removes any matching ``rejected`` entry."""
         if not isinstance(variant, dict) or not variant:
             return
-        from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
-
-        args = str(variant.get("candidate_extra_server_args") or variant.get("extra_server_args") or "")
-        envs = dict(variant.get("extra_envs") or {})
-
-        def _list_field(key: str) -> list[str]:
-            raw = variant.get(key)
-            if isinstance(raw, str):
-                return [raw.strip()] if raw.strip() else []
-            if isinstance(raw, (list, tuple, set)):
-                return [str(v).strip() for v in raw if str(v).strip()]
-            return []
-
-        remove_args = _list_field("remove_args")
-        unset_envs = _list_field("unset_envs")
-        args_mode = str(variant.get("args_mode") or "append").strip().lower()
-        control_fields: dict[str, Any] = {}
-        if remove_args:
-            control_fields["remove_args"] = remove_args
-        if unset_envs:
-            control_fields["unset_envs"] = unset_envs
-        if args_mode == "replace":
-            control_fields["args_mode"] = "replace"
-        fp = str(
-            variant.get("fingerprint")
-            or canonical_fingerprint(
-                args,
-                envs,
-                **control_fields,
-            )
-        )
-        entry = {
-            "fingerprint": fp,
-            "name": str(variant.get("name") or ""),
-            "extra_server_args": args,
-            "extra_envs": envs,
-            **control_fields,
-            "note": str(variant.get("note") or ""),
-            "tput": variant.get("output_throughput") or variant.get("tput"),
-            "gain_pct": variant.get("gain_pct"),
-            # Carried through so the ledger records what the KEEP was judged on; ``None`` means the variant was never
-            # gated, not that it scored 0.
-            "accuracy": variant.get("accuracy"),
-            "stack_index": variant.get("stack_index"),
-            "accepted_at_round": str(variant.get("accepted_at_round") or ""),
-            "ts": str(variant.get("ts") or now_iso()),
-            "provenance": str(variant.get("provenance") or "llm_direct"),
-            # Attribute the win to the macro-cycle it landed in.
-            "cycle": int(getattr(self, "macro_cycle", 0) or 0),
-        }
+        config = _accepted_config(variant)
+        fp = config.fingerprint
+        entry = _accepted_entry(variant, config, int(getattr(self, "macro_cycle", 0) or 0))
         search = dict(self.explore_search or {})
         search.setdefault("schema_version", 1)
         accepted = [
@@ -450,22 +536,8 @@ class _PhaseStateMixin:
         if entry["name"]:
             name_index[entry["name"]] = fp
         search["name_index"] = name_index
-        # Append a winners_history row so plateau judges needn't crawl optimization_stack.
         wh = list(search.get("winners_history") or [])
-        wh.append(
-            {
-                "round_id": entry["accepted_at_round"],
-                "variant_name": entry["name"],
-                "fingerprint": fp,
-                "gain_pct": entry["gain_pct"],
-                "extra_args": args,
-                "extra_envs": envs,
-                **control_fields,
-                "provenance": entry["provenance"],
-                "ts": entry["ts"],
-                "cycle": entry["cycle"],
-            }
-        )
+        wh.append(_winners_history_row(entry, config))
         search["winners_history"] = wh[-_WINNERS_HISTORY_CAP:]
         self.explore_search = search
 
@@ -482,33 +554,21 @@ class _PhaseStateMixin:
             return False
         rows = list(getattr(self, "authored_framework_levers", None) or [])
         by_switch = {str(r.get("switch") or ""): i for i, r in enumerate(rows) if isinstance(r, dict)}
+        registration = _LeverRegistration(
+            default_on=bool(default_on),
+            specialist_task_id=str(specialist_task_id or ""),
+            stack_delta_pct=(float(stack_delta_pct) if isinstance(stack_delta_pct, (int, float)) else None),
+            cycle=int(getattr(self, "macro_cycle", 0) or 0),
+        )
         now = now_iso()
         changed = False
         for entry in switches:
             if not isinstance(entry, dict):
                 continue
-            name = str(entry.get("switch") or "").strip().upper()
+            row = _lever_row(entry, registration, now)
+            name = row["switch"]
             if not name:
                 continue
-            row = {
-                "switch": name,
-                "value": str(entry.get("value") or "1"),
-                "category": str(entry.get("category") or ""),
-                "target": str(entry.get("target") or ""),
-                "evidence": str(entry.get("evidence") or ""),
-                "depends_on": list(entry.get("depends_on") or []),
-                "enables": list(entry.get("enables") or []),
-                "enabler": bool(entry.get("enabler")),
-                "default_on": bool(default_on),
-                "specialist_task_id": str(specialist_task_id or ""),
-                "stack_delta_pct": (float(stack_delta_pct) if isinstance(stack_delta_pct, (int, float)) else None),
-                # Filled in by the explore phase once the lever has been measured on its own; ``None`` means
-                # "registered, not yet attributed".
-                "attributed_gain_pct": None,
-                "attribution_source": "",
-                "ts": now,
-                "cycle": int(getattr(self, "macro_cycle", 0) or 0),
-            }
             index = by_switch.get(name)
             if index is None:
                 rows.append(row)

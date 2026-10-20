@@ -19,12 +19,11 @@ from typing import Any, Callable
 import yaml
 
 from hyperloom.common.coerce import to_str_list
+from hyperloom.common.benchmark_config import is_magpie_agentx
 from hyperloom.common.env import env_flag, is_truthy
 from hyperloom.common.perf_metric import constraint_fields
 from hyperloom.common.env_safety import (
-    BLOCKED_CHILD_ENV_NAMES,
     BLOCKED_EXTERNAL_ENV_NAMES,
-    _ENV_KEY_RE,
     is_python_package_root,
     redact_secret_values,
     scrub_benchmark_process_env,
@@ -40,16 +39,14 @@ from ..stop_attribution import (
 )
 from ._benchmark_runtime import apply_runtime_benchmark_overrides as apply_runtime_benchmark_overrides
 from ._benchmark_interpreter import (
-    _resolve_magpie_python as _resolve_magpie_python,
     _resolve_probe_python as _resolve_probe_python,
 )
-from ._accuracy_gate import materialized_run_eval_disabled
 from ._recipe_script import launcher_overwritten_envs
 from ._subprocess_kill import (
     AGENTX_PREFLIGHT_ERROR_CLASS,
     AGENTX_PREFLIGHT_RETURNCODE,
-    DETOKENIZER_STALL_RETURNCODE,
     EVAL_PROBE_UNPATCHABLE_RETURNCODE,
+    DETOKENIZER_STALL_RETURNCODE,
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SERVER_DEAD_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
@@ -68,73 +65,36 @@ from .benchmark_result import (
 )
 from ._gpu_metrics import write_gpu_metrics_from_report
 from .benchmark_backend import build_benchmark_command
-from ._inferencex_patcher import (
-    ensure_benchmark_lib_eval_start_patched,
-    ensure_eval_probe_patched,
-    ensure_eval_unbound_outputs_patched,
-    eval_probe_targets_exist,
-)
+from .benchmark_config import prepare_benchmark_runtime
+from .magpie_agentx import LaunchChanges, materialize_variant
+from hyperloom.inference_optimizer.runtime_environment import apply_runtime_override
+
 from ._launch_evidence import build_launch_evidence, persist_launch_evidence
 from ...measurement.runtime_findings import persist_runtime_findings, scan_server_log
 from ._server_argv import seal_server_argv
+from ._spec_decode_pin import SPECULATIVE_DECODING_PINNED, refuse_unpinned_speculative_change
 
 # Re-exported from sibling modules to keep the module namespace intact.
 from ._grid_base import (
     DEFAULT_KEEP_THRESHOLD_PCT as DEFAULT_KEEP_THRESHOLD_PCT,
     GridVariant as GridVariant,
-    coerce_extra_envs as coerce_extra_envs,
     VariantResult as VariantResult,
 )
 from hyperloom.inference_optimizer.grid_server_args import (
     server_args_env_name as server_args_env_name,
     merge_server_args as merge_server_args,
     compose_server_args as compose_server_args,
-    remove_server_args as remove_server_args,
-    compact_json_server_args as compact_json_server_args,
-    _SPACE_VALUE_FLAGS as _SPACE_VALUE_FLAGS,
-    _MULTI_VALUE_FLAGS as _MULTI_VALUE_FLAGS,
-    _VLLM_SINGLE_VALUE_FLAGS as _VLLM_SINGLE_VALUE_FLAGS,
-    dedup_vllm_server_args as dedup_vllm_server_args,
     _shell_safe_dedupe as _shell_safe_dedupe,
-    DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC as DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC,
-    SGLANG_WATCHDOG_TIMEOUT_ENV as SGLANG_WATCHDOG_TIMEOUT_ENV,
-    _SGLANG_WATCHDOG_FLAG as _SGLANG_WATCHDOG_FLAG,
-    _SGLANG_WATCHDOG_RE as _SGLANG_WATCHDOG_RE,
-    resolve_sglang_watchdog_timeout as resolve_sglang_watchdog_timeout,
-    inject_sglang_watchdog_timeout as inject_sglang_watchdog_timeout,
-    DEFAULT_SGLANG_CONTEXT_HEADROOM_TOKENS as DEFAULT_SGLANG_CONTEXT_HEADROOM_TOKENS,
-    DEFAULT_SGLANG_CONTEXT_FLOOR_TOKENS as DEFAULT_SGLANG_CONTEXT_FLOOR_TOKENS,
-    SGLANG_CONTEXT_HEADROOM_ENV as SGLANG_CONTEXT_HEADROOM_ENV,
-    SGLANG_CONTEXT_FLOOR_ENV as SGLANG_CONTEXT_FLOOR_ENV,
-    _SGLANG_CONTEXT_LENGTH_FLAG as _SGLANG_CONTEXT_LENGTH_FLAG,
-    _SGLANG_CONTEXT_LENGTH_RE as _SGLANG_CONTEXT_LENGTH_RE,
-    _SGLANG_ATTN_BACKEND_FLAG as _SGLANG_ATTN_BACKEND_FLAG,
-    _SGLANG_ATTN_BACKEND_RE as _SGLANG_ATTN_BACKEND_RE,
-    _SGLANG_DUAL_CHUNK_BACKEND as _SGLANG_DUAL_CHUNK_BACKEND,
-    _resolve_nonneg_int_env as _resolve_nonneg_int_env,
-    resolve_sglang_context_cap as resolve_sglang_context_cap,
-    inject_sglang_context_length as inject_sglang_context_length,
-    _resolve_dual_chunk_backend as _resolve_dual_chunk_backend,
-    inject_sglang_attention_backend as inject_sglang_attention_backend,
-    _SGLANG_MOE_RUNNER_BACKEND_FLAG as _SGLANG_MOE_RUNNER_BACKEND_FLAG,
     _SGLANG_MOE_RUNNER_BACKEND_RE as _SGLANG_MOE_RUNNER_BACKEND_RE,
     moe_runner_requires_aiter as moe_runner_requires_aiter,
 )
 from ._grid_variant_filter import (
     resolve_skip_spec as resolve_skip_spec,
-    _parse_skip_spec as _parse_skip_spec,
-    _RE_CUDA_GRAPH_MAX_BS as _RE_CUDA_GRAPH_MAX_BS,
     _MN_PARAMS_PRIORITY as _MN_PARAMS_PRIORITY,
     _MN_BACKENDS_PRIORITY as _MN_BACKENDS_PRIORITY,
-    _mn_priority_index as _mn_priority_index,
     reorder_grid_for_multi_node as reorder_grid_for_multi_node,
     apply_multi_node_invalid_variants as apply_multi_node_invalid_variants,
     apply_aiter_moe_pin_filter as apply_aiter_moe_pin_filter,
-    _COMPATIBILITY_FLAG_RULES as _COMPATIBILITY_FLAG_RULES,
-    _XDIT_ENV_BLACKLIST as _XDIT_ENV_BLACKLIST,
-    _XDIT_ENV_COMBO_BLACKLIST as _XDIT_ENV_COMBO_BLACKLIST,
-    xdit_blacklist_reason as xdit_blacklist_reason,
-    _detect_model_class as _detect_model_class,
     apply_compatibility_filter as apply_compatibility_filter,
     apply_user_skip_list as apply_user_skip_list,
 )
@@ -365,81 +325,26 @@ def sanitize_result_dir(value: Any) -> str | None:
     return text
 
 
-def _is_safe_path_entry(entry: str) -> bool:
-    """A single path entry is safe iff it has no ``:``, no ``..``, no control chars."""
-    return (
-        bool(entry)
-        and ":" not in entry
-        and ".." not in Path(entry).parts
-        and not any(c in entry for c in ("\n", "\r", "\x00"))
-    )
-
-
-# Reserved keys carried by dedicated override fields; never accepted via runtime_env.
-_RUNTIME_ENV_RESERVED: frozenset[str] = frozenset({"PATH", "PYTHONPATH", "LD_LIBRARY_PATH"})
-
-
-def apply_runtime_override(envs: dict[str, str], override: dict[str, Any]) -> None:
-    """Inject an attempt runtime override into the materialized YAML envs dict."""
-    if not override:
-        return
-    from ._workload_envs import prepend_launch_path
-
-    path_prefix = str(override.get("path_prefix") or "").strip()
-    if path_prefix:
-        prepend_launch_path(envs, "PATH", path_prefix)
-    entrypoint_bin = str(override.get("entrypoint_bin_dir") or "").strip()
-    if entrypoint_bin:
-        if _is_safe_path_entry(entrypoint_bin):
-            prepend_launch_path(envs, "PATH", entrypoint_bin)
-        else:
-            log.warning("apply_runtime_override: dropping unsafe entrypoint_bin_dir %r", entrypoint_bin)
-    pp_prefix = str(override.get("pythonpath_prefix") or "").strip()
-    if pp_prefix:
-        if _is_safe_path_entry(pp_prefix):
-            prepend_launch_path(envs, "PYTHONPATH", pp_prefix)
-        else:
-            log.warning("apply_runtime_override: dropping unsafe pythonpath_prefix %r", pp_prefix)
-    # Multi-entry prefixes: prepend in order so the first entry wins, ahead of any single-dir pythonpath_prefix and
-    # the inherited value.
-    for entry in reversed(_coerce_prefix_list(override.get("pythonpath_prefixes"))):
-        if _is_safe_path_entry(entry):
-            prepend_launch_path(envs, "PYTHONPATH", entry)
-        else:
-            log.warning("apply_runtime_override: dropping unsafe pythonpath entry %r", entry)
-    # Native loader path: prepend attempt entries while preserving any inherited entries (e.g. /opt/rocm/lib).
-    for entry in reversed(_coerce_prefix_list(override.get("ld_library_path_prefix"))):
-        if _is_safe_path_entry(entry):
-            prepend_launch_path(envs, "LD_LIBRARY_PATH", entry)
-        else:
-            log.warning("apply_runtime_override: dropping unsafe ld_library_path entry %r", entry)
-    _runtime_env = override.get("runtime_env")
-    if isinstance(_runtime_env, dict):
-        for raw_k, raw_v in _runtime_env.items():
-            key = str(raw_k)
-            if not _ENV_KEY_RE.match(key) or key in BLOCKED_CHILD_ENV_NAMES or key in _RUNTIME_ENV_RESERVED:
-                log.warning("apply_runtime_override: dropping unsafe runtime_env key %r", key)
-                continue
-            envs[key] = str(raw_v)
-    for key in ("framework_bin", "framework_python", "framework_venv_root"):
-        val = str(override.get(key) or "").strip()
-        if val:
-            envs[f"HYPERLOOM_{key.upper()}"] = val
-    # runtime_python_exe takes priority over framework_python as the launch interpreter.
-    rpe = str(override.get("runtime_python_exe") or "").strip()
-    if rpe:
-        envs["HYPERLOOM_FRAMEWORK_PYTHON"] = rpe
-
-
-def _coerce_prefix_list(value: Any) -> list[str]:
-    """Normalize a runtime-prefix field (list/tuple/str) to a list of entries."""
-    if value is None:
-        return []
-    if isinstance(value, str):
-        return [value.strip()] if value.strip() else []
-    if isinstance(value, (list, tuple)):
-        return [str(v).strip() for v in value if str(v).strip()]
-    return []
+def _apply_variant_env(envs, variant, base_extra_envs, base_unset_envs):
+    """Apply accepted environment edits before the candidate's set/unset operations."""
+    # Composed base-then-variant, so a variant unsetting a key the base sets
+    # removes it: the last layer to name a key is the one that decides it.
+    for k in to_str_list(base_unset_envs):
+        if k.strip().upper() in BLOCKED_EXTERNAL_ENV_NAMES:
+            continue
+        envs.pop(k, None)
+    for k, v in (base_extra_envs or {}).items():
+        envs[str(k)] = str(v)
+    base_envs = dict(envs)
+    for k in getattr(variant, "unset_envs", []) or []:
+        # Unsetting a pin retargets the benchmark rather than toggling a knob.
+        if str(k).strip().upper() in BLOCKED_EXTERNAL_ENV_NAMES:
+            log.warning("grid: refusing to unset pinned env %s for variant %s", k, variant.name)
+            continue
+        envs.pop(str(k), None)
+    for k, v in variant.extra_envs.items():
+        envs[str(k)] = str(v)
+    return base_envs
 
 
 def _build_variant_yaml(
@@ -458,9 +363,22 @@ def _build_variant_yaml(
     base_unset_envs: list[str] | None = None,
 ) -> Path:
     """Materialize a per-variant Magpie YAML on disk."""
-    with base_yaml_path.open(encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
+    cfg = yaml.safe_load(base_yaml_path.read_text(encoding="utf-8"))
     bench = cfg.setdefault("benchmark", {})
+    if is_magpie_agentx(bench):
+        return materialize_variant(
+            base_yaml_path,
+            variant,
+            output_subdir,
+            model_path=model_path,
+            base=LaunchChanges(
+                base_extra_args,
+                base_extra_envs or {},
+                base_remove_args or [],
+                base_unset_envs or [],
+                base_args_mode == "replace",
+            ),
+        )
     replacing = str(base_args_mode).strip().lower() == "replace"
     envs = apply_runtime_benchmark_overrides(
         bench,
@@ -471,17 +389,14 @@ def _build_variant_yaml(
     )
     extra_args_env = server_args_env_name(bench.get("framework"))
 
-    variant_remove = to_str_list(getattr(variant, "remove_args", []))
-    # A replacing base drops the inherited string wholesale, so only the
-    # variant's own removals still name flags that survive to be stripped.
-    effective_remove = (
-        variant_remove if replacing else list(dict.fromkeys(to_str_list(base_remove_args) + variant_remove))
-    )
+    # A replacing base drops the inherited string wholesale, so its own removals have nothing left to strip.
+    inherited, base_remove = ("", []) if replacing else (str(envs.get(extra_args_env, "")), base_remove_args)
+    base_args = compose_server_args(inherited_args=inherited, base_extra_args=base_extra_args, remove_args=base_remove)
     combined = compose_server_args(
-        inherited_args="" if replacing else str(envs.get(extra_args_env, "")),
+        inherited_args=inherited,
         base_extra_args=base_extra_args,
         variant_extra_args=variant.extra_server_args,
-        remove_args=effective_remove,
+        remove_args=to_str_list(base_remove) + to_str_list(getattr(variant, "remove_args", [])),
         args_mode=getattr(variant, "args_mode", "append"),
     )
     # A grid variant never injects a MoE runner backend itself, but it does inherit one -- from the baseline recipe it
@@ -501,23 +416,9 @@ def _build_variant_yaml(
         envs[extra_args_env] = _shell_safe_dedupe(combined)
     elif extra_args_env in envs or variant.args_mode == "replace" or base_args_mode == "replace":
         envs[extra_args_env] = ""
-    # Composed base-then-variant, so a variant unsetting a key the base sets
-    # removes it: the last layer to name a key is the one that decides it.
-    for k in to_str_list(base_unset_envs):
-        if k.strip().upper() in BLOCKED_EXTERNAL_ENV_NAMES:
-            continue
-        envs.pop(k, None)
-    for k, v in (base_extra_envs or {}).items():
-        envs[str(k)] = str(v)
-    for k in getattr(variant, "unset_envs", []) or []:
-        # Unsetting a pin retargets the benchmark rather than toggling a knob.
-        if str(k).strip().upper() in BLOCKED_EXTERNAL_ENV_NAMES:
-            log.warning("grid: refusing to unset pinned env %s for variant %s", k, variant.name)
-            continue
-        envs.pop(str(k), None)
-    for k, v in variant.extra_envs.items():
-        envs[str(k)] = str(v)
-    from ._workload_envs import pin_mlperf_round_concurrency, prepend_launch_path
+    base_envs = _apply_variant_env(envs, variant, base_extra_envs, base_unset_envs)
+    from ._workload_envs import pin_mlperf_round_concurrency
+    from hyperloom.inference_optimizer.runtime_environment import prepend_launch_path
 
     pin_mlperf_round_concurrency(envs)
     # The launcher re-exports these unconditionally, so a value carried here is
@@ -552,6 +453,7 @@ def _build_variant_yaml(
     _rt_override = getattr(variant, "runtime_override", None) or {}
     if _rt_override:
         apply_runtime_override(envs, _rt_override)
+    refuse_unpinned_speculative_change(base_args, base_envs, combined, envs)
 
     # PATH guard: the xdit wrapper needs both `/venv/bin` (the `xdit` console script) and `/opt/rocm/bin` (`hipcc`);
     # force-prepend both so an LLM-supplied PATH can't drop one.
@@ -604,6 +506,7 @@ async def _settled_measurement(
     workspace: Path,
     *,
     subprocess_started_unix: float | None,
+    config_path: Path | None = None,
     settle_seconds: float = REPORT_SETTLE_SECONDS,
     poll_seconds: float = REPORT_SETTLE_POLL_SECONDS,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
@@ -614,6 +517,7 @@ async def _settled_measurement(
         report = _parse_report(workspace)
         measurement = extract_benchmark_measurement(
             report,
+            config_path=config_path,
             workspace=workspace,
             subprocess_started_unix=subprocess_started_unix,
         )
@@ -702,41 +606,9 @@ def _run_magpie(
 
     env.update(magpie_remote_env())
 
-    # Pin Magpie's InferenceX resolution to ``$INFERENCEX_PATH`` (its highest-precedence rung) so it loads the patched
-    # checkout, not a stale copy.
-    inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
-    if inferencex_path:
-        env["MAGPIE_INFERENCEX_PATH"] = inferencex_path
-        # Baseline patches its own checkout, but explore / sweep never pass through that hook: re-assert here so a
-        # resumed session or a re-cloned checkout still emits the eval-start marker.
-        ensure_benchmark_lib_eval_start_patched(Path(inferencex_path))
-
-    # The generation bounds + pathology probe are asserted whether or not ``$INFERENCEX_PATH`` is set: unset falls
-    # back to the same env discovery the baseline arm uses ($MAGPIE_PATH/InferenceX).
-    probe_root = Path(inferencex_path) if inferencex_path else None
-    # Best-effort, unlike the probe below: a missing guard only costs the reason a failed round reports.
-    ensure_eval_unbound_outputs_patched(probe_root)
-    if not ensure_eval_probe_patched(probe_root) and not materialized_run_eval_disabled(config_path):
-        eval_bounds_msg = (
-            "eval generation bounds + pathology probe are not installed "
-            "(utils/evals/patches/lm_eval_sitecustomize.py, inferencex="
-            f"{inferencex_path or '<unset>'}, INFERENCEX_PATH="
-            f"{os.environ.get('INFERENCEX_PATH', '') or '<unset>'}); this "
-            "variant runs eval, so it would be scored against a baseline that "
-            "truncated at a different point"
-        )
-        if eval_probe_targets_exist(probe_root):
-            log.error("grid_runner: %s; failing this benchmark", eval_bounds_msg)
-            return (EVAL_PROBE_UNPATCHABLE_RETURNCODE, "", eval_bounds_msg)
-        log.warning("grid_runner: %s", eval_bounds_msg)
-    # AgentX: deploy the aiperf client into InferenceX ``benchmarks/`` + preflight aiperf right before Magpie runs it,
-    # via the shared helper (also used by the baseline/profile shell-out).
-    from ._workload_envs import prepare_agentx_runtime
-
-    _agx_err = prepare_agentx_runtime(env=env, inferencex_path=inferencex_path, config_path=config_path)
-    if _agx_err:
-        log.error("%s; failing this benchmark", _agx_err)
-        return (AGENTX_PREFLIGHT_RETURNCODE, "", _agx_err)
+    preparation_failure = prepare_benchmark_runtime(config_path, env)
+    if preparation_failure is not None:
+        return preparation_failure.returncode, "", preparation_failure.error
     # RESULT_DIR default; leaks are picked up by the salvage path.
     env["RESULT_DIR"] = result_dir or str(output_dir)
     # InferenceX ``run_lm_eval`` cleans ``$EVAL_RESULT_DIR`` after processing lm-eval output.
@@ -979,9 +851,9 @@ async def run_grid(
 
     _mn_ref_envs: dict[str, str] = {}
     if _mn_is_multi_node():
-        from ._workload_envs import resolve_reference_base
+        from ._workload_envs import resolve_reference_launch
 
-        _, _mn_ref_envs = resolve_reference_base()
+        _, _mn_ref_envs, _ = resolve_reference_launch()
 
     # Reported on entry, not on completion: ``_report_finished_variant`` only runs once a result has been appended, so
     # a first variant that hangs — or a branch that raises before reaching it — would emit nothing at all, which is
@@ -1146,7 +1018,8 @@ async def run_grid(
             lifecycle: dict[str, Any] = {"eligible": False}
             auto_warmup = False
             try:
-                cfg_path = _build_variant_yaml(
+                cfg_path = await asyncio.to_thread(
+                    _build_variant_yaml,
                     base_yaml_path,
                     base_extra_args,
                     variant,
@@ -1161,7 +1034,7 @@ async def run_grid(
                     base_unset_envs=base_unset_envs,
                 )
             except Exception as exc:  # noqa: BLE001
-                build_error = "yaml_build_error"
+                build_error = getattr(exc, "error_class", "yaml_build_error")
                 log.warning(
                     "grid_runner: variant %d/%d name=%s aborted: %s: %r",
                     i + 1,
@@ -1204,7 +1077,8 @@ async def run_grid(
                     lifecycle = resolve_lifecycle_params(cfg_path)
                     auto_warmup = bool(lifecycle.get("eligible"))
                     if auto_warmup:
-                        cfg_path = _build_variant_yaml(
+                        cfg_path = await asyncio.to_thread(
+                            _build_variant_yaml,
                             base_yaml_path,
                             base_extra_args,
                             variant,
@@ -1244,7 +1118,8 @@ async def run_grid(
                     "port": int(lifecycle.get("port") or 0),
                 }
                 try:
-                    warmup_cfg_path = _build_variant_yaml(
+                    warmup_cfg_path = await asyncio.to_thread(
+                        _build_variant_yaml,
                         base_yaml_path,
                         base_extra_args,
                         variant,
@@ -1365,12 +1240,14 @@ async def run_grid(
                 if warmup_run_ws is not None:
                     _, warmup_measurement = await _settled_measurement(
                         warmup_workspace,
+                        config_path=warmup_cfg_path,
                         subprocess_started_unix=warmup_started_unix,
                         settle_seconds=REPORT_SETTLE_SECONDS if warmup_rc == 0 else 0.0,
                     )
                 else:
                     warmup_measurement = extract_benchmark_measurement(
                         None,
+                        config_path=warmup_cfg_path,
                         workspace=warmup_workspace,
                         subprocess_started_unix=warmup_started_unix,
                     )
@@ -1776,11 +1653,8 @@ async def run_grid(
                 )
             if workspace is None:
                 harvest_tags = [f"harvested_leaked_artifact:{src}" for src, _ in harvested]
-                # An AgentX preflight abort never reaches Magpie, so of course no workspace exists -- but calling it
-                # ``no_benchmark_workspace`` erases the one fact that decides what to do next.
                 agentx_preflight_abort = rc == AGENTX_PREFLIGHT_RETURNCODE
                 if agentx_preflight_abort:
-                    # Same class the baseline path uses for the same abort, so both routes classify it identically.
                     no_ws_error_class = AGENTX_PREFLIGHT_ERROR_CLASS
                     no_ws_error_summary = (
                         redact_secret_values((stderr or "").strip()[-2000:]) or "AgentX preflight aborted the round"
@@ -1853,11 +1727,9 @@ async def run_grid(
                     break
                 continue
             report_path = workspace / "benchmark_report.json"
-            # The report is written during shutdown and the reader runs the moment the subprocess is reaped, so the read is
-            # worth waiting on however the process exited: a non-zero exit can still be a round that served its whole
-            # protocol, and that verdict is taken from this one read.
             report, measurement = await _settled_measurement(
                 workspace,
+                config_path=cfg_path,
                 subprocess_started_unix=variant_started_unix,
                 settle_seconds=REPORT_SETTLE_SECONDS,
             )
@@ -2132,6 +2004,7 @@ def _attach_grid_launch_evidence(
             "capability_unsupported",
             "yaml_build_error",
             "warmup_yaml_build_error",
+            SPECULATIVE_DECODING_PINNED,
         }:
             continue
         slot = output_root / f"variant_{idx:02d}_{_safe(grid[idx].name)}"
@@ -2142,13 +2015,19 @@ def _attach_grid_launch_evidence(
         if not actual_log and ready_server_log:
             actual_log = _existing_log_path(Path(ready_server_log))
         result.server_log_path = actual_log
-        evidence = build_launch_evidence(
-            config_path=config_path,
-            actual_server_log=actual_log,
-            framework=os.environ.get("FRAMEWORK", ""),
-            slot=slot,
-            caller_reused_ready_server=caller_reused_ready_server,
-        )
+        from hyperloom.inference_optimizer.agentx.report import agentx_measurement, native_launch_evidence
+
+        if result.benchmark_backend == "magpie_agentx" and workspace is not None:
+            measurement = agentx_measurement(_parse_report(workspace) or {})
+            evidence = native_launch_evidence(measurement, config_path, actual_server_log=actual_log)
+        else:
+            evidence = build_launch_evidence(
+                config_path=config_path,
+                actual_server_log=actual_log,
+                framework=os.environ.get("FRAMEWORK", ""),
+                slot=slot,
+                caller_reused_ready_server=caller_reused_ready_server,
+            )
         result.launch_evidence = evidence
         result.launch_evidence_path = persist_launch_evidence(evidence, slot=slot)
         declared_env = evidence["requested_server_env"].keys() - set(VLLM_SOURCE_ROOT_ENVS)
@@ -2224,23 +2103,16 @@ def _on_disk_stderr_tail(*dirs: Path, limit: int = 2000) -> str:
 
 
 __all__ = [
-    "DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC",
     "GridVariant",
     "ORCHESTRATOR_CANCELLED_CLASS",
     "SESSION_TIME_EXHAUSTED_CLASS",
     "StoppedByTheRun",
-    "SGLANG_WATCHDOG_TIMEOUT_ENV",
     "VariantResult",
     "apply_multi_node_invalid_variants",
     "apply_aiter_moe_pin_filter",
     "apply_runtime_benchmark_overrides",
     "reorder_grid_for_multi_node",
-    "inject_sglang_attention_backend",
-    "inject_sglang_context_length",
-    "inject_sglang_watchdog_timeout",
     "merge_server_args",
-    "remove_server_args",
-    "resolve_sglang_watchdog_timeout",
     "run_grid",
     "sanitize_result_dir",
     "sanitize_script_name",
@@ -2248,42 +2120,12 @@ __all__ = [
     "session_grid_bounds",
     "stopped_by_the_run",
     # Re-exported from the sibling modules to keep the namespace intact.
-    "_resolve_magpie_python",
     "_resolve_probe_python",
-    "coerce_extra_envs",
-    "compact_json_server_args",
-    "_SPACE_VALUE_FLAGS",
-    "_MULTI_VALUE_FLAGS",
-    "_VLLM_SINGLE_VALUE_FLAGS",
-    "dedup_vllm_server_args",
-    "_SGLANG_WATCHDOG_FLAG",
-    "_SGLANG_WATCHDOG_RE",
-    "DEFAULT_SGLANG_CONTEXT_HEADROOM_TOKENS",
-    "DEFAULT_SGLANG_CONTEXT_FLOOR_TOKENS",
-    "SGLANG_CONTEXT_HEADROOM_ENV",
-    "SGLANG_CONTEXT_FLOOR_ENV",
-    "_SGLANG_CONTEXT_LENGTH_FLAG",
-    "_SGLANG_CONTEXT_LENGTH_RE",
-    "_SGLANG_ATTN_BACKEND_FLAG",
-    "_SGLANG_ATTN_BACKEND_RE",
-    "_SGLANG_DUAL_CHUNK_BACKEND",
-    "_resolve_nonneg_int_env",
-    "resolve_sglang_context_cap",
-    "_resolve_dual_chunk_backend",
-    "_SGLANG_MOE_RUNNER_BACKEND_FLAG",
     "_SGLANG_MOE_RUNNER_BACKEND_RE",
     "moe_runner_requires_aiter",
     "resolve_skip_spec",
-    "_parse_skip_spec",
-    "_RE_CUDA_GRAPH_MAX_BS",
     "_MN_PARAMS_PRIORITY",
     "_MN_BACKENDS_PRIORITY",
-    "_mn_priority_index",
-    "_COMPATIBILITY_FLAG_RULES",
-    "_XDIT_ENV_BLACKLIST",
-    "_XDIT_ENV_COMBO_BLACKLIST",
-    "xdit_blacklist_reason",
-    "_detect_model_class",
     "apply_compatibility_filter",
     "apply_user_skip_list",
 ]

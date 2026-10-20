@@ -11,9 +11,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
+from hyperloom.common.io import JsonFormat, JsonLineFormat, WriteOptions
 from hyperloom.common.io import append_jsonl as _common_append_jsonl
 from hyperloom.common.io import atomic_write_json as _common_atomic_write_json
-from hyperloom.common.jsonio import read_json as _common_read_json
+from hyperloom.common.jsonio import read_json_strict as _common_read_json_strict
 from hyperloom.common.timeutil import now_iso
 
 from .errors import SessionMemoryError
@@ -131,10 +132,8 @@ class SessionMemory:
         _common_atomic_write_json(
             self._context_path(session_id),
             context,
-            ensure_ascii=False,
-            indent=2,
-            sort_keys=False,
-            make_parents=False,
+            fmt=JsonFormat(sort_keys=False, ensure_ascii=False),
+            options=WriteOptions(),
         )
 
     def merge_context(
@@ -188,7 +187,7 @@ class SessionMemory:
             "ts": now_iso(timespec="microseconds"),
             "decision_review": decision_review,
         }
-        _common_append_jsonl(self._decisions_path(session_id), record, ensure_ascii=False)
+        _common_append_jsonl(self._decisions_path(session_id), record, fmt=JsonLineFormat(ensure_ascii=False))
 
     # KB priors cache (per-scope+topic)
     def get_cached_priors(
@@ -224,7 +223,9 @@ class SessionMemory:
         path = self._priors_cache_path(session_id)
         cache = _read_object(path, default={})
         cache[cache_key] = {"ts": time.time(), "priors": list(priors)}
-        _common_atomic_write_json(path, cache, ensure_ascii=False, indent=2, sort_keys=False, make_parents=False)
+        _common_atomic_write_json(
+            path, cache, fmt=JsonFormat(sort_keys=False, ensure_ascii=False), options=WriteOptions()
+        )
 
     # Already-reviewed proposals
     def mark_reviewed(
@@ -246,7 +247,9 @@ class SessionMemory:
             "ts": now_iso(timespec="microseconds"),
             "decision_id": decision_id,
         }
-        _common_atomic_write_json(path, data, ensure_ascii=False, indent=2, sort_keys=False, make_parents=False)
+        _common_atomic_write_json(
+            path, data, fmt=JsonFormat(sort_keys=False, ensure_ascii=False), options=WriteOptions()
+        )
 
     def filter_unreviewed(
         self,
@@ -264,7 +267,7 @@ def _read_object(path: Path, *, default: dict[str, Any]) -> dict[str, Any]:
     if not path.exists():
         return default
     try:
-        return _common_read_json(path, require_dict=True, strict=True, empty_value=default)
+        return _common_read_json_strict(path, require_dict=True, empty_value=default)
     except (OSError, ValueError) as exc:
         raise SessionMemoryError(f"corrupt session memory file at {path}: {exc}") from exc
 

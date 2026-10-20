@@ -10,6 +10,7 @@ import logging
 import os
 import subprocess
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -17,7 +18,7 @@ from hyperloom.inference_optimizer.session.session_paths import runs_dir
 
 from ...enablement.recipe.credentials import sanitize_command_text
 from ...enablement.recipe.setup_allowlist import is_allowlisted_setup_command
-from ...enablement.recipe.setup_ledger import CMD_SANITIZED_CHARS, build_execution_row
+from ...enablement.recipe.setup_ledger import CMD_SANITIZED_CHARS, SetupExecution, build_execution_row
 from ..cancel_channel import cancel_scope_listener, stop_was_asked_for
 
 if TYPE_CHECKING:
@@ -100,14 +101,21 @@ def execute_setup_command(cmd: str, *, cwd: Path, env: dict[str, str], log_path:
     return proc.returncode == 0
 
 
+@dataclass(frozen=True)
+class SetupLedger:
+    """The durable ledger a replay records its executions in."""
+
+    round_task_id: str
+    seq_start: int
+    on_execution: Callable[[dict[str, Any]], None]
+
+
 def run_setup_commands(
     commands: list[tuple[str, str]],
     *,
     cwd: Path,
     log_dir: Path,
-    round_task_id: str,
-    seq_start: int,
-    on_execution: Callable[[dict[str, Any]], None],
+    ledger: SetupLedger,
 ) -> list[str]:
     """Replay enablement setup commands (installs) before boot.
 
@@ -126,16 +134,19 @@ def run_setup_commands(
             :func:`refused_setup_commands`.
         cwd: Working directory for the commands.
         log_dir: Directory to write ``enablement_setup.log`` into.
-        round_task_id: The round the executions belong to.
-        seq_start: Highest ledger ``seq`` already durable, so occurrence
-            identity stays monotonic across rounds.
-        on_execution: Persists one ledger row as its command finishes.
+        ledger: The round the executions belong to, the highest ledger
+            ``seq`` already durable (so occurrence identity stays monotonic
+            across rounds), and the callback persisting one ledger row as its
+            command finishes.
 
     Returns:
         list[str]: The commands that ran with rc==0, in replay order. Every
         ATTEMPTED command reaches ``on_execution`` as a ledger row, which is
         where a failed one is recorded.
     """
+    round_task_id = ledger.round_task_id
+    seq_start = ledger.seq_start
+    on_execution = ledger.on_execution
     applied: list[str] = []
     recorded = 0
     log_path = log_dir / "enablement_setup.log"
@@ -152,12 +163,14 @@ def run_setup_commands(
         # shared venv at all.
         on_execution(
             build_execution_row(
-                seq=seq_start + recorded,
-                round_task_id=round_task_id,
-                cmd_index=index,
-                cmd=cmd,
-                source=source,
-                outcome=outcome,
+                SetupExecution(
+                    seq=seq_start + recorded,
+                    round_task_id=round_task_id,
+                    cmd_index=index,
+                    cmd=cmd,
+                    source=source,
+                    outcome=outcome,
+                ),
                 env=env,
             )
         )
@@ -226,8 +239,10 @@ async def replay_setup_commands(
             commands,
             cwd=session_dir,
             log_dir=runs_dir(session_dir, "integrate_patch", attempt.task_id),
-            round_task_id=attempt.specialist_task_id,
-            seq_start=shared_state.enablement.last_execution_seq(),
-            on_execution=lambda row: _append_setup_execution(shared_state, row, session_dir=session_dir),
+            ledger=SetupLedger(
+                round_task_id=attempt.specialist_task_id,
+                seq_start=shared_state.enablement.last_execution_seq(),
+                on_execution=lambda row: _append_setup_execution(shared_state, row, session_dir=session_dir),
+            ),
         )
     return None

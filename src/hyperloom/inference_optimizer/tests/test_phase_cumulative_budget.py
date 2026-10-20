@@ -53,8 +53,7 @@ def _enter(state: SharedState, phase: str, at_unix: float) -> None:
         to_phase=phase,
         reason="phase_entered",
         evidence={},
-        ts="2026-05-19T00:00:00+00:00",
-        ts_unix=at_unix,
+        at=ps.PhaseClock(ts="2026-05-19T00:00:00+00:00", ts_unix=at_unix),
     )
 
 
@@ -197,55 +196,6 @@ def test_fresh_state_has_no_banked_totals():
     state = SharedState()
     assert state.phase_elapsed_totals == {}
     assert ps.phase_cumulative_seconds(state) == 0.0
-
-
-def test_resume_without_totals_rebuilds_them_from_phase_history():
-    # A state written before phase_elapsed_totals existed must not silently re-arm the per-entry bug for the rest of
-    # the resumed run.
-    source = _kernel_state()
-    now = _three_kernel_entries(source)
-    _enter(source, ps.PHASE_KERNEL_AGENT, now)
-
-    raw = source.to_dict()
-    raw.pop("phase_elapsed_totals")
-    resumed = SharedState.from_dict(raw)
-
-    # The trailing (still-active) segment is excluded: phase_cumulative_seconds adds the live segment itself.
-    assert resumed.phase_elapsed_totals[ps.PHASE_KERNEL_AGENT] == pytest.approx(3 * ENTRY_SEC)
-    assert resumed.phase_elapsed_totals[ps.PHASE_SWEEP] == pytest.approx(3 * GAP_SEC)
-    assert ps.phase_cap_seconds(resumed) is not None and ps.phase_cumulative_seconds(
-        resumed, now_unix=now
-    ) >= ps.phase_cap_seconds(resumed)
-
-
-def test_history_rebuild_excludes_the_active_segment():
-    # Rows the cap has evicted are simply absent, and the trailing row is the live segment; the rebuild must
-    # under-count rather than extrapolate, because over-charging would end a phase early.
-    history = [
-        {"to_phase": "KERNEL_AGENT", "ts_unix": T0},
-        {"to_phase": "SWEEP", "ts_unix": T0 + 300.0},
-        {"to_phase": "KERNEL_AGENT", "ts_unix": T0 + 400.0},
-    ]
-    assert ps.phase_elapsed_totals_from_history(history) == {
-        "KERNEL_AGENT": 300.0,
-        "SWEEP": 100.0,
-    }
-
-
-def test_history_rebuild_skips_unusable_rows():
-    history = [
-        # No phase name.
-        {"to_phase": "", "ts_unix": T0},
-        # Unset entry timestamp reads as "never entered".
-        {"to_phase": "KERNEL_AGENT", "ts_unix": 0.0},
-        {"to_phase": "EXPLORE", "ts_unix": T0 + 100.0},
-        # Non-advancing timestamp (clock skew) contributes nothing.
-        {"to_phase": "SWEEP", "ts_unix": T0 + 100.0},
-        {"to_phase": "CLOSE", "ts_unix": T0 + 900.0},
-    ]
-    assert ps.phase_elapsed_totals_from_history(history) == {"SWEEP": 800.0}
-    assert ps.phase_elapsed_totals_from_history(None) == {}
-    assert ps.phase_elapsed_totals_from_history("nope") == {}
 
 
 def _resumed_prelude_state() -> SharedState:

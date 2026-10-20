@@ -75,6 +75,19 @@ class DriverRun:
         return self.output[-_OUTPUT_TAIL_CHARS:].strip()
 
 
+@dataclass(frozen=True)
+class DriverMode:
+    """The mode flags one driver invocation runs with and, for a timed mode, its warmup and timed iterations."""
+
+    args: tuple[str, ...] = ()
+    warmup: int | None = None
+    iters: int | None = None
+
+
+_CANDIDATE_BENCH = DriverMode((BENCH_FLAG,), warmup=10, iters=30)
+_CANDIDATE_PROBE = DriverMode((BENCH_FLAG,), warmup=1, iters=1)
+
+
 @dataclass
 class DriverReading:
     """Everything the contract reads out of one driver invocation's output."""
@@ -184,18 +197,16 @@ def export_driver_environment(spec: RewriteSpec) -> None:
 def run_driver(
     spec: RewriteSpec,
     driver_path: str,
-    mode_args: list[str],
+    mode: DriverMode,
     *,
-    warmup: int | None = None,
-    iters: int | None = None,
     timeout_sec: int,
 ) -> DriverRun:
     """Invoke the driver once with the producer-owned environment."""
-    cmd = [sys.executable, str(driver_path), *mode_args]
-    if warmup is not None:
-        cmd += ["--warmup", str(warmup)]
-    if iters is not None:
-        cmd += ["--iters", str(iters)]
+    cmd = [sys.executable, str(driver_path), *mode.args]
+    if mode.warmup is not None:
+        cmd += ["--warmup", str(mode.warmup)]
+    if mode.iters is not None:
+        cmd += ["--iters", str(mode.iters)]
     env = {
         **os.environ,
         **protocol.driver_environment(
@@ -294,9 +305,7 @@ def preflight_reference(
     run = run_driver(
         spec,
         driver_path,
-        [REF_BENCH_FLAG],
-        warmup=warmup,
-        iters=iters,
+        DriverMode((REF_BENCH_FLAG,), warmup=warmup, iters=iters),
         timeout_sec=timeout_sec,
     )
     if run.timed_out:
@@ -349,14 +358,7 @@ def probe_candidate_arguments(
     timeout_sec: int,
 ) -> PreflightReport:
     """Check the candidate mode while the candidate is still an unbuilt stub."""
-    run = run_driver(
-        spec,
-        driver_path,
-        [BENCH_FLAG],
-        warmup=1,
-        iters=1,
-        timeout_sec=timeout_sec,
-    )
+    run = run_driver(spec, driver_path, _CANDIDATE_PROBE, timeout_sec=timeout_sec)
     if run.timed_out:
         return _failed(
             CANDIDATE_MODE_TIMEOUT,
@@ -404,19 +406,10 @@ def preflight_candidate(
     driver_path: str,
     *,
     reference_case_ids: tuple[str, ...] = (),
-    warmup: int = 10,
-    iters: int = 30,
     timeout_sec: int,
 ) -> PreflightReport:
     """Measure the ported candidate and prove it covered the reference cases."""
-    run = run_driver(
-        spec,
-        driver_path,
-        [BENCH_FLAG],
-        warmup=warmup,
-        iters=iters,
-        timeout_sec=timeout_sec,
-    )
+    run = run_driver(spec, driver_path, _CANDIDATE_BENCH, timeout_sec=timeout_sec)
     if run.timed_out:
         return _failed(
             CANDIDATE_MODE_TIMEOUT,

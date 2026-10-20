@@ -20,6 +20,7 @@ from hyperloom.inference_optimizer.session.resume_guard import (
     CleanupConfirmationError,
     ResumeBlocked,
     confirm_scope_gone,
+    confirm_task_stopped,
     ensure_resume_safe,
 )
 from hyperloom.orchestrator.bus.storage.schema import ensure_schema
@@ -126,6 +127,34 @@ def test_lost_scope_blocks_resume_until_confirmed_then_work_is_redone(tmp_path, 
     assert record["owner_scope"] == LOST and record["confirmed_by_scope"] == HERE
     assert record["confirmation_reason"] == REASON and record["operator"]
     assert record["cancelled_tasks"] == sorted(running)
+
+
+def test_lane_less_close_task_needs_confirm_stopped_after_the_scope_is_confirmed(tmp_path):
+    """A pod lost during CLOSE: the close step ran without a lane, so it holds no scoped lease."""
+    path = _session(tmp_path, LOST_SHAPES["explore"])
+    _execute(
+        path,
+        "INSERT INTO tasks (task_id, kind, state, params, idempotency_key, requires_lanes, history,"
+        " created_at, updated_at) VALUES ('report-1', 'report', 'running', '{}', 'report-1', '[]', ?, ?, ?)",
+        (json.dumps([{"ts": PAST, "from": "queued", "to": "running"}]), PAST, PAST),
+    )
+    confirmed = confirm_scope_gone(tmp_path, owner_scope=LOST, reason=REASON, current_scope=HERE)
+    assert [task["task_id"] for task in confirmed["tasks"]] == ["explore-1"]
+
+    with pytest.raises(ResumeBlocked) as blocked:
+        ensure_resume_safe(tmp_path, owner_scope=HERE)
+    message = str(blocked.value)
+    assert "task='report-1' lane='unknown' holder='unknown'" in message
+    assert "other owner scopes:" not in message
+    assert "legacy" not in message
+    assert "For a listed task that names no owner scope" in message
+    assert "--confirm-stopped <task-id>" in message
+
+    confirm_task_stopped(tmp_path, task_id="report-1", reason=REASON)
+
+    ensure_resume_safe(tmp_path, owner_scope=HERE)
+    states = {row["task_id"]: row["state"] for row in _rows(path, "SELECT task_id, state FROM tasks")}
+    assert states["report-1"] == "cancelled"
 
 
 @pytest.mark.parametrize("round_expires_unix", [1.0, 32503680000.0])

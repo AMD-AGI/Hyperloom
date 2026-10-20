@@ -56,6 +56,18 @@ class TestTupleLayout:
         assert key["use_g1u1"] == "1" and key["doweight_stage1"] == "0"
         assert key["dtype"] == "torch.bfloat16"  # quotes stripped
 
+    def test_a_dispatch_that_names_its_kernels_is_read(self):
+        named = _DISPATCH.replace(
+            "2stage default",
+            "2stage (kernelName1='flydsl_moe1_afp4_wfp4_bf16_t128x128x256_bnt0_fp4', "
+            "kernelName2='flydsl_moe2_layout_afp4_wfp4_bf16_t128x128x128_atomic_sbm128')",
+        )
+        rep = _log(named.format(tok=16))
+        (key,) = ev.moe_dispatch_keys(rep)
+        assert key["tokens"] == [16]
+        assert key["miss_count"] == 0
+        assert rep["dispatch"]["moe"]["stages_seen"] == ["2stage"]
+
     def test_a_tuple_without_the_arch_prefix_still_yields_its_token(self):
         # Builds that print no arch start the tuple at cu_num.
         rep = _log("[aiter] [fused_moe] using 2stage default for (304, 32, 4096, 1536, 8, 2)")
