@@ -22,7 +22,7 @@ from kernelforge.loop.search_policy import (
     SEARCH_MODE_EXPLOIT,
     SEARCH_MODES,
 )
-from kernelforge.durable_io import atomic_write_text
+from kernelforge.tools.durable_io import atomic_write_text
 
 log = logging.getLogger(__name__)
 
@@ -651,7 +651,7 @@ class LoopStateStore:
         self._recent_results: collections.deque[dict] = collections.deque(maxlen=_RECENT_RESULT_CACHE)
         try:
             self.root.mkdir(parents=True, exist_ok=True)
-        except Exception as e:  # noqa: BLE001 - best-effort
+        except OSError as e:
             self._mark_degraded("create root", e)
         self._prime_recent()
 
@@ -669,17 +669,14 @@ class LoopStateStore:
 
     def _prime_recent(self) -> None:
         """Seed the in-memory recent-event caches from disk (once, at init)."""
-        try:
-            events = self.read_events()
-            for event in events[-_RECENT_CACHE:]:
-                self._recent.append(event)
-            # Scanned in full rather than from the tail above: an outcome older than the last ``_RECENT_CACHE`` events
-            # is still inside the outcome window, and the deque keeps only what fits.
-            for event in events:
-                if event.get("type") == "iteration_result":
-                    self._recent_results.append(event)
-        except Exception as e:  # noqa: BLE001 - best-effort
-            self._mark_degraded("prime recent cache", e)
+        events = self.read_events()
+        for event in events[-_RECENT_CACHE:]:
+            self._recent.append(event)
+        # Scanned in full rather than from the tail above: an outcome older than the last ``_RECENT_CACHE`` events
+        # is still inside the outcome window, and the deque keeps only what fits.
+        for event in events:
+            if event.get("type") == "iteration_result":
+                self._recent_results.append(event)
 
     def load(self) -> RunState:
         """Load the current persisted state, or a fresh state when absent."""
@@ -698,7 +695,7 @@ class LoopStateStore:
                 self.state_path,
                 json.dumps(state.to_dict(), indent=2, sort_keys=True),
             )
-        except Exception as e:  # noqa: BLE001 - best-effort
+        except (OSError, TypeError, ValueError) as e:
             self._mark_degraded(f"save {self.state_path}", e)
 
     def append_event(self, event: dict) -> None:
@@ -714,7 +711,7 @@ class LoopStateStore:
                 f.write(json.dumps(event, sort_keys=True) + "\n")
                 f.flush()
                 os.fsync(f.fileno())
-        except Exception as e:  # noqa: BLE001 - best-effort
+        except (OSError, TypeError, ValueError) as e:
             self._mark_degraded(f"append {self.events_path}", e)
 
     def read_events(self) -> list[dict]:
@@ -729,7 +726,7 @@ class LoopStateStore:
                     continue
                 try:
                     event = json.loads(line)
-                except Exception as e:  # noqa: BLE001 - skip a bad line
+                except ValueError as e:  # skip a bad line
                     log.debug("run_state: skipping malformed event line: %s", e)
                     continue
                 event_type = event.get("type") if isinstance(event, dict) else None
@@ -748,7 +745,7 @@ class LoopStateStore:
                         "run_state: skipping invalid event record: %r",
                         event,
                     )
-        except Exception as e:  # noqa: BLE001 - best-effort
+        except (OSError, ValueError) as e:
             self._mark_degraded(f"read {self.events_path}", e)
         return out
 

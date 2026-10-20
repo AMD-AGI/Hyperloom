@@ -34,7 +34,7 @@ from hyperloom.inference_optimizer.grid_server_args import (
     merge_server_args,
     tokenize_server_args_preserving_json,
 )
-from ..actions.executors.integrate_patch import PATCH_SOURCE_UPSTREAM_PR
+from ..actions.executors.integrate_patch import PATCH_SOURCE_UPSTREAM_PR, RESULT_BENCHED
 from ..specialists.profile import is_authoring_specialist
 from hyperloom.common.framework_arm import LOCAL_EXPLORE_CANDIDATE_PREFIX
 from hyperloom.orchestrator.lever import LEVER_SOURCE_PATCH, LEVER_UPSTREAM_PR, patch_lever_kind, patch_owner_phase
@@ -611,6 +611,7 @@ def _record_source_attempt(
         },
         decision=attempt.status,
         adopted=attempt.adopted,
+        benched=bool(result.get(RESULT_BENCHED)),
         # What stood behind the adoption, on the same rule the config arm
         # writes it under: a KEEP no accuracy gate ruled on rests on
         # throughput alone, a weaker claim that must not read alike. Only
@@ -1145,7 +1146,7 @@ class FrameworkPhase(ProposalBench):
                     state.framework_agent_specialist_candidate_map = {}
                 state.framework_agent_specialist_candidate_map[spec_tid] = cand_id
                 state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.debug("FRAMEWORK %s: specialist->candidate map write failed", label, exc_info=True)
         return spec_tid
 
@@ -1325,7 +1326,7 @@ class FrameworkPhase(ProposalBench):
             )
             try:
                 state.save(self.session_dir)
-            except Exception:
+            except OSError:
                 log.debug("authored_lane: save after cap stamp failed", exc_info=True)
             return
 
@@ -1349,7 +1350,7 @@ class FrameworkPhase(ProposalBench):
         state.apply_fail_retry_pending = pending
         try:
             state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.debug("authored_lane: save after retry-pending failed", exc_info=True)
 
     async def _enqueue_author_specialist(self, retry: AuthoringRetry) -> str:
@@ -1508,7 +1509,7 @@ class FrameworkPhase(ProposalBench):
             )
         try:
             state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.debug("drain_apply_fail: save failed", exc_info=True)
 
     @staticmethod
@@ -1891,9 +1892,6 @@ class FrameworkPhase(ProposalBench):
             # Source patches require the accuracy gate for KEEP.
             "require_accuracy_for_keep": True,
             "accuracy_baseline": float(state.baseline_accuracy or 0.0),
-            # The lane templates from the shipped default config, which materializes RUN_EVAL=true and would override
-            # the session's choice.
-            "disable_run_eval": bool(state.eval_disabled),
         }
         idem = f"framework:{candidate.get('batch_id', '')}:{cand_id}"
         lanes, ttl = self._coord.dispatcher.registry_lanes_ttl("integrate_patch")
@@ -2052,7 +2050,7 @@ class FrameworkPhase(ProposalBench):
         )
         try:
             self.shared_state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.exception(
                 "save after framework_agent candidate submit failed for candidate=%s",
                 cand_id,
@@ -2152,7 +2150,7 @@ class FrameworkPhase(ProposalBench):
         )
         try:
             state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.exception(
                 "FRAMEWORK: save after progress stamp failed candidate=%s status=%s",
                 cand_id,
@@ -2317,7 +2315,7 @@ class FrameworkPhase(ProposalBench):
         )
         try:
             self.shared_state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.exception(
                 "save after re-author dispatch failed candidate=%s",
                 cand_id,
@@ -3130,7 +3128,7 @@ class FrameworkPhase(ProposalBench):
         )
         try:
             self.shared_state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.exception("save after integrate-review autosubmit failed for task=%s", sid)
         return pending
 

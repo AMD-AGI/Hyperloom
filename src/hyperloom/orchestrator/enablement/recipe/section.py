@@ -187,6 +187,44 @@ def _delivered_payloads(
     return deliverable(session_dir, referenced)
 
 
+def _recipe_accepted_config(enablement: dict[str, Any], state: dict[str, Any], session_dir: Path) -> dict[str, Any]:
+    """The accepted config, pointed at the archived file it was read from.
+
+    Empty when nothing was accepted. The archived copy wins over the probe's
+    own config: it is the one the session bundle ships.
+    """
+    from .projections import project_accepted_config
+
+    accepted_config = project_accepted_config(enablement.get("accepted_config"))
+    if not accepted_config:
+        return {}
+    archived = str(_eg(state, "accepted_config_path", "") or "")
+    config_path = archived or str(_eg(state, "probe_config_path", "") or "")
+    if config_path:
+        accepted_config["config_path"] = _rel(Path(config_path), session_dir) or config_path
+    return accepted_config
+
+
+def _recipe_projections(enablement: dict[str, Any]) -> dict[str, Any]:
+    """The portable projections of the accepted stack, empty values omitted."""
+    from .projections import project_roots, project_runtime_provenance, project_source_snapshots
+
+    candidates = (
+        ("roots", project_roots(enablement.get("roots"))),
+        ("source_snapshots", project_source_snapshots(enablement.get("source_snapshots"))),
+        ("accepted_stack_targets", enablement.get("accepted_stack_targets") or {}),
+        ("base_sha", str(enablement.get("base_sha") or "") or None),
+        ("runtime_provenance", project_runtime_provenance(enablement)),
+        # The interpreter is an absolute path on this host; the setup script reads it from state.
+        (
+            "environment_closure",
+            {k: v for k, v in (enablement.get("environment_closure") or {}).items() if k != "interpreter"},
+        ),
+        ("installed_versions_at_keep", enablement.get("installed_versions_at_keep") or None),
+    )
+    return {key: value for key, value in candidates if value}
+
+
 def _collect_recipe(
     out: dict[str, Any],
     state: dict[str, Any],
@@ -201,13 +239,7 @@ def _collect_recipe(
     meaning, and a consumer must read it as insufficient.
     """
     from . import build_recipe_steps, evaluate_replay_sufficiency
-    from .projections import (
-        project_accepted_config,
-        project_launch_evidence,
-        project_roots,
-        project_runtime_provenance,
-        project_source_snapshots,
-    )
+    from .projections import project_launch_evidence
 
     enablement = _recipe_state(state)
     steps = build_recipe_steps(enablement, attempt_summary=build_attempt_summary)
@@ -218,31 +250,13 @@ def _collect_recipe(
         # -- a portability fix that silently costs the steps their targets. The
         # published value is the only part a consumer reads.
         out["recipe_steps"] = [_portable_step(st, session_dir) for st in steps]
-    accepted_config = project_accepted_config(enablement.get("accepted_config"))
+    accepted_config = _recipe_accepted_config(enablement, state, session_dir)
     if accepted_config:
-        archived = str(_eg(state, "accepted_config_path", "") or "")
-        config_path = archived or str(_eg(state, "probe_config_path", "") or "")
-        if config_path:
-            accepted_config["config_path"] = _rel(Path(config_path), session_dir) or config_path
         out["accepted_config"] = accepted_config
     evidence, argv_refused = project_launch_evidence(enablement.get("launch_evidence"))
     out["accepted_config_source"] = str(enablement.get("accepted_config_source") or "") or None
     out["launch_evidence"] = evidence
-    for key, value in (
-        ("roots", project_roots(enablement.get("roots"))),
-        ("source_snapshots", project_source_snapshots(enablement.get("source_snapshots"))),
-        ("accepted_stack_targets", enablement.get("accepted_stack_targets") or {}),
-        ("base_sha", str(enablement.get("base_sha") or "") or None),
-        ("runtime_provenance", project_runtime_provenance(enablement)),
-        # The interpreter is an absolute path on this host; the setup script reads it from state.
-        (
-            "environment_closure",
-            {k: v for k, v in (enablement.get("environment_closure") or {}).items() if k != "interpreter"},
-        ),
-        ("installed_versions_at_keep", enablement.get("installed_versions_at_keep") or None),
-    ):
-        if value:
-            out[key] = value
+    out.update(_recipe_projections(enablement))
     # Tri-state observations: ``None`` (could not be read) and ``[]`` (clean)
     # mean opposite things, so they are copied through a sentinel rather than
     # dropped when falsy. A session that predates the field stays absent.
@@ -383,79 +397,62 @@ def _portable_step(step: dict[str, Any], session_dir: Path) -> dict[str, Any]:
     return out
 
 
-def _collect_landed_stack(out: dict[str, Any], state: dict[str, Any], *, session_dir: Path) -> None:
-    """Emit what the lane landed: patches, artifacts, stack action and setup."""
-    from .steps import root_ids_by_path
+def _portable_kept_rounds(rounds: list[Any], session_dir: Path) -> list[dict[str, Any]]:
+    """Reduce each kept round to the linkage a replay joins on.
 
-    kept_patches_raw = _eg(state, "kept_patches")
-    if isinstance(kept_patches_raw, list) and kept_patches_raw:
-        # Same portability rule as ``kept_rounds`` below, and for the same
-        # reason: ``_rel`` falls back to ``str(path)``, so ``_rel(p) or p`` would
-        # never fall through and a patch outside the session would travel as an
-        # authoring-host absolute path. It would also put the same
-        # patch in the recipe twice under two different names -- one of them
-        # naming a directory the consumer does not have.
-        out["kept_patches"] = [_portable_patch_ref(str(p), session_dir) for p in kept_patches_raw]
-    # Exported beside the patches, not only fed to the projection: a build linked
-    # through a round's durable identity is reachable only from here once the
-    # one-shot ``last_specialist_task_id`` has been consumed, which is the normal
-    # state by the time a build lands.
-    kept_rounds_raw = _eg(state, "kept_rounds")
-    if isinstance(kept_rounds_raw, list) and kept_rounds_raw:
-        out["kept_rounds"] = [
-            {
-                # The linkage the fallback joins on, and nothing host-local with
-                # it. ``_push_kept_round`` stores authoring-workspace patch paths
-                # and raw artifact dicts carrying source and target; copied
-                # verbatim they would put absolute paths from this machine into
-                # a recipe meant to be replayed on another -- the same reason
-                # ``kept_patches`` is relativized and ``kept_artifacts`` reduced
-                # to its normalized fields a few lines below.
-                "task_id": str(r.get("task_id") or ""),
-                # Session-relative where it can be, the bare name otherwise --
-                # never the authoring absolute path. ``_push_kept_round`` notes
-                # that the replay sources each round's patches from the archive
-                # by name, so the name is the whole linkage and the directory it
-                # sat in on this machine is not part of it. Checked explicitly
-                # rather than through ``_rel``'s falsy branch: ``_rel`` falls
-                # back to ``str(path)``, so ``or`` never fires and the absolute
-                # path would travel exactly as if nothing had been done.
-                "patches": [_portable_patch_ref(str(p), session_dir) for p in (r.get("patches") or [])],
-                # ``rel_target`` when the producer recorded one; otherwise the
-                # target's own name. Falling back to ``target`` verbatim put an
-                # install path from this machine into the recipe, which is the
-                # same leak this projection exists to close.
-                "artifacts": [
-                    str(a.get("rel_target") or "") or Path(str(a.get("target") or "")).name
-                    for a in (r.get("artifacts") or [])
-                    if isinstance(a, dict) and (a.get("rel_target") or a.get("target"))
-                ],
-            }
-            for r in kept_rounds_raw
-            if isinstance(r, dict)
-        ]
-    kept_artifacts_raw = _eg(state, "kept_artifacts")
-    framework_root = str(_eg(state, "framework_root", "") or "")
-    if isinstance(kept_artifacts_raw, list) and kept_artifacts_raw:
-        root_ids = root_ids_by_path({"roots": _eg(state, "roots")})
-        out["kept_artifacts"] = [
-            {
-                # ``rel_target`` and ``root_id`` are the portable pair, and the
-                # only two the rules read. ``target`` is an install path on this
-                # machine: shipped verbatim it named a directory the consumer
-                # does not have, for a field nothing consults.
-                "rel_target": str(a.get("rel_target") or ""),
-                "kind": str(a.get("kind") or ""),
-                "root_id": root_ids.get(str(a.get("root") or "") or framework_root) or None,
-            }
-            for a in kept_artifacts_raw
-            if isinstance(a, dict) and a.get("target")
-        ]
-    if framework_root:
-        out["framework_root"] = framework_root
-    kept_stack_action_raw = _eg(state, "kept_stack_action")
-    if isinstance(kept_stack_action_raw, dict) and kept_stack_action_raw:
-        out["kept_stack_action"] = _stack_action_summary(kept_stack_action_raw)
+    ``_push_kept_round`` stores authoring-workspace patch paths and raw artifact
+    dicts carrying source and target; copied verbatim they would put absolute
+    paths from this machine into a recipe meant to be replayed on another.
+    A round's patches are sourced from the archive by name, so the name is the
+    whole linkage and the directory it sat in on this machine is not part of it.
+    Checked explicitly rather than through ``_rel``'s falsy branch: ``_rel``
+    falls back to ``str(path)``, so ``or`` never fires and the absolute path
+    would travel exactly as if nothing had been done.
+
+    An artifact travels as its ``rel_target`` where the producer recorded one
+    and as the target's own name otherwise; ``target`` verbatim is an install
+    path on this machine.
+    """
+    return [
+        {
+            "task_id": str(r.get("task_id") or ""),
+            "patches": [_portable_patch_ref(str(p), session_dir) for p in (r.get("patches") or [])],
+            "artifacts": [
+                str(a.get("rel_target") or "") or Path(str(a.get("target") or "")).name
+                for a in (r.get("artifacts") or [])
+                if isinstance(a, dict) and (a.get("rel_target") or a.get("target"))
+            ],
+        }
+        for r in rounds
+        if isinstance(r, dict)
+    ]
+
+
+def _portable_kept_artifacts(
+    artifacts: list[Any],
+    *,
+    root_ids: Mapping[str, str],
+    framework_root: str,
+) -> list[dict[str, Any]]:
+    """Reduce each kept artifact to the portable pair the replay rules read.
+
+    ``rel_target`` and ``root_id`` are the only two the rules consult.
+    ``target`` is an install path on this machine: shipped verbatim it named a
+    directory the consumer does not have, for a field nothing reads.
+    """
+    return [
+        {
+            "rel_target": str(a.get("rel_target") or ""),
+            "kind": str(a.get("kind") or ""),
+            "root_id": root_ids.get(str(a.get("root") or "") or framework_root) or None,
+        }
+        for a in artifacts
+        if isinstance(a, dict) and a.get("target")
+    ]
+
+
+def _collect_setup_record(out: dict[str, Any], state: dict[str, Any], *, session_dir: Path) -> None:
+    """Emit the setup the lane ran and the session files that record it."""
     for key, name, project in (
         ("candidate_refs", "candidate_refs", str),
         ("setup_commands", "setup_commands", str),
@@ -480,6 +477,41 @@ def _collect_landed_stack(out: dict[str, Any], state: dict[str, Any], *, session
         )
 
 
+def _collect_landed_stack(out: dict[str, Any], state: dict[str, Any], *, session_dir: Path) -> None:
+    """Emit the stack the lane landed: patches, rounds, artifacts and acquisition."""
+    from .steps import root_ids_by_path
+
+    kept_patches_raw = _eg(state, "kept_patches")
+    if isinstance(kept_patches_raw, list) and kept_patches_raw:
+        # Same portability rule as ``kept_rounds`` below, and for the same
+        # reason: ``_rel`` falls back to ``str(path)``, so ``_rel(p) or p`` would
+        # never fall through and a patch outside the session would travel as an
+        # authoring-host absolute path. It would also put the same
+        # patch in the recipe twice under two different names -- one of them
+        # naming a directory the consumer does not have.
+        out["kept_patches"] = [_portable_patch_ref(str(p), session_dir) for p in kept_patches_raw]
+    # Exported beside the patches, not only fed to the projection: a build linked
+    # through a round's durable identity is reachable only from here once the
+    # one-shot ``last_specialist_task_id`` has been consumed, which is the normal
+    # state by the time a build lands.
+    kept_rounds_raw = _eg(state, "kept_rounds")
+    if isinstance(kept_rounds_raw, list) and kept_rounds_raw:
+        out["kept_rounds"] = _portable_kept_rounds(kept_rounds_raw, session_dir)
+    kept_artifacts_raw = _eg(state, "kept_artifacts")
+    framework_root = str(_eg(state, "framework_root", "") or "")
+    if isinstance(kept_artifacts_raw, list) and kept_artifacts_raw:
+        out["kept_artifacts"] = _portable_kept_artifacts(
+            kept_artifacts_raw,
+            root_ids=root_ids_by_path({"roots": _eg(state, "roots")}),
+            framework_root=framework_root,
+        )
+    if framework_root:
+        out["framework_root"] = framework_root
+    kept_stack_action_raw = _eg(state, "kept_stack_action")
+    if isinstance(kept_stack_action_raw, dict) and kept_stack_action_raw:
+        out["kept_stack_action"] = _stack_action_summary(kept_stack_action_raw)
+
+
 def _collect_eval_trigger(out: dict[str, Any], state: dict[str, Any], *, session_dir: Path) -> None:
     """Emit the eval-origin trigger the round was opened against."""
     out["trigger_kind"] = str(_eg(state, "baseline_eval_kind", "") or "")
@@ -496,8 +528,8 @@ def _collect_eval_trigger(out: dict[str, Any], state: dict[str, Any], *, session
         out["trigger_evidence_excerpt"] = evidence[-_ENABLEMENT_LOG_EXCERPT_CHARS:]
 
 
-def _collect_runtimes_and_builds(out: dict[str, Any], state: dict[str, Any]) -> None:
-    """Emit the runtimes the lane provisioned and the targeted builds it ran."""
+def _collect_runtimes(out: dict[str, Any], state: dict[str, Any]) -> None:
+    """Emit the runtimes the lane provisioned, marking the one it promoted."""
     active_runtime_raw = _eg(state, "active_runtime")
     have_active = isinstance(active_runtime_raw, dict) and bool(active_runtime_raw)
     active_root = str(active_runtime_raw.get("venv_root") or "") if have_active else ""
@@ -510,8 +542,14 @@ def _collect_runtimes_and_builds(out: dict[str, Any], state: dict[str, Any]) -> 
             for r in attempt_runtimes_raw
             if isinstance(r, dict)
         ]
-    # The failure classification moved onto the recorder's attempt row with the
-    # round rework; a pre-rework state document still carries it here.
+
+
+def _collect_build_attempts(out: dict[str, Any], state: dict[str, Any]) -> None:
+    """Emit the targeted builds the lane ran and how the last one failed.
+
+    ``failure_kind`` moved onto the recorder's attempt row with the round
+    rework; a pre-rework state document still carries it here.
+    """
     failure_kind = str(_eg(state, "failure_kind", "") or "")
     if failure_kind:
         out["failure_kind"] = failure_kind
@@ -550,9 +588,11 @@ def collect_enablement(
         return {}
     _collect_round_identity(out, state)
     _collect_landed_stack(out, state, session_dir=session_dir)
+    _collect_setup_record(out, state, session_dir=session_dir)
     if out["origin"] == "eval":
         _collect_eval_trigger(out, state, session_dir=session_dir)
-    _collect_runtimes_and_builds(out, state)
+    _collect_runtimes(out, state)
+    _collect_build_attempts(out, state)
     _collect_recipe(out, state, session_dir=session_dir)
     return out
 

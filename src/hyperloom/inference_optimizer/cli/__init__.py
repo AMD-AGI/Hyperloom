@@ -119,7 +119,7 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
 )
 from hyperloom.inference_optimizer.breakdown.stop_reasons import SUPERVISOR_RESTART_REASON
 
-from ..session.lock import SessionAlreadyRunning, SessionLock
+from ..session.lock import SessionAlreadyRunning, SessionLock, SessionLockPathError
 from ..session.paths import (
     ENV_USER_DATA_PATH,
     asset_system_prompts_dir,
@@ -491,7 +491,7 @@ def _probe_llm_catalog(
                 headers=headers,
                 timeout=_CATALOG_REQUEST_TIMEOUT_SEC,
             )
-        except Exception as exc:  # noqa: BLE001
+        except (httpx.HTTPError, httpx.InvalidURL) as exc:
             last_err = f"{type(exc).__name__}: {exc}"
             print(f"Preflight: catalog probe attempt {i + 1}/{len(delays)} failed: {last_err}")
             continue
@@ -1081,11 +1081,6 @@ def _resolve_run_max_model_len(args: argparse.Namespace) -> tuple[int, str]:
     )
 
 
-def _resume_can_disable_eval(baseline_accuracy: float) -> bool:
-    """Whether ``--no-eval`` may still disable the accuracy eval for a resumed session."""
-    return float(baseline_accuracy or 0.0) <= 0.0
-
-
 def _orchestration_banner(backend: Any, *, claude_model: str, codex_model: str) -> str:
     """Label the orchestration backend with the model it runs, for the launch banner."""
     if backend is None:
@@ -1126,15 +1121,12 @@ def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
 
 
 def _detect_checkpoint_precision(model_path: str | None) -> str:
-    """Detect weight precision from model config.json; returns '' on failure."""
+    """Detect weight precision from model config.json; returns '' when it names none."""
     if not model_path:
         return ""
-    try:
-        from hyperloom.inference_optimizer.model_config_utils import summarize_model_config
+    from hyperloom.inference_optimizer.model_config_utils import summarize_model_config
 
-        summary = summarize_model_config(str(model_path))
-    except Exception:  # noqa: BLE001
-        return ""
+    summary = summarize_model_config(str(model_path))
     quant = (summary.get("quantization") or "").strip().lower()
     if quant:
         if quant.startswith("fp8"):
@@ -1632,19 +1624,15 @@ def _persist_preflight_failure_artifacts(
 ) -> Path | None:
     """Best-effort materialize the failed install event and final SBD."""
     _mark_pending_install_event_failed(args, exc)
-    try:
-        session_dir = _new_preflight_failure_session_dir(
-            args,
-            failed_attempt=bool(str(getattr(args, "resume_from", "") or "").strip()),
-        )
-    except Exception:
-        log.warning("failed to create a session for SBD V6 preflight failure", exc_info=True)
-        return None
+    session_dir = _new_preflight_failure_session_dir(
+        args,
+        failed_attempt=bool(str(getattr(args, "resume_from", "") or "").strip()),
+    )
 
     session_lock = SessionLock(session_dir)
     try:
         session_lock.acquire()
-    except Exception:
+    except (SessionAlreadyRunning, SessionLockPathError, OSError):
         session_lock.release()
         log.warning("failed to lock SBD V6 preflight failure session", exc_info=True)
         return None
@@ -1796,22 +1784,6 @@ def _restore_phase_toggles(args: argparse.Namespace, state, session_dir: Path) -
                 f"  framework phase       : WARN --no-framework-agent ignored; "
                 f"session is already in phase={cur_phase!r} "
                 f"(cannot retroactively skip)"
-            )
-    # Same persistence contract for the eval toggle.
-    if state.eval_disabled:
-        args.no_eval = True
-        print("  accuracy eval         : DISABLED (persisted from original run)")
-    elif bool(getattr(args, "no_eval", False)):
-        anchored = float(state.baseline_accuracy or 0.0)
-        if _resume_can_disable_eval(anchored):
-            state.eval_disabled = True
-            state.save(session_dir)
-            print("  accuracy eval         : DISABLING for resume (--no-eval + no anchored accuracy)")
-        else:
-            print(
-                f"  accuracy eval         : WARN --no-eval ignored; "
-                f"session already anchored accuracy={anchored:.4f} "
-                f"(cannot retroactively ungrade prior KEEPs)"
             )
 
 

@@ -78,7 +78,7 @@ def _autodetect_gpu_type() -> str | None:
         arch = torch.cuda.get_device_properties(0).gcnArchName
         gfx = arch.split(":", 1)[0].lower()
         return _GFX_TO_RUNNER.get(gfx)
-    except Exception:  # noqa: BLE001
+    except (ImportError, OSError, RuntimeError, AssertionError, AttributeError):
         return None
 
 

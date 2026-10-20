@@ -319,3 +319,23 @@ def test_a_brace_inside_a_vllm_model_path_does_not_truncate_the_record(tmp_path)
         model_path="/models/m}",
     )
     assert evidence["observed_server_identity"]["tensor_parallel_size"] == 4
+
+
+def test_a_failing_server_log_reader_propagates_from_the_entry_point(tmp_path, monkeypatch):
+    import pytest
+
+    from hyperloom.orchestrator.actions.executors import _launch_evidence as evidence_module
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("log reader bug")
+
+    monkeypatch.setattr(evidence_module, "observed_server_config_from_log", _boom)
+    config, slot, log = _vllm_slot(tmp_path, "INFO 09-14 07:00:00 [config.py:1] anything\n")
+
+    with pytest.raises(RuntimeError, match="log reader bug"):
+        evidence_module.build_launch_evidence(
+            config_path=config,
+            actual_server_log=log,
+            framework="vllm",
+            slot=slot,
+        )

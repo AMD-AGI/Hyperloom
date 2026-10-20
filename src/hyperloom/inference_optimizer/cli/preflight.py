@@ -24,7 +24,6 @@ from pathlib import Path
 from typing import Any, NamedTuple, NoReturn
 
 from hyperloom.common import provenance
-from hyperloom.common.env import is_truthy
 from hyperloom.common.env_safety import (
     filter_untrusted_env_mapping,
     is_allowed_dotenv_key,
@@ -1276,14 +1275,6 @@ def _resumed_session_state(args: argparse.Namespace | None) -> dict[str, Any] | 
     return state if isinstance(state, dict) else None
 
 
-def _resolved_eval_disabled(args: argparse.Namespace) -> bool:
-    """Effective ``--no-eval`` for this launch, flag or persisted."""
-    if bool(getattr(args, "no_eval", False)):
-        return True
-    state = _resumed_session_state(args)
-    return bool(state and state.get("eval_disabled"))
-
-
 def _supported_framework_names() -> tuple[str, ...]:
     """The framework names ``--framework`` accepts (the framework registry)."""
     from hyperloom.inference_optimizer import framework_registry
@@ -1375,8 +1366,6 @@ def _pin_resumed_session_args(args: argparse.Namespace | None) -> None:
 def _ensure_lm_eval_dep(
     python_exe: str,
     pip_extra: list[str],
-    *,
-    eval_disabled: bool = False,
 ) -> dict[str, Any]:
     """Probe-then-install ``lm_eval`` in python_exe when the accuracy gate is on."""
     from hyperloom.orchestrator.actions.executors._multi_node_env import is_multi_node
@@ -1388,23 +1377,6 @@ def _ensure_lm_eval_dep(
             "target": "lm_eval[api]",
             "interpreter": python_exe,
             "message": "single-node InferenceX installs lm_eval on first use",
-        }
-    if eval_disabled:
-        return {
-            "status": "skipped",
-            "skip_reason": "eval_disabled",
-            "target": "lm_eval[api]",
-            "interpreter": python_exe,
-            "message": "accuracy evaluation is disabled",
-        }
-    run_eval = os.environ.get("RUN_EVAL")
-    if not is_truthy(run_eval, default=True):
-        return {
-            "status": "skipped",
-            "skip_reason": "eval_disabled",
-            "target": "lm_eval[api]",
-            "interpreter": python_exe,
-            "message": f"RUN_EVAL={run_eval}",
         }
     missing = _probe_missing_lm_eval_deps(python_exe)
     if missing is None:
@@ -1833,15 +1805,11 @@ def _print_recipe_kb_queue_status() -> dict[str, Any]:
 
 def _ensure_eval_concurrency_compat(magpie_path: str, inferencex_path: str) -> bool:
     """Scrub the fatal ``--concurrent-requests`` eval flag from the resolved trees."""
-    try:
-        from hyperloom.orchestrator.actions.executors._magpie_patcher import (
-            ensure_eval_concurrency_compat,
-        )
+    from hyperloom.orchestrator.actions.executors._magpie_patcher import (
+        ensure_eval_concurrency_compat,
+    )
 
-        ok = ensure_eval_concurrency_compat(magpie_path or None, inferencex_path or None)
-    except Exception as exc:  # noqa: BLE001 — preflight must not die here
-        print(f"Preflight: WARNING — eval-concurrency compat patch failed to run: {exc}")
-        return False
+    ok = ensure_eval_concurrency_compat(magpie_path or None, inferencex_path or None)
     if not ok:
         print(
             "Preflight: WARNING — could not remove the redundant "
@@ -1886,15 +1854,11 @@ def _ensure_client_trust_compat(magpie_path: str) -> bool:
 
     if not is_multi_node():
         return True
-    try:
-        from hyperloom.orchestrator.actions.executors._magpie_patcher import (
-            ensure_client_trust_compat,
-        )
+    from hyperloom.orchestrator.actions.executors._magpie_patcher import (
+        ensure_client_trust_compat,
+    )
 
-        ok = ensure_client_trust_compat(magpie_path or None)
-    except Exception as exc:  # noqa: BLE001 — preflight must not die here
-        print(f"Preflight: WARNING — client trust compat patch failed to run: {exc}")
-        return False
+    ok = ensure_client_trust_compat(magpie_path or None)
     if not ok:
         print(
             "Preflight: WARNING — could not apply the custom-tokenizer trust "
@@ -1921,12 +1885,9 @@ def _begin_install_event(args: argparse.Namespace | None) -> dict[str, Any]:
             "steps": [],
         },
     }
-    try:
-        from ..session.sbd_v6 import set_pending_install_event
+    from ..session.sbd_v6 import set_pending_install_event
 
-        set_pending_install_event(args, event)
-    except Exception:
-        log.warning("failed to initialize SBD V6 install event", exc_info=True)
+    set_pending_install_event(args, event)
     return event
 
 
@@ -1978,25 +1939,21 @@ def _fail_install_step(
 def _mark_pending_install_event_failed(
     args: argparse.Namespace | None,
     exc: BaseException,
-) -> dict[str, Any] | None:
+) -> dict[str, Any]:
     """Mark an unwrapped preflight exception on the pending install event."""
-    try:
-        from ..session.sbd_v6 import pending_install_event
+    from ..session.sbd_v6 import pending_install_event
 
-        event = pending_install_event(args)
-        if event is None:
-            event = _begin_install_event(args)
-        if str(event.get("status") or "") != "failed":
-            _fail_install_step(
-                event,
-                step_id="unhandled_preflight",
-                category="check",
-                exc=exc,
-            )
-        return event
-    except Exception:
-        log.warning("failed to finalize SBD V6 install failure", exc_info=True)
-        return None
+    event = pending_install_event(args)
+    if event is None:
+        event = _begin_install_event(args)
+    if str(event.get("status") or "") != "failed":
+        _fail_install_step(
+            event,
+            step_id="unhandled_preflight",
+            category="check",
+            exc=exc,
+        )
+    return event
 
 
 def _run_install_step(
@@ -2561,7 +2518,6 @@ def _preflight(
         action=lambda: _ensure_lm_eval_dep(
             benchmark_python,
             pip_extra,
-            eval_disabled=_resolved_eval_disabled(args),
         ),
     )
 
@@ -2624,16 +2580,11 @@ def _preflight(
         ),
     )
 
-    try:
-        _finish_install_event(
-            install_event,
-            args=args,
-            runtime=PreflightRuntime(
-                benchmark_backend, benchmark_python, magpie_python, inferencex_path, resolved_urls
-            ),
-        )
-    except Exception:
-        log.warning("failed to finalize SBD V6 install event", exc_info=True)
+    _finish_install_event(
+        install_event,
+        args=args,
+        runtime=PreflightRuntime(benchmark_backend, benchmark_python, magpie_python, inferencex_path, resolved_urls),
+    )
 
     return resolved_urls
 

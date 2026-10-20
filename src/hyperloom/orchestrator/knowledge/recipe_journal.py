@@ -24,7 +24,7 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
     derive_journal_outcome,
     summarize_change,
 )
-from hyperloom.orchestrator.knowledge.recipe_kb import recipe_canonical_id
+from hyperloom.orchestrator.knowledge.recipe_kb import LocalRecipeStoreError, recipe_canonical_id
 from hyperloom.orchestrator.knowledge.workload_tags import workload_shape_tags
 from hyperloom.orchestrator.lever import LEVER_CONFIG, lever_kind_for_task
 
@@ -245,6 +245,8 @@ def _record_config_attempts(
             },
             decision=outcome,
             adopted=adopted,
+            # Every variant recorded here ran: the deduped one is skipped above.
+            benched=True,
             # Recorded rather than referenced: every KEEP advances the
             # stack, so the session's current config is not what this
             # variant was measured on top of.
@@ -564,46 +566,48 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         if fact.variant_name is not None:
             provenance_base["source_variant_name"] = fact.variant_name
 
+        lesson = None
+        pitfall = None
         if fact.is_keep and fact.gain_pct is not None and fact.gain_pct > 0:
-            statement = self._build_statement(
-                change=fact.change,
-                kind="lesson",
-            )
-            impact = self._build_measured_impact(
-                gain_pct=fact.gain_pct,
-                throughput_after=fact.throughput_after,
-                stack_depth=len(self.shared_state.optimization_stack or []),
-                measured_at=now_iso,
-            )
-            live = self.read_local_recipe_row()
-            recipe_overrides = self.kb_best_config_overrides_for_keep(
-                live=live,
-                best_config_candidate=fact.best_config_candidate,
-                throughput_after=fact.throughput_after,
-            )
-            self.kb_amend_recipe(
-                append_lesson={
-                    "statement": statement,
-                    "measured_impact": impact,
-                },
-                recipe_overrides=recipe_overrides or None,
-                provenance_details=provenance_base,
-            )
-            return
-
-        severity = self._pitfall_severity_for(fact.pitfall_severity_dict)
-        if severity is not None:
-            description = self._build_statement(
-                change=fact.change,
-                severity=severity,
-                kind="pitfall",
-            )
-            self.kb_amend_recipe(
-                append_pitfall={
-                    "description": description,
+            lesson = {
+                "statement": self._build_statement(change=fact.change, kind="lesson"),
+                "measured_impact": self._build_measured_impact(
+                    gain_pct=fact.gain_pct,
+                    throughput_after=fact.throughput_after,
+                    stack_depth=len(self.shared_state.optimization_stack or []),
+                    measured_at=now_iso,
+                ),
+            }
+        else:
+            severity = self._pitfall_severity_for(fact.pitfall_severity_dict)
+            if severity is not None:
+                pitfall = {
+                    "description": self._build_statement(change=fact.change, severity=severity, kind="pitfall"),
                     "severity": severity,
-                },
-                provenance_details=provenance_base,
+                }
+
+        try:
+            if lesson is not None:
+                live = self.read_local_recipe_row()
+                recipe_overrides = self.kb_best_config_overrides_for_keep(
+                    live=live,
+                    best_config_candidate=fact.best_config_candidate,
+                    throughput_after=fact.throughput_after,
+                )
+                self.kb_amend_recipe(
+                    append_lesson=lesson,
+                    recipe_overrides=recipe_overrides or None,
+                    provenance_details=provenance_base,
+                )
+            elif pitfall is not None:
+                self.kb_amend_recipe(append_pitfall=pitfall, provenance_details=provenance_base)
+        except (LocalRecipeStoreError, OSError, ValueError) as error:
+            log.warning(
+                "recipe KB write for task %s%s failed: %s: %s",
+                fact.task.task_id,
+                f" variant {fact.variant_name}" if fact.variant_name is not None else "",
+                type(error).__name__,
+                error,
             )
 
     def _record_fact_per_task(
@@ -1209,7 +1213,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         _close_out.record_write_back_opened(self.session_dir, attempt=attempts, source=source)
         try:
             state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.exception("Recipe finalize pending-state save failed")
 
         try:
@@ -1238,7 +1242,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         self._record_write_back_settled(outcome, attempt=attempts, source=source)
         try:
             state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.exception("Recipe finalize outcome save failed")
         return outcome
 
@@ -1371,9 +1375,9 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             remote_sid = str(
                 self.shared_state.recipe_kb_session_id or self.shared_state.session_id or self.session_dir.name
             )
-            try:
-                from ..knowledge.remote_recipe import HyperloomRemoteKB
+            from ..knowledge.remote_recipe import HyperloomRemoteKB, KBStoreError
 
+            try:
                 remote_cid = self.workload_canonical_id()
                 remote_result = HyperloomRemoteKB.from_env().write(
                     remote_cid,
@@ -1406,7 +1410,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                     "session_id": str(getattr(remote_result, "session_id", "") or remote_sid),
                     "result_type": _remote_result_type(remote_result.status, remote_result.reason),
                 }
-            except Exception as exc:
+            except (KBStoreError, OSError, ValueError) as exc:
                 self._record_remote_recipe_audit(
                     source, RemoteRecipeAudit(status="error", canonical_id=remote_cid, session_id=remote_sid, error=exc)
                 )
@@ -1462,10 +1466,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             if self.recipe_kb is not None:
                 cid = self.workload_canonical_id()
                 # Read exactly the local store's authority row.
-                try:
-                    existing_row = self.recipe_kb.get_authoritative_recipe(canonical_id=cid) or {}
-                except Exception as exc:  # noqa: BLE001 - the recipe store may be remote
-                    log.info("recipe read failed (%s); finalize appends the current session only", exc)
+                existing_row = self.recipe_kb.get_authoritative_recipe(canonical_id=cid) or {}
                 existing_sessions: list[dict[str, Any]] = []
                 for row in existing_row.get("sessions") or []:
                     if not isinstance(row, dict):
@@ -1577,15 +1578,12 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         cache = self._local_recipe_cache
         if isinstance(cache, tuple) and len(cache) == 2 and cache[0] == tick:
             return cache[1]
-        try:
-            row = (
-                self.recipe_kb.get_authoritative_recipe(
-                    canonical_id=self.workload_canonical_id(),
-                )
-                or {}
+        row = (
+            self.recipe_kb.get_authoritative_recipe(
+                canonical_id=self.workload_canonical_id(),
             )
-        except Exception:  # noqa: BLE001 - the recipe store may be remote
-            row = {}
+            or {}
+        )
         self._local_recipe_cache = (tick, row)
         return row
 
@@ -1663,7 +1661,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         recipe_overrides: dict[str, Any] | None = None,
         provenance_details: dict[str, Any] | None = None,
     ) -> None:
-        """Read-modify-write helper for the recipe-snapshot KB: load live row, append lesson/pitfall, merge recipe_overrides (unset fields preserved), write back. Best-effort; lesson/pitfall appended without dedup."""
+        """Read-modify-write helper for the recipe-snapshot KB: load live row, append lesson/pitfall, merge recipe_overrides (unset fields preserved), write back. Read or write failures propagate; lesson/pitfall appended without dedup."""
         config = getattr(self.knowledge_plane, "config", None)
         if getattr(getattr(config, "mode", None), "value", None) == "remote" or self.recipe_kb is None:
             return
@@ -1681,14 +1679,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         precision = str(ss.precision or "")
 
         # Local mode reads the exact authority row before amending it.
-        try:
-            live = self.recipe_kb.get_authoritative_recipe(canonical_id=cid) or {}
-        except Exception as exc:  # noqa: BLE001
-            log.info(
-                "kb_amend_recipe: authority get_recipe failed (%s); proceeding with empty live",
-                exc,
-            )
-            live = {}
+        live = self.recipe_kb.get_authoritative_recipe(canonical_id=cid) or {}
 
         lessons = list(live.get("lessons") or [])
         if append_lesson is not None:
@@ -1787,14 +1778,8 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                 "details": dict(provenance_details or {}),
             },
         }
-        try:
-            self.recipe_kb.put_recipe(**put_kwargs)
-            self._local_recipe_cache = None
-        except Exception:
-            log.exception(
-                "kb_amend_recipe: put_recipe failed for cid=%s",
-                cid,
-            )
+        self.recipe_kb.put_recipe(**put_kwargs)
+        self._local_recipe_cache = None
 
 
 __all__ = ["RecipeJournalCollaborator"]

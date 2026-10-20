@@ -209,7 +209,7 @@ def test_moe_runner_crash_triggers_flagless_retry(tmp_path, monkeypatch):
             "timeout_sec": 10,
             "model_path": model,
             "gpu_type": "mi300x",
-            "disable_run_eval": True,
+            "extra_envs": {"RUN_EVAL": "false"},
             "extra_server_args": "--moe-runner-backend triton",
         }
     )
@@ -253,7 +253,7 @@ def test_operator_pinned_backend_is_also_dropped_on_retry(tmp_path, monkeypatch)
             "timeout_sec": 10,
             "model_path": model,
             "gpu_type": "mi300x",
-            "disable_run_eval": True,
+            "extra_envs": {"RUN_EVAL": "false"},
             "extra_server_args": "--moe-runner-backend triton --foo 1",
         }
     )
@@ -281,7 +281,7 @@ def test_backend_from_other_arg_sources_is_dropped_on_retry(tmp_path, monkeypatc
         "timeout_sec": 10,
         "model_path": model,
         "gpu_type": "mi300x",
-        "disable_run_eval": True,
+        "extra_envs": {"RUN_EVAL": "false"},
     }
     if source == "operator_env":
         monkeypatch.setenv("INFERENCE_OPTIMIZER_SERVER_ARGS", "--moe-runner-backend triton")
@@ -318,56 +318,6 @@ def test_backend_from_other_arg_sources_is_dropped_on_retry(tmp_path, monkeypatc
     assert result["status"] == "succeeded"
 
 
-def test_moe_fallback_keeps_eval_disabled_by_earlier_fallback(tmp_path, monkeypatch):
-    """An eval-rooted failure turns eval off; a MoE failure on that retry must keep it off instead of resurrecting the eval that already broke."""
-    monkeypatch.setenv("GPU_TYPE", "mi300x")
-    model = _moe_model_dir(tmp_path)
-    base = tmp_path / "base.yaml"
-    _write_yaml(base, model)
-    calls: list[tuple[str, str]] = []
-
-    def fake_run(cmd, *args, **kwargs):
-        cfg = yaml.safe_load(Path(cmd[cmd.index("--benchmark-config") + 1]).read_text())
-        run_eval = str(cfg["benchmark"]["envs"].get("RUN_EVAL", "true")).lower()
-        sglang_args = str(cfg["benchmark"]["envs"].get("EXTRA_SGLANG_ARGS", ""))
-        calls.append((run_eval, sglang_args))
-        if run_eval != "false":
-            return subprocess.CompletedProcess(cmd, 1, "", "ERROR: run_eval failed with exit code 1\n")
-        if "--moe-runner-backend" in sglang_args:
-            return subprocess.CompletedProcess(cmd, 1, "", _QUARK_TRACEBACK)
-        _fake_workspace(Path(cmd[cmd.index("--output-dir") + 1]))
-        return subprocess.CompletedProcess(cmd, 0, "ok", "")
-
-    executor = BaselineExecutor(
-        magpie_python="/opt/venv/bin/python",
-        default_config_path=base,
-        session_dir=tmp_path,
-    )
-    ctx = _make_ctx(
-        {
-            "output_dir": str(tmp_path / "ws"),
-            "timeout_sec": 10,
-            "model_path": model,
-            "gpu_type": "mi300x",
-            "extra_server_args": "--moe-runner-backend triton",
-        }
-    )
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        result = _run(executor(ctx))
-
-    assert [c[0] for c in calls] == ["true", "false", "false", "false"]
-    assert all("--moe-runner-backend" not in args for _, args in calls[2:])
-    assert result["status"] == "succeeded"
-    # Both fallbacks stay visible on the salvaged result.
-    assert result.get("accuracy_source") == "eval_unavailable"
-    warnings = result.get("nonfatal_warnings", [])
-    assert "eval_failed_fallback_no_accuracy" in warnings
-    assert "moe_runner_backend_fallback_dropped_flag" in warnings
-
-
 def test_quark_checkpoint_with_operator_pinned_backend_recovers(tmp_path, monkeypatch):
     """The original bug shape: on a Quark MX-FP4 checkpoint the gate skips injection, but an operator pin still reaches the server on attempt 1."""
     monkeypatch.setenv("GPU_TYPE", "mi300x")
@@ -395,7 +345,7 @@ def test_quark_checkpoint_with_operator_pinned_backend_recovers(tmp_path, monkey
             "timeout_sec": 10,
             "model_path": model,
             "gpu_type": "mi300x",
-            "disable_run_eval": True,
+            "extra_envs": {"RUN_EVAL": "false"},
             "extra_server_args": "--moe-runner-backend triton --mem-fraction-static 0.9",
         }
     )
@@ -440,7 +390,7 @@ def test_quark_checkpoint_without_pin_never_gets_the_flag(tmp_path, monkeypatch)
             "timeout_sec": 10,
             "model_path": model,
             "gpu_type": "mi300x",
-            "disable_run_eval": True,
+            "extra_envs": {"RUN_EVAL": "false"},
         }
     )
     with patch(
@@ -477,7 +427,7 @@ def test_fallback_fires_only_once(tmp_path, monkeypatch):
             "timeout_sec": 10,
             "model_path": model,
             "gpu_type": "mi300x",
-            "disable_run_eval": True,
+            "extra_envs": {"RUN_EVAL": "false"},
         }
     )
     with patch(
@@ -512,7 +462,7 @@ def test_unrelated_failure_does_not_retry(tmp_path, monkeypatch):
             "timeout_sec": 10,
             "model_path": model,
             "gpu_type": "mi300x",
-            "disable_run_eval": True,
+            "extra_envs": {"RUN_EVAL": "false"},
         }
     )
     with patch(

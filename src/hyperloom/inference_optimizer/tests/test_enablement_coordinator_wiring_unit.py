@@ -585,8 +585,33 @@ async def test_revalidation_enqueues_genuine_baseline(tmp_path):
     created = await fake.tasks.get(tid)
     assert created.kind == "baseline"
     assert created.params["config_path"] == "/runs/baseline/materialized.yaml"
-    assert created.params["disable_run_eval"] is False
     assert created.params["enablement_origin"] == "eval"
+
+
+@pytest.mark.asyncio
+async def test_revalidation_keeps_the_task_id_when_its_save_hits_an_os_error(tmp_path, monkeypatch):
+    fake = _enqueue_self(tmp_path, enablement_validation_pending=True, enablement_origin="eval")
+    monkeypatch.setattr(fake.shared_state, "save", _raise(OSError("no space left on device")))
+
+    tid = await fake.enablement_revalidation.maybe_enqueue_enablement_baseline_revalidation()
+
+    assert fake.shared_state.enablement.revalidation_task_id == tid
+
+
+@pytest.mark.asyncio
+async def test_revalidation_save_propagates_a_serialization_defect(tmp_path, monkeypatch):
+    fake = _enqueue_self(tmp_path, enablement_validation_pending=True, enablement_origin="eval")
+    monkeypatch.setattr(fake.shared_state, "save", _raise(TypeError("Object of type set is not JSON serializable")))
+
+    with pytest.raises(TypeError, match="not JSON serializable"):
+        await fake.enablement_revalidation.maybe_enqueue_enablement_baseline_revalidation()
+
+
+def _raise(error: Exception):
+    def _fail(_session_dir):
+        raise error
+
+    return _fail
 
 
 @pytest.mark.asyncio

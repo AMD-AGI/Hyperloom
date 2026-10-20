@@ -1245,7 +1245,7 @@ class RooflineExecutor:
             record_lifecycle_event(self.shared_state, step="roofline", **event)
             if session_dir.name and session_dir.is_dir() and (session_dir / "state.json").exists():
                 self.shared_state.save(session_dir)
-        except Exception:
+        except OSError:
             log.debug("roofline: lifecycle %s emit failed", event.get("status"), exc_info=True)
 
     # Helpers (instance methods so tests can subclass / monkeypatch)
@@ -1278,8 +1278,6 @@ class RooflineExecutor:
 
         parent_task = parent_ctx.task
         params = dict(parent_task.params or {})
-        # Accuracy is gated by baseline and explore; a profile run only needs the trace.
-        params["disable_run_eval"] = True
         if disable_cuda_graph:
             from .baseline import _with_cuda_graph_disabled
 
