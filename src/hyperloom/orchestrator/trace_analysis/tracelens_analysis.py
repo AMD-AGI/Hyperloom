@@ -3191,7 +3191,7 @@ def run_command(
 
 # Kept in sync with install.sh (TRACELENS_REPO / TRACELENS_REF). Overridable via env.
 _TRACELENS_REPO_DEFAULT = "https://github.com/AMD-AGI/TraceLens.git"
-_TRACELENS_REF_DEFAULT = "3359c3ef20432dff472454f86edcf0e97f0e0780"
+_TRACELENS_REF_DEFAULT = "614c597bc0c66cabf6a15152037324acc7386090"
 
 
 def _default_tracelens_root() -> Path:
