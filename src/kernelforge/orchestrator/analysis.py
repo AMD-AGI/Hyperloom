@@ -274,6 +274,13 @@ def _case_directory(case_id: str) -> str:
     return f"{readable}-{digest}"
 
 
+def _analysis_cases(context: OrchestrationContext) -> tuple[AnalysisCase, ...]:
+    return tuple(
+        AnalysisCase(case_id=case.case_id, directory=_case_directory(case.case_id), latency_ms=case.latency_ms)
+        for case in context.cases
+    )
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -887,14 +894,7 @@ class AnalysisAgentService:
         workspace = Path(context.workspace).resolve()
         analysis_root = workspace / "forge_experiments" / "analysis"
         final_root = analysis_root / context.analysis_commit
-        cases = tuple(
-            AnalysisCase(
-                case_id=case.case_id,
-                directory=_case_directory(case.case_id),
-                latency_ms=case.latency_ms,
-            )
-            for case in context.cases
-        )
+        cases = _analysis_cases(context)
         resolved_sources = tuple(
             sorted(
                 {
@@ -1360,102 +1360,47 @@ class AnalysisAgentService:
             cumulative_diff_error=context.cumulative_diff_error,
         )
 
-    def apply_published_evidence(
-        self,
-        context: OrchestrationContext,
-        *,
-        evidence_commit: str,
-    ) -> OrchestrationContext:
+    def apply_published_evidence(self, context: OrchestrationContext, *, evidence_commit: str) -> OrchestrationContext:
         """Restore one published bundle as stale-safe planning evidence."""
-        commit = str(evidence_commit or "").strip()
-        if not commit:
-            return context
-        workspace = Path(context.workspace).resolve()
-        commit_root = workspace / "forge_experiments" / "analysis" / commit
+        commit_root = Path(context.workspace).resolve() / "forge_experiments" / "analysis" / evidence_commit
         root = self._published_generation_root(commit_root)
         if root is None:
             return context
         try:
-            manifest = json.loads((root / "manifest.json").read_text())
             request_payload = _parse_request_payload(
-                json.loads((root / "request.json").read_text()),
-                analysis_commit=commit,
+                json.loads((root / "request.json").read_text()), analysis_commit=evidence_commit
             )
-        except (
-            OSError,
-            TypeError,
-            ValueError,
-            json.JSONDecodeError,
-            AnalysisBundleError,
-        ):
+        except (OSError, ValueError, AnalysisBundleError):
             return context
-        if not isinstance(manifest, dict):
-            return context
-        driver_digest = str(request_payload.get("driver_digest") or "")
-        source_digest = str(request_payload.get("source_digest") or "")
-        if manifest.get("driver_digest") != driver_digest or manifest.get("source_digest") != source_digest:
-            return context
-
-        cases = tuple(
-            AnalysisCase(
-                case_id=case.case_id,
-                directory=_case_directory(case.case_id),
-                latency_ms=case.latency_ms,
-            )
-            for case in context.cases
-        )
-        validation_context = replace(
-            context,
-            analysis_commit=commit,
-            canonical_commit=(context.canonical_commit or context.analysis_commit),
+        identity = _BundleIdentity(
+            replace(context, analysis_commit=evidence_commit),
+            _analysis_cases(context),
+            str(request_payload.get("driver_digest") or ""),
+            str(request_payload.get("source_digest") or ""),
         )
         try:
-            bundle = self._validate_bundle(
-                root, _BundleIdentity(validation_context, cases, driver_digest, source_digest)
-            )
+            bundle = self._validate_bundle(root, identity)
         except AnalysisBundleError:
             return context
-
         applied = bundle.apply(context)
-        canonical_commit = context.canonical_commit or context.analysis_commit
-        stale = commit != canonical_commit
-        refs = {reference.path: reference for reference in applied.evidence_refs}
-        if stale and applied.source_map_path:
+        if applied.evidence_stale:
             source_map = Path(applied.source_map_path).resolve()
-            if source_map.is_file():
-                refs[str(source_map)] = EvidenceRef(
-                    kind="analysis_source_map",
-                    path=str(source_map),
-                    summary=(f"Source map produced with stale Analysis evidence at commit {commit}."),
-                )
-        normalized_cases = tuple(
-            replace(
-                case,
-                flags=tuple(
-                    dict.fromkeys(
-                        [
-                            *case.flags,
-                            *(["analysis_evidence_stale"] if stale else []),
-                        ]
-                    )
-                ),
+            refs = {reference.path: reference for reference in applied.evidence_refs}
+            refs[str(source_map)] = EvidenceRef(
+                kind="analysis_source_map",
+                path=str(source_map),
+                summary=f"Source map produced with stale Analysis evidence at commit {evidence_commit}.",
             )
-            for case in applied.cases
-        )
-        return replace(
-            applied,
-            source_map_path=(context.source_map_path if stale else applied.source_map_path),
-            cases=normalized_cases,
-            evidence_refs=tuple(refs.values()),
-            canonical_commit=canonical_commit,
-            evidence_commit=commit,
-            evidence_stale=stale,
-            evidence_status=context.evidence_status,
-            evidence_mean_case_speedup=(context.evidence_mean_case_speedup),
-            current_mean_case_speedup=context.current_mean_case_speedup,
-            cumulative_diff_path=context.cumulative_diff_path,
-            cumulative_diff_error=context.cumulative_diff_error,
-        )
+            applied = replace(
+                applied,
+                source_map_path=context.source_map_path,
+                cases=tuple(
+                    replace(case, flags=tuple(dict.fromkeys([*case.flags, "analysis_evidence_stale"])))
+                    for case in applied.cases
+                ),
+                evidence_refs=tuple(refs.values()),
+            )
+        return replace(applied, evidence_status=context.evidence_status)
 
     async def _run_analysis_session(
         self,
@@ -1469,14 +1414,7 @@ class AnalysisAgentService:
         context = session.context
         work_root = session.work_root
         timeout_sec = session.timeout_sec
-        cases = tuple(
-            AnalysisCase(
-                case_id=case.case_id,
-                directory=_case_directory(case.case_id),
-                latency_ms=case.latency_ms,
-            )
-            for case in context.cases
-        )
+        cases = _analysis_cases(context)
         outputs = self._session_outputs(work_root, cases)
         request = json.loads(session.request_path.read_text())
         identity = _BundleIdentity(context, cases, str(request["driver_digest"]), str(request["source_digest"]))
