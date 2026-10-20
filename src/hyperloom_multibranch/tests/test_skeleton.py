@@ -646,6 +646,8 @@ async def test_a_session_scores_its_frontier_with_the_policy_the_calibration_cho
     assert isinstance(snapshot, NotebookSnapshot) and snapshot.profile is not None
     assert defaults == FrontierPolicy.for_budget(GRADED_OUTPUT, SETTINGS.max_hours * MB_SECONDS_PER_HOUR)
     assert await _frontier_fingerprint(stage) == CHOSEN_LABEL
+    manifest = json.loads(stage.layout.manifest.read_text())
+    assert manifest["policy_versions"][FRONTIER_POLICY_KEY] == CHOSEN_LABEL
     [decided] = [row for row in _decisions(stage) if row["reason"] == "frontier policy"]
     assert decided["detail"] == {"label": CHOSEN_LABEL, "evidence": CHOSEN_EVIDENCE}
     states = [_judge_state(prompt) for prompt in _judge_prompts(stage)]

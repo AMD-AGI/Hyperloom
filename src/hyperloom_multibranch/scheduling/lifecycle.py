@@ -32,6 +32,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from hyperloom.common.io import atomic_write_json
+from hyperloom.common.jsonio import read_json_strict
 from hyperloom.common.provenance import detect_code_revision
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.measure.versions import socket_versions
@@ -100,9 +101,10 @@ POLICY_VERSIONS = {
     "judge_prompt": JUDGE_PROMPT_VERSION,
     "scheduling": policy_version(SCHEDULING_POLICY),
 }
-#: The ``policy_versions`` key the frontier policy's label is recorded under once PRELUDE chose it.
+#: The ``policy_versions`` key the frontier policy's label is recorded under: the defaults' until PRELUDE chose it.
 FRONTIER_POLICY_KEY = "frontier"
 FORCED_DEFAULT_EVIDENCE = f"{DEFAULT_POLICY}: --frontier-policy default"
+UNCHOSEN_EVIDENCE = f"{DEFAULT_POLICY}: not chosen yet, PRELUDE has not established the baseline"
 #: Stop reasons a session ends with when it ran its course, a budget spent as set included; any other one, or an
 #: error, is a failed session.
 COMPLETED_REASONS = frozenset(
@@ -197,7 +199,9 @@ class Session:
         self._metric = settings.workload.metric
         self._budget_seconds = budget_seconds(settings.max_hours)
         # The defaults until PRELUDE's choice replaces it; EXPLORE and CLOSE build their scoring from it.
-        self._frontier_policy = FrontierPolicy.for_budget(self._metric, self._budget_seconds)
+        self._frontier = PolicyChoice(
+            FrontierPolicy.for_budget(self._metric, self._budget_seconds), DEFAULT_POLICY, UNCHOSEN_EVIDENCE
+        )
         self._history = archived_history()
         self._context = context
         self._repo = peers.repo
@@ -303,14 +307,14 @@ class Session:
             longest_root_test = await self._prelude.measure_baseline(prelude.root_commit)
         except PreludeFailed as exc:
             return SessionOutcome(SessionStopReason.PRELUDE_FAILED, None, None, str(exc))
-        frontier = await self._choose_frontier()
+        await self._adopt_frontier_policy()
         sockets = await asyncio.to_thread(socket_versions)
         await self._notebook.write_manifest_fingerprint(
             ManifestFingerprint(
                 activity=self._layout.session_id,
                 sockets=sockets,
                 prompt_versions=prompt_versions(),
-                policy_versions={**POLICY_VERSIONS, FRONTIER_POLICY_KEY: frontier.label},
+                policy_versions=self._policy_versions(),
             )
         )
         deadlines = budget.phases_after_prelude(self._clock.now(), longest_root_test)
@@ -326,7 +330,7 @@ class Session:
             prelude.child_gpu_seconds_upper_bound,
             self._settings.user_directions,
         )
-        reason = await self._explorer(frontier).run(window)
+        reason = await self._explorer().run(window)
         if reason is SessionStopReason.NO_MEASUREMENT_CARDS:
             await self._stopper.end_exploration(reason)
             return SessionOutcome(reason, None, None, NO_CARDS_LEFT)
@@ -338,23 +342,24 @@ class Session:
         self._decisions.record(Decision(DecisionKind.FINAL, final.reason, detail={"chosen": encode(final.chosen)}))
         return SessionOutcome(reason, final, None, "")
 
-    async def _choose_frontier(self) -> PolicyChoice:
-        """The frontier policy the session scores with from here on, recorded as a scheduler decision: the
-        calibration's choice for the profile PRELUDE recorded, or the defaults under ``--frontier-policy default``."""
+    async def _adopt_frontier_policy(self) -> None:
+        """Replace the defaults with the frontier policy the session scores with from here on, and record it as a
+        scheduler decision and in the manifest: the calibration's choice for the profile PRELUDE recorded, or the
+        defaults under ``--frontier-policy default``."""
 
-        defaults = self._frontier_policy
+        defaults = self._frontier.policy
         if self._settings.frontier_policy is FrontierPolicyMode.DEFAULT:
-            choice = PolicyChoice(defaults, DEFAULT_POLICY, FORCED_DEFAULT_EVIDENCE)
+            self._frontier = PolicyChoice(defaults, DEFAULT_POLICY, FORCED_DEFAULT_EVIDENCE)
         else:
             snapshot = await self._notebook.snapshot()
-            choice = await asyncio.to_thread(session_frontier_policy, snapshot, self._history, defaults)
-        self._frontier_policy = choice.policy
-        self._decisions.record(
-            Decision(
-                DecisionKind.PRELUDE, "frontier policy", detail={"label": choice.label, "evidence": choice.evidence}
-            )
-        )
-        return choice
+            self._frontier = await asyncio.to_thread(session_frontier_policy, snapshot, self._history, defaults)
+        detail = {"label": self._frontier.label, "evidence": self._frontier.evidence}
+        self._decisions.record(Decision(DecisionKind.PRELUDE, "frontier policy", detail=detail))
+        manifest = read_json_strict(self._layout.manifest)
+        atomic_write_json(self._layout.manifest, {**manifest, "policy_versions": self._policy_versions()})
+
+    def _policy_versions(self) -> dict[str, str]:
+        return {**POLICY_VERSIONS, FRONTIER_POLICY_KEY: self._frontier.label}
 
     def _scoring(self) -> FrontierScoring:
         return session_frontier(
@@ -362,13 +367,13 @@ class Session:
             self._metric,
             log_path=self._layout.reports / FRONTIER_LOG,
             history=self._history,
-            policy=self._frontier_policy,
+            policy=self._frontier.policy,
         )
 
     def _dashboard(self, scoring: FrontierScoring) -> SessionDashboard:
         return SessionDashboard(self._notebook, scoring, self._toolbox, self._metric, self._layout.dashboard)
 
-    def _explorer(self, frontier: PolicyChoice) -> Explorer:
+    def _explorer(self) -> Explorer:
         scoring = self._scoring()
         steering = Steering(
             self._judge,
@@ -379,7 +384,7 @@ class Session:
             self._similarity,
             self._events,
             self._lifecycle,
-            frontier,
+            self._frontier,
         )
         return Explorer(self._context, self._branches, self._integrator, steering)
 
@@ -477,7 +482,7 @@ class Session:
             "deadline": budget.deadline,
             "settings": encode(self._settings),
             "metric": self._settings.workload.metric,
-            "policy_versions": POLICY_VERSIONS,
+            "policy_versions": self._policy_versions(),
         }
         atomic_write_json(self._layout.manifest, document)
 

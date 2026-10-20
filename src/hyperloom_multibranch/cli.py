@@ -20,7 +20,8 @@ earlier session in ``DIR`` rooted on instead of starting a child, and still meas
 unless that session committed its root on the same workload and on the image ``HYPERLOOM_ACTIVE_IMAGE_DIGEST`` names.
 ``--frontier-policy`` says which frontier policy the session scores its branches with once PRELUDE established the
 baseline: ``auto`` (the default) takes the variation the calibration over similar archived sessions chooses, within
-its guardrails, and ``default`` keeps the defaults; the manifest fingerprint records the label under ``frontier``.
+its guardrails, and ``default`` keeps the defaults; the manifest fingerprint and the session's manifest record
+the label under ``frontier`` in ``policy_versions``.
 Each ``--specialist-prompt`` file holds a direction the user wrote for one specialist: its branch opens at PRELUDE's
 root ahead of the opening batch, counted within ``--max-branches``, its specialist sees the text in every launch
 prompt, and the judge neither stops it nor lowers its K for its first judged tests; an empty or unreadable file, or
