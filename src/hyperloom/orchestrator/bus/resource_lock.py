@@ -651,7 +651,8 @@ class SqliteLeaseBackend:
     def lanes_by_task_sync(self) -> dict[str, tuple[list[str], str]]:
         """Return ``{task_id: (lanes, soonest_expiry)}`` for every retained row.
 
-        Soonest, because reclaim starts when the first lane lapses.
+        The expiry only feeds the in-flight tasks' ``lease_expires_in_sec`` countdown; nothing releases a lane
+        when it passes.
         """
         by_task: dict[str, tuple[list[str], str]] = {}
         for row in self.db.fetchall_sync("SELECT lane, task_id, expires_at FROM leases", ()):

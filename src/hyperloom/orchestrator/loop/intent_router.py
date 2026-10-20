@@ -1272,7 +1272,7 @@ class IntentRouter(CoordinatorCollaborator):
         )
 
     async def _handle_prune_branch(self, source: str, intent: Intent) -> None:
-        """Prune an action family and cancel its in-flight tasks."""
+        """Cancel a family's queued tasks and, unless ``scope`` is ``queued``, retire the family; running tasks continue."""
         family = intent.payload["family"]
         reason = str(intent.payload.get("reason") or "prune_branch")
         scope = str(intent.payload.get("scope") or PRUNE_BRANCH_SCOPE_FAMILY).strip()
