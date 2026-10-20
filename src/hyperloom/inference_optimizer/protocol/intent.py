@@ -73,6 +73,24 @@ class IntentValidationError(RuntimeError):
         self.raw = raw
 
 
+def _without_unset_fields(payload: dict[str, Any]) -> dict[str, Any]:
+    """Drop the payload fields an agent wrote as JSON ``null``, one level into ``params``.
+
+    Readers downstream resolve an omitted field through ``get(name, default)``,
+    which returns the stored ``None`` when the key is present, so a field the
+    agent declined to set reaches them as a value rather than as its default.
+    An explore round proposing ``keep_threshold_pct: null`` died on
+    ``float(None)`` and took its whole measurement with it. Null is the
+    transport's way of spelling "not supplied", so it is removed here, where
+    the envelope enters, rather than guarded for at each reader.
+    """
+    cleaned = {name: value for name, value in payload.items() if value is not None}
+    params = cleaned.get("params")
+    if isinstance(params, dict):
+        cleaned["params"] = {name: value for name, value in params.items() if value is not None}
+    return cleaned
+
+
 def validate_envelope(envelope: dict[str, Any]) -> list[Intent]:
     """Validate the top-level envelope shape + per-intent payloads."""
     if not isinstance(envelope, dict):
@@ -96,6 +114,7 @@ def validate_envelope(envelope: dict[str, Any]) -> list[Intent]:
         payload = item["payload"]
         if not isinstance(payload, dict):
             raise IntentValidationError(f"intents[{i}].payload must be object, got {type(payload).__name__}")
+        payload = _without_unset_fields(payload)
         for required in _PAYLOAD_REQUIRED[it]:
             if required not in payload:
                 raise IntentValidationError(

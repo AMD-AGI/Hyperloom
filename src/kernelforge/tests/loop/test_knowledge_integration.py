@@ -16,6 +16,8 @@ from kernelforge.rewrite_by_flydsl.flydsl_rewrite_driver_preparation import (
     DriverPreflight,
 )
 from kernelforge.rewrite_by_flydsl.port_loop import PortResult
+from kernelforge.rewrite_by_flydsl.ingest import RewriteSubject
+from kernelforge.rewrite_by_flydsl.request import DriverSetup, RewriteRun, RewriteWorkspace
 from kernelforge.conftest import kb_store_run_config as _kb_store_config
 from kernelforge.knowledge.kb_store.identity.run import LoopKernel
 from kernelforge.loop.knowledge_integration import ExperiencePublication, WarmStartHarness
@@ -1407,14 +1409,13 @@ def test_rewrite_warm_start_failure_is_persisted_without_its_credential(
     monkeypatch.setattr(runner, "run_port_loop", port_never_runs)
 
     result = runner.run_rewrite(
-        op_name="softmax",
-        source_kernel=str(source),
-        driver=str(driver),
-        workspace=str(workspace),
-        experiments_dir=str(tmp_path / "experiments"),
-        target_functions=["softmax"],
-        config=_kb_store_config(tmp_path, token),
-        result_json=str(result_json),
+        RewriteRun(
+            RewriteSubject("softmax", str(source), ["softmax"]),
+            DriverSetup(str(driver)),
+            RewriteWorkspace(str(workspace), str(tmp_path / "experiments")),
+            result_json=str(result_json),
+        ),
+        _kb_store_config(tmp_path, token),
     )
 
     read = result["kb_experience"]["read"]

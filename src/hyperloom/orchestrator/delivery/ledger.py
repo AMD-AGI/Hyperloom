@@ -107,15 +107,34 @@ def _backup_of(record: Mapping[str, Any]) -> Any:
     return record.get("backup_path", record.get("backup"))
 
 
+def _names_absolute_path(value: Any) -> bool:
+    """Whether *value* is a non-empty string naming an absolute path."""
+    return isinstance(value, str) and bool(value) and Path(value).is_absolute()
+
+
+def _is_sha256(value: Any) -> bool:
+    """Whether *value* is a 64-character lowercase hex digest."""
+    return isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+
+
+def _is_file_mode(value: Any) -> bool:
+    """Whether *value* is an integer in the range a file mode occupies.
+
+    ``bool`` is a subclass of ``int`` and is not a mode, so the type is matched
+    exactly rather than with ``isinstance``.
+    """
+    return type(value) is int and 0 <= value <= 0o7777
+
+
 def _validate_restore_record(record: Mapping[str, Any]) -> None:
     target = record.get("target")
-    if not isinstance(target, str) or not target or not Path(target).is_absolute():
+    if not _names_absolute_path(target):
         raise ValueError(f"invalid backup target: {target!r}")
     existed = record.get("existed")
     if not isinstance(existed, bool):
         raise ValueError(f"invalid backup existence: {target}")
     backup = _backup_of(record)
-    if backup is not None and (not isinstance(backup, str) or not backup or not Path(backup).is_absolute()):
+    if backup is not None and not _names_absolute_path(backup):
         raise ValueError(f"invalid backup path: {target}")
     action = record.get("revert_action")
     # ``restore_old`` is no longer written; a ledger an older build left behind still has to restore.
@@ -124,15 +143,9 @@ def _validate_restore_record(record: Mapping[str, Any]) -> None:
     if (action == "delete" and existed) or (action in ("restore", "restore_old") and not existed):
         raise ValueError(f"contradictory restore action: {target}")
     mode = record.get("mode")
-    if mode is not None and (type(mode) is not int or not 0 <= mode <= 0o7777):
+    if mode is not None and not _is_file_mode(mode):
         raise ValueError(f"invalid backup mode: {target}")
-    digest = record.get("pre_image_sha256")
-    if existed and (
-        not backup
-        or not isinstance(digest, str)
-        or len(digest) != 64
-        or any(c not in "0123456789abcdef" for c in digest)
-    ):
+    if existed and not (backup and _is_sha256(record.get("pre_image_sha256"))):
         raise ValueError(f"incomplete backup preimage: {target}")
 
 

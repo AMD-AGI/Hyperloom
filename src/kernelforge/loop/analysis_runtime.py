@@ -15,7 +15,7 @@ from kernelforge.loop.analysis_refresh_policy import (
     decide_analysis_refresh,
 )
 from kernelforge.loop.run_state import make_event
-from kernelforge.orchestrator.analysis import AnalysisConfigurationError
+from kernelforge.orchestrator.analysis import AnalysisConfigurationError, AnalysisSources
 from kernelforge.orchestrator.analysis_session import AnalysisAttemptLimitError
 
 
@@ -51,30 +51,23 @@ class AnalysisRuntimeMixin(AnalysisEvidenceMixin):
         if getattr(self, "state_store", None) is None:
             return
         planning_iteration = self.run_state.iteration if iteration is None else int(iteration)
-        try:
-            self.state_store.append_event(
-                make_event(
-                    "analysis_refresh_decision",
-                    planning_iteration,
-                    action="refresh" if decision.refresh else "reuse",
-                    reasons=list(decision.reasons),
-                    canonical_commit=context.analysis_commit,
-                    evidence_commit=(self.run_state.analysis.evidence_commit),
-                    evidence_stale=decision.evidence_stale,
-                    gain_since_evidence=decision.gain_since_evidence,
-                    cumulative_diff_path=context.cumulative_diff_path,
-                    cumulative_diff_error=context.cumulative_diff_error,
-                    refresh_threshold=ANALYSIS_REFRESH_THRESHOLD,
-                    current_mean_case_speedup=(self.best_mean_case_speedup),
-                    evidence_mean_case_speedup=(self.run_state.analysis.evidence_mean_case_speedup),
-                )
+        self.state_store.append_event(
+            make_event(
+                "analysis_refresh_decision",
+                planning_iteration,
+                action="refresh" if decision.refresh else "reuse",
+                reasons=list(decision.reasons),
+                canonical_commit=context.analysis_commit,
+                evidence_commit=(self.run_state.analysis.evidence_commit),
+                evidence_stale=decision.evidence_stale,
+                gain_since_evidence=decision.gain_since_evidence,
+                cumulative_diff_path=context.cumulative_diff_path,
+                cumulative_diff_error=context.cumulative_diff_error,
+                refresh_threshold=ANALYSIS_REFRESH_THRESHOLD,
+                current_mean_case_speedup=(self.best_mean_case_speedup),
+                evidence_mean_case_speedup=(self.run_state.analysis.evidence_mean_case_speedup),
             )
-        except Exception as error:
-            message = f"persist analysis refresh decision for iteration {planning_iteration}: {error}"
-            self.persistence_degraded = True
-            self.persistence_errors.append(message)
-            self.persistence_errors = self.persistence_errors[-10:]
-            log.warning(message, exc_info=True)
+        )
 
     async def _resolve_analysis_context(
         self,
@@ -141,9 +134,7 @@ class AnalysisRuntimeMixin(AnalysisEvidenceMixin):
         try:
             self._analysis_bundle = await analysis_service.ensure_bundle(
                 context,
-                kernel_file=self.ic.kernel_file,
-                driver_script=self.ic.driver_script,
-                source_files=self._target_source_files(),
+                sources=AnalysisSources(self.ic.kernel_file, self.ic.driver_script, self._target_source_files()),
                 usage=self._usage,
                 deadline_unix=self._analysis_deadline_unix(),
                 incremental=incremental,
@@ -256,14 +247,7 @@ class AnalysisRuntimeMixin(AnalysisEvidenceMixin):
         finally:
             self._checkpoint_llm_usage()
             if getattr(self, "state_store", None) is not None:
-                try:
-                    self.state_store.save(self.run_state)
-                except Exception as error:
-                    message = f"persist Analysis refresh state for iteration {planning_iteration}: {error}"
-                    self.persistence_degraded = True
-                    self.persistence_errors.append(message)
-                    self.persistence_errors = self.persistence_errors[-10:]
-                    log.warning(message, exc_info=True)
+                self.state_store.save(self.run_state)
 
         if self._analysis_bundle is not None and self._analysis_bundle.analysis_commit == context.analysis_commit:
             # A published bundle, including PARTIAL, is the evidence view for its own commit.

@@ -23,6 +23,7 @@ from hyperloom.orchestrator.tests._helpers import (
 from hyperloom.orchestrator.actions.executors import _setup_replay as sr_mod
 from hyperloom.orchestrator.actions.executors._accuracy_gate import framework_run_eval_envs
 from hyperloom.orchestrator.actions.executors.integrate_patch import (
+    RESULT_BENCHED,
     IntegratePatchExecutor,
     _PatchBench,
     _apply_patch_no_git,
@@ -1332,6 +1333,17 @@ async def test_a_value_error_inside_the_keep_capture_is_not_read_as_an_unreadabl
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("booted", "status"), [(True, "kept"), (False, "reverted")])
+async def test_a_result_the_gate_returned_says_it_reached_the_bench(
+    tmp_path: Path, monkeypatch, booted: bool, status: str
+):
+    """Whatever the verdict, a result the bench-and-gate stage returned reached the bench."""
+    result, _repo = await _run_enablement_integrate(tmp_path, monkeypatch, booted=booted)
+
+    assert (result["status"], result[RESULT_BENCHED]) == (status, True)
+
+
+@pytest.mark.asyncio
 async def test_enablement_reverts_when_still_not_runnable(tmp_path: Path, monkeypatch):
     result, repo = await _run_enablement_integrate(tmp_path, monkeypatch, booted=False)
     assert result["status"] == "reverted"
@@ -1687,7 +1699,7 @@ async def _round_exiting_after_setup(tmp_path: Path, monkeypatch, *, arrange, pa
     from types import SimpleNamespace
 
     from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
-    from hyperloom.orchestrator.enablement.recipe.setup_ledger import build_execution_row
+    from hyperloom.orchestrator.enablement.recipe.setup_ledger import SetupExecution, build_execution_row
     from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 
     session_dir = tmp_path / "session"
@@ -1699,12 +1711,14 @@ async def _round_exiting_after_setup(tmp_path: Path, monkeypatch, *, arrange, pa
     def _installed(commands, *, cwd, log_dir, ledger):
         cmd, source = commands[0]
         row = build_execution_row(
-            seq=ledger.seq_start + 1,
-            round_task_id=ledger.round_task_id,
-            cmd_index=0,
-            cmd=cmd,
-            source=source,
-            outcome="applied",
+            SetupExecution(
+                seq=ledger.seq_start + 1,
+                round_task_id=ledger.round_task_id,
+                cmd_index=0,
+                cmd=cmd,
+                source=source,
+                outcome="applied",
+            ),
             env={},
         )
         ledger.on_execution(row)

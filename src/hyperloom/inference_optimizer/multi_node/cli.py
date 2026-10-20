@@ -13,6 +13,7 @@ import shlex
 import tempfile
 import time
 from collections.abc import Callable
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -208,45 +209,29 @@ def _infera_default_ssh_port(state: dict[str, Any]) -> int:
 def _infera_ssh_run_script(
     state: dict[str, Any],
     ip: str,
-    script: str,
-    interpreter: str,
-    script_args: str,
+    script: ssh_client.RemoteScript,
     *,
     timeout: int,
-    env: dict[str, str] | None = None,
-    remote_path: str | None = None,
     port: int | None = None,
 ):
     """Run a script on an Infera pod over SSH with host-key retry."""
-    key_path = state["ssh_key_path"]
-    ssh_port = int(port if port is not None else _infera_default_ssh_port(state))
-    known_hosts = _infera_known_hosts_path(state)
-    remote_path = remote_path or str(Path(tempfile.gettempdir()) / "mn_infera_launch")
+    target = ssh_client.SshTarget(
+        host=ip,
+        key_path=state["ssh_key_path"],
+        port=int(port if port is not None else _infera_default_ssh_port(state)),
+        known_hosts=_infera_known_hosts_path(state),
+    )
 
-    def _run(kh: Path):
-        return ssh_client.ssh_run_script(
-            ip,
-            script,
-            interpreter,
-            script_args,
-            key_path=key_path,
-            known_hosts=kh,
-            port=ssh_port,
-            timeout=timeout,
-            env=env,
-            remote_path=remote_path,
-        )
-
-    cp = _run(known_hosts)
+    cp = ssh_client.ssh_run_script(target, script, timeout=timeout)
     if cp.returncode != 0 and ssh_known_hosts.is_host_key_error(cp.stderr):
-        warn(f"infera ssh {ip}:{ssh_port}: host key mismatch; refreshing known_hosts and retrying once")
+        warn(f"infera ssh {ip}:{target.port}: host key mismatch; refreshing known_hosts and retrying once")
         try:
-            known_hosts = _refresh_infera_known_hosts([(ip, ssh_port)], state=state)
+            known_hosts = _refresh_infera_known_hosts([(ip, target.port)], state=state)
         except RuntimeError as exc:
-            warn(f"infera ssh {ip}:{ssh_port}: known_hosts refresh failed: {exc}")
+            warn(f"infera ssh {ip}:{target.port}: known_hosts refresh failed: {exc}")
             return cp
         _save_state(state)
-        cp = _run(known_hosts)
+        cp = ssh_client.ssh_run_script(replace(target, known_hosts=known_hosts), script, timeout=timeout)
     return cp
 
 
@@ -254,94 +239,57 @@ def _infera_ssh_bash_with_env(
     state: dict[str, Any],
     ip: str,
     script: str,
-    env: dict[str, str] | None,
     *,
     timeout: int,
     port: int | None = None,
 ):
     """Run a bash script on an Infera pod via SSH stdin with host-key retry."""
-    key_path = state["ssh_key_path"]
-    ssh_port = int(port if port is not None else _infera_default_ssh_port(state))
-    known_hosts = _infera_known_hosts_path(state)
+    target = ssh_client.SshTarget(
+        host=ip,
+        key_path=state["ssh_key_path"],
+        port=int(port if port is not None else _infera_default_ssh_port(state)),
+        known_hosts=_infera_known_hosts_path(state),
+    )
 
-    def _run(kh: Path):
-        return ssh_client.ssh_run_bash_with_env(
-            ip,
-            script,
-            env,
-            key_path=key_path,
-            known_hosts=kh,
-            port=ssh_port,
-            timeout=timeout,
-        )
-
-    cp = _run(known_hosts)
+    cp = ssh_client.ssh_run_bash_with_env(target, script, None, timeout=timeout)
     if cp.returncode != 0 and ssh_known_hosts.is_host_key_error(cp.stderr):
-        warn(f"infera ssh {ip}:{ssh_port}: host key mismatch; refreshing known_hosts and retrying once")
+        warn(f"infera ssh {ip}:{target.port}: host key mismatch; refreshing known_hosts and retrying once")
         try:
-            known_hosts = _refresh_infera_known_hosts([(ip, ssh_port)], state=state)
+            known_hosts = _refresh_infera_known_hosts([(ip, target.port)], state=state)
         except RuntimeError as exc:
-            warn(f"infera ssh {ip}:{ssh_port}: known_hosts refresh failed: {exc}")
+            warn(f"infera ssh {ip}:{target.port}: known_hosts refresh failed: {exc}")
             return cp
         _save_state(state)
-        cp = _run(known_hosts)
+        cp = ssh_client.ssh_run_bash_with_env(replace(target, known_hosts=known_hosts), script, None, timeout=timeout)
     return cp
 
 
 def _short_poll(
     *,
     label: str,
-    fetch: callable,
-    is_ok: callable,
-    is_fail: callable,
+    fetch: Callable[[], tuple[Any, str]],
     interval_s: int,
     timeout_s: int,
-    failure_diag: callable | None = None,
-    quiet_fetch_error_grace_s: float = 0.0,
-    is_quiet_fetch_error: Callable[[BaseException], bool] | None = None,
 ) -> Any:
-    """Run many short polls within one CLI invocation budget; returns the state_obj on success."""
+    """Poll a Ray job with many short fetches within one CLI invocation budget; returns the job on a terminal OK."""
     started = time.monotonic()
     attempt = 0
     while True:
         attempt += 1
-        fetch_was_quiet = False
         try:
             obj, summary = fetch()
         except Exception as exc:  # noqa: BLE001
-            elapsed_mid = time.monotonic() - started
-            fetch_was_quiet = (
-                quiet_fetch_error_grace_s > 0.0
-                and elapsed_mid < quiet_fetch_error_grace_s
-                and is_quiet_fetch_error is not None
-                and is_quiet_fetch_error(exc)
-            )
-            if fetch_was_quiet:
-                info(
-                    f"{label} poll #{attempt} t={elapsed_mid:.0f}s -> "
-                    f"GET workload not visible yet (404); retrying "
-                    f"(expected within ~{quiet_fetch_error_grace_s:.0f}s after create)"
-                )
-            else:
-                warn(f"{label} poll #{attempt} fetch error: {exc}")
+            warn(f"{label} poll #{attempt} fetch error: {exc}")
             obj, summary = None, str(exc)
 
         elapsed = time.monotonic() - started
-        if not fetch_was_quiet:
-            info(f"{label} poll #{attempt} t={elapsed:.0f}s -> {summary}")
+        info(f"{label} poll #{attempt} t={elapsed:.0f}s -> {summary}")
 
         if obj is not None:
-            if is_ok(obj):
+            status = str(obj.get("status", "")).upper()
+            if status in _TERMINAL_OK_STATUSES:
                 return obj
-            if is_fail(obj):
-                if failure_diag is not None:
-                    diag, snapshot = failure_diag(obj)
-                    raise WorkloadTerminalFailure(
-                        label=label,
-                        phase=str(obj.get("phase") if isinstance(obj, dict) else "?"),
-                        diag=diag,
-                        snapshot=snapshot,
-                    )
+            if status in _TERMINAL_FAIL_STATUSES:
                 raise RuntimeError(f"{label} terminal failure: {summary}")
 
         if elapsed >= timeout_s:
@@ -356,7 +304,7 @@ def _short_poll(
 
 
 def install_geak_on_pods_best_effort() -> int:
-    """Best-effort GEAK install on the Infera GPU pods (provisioner hook)."""
+    """Install GEAK on the Infera GPU pods (provisioner hook); raised errors propagate, the return code is the caller's."""
     if _load_state().get("backend") != "infera":
         return 0
     ns = argparse.Namespace(
@@ -365,11 +313,7 @@ def install_geak_on_pods_best_effort() -> int:
         poll_interval=_DEFAULT_POLL_INTERVAL_S,
         poll_timeout=_resolve_poll_timeout_s(),
     )
-    try:
-        return cmd_install_geak(ns)
-    except Exception as exc:  # noqa: BLE001
-        warn(f"install-geak skipped: {type(exc).__name__}: {exc}")
-        return 0
+    return cmd_install_geak(ns)
 
 
 # Subcommand `bootstrap`
@@ -407,8 +351,6 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
         result = _short_poll(
             label=f"bootstrap {sub_id}",
             fetch=_fetch,
-            is_ok=lambda j: str(j.get("status", "")).upper() in _TERMINAL_OK_STATUSES,
-            is_fail=lambda j: str(j.get("status", "")).upper() in _TERMINAL_FAIL_STATUSES,
             interval_s=args.poll_interval,
             timeout_s=_poll_timeout_from_args(args),
         )
@@ -453,8 +395,6 @@ def cmd_verify(args: argparse.Namespace) -> int:
         result = _short_poll(
             label=f"verify {sub_id}",
             fetch=_fetch,
-            is_ok=lambda j: str(j.get("status", "")).upper() in _TERMINAL_OK_STATUSES,
-            is_fail=lambda j: str(j.get("status", "")).upper() in _TERMINAL_FAIL_STATUSES,
             interval_s=args.poll_interval,
             timeout_s=_poll_timeout_from_args(args),
         )
@@ -601,8 +541,6 @@ def _exec_kill_submission(
         _short_poll(
             label=f"{label} {kill_sub}",
             fetch=_fetch_kill,
-            is_ok=lambda j: str(j.get("status", "")).upper() in _TERMINAL_OK_STATUSES,
-            is_fail=lambda j: str(j.get("status", "")).upper() in _TERMINAL_FAIL_STATUSES,
             interval_s=args.poll_interval,
             timeout_s=_poll_timeout_from_args(args),
         )
@@ -773,24 +711,28 @@ def _kernel_patch_pod_files() -> str:
     )
 
 
-def _build_multinode_apply_patch_entrypoint(
-    target_path: str,
-    patch_b64: str,
-    backup_dir: str,
-    kernel_id: str,
-    timeout_sec: int,
-    jit_build_dir: str = "",
-) -> str:
+@dataclass(frozen=True)
+class KernelPatchApply:
+    """One kernel patch to apply on every pod: the target file, the base64 patch, and where backups and JIT builds go."""
+
+    target_path: str
+    patch_b64: str
+    backup_dir: str
+    kernel_id: str
+    jit_build_dir: str = ""
+
+
+def _build_multinode_apply_patch_entrypoint(patch: KernelPatchApply, timeout_sec: int) -> str:
     """Compose the head-pod entrypoint that fans out a kernel patch to every pod via heredoc-embedded kernel_patch_multinode.py."""
     return (
         f"{_MN_ENTRYPOINT_PREAMBLE}"
         f"{_kernel_patch_pod_files()}"
         f'python3 "$WORK_DIR/kernel_patch_multinode.py" apply '
-        f"--target-path {shlex.quote(str(target_path))} "
-        f"--patch-b64 {shlex.quote(str(patch_b64))} "
-        f"--backup-dir {shlex.quote(str(backup_dir))} "
-        f"--kernel-id {shlex.quote(str(kernel_id))} "
-        f"--jit-build-dir {shlex.quote(str(jit_build_dir))} "
+        f"--target-path {shlex.quote(str(patch.target_path))} "
+        f"--patch-b64 {shlex.quote(str(patch.patch_b64))} "
+        f"--backup-dir {shlex.quote(str(patch.backup_dir))} "
+        f"--kernel-id {shlex.quote(str(patch.kernel_id))} "
+        f"--jit-build-dir {shlex.quote(str(patch.jit_build_dir))} "
         f"--timeout-sec {int(timeout_sec)}"
     )
 
@@ -938,12 +880,10 @@ def _submit_and_collect_pod_json(
     label: str,
     poll_interval: int,
     poll_timeout: int,
-    runtime_env: dict | None = None,
-    success_statuses: frozenset[str] | None = None,
 ) -> tuple[int, dict | None, str]:
     """Submit ``entrypoint``, poll to terminal, parse the per-pod JSON, and return ``(returncode, parsed_or_None, logs)``."""
     with _ray_dashboard_client(state) as ray:
-        sub_id = ray.submit_job(entrypoint, runtime_env=runtime_env)
+        sub_id = ray.submit_job(entrypoint)
         info(f"{label} submission_id={sub_id}")
 
         def _fetch():
@@ -954,8 +894,6 @@ def _submit_and_collect_pod_json(
         result = _short_poll(
             label=label,
             fetch=_fetch,
-            is_ok=lambda j: str(j.get("status", "")).upper() in _TERMINAL_OK_STATUSES,
-            is_fail=lambda j: str(j.get("status", "")).upper() in _TERMINAL_FAIL_STATUSES,
             interval_s=poll_interval,
             timeout_s=poll_timeout,
         )
@@ -969,9 +907,8 @@ def _submit_and_collect_pod_json(
         # Dashboard SUCCEEDED; the sub-script's own ``status`` says if the fan-out worked.
         if parsed is None:
             return EXIT_TRANSIENT, None, logs
-        ok_statuses = success_statuses or frozenset({"ok"})
         sub_status = str(parsed.get("status", "")).lower()
-        return (EXIT_OK if sub_status in ok_statuses else EXIT_TRANSIENT), parsed, logs
+        return (EXIT_OK if sub_status == "ok" else EXIT_TRANSIENT), parsed, logs
 
 
 # Subcommand: apply-patch / revert-patch (multi-node only) Cohesive rayjob/infera clusters live in
@@ -1013,14 +950,14 @@ def cmd_apply_patch(args: argparse.Namespace) -> int:
         f"backup_dir={args.backup_dir} bytes={len(patch_bytes)}"
     )
 
-    entrypoint = _build_multinode_apply_patch_entrypoint(
-        args.target_path,
-        patch_b64,
-        args.backup_dir,
-        args.kernel_id,
-        args.timeout_sec,
-        str(args.jit_build_dir or ""),
+    patch = KernelPatchApply(
+        target_path=args.target_path,
+        patch_b64=patch_b64,
+        backup_dir=args.backup_dir,
+        kernel_id=args.kernel_id,
+        jit_build_dir=str(args.jit_build_dir or ""),
     )
+    entrypoint = _build_multinode_apply_patch_entrypoint(patch, args.timeout_sec)
     rc, parsed, logs = _submit_and_collect_pod_json(
         state,
         entrypoint,
@@ -1318,8 +1255,6 @@ def _start_pd_router(
     router_result = _short_poll(
         label=f"router {router_sub}",
         fetch=_fetch_router,
-        is_ok=lambda j: str(j.get("status", "")).upper() in _TERMINAL_OK_STATUSES,
-        is_fail=lambda j: str(j.get("status", "")).upper() in _TERMINAL_FAIL_STATUSES,
         interval_s=args.poll_interval,
         timeout_s=_poll_timeout_from_args(args),
     )
@@ -1332,28 +1267,30 @@ def _start_pd_router(
     return router_sub, router_state, 0
 
 
-def _persist_multinode_restart(
-    state: dict,
-    args: argparse.Namespace,
-    *,
-    pid_dir: str,
-    log_dir: str,
-    kill_sub: str,
-    launch_sub: str,
-    topology,
-    router_sub: str,
-    router_state: dict,
-) -> None:
+@dataclass(frozen=True)
+class _MultinodeLaunch:
+    """What one multi-node restart launched: its PID/log dirs, Ray submissions, topology and PD router endpoints."""
+
+    pid_dir: str
+    log_dir: str
+    kill_sub: str
+    launch_sub: str
+    topology: dict[str, Any]
+    router_sub: str
+    router_state: dict
+
+
+def _persist_multinode_restart(state: dict, args: argparse.Namespace, launch: _MultinodeLaunch) -> None:
     """Record what this restart launched, so a later invocation can resume or fall back to it."""
-    state["last_server_pid_dir"] = pid_dir
-    state["last_server_log_dir"] = log_dir
-    state["last_kill_submission_id"] = kill_sub
-    state["last_restart_submission_id"] = launch_sub
+    state["last_server_pid_dir"] = launch.pid_dir
+    state["last_server_log_dir"] = launch.log_dir
+    state["last_kill_submission_id"] = launch.kill_sub
+    state["last_restart_submission_id"] = launch.launch_sub
     state["last_restart_framework"] = args.framework
     state["last_restart_model"] = args.model
     state["last_restart_tp"] = args.tp
     state["last_restart_ep"] = int(getattr(args, "ep", 1) or 1)
-    state["last_restart_topology"] = topology
+    state["last_restart_topology"] = launch.topology
     # Persist PD state so later invocations can fall back when a flag is omitted.
     pd_mode = (getattr(args, "pd_mode", "") or "aggregated").lower()
     state["last_restart_pd_mode"] = pd_mode
@@ -1364,9 +1301,9 @@ def _persist_multinode_restart(
         state["last_restart_pd_decode_tp"] = int(getattr(args, "pd_decode_tp", 0) or 0)
         state["last_restart_pd_transfer_backend"] = getattr(args, "pd_transfer_backend", "") or ""
         state["last_restart_pd_ib_device"] = getattr(args, "pd_ib_device", "") or ""
-        state["last_router_submission_id"] = router_sub
-        state["pd_prefill_url"] = router_state.get("pd_prefill_url", "")
-        state["pd_decode_url"] = router_state.get("pd_decode_url", "")
+        state["last_router_submission_id"] = launch.router_sub
+        state["pd_prefill_url"] = launch.router_state.get("pd_prefill_url", "")
+        state["pd_decode_url"] = launch.router_state.get("pd_decode_url", "")
     _save_state(state)
 
 
@@ -1427,8 +1364,6 @@ def _restart_multinode(args: argparse.Namespace, state: dict, nnodes: int) -> in
         result = _short_poll(
             label=f"launch {launch_sub}",
             fetch=_fetch_launch,
-            is_ok=lambda j: str(j.get("status", "")).upper() in _TERMINAL_OK_STATUSES,
-            is_fail=lambda j: str(j.get("status", "")).upper() in _TERMINAL_FAIL_STATUSES,
             interval_s=args.poll_interval,
             timeout_s=_poll_timeout_from_args(args),
         )
@@ -1471,13 +1406,15 @@ def _restart_multinode(args: argparse.Namespace, state: dict, nnodes: int) -> in
     _persist_multinode_restart(
         state,
         args,
-        pid_dir=pid_dir,
-        log_dir=log_dir,
-        kill_sub=kill_sub,
-        launch_sub=launch_sub,
-        topology=topology,
-        router_sub=router_sub,
-        router_state=router_state,
+        _MultinodeLaunch(
+            pid_dir=pid_dir,
+            log_dir=log_dir,
+            kill_sub=kill_sub,
+            launch_sub=launch_sub,
+            topology=topology,
+            router_sub=router_sub,
+            router_state=router_state,
+        ),
     )
     info("multi-node servers launched; benchmarks should target $service_url")
     return 0
@@ -1513,8 +1450,6 @@ def _restart_single_node(args: argparse.Namespace, state: dict) -> int:
         result = _short_poll(
             label=f"restart {sub_id}",
             fetch=_fetch,
-            is_ok=lambda j: str(j.get("status", "")).upper() in _TERMINAL_OK_STATUSES,
-            is_fail=lambda j: str(j.get("status", "")).upper() in _TERMINAL_FAIL_STATUSES,
             interval_s=args.poll_interval,
             timeout_s=_poll_timeout_from_args(args),
         )
@@ -1591,7 +1526,7 @@ def cmd_kill_inference(args: argparse.Namespace) -> int:
 
 
 def kill_inference_for_kernel_agent_best_effort() -> None:
-    """Best-effort inference teardown before kernel-agent Ray GPU tasks (swallows errors)."""
+    """Best-effort inference teardown before kernel-agent Ray GPU tasks; command errors are warned about."""
     ns = argparse.Namespace(
         pid_file=None,
         print_logs=False,
@@ -1600,7 +1535,7 @@ def kill_inference_for_kernel_agent_best_effort() -> None:
     )
     try:
         cmd_kill_inference(ns)
-    except Exception as exc:  # noqa: BLE001
+    except (RuntimeError, OSError) as exc:
         warn(f"kill-inference skipped: {type(exc).__name__}: {exc}")
 
 

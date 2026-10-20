@@ -459,7 +459,7 @@ async def test_the_repair_pass_ends_a_round_whose_holder_finished_silently(monke
     """
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
-    from hyperloom.orchestrator.bringup.reconcile import Reconciler
+    from hyperloom.orchestrator.bringup.reconcile import ReconcileLinks, Reconciler, ReconcileStores
     from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager, SqliteLeaseBackend
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
@@ -467,11 +467,11 @@ async def test_the_repair_pass_ends_a_round_whose_holder_finished_silently(monke
     fake = _enqueue_self(tmp_path)
     await _hold_round(fake, "spec-stuck", holder_state="succeeded")
     reconciler = Reconciler(
-        rounds=fake.rounds,
-        tasks=fake.tasks,
-        locks=ResourceLockManager(SqliteLeaseBackend(fake.rounds.db)),
-        shared_state=fake.shared_state,
-        proposals=lambda: fake.state.pending_proposals,
+        ReconcileStores(
+            rounds=fake.rounds, tasks=fake.tasks, locks=ResourceLockManager(SqliteLeaseBackend(fake.rounds.db))
+        ),
+        fake.shared_state,
+        links=ReconcileLinks(proposals=lambda: fake.state.pending_proposals),
     )
 
     await reconciler.run(time.time() + 3600.0)
@@ -585,7 +585,6 @@ async def test_revalidation_enqueues_genuine_baseline(tmp_path):
     created = await fake.tasks.get(tid)
     assert created.kind == "baseline"
     assert created.params["config_path"] == "/runs/baseline/materialized.yaml"
-    assert created.params["disable_run_eval"] is False
     assert created.params["enablement_origin"] == "eval"
 
 
@@ -1562,18 +1561,20 @@ async def test_rearm_records_the_rounds_disposition_on_the_executions_it_perform
     A discarded round still mutated the shared venv, so its rows stay in the
     ledger carrying the outcome the lane reported for them.
     """
-    from hyperloom.orchestrator.enablement.recipe.setup_ledger import build_execution_row
+    from hyperloom.orchestrator.enablement.recipe.setup_ledger import SetupExecution, build_execution_row
 
     fake = _enqueue_self(tmp_path)
     await _hold_round(fake, "spec-1")
     fake.shared_state.enablement.setup_executions = [
         build_execution_row(
-            seq=1,
-            round_task_id="spec-1",
-            cmd_index=0,
-            cmd="pip install -U transformers",
-            source="proposed",
-            outcome="applied",
+            SetupExecution(
+                seq=1,
+                round_task_id="spec-1",
+                cmd_index=0,
+                cmd="pip install -U transformers",
+                source="proposed",
+                outcome="applied",
+            ),
             env={},
             fs_root="/nonexistent-probe-root",
         )

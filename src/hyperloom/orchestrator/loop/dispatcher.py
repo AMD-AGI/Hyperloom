@@ -127,6 +127,18 @@ _CANCEL_NOTICE_SEC: float = STOP_GATE_POLL_SECONDS
 _SELF_SETTLING_KINDS: frozenset[str] = frozenset({"targeted_build", "kernel_agent"})
 
 
+class HeldLeases(NamedTuple):
+    """Leases a caller already holds for a task, released when the task's run ends.
+
+    ``prebound_lease`` is the lanes; ``gpu_lease`` the SQLite GPU-specialist accounting lease; ``gpu_specialist_lease``
+    the Ray ``GpuSpecialistLease`` to close.
+    """
+
+    prebound_lease: Any = None
+    gpu_lease: Any = None
+    gpu_specialist_lease: Any = None
+
+
 class _InflightAction(NamedTuple):
     """A running action's handle: what it is, its task, and how to ask it to stop."""
 
@@ -763,10 +775,8 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             atask = asyncio.create_task(
                 self.run_task_registered(
                     task,
-                    prebound_lease=lease,
+                    HeldLeases(prebound_lease=lease, gpu_lease=gpu_lease, gpu_specialist_lease=gpu_specialist_lease),
                     extra_context=extra_context,
-                    gpu_lease=gpu_lease,
-                    gpu_specialist_lease=gpu_specialist_lease,
                     cancel_scope=cancel_scope,
                     on_complete=None if self_settling else partial(self._queue_completion, task),
                 ),
@@ -800,11 +810,9 @@ class DispatcherCollaborator(CoordinatorCollaborator):
     async def run_task_registered(
         self,
         task: Task,
+        held: HeldLeases = HeldLeases(),
         *,
-        prebound_lease: Any = None,
         extra_context: dict[str, Any] | None = None,
-        gpu_lease: Any = None,
-        gpu_specialist_lease: Any = None,
         cancel_scope: CancelScope | None = None,
         on_complete: Callable[[SubAgentResult], Awaitable[None]] | None = None,
     ) -> "SubAgentResult | None":
@@ -817,11 +825,10 @@ class DispatcherCollaborator(CoordinatorCollaborator):
 
         Args:
             task: The task row to run.
-            prebound_lease: Lanes the caller already holds; when ``None`` and
-                the task needs lanes they are taken here, non-blocking.
+            held: Leases the caller already holds and this call releases; when
+                no lanes are held and the task needs lanes they are taken
+                here, non-blocking.
             extra_context: Per-task extras (wall budget, gpu ids, …).
-            gpu_lease: SQLite GPU-specialist accounting lease to release, if any.
-            gpu_specialist_lease: Ray ``GpuSpecialistLease`` to close, if any.
             cancel_scope: The caller's cancel channel. The pump passes one
                 because it registers its handle before this coroutine starts;
                 other callers leave it ``None`` and are registered here.
@@ -832,7 +839,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             The runner's result, or ``None`` when the task's lanes were busy, in
             which case the row is untouched and still queued.
         """
-        lease = prebound_lease
+        lease = held.prebound_lease
         if lease is None and task.requires_lanes:
             lease = await self.locks.try_acquire_many(
                 list(task.requires_lanes),
@@ -856,13 +863,13 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 self._inflight_actions[task.task_id] = _InflightAction(task.kind, handle, cancel_scope)
 
         async def release_resources() -> bool:
-            if gpu_specialist_lease is not None:
-                closed = await asyncio.to_thread(gpu_specialist_lease.close)
+            if held.gpu_specialist_lease is not None:
+                closed = await asyncio.to_thread(held.gpu_specialist_lease.close)
                 if closed is not True:
                     log.warning("dispatcher: task=%s GPU cleanup unconfirmed; retaining capacity", task.task_id)
                     return False
-            if gpu_lease is not None:
-                await self.gpu_specialist_pool.release(gpu_lease)
+            if held.gpu_lease is not None:
+                await self.gpu_specialist_pool.release(held.gpu_lease)
             return True
 
         # Fresh tasks carry the phase coordinates frozen when their row was

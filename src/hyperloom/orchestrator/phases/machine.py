@@ -105,9 +105,11 @@ class MachinePhase(CoordinatorCollaborator):
                     "predicate_inputs": _phase_state.initial_workflow_predicate_inputs(
                         state,
                         current_phase="",
-                        kernel_enabled=self.kernel_enabled(),
-                        optimize_enabled=self.optimize_enabled(),
-                        enablement_enabled=self._coord.enablement_lane.enablement_admitted(),
+                        flags=_phase_state.PhaseFlags(
+                            kernel_enabled=self.kernel_enabled(),
+                            optimize_enabled=self.optimize_enabled(),
+                            enablement_enabled=self._coord.enablement_lane.enablement_admitted(),
+                        ),
                     ),
                 },
             )
@@ -133,9 +135,11 @@ class MachinePhase(CoordinatorCollaborator):
                 "predicate_inputs": _phase_state.initial_workflow_predicate_inputs(
                     state,
                     current_phase=_phase_state.PHASE_CLOSE,
-                    kernel_enabled=self.kernel_enabled(),
-                    optimize_enabled=self.optimize_enabled(),
-                    enablement_enabled=self._coord.enablement_lane.enablement_admitted(),
+                    flags=_phase_state.PhaseFlags(
+                        kernel_enabled=self.kernel_enabled(),
+                        optimize_enabled=self.optimize_enabled(),
+                        enablement_enabled=self._coord.enablement_lane.enablement_admitted(),
+                    ),
                 ),
             },
         )
@@ -206,11 +210,13 @@ class MachinePhase(CoordinatorCollaborator):
         state = self.shared_state
         next_phase = _phase_state.compute_next_phase(
             state,
-            kernel_enabled=self.kernel_enabled(),
-            optimize_enabled=optimize_enabled,
-            enablement_enabled=self._coord.enablement_lane.enablement_admitted(),
             enablement_in_flight=enablement_in_flight,
             kernel_work_in_flight=kernel_work_in_flight,
+            flags=_phase_state.PhaseFlags(
+                kernel_enabled=self.kernel_enabled(),
+                optimize_enabled=optimize_enabled,
+                enablement_enabled=self._coord.enablement_lane.enablement_admitted(),
+            ),
         )
         if next_phase is None or str(state.phase or "").upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
             return next_phase
@@ -218,6 +224,148 @@ class MachinePhase(CoordinatorCollaborator):
             return next_phase
         log.info("phase_machine: holding %s exit (reason=%s) for operator work", state.phase, next_phase[1])
         return None
+
+    def _settle_escalate_hint(self, move: Transition) -> None:
+        """Consume or discard the pending escalate hint, according to what drove this transition."""
+        state = self.shared_state
+        if "hint" in move.evidence:
+            state.consume_pending_escalate_hint()
+        elif (
+            move.from_phase.strip().upper() == _phase_state.PHASE_SWEEP
+            and str(state.pending_escalate_hint or "").strip() == ESCALATE_HINT_SKIP_TO_CLOSE
+        ):
+            # SWEEP already had an honest closeout, so skip_to_close was suppressed in _global_terminal.
+            state.consume_pending_escalate_hint()
+        elif state.pending_escalate_hint:
+            # A hint speaks for the phase it was emitted in; carried across a transition it did not drive, it would
+            # act on a phase it was never about.
+            discarded_hint = state.discard_pending_escalate_hint()
+            log.info(
+                "phase_machine: discarded stale pending_escalate_hint=%r on unrelated transition %s -> %s (reason=%s)",
+                discarded_hint,
+                move.from_phase,
+                move.to_phase,
+                move.reason,
+            )
+
+    def _carry_cycle_facts_across(self, move: Transition) -> None:
+        """Persist the cycle-level facts the entered phase, or a later resume, has to see."""
+        state = self.shared_state
+        # A cyclic config-arm plateau winds the cycle down with ``switch_bottleneck``: record the plateaued bottleneck
+        # so the next cycle steers specialists off it.
+        if move.evidence.get("switch_bottleneck"):
+            state.mark_bottleneck_switch(
+                prev_bottleneck=state.current_top_bottleneck(),
+            )
+            log.info(
+                "plateau → bottleneck switch flagged (off %r)",
+                state.last_cycle_bottleneck,
+            )
+        # Persist the no-gain streak on a cyclic-mode terminal close so a subsequent resume sees the convergence state.
+        if (
+            not move.evidence.get("loopback")
+            and move.to_phase == _phase_state.PHASE_CLOSE
+            and "no_gain_cycle_streak_effective" in move.evidence
+        ):
+            state.no_gain_cycle_streak = int(move.evidence.get("no_gain_cycle_streak_effective", 0) or 0)
+
+    def _open_looped_back_cycle(self, move: Transition, prior_cycle: int) -> None:
+        """Open the macro-cycle a loopback transition has just entered."""
+        state = self.shared_state
+        state.open_macro_cycle(no_gain_cycle_streak=int(move.evidence.get("no_gain_cycle_streak_effective") or 0))
+        self._coord.phase_macro_cycle.record_cycle_strategy_for_current_cycle()
+        log.info(
+            "Coordinator: macro-cycle reloop %d -> %d (no_gain_streak=%d, gain_anchor=%.4f)",
+            prior_cycle,
+            state.macro_cycle,
+            state.no_gain_cycle_streak,
+            state.gain_at_cycle_start,
+        )
+
+    async def _announce_transition(self, move: Transition) -> None:
+        """Publish the phase boundary on the bus for the roles that follow it."""
+        try:
+            await self.bus.append_and_seq(
+                Message.new(
+                    "coordinator",
+                    "*",
+                    "event",
+                    {
+                        "kind": "phase_transition",
+                        "from_phase": move.from_phase,
+                        "to_phase": move.to_phase,
+                        "reason": move.reason,
+                        "evidence": move.evidence,
+                    },
+                )
+            )
+        except Exception:
+            log.exception("Coordinator: phase_transition event bus write failed")
+
+    async def _fire_phase_entry(self, move: Transition) -> None:
+        """Run the entered phase's side effects, recording rather than raising a hook failure."""
+        # Phase-entry side effects are additive; hook failures are logged only. They run on the transition itself,
+        # which is what callers advancing into CLOSE rely on to see the sequencer's settlement once it returns.
+        try:
+            await self._on_phase_entered(
+                from_phase=move.from_phase,
+                to_phase=move.to_phase,
+                reason=move.reason,
+                evidence=move.evidence,
+            )
+        except Exception as exc:
+            log.exception("Coordinator: _on_phase_entered hook failed")
+            # This hook is also what closes the left phase's event, so a raise here is the case where that event never
+            # got its exit evidence.
+            self._coord.record_exception(stage="phase_entered", exc=exc)
+
+    async def _commit_transition(self, move: Transition) -> None:
+        """Record the phase move and run everything the boundary owes, in order."""
+        state = self.shared_state
+        self._settle_escalate_hint(move)
+        if move.to_phase == _phase_state.PHASE_CLOSE:
+            self.set_terminal_stop_reason(state, move.reason)
+        self._carry_cycle_facts_across(move)
+        is_loopback = bool(move.evidence.get("loopback"))
+        prior_cycle = state.macro_cycle
+        _phase_state.record_phase_transition(
+            state,
+            to_phase=move.to_phase,
+            reason=move.reason,
+            evidence=move.evidence,
+        )
+        if is_loopback:
+            self._open_looped_back_cycle(move, prior_cycle)
+        # Mirror the phase boundary into the operator-facing lifecycle log using the ENTER status (a point-in-time
+        # marker, not a START/END interval).
+        _phase_state.record_lifecycle_event(
+            state,
+            step=move.to_phase,
+            status=_phase_state.LIFECYCLE_STATUS_ENTER,
+            phase=move.to_phase,
+            detail=f"reason={move.reason}" if move.reason else "",
+        )
+        # The in-memory phase has already moved, so a failed save is raised only after the entry has run.
+        save_error: OSError | None = None
+        try:
+            state.save(self.session_dir)
+        except OSError as exc:
+            save_error = exc
+        log.info(
+            "Coordinator.phase: %s → %s (reason=%s)",
+            move.from_phase or "<unset>",
+            move.to_phase,
+            move.reason,
+        )
+        await self._announce_transition(move)
+        await self._fire_phase_entry(move)
+        if is_loopback:
+            await self._coord.phase_macro_cycle.run_cycle_soft_restart(
+                prior_cycle=prior_cycle,
+                new_cycle=state.macro_cycle,
+            )
+        if save_error is not None:
+            raise save_error
 
     async def advance_phase_if_needed(self) -> None:
         """Scan exit conditions and transition phase at most once per tick."""
@@ -231,13 +379,11 @@ class MachinePhase(CoordinatorCollaborator):
             await self._coord.phase_close.ensure_close_sequence(reason="time_exhausted")
             return
         kernel_facts = await self._coord.phase_kernel.exit_facts()
-        optimize_enabled = self.optimize_enabled()
         in_enablement = str(state.phase or "").upper() == _phase_state.PHASE_ENABLEMENT
         await self._release_holds_no_task_will_settle()
-        enablement_in_flight = in_enablement and await self._coord.enablement_lane.enablement_in_flight()
         next_phase = await self._next_phase(
-            optimize_enabled=optimize_enabled,
-            enablement_in_flight=enablement_in_flight,
+            optimize_enabled=self.optimize_enabled(),
+            enablement_in_flight=in_enablement and await self._coord.enablement_lane.enablement_in_flight(),
             kernel_work_in_flight=kernel_facts.agent_in_flight,
         )
         await self._coord.phase_internal.maybe_enqueue_trajectory_reviewer()
@@ -251,123 +397,14 @@ class MachinePhase(CoordinatorCollaborator):
         if not await self._drain_for_transition(prior=prior, target=target, reason=reason, evidence=evidence):
             return
         dispatcher.admission_frozen = False
-        # Consume escalate hint after a hint-driven transition.
-        if isinstance(evidence, dict) and "hint" in evidence:
-            state.consume_pending_escalate_hint()
-        elif (
-            str(prior or "").strip().upper() == _phase_state.PHASE_SWEEP
-            and str(state.pending_escalate_hint or "").strip() == ESCALATE_HINT_SKIP_TO_CLOSE
-        ):
-            # SWEEP already had an honest closeout, so skip_to_close was suppressed in _global_terminal.
-            state.consume_pending_escalate_hint()
-        elif state.pending_escalate_hint:
-            # A hint speaks for the phase it was emitted in; carried across a transition it did not drive, it would
-            # act on a phase it was never about.
-            discarded_hint = state.discard_pending_escalate_hint()
-            log.info(
-                "phase_machine: discarded stale pending_escalate_hint=%r on unrelated transition %s -> %s (reason=%s)",
-                discarded_hint,
-                prior,
-                target,
-                reason,
-            )
-        if target == _phase_state.PHASE_CLOSE:
-            self.set_terminal_stop_reason(state, reason)
-        # A cyclic config-arm plateau winds the cycle down with ``switch_bottleneck``: record the plateaued bottleneck
-        # so the next cycle steers specialists off it.
-        if isinstance(evidence, dict) and evidence.get("switch_bottleneck"):
-            state.mark_bottleneck_switch(
-                prev_bottleneck=state.current_top_bottleneck(),
-            )
-            log.info(
-                "plateau → bottleneck switch flagged (off %r)",
-                state.last_cycle_bottleneck,
-            )
-        is_loopback = bool(isinstance(evidence, dict) and evidence.get("loopback"))
-        # Persist the no-gain streak on a cyclic-mode terminal close so a subsequent resume sees the convergence state.
-        if (
-            not is_loopback
-            and target == _phase_state.PHASE_CLOSE
-            and isinstance(evidence, dict)
-            and "no_gain_cycle_streak_effective" in evidence
-        ):
-            state.no_gain_cycle_streak = int(evidence.get("no_gain_cycle_streak_effective", 0) or 0)
-        prior_cycle = state.macro_cycle
-        _phase_state.record_phase_transition(
-            state,
-            to_phase=target,
-            reason=reason,
-            evidence=evidence,
-        )
-        if is_loopback:
-            state.open_macro_cycle(no_gain_cycle_streak=int(evidence.get("no_gain_cycle_streak_effective") or 0))
-            self._coord.phase_macro_cycle.record_cycle_strategy_for_current_cycle()
-            log.info(
-                "Coordinator: macro-cycle reloop %d -> %d (no_gain_streak=%d, gain_anchor=%.4f)",
-                prior_cycle,
-                state.macro_cycle,
-                state.no_gain_cycle_streak,
-                state.gain_at_cycle_start,
-            )
-        # Mirror the phase boundary into the operator-facing lifecycle log using the ENTER status (a point-in-time
-        # marker, not a START/END interval).
-        _phase_state.record_lifecycle_event(
-            state,
-            step=target,
-            status=_phase_state.LIFECYCLE_STATUS_ENTER,
-            phase=target,
-            detail=f"reason={reason}" if reason else "",
-        )
-        # The in-memory phase has already moved, so a failed save is raised only after the entry has run.
-        save_error: OSError | None = None
-        try:
-            state.save(self.session_dir)
-        except OSError as exc:
-            save_error = exc
-        log.info(
-            "Coordinator.phase: %s → %s (reason=%s)",
-            prior or "<unset>",
-            target,
-            reason,
-        )
-        try:
-            await self.bus.append_and_seq(
-                Message.new(
-                    "coordinator",
-                    "*",
-                    "event",
-                    {
-                        "kind": "phase_transition",
-                        "from_phase": prior or "",
-                        "to_phase": target,
-                        "reason": reason,
-                        "evidence": evidence,
-                    },
-                )
-            )
-        except Exception:
-            log.exception("Coordinator: phase_transition event bus write failed")
-        # Phase-entry side effects are additive; hook failures are logged only. They run on the transition itself,
-        # which is what callers advancing into CLOSE rely on to see the sequencer's settlement once it returns.
-        try:
-            await self._on_phase_entered(
+        await self._commit_transition(
+            Transition(
                 from_phase=prior or "",
                 to_phase=target,
-                reason=reason or "",
-                evidence=evidence if isinstance(evidence, dict) else None,
+                reason=reason,
+                evidence=evidence if isinstance(evidence, dict) else {},
             )
-        except Exception as exc:
-            log.exception("Coordinator: _on_phase_entered hook failed")
-            # This hook is also what closes the left phase's event, so a raise here is the case where that event never
-            # got its exit evidence.
-            self._coord.record_exception(stage="phase_entered", exc=exc)
-        if is_loopback:
-            await self._coord.phase_macro_cycle.run_cycle_soft_restart(
-                prior_cycle=prior_cycle,
-                new_cycle=state.macro_cycle,
-            )
-        if save_error is not None:
-            raise save_error
+        )
 
     async def _release_holds_no_task_will_settle(self) -> None:
         """Settle what the current phase's exit is waiting on when the task that would have settled it is gone.

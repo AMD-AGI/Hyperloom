@@ -20,6 +20,20 @@ from kernelforge.tracker import UsageAccumulator
 log = logging.getLogger(__name__)
 
 
+# The canonical correctness suite's per-stage ceiling; PORT clips it to the time left before the cutoff.
+_VALIDATE_STAGE_TIMEOUT_SEC = 1800
+
+
+@dataclass(frozen=True)
+class PortRequest:
+    """One PORT campaign: how many sessions may run, their permission mode, the cutoff and the KB references."""
+
+    max_attempts: int = 3
+    permission_mode: str | None = None
+    stop_at_unix: float | None = None
+    pre_task_context: str = ""
+
+
 @dataclass
 class PortResult:
     ok: bool
@@ -118,16 +132,13 @@ async def run_port_loop(
     spec: RewriteSpec,
     driver_path: str,
     config: Config,
+    request: PortRequest = PortRequest(),
     *,
-    kernel_backend: str = "flydsl",
-    max_attempts: int = 3,
-    permission_mode: str | None = None,
-    validate_stage_timeout_sec: int = 1800,
     usage: UsageAccumulator | None = None,
-    stop_at_unix: float | None = None,
-    pre_task_context: str = "",
 ) -> PortResult:
     """Run the correctness-only port loop; return whether a correct port emerged."""
+    max_attempts = request.max_attempts
+    stop_at_unix = request.stop_at_unix
     from kernelforge.loop.gate_settings import GateMeasurement
     from kernelforge.orchestrator.agent import ImplementerSetup, ImplementerTask, SessionOptions, make_agent_fn
 
@@ -145,8 +156,8 @@ async def run_port_loop(
         ImplementerSetup(
             ImplementerTask(
                 program_md=program_md,
-                kernel_backend_name=kernel_backend,
-                pre_task_context=pre_task_context,
+                kernel_backend_name="flydsl",
+                pre_task_context=request.pre_task_context,
                 # Only the FlyDSL kernel is editable; the kernel it ports FROM is the driver's live oracle and baseline.
                 source_files=[spec.flydsl_kernel],
                 target_functions=[spec.builder_symbol],
@@ -155,9 +166,9 @@ async def run_port_loop(
             ),
             # PORT is correctness-only: no perf requirement (a correct port is the goal; OPTIMIZE tunes speed later).
             GateMeasurement(
-                driver_path, spec.snr_threshold, stage_timeout_sec=validate_stage_timeout_sec, correctness_only=True
+                driver_path, spec.snr_threshold, stage_timeout_sec=_VALIDATE_STAGE_TIMEOUT_SEC, correctness_only=True
             ),
-            SessionOptions(permission_mode=permission_mode, insession_gate=True),
+            SessionOptions(permission_mode=request.permission_mode, insession_gate=True),
         ),
         usage=usage,
     )
@@ -258,7 +269,9 @@ async def run_port_loop(
                 error_tail="PORT stopped before validation at the finalization reserve",
             )
         validation_timeout = (
-            validate_stage_timeout_sec if remaining is None else max(1, min(validate_stage_timeout_sec, int(remaining)))
+            _VALIDATE_STAGE_TIMEOUT_SEC
+            if remaining is None
+            else max(1, min(_VALIDATE_STAGE_TIMEOUT_SEC, int(remaining)))
         )
         validation = run_validation_pipeline(
             driver_script=driver_path,

@@ -607,13 +607,13 @@ _CONFIRMATION_REASON = "Verified the entire process tree and every Ray actor sto
 
 
 def _confirm_in_sqlite(path, *, task_id="task-1", reason=_CONFIRMATION_REASON):
-    from hyperloom.inference_optimizer.session.resume_guard import _confirm_task_stopped_in_transaction
+    from hyperloom.inference_optimizer.session.resume_guard import _Confirmation, _confirm_task_stopped_in_transaction
 
     with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=rw", uri=True)) as db, db:
         db.row_factory = sqlite3.Row
         db.execute("BEGIN IMMEDIATE")
         return _confirm_task_stopped_in_transaction(
-            db, task_id=task_id, reason=reason, operator="test-operator", confirmed_at=_CONFIRMED_AT
+            db, task_id, _Confirmation(reason=reason, operator="test-operator", confirmed_at=_CONFIRMED_AT)
         )
 
 
@@ -918,7 +918,7 @@ def test_confirmation_cli_reports_confirmation_failure_without_reports(tmp_path,
 
 @pytest.mark.asyncio
 async def test_confirmation_leaves_round_fence_and_events_for_existing_reconciler(tmp_path):
-    from hyperloom.orchestrator.bringup.reconcile import Reconciler
+    from hyperloom.orchestrator.bringup.reconcile import ReconcileLimits, Reconciler, ReconcileStores
     from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager, SqliteLeaseBackend
     from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
     from hyperloom.orchestrator.state.round_store import EXPIRED_REAPED, RoundRequest, RoundStore
@@ -937,11 +937,9 @@ async def test_confirmation_leaves_round_fence_and_events_for_existing_reconcile
         )
         assert opened.ok
         reconciler = Reconciler(
-            rounds=rounds,
-            tasks=tasks,
-            locks=ResourceLockManager(SqliteLeaseBackend(db)),
-            shared_state=None,
-            terminal_holder_cap_sec=0,
+            ReconcileStores(rounds=rounds, tasks=tasks, locks=ResourceLockManager(SqliteLeaseBackend(db))),
+            None,
+            limits=ReconcileLimits(terminal_holder_cap_sec=0),
         )
         report = await reconciler.run(2_000_000_000)
         assert not report.settled and not report.failures

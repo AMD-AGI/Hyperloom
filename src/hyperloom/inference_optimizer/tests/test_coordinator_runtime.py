@@ -25,7 +25,7 @@ from hyperloom.orchestrator.roles import (
     MockTurn,
     ScriptedPlan,
 )
-from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.coordinator import Coordinator, RunOptions
 from hyperloom.orchestrator.loop.writeback import _BASELINE_FINGERPRINT_KEYS, WritebackCollaborator
 from hyperloom.orchestrator.loop.proposals import ProposalsCollaborator
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType, NoIntentEmitted
@@ -108,7 +108,7 @@ async def test_sighup_takes_the_same_priority_as_other_stop_signals(session_dir)
     c.phase_close.ensure_close_sequence = _close
     c._recipe_kb_t4_hook = _finalize
     try:
-        reason = await c.run(max_ticks=1, tick_interval_sec=0.0)
+        reason = await c.run(options=RunOptions(tick_interval_sec=0.0, max_ticks=1))
         assert (
             reason,
             c.shared_state.stop_reason,
@@ -143,7 +143,7 @@ async def test_the_final_signal_snapshot_makes_a_late_sigterm_terminal(session_d
     c.phase_close.ensure_close_sequence = _close
     c._recipe_kb_t4_hook = _noop_finalize
     try:
-        reason = await c.run(max_ticks=1, tick_interval_sec=0.0)
+        reason = await c.run(options=RunOptions(tick_interval_sec=0.0, max_ticks=1))
         assert (
             reason,
             c.shared_state.stop_reason,
@@ -186,9 +186,9 @@ async def test_stop_signals_follow_the_normal_terminal_path(session_dir, stop_si
     try:
         if cancelled:
             with pytest.raises(asyncio.CancelledError):
-                await c.run(max_ticks=1, tick_interval_sec=0.0)
+                await c.run(options=RunOptions(tick_interval_sec=0.0, max_ticks=1))
         else:
-            assert await c.run(max_ticks=1, tick_interval_sec=0.0) == "signal"
+            assert await c.run(options=RunOptions(tick_interval_sec=0.0, max_ticks=1)) == "signal"
         assert (
             c.shared_state.stop_reason,
             bool(c.shared_state.stop_ts),
@@ -512,17 +512,15 @@ class _SelfTracingLLMFailingBackend(_LLMFailingBackend):
         max_turns: int = 1,
     ) -> "BackendTurnResult":  # noqa: F821 — protocol return type, raises before returning
         from hyperloom.orchestrator.roles.base import LLMCallFailed
-        from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, append_llm_call
+        from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, LLMCallSite, append_llm_call
 
         self.calls += 1
         error = LLMCallFailed(f"simulated {self.name} gateway 400 #{self.calls}")
         append_llm_call(
             session_dir=self._session_dir,
             record=LLMCallRecord.for_failure(
-                session_id=self._session_dir.name,
-                component="critic",
-                role="critic",
-                error=error,
+                LLMCallSite(session_id=self._session_dir.name, component="critic", role="critic"),
+                error,
                 model="claude-opus-4-7",
             ),
         )
@@ -671,7 +669,7 @@ async def test_run_does_not_call_a_failing_backend_before_its_retry(session_dir,
     backends["critic"] = failing
     c = Coordinator(session_dir, backends=backends)
     try:
-        assert await c.run(max_ticks=3, tick_interval_sec=0.0) == "max_ticks"
+        assert await c.run(options=RunOptions(tick_interval_sec=0.0, max_ticks=3)) == "max_ticks"
         assert failing.calls == 1
     finally:
         await c.stop()
@@ -683,7 +681,7 @@ async def test_run_waits_for_a_retry_when_every_backend_is_failing(session_dir, 
     backends = {name: _AlwaysFailingBackend(name) for name in ("orchestration", "critic")}
     c = Coordinator(session_dir, backends=backends)
     try:
-        assert await c.run(max_ticks=3, tick_interval_sec=0.0) == "max_ticks"
+        assert await c.run(options=RunOptions(tick_interval_sec=0.0, max_ticks=3)) == "max_ticks"
         assert backends["orchestration"].calls >= 2
     finally:
         await c.stop()
@@ -696,7 +694,7 @@ async def test_run_stops_once_a_backend_has_failed_for_the_unhealthy_window(sess
     backends["critic"] = _AlwaysFailingBackend("critic")
     c = Coordinator(session_dir, backends=backends)
     try:
-        assert await c.run(max_ticks=5, tick_interval_sec=0.0) == "backend_unhealthy"
+        assert await c.run(options=RunOptions(tick_interval_sec=0.0, max_ticks=5)) == "backend_unhealthy"
         assert c.shared_state.stop_reason == "backend_unhealthy"
     finally:
         await c.stop()
@@ -1656,28 +1654,6 @@ async def test_promote_baseline_revalidation_finalizes_when_accuracy_meets_floor
 
 
 @pytest.mark.asyncio
-async def test_promote_baseline_revalidation_promotes_without_accuracy_when_eval_disabled(session_dir):
-    """When the session has eval disabled, a revalidation baseline promotes on throughput alone."""
-    c = Coordinator(session_dir, backends=_silent_backends())
-    _mute_action_scoring(c)
-    try:
-        c.shared_state.eval_disabled = True
-        c.shared_state.enablement.validation_pending = True
-        c.shared_state.enablement.accuracy_floor = 0.3
-        c.shared_state.enablement.revalidation_task_id = "t-reval-noeval"
-        await c.writeback.promote_to_shared_state(
-            "baseline",
-            {"output_throughput": 900.0, "completed_requests": 8},
-            task=_mk_task("baseline", "t-reval-noeval"),
-        )
-        assert c.shared_state.baseline_tput == 900.0
-        assert c.shared_state.enablement.succeeded is True
-        assert c.shared_state.enablement.validation_pending is False
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
 async def test_promote_baseline_unrelated_baseline_does_not_consume_pending(session_dir):
     """A baseline that is NOT the tracked revalidation task must not consume pending state."""
     c = Coordinator(session_dir, backends=_silent_backends())
@@ -2119,7 +2095,10 @@ async def test_handle_unpromotable_profile_clears_the_initial_analysis_gate(sess
             {"status": "failed", "measurement_status": "failed", "error_class": "no_trace_files"},
         )
         assert c.shared_state.auto_roofline_pending_task_id == ""
-        assert phase_state.compute_next_phase(c.shared_state, kernel_enabled=True) is not None
+        assert (
+            phase_state.compute_next_phase(c.shared_state, flags=phase_state.PhaseFlags(kernel_enabled=True))
+            is not None
+        )
 
         c.shared_state.auto_roofline_pending_task_id = "t-other"
         await c.writeback.handle_unpromotable_result(
@@ -2156,7 +2135,7 @@ async def test_a_phase_releases_the_initial_analysis_gate_when_its_task_ended_un
         assert c.shared_state.auto_roofline_pending_task_id == task.task_id
 
         await c.tasks.transition(task.task_id, ending)
-        assert phase_state.compute_next_phase(c.shared_state, kernel_enabled=True) is None
+        assert phase_state.compute_next_phase(c.shared_state, flags=phase_state.PhaseFlags(kernel_enabled=True)) is None
         await c.phase_machine.advance_phase_if_needed()
         assert c.shared_state.auto_roofline_pending_task_id == ""
     finally:
@@ -2221,7 +2200,6 @@ def test_fingerprint_keys_covers_recovery_surface():
         "model_path",
         "gpu_type",
         "config_path",
-        "disable_run_eval",
     }
     assert set(_BASELINE_FINGERPRINT_KEYS) == expected
 
@@ -2366,7 +2344,7 @@ async def test_idle_run_reaches_max_ticks_without_closing(session_dir):
     """An idle run keeps ticking until max_ticks rather than self-closing on silence."""
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
-        reason = await c.run(max_ticks=5, tick_interval_sec=0.0)
+        reason = await c.run(options=RunOptions(tick_interval_sec=0.0, max_ticks=5))
         assert reason == "max_ticks"
         assert c.shared_state.closing_phase is False
     finally:
@@ -2615,7 +2593,7 @@ async def test_run_preserves_prior_stop_reason_when_loop_exits_without_new_reaso
     c.phase_machine.advance_phase_if_needed = _boom  # type: ignore[assignment]
 
     try:
-        reason = await c.run(max_ticks=5)
+        reason = await c.run(options=RunOptions(max_ticks=5))
         assert reason == "target_reached"
         assert c.shared_state.stop_reason == "target_reached"
         # Two advance_phase calls per run (pre-reactor hint consume + main) each record a coordinator exception when
@@ -2671,7 +2649,7 @@ async def test_a_failed_sweep_is_not_renamed_by_a_met_target(session_dir):
 
     c.phase_sweep._enqueue_internal_conc_sweep_task = _ladder_already_settled  # type: ignore[method-assign]
     try:
-        reason = await c.run(objective=TargetGainObjective(target_gain_pct=10.0), max_ticks=6)
+        reason = await c.run(objective=TargetGainObjective(target_gain_pct=10.0), options=RunOptions(max_ticks=6))
         assert reason == "sweep_failed"
         assert c.shared_state.target_reached_at
         hops = [(r.get("to_phase"), r.get("reason")) for r in c.shared_state.phase_history]
@@ -2697,7 +2675,7 @@ async def test_a_met_target_waits_for_the_ladder_it_routed_to(session_dir):
 
     c.phase_sweep._enqueue_internal_conc_sweep_task = _ladder_stays_queued  # type: ignore[method-assign]
     try:
-        reason = await c.run(objective=TargetGainObjective(target_gain_pct=10.0), max_ticks=6)
+        reason = await c.run(objective=TargetGainObjective(target_gain_pct=10.0), options=RunOptions(max_ticks=6))
         assert reason == "max_ticks"
         assert c.shared_state.target_reached_at
         assert c.shared_state.last_conc_sweep == {}
@@ -2723,7 +2701,7 @@ async def test_target_reached_routes_through_sweep_then_close(session_dir):
 
     c.phase_sweep._enqueue_internal_conc_sweep_task = _ladder_already_settled  # type: ignore[method-assign]
     try:
-        reason = await c.run(objective=TargetGainObjective(target_gain_pct=10.0), max_ticks=6)
+        reason = await c.run(objective=TargetGainObjective(target_gain_pct=10.0), options=RunOptions(max_ticks=6))
         assert reason == "target_reached"
         assert c.shared_state.target_reached_at
         hops = [(r.get("to_phase"), r.get("reason")) for r in c.shared_state.phase_history]
@@ -2757,8 +2735,21 @@ async def test_target_reached_close_still_runs_the_post_opt_roofline(session_dir
     c.phase_sweep._enqueue_internal_conc_sweep_task = _ladder_already_settled  # type: ignore[method-assign]
     c.phase_close._maybe_run_close_post_opt_roofline = _record_roofline  # type: ignore[method-assign]
     try:
-        reason = await c.run(objective=TargetGainObjective(target_gain_pct=10.0), max_ticks=6)
+        reason = await c.run(objective=TargetGainObjective(target_gain_pct=10.0), options=RunOptions(max_ticks=6))
         assert reason == "target_reached"
         assert ran == ["False"], f"post-opt roofline saw closing_phase={ran}"
     finally:
         await c.stop()
+
+
+def test_a_failing_proposal_outcome_record_propagates(monkeypatch) -> None:
+    from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+    from hyperloom.orchestrator.loop import proposals
+
+    def _boom(**_kwargs) -> None:
+        raise RuntimeError("proposal outcome bug")
+
+    monkeypatch.setattr(phase_event, "record_proposal_outcome", _boom)
+
+    with pytest.raises(RuntimeError, match="proposal outcome bug"):
+        proposals._record_proposal_materialized("m-1", "t-1")
