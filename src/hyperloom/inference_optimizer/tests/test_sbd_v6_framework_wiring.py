@@ -1083,6 +1083,27 @@ def test_a_rejected_grid_is_reviewed_and_dropped(session_dir: Path):
     assert [step["step"] for step in proposal["lifecycle"]] == ["proposed", "reviewed"]
 
 
+def test_a_grid_denied_on_the_review_timeout_is_dropped(session_dir: Path):
+    """The timeout deny bypasses the verdict handler, and must still settle what the event log calls rejected."""
+    import asyncio
+    import time
+
+    from hyperloom.orchestrator.bringup.reconcile import REVIEW_TTL_SEC
+
+    coord = _coordinator(session_dir)
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
+    coord.phase_framework._open_framework_timeline()
+
+    msg_id = _propose_grid(coord, [{"provenance": "llm_direct"}])
+    asyncio.run(coord.reconciler.run(time.time() + REVIEW_TTL_SEC + 60.0))
+    coord.phase_framework.close_framework_timeline(_tr("optimize_no_more_leverage"))
+
+    assert msg_id not in coord.state.pending_proposals
+    proposal = _events(session_dir)[0]["ext"]["proposals"][0]
+    assert proposal["terminal"]["disposition"] == "dropped"
+    assert proposal["terminal"]["reason"] == "review_timeout"
+
+
 def _review(coord: Coordinator, msg_id: str, payload: dict[str, Any]) -> None:
     """Rule on a pending proposal through the real review_verdict seam."""
     import asyncio

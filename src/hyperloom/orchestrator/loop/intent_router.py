@@ -260,7 +260,6 @@ def _record_critic_review(
     if recorder is None:
         return
     from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
-        DISPOSITION_DROPPED,
         REVIEWER_CRITIC,
         REVIEWER_CRITIC_UNAVAILABLE,
         STEP_REVIEWED,
@@ -287,11 +286,7 @@ def _record_critic_review(
         reason=reason,
     )
     if effective == "reject":
-        recorder.settle_proposal(
-            proposal_id,
-            disposition=DISPOSITION_DROPPED,
-            reason=reason or "critic_rejected",
-        )
+        router.settle_dropped_proposal(pending, reason or "critic_rejected")
 
 
 def _record_phase_proposal_outcome(pending: Any, **outcome: Any) -> None:
@@ -332,6 +327,16 @@ def _record_review_outcome(router: Any, pending: Any, **outcome: Any) -> None:
 
 class IntentRouter(CoordinatorCollaborator):
     """Validates and dispatches agent-emitted intents on behalf of a Coordinator."""
+
+    def settle_dropped_proposal(self, pending: Any, reason: str) -> None:
+        """Settle a denied proposal as dropped on the framework timeline: it never reaches a bench."""
+        proposal_id = review_row_id(pending.payload or {}, fallback_msg_id=pending.proposal_msg_id)
+        recorder = self._coord.phase_framework.timeline()
+        if not proposal_id or recorder is None:
+            return
+        from hyperloom.inference_optimizer.breakdown.recorder.framework_event import DISPOSITION_DROPPED
+
+        recorder.settle_proposal(proposal_id, disposition=DISPOSITION_DROPPED, reason=reason)
 
     def _resolve_primatune_mandate(self, params: dict[str, Any]) -> PolicyDenied | None:
         """Swap a queued predictor mandate in for the ``primatune_mandate_id`` that cites it.
