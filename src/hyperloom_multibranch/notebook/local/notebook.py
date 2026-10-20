@@ -21,6 +21,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from hyperloom.contracts.recipe import DIGEST_PREFIX, RecipeDelta
+from hyperloom_multibranch.contracts.intent import intent_fingerprint
 from hyperloom_multibranch.contracts.notebook.interfaces import (
     AlreadyTested,
     BranchLogStore,
@@ -57,6 +58,7 @@ from hyperloom_multibranch.contracts.notebook.peers import (
     Validity,
 )
 from hyperloom_multibranch.contracts.notebook.records import (
+    REPLAY_TARGET,
     BaselineRecord,
     BranchLogRecord,
     BranchProgress,
@@ -159,11 +161,23 @@ def _same_action(one: str | None, other: str | None) -> bool:
 
 
 def _refusal(answer: DedupAnswer, reason: str) -> NotebookError | None:
-    if answer.status is DedupStatus.IN_PROGRESS:
+    if answer.status in (DedupStatus.IN_PROGRESS, DedupStatus.TESTING_ELSEWHERE):
         return ClaimHeld(answer)
     if answer.status is DedupStatus.TESTED or (answer.status is DedupStatus.SUSPECTED and not reason.strip()):
         return AlreadyTested(answer)
     return None
+
+
+def _replays(state: NotebookState, key: ClaimKey) -> bool:
+    known = state.intents.get(key.intent_fingerprint)
+    return known is not None and known.fingerprint == intent_fingerprint(REPLAY_TARGET, known.mechanism, known.layer)
+
+
+def _holders(answer: DedupAnswer) -> tuple[str, ...]:
+    if answer.status is not DedupStatus.TESTING_ELSEWHERE:
+        return ()
+    held = (answer.claim.holder,) if answer.claim is not None else ()
+    return tuple(sorted({*held, *(record.request.branch for record in answer.records)}))
 
 
 def _bar_pct(state: NotebookState) -> float | None:
@@ -484,9 +498,37 @@ class LocalNotebook(
     # --- claims ---------------------------------------------------------------------------------------------------
 
     async def lookup(self, key: ClaimKey, action_fingerprint: str) -> DedupAnswer:
-        return self._answer(self._state(), key, action_fingerprint, self._clock())
+        return self._answer(self._state(), key, action_fingerprint, self._clock(), self.writer.branch)
 
-    def _answer(self, state: NotebookState, key: ClaimKey, action_fingerprint: str, now: float) -> DedupAnswer:
+    def _elsewhere(
+        self, state: NotebookState, key: ClaimKey, branch: str, now: float
+    ) -> tuple[Claim | None, tuple[TestRecord, ...]]:
+        """Another branch's live claim on the intent of ``key`` and the other branches' tests of it in flight, on other
+        states; what happens on the state of ``key`` itself the other answers say."""
+
+        if _replays(state, key):
+            return None, ()
+        held = (
+            claim
+            for claim in self._leases.all_current()
+            if is_live(claim, now)
+            and claim.holder != branch
+            and claim.key.intent_fingerprint == key.intent_fingerprint
+            and claim.key.parent_commit != key.parent_commit
+        )
+        running = tuple(
+            record
+            for record in state.records()
+            if record.in_flight
+            and record.request.branch != branch
+            and record.request.intent_fingerprint == key.intent_fingerprint
+            and record.request.parent_commit != key.parent_commit
+        )
+        return next(held, None), running
+
+    def _answer(
+        self, state: NotebookState, key: ClaimKey, action_fingerprint: str, now: float, branch: str
+    ) -> DedupAnswer:
         measured = [
             record for record in state.records() if record.measured and record.request.intent_fingerprint is not None
         ]
@@ -513,6 +555,10 @@ class LocalNotebook(
             return DedupAnswer(key, action_fingerprint, DedupStatus.TESTED, records=exact, elsewhere=elsewhere)
         if live:
             return DedupAnswer(key, action_fingerprint, DedupStatus.IN_PROGRESS, claim=live[0], elsewhere=elsewhere)
+        held, running = self._elsewhere(state, key, branch, now)
+        if held is not None or running:
+            testing = DedupStatus.TESTING_ELSEWHERE
+            return DedupAnswer(key, action_fingerprint, testing, claim=held, records=running, elsewhere=elsewhere)
         status = DedupStatus.SUSPECTED if same_intent else DedupStatus.FREE
         return DedupAnswer(key, action_fingerprint, status, records=same_intent, elsewhere=elsewhere)
 
@@ -522,7 +568,7 @@ class LocalNotebook(
         now = self._clock()
         key = ClaimKey(intent.parent_commit, intent.fingerprint)
         state = self._state()
-        answer = self._answer(state, key, action_fingerprint, now)
+        answer = self._answer(state, key, action_fingerprint, now, intent.branch)
         bar = _bar_pct(state)
         too_low = _ceiling_refusal(state, intent, bar)
         refusal = _refusal(answer, reason) or too_low
@@ -545,12 +591,16 @@ class LocalNotebook(
                 answer = replace(answer, status=DedupStatus.IN_PROGRESS, claim=taken.claim)
                 refusal = ClaimHeld(answer)
         matched = tuple(record.request_id for record in answer.records)
+        holders = _holders(answer)
+        acquired = claim is not None
         decision = ClaimDecision(
-            intent, action_fingerprint, answer.status, claim is not None, reason, matched, _ceiling_pct(intent), bar
+            intent, action_fingerprint, answer.status, acquired, reason, matched, _ceiling_pct(intent), bar, holders
         )
         found = answer.status.value
         if too_low is not None and refusal is too_low:
             found = f"ceiling {too_low.ceiling_pct:.2f}% below the bar of {too_low.bar_pct:.2f}%"
+        elif holders:
+            found = f"being tested by {', '.join(holders)}"
         outcome = "claimed" if claim is not None else f"refused ({found})"
         summary = f"{outcome} {intent.target} / {intent.mechanism} on {intent.parent_commit}"
         self._append(EntryKind.CLAIM, decision, branch=intent.branch, parent=intent.parent_commit, summary=summary)

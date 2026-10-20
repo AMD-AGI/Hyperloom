@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Same-state deduplication and the life of a claim, as a specialist runtime and the toolbox see them."""
+"""Deduplication on a state and across branches, and the life of a claim, as a specialist runtime and the toolbox see
+them; a branch refused while another branch tests the same intent hears how that test ended."""
 
 from __future__ import annotations
 
@@ -22,16 +23,24 @@ from hyperloom_multibranch.contracts.notebook import (
     UnknownRequest,
     WriterNotAllowed,
 )
-from hyperloom_multibranch.contracts.notebook.records import BaselineRecord, ToolResultPointer
-from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, DedupStatus
+from hyperloom_multibranch.contracts.notebook.peers import IntentLayer, Validity
+from hyperloom_multibranch.contracts.notebook.records import (
+    REPLAY_TARGET,
+    BaselineRecord,
+    InboxItem,
+    ToolResultPointer,
+    Withdrawal,
+)
+from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, Conclusion, DedupStatus, InboxKind
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.local.claims import LeaseTaken
 from hyperloom_multibranch.notebook.local.segments import EntryKind
-from hyperloom_multibranch.notebook.tests.factories import TTL, FakeClock, delta, intent, request, result
+from hyperloom_multibranch.notebook.tests.factories import TTL, FakeClock, delta, intent, judgement, request, result
 
 Open = Callable[..., LocalNotebook]
 ACTION = delta("--max-num-seqs 256").fingerprint()
 OTHER_ACTION = delta("--max-num-seqs 512").fingerprint()
+REPLAY_ACTION = delta("--enable-chunked-prefill").fingerprint()
 
 
 async def _measured(open_as: Open, branch: str, parent: str, request_id: str, change_args: str) -> None:
@@ -134,6 +143,130 @@ async def test_the_same_intent_on_another_state_is_only_a_reference(open_as: Ope
     assert answer.status is DedupStatus.FREE
     assert [record.request_id for record in answer.elsewhere] == ["r1"]
     assert claim.key.parent_commit == "c9"
+
+
+async def _in_flight(open_as: Open, branch: str, parent: str, request_id: str) -> None:
+    tried = intent(branch, parent)
+    claim = await open_as(Role.SPECIALIST_RUNTIME, branch).acquire(tried, ACTION, ttl_seconds=TTL)
+    toolbox = open_as(Role.TOOLBOX)
+    await toolbox.write_request(request(request_id, tried, delta("--max-num-seqs 256")))
+    await toolbox.attach_request(claim.key, request_id, ttl_seconds=TTL)
+
+
+def _decisions(handle: LocalNotebook) -> list[dict[str, object]]:
+    return [entry.detail for entry in handle._state().entries if entry.kind is EntryKind.CLAIM]
+
+
+async def test_an_intent_another_branch_is_testing_is_refused_naming_the_branch_and_its_test(open_as: Open) -> None:
+    await _in_flight(open_as, "s1", "c1", "r1")
+    s2 = open_as(Role.SPECIALIST_RUNTIME, "s2")
+
+    looked = await s2.lookup(ClaimKey("c2", intent("s2", "c2").fingerprint), OTHER_ACTION)
+    with pytest.raises(ClaimHeld) as held:
+        await s2.acquire(intent("s2", "c2"), OTHER_ACTION, ttl_seconds=TTL, reason="c2 is another head")
+
+    answer = held.value.answer
+    assert (looked.status, answer.status) == (DedupStatus.TESTING_ELSEWHERE, DedupStatus.TESTING_ELSEWHERE)
+    assert answer.claim is not None and (answer.claim.holder, answer.claim.key.parent_commit) == ("s1", "c1")
+    assert [record.request_id for record in answer.records] == ["r1"]
+    (decision,) = _decisions(s2)[-1:]
+    assert (decision["found"], decision["acquired"], decision["matched"], decision["holders"]) == (
+        "testing_elsewhere",
+        False,
+        ["r1"],
+        ["s1"],
+    )
+
+
+async def test_the_intent_is_free_again_once_the_other_branchs_test_has_its_result(open_as: Open) -> None:
+    await _in_flight(open_as, "s1", "c1", "r1")
+    await open_as(Role.TOOLBOX).write_result(result("r1"))
+
+    claim = await open_as(Role.SPECIALIST_RUNTIME, "s2").acquire(intent("s2", "c2"), OTHER_ACTION, ttl_seconds=TTL)
+
+    assert claim.holder == "s2"
+
+
+async def test_a_claim_held_before_its_test_is_written_refuses_the_intent_on_other_heads_too(open_as: Open) -> None:
+    await open_as(Role.SPECIALIST_RUNTIME, "s1").acquire(intent("s1", "c1"), ACTION, ttl_seconds=TTL)
+    s2 = open_as(Role.SPECIALIST_RUNTIME, "s2")
+
+    with pytest.raises(ClaimHeld) as held:
+        await s2.acquire(intent("s2", "c2"), OTHER_ACTION, ttl_seconds=TTL)
+
+    assert (held.value.answer.status, held.value.answer.records) == (DedupStatus.TESTING_ELSEWHERE, ())
+    (decision,) = _decisions(s2)[-1:]
+    assert (decision["matched"], decision["holders"]) == ([], ["s1"])
+
+
+async def test_neither_a_replay_nor_the_branchs_own_test_on_an_older_head_refuses_an_intent(open_as: Open) -> None:
+    replayed = intent("s1", "c1", REPLAY_TARGET, "inference:champion", IntentLayer.CONFIG)
+    await open_as(Role.SPECIALIST_RUNTIME, "s1").acquire(replayed, REPLAY_ACTION, ttl_seconds=TTL)
+    await _in_flight(open_as, "s1", "c1", "r1")
+
+    again = await open_as(Role.SPECIALIST_RUNTIME, "s2").acquire(
+        replace(replayed, branch="s2", parent_commit="c2"), REPLAY_ACTION, ttl_seconds=TTL
+    )
+    own = await open_as(Role.SPECIALIST_RUNTIME, "s1").acquire(intent("s1", "c3"), OTHER_ACTION, ttl_seconds=TTL)
+
+    assert (again.holder, own.holder) == ("s2", "s1")
+
+
+async def _end(open_as: Open, request_id: str, ending: str) -> None:
+    toolbox = open_as(Role.TOOLBOX)
+    if ending == "withdrawn":
+        await toolbox.write_withdrawal(Withdrawal(request_id, "branch stopped"))
+    elif ending == "unmeasured":
+        await toolbox.write_result(result(request_id, validity=Validity.MEASUREMENT_FAILED, failure_reason="node lost"))
+    else:
+        await toolbox.write_result(result(request_id))
+        await open_as(Role.GATE).write_judgement(request_id, judgement(4.0, (request_id,)), Conclusion.RECORDED_ONLY)
+
+
+def _heard(items: tuple[InboxItem, ...]) -> list[InboxItem]:
+    return [item for item in items if item.kind is InboxKind.PEER_OUTCOME]
+
+
+@pytest.mark.parametrize(
+    ("ending", "says"),
+    [
+        ("judged", "recorded_only: improved +4.00% on r1"),
+        ("withdrawn", "withdrawn r1 on s1: branch stopped"),
+        ("unmeasured", "measurement_failed r1 on s1"),
+    ],
+)
+async def test_a_branch_refused_for_another_branchs_test_hears_once_how_it_ended(
+    open_as: Open, ending: str, says: str
+) -> None:
+    await _in_flight(open_as, "s1", "c1", "r1")
+    s1, s2, s3 = (open_as(Role.SPECIALIST_RUNTIME, branch) for branch in ("s1", "s2", "s3"))
+    with pytest.raises(ClaimHeld):
+        await s2.acquire(intent("s2", "c2"), OTHER_ACTION, ttl_seconds=TTL)
+    before = await s2.poll("s2")
+
+    await _end(open_as, "r1", ending)
+    page = await s2.poll("s2", before.cursor)
+
+    (heard,) = _heard(page.items)
+    assert (heard.branch, heard.pointer) == ("s2", "r1")
+    assert heard.summary.startswith("s1's test of moe gemm / tuned kernel, which refused your claim, ended: ")
+    assert says in heard.summary and "notebook_replay with request_id r1" in heard.summary
+    assert (await s2.poll("s2", page.cursor)).items == ()
+    assert _heard((await s1.poll("s1")).items) == [] and _heard((await s3.poll("s3")).items) == []
+
+
+async def test_a_branch_refused_before_the_holder_wrote_its_test_hears_how_that_test_ended(open_as: Open) -> None:
+    held = await open_as(Role.SPECIALIST_RUNTIME, "s1").acquire(intent("s1", "c1"), ACTION, ttl_seconds=TTL)
+    s2 = open_as(Role.SPECIALIST_RUNTIME, "s2")
+    with pytest.raises(ClaimHeld):
+        await s2.acquire(intent("s2", "c2"), OTHER_ACTION, ttl_seconds=TTL)
+    toolbox = open_as(Role.TOOLBOX)
+    await toolbox.write_request(request("r1", intent("s1", "c1"), delta("--max-num-seqs 256")))
+    await toolbox.attach_request(held.key, "r1", ttl_seconds=TTL)
+
+    await _end(open_as, "r1", "judged")
+
+    assert [item.pointer for item in _heard((await s2.poll("s2")).items)] == ["r1"]
 
 
 async def test_an_expired_claim_can_be_taken_over_and_its_old_holder_loses_it(open_as: Open, clock: FakeClock) -> None:

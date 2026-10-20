@@ -57,7 +57,7 @@ from hyperloom_multibranch.contracts.notebook.records import (
     WarmReplay,
     amdahl_ceiling_pct,
 )
-from hyperloom_multibranch.contracts.notebook.vocab import LearningKind
+from hyperloom_multibranch.contracts.notebook.vocab import DedupStatus, LearningKind
 from hyperloom_multibranch.notebook.changes import NO_CHANGE
 from hyperloom_multibranch.notebook.learning_search import (
     LearningFinder,
@@ -123,15 +123,31 @@ def outcome(record: TestRecord) -> str:
     return f"{verdict}, {record.conclusion.value}{made}"
 
 
-def render_answer(answer: DedupAnswer) -> str:
-    held = f", claimed by {answer.claim.holder}" if answer.claim is not None else ""
-    found = [
-        f"{answer.status.value} on {answer.key.parent_commit}{held}",
-        *(f"- {record.request_id}: {outcome(record)}" for record in answer.records),
+def _testing_elsewhere(answer: DedupAnswer) -> list[str]:
+    tester = answer.claim.holder if answer.claim is not None else answer.records[0].request.branch
+    state = answer.claim.key.parent_commit if answer.claim is not None else answer.records[0].request.parent_commit
+    return [
+        f"{answer.status.value}: {tester} is testing this intent on {state}; its outcome comes to your inbox when that "
+        "test ends, and the intent is free again then",
         *(
-            f"- elsewhere, {record.request_id} on {record.request.parent_commit}: {outcome(record)}"
-            for record in answer.elsewhere
+            f"- {record.request_id} on {record.request.branch} from {record.request.parent_commit}: {outcome(record)}"
+            for record in answer.records
         ),
+    ]
+
+
+def render_answer(answer: DedupAnswer) -> str:
+    if answer.status is DedupStatus.TESTING_ELSEWHERE:
+        found = _testing_elsewhere(answer)
+    else:
+        held = f", claimed by {answer.claim.holder}" if answer.claim is not None else ""
+        found = [
+            f"{answer.status.value} on {answer.key.parent_commit}{held}",
+            *(f"- {record.request_id}: {outcome(record)}" for record in answer.records),
+        ]
+    found += [
+        f"- elsewhere, {record.request_id} on {record.request.parent_commit}: {outcome(record)}"
+        for record in answer.elsewhere
     ]
     return "\n".join(lines(found))
 

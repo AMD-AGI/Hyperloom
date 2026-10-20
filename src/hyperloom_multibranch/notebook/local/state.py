@@ -58,7 +58,9 @@ class ClaimDecision:
     """What one claim attempt found and whether it got the claim: what Q6 counts wrong refusals from.
 
     ``ceiling_pct`` is the Amdahl ceiling of an intent that gave its target's share, and ``bar_pct`` the bar it was held
-    to, ``None`` before a baseline; a refusal for the ceiling has ``ceiling_pct`` below ``bar_pct``.
+    to, ``None`` before a baseline; a refusal for the ceiling has ``ceiling_pct`` below ``bar_pct``. A refusal while
+    another branch tested the intent names those branches in ``holders`` and their tests in flight in ``matched``: it is
+    what tells the branch how those tests ended.
     """
 
     intent: Intent
@@ -69,6 +71,7 @@ class ClaimDecision:
     matched: tuple[str, ...] = ()
     ceiling_pct: float | None = None
     bar_pct: float | None = None
+    holders: tuple[str, ...] = ()
 
 
 #: The type each kind of entry stores in its detail.

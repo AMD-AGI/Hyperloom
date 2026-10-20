@@ -7,11 +7,12 @@ learns a pitfall in a direction it holds a claim on."""
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
+from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, ClaimHeld, Role, Writer
 from hyperloom_multibranch.contracts.notebook.peers import IntentLayer
 from hyperloom_multibranch.contracts.notebook.records import InboxItem, Learning, LineageEvent
 from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, InboxKind, LearningKind, LineageKind
@@ -94,6 +95,27 @@ async def test_another_branchs_pitfall_briefs_a_branch_holding_a_claim_in_that_d
     assert brief.pointer == "c0"
     assert brief.summary.startswith(f"pitfall: s2 learnt, in a direction this branch holds: {FP8_PITFALL};")
     assert _briefs(unheld.items) == [] and _briefs(quiet.items) == []
+
+
+async def test_claims_refused_while_another_branch_tests_the_intent_do_not_count_toward_a_stall(
+    open_as: Open, root: Path, clock: FakeClock
+) -> None:
+    s2 = _briefed(root, clock, "s2", BriefTriggers(stall_tests=1))
+    await open_as(Role.SPECIALIST_RUNTIME, "s1").acquire(
+        FP8_KV, delta("--kv-cache-dtype fp8").fingerprint(), ttl_seconds=TTL
+    )
+    for head in ("c2", "c3", "c4"):
+        with pytest.raises(ClaimHeld):
+            await s2.acquire(
+                replace(FP8_KV, branch="s2", parent_commit=head),
+                delta("--kv-cache-dtype fp8_e5m2").fingerprint(),
+                ttl_seconds=TTL,
+            )
+
+    page = await s2.poll("s2")
+    (row,) = [row for row in await s2.progress() if row.branch == "s2"]
+
+    assert _briefs(page.items) == [] and row.judged_since_commit == 0
 
 
 async def test_without_triggers_the_inbox_has_no_brief_items(open_as: Open) -> None:

@@ -12,6 +12,10 @@ so a poll returns each once: when a judgement brings the branch's tests judged s
 ``stall_tests``, once a stall, and when another branch's pitfall learning names a direction the branch holds a claim
 on.
 
+A branch whose claim was refused because another branch was testing the same intent gets a ``peer_outcome`` item when
+that test ends, judged, withdrawn or not measured, pointing at the test so its change can be replayed. The refused claim
+decision is the registration, so a restarted notebook still knows who waits.
+
 Search: ``,`` separates alternatives and ``&`` joins terms that must all appear, so ``fp8&kv,attention`` matches an
 entry mentioning both ``fp8`` and ``kv``, or one mentioning ``attention``. Matching is case-insensitive substring search
 over an entry's kind, branch, actor, summary and stored detail.
@@ -23,7 +27,7 @@ import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from hyperloom_multibranch.contracts.notebook.peers import TestKind
+from hyperloom_multibranch.contracts.notebook.peers import TestKind, TestResult, Validity
 from hyperloom_multibranch.contracts.notebook.records import (
     Claim,
     InboxItem,
@@ -33,11 +37,12 @@ from hyperloom_multibranch.contracts.notebook.records import (
     LineageView,
     SearchHit,
     TestRecord,
+    Withdrawal,
 )
-from hyperloom_multibranch.contracts.notebook.vocab import InboxKind, LearningKind
+from hyperloom_multibranch.contracts.notebook.vocab import DedupStatus, InboxKind, LearningKind
 from hyperloom_multibranch.notebook.learning_search import names
 from hyperloom_multibranch.notebook.local.segments import Entry, EntryKind
-from hyperloom_multibranch.notebook.local.state import JudgementWrite, NotebookState
+from hyperloom_multibranch.notebook.local.state import ClaimDecision, JudgementWrite, NotebookState
 from hyperloom_multibranch.notebook.local.views import judged_since_commit, lineage_view
 
 #: How many tests judged since the last commit make a stall, unless the run entry names another number.
@@ -103,6 +108,7 @@ def poll(
     briefing = (
         _Briefing(triggers, tuple(held), tuple(state.records()), lineage_view(state)) if triggers is not None else None
     )
+    refusals = _refusals(state, branch)
     items = tuple(
         item
         for entry, value in state.decoded
@@ -110,6 +116,7 @@ def poll(
         for item in (
             _inbox_item(entry, value, branch),
             _brief_item(entry, value, branch, briefing) if briefing is not None else None,
+            _peer_item(entry, value, branch, refusals, state) if refusals else None,
         )
         if item is not None
     )
@@ -146,6 +153,60 @@ def _brief_item(entry: Entry, value: object, branch: str, briefing: _Briefing) -
         summary = f"pitfall: {value.branch} learnt, in a direction this branch holds: {value.content}; {reread}"
         return InboxItem(InboxKind.BRIEF, branch, head, summary, entry.at)
     return None
+
+
+def _refusals(state: NotebookState, branch: str) -> tuple[tuple[float, ClaimDecision], ...]:
+    """The claims of ``branch`` refused while another branch tested the same intent, with when each was refused."""
+
+    return tuple(
+        (entry.at, value)
+        for entry, value in state.decoded
+        if isinstance(value, ClaimDecision)
+        and value.found is DedupStatus.TESTING_ELSEWHERE
+        and not value.acquired
+        and value.intent.branch == branch
+    )
+
+
+def _ended(value: object) -> str | None:
+    """The test an entry ends: judged, withdrawn, or not measured, which no judgement follows."""
+
+    if isinstance(value, (JudgementWrite, Withdrawal)):
+        return value.request_id
+    if isinstance(value, TestResult) and value.validity is Validity.MEASUREMENT_FAILED:
+        return value.request_id
+    return None
+
+
+def _peer_item(
+    entry: Entry,
+    value: object,
+    branch: str,
+    refusals: Sequence[tuple[float, ClaimDecision]],
+    state: NotebookState,
+) -> InboxItem | None:
+    request_id = _ended(value)
+    if request_id is None or entry.branch == branch:
+        return None
+    fingerprint = state.record(request_id).request.intent_fingerprint
+    refused = next(
+        (
+            decision
+            for at, decision in refusals
+            if at <= entry.at
+            and decision.intent.fingerprint == fingerprint
+            and (request_id in decision.matched or entry.branch in decision.holders)
+        ),
+        None,
+    )
+    if refused is None:
+        return None
+    summary = (
+        f"{entry.branch}'s test of {refused.intent.target} / {refused.intent.mechanism}, which refused your claim, "
+        f"ended: {entry.summary}; on a gain, notebook_replay with request_id {request_id} replays its change on your "
+        "head, or record why not"
+    )
+    return InboxItem(InboxKind.PEER_OUTCOME, branch, request_id, summary, entry.at)
 
 
 def _alternatives(query: str) -> list[list[str]]:

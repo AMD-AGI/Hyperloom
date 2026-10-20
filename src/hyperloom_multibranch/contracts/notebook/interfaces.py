@@ -70,7 +70,8 @@ class _DedupRefusal(NotebookError):
 
 
 class ClaimHeld(_DedupRefusal):
-    """Someone holds the key, or the same action is in progress on the state; ``answer`` says who."""
+    """Someone holds the key, or the same action is in progress on the state, or another branch is testing the intent
+    on its own state; ``answer`` says who."""
 
 
 class AlreadyTested(_DedupRefusal):

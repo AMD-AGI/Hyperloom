@@ -148,6 +148,8 @@ class DedupAnswer:
 
     ``TESTED``: the same action was measured on this state. ``IN_PROGRESS``: ``claim`` holds the key, or another claim
     on this state carries the same action. ``SUSPECTED``: the same intent was measured here through another action.
+    ``TESTING_ELSEWHERE``: another branch holds ``claim`` on the same intent, or has ``records`` of it in flight, on
+    another state; a replay is never refused for it, as it tests a known change on the caller's own head.
     """
 
     key: ClaimKey

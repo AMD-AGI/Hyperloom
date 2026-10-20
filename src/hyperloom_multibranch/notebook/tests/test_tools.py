@@ -18,13 +18,16 @@ from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.intent import Intent, IntentLayer, intent_fingerprint
 from hyperloom_multibranch.contracts.notebook.peers import Validity, Verdict
 from hyperloom_multibranch.contracts.notebook.records import (
+    Claim,
+    ClaimKey,
+    DedupAnswer,
     NotebookSnapshot,
     OpShares,
     StartupBrief,
     TestRecord,
     TriedDirection,
 )
-from hyperloom_multibranch.contracts.notebook.vocab import Conclusion
+from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, Conclusion, DedupStatus
 from hyperloom_multibranch.notebook.changes import NO_CHANGE
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.contracts.notebook.records import REPLAY_TOOL, WarmReplay
@@ -39,6 +42,7 @@ from hyperloom_multibranch.notebook.tools import (
     lines,
     notebook_tools,
     outcome,
+    render_answer,
     render_brief,
     render_ceiling,
 )
@@ -139,6 +143,29 @@ async def test_a_claim_is_the_handles_and_a_taken_one_is_refused_with_who_holds_
     assert refused.startswith(f"{ERROR} refused, in_progress on c1, claimed by s1")
     assert released == "released the claim on c1"
     assert again.startswith(f"{ERROR} ClaimLost:")
+
+
+async def test_a_claim_another_branch_is_testing_on_its_head_is_refused_saying_who_and_what_comes_next(
+    tools_of: Tools,
+) -> None:
+    await _call(tools_of("s1"), "claim", **FLASH_ON_C1)
+
+    refused = await _call(tools_of("s3"), "claim", **{**FLASH_ON_C1, "parent_commit": "c7"})
+
+    assert refused == (
+        f"{ERROR} refused, testing_elsewhere: s1 is testing this intent on c1; its outcome comes to your inbox when "
+        "that test ends, and the intent is free again then"
+    )
+
+
+def test_an_answer_for_an_intent_tested_elsewhere_lists_the_tests_in_flight_with_their_branch() -> None:
+    tried = intent("s1", "c1")
+    held = Claim(ClaimKey("c1", tried.fingerprint), "s1", tried, "a", 60.0, 0.0, 0.0, 60.0, ClaimStatus.HELD, "r9")
+    running = TestRecord(request("r9", tried), requested_at=1.0)
+
+    answer = DedupAnswer(ClaimKey("c7", tried.fingerprint), "b", DedupStatus.TESTING_ELSEWHERE, held, (running,))
+
+    assert render_answer(answer).splitlines()[1:] == ["- r9 on s1 from c1: in flight"]
 
 
 async def test_a_claim_whose_change_misspells_a_key_is_refused_and_holds_nothing(tools_of: Tools) -> None:

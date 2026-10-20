@@ -32,12 +32,14 @@ class ClaimStatus(str, Enum):
 
 
 class DedupStatus(str, Enum):
-    """What the notebook knows about an intent on a state (a parent commit)."""
+    """What the notebook knows about an intent on a state (a parent commit); ``testing_elsewhere``: another branch holds
+    a claim on it, or has a test of it in flight, on another state."""
 
     FREE = "free"
     IN_PROGRESS = "in_progress"
     TESTED = "tested"
     SUSPECTED = "suspected"
+    TESTING_ELSEWHERE = "testing_elsewhere"
 
 
 class Conclusion(str, Enum):
@@ -105,13 +107,15 @@ class MergeOutcome(str, Enum):
 
 
 class InboxKind(str, Enum):
-    """What an inbox item points at; a ``brief`` item points at the branch's head and asks for its brief again."""
+    """What an inbox item points at; a ``brief`` item points at the branch's head and asks for its brief again, and a
+    ``peer_outcome`` item at another branch's test that refused the branch's claim, once that test ended."""
 
     RESULT = "result"
     JUDGEMENT = "judgement"
     TOOL_RESULT = "tool_result"
     LINEAGE = "lineage"
     BRIEF = "brief"
+    PEER_OUTCOME = "peer_outcome"
 
 
 class UsageSource(str, Enum):
