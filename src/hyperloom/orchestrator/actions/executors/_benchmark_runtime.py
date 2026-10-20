@@ -17,6 +17,31 @@ from ._workload_envs import (
 )
 
 
+def _apply_sizing_env_overrides(envs: dict[str, Any]) -> None:
+    """Pull the round's shape (ISL/OSL/MAX_MODEL_LEN/TP/CONC) out of the ambient env into ``envs``."""
+    for env_key in ("ISL", "OSL", "MAX_MODEL_LEN", "TP", "CONC"):
+        val = os.environ.get(env_key, "").strip()
+        if not val:
+            continue
+        # TP yaml-explicit wins: a stale state.tp must not downgrade a YAML-pinned TP.
+        if env_key == "TP" and envs.get("TP") not in (None, 0, "", "0"):
+            continue
+        envs[env_key] = int(val)
+
+
+def _pin_rocr_visible_devices(envs: dict[str, Any]) -> None:
+    """Give the round as many visible cards as its TP needs, unless the ambient env names them itself."""
+    explicit_rocr = os.environ.get("ROCR_VISIBLE_DEVICES", "").strip()
+    if explicit_rocr:
+        envs["ROCR_VISIBLE_DEVICES"] = explicit_rocr
+        return
+    tp_val = int(envs.get("TP", 1) or 1)
+    existing_rocr = str(envs.get("ROCR_VISIBLE_DEVICES", "")).strip()
+    existing_count = len([x for x in existing_rocr.split(",") if x.strip()]) if existing_rocr else 0
+    if tp_val > 1 and existing_count < tp_val:
+        envs["ROCR_VISIBLE_DEVICES"] = ",".join(str(i) for i in range(tp_val))
+
+
 def apply_runtime_benchmark_overrides(
     bench: dict[str, Any],
     *,
@@ -62,27 +87,8 @@ def apply_runtime_benchmark_overrides(
         gpu_type=gpu_type,
         explicit_benchmark_script=bool(benchmark_script),
     )
-    for env_key in ("ISL", "OSL", "MAX_MODEL_LEN", "TP", "CONC"):
-        val = os.environ.get(env_key, "").strip()
-        if not val:
-            continue
-        # TP yaml-explicit wins: a stale state.tp must not downgrade a YAML-pinned TP.
-        if env_key == "TP":
-            yaml_tp = envs.get("TP")
-            if yaml_tp not in (None, 0, "", "0"):
-                continue
-        envs[env_key] = int(val)
-
+    _apply_sizing_env_overrides(envs)
     pin_mlperf_round_concurrency(envs)
-
-    explicit_rocr = os.environ.get("ROCR_VISIBLE_DEVICES", "").strip()
-    if explicit_rocr:
-        envs["ROCR_VISIBLE_DEVICES"] = explicit_rocr
-    else:
-        tp_val = int(envs.get("TP", 1) or 1)
-        existing_rocr = str(envs.get("ROCR_VISIBLE_DEVICES", "")).strip()
-        existing_count = len([x for x in existing_rocr.split(",") if x.strip()]) if existing_rocr else 0
-        if tp_val > 1 and existing_count < tp_val:
-            envs["ROCR_VISIBLE_DEVICES"] = ",".join(str(i) for i in range(tp_val))
+    _pin_rocr_visible_devices(envs)
 
     return envs

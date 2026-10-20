@@ -29,6 +29,7 @@ from kernelforge.knowledge.kb_store.identity.implementation import (
 from kernelforge.knowledge.kb_store.identity.kernel_names import derive_kernel_names
 from kernelforge.loop.new_path_allowlist import normalize_commit_new_paths
 from kernelforge.tools.durable_io import atomic_write_text
+from kernelforge.loop.agent_relay import AgentRelayPolicy
 from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
 
 
@@ -75,6 +76,7 @@ class CampaignConfig:
     # Paths the Implementer may CREATE and still have committed with a KEEP (see
     # ``IterationConfig.commit_new_paths``).
     commit_new_paths: list[str] = field(default_factory=list)
+    agent_relay: AgentRelayPolicy | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -117,6 +119,9 @@ class CampaignConfig:
             # hand-edited pattern the loop would read differently than its author meant is refused here rather than
             # acted on later.
             commit_new_paths=normalize_commit_new_paths(payload["commit_new_paths"]),
+            agent_relay=(
+                AgentRelayPolicy.from_dict(payload["agent_relay"]) if payload["agent_relay"] is not None else None
+            ),
         )
         if config.nproc_per_node < 1:
             raise ValueError("campaign nproc_per_node must be positive")
@@ -227,6 +232,8 @@ class CampaignConfigStore:
             raise ValueError(f"invalid campaign config: {error}") from error
         if not isinstance(payload, dict):
             raise ValueError("campaign config must be a JSON object")
+        if "agent_relay" not in payload:
+            payload["agent_relay"] = None
         return CampaignConfig.from_dict(payload)
 
     def save(
@@ -449,6 +456,18 @@ class CampaignInputs:
     nproc_per_node: int = 1
     bench_repeat: int = 1
     commit_new_paths: tuple[str, ...] = ()
+    # The Agent profiles a blockage may relay between, fixed when the campaign is created.
+    agent_relay: AgentRelayPolicy | None = None
+
+
+def _normalized_sources(workspace: Path, kernel: str, source_files: str) -> list[str]:
+    """Workspace-relative source files, kernel first, without duplicates."""
+    normalized: list[str] = []
+    for raw_path in [kernel, *parse_list(source_files)]:
+        relative = _relative_file(workspace, raw_path, "source file")
+        if relative not in normalized:
+            normalized.append(relative)
+    return normalized
 
 
 def create_campaign_config(
@@ -464,11 +483,7 @@ def create_campaign_config(
     kernel_path = _relative_file(workspace, kernel, "kernel")
     driver_path = _driver_reference(workspace, driver)
 
-    normalized_sources: list[str] = []
-    for raw_path in [kernel, *parse_list(inputs.source_files)]:
-        relative = _relative_file(workspace, raw_path, "source file")
-        if relative not in normalized_sources:
-            normalized_sources.append(relative)
+    normalized_sources = _normalized_sources(workspace, kernel, inputs.source_files)
 
     dirty = _git_value(
         workspace,
@@ -572,4 +587,5 @@ def create_campaign_config(
         nproc_per_node=max(1, int(inputs.nproc_per_node or 1)),
         bench_repeat=max(1, int(inputs.bench_repeat or 1)),
         commit_new_paths=normalize_commit_new_paths(list(inputs.commit_new_paths)),
+        agent_relay=inputs.agent_relay,
     )

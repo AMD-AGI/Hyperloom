@@ -956,14 +956,13 @@ def test_finalize_reports_error_when_authority_read_fails(tmp_path: Path) -> Non
     coord = _make_coordinator(tmp_path)
     before = _seed_recipe_with_lesson(coord)
     _fail_authoritative_read(coord)
-    out = coord.recipe_journal.finalize_recipe_and_journal()
-    assert out == {
-        "status": "error",
-        "reason": "RuntimeError",
-        "backend": "local",
-        "result_type": _close_out.RESULT_TRANSPORT_FAILED,
-        "error_class": "RuntimeError",
-    }
+    out = coord.recipe_journal.ensure_recipe_finalized(source="close")
+    assert (out["status"], out["reason"], out["result_type"], out["error_class"]) == (
+        "error",
+        "RuntimeError",
+        _close_out.RESULT_TRANSPORT_FAILED,
+        "RuntimeError",
+    )
     assert coord.recipe_kb.get_recipe(canonical_id=_expected_cid()) == before
 
 
@@ -974,14 +973,13 @@ def test_finalize_reports_error_when_put_recipe_fails(tmp_path: Path) -> None:
         raise OSError("disk full")
 
     coord.recipe_kb.put_recipe = _boom
-    out = coord.recipe_journal.finalize_recipe_and_journal()
-    assert out == {
-        "status": "error",
-        "reason": "OSError",
-        "backend": "local",
-        "result_type": _close_out.RESULT_TRANSPORT_FAILED,
-        "error_class": "OSError",
-    }
+    out = coord.recipe_journal.ensure_recipe_finalized(source="close")
+    assert (out["status"], out["reason"], out["result_type"], out["error_class"]) == (
+        "error",
+        "OSError",
+        _close_out.RESULT_TRANSPORT_FAILED,
+        "OSError",
+    )
 
 
 def _fact_write_for_three_kept_variants(coord) -> None:

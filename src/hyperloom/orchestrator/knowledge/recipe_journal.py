@@ -374,7 +374,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                     tick=int(self.shared_state.tick or 0),
                 )
             )
-        except Exception:
+        except (OSError, ValueError, TypeError):
             log.exception("integrate journal append failed")
 
     def _source_session_id(self) -> str:
@@ -1040,7 +1040,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
 
         try:
             config = getattr(knowledge_plane, "config", None) or KnowledgeConfig.from_env()
-        except Exception as exc:
+        except ValueError as exc:
             log.exception("Recipe KB finalize configuration failed (non-fatal)")
             return _finalize_error(
                 exc,
@@ -1179,25 +1179,15 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                 backend="local",
                 result_type=_close_out.RESULT_INVALID_SCOPE,
             )
-        try:
-            self.kb_amend_recipe(
-                recipe_overrides=self._final_recipe_overrides(),
-                provenance_details={
-                    "phase": "close_finalize",
-                    "evidence": [
-                        f"log:session-{state.recipe_kb_session_id or self.session_dir.name}",
-                    ],
-                },
-            )
-        # Catch-all keeps CLOSE step 2.5 defensive against programmer bugs.
-        except Exception as exc:
-            log.exception("update_recipe raised unexpectedly")
-            return _finalize_error(
-                exc,
-                reason=type(exc).__name__,
-                backend="local",
-                result_type=_close_out.RESULT_TRANSPORT_FAILED,
-            )
+        self.kb_amend_recipe(
+            recipe_overrides=self._final_recipe_overrides(),
+            provenance_details={
+                "phase": "close_finalize",
+                "evidence": [
+                    f"log:session-{state.recipe_kb_session_id or self.session_dir.name}",
+                ],
+            },
+        )
         return _finalize_outcome(
             status="written",
             reason="",
