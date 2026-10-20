@@ -225,7 +225,12 @@ def geak_spec_is_env(spec: Any) -> bool:
 
 
 def _geak_accepted_kernel_specs(result: Any) -> list[dict[str, Any]]:
-    """Return the authored kernels a GEAK result accepted, both lanes, deduped."""
+    """Return the authored kernels a GEAK result accepted, both lanes, deduped.
+
+    GEAK's own ``e2e_delta_pct`` never decides whether a kernel counts: the rebench
+    measures it. The delta is read only as twin evidence -- a slot tag and the symbol
+    it produced report the same number -- and an absent or unreadable one is none.
+    """
     if not isinstance(result, dict):
         return []
     out: list[dict[str, Any]] = []
@@ -236,14 +241,13 @@ def _geak_accepted_kernel_specs(result: Any) -> list[dict[str, Any]]:
             continue
         if geak_spec_is_env(k):
             continue
-        try:
-            delta = float(k.get("e2e_delta_pct") or 0.0)
-        except (TypeError, ValueError):
-            continue
-        if delta <= 0.0:
-            continue
         name = geak_spec_name(k)
         if not name:
+            continue
+        try:
+            delta = float(k.get("e2e_delta_pct"))
+        except (TypeError, ValueError):
+            out.append(k)
             continue
         twin = (str(k.get("op_kind") or ""), f"{delta:.4f}")
         pos = index.get(twin)
@@ -264,7 +268,7 @@ def _geak_accepted_kernel_specs(result: Any) -> list[dict[str, Any]]:
 
 
 def _geak_has_accepted_kernel(result: Any) -> bool:
-    """Report whether a GEAK result carries an accepted kernel that gained."""
+    """Report whether a GEAK result names an authored kernel for the rebench to measure."""
     return bool(_geak_accepted_kernel_specs(result))
 
 
