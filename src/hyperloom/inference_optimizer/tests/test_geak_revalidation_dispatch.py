@@ -200,8 +200,8 @@ async def test_geak_rebench_preserves_native_base_removal_controls(
                 "remove_args": ["--disable-radix-cache"],
                 "unset_envs": ["SGLANG_AITER_MLA_PERSIST"],
             },
-            {"flags": "--mem-fraction-static 0.9", "env_map": {}},
-            "--mem-fraction-static 0.9",
+            {"flags": "--mem-fraction-static 0.85", "env_map": {}},
+            "--mem-fraction-static 0.85",
             None,
         ),
         (
@@ -594,9 +594,20 @@ async def test_resume_stack_revalidate_promotes_material_geak_candidate(coordina
     assert st.geak_pending == {}
 
 
+def _forbid_rebench(coordinator, monkeypatch) -> None:
+    async def _must_not_measure(_task):
+        pytest.fail("a GEAK config that restates current_best must not be benchmarked")
+
+    async def _must_not_replay(**_kwargs):
+        pytest.fail("a GEAK config that restates current_best must not be replayed")
+
+    monkeypatch.setattr(coordinator.sub, "execute_covered", _must_not_measure)
+    monkeypatch.setattr(coordinator.writeback, "validate_geak_via_geak_harness", _must_not_replay)
+
+
 @pytest.mark.asyncio
-async def test_resume_stack_revalidate_rejects_same_config_noise(coordinator) -> None:
-    """A faster remeasure of unchanged config is not a GEAK optimization."""
+async def test_same_config_geak_result_settles_without_measurement(coordinator, monkeypatch) -> None:
+    """Re-measuring an unchanged config can only produce noise, so it is never measured."""
     c = coordinator
     st = c.shared_state
     st.baseline_tput = 100.0
@@ -613,24 +624,10 @@ async def test_resume_stack_revalidate_rejects_same_config_noise(coordinator) ->
             "env": "SGLANG_USE_AITER=1",
         },
     }
+    st.geak_pending = {"status": "awaiting_rebench"}
+    _forbid_rebench(c, monkeypatch)
 
-    task = await c.tasks.create(
-        kind="explore",
-        params=_geak_rebench_params(),
-        idempotency_key="geak-revalidate-c0",
-        task_id="same-config-geak-rebench",
-    )
-    st.geak_pending = {"status": "awaiting_rebench", "revalidation_task_id": task.task_id}
-
-    await c.writeback.promote_to_shared_state(
-        task.kind,
-        {
-            "output_throughput": 120.0,
-            "best_variant": {"fingerprint": "same-config-hash"},
-            "winners": [],
-        },
-        task=task,
-    )
+    await c.phase_kernel._revalidate_geak_candidate(reason="geak_e2e_win")
 
     assert st.current_best["action"] == "explore"
     assert st.current_best["tput"] == pytest.approx(110.0)
@@ -639,8 +636,33 @@ async def test_resume_stack_revalidate_rejects_same_config_noise(coordinator) ->
     assert st.geak_pending == {}
 
 
+@pytest.mark.parametrize(
+    ("accepted_flags", "settles"),
+    [
+        ("--tp 8 --watchdog-timeout 1800 --same-config", True),
+        ("--tp 8 --watchdog-timeout 1800 --same-config --chunked-prefill-size 8192", False),
+        ("--same-config --tp 4", False),
+    ],
+    ids=["full-spelling", "added-flag", "changed-value"],
+)
+def test_geak_config_is_judged_on_the_launch_it_produces(coordinator, accepted_flags, settles) -> None:
+    """GEAK may hand back the incumbent launch spelled out in full; only a change to the launch is worth measuring."""
+    st = coordinator.shared_state
+    st.baseline_tput = 100.0
+    st.current_best = {"action": "explore", "tput": 110.0, "extra_server_args": "--same-config", "extra_envs": {}}
+    st.current_best_measurement = {"resolved_server_launch_flags": "--tp 8 --watchdog-timeout 1800 --same-config"}
+    st.geak_result = {"status": "ok", "accepted_config": {"flags": accepted_flags, "env_map": {}}}
+
+    params = coordinator.writeback.geak_rebench_params(reason="geak_e2e_win")
+
+    if settles:
+        assert params == {"skipped": True, "reason": "geak_no_material"}
+    else:
+        assert params["grid"][0]["provenance"] == "geak_revalidate"
+
+
 @pytest.mark.asyncio
-async def test_no_material_drop_does_not_claim_the_stack_was_revalidated(coordinator) -> None:
+async def test_no_material_drop_does_not_claim_the_stack_was_revalidated(coordinator, monkeypatch) -> None:
     """Dropping a candidate is not a revalidation of the stack behind it.
 
     The accepted stack still owes a post-resume remeasure while the validation
@@ -651,21 +673,9 @@ async def test_no_material_drop_does_not_claim_the_stack_was_revalidated(coordin
     st = c.shared_state
     st.benchmark_mode = "agentx"
     st.baseline_tput = 100.0
-    st.baseline_perf = {
-        "total_throughput": 1000.0,
-        "e2e_norm_intvty_p90": 30.0,
-        "e2e_norm_intvty_p50": 30.0,
-        "duration_seconds": 900.0,
-        "request_error_rate": 0.0,
-    }
     st.current_best = {
         "action": "explore",
         "tput": 110.0,
-        "total_throughput": 1100.0,
-        "e2e_norm_intvty_p90": 33.0,
-        "e2e_norm_intvty_p50": 33.0,
-        "duration_seconds": 900.0,
-        "request_error_rate": 0.0,
         "extra_server_args": "--same-config",
         "extra_envs": {"SGLANG_USE_AITER": "1"},
     }
@@ -676,34 +686,13 @@ async def test_no_material_drop_does_not_claim_the_stack_was_revalidated(coordin
         "status": "ok",
         "accepted_config": {"flags": "--same-config", "env": "SGLANG_USE_AITER=1"},
     }
+    st.geak_pending = {"status": "awaiting_rebench"}
+    _forbid_rebench(c, monkeypatch)
 
-    task = await c.tasks.create(
-        kind="explore",
-        params=_geak_rebench_params(),
-        idempotency_key="geak-revalidate-c0",
-        task_id="no-material-watermark",
-    )
-    st.geak_pending = {"status": "awaiting_rebench", "revalidation_task_id": task.task_id}
-
-    await c.writeback.promote_to_shared_state(
-        task.kind,
-        {
-            "output_throughput": 120.0,
-            "best_variant": {
-                "fingerprint": "same-config-hash",
-                "output_throughput": 120.0,
-                "total_throughput": 1200.0,
-                "e2e_norm_intvty_p90": 36.0,
-                "e2e_norm_intvty_p50": 36.0,
-                "duration_seconds": 900.0,
-                "request_error_rate": 0.0,
-            },
-            "winners": [],
-        },
-        task=task,
-    )
+    await c.phase_kernel._revalidate_geak_candidate(reason="geak_e2e_win")
 
     assert st.geak_result["revalidation_status"] == "no_material"
+    assert st.cumulative_gain_validated == pytest.approx(10.0)
     assert not (
         not st.optimization_stack_has_unvalidated_keeps()
         and st.cumulative_gain_validated_stack_len < len(st.optimization_stack)

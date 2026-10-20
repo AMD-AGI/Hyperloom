@@ -1858,8 +1858,7 @@ class KernelPhase(CoordinatorCollaborator):
         if skip_reason == "geak_invalid_config":
             return
         if skip_reason == "geak_no_material":
-            state.geak_result = {**state.geak_result, "revalidation_status": "no_material"}
-            state.geak_pending = {}
+            self._coord.writeback.settle_geak_no_material()
             state.save(self.session_dir)
             return
         if skip_reason is not None:

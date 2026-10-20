@@ -531,8 +531,11 @@ look very different from Orchestration's side:
   taking a turn in it.
 - **On a GEAK win**, the same `kernel_agent` task re-measures the candidate on
   the orchestrator's own harness under the lanes it already holds, and writes
-  the headline from that measurement before it returns. KERNEL leaves once the
-  task settles, or when its phase budget runs out.
+  the headline from that measurement before it returns. A candidate whose
+  launch config, applied over `current_best`, launches what `current_best`
+  already runs, and that carries no loadable overlay, is settled as
+  `no_material` without being measured. KERNEL leaves once the task settles, or
+  when its phase budget runs out.
 - **Forge (`KERNEL_OPT_BACKEND_ORDER=forge`)**: the phase runs the deterministic
   KERNEL-entry ladder — GEMM tuning, then the fusion lane, then the kernel
   rewrite controller, which selects its own operators and publishes patches
