@@ -1733,7 +1733,7 @@ def _preflight_unsupported_model_arch(
                 }
             ]
             state.save(session_dir)
-        except Exception as exc:  # noqa: BLE001 — never block the run on advisory write
+        except (OSError, ValueError) as exc:  # the marker is advisory; the run proceeds without it
             print(
                 f"WARNING: failed to persist degraded-mode marker: {exc!r}",
                 file=sys.stderr,

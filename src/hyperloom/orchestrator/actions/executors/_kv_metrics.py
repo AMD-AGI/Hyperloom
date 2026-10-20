@@ -58,6 +58,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 
 log = logging.getLogger(__name__)
 
@@ -708,10 +710,8 @@ def port_from_workspace(workspace: Any) -> int | None:
         for pattern in ("*.yaml", "*/config.yaml"):
             for candidate in sorted(root.glob(pattern)):
                 try:
-                    import yaml
-
                     payload = yaml.safe_load(candidate.read_text(encoding="utf-8"))
-                except Exception:  # noqa: BLE001 - a config we cannot read is not a reason to fail a round
+                except (OSError, ValueError, yaml.YAMLError):
                     continue
                 if not isinstance(payload, dict):
                     continue
@@ -1578,7 +1578,7 @@ class KvMetricsRecorder:
             from hyperloom.common.io import atomic_write_json
 
             atomic_write_json(Path(self._output_path), payload)
-        except Exception:
+        except (OSError, TypeError, ValueError):
             # Warning, not debug. Not failing the round is the requirement; being quiet about it is not. A round that
             # collected samples and then dropped them on the floor looks identical afterwards to one that never
             # collected any, and nobody goes looking for a file they were never told was missing.

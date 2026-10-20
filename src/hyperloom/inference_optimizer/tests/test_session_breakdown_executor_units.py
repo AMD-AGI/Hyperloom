@@ -73,7 +73,7 @@ class TestExecutor:
         assert "session_dir" in result["error"]
 
     @pytest.mark.asyncio
-    async def test_returns_failed_when_writer_raises(self, monkeypatch, session_dir):
+    async def test_writer_error_propagates(self, monkeypatch, session_dir):
         def boom(*args, **kwargs):
             raise RuntimeError("kaboom")
 
@@ -85,11 +85,10 @@ class TestExecutor:
             "hyperloom.inference_optimizer.breakdown.build",
             lambda *a, **k: {"warnings": []},
         )
-        result = await sb.SessionBreakdownExecutor()(
-            _ctx(extra={"session_dir": str(session_dir)}),
-        )
-        assert result["status"] == "failed"
-        assert "RuntimeError" in result["error"]
+        with pytest.raises(RuntimeError, match="kaboom"):
+            await sb.SessionBreakdownExecutor()(
+                _ctx(extra={"session_dir": str(session_dir)}),
+            )
 
     @pytest.mark.asyncio
     async def test_succeeded_returns_breakdown_metadata(

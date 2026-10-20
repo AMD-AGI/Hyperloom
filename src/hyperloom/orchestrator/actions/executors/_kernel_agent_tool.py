@@ -74,7 +74,7 @@ def _final_content_snapshot(
     try:
         targets = repo_relative_manifest(Path(patch_path).read_text(encoding="utf-8", errors="replace"))
         writes = [t.path for t in targets if t.op is PatchOp.WRITE]
-    except Exception:  # noqa: BLE001 — an unreadable patch is apply's error to report.
+    except (OSError, ValueError):
         return snapshot_dir
     if not writes:
         return snapshot_dir

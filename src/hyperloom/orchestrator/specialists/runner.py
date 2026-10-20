@@ -860,7 +860,7 @@ class SpecialistRunner:
                         "query": _redact_transcript_value(call.get("query")),
                     }
                     f.write(json.dumps(row, sort_keys=True) + "\n")
-        except Exception:
+        except OSError:
             log.debug(
                 "full-trace: specialist intel append failed for task_id=%s turn=%s",
                 task_id,
@@ -1312,7 +1312,7 @@ class SpecialistRunner:
             return False
         try:
             return bool(SharedState.load_or_init(self.session_dir).pending_integrate)
-        except Exception:
+        except (OSError, ValueError):
             # An unreadable state cannot vouch for the tree.
             log.warning(
                 "specialist worktree: cannot read pending_integrate; not refreshing the snapshot", exc_info=True

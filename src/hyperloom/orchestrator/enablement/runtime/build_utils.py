@@ -210,7 +210,7 @@ def probe_torch_abi(
         return {"torch_version": "", "hip_version": "", "python_version": "", "is_rocm": False}
     try:
         return json.loads(out)
-    except Exception:  # noqa: BLE001
+    except ValueError:
         return {"torch_version": "", "hip_version": "", "python_version": "", "is_rocm": False}
 
 
