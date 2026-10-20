@@ -69,23 +69,6 @@ def count_tunableop_result_lines(text: str) -> int:
     return sum(1 for line in text.splitlines() if _is_tunableop_result_line(line))
 
 
-def _tuned_shape_count(script_result: dict[str, Any], output_file: Path) -> int:
-    """The tuned-shape count the script reported, else the result lines its output file holds."""
-    tuned_shapes = int(script_result.get("tuned_shapes", 0) or 0)
-    if tuned_shapes == 0 and output_file.is_file():
-        raw_text = output_file.read_text(encoding="utf-8", errors="replace")
-        tuned_shapes = count_tunableop_result_lines(raw_text)
-        if tuned_shapes == 0 and raw_text.strip():
-            log.warning(
-                "TunableOp output %s is non-empty but no result lines matched "
-                "(expected >=3 comma-separated fields); candidate will be skipped. "
-                "First 200 chars: %r",
-                output_file,
-                raw_text[:200],
-            )
-    return tuned_shapes
-
-
 def _generate_candidate_sitecustomize() -> str:
     return (
         "import os\n"
@@ -122,22 +105,6 @@ def _candidate_pythonpath(site_dir: Path) -> str:
     site = str(site_dir)
     existing = os.environ.get("PYTHONPATH", "").strip()
     return site if not existing else os.pathsep.join([site, existing])
-
-
-def _install_candidate_sitecustomize(work_dir: Path, output_file: Path) -> dict[str, str]:
-    """Write the sitecustomize that loads ``output_file`` in candidate mode; return the env that activates it."""
-    site_dir = work_dir / "runtime_sitecustomize"
-    site_dir.mkdir(parents=True, exist_ok=True)
-    (site_dir / "sitecustomize.py").write_text(
-        _generate_candidate_sitecustomize(),
-        encoding="utf-8",
-    )
-    return {
-        "PYTHONPATH": _candidate_pythonpath(site_dir),
-        "HL_TUNABLEOP_MODE": "candidate",
-        "HL_TUNABLEOP_FILE": str(output_file),
-        "PYTORCH_TUNABLEOP_FILENAME": str(output_file),
-    }
 
 
 def _generate_tunableop_script(
@@ -355,8 +322,8 @@ class VllmDenseTunableopTuner(BaseTuner):
     # for.
     _demand_skip_reason: str = ""
 
-    def _no_input_result(self) -> TuneResult:
-        """Skip when demand held only dtypes without a TunableOp record type; otherwise fail, naming each source."""
+    def _missing_input(self) -> TuneResult:
+        """Why no source produced an input file: a skip when demand named only unsupported dtypes, else a failure."""
         if self._demand_skip_reason:
             log.info("%s: skipped -- %s", self.name, self._demand_skip_reason)
             return TuneResult(
@@ -366,12 +333,10 @@ class VllmDenseTunableopTuner(BaseTuner):
                 error_class="unsupported_precision",
             )
         # Say which sources were offered and why none produced a file.
-        offered = {
-            "tunableop_input": str(self.ctx.tunableop_input or ""),
-            "shapes_json": str(self.ctx.shapes_json or ""),
-            "demand_json": str(getattr(self.ctx, "demand_json", "") or ""),
-        }
-        detail = ", ".join(f"{k}={v or '(unset)'}" for k, v in offered.items())
+        detail = ", ".join(
+            f"{name}={getattr(self.ctx, name) or '(unset)'}"
+            for name in ("tunableop_input", "shapes_json", "demand_json")
+        )
         log.error("%s: no usable input file. Sources: %s", self.name, detail)
         return TuneResult(
             tuner_name=self.name,
@@ -383,27 +348,17 @@ class VllmDenseTunableopTuner(BaseTuner):
     def run(self) -> TuneResult:
         input_file = self._resolve_input()
         if input_file is None:
-            return self._no_input_result()
+            return self._missing_input()
 
         output_file = self.work_dir / "tunableop_results.csv"
         gpu_id = self.ctx.gpu_ids.split(",")[0] if self.ctx.gpu_ids else "0"
         timeout_per_shape = max(30, self.ctx.timeout_s // 100)
 
-        script = _generate_tunableop_script(
-            work_dir=self.work_dir,
-            input_file=input_file,
-            output_file=output_file,
-            timeout_per_shape=timeout_per_shape,
-            gpu_id=gpu_id,
-        )
-
+        script = _generate_tunableop_script(self.work_dir, input_file, output_file, timeout_per_shape, gpu_id)
         rc, stdout, stderr = run_subprocess(
-            ["python3", str(script)],
-            timeout_s=self.ctx.timeout_s,
-            log_file=self.work_dir / "tune.log",
+            ["python3", str(script)], timeout_s=self.ctx.timeout_s, log_file=self.work_dir / "tune.log"
         )
 
-        # Parse result
         try:
             result_line = stdout.strip().splitlines()[-1] if stdout.strip() else "{}"
             script_result = json.loads(result_line)
@@ -426,11 +381,30 @@ class VllmDenseTunableopTuner(BaseTuner):
                 error_class=script_result.get("error_class", "subprocess_error"),
             )
 
-        tuned_shapes = _tuned_shape_count(script_result, output_file)
+        tuned_shapes = int(script_result.get("tuned_shapes", 0) or 0)
+        if tuned_shapes == 0 and output_file.is_file():
+            raw_text = output_file.read_text(encoding="utf-8", errors="replace")
+            tuned_shapes = count_tunableop_result_lines(raw_text)
+            if tuned_shapes == 0 and raw_text.strip():
+                log.warning(
+                    "TunableOp output %s is non-empty but no result lines matched "
+                    "(expected >=3 comma-separated fields); candidate will be skipped. "
+                    "First 200 chars: %r",
+                    output_file,
+                    raw_text[:200],
+                )
 
         env_vars: dict[str, str] = {}
         if tuned_shapes > 0:
-            env_vars = _install_candidate_sitecustomize(self.work_dir, output_file)
+            site_dir = self.work_dir / "runtime_sitecustomize"
+            site_dir.mkdir(parents=True, exist_ok=True)
+            (site_dir / "sitecustomize.py").write_text(_generate_candidate_sitecustomize(), encoding="utf-8")
+            env_vars = {
+                "PYTHONPATH": _candidate_pythonpath(site_dir),
+                "HL_TUNABLEOP_MODE": "candidate",
+                "HL_TUNABLEOP_FILE": str(output_file),
+                "PYTORCH_TUNABLEOP_FILENAME": str(output_file),
+            }
 
         # TunableOp picks the fastest hipBLASLt/rocBLAS solution per shape but never times the untuned dispatch, so
         # there is no baseline to compare against and this tuner has no micro metrics to report at all.
