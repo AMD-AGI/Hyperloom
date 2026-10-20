@@ -150,7 +150,7 @@ def record_controller_llm_usage(*, result: dict[str, Any], session_dir: Path) ->
                     cache_read_input_tokens=row.get("cache_read_input_tokens"),
                 ),
             )
-        except Exception:  # noqa: BLE001 - accounting must not fail the phase
+        except ValueError:  # a malformed usage row is skipped
             continue
         appended += 1
     return appended
