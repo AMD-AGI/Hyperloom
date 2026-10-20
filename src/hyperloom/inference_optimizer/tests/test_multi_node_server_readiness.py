@@ -326,11 +326,6 @@ def test_the_frontend_gate_skips_a_cluster_with_no_service_url(monkeypatch: pyte
     asyncio.run(readiness._wait_for_server_health_async(timeout_s=600, poll_every_s=10))
 
 
-def test_generated_tokens_come_from_the_usage_block() -> None:
-    assert readiness._probe_generated_tokens({"usage": {"completion_tokens": 7}}) == 7
-    assert readiness._probe_generated_tokens({"usage": {"completion_tokens": 0}}) == 0
-
-
 def test_a_restarted_server_is_proven_worker_first_then_frontend_then_published(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

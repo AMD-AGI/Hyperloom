@@ -13,6 +13,7 @@ from typing import Any, Mapping, NamedTuple
 
 from hyperloom.common.timeutil import format_exc_brief
 from hyperloom.common.env import env_flag, env_int
+from hyperloom.inference_optimizer.multi_node._internal.serving_probe import generated_tokens
 from ._multi_node_env import _read_state
 from ._multi_node_worker_logs import (
     shared_server_log_dir,
@@ -30,13 +31,6 @@ class ServerRestartFailed(RuntimeError):
 def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
     """Read a poll-count knob whose smallest meaningful value is *minimum*, not zero."""
     return max(minimum, env_int(name, default))
-
-
-def _probe_generated_tokens(data: object) -> int:
-    """Best-effort count of tokens a /v1/completions probe actually generated."""
-    from hyperloom.inference_optimizer.multi_node._internal.serving_probe import generated_tokens
-
-    return generated_tokens(data)
 
 
 class _WorkerTarget(NamedTuple):
@@ -292,7 +286,7 @@ async def _run_serving_probe(
         state.last_err = f"completion_probe_http={cresp.status_code}"
         return 0
     try:
-        gen_toks = _probe_generated_tokens(cresp.json())
+        gen_toks = generated_tokens(cresp.json())
     except ValueError:
         gen_toks = 0
     if gen_toks < rules.min_tokens:

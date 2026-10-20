@@ -75,7 +75,7 @@ def _rewritten_state() -> dict[str, object]:
 
 def test_gate_waits_out_the_post_restart_connection_refused_window(monkeypatch: pytest.MonkeyPatch) -> None:
     """Refused right after a restart, then ready: the gate must wait, not fail."""
-    monkeypatch.setattr(readiness, "_read_state", lambda: _rewritten_state())
+    monkeypatch.setattr(readiness, "_read_state", _rewritten_state)
     _fast_clock(monkeypatch)
     # Two refusals (the readiness window) then two consecutive 200s.
     refused = ConnectionRefusedError(111, "Connection refused")
@@ -86,7 +86,7 @@ def test_gate_waits_out_the_post_restart_connection_refused_window(monkeypatch: 
 
 def test_gate_skips_when_the_published_name_never_resolves(monkeypatch: pytest.MonkeyPatch) -> None:
     """Outside-cluster: the ClusterIP name is unusable, so the gate is a no-op."""
-    monkeypatch.setattr(readiness, "_read_state", lambda: _rewritten_state())
+    monkeypatch.setattr(readiness, "_read_state", _rewritten_state)
     _fast_clock(monkeypatch)
     _install_fake_httpx(monkeypatch, [socket.gaierror(-2, "Name or service not known")])
 
@@ -95,7 +95,7 @@ def test_gate_skips_when_the_published_name_never_resolves(monkeypatch: pytest.M
 
 def test_gate_survives_a_transient_dns_flap_within_the_window(monkeypatch: pytest.MonkeyPatch) -> None:
     """A CoreDNS blip must not disable the gate when it is most needed."""
-    monkeypatch.setattr(readiness, "_read_state", lambda: _rewritten_state())
+    monkeypatch.setattr(readiness, "_read_state", _rewritten_state)
     _fast_clock(monkeypatch)
     # DNS blips once, then the published endpoint answers: gate must hold + pass.
     _install_fake_httpx(monkeypatch, [socket.gaierror(-2, "Name or service not known"), 200, 200])
@@ -107,7 +107,7 @@ def test_gate_warns_not_infos_when_it_skips_on_an_unresolvable_name(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Skipping the gate is a WARNING, not a silent INFO: a later completed=0 must be traceable back to this skip (the #1060 'surface it' discipline)."""
-    monkeypatch.setattr(readiness, "_read_state", lambda: _rewritten_state())
+    monkeypatch.setattr(readiness, "_read_state", _rewritten_state)
     _fast_clock(monkeypatch)
     _install_fake_httpx(monkeypatch, [socket.gaierror(-2, "Name or service not known")])
 
@@ -120,7 +120,7 @@ def test_gate_warns_not_infos_when_it_skips_on_an_unresolvable_name(
 def test_dns_skip_after_is_env_overridable(monkeypatch: pytest.MonkeyPatch) -> None:
     """HYPERLOOM_MN_PUBLISHED_DNS_SKIP_AFTER widens the DNS tolerance."""
     monkeypatch.setenv("HYPERLOOM_MN_PUBLISHED_DNS_SKIP_AFTER", "1")
-    monkeypatch.setattr(readiness, "_read_state", lambda: _rewritten_state())
+    monkeypatch.setattr(readiness, "_read_state", _rewritten_state)
     _fast_clock(monkeypatch)
     # One gaierror then 200s: skip_after=1 skips on the first failure (returns before the 200s); if the knob were
     # ignored (default 6) it would pass on 200s -- either way it returns, but this asserts the env path does not
@@ -158,7 +158,7 @@ def test_an_unreadable_knob_does_not_pass_as_the_default(monkeypatch: pytest.Mon
 
 def test_gate_fails_when_a_resolvable_endpoint_never_serves(monkeypatch: pytest.MonkeyPatch) -> None:
     """A published endpoint that resolves but never answers is a real failure."""
-    monkeypatch.setattr(readiness, "_read_state", lambda: _rewritten_state())
+    monkeypatch.setattr(readiness, "_read_state", _rewritten_state)
     _fast_clock(monkeypatch)
     _install_fake_httpx(monkeypatch, [ConnectionRefusedError(111, "Connection refused")])
 
@@ -187,7 +187,7 @@ def test_gate_is_a_noop_without_a_rewrite(monkeypatch: pytest.MonkeyPatch) -> No
 
 def test_gate_disabled_by_nonpositive_timeout_skips_instead_of_failing(monkeypatch: pytest.MonkeyPatch) -> None:
     """timeout_s<=0 is an escape hatch: skip the gate, never fail on it."""
-    monkeypatch.setattr(readiness, "_read_state", lambda: _rewritten_state())
+    monkeypatch.setattr(readiness, "_read_state", _rewritten_state)
 
     asyncio.run(readiness._wait_for_published_service_ready_async(timeout_s=0, poll_every_s=5))
     asyncio.run(readiness._wait_for_published_service_ready_async(timeout_s=-1, poll_every_s=5))
