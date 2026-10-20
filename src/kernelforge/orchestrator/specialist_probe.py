@@ -386,10 +386,10 @@ async def probe_variant(
         raise ProbeRequestError("driver_script must be a non-empty string")
     # Joining an absolute path onto the workspace yields that path, so a relative one alone is resolved against it.
     driver = (sandbox.workspace / driver_raw).expanduser().resolve()
-    base["driver_script"] = str(driver)
     if not _is_inside(driver, sandbox.workspace) or not driver.is_file():
         detail = f"{driver} is not a file inside the canonical workspace {sandbox.workspace}; nothing was measured"
-        return record({"status": REFUSED, "detail": detail})
+        return record({"status": REFUSED, "driver_script": str(driver), "detail": detail})
+    base["driver_script"] = str(driver)
     run = partial(
         primitive,
         driver_script=str(driver),
@@ -490,7 +490,8 @@ def _record(
     outcome: dict[str, Any],
 ) -> dict[str, Any]:
     """Charge one attempt to the round, persist it, and return it; an outcome without a duration took no time."""
-    record = {**base, "duration_sec": 0.0, **outcome}
+    record = {**base, **outcome}
+    record.setdefault("duration_sec", 0.0)
     budget.spend(attempts=1, seconds=float(record["duration_sec"]))
     record = {
         **record,
