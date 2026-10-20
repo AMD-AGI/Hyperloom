@@ -351,6 +351,7 @@ class ClaudeBackend:
                     server_factory=self.mcp_server_factory,
                 )
             except Exception as exc:  # noqa: BLE001
+                log.warning("emit_intent MCP setup failed: %s", exc)
                 self.calls.append({"warn": f"emit_intent MCP setup failed: {exc!r}"})
                 self._mcp_setup_error = f"{type(exc).__name__}: {exc}"
                 cfg = None
@@ -546,6 +547,7 @@ class ClaudeBackend:
                 server_factory=self.mcp_server_factory,
             )
         except Exception as exc:  # noqa: BLE001
+            log.warning("context tools MCP setup failed: %s", exc)
             self.calls.append({"warn": f"context tools MCP setup failed: {exc!r}"})
             self._context_server_config = None
 
@@ -975,8 +977,8 @@ class ClaudeBackend:
             if aclose is not None:
                 try:
                     await aclose()
-                except Exception:  # noqa: BLE001 — cleanup must not mask the turn result
-                    pass
+                except Exception:  # cleanup must not mask the turn result
+                    log.debug("claude SDK stream aclose failed", exc_info=True)
         # Prefer the consolidated ResultMessage text; fall back to TextBlocks.
         raw_text = "".join(result_chunks) or "".join(text_chunks)
         if self._active_turn_diagnostic is not None:
