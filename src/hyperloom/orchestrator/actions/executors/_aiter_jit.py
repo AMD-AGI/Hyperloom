@@ -10,7 +10,6 @@ import logging
 import os
 import re
 import time
-from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -112,16 +111,8 @@ def probe_aiter_jit_cache() -> dict[str, Any]:
         return info
 
 
-class _CompilerMatch(Enum):
-    """What one process answered when asked whether a compiler is working on the build trees."""
-
-    WORKING = "working"
-    NOT_A_COMPILER = "not_a_compiler"
-    WITHHELD = "withheld"
-
-
-def _compiler_match(info: dict[str, Any], build_dirs: list[str]) -> _CompilerMatch:
-    """Whether one process is a compiler working under ``build_dirs``, or withheld the fields that would say.
+def _compiler_match(info: dict[str, Any], build_dirs: list[str]) -> bool | None:
+    """Whether one process is a compiler working under ``build_dirs``; ``None`` when it withheld the fields that say.
 
     An empty ``build_dirs`` asks only whether the process is a compiler at all.
     """
@@ -134,19 +125,19 @@ def _compiler_match(info: dict[str, Any], build_dirs: list[str]) -> _CompilerMat
             is_compiler = True
     if not is_compiler:
         if info.get("name") is None or info.get("cmdline") is None:
-            return _CompilerMatch.WITHHELD
-        return _CompilerMatch.NOT_A_COMPILER
+            return None
+        return False
     if not build_dirs:
-        return _CompilerMatch.WORKING
+        return True
     cwd = str(info.get("cwd") or "")
     command = "\0".join(str(arg) for arg in cmdline)
     if any(
         cwd == build_dir or cwd.startswith(f"{build_dir}{os.sep}") or build_dir in command for build_dir in build_dirs
     ):
-        return _CompilerMatch.WORKING
+        return True
     if info.get("cwd") is None or info.get("cmdline") is None:
-        return _CompilerMatch.WITHHELD
-    return _CompilerMatch.NOT_A_COMPILER
+        return None
+    return False
 
 
 def _any_live_compiler(
@@ -166,9 +157,9 @@ def _any_live_compiler(
                 if info.get("status") == psutil.STATUS_ZOMBIE:
                     continue
                 match = _compiler_match(info, normalized_dirs)
-                if match is _CompilerMatch.WORKING:
+                if match:
                     return True
-                if match is _CompilerMatch.WITHHELD:
+                if match is None:
                     unknown = True
             except psutil.AccessDenied:
                 unknown = True

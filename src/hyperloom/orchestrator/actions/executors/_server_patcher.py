@@ -229,7 +229,7 @@ def _resolve_versioned_patches_dir(
         if vt in available and _subdir_is_release_branch(d.name) is not want_branch:
             continue
         available[vt] = d
-    return _nearest_not_newer(available, running) if available else None
+    return _nearest_not_newer(available, running)
 
 
 # Public API

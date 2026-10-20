@@ -91,43 +91,46 @@ def _read_config_recipe(config_path: Path) -> _ConfigRecipe:
     return _ConfigRecipe(raw, benchmark)
 
 
-class _ObservedLaunch(NamedTuple):
-    """What a server's own log says it launched with; every field is empty where the log said nothing."""
-
-    flags: str
-    identity: dict[str, Any]
-    config: dict[str, Any]
-    engine_adjusted_settings: dict[str, dict[str, str]]
-    model_binding: dict[str, Any]
-
-
-def _observed_launch_from_log(actual_server_log: str | None, framework: str) -> _ObservedLaunch:
-    """Read back from the server log what the engine resolved."""
+def _observed_launch_from_log(actual_server_log: str | None, framework: str) -> dict[str, Any]:
+    """The evidence document's observed half: what the server's own log says the engine resolved."""
+    flags = ""
     identity: dict[str, Any] = {}
-    if not actual_server_log:
-        return _ObservedLaunch("", identity, {}, {}, {})
-    config = observed_server_config_from_log(actual_server_log, framework)
-    adjusted = engine_adjusted_settings_from_log(actual_server_log, framework)
-    flags = launch_argv_from_log(actual_server_log, framework)
-    # Read from the raw launch line, which still carries the operands
-    # ``split_launch_flags`` strips: without it the evidence records only
-    # the *requested* model and cannot detect a server that resolved a
-    # different one.
-    binding = observed_model_binding_from_log(actual_server_log, framework)
-    if not flags:
-        # Neither engine echoes an argv line reliably -- vLLM never does,
-        # in no log, successful or failed -- so without the record every
-        # requested setting would be judged unconfirmed. The resolved
-        # settings the engine DOES print are the observed side.
-        identity = observed_server_identity_from_log(actual_server_log, framework)
-        if not binding:
-            # The two engines name the model differently, so the binding
-            # is read per engine even though the record is not.
-            if framework == "vllm":
-                binding = _binding_from_vllm_identity(identity)
-            else:
-                binding = _binding_from_identity(identity)
-    return _ObservedLaunch(flags, identity, config, adjusted, binding)
+    config: dict[str, Any] = {}
+    adjusted: dict[str, dict[str, str]] = {}
+    binding: dict[str, Any] = {}
+    if actual_server_log:
+        config = observed_server_config_from_log(actual_server_log, framework)
+        adjusted = engine_adjusted_settings_from_log(actual_server_log, framework)
+        flags = launch_argv_from_log(actual_server_log, framework)
+        # Read from the raw launch line, which still carries the operands
+        # ``split_launch_flags`` strips: without it the evidence records only
+        # the *requested* model and cannot detect a server that resolved a
+        # different one.
+        binding = observed_model_binding_from_log(actual_server_log, framework)
+        if not flags:
+            # Neither engine echoes an argv line reliably -- vLLM never does,
+            # in no log, successful or failed -- so without the record every
+            # requested setting would be judged unconfirmed. The resolved
+            # settings the engine DOES print are the observed side.
+            identity = observed_server_identity_from_log(actual_server_log, framework)
+            if not binding:
+                # The two engines name the model differently, so the binding
+                # is read per engine even though the record is not.
+                if framework == "vllm":
+                    binding = _binding_from_vllm_identity(identity)
+                else:
+                    binding = _binding_from_identity(identity)
+    return {
+        "observed_server_launch_flags": flags,
+        # What the engine resolved, the only account of a launch neither engine
+        # echoes as argv. Complete for SGLang; non-defaults only for vLLM.
+        "observed_server_config": config,
+        # Settings the engine rewrote after parsing them: the config above holds
+        # the resolved value, which is not what a flag would pass.
+        "engine_adjusted_settings": adjusted,
+        "observed_server_identity": identity,
+        "observed_model_binding": binding,
+    }
 
 
 def _warm_reuse_record(actual_server_log: str | None, slot: Path, caller_reused_ready_server: bool) -> dict[str, Any]:
@@ -171,7 +174,6 @@ def build_launch_evidence(
     requested_args = str(requested_server_args).strip() if requested_server_args is not None else declared_args
     requested_model = str(model_path if model_path is not None else benchmark.get("model") or "")
 
-    observed = _observed_launch_from_log(actual_server_log, resolved_framework)
     return {
         "schema_version": 1,
         "materialized_config_path": str(config_path) if recipe.raw else "",
@@ -182,16 +184,8 @@ def build_launch_evidence(
         "requested_server_flags": requested_args,
         "requested_server_env": requested_env,
         "actual_server_log_path": actual_server_log or "",
-        "observed_server_launch_flags": observed.flags,
         "observed_server_env": dict(requested_env),
-        # What the engine resolved, the only account of a launch neither engine
-        # echoes as argv. Complete for SGLang; non-defaults only for vLLM.
-        "observed_server_config": observed.config,
-        # Settings the engine rewrote after parsing them: the config above holds
-        # the resolved value, which is not what a flag would pass.
-        "engine_adjusted_settings": observed.engine_adjusted_settings,
-        "observed_server_identity": observed.identity,
-        "observed_model_binding": observed.model_binding,
+        **_observed_launch_from_log(actual_server_log, resolved_framework),
         "requested_model_digest": _digest_operand(requested_model),
         "warm_reuse": _warm_reuse_record(actual_server_log, slot, caller_reused_ready_server),
     }
