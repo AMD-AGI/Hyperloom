@@ -4491,9 +4491,9 @@ class WritebackCollaborator(CoordinatorCollaborator):
         reproduces the optimized config from ``result.json`` directly, a
         ``succeeded`` status is itself the engagement proof. The validated gain
         is the MEASURED replay throughput over the orchestrator's raw baseline
-        (``(measured - baseline) / baseline``); GEAK's own ``throughput_speedup``
-        / ``hot_geak_speedup`` serves only as a ``> 1.0`` sanity gate, not as the
-        reported number. Recorded under a distinct provenance
+        (``(measured - baseline) / baseline``), and the promotion accepts it only
+        when that measurement beats ``current_best``; no speedup GEAK reports for
+        itself is read. Recorded under a distinct provenance
         (``geak_same_harness_geak``) because the measurement came from GEAK's
         harness rather than the orchestrator's. Used only when 2b (orchestrator
         harness) is inconclusive.
@@ -4535,25 +4535,6 @@ class WritebackCollaborator(CoordinatorCollaborator):
         # Same check 2b runs; see ``geak_overlay_is_loadable``.
         ps_overlay_2a = _normalize_geak_overlay_dir(str(ps.get("final_overlay") or "").strip())
         overlay_digest_before = _geak_overlay_digest(ps_overlay_2a) if ps_overlay_2a else ""
-        am = ps.get("alignment_metrics") or {}
-        # Read GEAK's OWN within-harness speedup on the SAME basis it promoted
-        # (result.throughput_speedup == cold_geak_speedup when final_basis=="cold",
-        # else the hot within-GEAK ratio; see run_e2e final-basis selection). It is
-        # used solely to sanity-check that GEAK claimed a win on its promoted basis
-        # before the replay measurement is promoted as the headline.
-        # Falls back to the explicit within-GEAK ratios when throughput_speedup is
-        # missing (older result.json), preferring the promoted basis.
-        try:
-            geak_sp = float(ps.get("throughput_speedup") or 0.0)
-        except (TypeError, ValueError):
-            geak_sp = 0.0
-        if geak_sp <= 0:
-            basis = str(am.get("final_basis") or ps.get("final_throughput_basis") or "hot")
-            fallback_key = "cold_geak_speedup" if basis == "cold" else "hot_geak_speedup"
-            try:
-                geak_sp = float(am.get(fallback_key) or am.get("hot_geak_speedup") or 0.0)
-            except (TypeError, ValueError):
-                geak_sp = 0.0
         regimes = ps.get("validated_regimes") or []
         reg = regimes[0] if regimes and isinstance(regimes[0], dict) else {}
         try:
@@ -4612,7 +4593,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             )
             self.shared_state.save(self.session_dir)
             return {"validated": False, "status": "no_promote", "reason": accuracy_failure}
-        if str(res.get("status") or "") == "succeeded" and geak_sp > 1.0:
+        if str(res.get("status") or "") == "succeeded":
             # Rebench-first: write the headline from the GEAK-harness MEASURED
             # throughput (engages by construction via the launch-script replay),
             # keeping the leaderboard number a same-harness total rather than a
@@ -4659,9 +4640,8 @@ class WritebackCollaborator(CoordinatorCollaborator):
         if res.get("error"):
             reason = str(res["error"])
         log.warning(
-            "geak 2a fallback did not validate (status=%r geak_speedup=%r reason=%s accuracy_failure=%s)",
+            "geak 2a fallback did not validate (status=%r reason=%s accuracy_failure=%s)",
             res.get("status"),
-            geak_sp,
             reason,
             accuracy_failure,
         )

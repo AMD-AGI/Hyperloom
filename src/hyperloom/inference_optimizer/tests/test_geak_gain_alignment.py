@@ -180,7 +180,7 @@ def _coord(tmp_path: Path, *, baseline: float, best_tput: float) -> Coordinator:
     return coord
 
 
-# ── 2a: GEAK-harness fallback validates on GEAK's OWN promoted-basis speedup ──
+# ── 2a: GEAK-harness fallback validates on the replayed measurement ──
 
 
 @pytest.mark.asyncio
@@ -225,6 +225,36 @@ async def test_geak_harness_fallback_writes_measured_headline(tmp_path: Path, mo
     assert ss.current_best["tput"] == pytest.approx(measured)
     assert any(e.get("action") == "geak_e2e" for e in ss.optimization_stack)
     assert not ss.geak_pending  # candidate cleared on promote
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("self_reported", "replayed", "validated"),
+    [(0.95, 120.0, True), (2.0, 105.0, False)],
+    ids=["claims-loss-measures-win", "claims-win-measures-loss"],
+)
+async def test_geak_harness_verdict_rests_on_the_replay_measurement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, self_reported: float, replayed: float, validated: bool
+) -> None:
+    """GEAK's own speedup is never read: only the replayed throughput against current_best decides."""
+    coord = _coord(tmp_path, baseline=100.0, best_tput=110.0)
+    coord.shared_state.geak_result = {
+        "status": "ok",
+        "throughput_speedup": self_reported,
+        "accepted_config": {"flags": "--block-size 32"},
+    }
+
+    async def _replay(**_kwargs):
+        return {"status": "succeeded", "promotion_measurement": {"output_throughput": replayed}}
+
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._geak_sweep.sweep_via_geak", _replay)
+    out = await coord.writeback.validate_geak_via_geak_harness(reason="unit")
+
+    assert out["validated"] is validated
+    assert coord.shared_state.current_best["tput"] == pytest.approx(replayed if validated else 110.0)
+    if not validated:
+        assert out["status"] == "no_promote"
+        assert coord.shared_state.geak_result["revalidation_status"] == "no_promote"
 
 
 def _agentx_rebench_coord(tmp_path: Path) -> Coordinator:
