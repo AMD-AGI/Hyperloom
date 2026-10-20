@@ -1134,7 +1134,6 @@ async def test_required_failure_does_not_run_config_only_fallback(monkeypatch):
                 "recipe_extra_server_args": "--recipe",
                 "recipe_extra_envs": {"RECIPE": "1"},
                 "warm_kernel_apply_results": [{"status": "ok"}],
-                "disable_run_eval": True,
             },
         )
     )
@@ -1174,7 +1173,6 @@ async def test_required_rollback_failure_is_returned_unchanged():
             params={
                 "recipe_extra_server_args": "--safe-only",
                 "recipe_extra_envs": {"VLLM_SAFE": "1"},
-                "disable_run_eval": True,
             },
         )
     )

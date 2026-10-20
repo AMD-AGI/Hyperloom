@@ -41,7 +41,7 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
     Verdict,
 )
 from ..actions.executors._launch_restatement import config_launch_restated_by
-from ..actions.executors.baseline import _revert_warm_patch_state, revert_warm_kernel_patches
+from ..actions.executors._warm_patch_apply import _revert_warm_patch_state, revert_warm_kernel_patches
 from ..state.analysis_failures import RECIPE_PARAM, repeated_roofline_failure, roofline_recipe
 from ..state.shared_state import inject_stack_base_params, resolve_graded_comparison
 from ..state.task_registry import Task

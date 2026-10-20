@@ -114,16 +114,9 @@ class TargetAnalysisExecutor:
                     benchmark_mode=benchmark_mode,
                 ),
             )
-        except Exception as exc:
-            log.exception("target_analysis_executor: analyze() raised: %s", exc)
+        except Exception:
             clear_competitor_target(session_dir)
-            return {
-                "status": "succeeded",
-                "kind": ctx.task.kind,
-                "note": f"analyzer crashed: {exc}",
-                "baseline_status": "fetch_error",
-                "reason": "analyzer_crash",
-            }
+            raise
         return self._format_result(ctx, summary, session_dir)
 
     def _format_result(

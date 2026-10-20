@@ -179,10 +179,7 @@ def _end_obs(obs: Any, end_dt: Any) -> None:
     try:
         obs.end(end_time=end_time)
     except (TypeError, ValueError):
-        try:
-            obs.end()
-        except Exception:  # noqa: BLE001
-            pass
+        obs.end()
 
 
 def _otel_attr_value(v: Any) -> Any:
@@ -212,28 +209,22 @@ def _set_trace_attrs(
         return
     except AttributeError:
         pass  # v4: no update_trace
-    except Exception:
-        log.debug("langfuse: update_trace failed", exc_info=True)
-        return
     otel = getattr(span, "_otel_span", None)
     if otel is None or not hasattr(otel, "set_attribute"):
         log.debug("langfuse: no OTEL span to set trace attrs on")
         return
-    try:
-        if name is not None:
-            otel.set_attribute("langfuse.trace.name", name)
-        if session_id is not None:
-            otel.set_attribute("session.id", session_id)
-        for k, v in (metadata or {}).items():
-            clean = _otel_attr_value(v)
-            if clean is None:
-                continue  # OTEL rejects None
-            try:
-                otel.set_attribute(f"langfuse.trace.metadata.{k}", clean)
-            except Exception:  # noqa: BLE001 — skip unserialisable values
-                continue
-    except Exception:
-        log.debug("langfuse: setting OTEL trace attrs failed", exc_info=True)
+    if name is not None:
+        otel.set_attribute("langfuse.trace.name", name)
+    if session_id is not None:
+        otel.set_attribute("session.id", session_id)
+    for k, v in (metadata or {}).items():
+        clean = _otel_attr_value(v)
+        if clean is None:
+            continue  # OTEL rejects None
+        try:
+            otel.set_attribute(f"langfuse.trace.metadata.{k}", clean)
+        except Exception:  # noqa: BLE001 — skip unserialisable values
+            continue
 
 
 def _load_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -484,10 +475,7 @@ class LangfuseEmitter:
         """Buffer a token row; emit the Generation if its text half is in."""
         if not self._enabled:
             return
-        try:
-            self._buffer(row, half="llm")
-        except Exception:
-            log.debug("langfuse: record_llm_call failed", exc_info=True)
+        self._buffer(row, half="llm")
 
     def record_conversation(self, row: dict[str, Any]) -> None:
         """Buffer a conversation row; emit the Generation if its tokens are in."""

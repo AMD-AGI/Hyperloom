@@ -760,7 +760,7 @@ def _failure_recovery_lines(*, phase: str, transport: str = "") -> list[str]:
         lines.extend(
             [
                 "* **RULE F1** (PRELUDE) — same baseline fingerprint twice failed →"
-                " change at least one of the eight fingerprint fields.",
+                " change at least one of the seven fingerprint fields.",
                 "* **RULE F2** (PRELUDE) — `error_class='no_report'` + no"
                 " `rescued_from_leaked_path:*` → redirect RESULT_DIR.",
             ]

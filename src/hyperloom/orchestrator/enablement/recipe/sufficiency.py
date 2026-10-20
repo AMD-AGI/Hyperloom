@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 from pathlib import PurePosixPath
 import re
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping, NamedTuple, Sequence
 
 from .launch_flags import PARALLELISM_AXES as _PARALLELISM_AXES
 from .launch_flags import requested_flags as _requested_flags
@@ -326,6 +326,18 @@ def _root_reasons(section: Mapping[str, Any], steps: Sequence[Mapping[str, Any]]
         record = roots.get(str(artifact.get("root_id") or ""))
         if record is None or not record.get("contributions"):
             reasons.append(_reason("root_unidentified", f"artifact[{index}]"))
+    reasons.extend(_root_record_reasons(roots))
+    return reasons
+
+
+def _root_record_reasons(roots: Mapping[str, Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Judge each root record against what a consumer needs to resolve it.
+
+    A root needs a commit a checkout can reach and a replay anchor no other
+    root claims: two roots mapping to one anchor overlay the same directory,
+    so the stack a replay assembles is not the one that was captured.
+    """
+    reasons: list[dict[str, Any]] = []
     for root_id, record in roots.items():
         # A read that failed leaves is_git standing over no commit, which names
         # no tree a consumer can check out.
@@ -693,19 +705,22 @@ def _credential_reasons(
     return reasons
 
 
-def _payload_references(
-    section: Mapping[str, Any],
-    steps: Sequence[Mapping[str, Any]],
-) -> list[tuple[str, str, str, str]]:
-    """Return ``(code, scope, path, sha256)`` for every byte a replay is handed.
+class _PayloadReference(NamedTuple):
+    """A byte payload the recipe names, with the refusal its absence earns.
 
-    The recipe carries manifests, digests and class names; these name the bytes
-    behind them, each with the refusal its absence earns and, where its recorder
-    took one, the digest the delivered bytes must still hash to. A patch step is
-    not among them: its own ``path`` names the authoring workspace no bundle
-    ships, while the content it produced is its root's snapshot payload.
+    ``sha256`` is ``""`` where the recorder took no digest; where it took one,
+    a delivery carrying different bytes is not carrying this payload.
     """
-    refs: list[tuple[str, str, str, str]] = []
+
+    code: str
+    scope: str
+    path: str
+    sha256: str
+
+
+def _snapshot_payload_references(section: Mapping[str, Any]) -> list[_PayloadReference]:
+    """Return the captured files each source snapshot promises a replay."""
+    refs: list[_PayloadReference] = []
     for snapshot in section.get("source_snapshots") or []:
         if not isinstance(snapshot, Mapping):
             continue
@@ -716,9 +731,49 @@ def _payload_references(
         # reference at all has nowhere for one to be.
         payloads = [str(row.get("rel") or "").strip("/") for row in rows if str(row.get("op") or "") != "delete"]
         if not ref:
-            refs.append(("source_snapshot_missing", root_id, "", ""))
+            refs.append(_PayloadReference("source_snapshot_missing", root_id, "", ""))
             continue
-        refs.extend(("source_snapshot_missing", root_id, f"{ref}/files/{rel}", "") for rel in payloads if rel)
+        refs.extend(
+            _PayloadReference("source_snapshot_missing", root_id, f"{ref}/files/{rel}", "") for rel in payloads if rel
+        )
+    return refs
+
+
+def _install_payload_references(steps: Sequence[Mapping[str, Any]]) -> list[_PayloadReference]:
+    """Return the recorded input bytes each step's install consumed.
+
+    A digest names the bytes an install consumed; only the delivery makes them
+    obtainable.
+
+    PORT NOTE: ``input_identity`` is not recorded on any step today, so this is
+    inert. It is the enforcement point for install payloads and must be here
+    when the setup ledger records identities again.
+    """
+    refs: list[_PayloadReference] = []
+    for index, step in enumerate(steps):
+        for identity in step.get("input_identity") or ():
+            if not isinstance(identity, Mapping):
+                continue
+            rel = str(identity.get("rel") or "").strip("/")
+            if rel:
+                digest = str(identity.get("sha256") or "")
+                refs.append(_PayloadReference("artifact_not_self_contained", f"step[{index}]", rel, digest))
+    return refs
+
+
+def _payload_references(
+    section: Mapping[str, Any],
+    steps: Sequence[Mapping[str, Any]],
+) -> list[_PayloadReference]:
+    """Return a reference to every byte a replay is handed.
+
+    The recipe carries manifests, digests and class names; these name the bytes
+    behind them, each with the refusal its absence earns and, where its recorder
+    took one, the digest the delivered bytes must still hash to. A patch step is
+    not among them: its own ``path`` names the authoring workspace no bundle
+    ships, while the content it produced is its root's snapshot payload.
+    """
+    refs = _snapshot_payload_references(section)
     accepted_config = section.get("accepted_config") or {}
     config_path = str(accepted_config.get("config_path") or "").strip("/")
     if config_path:
@@ -726,19 +781,8 @@ def _payload_references(
         # presence check. The read stays so the reference re-binds to bytes the moment a
         # recorder writes the digest again.
         digest = str(accepted_config.get("config_digest") or "")
-        refs.append(("artifact_not_self_contained", "config_path", config_path, digest))
-    for index, step in enumerate(steps):
-        # A digest names the bytes an install consumed; only the delivery makes
-        # them obtainable.
-        # PORT NOTE: ``input_identity`` is not recorded on any step today, so this loop is
-        # inert. It is the enforcement point for install payloads and must be here when the
-        # setup ledger records identities again.
-        for identity in step.get("input_identity") or ():
-            if not isinstance(identity, Mapping):
-                continue
-            rel = str(identity.get("rel") or "").strip("/")
-            if rel:
-                refs.append(("artifact_not_self_contained", f"step[{index}]", rel, str(identity.get("sha256") or "")))
+        refs.append(_PayloadReference("artifact_not_self_contained", "config_path", config_path, digest))
+    refs.extend(_install_payload_references(steps))
     return refs
 
 
@@ -753,7 +797,7 @@ def referenced_payloads(
     referenced under two digests yields two entries: two occurrences consumed
     different bytes there, and a delivery holding one is not holding the other.
     """
-    return {(path, digest) for _code, _scope, path, digest in _payload_references(section, steps) if path}
+    return {(ref.path, ref.sha256) for ref in _payload_references(section, steps) if ref.path}
 
 
 def _delivery_reasons(
@@ -772,9 +816,9 @@ def _delivery_reasons(
     """
     packaged = {(str(path).strip("/"), str(digest or "")) for path, digest in delivered}
     reasons: list[dict[str, Any]] = []
-    for code, scope, path, digest in _payload_references(section, steps):
-        if (path, digest) not in packaged:
-            reasons.append(_reason(code, scope))
+    for ref in _payload_references(section, steps):
+        if (ref.path, ref.sha256) not in packaged:
+            reasons.append(_reason(ref.code, ref.scope))
     return reasons
 
 
