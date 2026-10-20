@@ -485,3 +485,22 @@ def test_startup_report_says_why_the_session_is_not_on_the_primary(capsys, claud
     _report_search_actors(pool, relay_enabled=True)
 
     assert line in capsys.readouterr().out
+
+
+def test_startup_report_explains_a_session_without_relay_and_how_to_enable_it(capsys):
+    from kernelforge.cli.relay import _report_search_actors
+
+    pool = build_search_actor_pool(
+        _relay_config("claude"),
+        availability=_availability(claude=True, codex=False),
+        start=StartPreference("claude"),
+        bundle_factory=lambda profile: SearchActorBundle(profile=profile, agent_fn=lambda: None),
+    )
+
+    _report_search_actors(pool, relay_enabled=True)
+
+    out = capsys.readouterr().out
+    assert "Agent profile: codex / gpt-6-astra: unavailable (codex down)" in out
+    assert "Model relay: off for this session, only claude passed its startup check" in out
+    assert "OPENAI_* for codex" in out
+    assert "WARNING" not in out

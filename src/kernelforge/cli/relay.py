@@ -415,8 +415,9 @@ def _report_search_actors(pool: SearchActorPool, *, relay_enabled: bool) -> None
         print(f"  WARNING: primary Agent profile {primary} is unavailable; starting on profile {start}")
     if relay_enabled and not relay_switch_possible(pool.availability):
         print(
-            "  WARNING: model relay disabled for this session: only one Agent profile passed its startup check "
-            "(reasons above); a search blockage falls back to the Supervisor"
+            f"  Model relay: off for this session, only {start} passed its startup check (reasons above). "
+            "Give another provider a line of its own (ANTHROPIC_* for claude, OPENAI_* for codex) or use a gateway "
+            "serving both protocols to turn it on; until then a search blockage runs the Supervisor"
         )
 
 

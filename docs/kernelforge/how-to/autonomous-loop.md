@@ -287,9 +287,11 @@ from the campaign's primary is refused on resume; leave it unset to keep the
 campaign's primary.
 
 Before the first iteration, every profile's exact provider and model is checked
-once. A profile that fails the check stays unavailable for the session, and the
-startup log gives the reason. When only one profile passes, the log warns that
-model relay is disabled for the session.
+once, with one minimal model call per profile. Like the rest of the campaign
+setup, the check runs before the `--max-hours` budget starts. A profile that
+fails the check stays unavailable for the session, and the startup log gives
+the reason. When only one profile passes, the log says model relay is off for
+the session and how to turn it on.
 
 A blockage is three consecutive non-improving search iterations produced by the
 active profile. Infrastructure, API, device-contention and integrity failures,
