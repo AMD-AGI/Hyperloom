@@ -89,10 +89,7 @@ def _split_args_preserving_json(text: str) -> list[str] | None:
 
 
 def _removed_token_count(tokens: list[str], index: int, removals: set[tuple[str, str | None]]) -> int:
-    """Count the tokens at *index* that *removals* deletes; 0 when the token survives.
-
-    A ``(flag, None)`` entry removes the flag whatever its value; ``(flag, value)`` only that exact pairing.
-    """
+    """Count the tokens at *index* that *removals* deletes; 0 when the token survives."""
     tok = tokens[index]
     if not tok.startswith("--"):
         return 0
@@ -289,10 +286,7 @@ def compact_json_server_args(
 
 
 def _json_blob_end(args: str, start: int) -> int:
-    """Offset just past the close balancing the bracket at *start*, or ``len(args)`` when it never balances.
-
-    Brackets inside a JSON string literal do not count, so an escaped quote cannot end the scan early.
-    """
+    """Offset just past the close balancing the bracket at *start*, or ``len(args)`` when it never balances."""
     depth = 0
     in_str = False
     esc = False

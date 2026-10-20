@@ -56,12 +56,7 @@ def _apply_variant_env(envs, variant, base_extra_envs, base_unset_envs):
 
 
 def _runnable_moe_backend_args(combined: str, *, args_env: str, model_path: str | None, variant: GridVariant) -> str:
-    """``combined`` with a MoE runner backend this checkpoint cannot run dropped.
-
-    A grid variant never injects one itself, but it inherits one from the baseline recipe it
-    was seeded with or from an explicitly authored variant, and a quant scheme implemented
-    only on the aiter runner crashes on the first forward pass under any other.
-    """
+    """``combined`` with a MoE runner backend this checkpoint cannot run dropped."""
     if not combined or not SGLANG_MOE_RUNNER_BACKEND_RE.search(combined):
         return combined
     if args_env != "EXTRA_SGLANG_ARGS" or not moe_runner_requires_aiter(combined, model_path):
@@ -78,11 +73,7 @@ def _runnable_moe_backend_args(combined: str, *, args_env: str, model_path: str 
 
 
 def _importable_overlay_dir(variant: GridVariant) -> str:
-    """This variant's overlay directory, or ``""`` when it names none the server may import.
-
-    A legitimate authored-kernel overlay is a single existing directory: never a
-    ``:``-joined list, a ``..`` traversal, or a path carrying control characters.
-    """
+    """This variant's overlay directory, or ``""`` when it names none the server may import."""
     overlay = str(getattr(variant, "overlay_pythonpath", "") or "").strip()
     if not overlay:
         return ""
@@ -97,11 +88,7 @@ def _importable_overlay_dir(variant: GridVariant) -> str:
 
 
 def _pin_xdit_tool_path(envs: dict[str, Any], framework: Any) -> None:
-    """Force the xdit wrapper's own tool directories onto ``PATH``.
-
-    It needs both ``/venv/bin`` (the ``xdit`` console script) and ``/opt/rocm/bin``
-    (``hipcc``), and an LLM-supplied PATH must not be able to drop either.
-    """
+    """Force the xdit wrapper's own tool directories onto ``PATH``."""
     if str(framework or "").strip().lower() != "xdit":
         return
     parts = [p for p in str(envs.get("PATH", "") or "").split(":") if p]

@@ -612,13 +612,7 @@ def _invalid_measurement_error(
     workspace: Any,
     slot: Any,
 ) -> _RoundError:
-    """Say why a round that finished produced no valid measurement.
-
-    The bypass and scriptable paths run the customer body in a child whose
-    stderr goes to ``benchmark_stderr.log``, not the parent pipe, so the pipe is
-    often empty and the real diagnostic is only on disk; ``report.errors`` is the
-    last resort when the pipe and the on-disk logs are both empty.
-    """
+    """Say why a round that finished produced no valid measurement."""
     if proc.returncode != 0:
         error = death_excerpt or redact_secret_values((proc.stderr or proc.stdout)[-2000:])
         if not error.strip():
@@ -912,11 +906,7 @@ def _abandon_rest_of_grid(run: _GridRun, at: _VariantSlot) -> NoReturn:
 
 
 def _warn_budget_cannot_admit(run: _GridRun, idx: int, *, rounds_left: int, spent_on: str) -> bool:
-    """Warn when the session budget can no longer admit ``rounds_left`` rounds, and say whether it can.
-
-    A timeout then halts the grid instead of draining it, and the last variant admitted
-    cannot overrun the session's close window.
-    """
+    """Warn when the session budget can no longer admit ``rounds_left`` rounds, and say whether it can."""
     budget = run.budget
     if budget.deadline_sec is None:
         return False
@@ -997,10 +987,7 @@ def _multi_node_reference_envs() -> dict[str, str]:
 
 
 def _refuse_unsupported_capability(run: _GridRun, at: _VariantSlot) -> None:
-    """End a variant whose env flag the build cannot honour before a doomed server boots.
-
-    The failure is still recorded, so the LLM learns not to re-pick it.
-    """
+    """End a variant whose env flag the build cannot honour before a doomed server boots."""
     reason = unsupported_capability_reason(at.variant)
     if not reason:
         return
@@ -1040,11 +1027,7 @@ async def _variant_yaml_or_abort(
     lifecycle: dict[str, Any] | None,
     failure_class: str | None = None,
 ) -> Path:
-    """Materialize this variant's Magpie YAML under ``into``, or end the variant on the build error.
-
-    ``failure_class`` names the class a build failure is recorded under; when it is None
-    the exception names its own.
-    """
+    """Materialize this variant's Magpie YAML under ``into``, or end the variant on the build error."""
     try:
         return await _variant_yaml(run, at, into=into, lifecycle=lifecycle)
     except Exception as exc:  # noqa: BLE001
@@ -1098,10 +1081,7 @@ async def _prepare_variant_rounds(run: _GridRun, at: _VariantSlot) -> _VariantRo
 
 
 async def _run_warmup_round(run: _GridRun, at: _VariantSlot, rounds: _VariantRounds) -> float | None:
-    """Run and discard one benchmark pass so the measured round starts on a warm server.
-
-    Returns the throughput it reached, which the measured row carries as a warning.
-    """
+    """Run and discard one benchmark pass so the measured round starts on a warm server."""
     launch = run.launch
     warmup_slot = at.path / _WARMUP_ROUND_DIR
     warmup_server_log = warmup_slot / "server.log"
@@ -1265,12 +1245,7 @@ async def _restart_multi_node_server(run: _GridRun, at: _VariantSlot, rounds: _V
 
 
 async def _run_multi_node_warmup(run: _GridRun, at: _VariantSlot, rounds: _VariantRounds) -> None:
-    """Run and discard one client pass against the just-restarted, persistent remote server.
-
-    It warms JIT and steady state before the measured pass. The measurement is discarded,
-    but the returncode is not: a warmup the run stopped is the same stop as one in the
-    measured round, and discarding it would launch the measured round after the cancel.
-    """
+    """Run and discard one client pass against the just-restarted, persistent remote server."""
     from ._multi_node_env import is_multi_node, mn_bench_warmup_enabled
 
     if not is_multi_node() or not mn_bench_warmup_enabled():
@@ -1419,10 +1394,7 @@ def _refuse_reaped_round(run: _GridRun, at: _VariantSlot, round_: _BenchmarkPass
 
 
 def _harvest_round_workspace(run: _GridRun, at: _VariantSlot, round_: _BenchmarkPass) -> _RoundHarvest:
-    """Salvage the round's leaked artifacts into the workspace it produced.
-
-    Always on, so each slot keeps its server.log / gpu_metrics / profile relay for Robustness RCA.
-    """
+    """Salvage the round's leaked artifacts into the workspace it produced."""
     workspace = select_run_workspace(at.path, known_before=round_.workspaces_before)
     artifacts = harvest_leaked_artifacts(
         workspace if workspace is not None else at.path,
@@ -1562,10 +1534,7 @@ def _booted_server_row(at: _VariantSlot, outcome: _VariantOutcome) -> VariantRes
 
 
 def _kept_nonzero_exit(at: _VariantSlot, outcome: _VariantOutcome) -> str | None:
-    """The exit code this measurement is kept despite, or None when the round exited clean.
-
-    A round that did not serve its whole protocol ends the variant instead.
-    """
+    """The exit code this measurement is kept despite, or None when the round exited clean."""
     returncode = outcome.measured.round.proc.returncode
     if returncode == 0:
         return None
