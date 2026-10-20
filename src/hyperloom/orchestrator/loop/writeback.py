@@ -74,7 +74,6 @@ from ..knowledge.agent_kb import PatchKB
 from .proposals import PendingProposal
 from ..measurement.integrate_performance import integrate_measurement_fields
 from ..measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX
-from ._geak_harness_replay import GeakHarnessReplay
 from ._geak_revalidation import GeakRevalidation
 from ._launch_identity import LaunchIdentity
 from ._promote_outcome import _PromoteOutcome
@@ -969,7 +968,7 @@ def _parse_baseline_workload_extra(yaml_path: str) -> dict[str, Any]:
     return out
 
 
-class WritebackCollaborator(GeakRevalidation, GeakHarnessReplay, LaunchIdentity):
+class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
     """Handles result writeback: promotion of measured results, KEEP/REVERT settlement, and resume replay."""
 
     @staticmethod
