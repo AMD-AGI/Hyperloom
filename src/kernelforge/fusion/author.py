@@ -397,12 +397,7 @@ def _is_fusion_scratch_relpath(rel: str) -> bool:
 class _AuthorWorkspaceGuard:
     """Restore every Git-visible mutation outside the author's writable scope."""
 
-    def __init__(
-        self,
-        workdir: str,
-        target_files: list[str],
-        new_module_dirs: Optional[list[str]] = None,
-    ) -> None:
+    def __init__(self, workdir: str, target_files: list[str], new_module_dirs: list[str]) -> None:
         cwd = Path(workdir).expanduser().resolve()
         root_result = _git_bytes(cwd, "rev-parse", "--show-toplevel")
         root_text = root_result.stdout.decode(errors="surrogateescape").strip()
@@ -410,80 +405,31 @@ class _AuthorWorkspaceGuard:
             raise AuthorSafetyError("registered authoring requires a Git worktree")
         self.root = Path(root_text).resolve()
         self.cwd = cwd
-        self.target_relpaths: set[str] = set()
-        self.target_files: list[str] = []
-        for value in target_files:
-            if not value:
-                continue
-            raw = Path(value).expanduser()
-            lexical = Path(os.path.abspath(str(raw if raw.is_absolute() else cwd / raw)))
-            try:
-                lexical.relative_to(self.root)
-            except ValueError as exc:
-                raise AuthorSafetyError(
-                    f"author target is outside the Git worktree: {lexical}",
-                    paths=[str(lexical)],
-                ) from exc
-            resolved = lexical.resolve(strict=False)
-            try:
-                relative = resolved.relative_to(self.root)
-            except ValueError as exc:
-                raise AuthorSafetyError(
-                    f"author target is outside the Git worktree: {lexical}",
-                    paths=[str(lexical)],
-                ) from exc
-            if lexical.is_symlink() or resolved != lexical:
-                raise AuthorSafetyError(
-                    f"author target symlink/path escape is not allowed: {lexical}",
-                    paths=[str(lexical)],
-                )
-            rel = relative.as_posix()
-            self.target_relpaths.add(rel)
-            self.target_files.append(str(resolved))
+        self.target_files = [str(self._contained_path(value, "author target")) for value in target_files]
+        self.target_relpaths = {Path(path).relative_to(self.root).as_posix() for path in self.target_files}
 
-        self.new_module_dirs: list[str] = []
         # Name inventory per nominated directory.
         self.new_module_baselines: dict[str, frozenset[str]] = {}
-        for value in new_module_dirs or []:
-            if not value:
-                continue
-            raw = Path(value).expanduser()
-            lexical = Path(os.path.abspath(str(raw if raw.is_absolute() else cwd / raw)))
-            resolved = lexical.resolve(strict=False)
+        for value in new_module_dirs:
+            directory = self._contained_path(value, "author module directory")
             try:
-                relative = resolved.relative_to(self.root)
-            except ValueError as exc:
-                raise AuthorSafetyError(
-                    f"author module directory is outside the Git worktree: {lexical}",
-                    paths=[str(lexical)],
-                ) from exc
-            if lexical.is_symlink() or resolved != lexical:
-                raise AuthorSafetyError(
-                    f"author module directory symlink/path escape is not allowed: {lexical}",
-                    paths=[str(lexical)],
-                )
-            try:
-                entries = frozenset(os.listdir(resolved))
+                entries = frozenset(os.listdir(directory))
             except FileNotFoundError as exc:
                 # An empty inventory is the most permissive scope there is -- every name in it counts as absent -- and
                 # the prompt would then advertise a directory the author cannot write into anyway.
                 raise AuthorSafetyError(
-                    f"author module directory does not exist: {lexical}",
-                    paths=[str(lexical)],
+                    f"author module directory does not exist: {directory}",
+                    paths=[str(directory)],
                 ) from exc
             except OSError as exc:
                 # A missing directory above is a verdict: it is absent on every attempt.
                 raise AuthorSafetyError(
-                    f"cannot inventory author module directory: {lexical}",
-                    paths=[str(lexical)],
+                    f"cannot inventory author module directory: {directory}",
+                    paths=[str(directory)],
                     transient=True,
                 ) from exc
-            self.new_module_baselines[relative.as_posix()] = entries
-            if str(resolved) not in self.new_module_dirs:
-                self.new_module_dirs.append(str(resolved))
-
-        # Paths the current transaction must not clobber while restoring others.
-        self.preserved_relpaths: set[str] = set(self.target_relpaths)
+            self.new_module_baselines[directory.relative_to(self.root).as_posix()] = entries
+        self.new_module_dirs = [str(self.root / rel) for rel in self.new_module_baselines]
 
         self.baseline_head = self._head()
         self.baseline_branch = self._branch()
@@ -505,9 +451,8 @@ class _AuthorWorkspaceGuard:
         except OSError as exc:
             raise AuthorSafetyError(f"cannot snapshot Git index: {self.index_path}") from exc
         hidden_index_paths = {rel for rel, flag in self.baseline_index_flags.items() if flag != "H"}
-        self.baseline_status_paths = self._status_paths() | hidden_index_paths
         self.baseline_states: dict[str, _WorkspacePathState] = {}
-        for rel in self.baseline_status_paths:
+        for rel in self._status_paths() | hidden_index_paths:
             state = _capture_path_state(self._path(rel))
             if state.kind in {"directory", "unsupported"}:
                 raise AuthorSafetyError(
@@ -515,6 +460,17 @@ class _AuthorWorkspaceGuard:
                     paths=[rel],
                 )
             self.baseline_states[rel] = state
+
+    def _contained_path(self, value: str, what: str) -> Path:
+        """Resolve one caller-named path, refusing one outside the worktree or reached through a symlink."""
+        raw = Path(value).expanduser()
+        lexical = Path(os.path.abspath(str(raw if raw.is_absolute() else self.cwd / raw)))
+        resolved = lexical.resolve(strict=False) if lexical.is_relative_to(self.root) else lexical
+        if not resolved.is_relative_to(self.root):
+            raise AuthorSafetyError(f"{what} is outside the Git worktree: {lexical}", paths=[str(lexical)])
+        if lexical.is_symlink() or resolved != lexical:
+            raise AuthorSafetyError(f"{what} symlink/path escape is not allowed: {lexical}", paths=[str(lexical)])
+        return resolved
 
     def _head(self) -> bytes:
         return _git_bytes(
@@ -851,6 +807,26 @@ class _AuthorWorkspaceGuard:
                     selected.discard(child)
         return selected
 
+    def _changed_paths(
+        self,
+        entries: dict[str, tuple[tuple[str, str, int], ...]],
+        flags: dict[str, str],
+        status: set[str],
+    ) -> set[str]:
+        """Git-visible paths whose index entry, index flag or worktree state differs from the baseline snapshot."""
+        baseline_entries, baseline_flags = self.baseline_index_entries, self.baseline_index_flags
+        changed = {
+            rel
+            for rel in baseline_entries.keys() | entries.keys()
+            if baseline_entries.get(rel, ()) != entries.get(rel, ())
+        }
+        changed.update(rel for rel in baseline_flags.keys() | flags.keys() if baseline_flags.get(rel) != flags.get(rel))
+        changed.update(status - self.baseline_states.keys())
+        changed.update(
+            rel for rel, state in self.baseline_states.items() if _capture_path_state(self._path(rel)) != state
+        )
+        return changed
+
     def enforce(self) -> _AuthorWorkspaceOutcome:
         """Restore out-of-scope deltas and report rejections plus new modules."""
         if self._head() != self.baseline_head or self._branch() != self.baseline_branch:
@@ -861,24 +837,7 @@ class _AuthorWorkspaceGuard:
 
         post_entries = self._index_entries()
         post_flags = self._index_flags()
-        post_status = self._status_paths()
-        index_paths = set(self.baseline_index_entries) | set(post_entries)
-        flag_paths = set(self.baseline_index_flags) | set(post_flags)
-        index_changed = {
-            rel for rel in index_paths if self.baseline_index_entries.get(rel, ()) != post_entries.get(rel, ())
-        }
-        flag_changed = {rel for rel in flag_paths if self.baseline_index_flags.get(rel) != post_flags.get(rel)}
-        candidates = self.baseline_status_paths | post_status | index_changed | flag_changed
-        worktree_changed: set[str] = set()
-        for rel in candidates:
-            baseline = self.baseline_states.get(rel)
-            if baseline is not None:
-                if _capture_path_state(self._path(rel)) != baseline:
-                    worktree_changed.add(rel)
-            elif rel in post_status:
-                worktree_changed.add(rel)
-
-        changed = worktree_changed | index_changed | flag_changed
+        changed = self._changed_paths(post_entries, post_flags, self._status_paths())
         # A new fused helper module inside the nominated scope is part of the authored fusion, so it is allowed to
         # survive.
         scratch = {rel for rel in changed if _is_fusion_scratch_relpath(rel)}
@@ -894,11 +853,11 @@ class _AuthorWorkspaceGuard:
             return _AuthorWorkspaceOutcome(created=tuple(sorted(created)))
 
         preserved = allowed - unsafe_allowed
-        if flag_changed & preserved:
-            unsafe_flags = sorted(flag_changed & preserved)
-            violations.update(unsafe_flags)
-            preserved.difference_update(unsafe_flags)
-        self.preserved_relpaths = set(preserved)
+        unsafe_flags = {rel for rel in preserved if self.baseline_index_flags.get(rel) != post_flags.get(rel)}
+        violations |= unsafe_flags
+        preserved -= unsafe_flags
+        # Paths the current transaction must not clobber while restoring others.
+        self.preserved_relpaths = preserved
 
         self._restore_index(post_entries, preserved)
         restore_paths = self._minimal_restore_paths(violations)
@@ -911,29 +870,7 @@ class _AuthorWorkspaceGuard:
             else:
                 self._remove_path(rel)
 
-        final_entries = self._index_entries()
-        final_flags = self._index_flags()
-        final_status = self._status_paths()
-        verify_paths = (
-            self.baseline_status_paths | final_status | set(self.baseline_index_entries) | set(final_entries)
-        ) - preserved
-        failed: set[str] = set()
-        for rel in verify_paths:
-            if self.baseline_index_entries.get(rel, ()) != final_entries.get(
-                rel,
-                (),
-            ):
-                failed.add(rel)
-                continue
-            if self.baseline_index_flags.get(rel) != final_flags.get(rel):
-                failed.add(rel)
-                continue
-            baseline = self.baseline_states.get(rel)
-            if baseline is not None:
-                if _capture_path_state(self._path(rel)) != baseline:
-                    failed.add(rel)
-            elif (rel in self.baseline_status_paths) != (rel in final_status):
-                failed.add(rel)
+        failed = self._changed_paths(self._index_entries(), self._index_flags(), self._status_paths()) - preserved
         if failed:
             raise AuthorSafetyError(
                 "could not prove exact restoration of non-target paths",
