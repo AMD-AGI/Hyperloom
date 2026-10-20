@@ -10,7 +10,7 @@ from typing import Any, Literal, TypedDict
 from ..session.sbd_v6 import SCHEMA_VERSION_V6
 
 
-#: Current breakdown schema version (v7.0). ``enablement`` carries its
+#: Current breakdown schema version (v6.1). ``enablement`` carries its
 #: ledger-sourced round fields inside this version without reshaping the document.
 SCHEMA_VERSION = SCHEMA_VERSION_V6
 

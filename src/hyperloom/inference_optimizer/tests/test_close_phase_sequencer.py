@@ -1139,7 +1139,7 @@ async def test_the_sequencer_delivers_the_finished_close_section_in_the_package(
     (session_dir / "session_breakdown.json").write_text(
         json.dumps(
             {
-                "schema_version": "hyperloom.session_breakdown.v7.0",
+                "schema_version": "hyperloom.session_breakdown.v6.1",
                 "close": {"status": "degraded", "steps": [{"step": "sequencer_started"}]},
             }
         ),

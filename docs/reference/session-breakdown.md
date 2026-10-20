@@ -34,20 +34,21 @@ The top-level `schema_version` field is a stable string. New exports use the
 recorded-timeline wire shape:
 
 ```json
-"schema_version": "hyperloom.session_breakdown.v7.0"
+"schema_version": "hyperloom.session_breakdown.v6.1"
 ```
 
-V7 is a breaking cutover: it renames one key, removes keys no producer populated
-and reports two unmeasured figures as null, each listed below. `throughput_tok_s_per_gpu` in
+6.1 changes three things inside the 6 major, an exception to the compatibility
+rules below: it renames one key, removes keys no producer populated, and
+reports two unmeasured figures as null. `throughput_tok_s_per_gpu` in
 `outcome.baseline`, `outcome.final` and the `baseline` event's `measurement` is
-now `output_throughput`. The value is unchanged: the whole-server output
-throughput, not a per-GPU figure. Archived V6 documents carry the old key and
-require a downstream migration before V7 readers consume them. Within V7,
-`perf.output_tput_per_gpu` also carries its value on the `baseline` event and
-on stack validation rows.
+now `output_throughput`, and the old key is no longer written. The value is
+unchanged: the whole-server output throughput, not a per-GPU figure. Archived
+6.0 documents and documents exported by 1.1.x carry the old key, so readers must
+accept both keys or migrate. Within 6.1, `perf.output_tput_per_gpu` also carries
+its value on the `baseline` event and on stack validation rows.
 
-V7 also removes keys that no producer ever populated. Each carries the
-disposition `removed in V7, never populated`:
+6.1 also removes keys that no producer ever populated. Each carries the
+disposition `removed in 6.1, never populated`:
 
 - `framework_agent` `policy.force_exit_budget_pct`, `policy.variant_timeout_sec`
   and `policy.overtime_kill_ratio`
@@ -67,7 +68,7 @@ measured or not provided. `outcome.validation.attributed_gain_pct` and
 report it, rather than `false`. `kernel_agent` `entry.snapshot_staleness` is the
 string `"absent"` or `"fresh"`.
 
-Re-exporting a session directory created before V7 reads its old `baseline`
+Re-exporting a 6.0 session directory reads its old `baseline`
 event, so `outcome.baseline.output_throughput` is null while `outcome.final` and
 the gain keep their values, and `metadata.workflow.contract_digest` keeps the
 digest recorded at session creation rather than the one pinned by the packaged
@@ -94,20 +95,24 @@ carried a field a consumer could gate on.
 V5 was the preceding cutover, for optimization results: consumers read only
 `optimizations`; the old `optimization_stack`, attribution, GEAK invocation,
 Forge invocation, and GEMM-tuning result projections are no longer emitted.
-Archived V2/V3/V4/V5/V6 documents require a downstream migration before V7 readers
+Archived V2/V3/V4/V5 documents require a downstream migration before V6 readers
 consume them.
 
 Compatibility rules:
 
 * **Parse the version, do not gate on string equality**. Read the
   `vN[.M]` prefix and compare the major component so a future minor
-  revision of V7 is still accepted.
+  revision of V6 is still accepted.
 * **New optional fields** might appear at any time without bumping
   the major version. Consumers must tolerate unknown keys.
 * **Renamed, removed, or semantically changed** fields of a result section
   require a major bump; `enablement` is outside that rule, as the stability
-  guarantee below records. Only one version is written per session; there is
-  no parallel write of the previous version's file.
+  guarantee below records, and so are the 6.1 changes declared above: the
+  rename of `throughput_tok_s_per_gpu` to `output_throughput`, the removal of
+  keys no producer populated, and the null reporting of unmeasured
+  `attributed_gain_pct`, `unattributed_gain_pct` and run `empty`. Only one
+  version is written per session; there is no parallel write of the previous
+  version's file.
 * **Missing data** is always represented as `null`, `[]`, or `{}` —
   never as a default / fabricated value. Consumers MUST treat
   missing data as "not available".
@@ -126,7 +131,7 @@ The following JSON structure shows all top-level fields in `session_breakdown.js
 
 ```text
 {
-  "schema_version": "hyperloom.session_breakdown.v7.0",
+  "schema_version": "hyperloom.session_breakdown.v6.1",
   "exported_at_utc": "2026-05-17T12:34:56.789Z",
   "exporter_version": "session-breakdown-1.0.0",
 
@@ -155,8 +160,8 @@ earlier shape also carried a top-level `warnings`, taken partway through the
 export; it was a strict subset and so disagreed with `metadata.warnings`
 about the same export.
 
-The V7 surface is identified by
-`metadata.versions.schema_version = "hyperloom.session_breakdown.v7.0"`. Startup
+The V6 surface is identified by
+`metadata.versions.schema_version = "hyperloom.session_breakdown.v6.1"`. Startup
 source events are stored in execution order under `reports/sbd_v6/timeline/`;
 writer failures are reported through `metadata.warnings` rather than being
 indistinguishable from a stage that never ran.
@@ -252,7 +257,7 @@ benchmark config path, attempt history (in case the baseline required
 retries), and the `BenchmarkInvocation` record needed to **replay**
 the exact baseline benchmark.
 
-Disposition: `baseline.throughput_tok_s_per_gpu` (V6) → `baseline.output_throughput` (V7).
+Disposition: `baseline.throughput_tok_s_per_gpu` (6.0) → `baseline.output_throughput` (6.1).
 
 `baseline.invocation.framework_args_source` is one of:
 
@@ -322,7 +327,7 @@ downstream consumers:
 > **Scope of `output_throughput`: whole-server total in `throughput_unit`, not per-GPU.**
 > Do not divide it by a GPU count.
 > `cumulative_gain_pct_validated` is a ratio of two such numbers and is unaffected.
-> Disposition: `throughput_tok_s_per_gpu` (V6) → `output_throughput` (V7).
+> Disposition: `throughput_tok_s_per_gpu` (6.0) → `output_throughput` (6.1).
 
 > Consumer best practice: index on
 > `(session.session_id, final.output_throughput,
@@ -403,14 +408,14 @@ The following example shows a complete `session_breakdown.json` for a finished G
 
 ```text
 {
-  "schema_version": "hyperloom.session_breakdown.v7.0",
+  "schema_version": "hyperloom.session_breakdown.v6.1",
   "exported_at_utc": "2026-05-17T14:02:15.001Z",
   "exporter_version": "session-breakdown-1.0.0",
 
   "metadata": {
     "exported_at_utc": "2026-05-17T14:02:15.001Z",
     "versions": {
-      "schema_version": "hyperloom.session_breakdown.v7.0",
+      "schema_version": "hyperloom.session_breakdown.v6.1",
       "hyperloom": "a1b2c3d",
       "framework": "sglang",
       "framework_version": "0.5.21",
@@ -645,7 +650,11 @@ The Hyperloom team commits to the following compatibility guarantees.
 1. Never removing or renaming a documented field of a result section within
    a major `schema_version`. Such changes require a major bump, as the `v5.0`
    optimization cutover did, and every removed or renamed field is given a
-   disposition in the section it left. `enablement` is outside this guarantee:
+   disposition in the section it left. The 6.1 changes (the
+   rename of `throughput_tok_s_per_gpu` to `output_throughput`, the removal of
+   keys no producer populated, and null reporting of unmeasured
+   `attributed_gain_pct`, `unattributed_gain_pct` and run `empty`) are a
+   declared exception to this rule, recorded under Versioning. `enablement` is outside this guarantee:
    it reports on the runtime a session built rather than on its results, is
    emitted as `{}` whenever no enablement ran, and its fields move with the
    runtime they describe — every field the round ledger replaced is still given

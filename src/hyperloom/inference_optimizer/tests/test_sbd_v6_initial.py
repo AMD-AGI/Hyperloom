@@ -61,7 +61,7 @@ def _write_model_config(model: Path, payload: dict) -> None:
 def _model_gate_from_breakdown(session_dir: Path) -> dict:
     breakdown = json.loads((session_dir / "session_breakdown.json").read_text(encoding="utf-8"))
     assert breakdown["schema_version"] == SCHEMA_VERSION_V6
-    assert breakdown["schema_version"] == "hyperloom.session_breakdown.v7.0"
+    assert breakdown["schema_version"] == "hyperloom.session_breakdown.v6.1"
     assert breakdown["outcome"]["status"] == "failed"
     assert breakdown["outcome"]["stage_reached"] == "model_gate"
     return next(event for event in breakdown["timeline"] if event["type"] == "model_gate")

@@ -259,20 +259,23 @@ controlled by the CLI flag `--enable-roofline`, which defaults **on**. Pass
 
 ### Schema compatibility
 
-`session_breakdown.json` emits `hyperloom.session_breakdown.v7.0`. V7 is a
-breaking cutover: it renames one key, removes never-populated keys and reports
-unmeasured figures as null. `throughput_tok_s_per_gpu` in
-`outcome.baseline`, `outcome.final` and the `baseline` event's `measurement` is
-now `output_throughput`; archived V6 documents keep the old key.
-Re-exporting a session directory created before V7 emits a null
+`session_breakdown.json` emits `hyperloom.session_breakdown.v6.1`. 6.1 changes
+three things inside the 6 major, a declared exception to the major-bump rule: it
+renames `throughput_tok_s_per_gpu` in `outcome.baseline`, `outcome.final` and
+the `baseline` event's `measurement` to `output_throughput` (the old key is no
+longer written), removes keys no producer populated, and reports two unmeasured
+figures as null. Archived 6.0 documents and documents exported by 1.1.x keep
+the old key, so readers must accept both keys or migrate.
+Re-exporting a 6.0 session directory emits a null
 `outcome.baseline.output_throughput` and the `contract_digest` recorded at
 session creation, and the default output overwrites the archived
-`<session_dir>/session_breakdown.json`. V7 also drops keys that were never
-populated (`policy.force_exit_budget_pct`, `policy.variant_timeout_sec`,
-`policy.overtime_kill_ratio`, `trace_validate_ref`, `critic_review.iteration`,
-`geak.product.cfg_hash`, `geak.product.final_overlay_digest`,
-`entry.budget_remaining_sec`), and reports `attributed_gain_pct`,
-`unattributed_gain_pct` and run `empty` as null when unmeasured or not provided.
+`<session_dir>/session_breakdown.json`. The removed keys (disposition: removed
+in 6.1, never populated) are `policy.force_exit_budget_pct`,
+`policy.variant_timeout_sec`, `policy.overtime_kill_ratio`,
+`trace_validate_ref`, `critic_review.iteration`, `geak.product.cfg_hash`,
+`geak.product.final_overlay_digest` and `entry.budget_remaining_sec`.
+`attributed_gain_pct`, `unattributed_gain_pct` and run `empty` are null when
+unmeasured or not provided.
 
 V6 was the preceding cutover, for the timeline: each action records its own event as it
 runs, so an event's `start_time` is when the work started rather than when its
@@ -282,7 +285,7 @@ emitted. Ordering that relied on the old collapsed windows changes as a result.
 V5 was the preceding cutover, for optimization results: adopted optimizations
 are reported only through `optimizations`, and the `optimization_stack`,
 `attribution`, GEAK invocation, Forge invocation, and GEMM-tuning projections
-are no longer emitted. Consumers reading archived v2 / v3 / v4 / v5 / v6 documents
+are no longer emitted. Consumers reading archived v2 / v3 / v4 / v5 documents
 need a downstream migration, as described in
 [`session_breakdown.json` integration in Hyperloom](session-breakdown.md).
 
