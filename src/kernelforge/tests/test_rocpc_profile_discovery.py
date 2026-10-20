@@ -235,6 +235,12 @@ def _site_probe(rocpc_profile, tmp_path, monkeypatch, failure):
     return rocpc_profile._python_can_run_rocpc("python3", str(tmp_path))
 
 
+def _site_torch_import(rocpc_profile, tmp_path, monkeypatch, failure):
+    monkeypatch.setattr(rocpc_profile.shutil, "which", lambda name, path=None: "/opt/venv/bin/rocprofv3")
+    monkeypatch.setattr(rocpc_profile.subprocess, "run", _raiser(failure))
+    return rocpc_profile._torch_import_under_rocprofv3("/usr/bin/python3")
+
+
 def _site_drain_after_kill(rocpc_profile, tmp_path, monkeypatch, failure):
     monkeypatch.setattr(rocpc_profile.subprocess, "Popen", lambda *_a, **_k: _hung_proc(failure))
     monkeypatch.setattr(rocpc_profile, "_kill_tree", lambda _pid: None)
@@ -243,7 +249,7 @@ def _site_drain_after_kill(rocpc_profile, tmp_path, monkeypatch, failure):
 
 @pytest.mark.parametrize(
     "site",
-    [_site_wheel_roots, _site_runtime_root, _site_probe, _site_drain_after_kill],
+    [_site_wheel_roots, _site_runtime_root, _site_probe, _site_torch_import, _site_drain_after_kill],
     ids=lambda site: site.__name__,
 )
 def test_an_unexpected_error_at_a_narrowed_probe_propagates(rocpc_profile, tmp_path, monkeypatch, site) -> None:
@@ -258,6 +264,16 @@ def test_an_unexpected_error_at_a_narrowed_probe_propagates(rocpc_profile, tmp_p
         (_site_runtime_root, ValueError("_rocm_sdk_devel.__spec__ is None"), None),
         (_site_probe, OSError("no such interpreter"), False),
         (_site_probe, subprocess.TimeoutExpired("python3", 60), False),
+        (
+            _site_torch_import,
+            OSError("no such interpreter"),
+            (False, "rocprofv3 torch-import preflight failed: no such interpreter"),
+        ),
+        (
+            _site_torch_import,
+            ValueError("embedded null byte"),
+            (False, "rocprofv3 torch-import preflight failed: embedded null byte"),
+        ),
         (_site_drain_after_kill, subprocess.TimeoutExpired("rocprof-compute", 30), (124, "TIMEOUT after 5s")),
     ],
     ids=lambda value: value.__name__ if callable(value) else type(value).__name__,

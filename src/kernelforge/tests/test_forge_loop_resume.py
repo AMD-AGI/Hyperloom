@@ -484,13 +484,24 @@ def test_a_warm_start_rejected_by_the_task_suite_is_not_returned(
 
 
 @pytest.mark.parametrize(
-    "failure_stage",
-    ["derived-best-view", "checkpoint", "result_json"],
+    ("failure_stage", "error"),
+    [
+        ("derived-best-view", OSError),
+        ("checkpoint", OSError),
+        ("checkpoint", TypeError),
+        ("checkpoint", ValueError),
+        ("checkpoint", RuntimeError),
+        ("result_json", OSError),
+        ("result_json", TypeError),
+        ("result_json", ValueError),
+        ("result_json", RuntimeError),
+    ],
 )
 def test_warm_start_post_commit_point_failures_are_degraded(
     tmp_path,
     monkeypatch,
     failure_stage,
+    error,
 ):
     workspace, kernel, _driver = _initialize_workspace(tmp_path)
     base_commit = subprocess.run(
@@ -513,14 +524,14 @@ def test_warm_start_post_commit_point_failures_are_degraded(
         @staticmethod
         def set_checkpoint(_experiment_id, _checkpoint):
             if failure_stage == "checkpoint":
-                raise OSError("checkpoint unavailable")
+                raise error("checkpoint unavailable")
 
     if failure_stage == "derived-best-view":
         original_publish = recovery_module.BestResultPublisher.publish
 
         def fail_after_commit_point(self, *args, **kwargs):
             original_publish(self, *args, **kwargs)
-            raise OSError("report unavailable")
+            raise error("report unavailable")
 
         monkeypatch.setattr(
             recovery_module.BestResultPublisher,
@@ -530,7 +541,7 @@ def test_warm_start_post_commit_point_failures_are_degraded(
     if failure_stage == "result_json":
 
         def fail_result_write(_path, _payload):
-            raise OSError("result unavailable")
+            raise error("result unavailable")
 
         monkeypatch.setattr(
             recovery_module,
@@ -538,31 +549,75 @@ def test_warm_start_post_commit_point_failures_are_degraded(
             fail_result_write,
         )
     result_json = tmp_path / "forge_cli_result.json"
-    result = recovery_module.publish_warm_start_recovery(
-        str(workspace),
-        base_commit=base_commit,
-        warm={
-            "applied": True,
-            "pristine_ms": 10.0,
-            "keep_baseline_ms": 8.0,
-            "mean_case_speedup": 1.25,
-            "solution_slug": "prior/solution",
-        },
-        caller=recovery_module.CallerRecovery(
-            caller_experiment_id="hyperloom", experience_id="experience", result_json=str(result_json)
-        ),
-        tracker=Tracker(),
-    )
+
+    def publish():
+        return recovery_module.publish_warm_start_recovery(
+            str(workspace),
+            base_commit=base_commit,
+            warm={
+                "applied": True,
+                "pristine_ms": 10.0,
+                "keep_baseline_ms": 8.0,
+                "mean_case_speedup": 1.25,
+                "solution_slug": "prior/solution",
+            },
+            caller=recovery_module.CallerRecovery(
+                caller_experiment_id="hyperloom", experience_id="experience", result_json=str(result_json)
+            ),
+            tracker=Tracker(),
+        )
+
+    if error is RuntimeError:
+        with pytest.raises(RuntimeError, match="unavailable"):
+            publish()
+        return
+    result = publish()
 
     assert result is not None
     assert result["persistence_degraded"] is True
     assert failure_stage.replace("_", "-") in result["persistence_errors"][0]
+    expected_errors = {
+        "checkpoint": ["checkpoint: checkpoint unavailable"],
+        "result_json": ["result-json: result unavailable"],
+    }
+    if failure_stage in expected_errors:
+        assert result["persistence_errors"] == expected_errors[failure_stage]
     assert (workspace / "forge_experiments" / "best_result.json").is_file()
     if failure_stage != "result_json":
         sidecar = json.loads(result_json.read_text())
         assert sidecar["persistence_degraded"] is True
     else:
         assert not result_json.exists()
+
+
+def test_a_publication_failure_is_recorded_as_a_pending_retry(monkeypatch):
+    def fail(**_kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(forge_loop_command, "write_experience_to_kb", fail)
+    run = SimpleNamespace(
+        request=SimpleNamespace(
+            knowledge=SimpleNamespace(experience_kb=True),
+            artifacts=SimpleNamespace(experience_id="experience"),
+        ),
+        config=SimpleNamespace(gpu_target="gfx942"),
+        iter_config=SimpleNamespace(kernel_file="kernel.py", target_functions=[], source_files=[], workspace_dir="ws"),
+        campaign=SimpleNamespace(kernel_backend="triton", framework="", operator_name="op", base_commit="base"),
+        usage=None,
+    )
+    reporter = forge_loop_command._RunReporter(
+        run=run,
+        loop_runner=object(),
+        warm_start=SimpleNamespace(warm={}, kb_pristine_baseline_ms=None, kb_reused_speedup=None),
+        assembly_preparation=None,
+        implementer=None,
+    )
+
+    status = reporter.attempt_remote_publication(commit="abc", llm_summary=False)
+
+    assert status == {"written": False, "reason": "error:RuntimeError('boom')"}
+    assert reporter.remote_publication["status"] == "pending_retry"
+    assert reporter.remote_publication["pending_commit"] == "abc"
 
 
 def test_warm_start_publication_failure_rolls_back_and_continues_reference_only(

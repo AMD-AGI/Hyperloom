@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import signal
 from types import SimpleNamespace
+
+import pytest
 
 from kernelforge.loop import task_preflight
 
@@ -65,14 +68,25 @@ def test_killpg_processlookup_falls_back_to_proc_kill(monkeypatch):
     assert killed["called"] is True
 
 
-def test_killpg_generic_exception_falls_back_to_proc_kill(monkeypatch):
+def test_killpg_os_error_falls_back_to_proc_kill(monkeypatch):
     def broken(pgid, sig):
-        raise RuntimeError("unexpected")
+        raise OSError(errno.EINVAL, "invalid signal")
 
     monkeypatch.setattr(os, "killpg", broken)
     proc, killed = _proc(999)
     task_preflight._kill_process_group(proc)
     assert killed["called"] is True
+
+
+def test_killpg_non_os_error_surfaces(monkeypatch):
+    def broken(pgid, sig):
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(os, "killpg", broken)
+    proc, killed = _proc(999)
+    with pytest.raises(RuntimeError, match="unexpected"):
+        task_preflight._kill_process_group(proc)
+    assert killed["called"] is False
 
 
 def test_permission_error_continues_then_fallback(monkeypatch):
