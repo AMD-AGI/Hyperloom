@@ -498,3 +498,79 @@ def test_patch_path_within_bases_rejects_outside_paths(tmp_path):
     assert sr._patch_path_within_bases(Path("/etc/passwd"), bases) is False
     assert sr._patch_path_within_bases(worktree / ".." / "escape.patch", bases) is False
     assert sr._patch_path_within_bases(tmp_path / "sibling.patch", bases) is False
+
+
+def test_subprocess_backend_error_leading_tokens():
+    assert sr._subprocess_backend_error(sr.SpecialistSubprocessResult(timed_out=True)) == "subprocess_timeout"
+    assert (
+        sr._subprocess_backend_error(sr.SpecialistSubprocessResult(timed_out=True, error="  late  "))
+        == "subprocess_timeout: late"
+    )
+    assert (
+        sr._subprocess_backend_error(sr.SpecialistSubprocessResult(stale_heartbeat=True))
+        == "subprocess_stale_heartbeat"
+    )
+    assert (
+        sr._subprocess_backend_error(sr.SpecialistSubprocessResult(exit_code=1, done_payload=None))
+        == "subprocess_exit_code:1"
+    )
+    assert sr._subprocess_backend_error(sr.SpecialistSubprocessResult(error="boom")) == "subprocess_error:boom"
+
+
+def test_finalize_notes_a_recovered_partial_payload(tmp_path):
+    result, written = _finalize(
+        _runner(),
+        tmp_path,
+        {"proposal_set": [{"name": "v1"}], "summary": "s", "_recovered_from_partial": True},
+    )
+    assert result.status == "partial"
+    assert "recovered_from_partial" in result.notes
+    assert written["_specialist_notes"]
+
+
+def test_finalize_skips_non_dict_proposals_and_drops_scanned_patches_outside(tmp_path, monkeypatch):
+    monkeypatch.setattr(sr._patch_safety, "vet_patches", lambda patches, **_: (list(patches), [], {}, False))
+    outside = tmp_path.parent / "outside.patch"
+    outside.write_text("diff\n", encoding="utf-8")
+    prep = sr._PreparedRun(domain=SimpleNamespace(key="serving_specialist"), gap="gap-1", workspace=tmp_path)
+    ctx = SimpleNamespace(task=SimpleNamespace(task_id="t1", params={}), extra={})
+    result = _runner()._finalize(
+        ctx=ctx,
+        prep=prep,
+        sub_result=sr.SpecialistSubprocessResult(
+            done_payload={"proposal_set": ["skip-me", {"name": "keep"}], "summary": "s"},
+            patches=[str(outside)],
+        ),
+    )
+    assert any(n.startswith("patches_scanned_outside_workspace:") for n in result.notes)
+
+
+def test_record_subprocess_run_emits_one_ledger_row_per_turn(tmp_path):
+    r = _runner(session_dir=tmp_path / "session")
+    (tmp_path / "session").mkdir()
+    prep = sr._PreparedRun(
+        domain=SimpleNamespace(key="serving_specialist"),
+        gap="gap-1",
+        workspace=tmp_path,
+        system_prompt="sys",
+        user_prompt="usr",
+        max_turns=2,
+    )
+    ctx = SimpleNamespace(task=SimpleNamespace(task_id="t1", params={}), extra={})
+    traced: list[int] = []
+
+    def _spy(ctx, turn, metadata, latency_ms=None):
+        traced.append(turn)
+
+    r._trace_specialist_llm_call = _spy  # type: ignore[method-assign]
+    r._record_subprocess_run(
+        ctx,
+        prep,
+        sr.SpecialistSubprocessResult(
+            turn_usages=[{"input_tokens": 1}, {"input_tokens": 2}],
+            usage={"model": "m", "input_tokens": 3},
+        ),
+        "call-1",
+        12,
+    )
+    assert traced == [1, 2]

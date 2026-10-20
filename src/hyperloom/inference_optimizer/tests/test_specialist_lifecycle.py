@@ -271,6 +271,20 @@ async def test_build_specialist_round_entry_round_id_falls_back_to_task_id(coord
     assert entry["round_id"] == "task-no-round"
 
 
+@pytest.mark.asyncio
+async def test_build_specialist_round_entry_records_run_error_and_notes(coord):
+    task = _StubTask(task_id="t-err", params={})
+    entry = coord.specialist_dispatch.build_specialist_round_entry(
+        task=task,
+        done_payload={**_done_payload(), "_specialist_notes": ["n1", 2]},
+        source=f"{SPECIALIST_FROM_AGENT_PREFIX}t-err",
+        run_error="dispatch failed",
+    )
+    assert entry["status"] == "failed"
+    assert entry["error"] == entry["run_error"] == "dispatch failed"
+    assert entry["notes"] == ["n1", "2"]
+
+
 # 5. End-to-end: dispatcher exit hook bookkeeping
 @pytest.mark.asyncio
 async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
