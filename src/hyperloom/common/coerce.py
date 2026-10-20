@@ -24,11 +24,11 @@ def to_float(value: Any, default: _T | None = None) -> float | _T | None:
 
 
 def recorded_float(value: Any, default: float = 0.0) -> float:
-    """Coerce a recorded measurement to ``float``, keeping ``inf`` / ``nan`` as they were recorded.
+    """Coerce a recorded value to ``float``, keeping ``inf`` / ``nan`` as they were recorded.
 
-    Unlike :func:`to_float`, a non-finite figure survives the coercion. It says
-    the benchmark behind it is broken, and *default* would render that as a
-    measurement somebody took.
+    Unlike :func:`to_float`, a non-finite figure survives the coercion. It
+    records that whatever produced it was degenerate, and *default* would
+    render that as an ordinary value.
     """
     try:
         return float(value or default)

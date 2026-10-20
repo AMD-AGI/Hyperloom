@@ -60,26 +60,12 @@ class AttemptProvenance(NamedTuple):
     kept_by_gap: dict[str, str]
     reverted: list[dict[str, Any]]
 
-    @classmethod
-    def unrecorded(cls) -> "AttemptProvenance":
-        """The empty provenance a session that does not sediment its attempts reports."""
-        return cls(kept_by_name={}, kept_by_gap={}, reverted=[])
-
 
 class _IntegrateIndex(NamedTuple):
     """Integrate-layer entries under both keys a micro KEEP can name them by."""
 
     by_kernel: dict[str, dict[str, Any]]
     by_task_group: dict[str, dict[str, Any]]
-
-
-class _E2eVerdict(NamedTuple):
-    """What integrating a kernel measured end to end."""
-
-    gain_pct: float
-    throughput: float
-    decision: str
-    integrated: bool
 
 
 def _known_version(raw: Any) -> str:
@@ -179,38 +165,26 @@ def _last_rebenched_throughput(integration: Mapping[str, Any]) -> float:
     return 0.0
 
 
-def _e2e_verdict(integration: Any) -> _E2eVerdict:
-    """The integrate layer's verdict on a kernel, or the never-integrated default.
+def _kernel_optimization_row(entry: Mapping[str, Any], ledger_id: str, index: _IntegrateIndex) -> dict[str, Any]:
+    """One KernelOptimization row: a micro KEEP joined to its end-to-end verdict.
 
-    Carrying the verdict lets a warm start skip a kernel that won on the micro
+    Carrying that verdict lets a warm start skip a kernel that won on the micro
     bench and lost end to end.
     """
-    if not isinstance(integration, dict):
-        return _E2eVerdict(gain_pct=0.0, throughput=0.0, decision="", integrated=False)
-    return _E2eVerdict(
-        gain_pct=recorded_float(integration.get("best_gain_pct")),
-        throughput=_last_rebenched_throughput(integration),
-        decision=str(integration.get("last_decision") or "").upper(),
-        integrated=True,
-    )
-
-
-def _kernel_optimization_row(entry: Mapping[str, Any], ledger_id: str, index: _IntegrateIndex) -> dict[str, Any]:
-    """One KernelOptimization row: a micro KEEP joined to its end-to-end verdict."""
     kernel_id = str(entry.get("current_kernel_id") or entry.get("kernel_id") or ledger_id)
     task_group_key = str(entry.get("task_group_key") or "")
     integration = index.by_task_group.get(task_group_key) if task_group_key else index.by_kernel.get(kernel_id)
-    e2e = _e2e_verdict(integration)
+    integrated = isinstance(integration, dict)
     return {
         "kernel_id": kernel_id,
         "source_file": str(entry.get("last_source_file") or ""),
         "artifact_path": str(entry.get("last_artifact_path") or ""),
         "micro_speedup": recorded_float(entry.get("last_micro_speedup")),
         "decision": OUTCOME_KEEP,
-        "e2e_gain_pct": e2e.gain_pct,
-        "e2e_tput": e2e.throughput,
-        "e2e_decision": e2e.decision,
-        "integrated": e2e.integrated,
+        "e2e_gain_pct": recorded_float(integration.get("best_gain_pct")) if integrated else 0.0,
+        "e2e_tput": _last_rebenched_throughput(integration) if integrated else 0.0,
+        "e2e_decision": str(integration.get("last_decision") or "").upper() if integrated else "",
+        "integrated": integrated,
         "ts": str(entry.get("last_ts") or ""),
     }
 
@@ -419,7 +393,8 @@ def recipe_attrs_from_state(state: Any, session_name: str) -> dict[str, Any]:
     the T0 backfill writes it.
     """
     optimization_stack = state.optimization_stack or []
-    provenance = attempt_provenance(state) if state.recipe_sediment_enabled else AttemptProvenance.unrecorded()
+    # A session that does not sediment its attempts reports no provenance.
+    provenance = attempt_provenance(state) if state.recipe_sediment_enabled else AttemptProvenance({}, {}, [])
     final_throughput = float(state.current_best.get("tput", 0.0))
     return {
         "best_config": _best_config(state.current_best, optimization_stack),

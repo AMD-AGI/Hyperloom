@@ -78,32 +78,6 @@ def record_config_run(coord: Any, *, task: Any, result_dict: Mapping[str, Any]) 
     )
 
 
-def _attempt_measurement(metrics: Mapping[str, Any]) -> dict[str, Any]:
-    """What one variant's benchmark measured.
-
-    Both ends of the pair: the anchor advances on every KEEP, so a percentage
-    without its denominator adds to nothing.
-    """
-    return {
-        "before_tput": metrics.get("base_tput"),
-        "after_tput": metrics.get("tput"),
-        "gain_pct": metrics.get("gain_pct"),
-        "runtime_sec": metrics.get("runtime_sec"),
-        "estimated_output_throughput": metrics.get("estimated_output_throughput"),
-    }
-
-
-def _attempt_config_delta(variant: Mapping[str, Any]) -> dict[str, Any]:
-    """The launch-configuration change one variant applied."""
-    return {
-        "extra_server_args": variant.get("extra_server_args"),
-        "extra_envs": variant.get("extra_envs"),
-        "remove_args": variant.get("remove_args"),
-        "unset_envs": variant.get("unset_envs"),
-        "args_mode": variant.get("args_mode"),
-    }
-
-
 def _attempt_accuracy(gates: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     """The accuracy block, projected from the gate that ruled.
 
@@ -174,8 +148,22 @@ def _attempt_fields(
         # The fingerprint is the join key; the name is what a reader
         # recognises the variant by.
         "variant_name": str(row.get("variant_name") or ""),
-        "measurement": _attempt_measurement(metrics),
-        "config_delta": _attempt_config_delta(variant),
+        "measurement": {
+            # Both ends of the pair: the anchor advances on every KEEP, so a
+            # percentage without its denominator adds to nothing.
+            "before_tput": metrics.get("base_tput"),
+            "after_tput": metrics.get("tput"),
+            "gain_pct": metrics.get("gain_pct"),
+            "runtime_sec": metrics.get("runtime_sec"),
+            "estimated_output_throughput": metrics.get("estimated_output_throughput"),
+        },
+        "config_delta": {
+            "extra_server_args": variant.get("extra_server_args"),
+            "extra_envs": variant.get("extra_envs"),
+            "remove_args": variant.get("remove_args"),
+            "unset_envs": variant.get("unset_envs"),
+            "args_mode": variant.get("args_mode"),
+        },
         "accuracy": _attempt_accuracy(gates),
         "failure": _attempt_failure(row, outcome),
         "artifacts": _attempt_artifacts(row),
@@ -233,17 +221,6 @@ def _record_variant_attempt(recorder: Any, row: Any, context: _ConfigAttemptCont
     return True
 
 
-def _settle_proposal_as_attempted(recorder: Any, proposal_ref: str, recorded: int) -> None:
-    """Settle the proposal behind a grid, now that its variants have been recorded.
-
-    Settled here rather than at materialization: a grid whose task dies before
-    any variant runs has no attempt to stand behind an ``attempted`` reading,
-    and is more honestly left unsettled.
-    """
-    recorder.record_proposal_step(proposal_ref, step=STEP_ATTEMPTED, outcome=str(recorded))
-    recorder.settle_proposal(proposal_ref, disposition=DISPOSITION_ATTEMPTED)
-
-
 def record_config_attempts(
     coord: Any,
     *,
@@ -268,4 +245,8 @@ def record_config_attempts(
         if _record_variant_attempt(recorder, row, context):
             recorded += 1
     if recorded and context.proposal_ref:
-        _settle_proposal_as_attempted(recorder, context.proposal_ref, recorded)
+        # Settled here rather than at materialization: a grid whose task dies
+        # before any variant runs has no attempt to stand behind an
+        # ``attempted`` reading, and is more honestly left unsettled.
+        recorder.record_proposal_step(context.proposal_ref, step=STEP_ATTEMPTED, outcome=str(recorded))
+        recorder.settle_proposal(context.proposal_ref, disposition=DISPOSITION_ATTEMPTED)
