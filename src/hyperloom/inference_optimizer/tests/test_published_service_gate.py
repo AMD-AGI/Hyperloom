@@ -177,12 +177,12 @@ def test_gate_fails_when_a_resolvable_endpoint_never_serves(monkeypatch: pytest.
 
 def test_gate_lets_a_non_transport_failure_propagate(monkeypatch: pytest.MonkeyPatch) -> None:
     """Only httpx transport errors are polled through; anything else is a bug."""
-    monkeypatch.setattr(life, "_read_state", lambda: _rewritten_state())
+    monkeypatch.setattr(readiness, "_read_state", lambda: _rewritten_state())
     _fast_clock(monkeypatch)
     _install_fake_httpx(monkeypatch, [RuntimeError("client bug"), 200, 200])
 
     with pytest.raises(RuntimeError, match="client bug"):
-        asyncio.run(life._wait_for_published_service_ready_async(timeout_s=600, poll_every_s=5))
+        asyncio.run(readiness._wait_for_published_service_ready_async(timeout_s=600, poll_every_s=5))
 
 
 def test_gate_is_a_noop_for_infera(monkeypatch: pytest.MonkeyPatch) -> None:

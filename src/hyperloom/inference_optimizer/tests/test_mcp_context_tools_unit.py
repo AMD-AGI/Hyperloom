@@ -9,6 +9,8 @@ import json
 import threading
 from types import SimpleNamespace
 
+import pytest
+
 from hyperloom.orchestrator.roles import mcp_context_tools as mct
 
 
@@ -47,8 +49,8 @@ def test_safe_handles_exception():
         raise RuntimeError("x")
 
     p = mct.ContextProvider(shared_state=SimpleNamespace())
-    out = p._safe(boom, "lbl")
-    assert "unavailable" in out
+    with pytest.raises(RuntimeError, match="x"):
+        p._safe(boom, "lbl")
 
 
 def test_safe_empty_marker():

@@ -569,7 +569,7 @@ class ProfileExecutor(BenchmarkRunExecutor):
             self._host_probe_status = f"probe_injection_failed: {exc}"
         try:
             cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-        except Exception as exc:  # noqa: BLE001
+        except (OSError, ValueError, yaml.YAMLError) as exc:
             return {
                 "status": "failed",
                 "error_class": "profile_config_unreadable",

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Mapping
@@ -13,6 +14,8 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from ..model_analyzer import ModelProfile
+
+log = logging.getLogger(__name__)
 
 
 def published_metric(value: float | None) -> float | None:
@@ -205,6 +208,7 @@ class BaseTuner(ABC):
             result.elapsed_s = time.time() - started
             return result
         except Exception as exc:  # noqa: BLE001 - tuner body is subclass-supplied
+            log.warning("tuner %s raised: %r", self.name, exc)
             return TuneResult(
                 tuner_name=self.name,
                 status="failed",

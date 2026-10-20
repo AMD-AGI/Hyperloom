@@ -97,6 +97,30 @@ async def test_escalate_enqueues_for_compiled_gap(coord, monkeypatch, gpu_type, 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("entry", ["escalate", "route"])
+async def test_build_pumps_propagate_their_failures(coord, monkeypatch, entry):
+    """A failing pump reaches the lane's recording handler instead of dying at debug level."""
+    coord.shared_state.framework = "vllm"
+
+    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+
+    monkeypatch.setattr(mne, "is_multi_node", lambda: False)
+
+    async def _boom(*_args, **_kwargs):
+        raise RuntimeError("store down")
+
+    monkeypatch.setattr(coord.build_lifecycle, "enqueue_targeted_build", _boom)
+    monkeypatch.setattr(coord.tasks, "by_state", _boom)
+    build = coord.enablement_build
+
+    with pytest.raises(RuntimeError, match="store down"):
+        if entry == "escalate":
+            await build.maybe_escalate_to_targeted_build("hipErrorNoBinaryForGpu")
+        else:
+            await build.maybe_route_build_outcomes()
+
+
+@pytest.mark.asyncio
 async def test_escalate_skipped_for_pure_python_gap(coord, monkeypatch):
     coord.shared_state.framework = "vllm"
 

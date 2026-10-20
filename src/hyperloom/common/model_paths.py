@@ -97,7 +97,7 @@ def resolve_local_model_dir(model: str | Path | None) -> Path | None:
     return None
 
 
-def resolve_serving_model_path(raw: str) -> str:
+def resolve_serving_model_path(raw: str, *, model_base: str | None = None) -> str:
     """Resolve a session model identity to a path suitable for launching servers."""
     text = str(raw or "").strip()
     if not text:
@@ -108,7 +108,7 @@ def resolve_serving_model_path(raw: str) -> str:
             return str(direct)
     except OSError:
         pass
-    base = os.environ.get("HL_MODEL_BASE", "").strip()
+    base = (os.environ.get("HL_MODEL_BASE", "") if model_base is None else model_base).strip()
     if base:
         leaf = text.rstrip("/").split("/")[-1]
         if leaf:

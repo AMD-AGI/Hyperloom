@@ -183,7 +183,7 @@ def platform_fingerprint(
             record["gpu"]["power_settings"] = power
         record["stack"] = detect_stack_fingerprint(os.environ)
         return record
-    except Exception as exc:
+    except (OSError, ValueError) as exc:
         # Warning, not debug: this record is provenance, and a silent hole in it is only discovered when someone needs
         # it and it is too late to re-run.
         log.warning("platform fingerprint failed: %s", exc, exc_info=True)

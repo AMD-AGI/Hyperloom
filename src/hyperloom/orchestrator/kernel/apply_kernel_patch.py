@@ -2076,7 +2076,7 @@ def apply_kernel_patch(request: KernelPatchRequest) -> dict[str, Any]:
     try:
         strategy = _detect_strategy(target)
         _validate_patch_source(patch, target)
-    except Exception as exc:  # noqa: BLE001
+    except (ValueError, OSError, py_compile.PyCompileError) as exc:
         return {"status": "failed", "error": str(exc)}
 
     # Coerce/validate the rebuild_command BEFORE any file/pod mutation so an
