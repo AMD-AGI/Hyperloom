@@ -22,9 +22,11 @@ from hyperloom_multibranch.notebook.knowledge.breakdown import build_breakdown
 from hyperloom_multibranch.notebook.knowledge.tests.kb_service import experience_service
 from hyperloom_multibranch.notebook.rsi import session
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV, ARCHIVED, SKIPPED, TreeArchive
+from hyperloom_multibranch.notebook.rsi.calibration import DEFAULT_POLICY
 from hyperloom_multibranch.notebook.rsi.frontier import FrontierPolicy
 from hyperloom_multibranch.notebook.rsi.history import MAX_CHARS, session_history
 from hyperloom_multibranch.notebook.rsi.session import (
+    CALIBRATION_REPORT,
     DISABLED,
     EXPERIENCE_RECEIPT,
     FAILED,
@@ -33,6 +35,7 @@ from hyperloom_multibranch.notebook.rsi.session import (
     MULTIBRANCH_RECEIPT,
     NO_KB,
     NO_PROFILE,
+    NO_REPORTS,
     WRITTEN,
     CloseStep,
     CloseTargets,
@@ -40,6 +43,7 @@ from hyperloom_multibranch.notebook.rsi.session import (
     close_knowledge,
     judge_history,
     session_frontier,
+    session_frontier_policy,
 )
 from hyperloom_multibranch.notebook.rsi.similarity import task_conditions
 from hyperloom_multibranch.notebook.rsi.tests.trees import branch, tree
@@ -108,6 +112,19 @@ def test_a_live_kb_and_an_archive_take_the_experiences_the_learnings_and_the_tre
     assert [(item.session_id, item.budget_seconds) for item in archive.load()] == [("sess-1", BUDGET)]
     assert (reports / EXPERIENCE_RECEIPT).is_file() and (reports / LEARNING_RECEIPT).is_file()
     assert done.multibranch_experiences == CloseStep(DISABLED, NO_KB)
+
+
+@pytest.mark.usefixtures("unconfigured")
+def test_close_writes_the_frontier_calibration_over_the_archived_sessions_like_this_one(
+    snapshot: NotebookSnapshot, tmp_path: Path
+) -> None:
+    reports = tmp_path / "reports"
+
+    done = close_knowledge(snapshot, METRIC, targets=CloseTargets(archive=TreeArchive(tmp_path), receipts=reports))
+
+    assert done.archive.status == ARCHIVED
+    assert done.calibration.status == WRITTEN and done.calibration.reason.startswith("Too little evidence")
+    assert (reports / CALIBRATION_REPORT).read_text(encoding="utf-8").startswith("Frontier calibration")
 
 
 @pytest.mark.usefixtures("unconfigured")
@@ -188,6 +205,7 @@ def test_the_breakdown_records_the_knowledge_steps_only_when_given(snapshot: Not
         "multibranch_experiences": {"status": DISABLED, "reason": NO_KB, "counts": {}},
         "learnings": {"status": DISABLED, "reason": NO_KB, "counts": {}},
         "archive": {"status": ARCHIVED, "reason": "", "counts": {}},
+        "calibration": {"status": SKIPPED, "reason": NO_REPORTS, "counts": {}},
     }
     assert json.loads(json.dumps(close["knowledge"])) == close["knowledge"]
     assert "knowledge" not in build_breakdown(snapshot)["close"]
@@ -215,9 +233,25 @@ async def test_without_a_budget_or_an_archive_the_defaults_stand(tmp_path: Path)
 
     plain = session_frontier(notebook, METRIC)
     given = session_frontier(notebook, METRIC, history=[PAST])
+    chosen = dataclasses.replace(FrontierPolicy(METRIC), window_seconds=3600.0)
 
     assert (plain.policy, plain.history, plain.log) == (FrontierPolicy(METRIC), (), None)
     assert given.history == (PAST,)
+    assert session_frontier(notebook, METRIC, budget_seconds=BUDGET, policy=chosen).policy == chosen
+
+
+def test_a_session_scores_with_the_defaults_before_its_profile_and_while_the_evidence_is_thin(
+    snapshot: NotebookSnapshot,
+) -> None:
+    defaults = FrontierPolicy.for_budget(METRIC, BUDGET)
+
+    early = session_frontier_policy(dataclasses.replace(snapshot, profile=None), [PAST], defaults)
+    started = session_frontier_policy(snapshot, [PAST], defaults)
+
+    assert (early.policy, early.label) == (defaults, DEFAULT_POLICY)
+    assert early.evidence == f"{DEFAULT_POLICY}: the session has no profile yet"
+    assert (started.policy, started.label) == (defaults, DEFAULT_POLICY)
+    assert started.evidence.startswith(f"{DEFAULT_POLICY}: Too little evidence")
 
 
 def test_the_judge_reads_the_digest_of_the_archived_sessions_and_nothing_without_any(

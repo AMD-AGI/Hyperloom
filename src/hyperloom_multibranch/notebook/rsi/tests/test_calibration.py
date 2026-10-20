@@ -10,12 +10,16 @@ import dataclasses
 import pytest
 
 from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot
+from hyperloom_multibranch.notebook.rsi import calibration
 from hyperloom_multibranch.notebook.rsi.archive import SearchTree, session_start, tree_from_snapshot
 from hyperloom_multibranch.notebook.rsi.calibration import (
     CURRENT,
+    DEFAULT_POLICY,
     LOGGED,
+    VARIATIONS,
     Variation,
     calibrate,
+    frontier_policy_for,
     gain_after,
     rank_correlation,
     score_archived,
@@ -121,6 +125,41 @@ def test_the_gain_that_followed_runs_to_the_stop_or_the_horizon() -> None:
     assert gain_after(SESSIONS[0], steady, 5400.0, 600.0) == pytest.approx(0.2)
     assert session_policy(SESSIONS[0]).window_seconds == 900.0
     assert session_policy(dataclasses.replace(SESSIONS[0], longest_root_test_seconds=600.0)).window_seconds == 2400.0
+
+
+def _on_the_gpu(n: int, session: SearchTree) -> SearchTree:
+    """``session`` on the new session's GPU, with a framework and an architecture no other archived session has: like
+    the new session, and too unlike any other archived one to be its prior."""
+
+    labels = {"gpu": "mi355x", "framework": f"framework-{n}", "architecture": f"architecture-{n}"}
+    return dataclasses.replace(session, task=TaskConditions(labels=labels))
+
+
+def test_a_session_scores_with_the_variation_its_similar_sessions_recommend_or_else_the_defaults() -> None:
+    archived = tuple(_on_the_gpu(n, session) for n, session in enumerate(SESSIONS))
+    defaults = FrontierPolicy.for_budget(METRIC, BUDGET)
+
+    chosen = frontier_policy_for(archived, TaskConditions(labels={"gpu": "mi355x"}), defaults)
+    alone = frontier_policy_for(SESSIONS, TaskConditions(labels={"model": "model-0"}), defaults)
+
+    variations = {item.label: item for item in VARIATIONS[1:]}
+    assert chosen.label in variations and chosen.policy == variations[chosen.label].apply(defaults)
+    assert chosen.evidence.startswith(f"{chosen.label}: rank correlation ") and "7 similar sessions" in chosen.evidence
+    assert (alone.policy, alone.label) == (defaults, DEFAULT_POLICY)
+    assert alone.evidence.startswith(f"{DEFAULT_POLICY}: Too little evidence")
+
+
+def test_an_archive_the_calibration_cannot_read_leaves_the_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    def unreadable(*_args: object, **_kwargs: object) -> calibration.CalibrationReport:
+        raise ValueError("a tree without a baseline")
+
+    monkeypatch.setattr(calibration, "calibrate", unreadable)
+    defaults = FrontierPolicy.for_budget(METRIC, BUDGET)
+
+    choice = frontier_policy_for(SESSIONS, TaskConditions(labels={"model": "model-0"}), defaults)
+
+    assert (choice.policy, choice.label) == (defaults, DEFAULT_POLICY)
+    assert choice.evidence == f"{DEFAULT_POLICY}: the calibration failed: a tree without a baseline"
 
 
 def test_rank_correlation_ranks_ties_alike_and_needs_a_spread() -> None:

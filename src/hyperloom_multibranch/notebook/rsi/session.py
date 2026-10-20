@@ -5,11 +5,13 @@
 
 * :func:`close_knowledge` is CLOSE's one call after the Recipe KB write-back: the session's Experiences and the
   specialists' learnings go to the Experience KB, and the session's search tree to the archive. The Experiences the
-  shared declaration cannot hold, kernel changes and an AgentX session's, are a step of their own. A step that cannot
+  shared declaration cannot hold, kernel changes and an AgentX session's, are a step of their own, and the last step
+  writes the frontier calibration over the archived sessions like this one beside the receipts. A step that cannot
   be done says why and never stops CLOSE; :meth:`KnowledgeClose.document` is what the breakdown records of the steps
   (``build_breakdown(..., knowledge=...)``).
 * :func:`session_frontier` is one session's frontier scoring: windows sized to its budget, the archived sessions as
-  the prior, and the scores log.
+  the prior, and the scores log. :func:`session_frontier_policy` chooses its policy once the session has a profile:
+  the calibration's recommendation for sessions like it, or the defaults.
 * :func:`judge_history` is the history digest the judge reads every round, as text; empty while nothing is archived.
 
 Passed no KB or archive, each step uses the environment's: the Experience KB ``HYPERLOOM_KB_URL`` names, and the
@@ -27,15 +29,18 @@ from pathlib import Path
 
 from hyperloom_kb import NoOpExperienceKB
 from hyperloom_kb.collect import CollectionTarget, CollectReport
+from hyperloom.common.io import WriteOptions, atomic_write_text
 from hyperloom_multibranch.contracts.notebook import NotRecorded
 from hyperloom_multibranch.contracts.notebook.interfaces import SnapshotQuery
 from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot
 from hyperloom_multibranch.notebook.codec import encode
 from hyperloom_multibranch.notebook.knowledge.experience import publish_experiences, publish_multibranch_experiences
 from hyperloom_multibranch.notebook.knowledge.learnings import publish_learnings
-from hyperloom_multibranch.notebook.rsi.archive import SKIPPED, SearchTree, TreeArchive, archive_session
+from hyperloom_multibranch.notebook.rsi.archive import SKIPPED, SearchTree, TreeArchive, archive_session, similar_trees
+from hyperloom_multibranch.notebook.rsi.calibration import DEFAULT_POLICY, PolicyChoice, calibrate, frontier_policy_for
 from hyperloom_multibranch.notebook.rsi.frontier import FrontierPolicy, FrontierScoring
 from hyperloom_multibranch.notebook.rsi.history import MAX_CHARS, session_history
+from hyperloom_multibranch.notebook.rsi.similarity import task_conditions
 
 log = logging.getLogger(__name__)
 
@@ -47,6 +52,9 @@ NO_PROFILE = "no_session_profile"
 EXPERIENCE_RECEIPT = "experience_kb_experiences.json"
 MULTIBRANCH_RECEIPT = "experience_kb_multibranch_experiences.json"
 LEARNING_RECEIPT = "experience_kb_learnings.json"
+#: The frontier calibration's report, written beside the receipts at every CLOSE.
+CALIBRATION_REPORT = "frontier-calibration.md"
+NO_REPORTS = "no_reports_folder"
 #: The scores log's usual name in the session's reports folder.
 FRONTIER_LOG = "frontier.jsonl"
 #: What a step raises when its target or its input lets it down; CLOSE records it and goes on.
@@ -68,13 +76,14 @@ class CloseStep:
 
 @dataclass(frozen=True)
 class KnowledgeClose:
-    """CLOSE's knowledge steps: the Experiences, the learnings, the archived search tree, and the Experiences only the
-    notebook's own declaration holds (``multibranch_experiences``)."""
+    """CLOSE's knowledge steps: the Experiences, the learnings, the archived search tree, the Experiences only the
+    notebook's own declaration holds (``multibranch_experiences``), and the frontier calibration's report."""
 
     experiences: CloseStep
     learnings: CloseStep
     archive: CloseStep
     multibranch_experiences: CloseStep = CloseStep(DISABLED, NO_KB)
+    calibration: CloseStep = CloseStep(SKIPPED, NO_REPORTS)
 
     def document(self) -> dict[str, object]:
         """The steps as JSON-ready data: the breakdown's ``close.knowledge``."""
@@ -84,6 +93,7 @@ class KnowledgeClose:
             "multibranch_experiences": self.multibranch_experiences,
             "learnings": self.learnings,
             "archive": self.archive,
+            "calibration": self.calibration,
         }
         return {name: encode(step) for name, step in steps.items()}
 
@@ -126,6 +136,24 @@ def _archived(
     except STEP_ERRORS as exc:
         return _failed("archive the search tree", exc)
     return CloseStep(result.status, result.reason)
+
+
+def _calibrated(
+    snapshot: NotebookSnapshot, archive: TreeArchive | None, path: Path | None, bottlenecks: Mapping[str, float] | None
+) -> CloseStep:
+    """The frontier calibration over the archived sessions like this one, this one included, written to ``path``."""
+
+    if path is None:
+        return CloseStep(SKIPPED, NO_REPORTS)
+    if snapshot.profile is None:
+        return CloseStep(SKIPPED, NO_PROFILE)
+    try:
+        task = task_conditions(snapshot.profile, bottlenecks)
+        report = calibrate(tuple(item.tree for item in similar_trees(archived_history(archive), task)))
+        atomic_write_text(path, report.render() + "\n", options=WriteOptions(make_parents=True))
+    except STEP_ERRORS as exc:
+        return _failed("write the frontier calibration", exc)
+    return CloseStep(WRITTEN, report.note)
 
 
 @dataclass(frozen=True)
@@ -193,6 +221,7 @@ def close_knowledge(
                 receipt=targets.receipt(MULTIBRANCH_RECEIPT),
             ),
         ),
+        calibration=_calibrated(snapshot, targets.archive, targets.receipt(CALIBRATION_REPORT), bottlenecks),
     )
 
 
@@ -216,16 +245,30 @@ def session_frontier(
     budget_seconds: float | None = None,
     log_path: Path | None = None,
     history: Sequence[SearchTree] | None = None,
+    policy: FrontierPolicy | None = None,
 ) -> FrontierScoring:
     """One session's frontier scoring: windows sized to ``budget_seconds``, ``history`` as the prior, the scores log.
 
     ``history`` defaults to the environment's archive, read once here. ``log_path`` (:data:`FRONTIER_LOG` in the
-    session's reports folder, say) gets one line per round that scored a branch.
+    session's reports folder, say) gets one line per round that scored a branch. ``policy`` replaces the budget's,
+    such as the one ``calibration.frontier_policy_for`` chose.
     """
 
-    policy = FrontierPolicy(metric) if budget_seconds is None else FrontierPolicy.for_budget(metric, budget_seconds)
+    if policy is None:
+        policy = FrontierPolicy(metric) if budget_seconds is None else FrontierPolicy.for_budget(metric, budget_seconds)
     trees = archived_history() if history is None else tuple(history)
     return FrontierScoring(notebook, policy, trees, log=log_path)
+
+
+def session_frontier_policy(
+    snapshot: NotebookSnapshot, history: Sequence[SearchTree], defaults: FrontierPolicy
+) -> PolicyChoice:
+    """The policy the session ``snapshot`` records scores with: :func:`calibration.frontier_policy_for` on its task, as
+    the scoring reads it, once PRELUDE recorded the session's profile; ``defaults`` before."""
+
+    if snapshot.profile is None:
+        return PolicyChoice(defaults, DEFAULT_POLICY, f"{DEFAULT_POLICY}: the session has no profile yet")
+    return frontier_policy_for(history, task_conditions(snapshot.profile), defaults)
 
 
 def judge_history(
@@ -247,6 +290,7 @@ def judge_history(
 
 
 __all__ = [
+    "CALIBRATION_REPORT",
     "DISABLED",
     "EXPERIENCE_RECEIPT",
     "FAILED",
@@ -254,6 +298,7 @@ __all__ = [
     "LEARNING_RECEIPT",
     "NO_KB",
     "NO_PROFILE",
+    "NO_REPORTS",
     "STEP_ERRORS",
     "WRITTEN",
     "CloseStep",
@@ -263,4 +308,5 @@ __all__ = [
     "close_knowledge",
     "judge_history",
     "session_frontier",
+    "session_frontier_policy",
 ]

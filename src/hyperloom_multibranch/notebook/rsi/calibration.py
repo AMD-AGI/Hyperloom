@@ -23,7 +23,9 @@ each, beside other scores given as :class:`Baseline` rows (such as the island ba
 the scores the sessions logged when their logs are given. It recommends a variation, or a baseline that may be advice,
 only when it beats the current policy's rank correlation by :data:`MIN_IMPROVEMENT` over at least
 :data:`MIN_SESSIONS` sessions and :data:`MIN_ROUNDS` rounds whose scores and later gains both differ; otherwise it
-says why not. The advice is for the scheduler's owner; nothing here changes a parameter.
+says why not. :func:`frontier_policy_for` is the one place a recommendation changes a parameter: a session starting on
+a task scores with the variation the calibration over its similar sessions recommends, one step from the defaults.
+Baselines such as the bandit stay advice for the scheduler's owner.
 """
 
 from __future__ import annotations
@@ -36,7 +38,7 @@ from typing import Any
 
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.records import FrontierScore
-from hyperloom_multibranch.notebook.rsi.archive import SearchTree, TreeBranch
+from hyperloom_multibranch.notebook.rsi.archive import SearchTree, TreeBranch, similar_trees
 from hyperloom_multibranch.notebook.rsi.frontier import (
     NEW_BRANCH_FLOOR_PCT,
     FrontierPolicy,
@@ -47,6 +49,7 @@ from hyperloom_multibranch.notebook.rsi.frontier import (
     score_at,
 )
 from hyperloom_multibranch.notebook.rsi.report import number, table
+from hyperloom_multibranch.notebook.rsi.similarity import TaskConditions
 
 #: The judge's cadence, about: how often a replayed session's branches are scored.
 ROUND_SECONDS = 600.0
@@ -56,6 +59,8 @@ MIN_ROUNDS = 20
 MIN_IMPROVEMENT = 0.05
 CURRENT = "current"
 LOGGED = "as logged"
+#: The label of a session that scores with the defaults.
+DEFAULT_POLICY = "default"
 _SAME = 1e-9
 _PERCENT = 100.0
 _HALF, _DOUBLE = 0.5, 2.0
@@ -174,11 +179,11 @@ class _Round:
 
 
 def session_policy(tree: SearchTree, variation: Variation = VARIATIONS[0]) -> FrontierPolicy:
-    """The policy the scoring would have used in ``tree``'s session, sized to its budget and paced by its longest root
-    test, changed by ``variation``."""
+    """The policy the scoring would have used in ``tree``'s session, sized to its budget, changed by ``variation`` and
+    paced by its longest root test, in the order the live scoring takes them."""
 
     base = FrontierPolicy.for_budget("", tree.budget_seconds) if tree.budget_seconds > 0 else FrontierPolicy("")
-    return variation.apply(paced(base, tree.longest_root_test_seconds))
+    return paced(variation.apply(base), tree.longest_root_test_seconds)
 
 
 def score_archived(
@@ -382,8 +387,43 @@ def calibrate(
     return CalibrationReport(tuple(rows), horizon_seconds, recommended, note)
 
 
+@dataclass(frozen=True)
+class PolicyChoice:
+    """The policy a session scores with: ``label`` is :data:`DEFAULT_POLICY` or a variation's, which the manifest's
+    ``policy_versions`` records, and ``evidence`` one line on why, for the judge's prompt and the frontier log."""
+
+    policy: FrontierPolicy
+    label: str
+    evidence: str
+
+
+def frontier_policy_for(history: Sequence[SearchTree], task: TaskConditions, defaults: FrontierPolicy) -> PolicyChoice:
+    """The policy a session on ``task`` scores with: the variation the calibration over the archived sessions similar to
+    it recommends, one step from ``defaults``, or ``defaults`` with the reason when the evidence does not carry one.
+
+    Only :data:`VARIATIONS` are candidates; the bandit and any other change of formula stay a person's decision. An
+    archive the calibration cannot read gives the defaults too, so a session never fails to start over it.
+    """
+
+    try:
+        report = calibrate(tuple(item.tree for item in similar_trees(history, task)))
+    except (ArithmeticError, ValueError) as exc:
+        return PolicyChoice(defaults, DEFAULT_POLICY, f"{DEFAULT_POLICY}: the calibration failed: {exc}")
+    best = report.recommended
+    chosen = next((item for item in VARIATIONS[1:] if best is not None and item.label == best.label), None)
+    if best is None or chosen is None:
+        return PolicyChoice(defaults, DEFAULT_POLICY, f"{DEFAULT_POLICY}: {report.note}")
+    current = report.rows[0]
+    evidence = (
+        f"{chosen.label}: rank correlation {number(best.rank_correlation)} against {number(current.rank_correlation)} "
+        f"for the defaults, over {current.compared_rounds} compared rounds in {current.sessions} similar sessions"
+    )
+    return PolicyChoice(chosen.apply(defaults), chosen.label, evidence)
+
+
 __all__ = [
     "CURRENT",
+    "DEFAULT_POLICY",
     "LOGGED",
     "MIN_IMPROVEMENT",
     "MIN_ROUNDS",
@@ -394,9 +434,11 @@ __all__ = [
     "CalibrationReport",
     "CalibrationSettings",
     "PolicyCalibration",
+    "PolicyChoice",
     "Scorer",
     "Variation",
     "calibrate",
+    "frontier_policy_for",
     "gain_after",
     "rank_correlation",
     "score_archived",

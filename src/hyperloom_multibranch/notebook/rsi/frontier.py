@@ -26,8 +26,8 @@ call (gongzheng's), and it stays here until then. :func:`score_at` is the formul
 tree has it, so the live scoring and the calibration score with the same one.
 
 Given a ``log`` path, the scoring appends one :data:`FRONTIER_LOG_FORMAT` line per round it scored anything: when, on
-the session clock too, and each scored branch's spend, head value and score. Checking the scores against the gains that
-followed is how they get calibrated.
+the session clock too, the parameters the calibration varies, and each scored branch's spend, head value and score.
+Checking the scores against the gains that followed is how they get calibrated.
 """
 
 from __future__ import annotations
@@ -311,6 +311,8 @@ def frontier_log_line(
         "metric": policy.metric,
         "window_seconds": policy.window_seconds,
         "observation_seconds": policy.observation_seconds,
+        "new_branch_floor_pct": policy.new_branch_floor_pct,
+        "min_similarity": policy.min_similarity,
         "branches": [
             {
                 "branch": row.branch,

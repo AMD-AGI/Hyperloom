@@ -259,6 +259,10 @@ async def test_with_a_log_every_round_that_scored_a_branch_is_appended(tmp_path:
     assert len(lines) == 2 and lines[0]["at"] < lines[1]["at"]
     first = lines[0]
     assert (first["format"], first["metric"], first["window_seconds"]) == (FRONTIER_LOG_FORMAT, METRIC, 900.0)
+    assert (first["new_branch_floor_pct"], first["min_similarity"]) == (
+        policy.new_branch_floor_pct,
+        policy.min_similarity,
+    )
     assert first["t_s"] > 0
     assert [row["branch"] for row in first["branches"]] == ["s1"]
     s1 = first["branches"][0]
