@@ -2560,7 +2560,8 @@ class TestRunGemmTuningHandler:
         assert "PYTORCH_TUNABLEOP_ENABLED" not in task.params["unset_envs"]
         assert captured["init"]["shared_state"] is state
 
-    def test_vllm_block_fp8_profile_capture_uses_standard_roofline(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("roofline_status", ["succeeded", "recovered"])
+    def test_vllm_block_fp8_profile_capture_uses_standard_roofline(self, tmp_path, monkeypatch, roofline_status):
         import gzip
 
         from hyperloom.orchestrator.actions.executors import baseline as baseline_module
@@ -2607,7 +2608,7 @@ class TestRunGemmTuningHandler:
             async def __call__(self, ctx):
                 captured["task"] = ctx.task
                 return {
-                    "status": "succeeded",
+                    "status": roofline_status,
                     "steady_state_trace": str(steady_trace),
                 }
 

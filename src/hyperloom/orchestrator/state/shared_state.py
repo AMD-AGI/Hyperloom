@@ -567,7 +567,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     last_profile_trace: str = ""
     # Launch evidence of the run that produced ``last_profile_trace``; its runtime findings share the trace's shapes.
     last_profile_launch_evidence_path: str = ""
-    # ``succeeded``/``failed`` for most recent profile; failed allows re-run even when last_profile_trace is non-empty.
+    # ``succeeded``/``recovered``/``failed`` for most recent profile; failed allows re-run with a last_profile_trace.
     last_profile_status: str = ""
     # Workload context captured with ``last_profile_trace``; strict matching prevents consumers from reusing runtime
     # shapes after workload changes.
@@ -931,15 +931,14 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             context["serving_config"] = serving_config
         return context
 
-    def profile_trace_matches_workload(
-        self,
-        expected: dict[str, Any] | None = None,
-    ) -> bool:
+    def profile_trace_usable(self) -> bool:
+        """Whether the latest profile left a trace; ``recovered`` was salvaged from a run that reported failure."""
+        return self.last_profile_status in {"succeeded", "recovered"}
+
+    def profile_trace_matches_workload(self, expected: dict[str, Any] | None = None) -> bool:
         """Whether the recorded profile trace is fresh for a target workload."""
-        if str(getattr(self, "last_profile_status", "") or "").strip().lower() != "succeeded":
-            return False
-        recorded = getattr(self, "last_profile_workload", None)
-        if not isinstance(recorded, dict) or not recorded:
+        recorded = self.last_profile_workload
+        if not self.profile_trace_usable() or not isinstance(recorded, dict) or not recorded:
             return False
         # Default to the *current-best* runtime identity, not the bare context: last_profile_workload is recorded with
         # the real profile params (actual server_args / extra_envs), while profile_workload_context() with no

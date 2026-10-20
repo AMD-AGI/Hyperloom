@@ -347,8 +347,7 @@ class KernelPhase(CoordinatorCollaborator):
 
     def _profile_workload_changed(self) -> bool:
         """Whether the latest trace predates the active serving workload."""
-        status = str(self.shared_state.last_profile_status or "").strip().lower()
-        if status and status != "succeeded":
+        if self.shared_state.last_profile_status and not self.shared_state.profile_trace_usable():
             return True
         recorded = self.shared_state.last_profile_workload
         if not isinstance(recorded, dict) or not recorded:
@@ -443,7 +442,6 @@ class KernelPhase(CoordinatorCollaborator):
         )
         if after > 0 and snapshot_landed:
             self.shared_state.last_roofline_tput = after
-            self.shared_state.last_profile_status = "succeeded"
             # Record the workload (incl. serving_config) that this trace reflects; _profile_config_changed derives the
             # config signature from it, so last_profile_args stays the plain-args field it is everywhere else.
             self.shared_state.last_profile_workload = self.shared_state.profile_workload_context()

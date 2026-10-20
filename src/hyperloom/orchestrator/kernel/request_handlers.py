@@ -2339,9 +2339,9 @@ def _reuse_vllm_block_fp8_roofline_shapes(
             "not match the latest profile; running a standard Roofline fallback"
         )
         return None
-    if str(getattr(state, "last_profile_status", "") or "").strip().lower() != "succeeded":
+    if not state.profile_trace_usable():
         log.info(
-            "vLLM block-FP8 shape capture: latest Roofline profile is not successful; "
+            "vLLM block-FP8 shape capture: latest Roofline profile left no usable trace; "
             "running a standard Roofline fallback"
         )
         return None
@@ -2701,7 +2701,7 @@ async def _capture_vllm_tunableop_shapes(
             )
         else:
             shapes_json, shape_count = "", 0
-        if benchmark_result.get("status") == "succeeded" and shape_count > 0:
+        if benchmark_result.get("status") in {"succeeded", "recovered"} and shape_count > 0:
             return {
                 "status": "ok",
                 "shapes_json": shapes_json,

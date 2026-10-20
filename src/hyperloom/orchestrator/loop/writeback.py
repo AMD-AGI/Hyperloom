@@ -2396,7 +2396,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             if task is not None and self.shared_state.auto_roofline_pending_task_id == task.task_id:
                 self.shared_state.auto_roofline_pending_task_id = ""
                 changed = True
-        elif status == "succeeded":
+        elif status in {"succeeded", "recovered"}:
             audit_decision = "promoted"
             # Prefer the executor's last_trace_analyze snapshot over the result dict.
             _last_ta = self.shared_state.last_trace_analyze or {}

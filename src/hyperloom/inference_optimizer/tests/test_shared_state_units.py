@@ -757,6 +757,18 @@ def test_profile_trace_matches_workload_with_server_args():
     assert state.last_profile_workload != state.profile_workload_context()
 
 
+@pytest.mark.parametrize(
+    ("status", "usable"), [("succeeded", True), ("recovered", True), ("failed", False), ("", False)]
+)
+def test_a_salvaged_profile_trace_stays_usable(status, usable):
+    """A trace recovered from a profile run that reported failure was analysed like any other."""
+    state = SharedState(last_profile_status=status)
+    state.record_profile_workload({})
+
+    assert state.profile_trace_usable() is usable
+    assert state.profile_trace_matches_workload() is usable
+
+
 def test_baseline_current_best_ignores_tuned_arm_profile_runtime():
     """A runtime measured off a tuned arm must not read as still active."""
     state = SharedState(
