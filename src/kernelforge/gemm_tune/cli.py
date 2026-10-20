@@ -318,13 +318,9 @@ def _write_gpu_check(output_dir: Path) -> None:
 
 def _aiter_preflight_problems(output_dir: Path) -> list[str]:
     """Record the aiter tune/serve alignment check and return the problems that block tuning."""
-    try:
-        from .aiter_preflight import collect as _aiter_collect
+    from .aiter_preflight import collect as _aiter_collect
 
-        preflight = _aiter_collect()
-    except Exception as exc:  # noqa: BLE001 - unavailable diagnostics remain best-effort
-        log.debug("aiter preflight skipped: %s", exc)
-        return []
+    preflight = _aiter_collect()
     (output_dir / "aiter_preflight.json").write_text(json.dumps(preflight, indent=2), encoding="utf-8")
     for message in preflight["soft"]:
         log.warning("aiter preflight: %s", message)
