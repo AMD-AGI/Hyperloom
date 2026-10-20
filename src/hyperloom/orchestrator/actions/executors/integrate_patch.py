@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from collections.abc import Mapping
 from collections.abc import Iterable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from hyperloom.common.coerce import to_str_list
 from hyperloom.inference_optimizer.session.session_paths import enablement_stacks_dir
@@ -139,6 +139,9 @@ from ._workload_envs import (
     default_baseline_config,
 )
 
+if TYPE_CHECKING:
+    from ...enablement.runtime.stack_actions import EnablementStackAction, ProvisionResult
+
 
 log = logging.getLogger(__name__)
 
@@ -200,6 +203,25 @@ def _acquiring_round(params: dict[str, Any]) -> bool:
     acquire nothing of its own.
     """
     return bool(params.get("enablement")) and not params.get("enablement_launch_only")
+
+
+def _accepted_runtime_records(
+    stack_action: EnablementStackAction | None,
+    provision_result: ProvisionResult | None,
+) -> dict[str, Any]:
+    """Runtime an accepted round booted on, for rearm to re-activate; empty when none was provisioned."""
+    if stack_action is None or provision_result is None or not provision_result.ok:
+        return {}
+    return {
+        "enablement_kept_stack_action": {
+            **stack_action.to_state(),
+            "resolved_ref": provision_result.resolved_ref,
+            "resolved_packages": {str(k): dict(v) for k, v in provision_result.resolved_packages.items()},
+            "credential_channels": detect_credential_channels(os.environ),
+        },
+        "enablement_active_runtime": provision_result.runtime.to_state(),
+        "installed_versions": dict(provision_result.installed_versions),
+    }
 
 
 def _enablement_gap(params: dict[str, Any]) -> CapabilityGap | None:
@@ -2331,10 +2353,12 @@ class IntegratePatchExecutor:
 
     @staticmethod
     def _gc_attempt_dir(attempt_dir: Path) -> None:
-        """Remove a half/failed attempt-runtime dir (best-effort)."""
+        """Remove a half/failed attempt runtime's venv and checkout, keeping its provision log (best-effort)."""
         try:
             if attempt_dir.exists():
-                shutil.rmtree(attempt_dir, ignore_errors=True)
+                for child in attempt_dir.iterdir():
+                    if child.is_dir():
+                        shutil.rmtree(child, ignore_errors=True)
         except OSError:
             log.debug("integrate_patch: attempt-dir GC failed for %s", attempt_dir, exc_info=True)
 
@@ -3040,9 +3064,9 @@ class IntegratePatchExecutor:
         ``enablement_effective_config``, captured from the variant that ran: the
         materialized YAML holds only the base layer, so the revalidation baseline
         needs them to re-run the graded config.
-        When an attempt runtime was provisioned, the stack action is recorded in
-        the result (``enablement_kept_stack_action``) so it survives rearm. On
-        REVERT / non-KEEP, the attempt runtime dir is GC'd.
+        When an attempt runtime was provisioned, an accepted round (kept or
+        advanced) records it in the result (``enablement_kept_stack_action``) so
+        it survives rearm. On REVERT, the attempt runtime dir is GC'd.
 
         Every verdict carries ``framework_root`` (the source tree patches were applied
         against, needed to replay them on a fresh machine).
@@ -3176,6 +3200,7 @@ class IntegratePatchExecutor:
                 "bench_result": bench_result,
                 "workspace": str(output_root),
                 **eval_provenance,
+                **_accepted_runtime_records(stack_action, provision_result),
             }
 
         provisional = correctness_ok is None
@@ -3211,25 +3236,7 @@ class IntegratePatchExecutor:
             "enablement_effective_config": dict(bench_result.get("effective_config") or {}),
             **eval_provenance,
         }
-        # Record the KEEP'd attempt runtime so it survives rearm and every later
-        # bench in this session re-activates it.
-        if stack_action is not None and provision_result is not None and getattr(provision_result, "ok", False):
-            # The action names a branch, a tag or an unpinned spec list; the
-            # resolved identity beside it is what makes the acquisition a
-            # rebuild path rather than a source that moves.
-            kept_result["enablement_kept_stack_action"] = {
-                **stack_action.to_state(),
-                "resolved_ref": str(getattr(provision_result, "resolved_ref", "") or ""),
-                "resolved_packages": {
-                    str(k): dict(v) for k, v in (getattr(provision_result, "resolved_packages", {}) or {}).items()
-                },
-                # The clone and the install inherit the whole process
-                # environment, so a runtime acquired over an authenticated
-                # remote replays no better than an install that was.
-                "credential_channels": detect_credential_channels(os.environ),
-            }
-            kept_result["enablement_active_runtime"] = provision_result.runtime.to_state()
-            kept_result["installed_versions"] = dict(getattr(provision_result, "installed_versions", {}) or {})
+        kept_result.update(_accepted_runtime_records(stack_action, provision_result))
         # Snapshot a manifest of the localized closure that survives rearm, so
         # the closure is recorded and not re-fetched.
         manifest = await asyncio.to_thread(

@@ -41,8 +41,10 @@ from .projection import (
     ResourceFacts,
 )
 from ..specialists.domains import (
+    CUSTOM_SPECIALIST_KEY,
     KNOWLEDGE_DOMAIN_TAG_SET,
     SPECIALIST_MAX_TURNS_HARD_CAP,
+    authoring_domain_for_framework,
     domain_for_tag,
     get_domain,
     normalize_dispatch_tags,
@@ -456,6 +458,8 @@ class PolicyGate:
             if check_source and isinstance(params, dict):
                 deny_custom_specialist_delegate(params)
             self._validate_specialist_dispatch(role, payload)
+            if check_source:
+                _validate_specialist_domain_llm_selectable(payload.get("params") or {})
             return
         # ``integrate_patch`` requires a non-reject Critic verdict.
         if action_name == INTEGRATE_PATCH_ACTION_NAME:
@@ -1494,6 +1498,25 @@ def _validate_specialist_framework(params: dict[str, Any]) -> None:
                 f"or pass one of {list(framework_registry.names())!r}."
             ),
         )
+
+
+def _validate_specialist_domain_llm_selectable(params: dict[str, Any]) -> None:
+    """Refuse a specialist domain only the Coordinator dispatches.
+
+    Raises:
+        PolicyDenied: When ``params.domain`` names such a domain.
+    """
+    domain = get_domain(str(params.get("domain") or ""))
+    if domain is None or domain.llm_selectable or domain.key == CUSTOM_SPECIALIST_KEY:
+        return
+    raise PolicyDenied(
+        f"delegate{{action='specialist'}}: {domain.key} is dispatched by the Coordinator, not by Orchestration",
+        rule="specialist_domain_coordinator_dispatched",
+        hint=(
+            f"The Coordinator runs {domain.key} itself; to author a fix alongside it, dispatch "
+            f"domain={authoring_domain_for_framework(params.get('framework'))!r} with the same task."
+        ),
+    )
 
 
 def validate_specialist_max_turns_raw(

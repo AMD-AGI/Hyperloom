@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -731,6 +732,26 @@ def test_invalidate_aiter_jit_build_ignores_orphaned_prior_backup(
     assert first["backup_path"] != second["backup_path"]
     assert Path(first["backup_path"]).is_dir()
     assert Path(second["backup_path"]).is_dir()
+
+
+class TestPointSessionFrameworkRoot:
+    def test_points_generic_and_prefixed_aliases(self, monkeypatch, tmp_path):
+        """One write makes every resolver name the same tree, including a prior prefixed pin."""
+        prior = tmp_path / "image"
+        prior.mkdir()
+        checkout = tmp_path / "attempt-src"
+        checkout.mkdir()
+        monkeypatch.setenv("FRAMEWORK", "sglang")
+        monkeypatch.setenv("SGLANG_DIR", str(prior))
+        monkeypatch.delenv("SGLANG_REPO_PATH", raising=False)
+        monkeypatch.delenv("FRAMEWORK_REPO_PATH", raising=False)
+
+        assert fp.point_session_framework_root(str(checkout), framework="sglang") == str(checkout)
+        assert os.environ["FRAMEWORK_REPO_PATH"] == str(checkout)
+        assert os.environ["SGLANG_REPO_PATH"] == str(checkout)
+        assert os.environ["SGLANG_DIR"] == str(checkout)
+        assert fp.resolve_session_framework_root() == f"{checkout}/"
+        assert fp.resolve_framework_tree("sglang") == f"{checkout}/"
 
 
 class TestResolveFrameworkTree:

@@ -225,7 +225,12 @@ def _restore_operator_supplied_paths_from_state(args: Any, state: SharedState) -
     if not cli_repo and not os.environ.get("FRAMEWORK_REPO_PATH", "").strip():
         archived = str(getattr(state, "framework_repo_path", "") or "").strip()
         if archived:
-            os.environ["FRAMEWORK_REPO_PATH"] = archived
+            from hyperloom.inference_optimizer.framework_paths import point_session_framework_root
+
+            point_session_framework_root(
+                archived,
+                framework=str(getattr(state, "framework", "") or ""),
+            )
     if not cli_scripts and not os.environ.get("HYPERLOOM_BYPASS_SCRIPTS_DIR", "").strip():
         archived = str(getattr(state, "bypass_scripts_dir", "") or "").strip()
         if archived:

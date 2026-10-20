@@ -677,6 +677,17 @@ def _stack_kept_runtime(state: Any, res: dict[str, Any]) -> None:
         records = list(state.enablement.attempt_runtimes or [])
         records.append(runtime)
         state.enablement.attempt_runtimes = records[-5:]
+        # The tree the runtime imports is now the tree under optimisation:
+        # specialists, integrate and the orchestration prompt all resolve it
+        # through the session's explicit framework checkout channel.
+        from hyperloom.inference_optimizer.framework_paths import point_session_framework_root
+
+        pointed = point_session_framework_root(
+            str(runtime.get("source_root") or ""),
+            framework=str(getattr(state, "framework", "") or ""),
+        )
+        if pointed:
+            state.framework_repo_path = pointed
     # Record the localized closure manifest so it is not re-fetched on the next round.
     manifest = res.get("enablement_localization_manifest")
     if isinstance(manifest, dict) and manifest:

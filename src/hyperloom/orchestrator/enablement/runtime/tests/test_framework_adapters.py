@@ -254,6 +254,21 @@ def test_sglang_editable_provision_fetches_the_pr_head_and_records_the_clone_it_
     assert pip[-3:] == ["-e", str(checkout / "python"), "transformers==4.57.1"]
 
 
+
+
+def test_a_failed_install_reports_pips_error_and_logs_every_step(tmp_path):
+    """The image's venv prefixes pip's stderr with egg deprecations; the error is at the end."""
+    warnings = "DEPRECATION: Loading egg at /opt/venv/lib/python3.12/site-packages/x.egg is deprecated.\n" * 20
+    error = "RuntimeError: cargo is required to discover the Rust extension modules"
+    run = _FakeRun(rules=[("-m pip install", 1, "Obtaining file:///src/python\n", f"{warnings}{error}\n")])
+    action = SglangAdapter().build_stack_action(RuntimeRequest(ref="v0.5.21"))
+    result = SglangAdapter(run=run).provision(action, tmp_path / "attempt")
+    assert result.ok is False
+    assert error in result.error
+    log = Path(result.log_path).read_text(encoding="utf-8")
+    assert " fetch -q --depth 1 " in log
+    assert "rc=1" in log and "Obtaining file:///src/python" in log and error in log
+
 def test_sglang_editable_provision_reports_a_ref_it_cannot_fetch(tmp_path):
     run = _FakeRun(rules=[(" fetch ", 128, "", "couldn't find remote ref v9")])
     action = SglangAdapter().build_stack_action(RuntimeRequest(ref="v9"))

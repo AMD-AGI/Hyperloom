@@ -800,6 +800,24 @@ def test_specialist_emit_hint_lists_every_llm_selectable_domain():
         assert key not in hint, key
 
 
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"domain": "enablement_specialist", "gap_canonical_id": "gap.x", "framework": "sglang"},
+        {"scope": "freeform", "domain": "enablement_specialist", "task_description": "bridge it"},
+    ],
+)
+def test_gate_denies_orchestration_naming_a_coordinator_dispatched_domain(gate, params):
+    """A domain only the Coordinator dispatches is refused to Orchestration, with the authoring domain to use instead."""
+    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+
+    intent = Intent(type=IntentType.DELEGATE, payload=_dispatch(params))
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent("orchestration", intent)
+    assert exc.value.rule == "specialist_domain_coordinator_dispatched"
+    assert "serving_specialist" in exc.value.hint
+
+
 # --------------------------------------------------------------------------- # gate gpu_count default aligned with
 # dispatcher at serving_tp=0 --------------------------------------------------------------------------- #
 def test_bench_specialist_no_serving_tp_defaults_to_whole_machine(orchestration_role, monkeypatch):

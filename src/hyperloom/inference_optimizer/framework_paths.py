@@ -411,6 +411,34 @@ def _env_source_roots() -> tuple[str, ...]:
     return tuple(kept)
 
 
+def point_session_framework_root(root: str, *, framework: str = "") -> str:
+    """Make ``root`` this session's explicit framework checkout.
+
+    Writes :data:`GENERIC_FRAMEWORK_ROOT_ENV` and, when ``framework`` (or
+    ``$FRAMEWORK``) is set, the prefixed ``_REPO_PATH`` / ``_DIR`` aliases so
+    every resolver that prefers the prefix still names the same tree. Resume
+    restores the same channel through ``state.framework_repo_path``. The path
+    is published even when it is not on disk yet — a resume may re-export the
+    pin before the tree is remounted; resolvers still require a live directory.
+
+    Args:
+        root: Checkout the session now optimises.
+        framework: Registered framework name; defaults to ``$FRAMEWORK``.
+
+    Returns:
+        The stored path, or ``""`` when ``root`` is blank.
+    """
+    candidate = str(root or "").strip().rstrip("/")
+    if not candidate:
+        return ""
+    os.environ[GENERIC_FRAMEWORK_ROOT_ENV] = candidate
+    name = str(framework or os.environ.get("FRAMEWORK", "") or "").strip().upper()
+    if name:
+        os.environ[f"{name}_REPO_PATH"] = candidate
+        os.environ[f"{name}_DIR"] = candidate
+    return candidate
+
+
 def resolve_session_framework_root() -> str:
     """The one source tree this session was explicitly pointed at, or ``""``.
 
@@ -704,6 +732,7 @@ __all__ = [
     "FRAMEWORK_SOURCE_PACKAGES",
     "FrameworkTree",
     "framework_apply_tree",
+    "point_session_framework_root",
     "probe_framework_source_roots_for_env",
     "resolve_framework_tree",
     "resolve_kernel_search_roots",

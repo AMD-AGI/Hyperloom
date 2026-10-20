@@ -15,6 +15,8 @@ from hyperloom.common.failure_signature import classify_failure
 from hyperloom.orchestrator.actions.executors import integrate_patch as ip
 from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant, _build_variant_yaml
 from hyperloom.inference_optimizer.runtime_environment import apply_runtime_override
+from hyperloom.orchestrator.bringup import observe_bringup, write_boot_observation
+from hyperloom.orchestrator.rehearsal import boot_log_for
 from hyperloom.orchestrator.enablement.runtime.stack_actions import (
     EnablementStackAction,
     FrameworkRuntime,
@@ -78,6 +80,7 @@ class _FakeAdapter:
         self.provision_calls += 1
         # Simulate an on-disk venv so GC has something to remove.
         (attempt_dir / "venv" / "bin").mkdir(parents=True, exist_ok=True)
+        (attempt_dir / "provision.log").write_text("$ pip install\nrc=1\n", encoding="utf-8")
         return self._result
 
     def probe(self, result, action):
@@ -245,7 +248,7 @@ async def test_provision_runs_off_the_event_loop_thread(_executor, monkeypatch):
     assert seen["ident"] != loop_ident
 
 
-async def test_provision_fail_returns_reverted_and_gcs(_executor, monkeypatch):
+async def test_provision_fail_returns_reverted_and_gcs_the_venv_but_keeps_its_log(_executor, monkeypatch):
     adapter = _FakeAdapter(ProvisionResult(ok=False, error="pip failed"))
     monkeypatch.setattr("hyperloom.orchestrator.enablement.runtime.adapters.get_adapter", lambda _fw: adapter)
     attempt = _attempt(kept=_candidate())
@@ -254,9 +257,9 @@ async def test_provision_fail_returns_reverted_and_gcs(_executor, monkeypatch):
     assert out["status"] == "reverted"
     assert out["error_class"] == "provision_failed"
     assert out["enablement"] is True
-    # GC removed the attempt dir.
     attempt = _executor.session_dir / "enablement" / "stacks" / "vllm" / "t-1"
-    assert not attempt.exists()
+    assert not (attempt / "venv").exists()
+    assert (attempt / "provision.log").read_text(encoding="utf-8").startswith("$ pip install")
 
 
 async def test_probe_fail_returns_reverted(_executor, monkeypatch):
@@ -404,15 +407,77 @@ def test_opt_venv_path_never_replaced(tmp_path):
     assert "/opt/venv/bin" in parts  # shared venv still present, not replaced
 
 
-# rearm: KEEP'd stack action survives one rearm cycle
+def _observation(session: Path, slot: str, log_text: str) -> str:
+    """Observe ``log_text`` as a server log and persist it the way a round does."""
+    out = session / slot
+    out.mkdir(parents=True, exist_ok=True)
+    verdict = observe_bringup(server_log=log_text, server_elapsed_sec=3.0, session_dir=session)
+    return write_boot_observation(verdict.observation, session_dir=session, output_dir=out, attempt=0)
+
+
+_IMPORT_WALL = (
+    'Traceback (most recent call last):\n  File "/x/ops.py", line 4, in init\n'
+    "ImportError: cannot import name '_C' from 'vllm'\n"
+)
+_ENGINE_WALL = (
+    'Traceback (most recent call last):\n  File "/x/attention.py", line 51, in forward\n'
+    "NotImplementedError: paged attention v2 has no ROCm path yet\n"
+)
 
 
 @pytest.mark.asyncio
-async def test_kept_stack_action_survives_rearm(monkeypatch):
+@pytest.mark.parametrize("verdict", ["advanced", "kept"])
+async def test_an_accepted_round_reports_the_runtime_it_booted_on(_executor, tmp_path, verdict):
+    session = _executor.session_dir
+    session.mkdir(parents=True)
+    attempt = _attempt()
+    attempt.output_root = tmp_path / "out"
+    attempt.stack_action = EnablementStackAction.from_state(_candidate())
+    attempt.provision_result = _ok_result(str(tmp_path / "venv"))
+    if verdict == "advanced":
+        bench_result = {"status": "failed", "boot_observation_path": _observation(session, "after", _ENGINE_WALL)}
+    else:
+        booted = _observation(session, "after", boot_log_for(None))
+        bench_result = {"output_throughput": 100.0, "completed_requests": 12, "boot_observation_path": booted}
+    params = {"enablement": True, "enablement_before_observation_path": _observation(session, "before", _IMPORT_WALL)}
+
+    res = await _executor._gate_enablement(
+        attempt=attempt,
+        params=params,
+        extra={},
+        bench_result=bench_result,
+        gate_evidence={"enablement_accuracy": None, "timed_out": False},
+    )
+
+    assert res["status"] == verdict, res.get("reason")
+    assert res["enablement_active_runtime"]["venv_root"] == str(tmp_path / "venv")
+    assert res["enablement_kept_stack_action"]["packages"] == ["vllm"]
+    assert res["installed_versions"] == {"vllm": "0.21.0"}
+
+
+# rearm: an accepted round's stack action survives one rearm cycle
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["kept", "advanced"])
+async def test_kept_stack_action_survives_rearm(monkeypatch, tmp_path, status):
+    from hyperloom.inference_optimizer.framework_paths import (
+        GENERIC_FRAMEWORK_ROOT_ENV,
+        resolve_framework_tree,
+        resolve_session_framework_root,
+    )
     from hyperloom.orchestrator.state.shared_state import SharedState
 
-    # Simulate a coordinator with just enough surface for maybe_rearm_enablement.
+    checkout = tmp_path / "attempt-src"
+    checkout.mkdir()
+    # Image defaults and a prior operator pin must not keep winning after promote.
+    monkeypatch.setenv("FRAMEWORK", "sglang")
+    monkeypatch.setenv("SGLANG_DIR", str(tmp_path / "image-sglang"))
+    (tmp_path / "image-sglang").mkdir()
+    monkeypatch.delenv(GENERIC_FRAMEWORK_ROOT_ENV, raising=False)
+
     state = SharedState()
+    state.framework = "sglang"
     coord = types.SimpleNamespace(shared_state=state, session_dir=Path("/tmp/does-not-matter"))
     coord.save = lambda *a, **k: None
 
@@ -426,10 +491,14 @@ async def test_kept_stack_action_survives_rearm(monkeypatch):
     coord.rounds = types.SimpleNamespace(consecutive_stalled=_no_stalls, held=_no_round)
 
     action_state = _candidate()
-    runtime_state = FrameworkRuntime(bin_path="/a/bin", venv_root="/a").to_state()
+    runtime_state = FrameworkRuntime(
+        bin_path="/a/bin",
+        venv_root="/a",
+        source_root=str(checkout),
+    ).to_state()
     res = {
         "enablement": True,
-        "status": "kept",
+        "status": status,
         "enablement_kept_stack_action": action_state,
         "enablement_active_runtime": runtime_state,
     }
@@ -440,3 +509,6 @@ async def test_kept_stack_action_survives_rearm(monkeypatch):
     assert state.enablement.kept_stack_action == action_state
     assert state.enablement.active_runtime == runtime_state
     assert runtime_state in state.enablement.attempt_runtimes
+    assert state.framework_repo_path == str(checkout)
+    assert resolve_session_framework_root() == f"{checkout}/"
+    assert resolve_framework_tree("sglang") == f"{checkout}/"
