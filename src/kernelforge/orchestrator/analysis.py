@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -1221,66 +1222,39 @@ class AnalysisAgentService:
         )
         return catalog_path
 
-    def apply_checkpoint(
-        self,
-        context: OrchestrationContext,
-    ) -> OrchestrationContext:
+    def apply_checkpoint(self, context: OrchestrationContext) -> OrchestrationContext:
         """Expose validated partial Analysis outputs to downstream agents."""
         work_root = (
             Path(context.workspace).resolve() / "forge_experiments" / "analysis" / "work" / context.analysis_commit
         )
-        workflow_path = work_root / "workflow.json"
-        catalog_path = work_root / "artifact_catalog.json"
-        if not workflow_path.is_file() or not catalog_path.is_file():
-            return context
         try:
-            workflow = json.loads(workflow_path.read_text())
-            catalog = json.loads(catalog_path.read_text())
-        except (OSError, TypeError, ValueError, json.JSONDecodeError):
-            return context
-        if not isinstance(workflow, dict) or not isinstance(catalog, dict):
+            workflow = json.loads((work_root / "workflow.json").read_text())
+            catalog = json.loads((work_root / "artifact_catalog.json").read_text())
+            request_payload = json.loads((work_root / "request.json").read_text())
+        except (OSError, ValueError):
             return context
         if (
-            workflow.get("analysis_commit") != context.analysis_commit
+            not isinstance(workflow, dict)
+            or not isinstance(catalog, dict)
+            or not isinstance(request_payload, dict)
+            or workflow.get("analysis_commit") != context.analysis_commit
             or catalog.get("analysis_commit") != context.analysis_commit
+            or not isinstance(request_payload.get("analysis_profiling_enabled"), bool)
+            or not isinstance(catalog.get("artifacts"), list)
         ):
             return context
-        try:
-            request_payload = json.loads((work_root / "request.json").read_text())
-        except (OSError, TypeError, ValueError, json.JSONDecodeError):
-            return context
-        if not isinstance(request_payload, dict) or not isinstance(
-            request_payload.get("analysis_profiling_enabled"),
-            bool,
-        ):
-            return context
-        static_only = request_payload["analysis_profiling_enabled"] is False
-
         evidence_by_path = {reference.path: reference for reference in context.evidence_refs}
-        artifacts = catalog.get("artifacts")
-        if not isinstance(artifacts, list):
-            return context
-        for artifact in artifacts:
+        for artifact in catalog["artifacts"]:
             if not isinstance(artifact, dict):
                 continue
             path = str(artifact.get("path") or "")
-            status = str(artifact.get("status") or "")
             information = artifact.get("available_information")
             if (
                 not path
-                or status
-                not in {
-                    "AVAILABLE",
-                    "COMPLETE",
-                    "FAILED",
-                    "SKIPPED",
-                }
+                or str(artifact.get("status")) not in {"AVAILABLE", "COMPLETE", "FAILED", "SKIPPED"}
                 or not isinstance(information, list)
+                or not Path(path).resolve().is_relative_to(work_root.resolve())
             ):
-                continue
-            try:
-                Path(path).resolve().relative_to(work_root.resolve())
-            except ValueError:
                 continue
             evidence_by_path[path] = EvidenceRef(
                 kind=str(artifact.get("kind") or "analysis_artifact"),
@@ -1291,48 +1265,14 @@ class AnalysisAgentService:
                     f"{', '.join(str(item) for item in information)}."
                 ),
             )
-
-        normalized_cases = []
-        for original in context.cases:
-            case_root = work_root / "cases" / _case_directory(original.case_id)
-            bottleneck_path = case_root / "bottleneck.json"
-            analysis_path = case_root / "analysis.md"
-            normalized_path = case_root / "normalized_metrics.json"
-            profile_root = case_root / "profile"
-            bottleneck = original.bottleneck
-            summary_path = original.profile_summary_path
-            flags = list(original.flags)
-            if static_only:
-                flags.append("analysis_static_only")
-            if bottleneck_path.is_file() and analysis_path.is_file():
-                try:
-                    payload = json.loads(bottleneck_path.read_text())
-                    bottleneck = str(payload.get("classification") or bottleneck)
-                except (OSError, TypeError, ValueError, json.JSONDecodeError):
-                    bottleneck = original.bottleneck
-                summary_path = str(analysis_path.resolve())
-                flags.append(
-                    "analysis_checkpoint_profile_interpretation"
-                    if (normalized_path.is_file() and profile_root.is_dir() and any(profile_root.iterdir()))
-                    else "analysis_checkpoint_interpretation_only"
-                )
-            elif normalized_path.is_file():
-                summary_path = str(normalized_path.resolve())
-                flags.append("analysis_checkpoint_normalized_only")
-            elif profile_root.is_dir() and any(profile_root.iterdir()):
-                summary_path = str(profile_root.resolve())
-                flags.append("analysis_checkpoint_raw_profile_only")
-            normalized_cases.append(
-                CaseEvidence(
-                    case_id=original.case_id,
-                    shape=original.shape,
-                    dtype=original.dtype,
-                    latency_ms=original.latency_ms,
-                    bottleneck=bottleneck,
-                    profile_summary_path=summary_path,
-                    flags=tuple(dict.fromkeys(flags)),
-                )
+        normalized_cases = tuple(
+            self._checkpoint_case_evidence(
+                original,
+                case_root=work_root / "cases" / _case_directory(original.case_id),
+                profiling_enabled=request_payload["analysis_profiling_enabled"],
             )
+            for original in context.cases
+        )
         source_map = work_root / "source_map.md"
         return OrchestrationContext(
             analysis_commit=context.analysis_commit,
@@ -1342,7 +1282,7 @@ class AnalysisAgentService:
             program_context=context.program_context,
             source_map_path=(str(source_map.resolve()) if source_map.is_file() else context.source_map_path),
             editable_sources=context.editable_sources,
-            cases=tuple(normalized_cases),
+            cases=normalized_cases,
             knowledge_index=context.knowledge_index,
             supervisor_guidance=context.supervisor_guidance,
             search_mode=context.search_mode,
@@ -1915,6 +1855,43 @@ Update analysis incrementally:
             bottleneck=original.bottleneck,
             profile_summary_path=(str(analysis_path) if has_analysis else original.profile_summary_path),
             flags=tuple(dict.fromkeys([*original.flags, reason])),
+        )
+
+    @staticmethod
+    def _checkpoint_case_evidence(original: CaseEvidence, *, case_root: Path, profiling_enabled: bool) -> CaseEvidence:
+        """A case's evidence from an unpublished checkpoint, flagged by how far the session got with it."""
+        bottleneck_path = case_root / "bottleneck.json"
+        analysis_path = case_root / "analysis.md"
+        normalized_path = case_root / "normalized_metrics.json"
+        profile_root = case_root / "profile"
+        bottleneck = original.bottleneck
+        summary_path = original.profile_summary_path
+        flags = list(original.flags)
+        if not profiling_enabled:
+            flags.append("analysis_static_only")
+        if bottleneck_path.is_file() and analysis_path.is_file():
+            with contextlib.suppress(OSError, ValueError):
+                bottleneck = str(json.loads(bottleneck_path.read_text()).get("classification") or bottleneck)
+            summary_path = str(analysis_path.resolve())
+            flags.append(
+                "analysis_checkpoint_profile_interpretation"
+                if (normalized_path.is_file() and profile_root.is_dir() and any(profile_root.iterdir()))
+                else "analysis_checkpoint_interpretation_only"
+            )
+        elif normalized_path.is_file():
+            summary_path = str(normalized_path.resolve())
+            flags.append("analysis_checkpoint_normalized_only")
+        elif profile_root.is_dir() and any(profile_root.iterdir()):
+            summary_path = str(profile_root.resolve())
+            flags.append("analysis_checkpoint_raw_profile_only")
+        return CaseEvidence(
+            case_id=original.case_id,
+            shape=original.shape,
+            dtype=original.dtype,
+            latency_ms=original.latency_ms,
+            bottleneck=bottleneck,
+            profile_summary_path=summary_path,
+            flags=tuple(dict.fromkeys(flags)),
         )
 
     @staticmethod
