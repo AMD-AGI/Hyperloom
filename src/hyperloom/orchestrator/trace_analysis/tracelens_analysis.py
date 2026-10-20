@@ -1179,11 +1179,8 @@ def classify_patchability(candidate: dict[str, Any]) -> tuple[bool, str]:
     source_file = str(candidate.get("source_file") or "")
     name = str(candidate.get("name") or "")
     lower_name = name.lower()
-    # Verdict-first: honor TraceLens' resolve_kernel_source verdict (carried on
-    # the op_to_source_* fields) when it decided this symbol. A patchable entry is
-    # ground truth and bypasses the heuristics; a non-patchable one -- Tensile,
-    # MIOpen, inductor-Triton, or a Composable Kernel template -- reports the kind
-    # as its reason. Only genuinely unresolved symbols fall through below.
+    # TraceLens' resolver verdict is ground truth: a patchable entry skips the heuristics below, and a non-patchable
+    # one (Tensile, MIOpen, inductor-Triton, a Composable Kernel template) reports its kind as the reason.
     if candidate.get("source_resolution_method") in _RESOLVER_VERDICT_METHODS:
         patchable = candidate.get("op_to_source_patchable")
         if patchable is True and source_file:
@@ -1195,22 +1192,15 @@ def classify_patchability(candidate: dict[str, Any]) -> tuple[bool, str]:
                 or "non-rewritable"
             )
             return False, f"source: {reason}"
-    # Vendor-operator-playbook check: some closed-source vendor operators (a
-    # pip-installed compiled library with no rewritable device source) still
-    # have a small, named set of launch-config knobs that a KernelForge
-    # forge-loop task bundle has already been validated to tune (mori's EP
-    # dispatch/combine is the first case -- see KernelForge PR #88). This is
-    # checked before the vendor_binary/no-source-file rejections below and
-    # before the ``source_file`` requirement, since a vendor-playbook
-    # candidate's "source" is a pip-installed file, not something forge would
-    # ever rewrite.
+    # A vendor operator with a validated KernelForge task bundle is tuned through launch knobs, never rewritten,
+    # so it passes before the source-file and vendor-binary rejections below.
     if match_vendor_operator_playbook(candidate) is not None:
         return True, ""
     if not source_file:
         # A bare launch API has no kernel body to rewrite, which is a different
         # situation from a kernel whose source we merely failed to locate. Say
         # so rather than sending a reader looking for a file that cannot exist.
-        if is_runtime_api_name(str(candidate.get("name") or "")):
+        if is_runtime_api_name(name):
             return False, "launch API, not a kernel (no rewritable body)"
         return False, "source file not resolved"
     if candidate.get("source_type") == "vendor_binary":
@@ -1227,35 +1217,27 @@ def classify_patchability(candidate: dict[str, Any]) -> tuple[bool, str]:
         return False, (
             f"vendor backend library {candidate.get('library')!r} (precompiled binary, no rewritable source)"
         )
-    if name.startswith("aten::"):
-        if not library or library in {"tensile", "pytorch native"}:
-            return False, (
-                f"PyTorch native op {name!r} backed by "
-                f"{candidate.get('library') or 'unknown'} library "
-                "(typically Tensile / vendor backend)"
-            )
+    if name.startswith("aten::") and library in {"", "pytorch native"}:
+        return False, (
+            f"PyTorch native op {name!r} backed by "
+            f"{candidate.get('library') or 'unknown'} library "
+            "(typically Tensile / vendor backend)"
+        )
     if is_runtime_generated_kernel(name, source_file):
         return False, (f"runtime-generated (torch.compile / Inductor cache): {source_file}")
     lower_file = source_file.lower()
     if not any(root in lower_file for root in _reusable_roots()):
         return False, (f"source not under a reusable framework root: {source_file}")
-    # cpp_itfs host-launcher guard: a .py under csrc/cpp_itfs/ is a host driver
-    # whose real GPU code lives in sibling .cuh/.cpp.jinja; skip it so the
-    # candidate doesn't burn a forge/geak attempt.
     if "/csrc/cpp_itfs/" in lower_file and lower_file.endswith(".py"):
         return False, (
             f"cpp_itfs host launcher (device code is in sibling .cuh/.cpp.jinja, not this .py): {source_file}"
         )
-    source_type = candidate.get("source_type")
     # aiter device-source promotion: a real .cu/.cuh/.hip kernel under /aiter/ is
     # patchable even when the classifier left source_type unknown, since aiter
     # JIT-compiles each op and forge edits it in place.
-    if (
-        source_type not in {"hip_cpp", "triton", "python", "flydsl"}
-        and "/aiter/" in lower_file
-        and lower_file.endswith((".cu", ".cuh", ".hip"))
-    ):
+    if "/aiter/" in lower_file and lower_file.endswith((".cu", ".cuh", ".hip")):
         return True, ""
+    source_type = candidate.get("source_type")
     if source_type not in {"hip_cpp", "triton", "python", "flydsl"}:
         return False, (f"source_type={source_type!r} not in {{hip_cpp, triton, python, flydsl}}")
     return True, ""
