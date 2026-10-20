@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from kernelforge.durable_io import atomic_write_text, fsync_directory, fsync_tree
+from kernelforge.tools.durable_io import atomic_write_text, fsync_directory, fsync_tree
 from kernelforge.kernel_rewrite_controller.contracts import KernelRewriteTask
 from kernelforge.kernel_rewrite_controller.paths import ControllerLayout
 

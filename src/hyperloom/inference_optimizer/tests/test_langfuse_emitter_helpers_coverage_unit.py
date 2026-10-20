@@ -273,3 +273,20 @@ def test_set_trace_attrs_propagates_otel_failure() -> None:
 
     with pytest.raises(RuntimeError):
         lfe._set_trace_attrs(_SpanV4OtelFails(), name="n")
+
+
+def test_set_trace_attrs_propagates_metadata_otel_failure() -> None:
+    import pytest
+
+    class _OtelFails:
+        def set_attribute(self, key: str, value: Any) -> None:
+            raise RuntimeError("otel rejected metadata")
+
+    class _SpanV4OtelFails:
+        _otel_span = _OtelFails()
+
+        def update_trace(self, **kwargs: Any) -> None:
+            raise AttributeError("v4")
+
+    with pytest.raises(RuntimeError, match="otel rejected metadata"):
+        lfe._set_trace_attrs(_SpanV4OtelFails(), metadata={"k": "v"})

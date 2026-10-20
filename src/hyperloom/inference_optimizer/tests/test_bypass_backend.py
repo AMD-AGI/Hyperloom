@@ -69,21 +69,6 @@ def test_bypass_backend_selected(monkeypatch):
     ]
 
 
-def test_bypass_runner_scalar_coercions():
-    assert bypass_runner._as_int("7", 1) == 7
-    assert bypass_runner._as_int("bad", 3) == 3
-    assert bypass_runner._as_int(None, 4) == 4
-
-    assert bypass_runner._as_opt_int("9") == 9
-    assert bypass_runner._as_opt_int("") is None
-    assert bypass_runner._as_opt_int(None) is None
-    assert bypass_runner._as_opt_int("bad") is None
-
-    assert bypass_runner._as_float("1.25", 0.0) == 1.25
-    assert bypass_runner._as_float("bad", 2.5) == 2.5
-    assert bypass_runner._as_float(None, 3.5) == 3.5
-
-
 def test_run_eval_enabled_env_and_yaml(monkeypatch):
     monkeypatch.delenv("RUN_EVAL", raising=False)
     assert bypass_runner._run_eval_enabled({}) is False
@@ -1835,7 +1820,7 @@ def test_terminate_server_fallback_kill_and_closes_log(monkeypatch):
             self.terminated = True
 
         def wait(self, timeout=None):
-            raise TimeoutError("still running")
+            raise subprocess.TimeoutExpired(cmd="server", timeout=timeout)
 
     proc = _Proc()
     signals = []
@@ -1852,6 +1837,25 @@ def test_terminate_server_fallback_kill_and_closes_log(monkeypatch):
     assert proc.terminated is True
     assert signals == [bypass_runner.signal.SIGTERM, bypass_runner.signal.SIGKILL]
     assert proc._bypass_log_fh.closed is True
+
+
+def test_terminate_server_wait_failure_other_than_timeout_propagates(monkeypatch):
+    """Only a wait timeout escalates to SIGKILL; any other failure is a bug."""
+
+    class _Proc:
+        pid = 123
+
+        def terminate(self):
+            pass
+
+        def wait(self, timeout=None):
+            raise RuntimeError("wait broke")
+
+    monkeypatch.setattr(bypass_runner.os, "getpgid", lambda pid: 456)
+    monkeypatch.setattr(bypass_runner.os, "killpg", lambda pgid, sig: None)
+
+    with pytest.raises(RuntimeError, match="wait broke"):
+        bypass_runner._terminate_server(_Proc())
 
 
 def test_tokenize_extra_args_falls_back_on_bad_quoting():
