@@ -96,9 +96,12 @@ def learning_conditions(profile: SessionProfile) -> dict[str, object]:
 
 
 def learning_context(profile: SessionProfile, query: str) -> dict[str, Any]:
+    """The read context. ``multibranch-learning-v1`` declares the sizes under identity and the Framework phase's
+    shape keeps them under workload; the read planner may source them from either, so both hold them."""
+
     identity = experience_identity(profile)
     return {
-        "identity": {key: value for key, value in identity.items() if key not in WORKLOAD_KEYS},
+        "identity": dict(identity),
         "workload": {key: value for key, value in identity.items() if key in WORKLOAD_KEYS},
         "objective": {"id": LEARNING_OBJECTIVE},
         "observations": {"query": query} if query else {},

@@ -75,6 +75,17 @@ def test_past_learnings_say_which_conditions_differ_and_leave_this_session_out()
     )
 
 
+def test_the_read_context_holds_the_declared_identity_under_identity_and_the_workload_under_workload() -> None:
+    reader = FakeExperienceReader(completed_read())
+
+    read_past_learnings(reader, profile(), "kv cache", limit=5)
+
+    ((_, context, _),) = reader.calls
+    sizes = {"tp": 8, "conc": 64, "isl": 1024, "osl": 1024}
+    assert sizes.items() <= context["identity"].items()
+    assert sizes.items() <= context["workload"].items()
+
+
 def test_a_learning_of_the_other_kind_of_session_says_which_kind() -> None:
     agentx_conditions = {key: value for key, value in SAME.items() if key not in ("isl", "osl")}
     reader = FakeExperienceReader(completed_read(_past("exp-inferencex", SAME), _past("exp-agentx", agentx_conditions)))
