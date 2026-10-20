@@ -82,8 +82,6 @@ cognitive-complexity src/hyperloom/orchestrator/delivery/ledger.py::restore_reco
 cognitive-complexity src/hyperloom/orchestrator/enablement/artifacts.py::snapshot_round 38
 cognitive-complexity src/hyperloom/orchestrator/enablement/build.py::EnablementBuild.maybe_escalate_to_targeted_build 37
 cognitive-complexity src/hyperloom/orchestrator/enablement/params.py::EnablementParams._derive_checkpoint_weight_facts 32
-cognitive-complexity src/hyperloom/orchestrator/enablement/recipe/section.py::_collect_landed_stack 49
-cognitive-complexity src/hyperloom/orchestrator/enablement/recipe/sufficiency.py::_payload_references 31
 cognitive-complexity src/hyperloom/orchestrator/enablement/runtime/targeted_build.py::run_aiter_build 42
 cognitive-complexity src/hyperloom/orchestrator/kernel/_kernel_decisions.py::_queue_kernel_keep 36
 cognitive-complexity src/hyperloom/orchestrator/kernel/_kernel_decisions.py::enqueue_nominated_patch 32
@@ -650,7 +648,6 @@ function-lines src/hyperloom/orchestrator/enablement/lane.py::EnablementLane.may
 function-lines src/hyperloom/orchestrator/enablement/params.py::EnablementParams._derive_checkpoint_weight_facts 117
 function-lines src/hyperloom/orchestrator/enablement/params.py::EnablementParams._discover_enablement_candidate_refs 87
 function-lines src/hyperloom/orchestrator/enablement/params.py::EnablementParams.build_enablement_specialist_params 114
-function-lines src/hyperloom/orchestrator/enablement/recipe/section.py::_collect_landed_stack 95
 function-lines src/hyperloom/orchestrator/enablement/recipe/sufficiency.py::_patch_step_reasons 92
 function-lines src/hyperloom/orchestrator/enablement/runtime/targeted_build.py::run_aiter_build 218
 function-lines src/hyperloom/orchestrator/enablement/runtime/targeted_build.py::run_sgl_kernel_build 172
