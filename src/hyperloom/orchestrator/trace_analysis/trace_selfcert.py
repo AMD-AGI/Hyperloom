@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import median
-from typing import Any, Iterable, NamedTuple, Sequence
+from typing import Any, NamedTuple, Sequence
 
 from ._bypass_trace_reader import (
     _GRAPH_RECORDED_LAUNCH_COVERAGE_MAX,
@@ -63,7 +63,6 @@ _ROOT_PATTERNS = {
 _SGLANG_STEP_RE = re.compile(r"step\[(\w+)\s+bs=(\d+)(?:\s+toks=(\d+))?\]")
 _STEP_MARKER_RE = re.compile(r"(?i)profilerstep|denoise|iteration|(?:^|[^a-z])step|step(?:$|[^a-z])")
 _ROOFLINE_TASK_RE = re.compile(r"/runs/[a-z_]+/([0-9a-f]{32})/")
-_SPLIT_NAME_RE = re.compile(r"^(?P<mode>.+?)_steady_state_prefill_\d+_prefilldecode_\d+_decode_\d+_bs\d+_conc\d+_")
 
 _SCRIPTABLE_FRAMEWORKS = frozenset(("sglang", "vllm", "trtllm", "tensorrt_llm"))
 
@@ -420,51 +419,6 @@ def annotation_report(sp: StepPass, *, framework: str, min_repeats: int) -> dict
     }
 
 
-def certify_chunks(chunk_files: Iterable[Path], source_kernel_corrs: set[Any]) -> list[dict[str, Any]]:
-    """Check each existing chunk for kernels it should have carried but did not."""
-    out: list[dict[str, Any]] = []
-    for path in sorted(chunk_files):
-        mode_match = _SPLIT_NAME_RE.match(path.name)
-        retained: set[Any] = set()
-        kernels = 0
-        annotation_names: set[str] = set()
-        errors: list[str] = []
-        try:
-            fobj = _open_trace_binary(path)
-        except OSError as exc:
-            out.append({"path": str(path), "error": f"{type(exc).__name__}: {exc}"})
-            continue
-        try:
-            for ev in stream_events(fobj, errors=errors):
-                cat = ev.get("cat", "")
-                if cat == "cuda_runtime":
-                    corr = (ev.get("args") or {}).get("correlation")
-                    if corr is not None:
-                        retained.add(corr)
-                elif cat == "kernel" and ev.get("ph") == "X":
-                    kernels += 1
-                elif cat == "user_annotation" and ev.get("ph") == "X":
-                    name = ev.get("name") or ""
-                    if name.startswith("step["):
-                        annotation_names.add(name)
-        finally:
-            fobj.close()
-        intersect = len(retained & source_kernel_corrs)
-        out.append(
-            {
-                "path": str(path),
-                "mode": mode_match.group("mode") if mode_match else None,
-                "annotation_name": sorted(annotation_names)[:3],
-                "kernel_count": kernels,
-                "retained_runtime_correlations": len(retained),
-                "corr_intersect_source": intersect,
-                "lost_by_correlation": kernels == 0 and intersect > 0,
-                "stream_errors": errors[:5],
-            }
-        )
-    return out
-
-
 # verdict
 
 
@@ -570,17 +524,11 @@ def build_verdict(
 # entry point
 
 
-def certify_trace_dir(
-    trace_dir: str | Path,
-    *,
-    chunk_files: Iterable[str | Path] = (),
-    framework: str = "",
-) -> dict[str, Any]:
+def certify_trace_dir(trace_dir: str | Path, *, framework: str = "") -> dict[str, Any]:
     """Produce the self-certification record for one capture directory."""
     tdir = Path(trace_dir)
     thresholds = effective_thresholds()
-    min_repeats = MIN_REPEATS_XDIT if framework.lower() == "xdit" else MIN_REPEATS_DEFAULT
-    thresholds["min_repeats"] = min_repeats
+    thresholds["min_repeats"] = MIN_REPEATS_XDIT if framework.lower() == "xdit" else MIN_REPEATS_DEFAULT
 
     inv = inventory(tdir)
     task = _ROOFLINE_TASK_RE.search(str(tdir))
@@ -591,7 +539,7 @@ def certify_trace_dir(
         "trace_dir": str(tdir),
         "roofline_task_id": task.group(1) if task else None,
         "framework": framework or None,
-        "has_steady_state_semantics": (framework or "").lower() in _SCRIPTABLE_FRAMEWORKS if framework else None,
+        "has_steady_state_semantics": framework.lower() in _SCRIPTABLE_FRAMEWORKS if framework else None,
         "trace_dir_level": inv,
         "rank_level": [],
         "chunk_level": [],
@@ -601,7 +549,7 @@ def certify_trace_dir(
     # exactly the case where knowing what the sidecars contain matters most.
     capture_paths = [Path(c["path"]) for c in inv["candidates"] if c["role"] == "capture_sidecar"]
     if capture_paths:
-        record["trace_dir_level"]["capture_sidecar_probe"] = certify_capture_sidecars(capture_paths)
+        inv["capture_sidecar_probe"] = certify_capture_sidecars(capture_paths)
 
     selected = inv["selected_path"]
     if not selected:
@@ -633,33 +581,53 @@ def certify_trace_dir(
         record["verdict"]["blocking_reasons"] = ["no usable trace file in the directory"]
         return record
 
-    sel = Path(selected)
-
-    # When the live resolver would open a different file, measure that file too.
-    production_pick = None
     if inv["production_selected_path"] and inv["production_selected_path"] != selected:
-        probe = analyze_trace(inv["production_selected_path"], TraceAnalysisOptions(top_k=1, steady_state=False))
-        # ``analyze_trace`` reports the kernel count inside ``attribution`` and has no ``parse_ok`` key at all --
-        # parse health is the emptiness of ``stream_errors``.
-        probe_errors = probe.get("stream_errors") or []
-        production_pick = {
-            "path": inv["production_selected_path"],
-            "role": inv["production_selected_role"],
-            "certified_path": selected,
-            "kernel_count": (probe.get("attribution") or {}).get("kernel_count") or 0,
-            "event_total": probe.get("event_total"),
-            "parse_ok": not probe_errors and not probe.get("truncated"),
-            "truncated": bool(probe.get("truncated")),
-        }
-        record["trace_dir_level"]["production_pick_probe"] = production_pick
+        inv["production_pick_probe"] = _probe_production_pick(inv)
+    rank = _certify_rank(Path(selected), framework=framework, thresholds=thresholds)
+    record["rank_level"].append(rank)
+    record["verdict"] = build_verdict(
+        TraceHealth(
+            parse_ok=rank["parse"]["parse_ok"],
+            kernel_count=rank["density"]["kernel_count"],
+            capture_fragment=inv["selected_capture_fragment"],
+            attributed_pct=rank["attribution"]["attributed_pct"],
+            graph_under_recorded=rank["density"]["graph_under_recorded"],
+        ),
+        thresholds=thresholds,
+        production_pick=inv.get("production_pick_probe"),
+        coverage=CoverageMeasures(
+            rank["density"]["graph_launch_coverage"],
+            rank["attribution"]["op_meta_coverage"],
+            inv.get("capture_sidecar_probe", {}).get("op_meta_coverage"),
+        ),
+    )
+    return record
 
+
+def _probe_production_pick(inv: dict[str, Any]) -> dict[str, Any]:
+    """Measure the file the live resolver would open in place of the selected one."""
+    probe = analyze_trace(inv["production_selected_path"], TraceAnalysisOptions(top_k=1, steady_state=False))
+    # ``analyze_trace`` reports the kernel count inside ``attribution`` and has no ``parse_ok`` key at all --
+    # parse health is the emptiness of ``stream_errors``.
+    return {
+        "path": inv["production_selected_path"],
+        "role": inv["production_selected_role"],
+        "certified_path": inv["selected_path"],
+        "kernel_count": (probe.get("attribution") or {}).get("kernel_count") or 0,
+        "event_total": probe.get("event_total"),
+        "parse_ok": not probe.get("stream_errors") and not probe.get("truncated"),
+        "truncated": bool(probe.get("truncated")),
+    }
+
+
+def _certify_rank(path: Path, *, framework: str, thresholds: dict[str, Any]) -> dict[str, Any]:
+    """The rank-level row for one trace file: the shipping reader's pass, then the step pass."""
     # Pass 1: the shipping reader, whole-trace scope. Groups 1, 3, 4, 5.
-    analysis = analyze_trace(sel, TraceAnalysisOptions(top_k=1, steady_state=False, framework=framework))
+    analysis = analyze_trace(path, TraceAnalysisOptions(top_k=1, steady_state=False, framework=framework))
     # Pass 2: step structure and subtree attribution. Groups 6, 7, 8.
     sp = StepPass()
-    pass2_errors = sp.scan(sel)
+    pass2_errors = sp.scan(path)
     sp.attribute_steps()
-
     attribution = analysis.get("attribution") or {}
     coverage_block = analysis.get("graph_coverage") or {}
     timeline = analysis.get("timeline") or {}
@@ -668,31 +636,24 @@ def certify_trace_dir(
         stream_errors.append(
             f"trace aggregation truncated at safety cap ({analysis.get('truncation_reason', 'unknown')})"
         )
-
-    ann = annotation_report(sp, framework=framework, min_repeats=min_repeats)
-
     kernel_count = attribution.get("kernel_count", 0)
     graph_launch_count = coverage_block.get("graph_launch_count", 0)
     graph_with_kernels = coverage_block.get("graph_launches_with_kernels", 0)
-    coverage = _ratio(graph_with_kernels, graph_launch_count)
-
     try:
-        size = sel.stat().st_size
+        size = path.stat().st_size
     except OSError:
         size = None
-
-    rank_record = {
+    return {
         "rank": analysis.get("analyzed_rank"),
-        "path": str(sel),
+        "path": str(path),
         "parse": {
             "parse_ok": not stream_errors,
             "stream_errors": stream_errors,
             "event_total": analysis.get("event_total", 0),
             "bytes": size,
-            "gz": sel.name.lower().endswith(".gz"),
-            # Carried from the reader rather than left behind: a ratio computed over a truncated aggregation is
-            # not the same measurement as one computed over the whole trace, and until now the record gave a
-            # reader no way to tell the two apart.
+            "gz": path.name.lower().endswith(".gz"),
+            # A ratio computed over a truncated aggregation is not the same measurement as one computed over the
+            # whole trace, so the record says which one it carries.
             "aggregation_scope": analysis.get("aggregation_scope"),
             "truncated": bool(analysis.get("truncated")),
             "truncation_reason": analysis.get("truncation_reason") or "",
@@ -716,7 +677,7 @@ def certify_trace_dir(
             "graph_mode": coverage_block.get("graph_mode"),
             "graph_launch_count": graph_launch_count,
             "graph_launches_with_kernels": graph_with_kernels,
-            "graph_launch_coverage": coverage,
+            "graph_launch_coverage": _ratio(graph_with_kernels, graph_launch_count),
             "graph_under_recorded": coverage_block.get("graph_under_recorded"),
             # The boolean above is a comparison, so it travels with the number it was compared against.
             "graph_under_recorded_threshold": thresholds["graph_launch_coverage_max"],
@@ -731,27 +692,5 @@ def certify_trace_dir(
             "idle_pct_full_trace": timeline.get("idle_pct"),
             "stream_overlap": timeline.get("stream_overlap") or {},
         },
-        "annotations": ann,
+        "annotations": annotation_report(sp, framework=framework, min_repeats=thresholds["min_repeats"]),
     }
-    record["rank_level"].append(rank_record)
-
-    source_kernel_corrs = {c for c in sp.kernel_by_corr if c is not None}
-    record["chunk_level"] = certify_chunks([Path(c) for c in chunk_files], source_kernel_corrs)
-
-    record["verdict"] = build_verdict(
-        TraceHealth(
-            parse_ok=not stream_errors,
-            kernel_count=kernel_count,
-            capture_fragment=inv["selected_capture_fragment"],
-            attributed_pct=attribution.get("attributed_pct"),
-            graph_under_recorded=coverage_block.get("graph_under_recorded"),
-        ),
-        thresholds=thresholds,
-        production_pick=production_pick,
-        coverage=CoverageMeasures(
-            coverage,
-            rank_record["attribution"]["op_meta_coverage"],
-            (record["trace_dir_level"].get("capture_sidecar_probe") or {}).get("op_meta_coverage"),
-        ),
-    )
-    return record
