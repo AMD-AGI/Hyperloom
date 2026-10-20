@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -24,7 +24,7 @@ from hyperloom.common.coerce import to_str_list
 from hyperloom.common.launch_log_evidence import settings_the_engine_rewrote
 from hyperloom.inference_optimizer.grid_server_args import MULTI_VALUE_FLAGS
 from ._framework_switch_manifest import additive_variants, leave_one_out_variants
-from ._grid_runner import GridVariant, _build_variant_yaml
+from ._grid_base import GridVariant
 from ._launch_restatement import config_envs, named_settings, restates_the_baseline
 from ._proposal_identity import effective_fingerprint, normalize_proposal
 from ._server_argv import ConfigUnreadable, config_server_argv
@@ -386,16 +386,31 @@ def _is_noop_filter_exempt(variant: GridVariant) -> bool:
     return str(getattr(variant, "provenance", "") or "").strip() in _NOOP_FILTER_ALWAYS_RUNS
 
 
+#: Materializes one variant's Magpie YAML; the grid runner owns it and hands it to the filters,
+#: so deciding which variants to launch does not depend on the runner that launches them.
+VariantYamlBuilder = Callable[..., Path]
+
+
 def _materialized_launch(
-    base_yaml_path: Path, base_extra_args: str, gv: GridVariant, output_subdir: Path, **build: Any
+    build_variant_yaml: VariantYamlBuilder,
+    base_yaml_path: Path,
+    base_extra_args: str,
+    gv: GridVariant,
+    output_subdir: Path,
+    **build: Any,
 ) -> tuple[str, dict[str, str]]:
     """The server argv and benchmark envs ``run_grid`` would launch *gv* with."""
-    out_path = _build_variant_yaml(base_yaml_path, base_extra_args, gv, output_subdir=output_subdir, **build)
+    out_path = build_variant_yaml(base_yaml_path, base_extra_args, gv, output_subdir=output_subdir, **build)
     return config_server_argv(out_path).text, config_envs(out_path)
 
 
 def filter_context_copy_drafts(
-    grid: list[GridVariant], *, base_yaml_path: Path, base_extra_args: str, **build: Any
+    grid: list[GridVariant],
+    *,
+    build_variant_yaml: VariantYamlBuilder,
+    base_yaml_path: Path,
+    base_extra_args: str,
+    **build: Any,
 ) -> tuple[list[GridVariant], list[tuple[str, str]]]:
     """Drop variants that introduce or change a context-copying speculative-decoding draft (synthetic sessions only)."""
     if not grid:
@@ -406,7 +421,12 @@ def filter_context_copy_drafts(
         tmp_root = Path(tmp_dir)
         try:
             base = _materialized_launch(
-                base_yaml_path, base_extra_args, GridVariant(_NOOP_PROBE_BASE_NAME), tmp_root / "base", **build
+                build_variant_yaml,
+                base_yaml_path,
+                base_extra_args,
+                GridVariant(_NOOP_PROBE_BASE_NAME),
+                tmp_root / "base",
+                **build,
             )
         except (OSError, ValueError, yaml.YAMLError, ConfigUnreadable) as exc:
             log.warning("explore: could not materialize the base to read its speculative decoding (%s)", exc)
@@ -414,7 +434,9 @@ def filter_context_copy_drafts(
         for idx, gv in enumerate(grid):
             against = base
             try:
-                launch = _materialized_launch(base_yaml_path, base_extra_args, gv, tmp_root / f"v{idx}", **build)
+                launch = _materialized_launch(
+                    build_variant_yaml, base_yaml_path, base_extra_args, gv, tmp_root / f"v{idx}", **build
+                )
             except (OSError, ValueError, yaml.YAMLError, ConfigUnreadable) as exc:
                 log.warning("explore: could not materialize %s to read its speculative decoding (%s)", gv.name, exc)
                 launch = (str(gv.extra_server_args or ""), {str(k): str(v) for k, v in (gv.extra_envs or {}).items()})
@@ -438,24 +460,29 @@ def filter_baseline_noop_variants(
     grid: list[GridVariant],
     *,
     framework: str,
+    build_variant_yaml: VariantYamlBuilder,
     base_yaml_path: Path,
     base_extra_args: str,
-    observed_server_config: Mapping[str, Any] | None = None,
-    observed_server_env: Mapping[str, str] | None = None,
+    observed: ObservedLaunch | None = None,
     **build: Any,
 ) -> tuple[list[GridVariant], list[tuple[str, str]]]:
     """Drop variants that would launch the server the stack is already running."""
-    observed_config = dict(observed_server_config or {})
+    observed_config = dict(observed.config if observed else {})
     if not observed_config or not grid:
         return list(grid), []
-    observed_env = dict(observed_server_env or {})
+    observed_env = dict(observed.env if observed else {})
     kept: list[GridVariant] = []
     dropped: list[tuple[str, str]] = []
     with tempfile.TemporaryDirectory(prefix="explore_noop_probe_") as tmp_dir:
         tmp_root = Path(tmp_dir)
         try:
             base_argv, base_envs = _materialized_launch(
-                base_yaml_path, base_extra_args, GridVariant(_NOOP_PROBE_BASE_NAME), tmp_root / "base", **build
+                build_variant_yaml,
+                base_yaml_path,
+                base_extra_args,
+                GridVariant(_NOOP_PROBE_BASE_NAME),
+                tmp_root / "base",
+                **build,
             )
         except (OSError, ValueError, yaml.YAMLError) as exc:
             log.warning(
@@ -471,7 +498,7 @@ def filter_baseline_noop_variants(
                 continue
             try:
                 variant_argv, variant_envs = _materialized_launch(
-                    base_yaml_path, base_extra_args, gv, tmp_root / f"v{idx}", **build
+                    build_variant_yaml, base_yaml_path, base_extra_args, gv, tmp_root / f"v{idx}", **build
                 )
             except (OSError, ValueError, yaml.YAMLError) as exc:
                 log.warning("explore: baseline-noop probe failed for variant %s (%s); keeping it", gv.name, exc)

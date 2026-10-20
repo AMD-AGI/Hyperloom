@@ -73,6 +73,7 @@ from ._grid_runner import (
     _MN_PARAMS_PRIORITY,
     GridVariant,
     SessionDirField,
+    _build_variant_yaml,
     _num_gpus_for_config,
     apply_aiter_moe_pin_filter,
     apply_compatibility_filter,
@@ -825,6 +826,7 @@ class _ExploreRound:
         _, restated = filter_baseline_noop_variants(
             [gv],
             framework=self.launch.framework,
+            build_variant_yaml=_build_variant_yaml,
             base_yaml_path=self.workload.config_path,
             base_extra_args=self.stack.extra_args,
             base_extra_envs=dict(self.stack.extra_envs),
@@ -834,8 +836,7 @@ class _ExploreRound:
             model_path=self.workload.model_path,
             gpu_type=self.workload.gpu_type,
             benchmark_script=self.workload.benchmark_script,
-            observed_server_config=config,
-            observed_server_env=env,
+            observed=ObservedLaunch(config, env),
         )
         if not restated:
             return False
@@ -873,6 +874,7 @@ class _ExploreRound:
             return ""
         _, copy_refused = filter_context_copy_drafts(
             [gv],
+            build_variant_yaml=_build_variant_yaml,
             base_yaml_path=self.workload.config_path,
             base_extra_args=self.stack.extra_args,
             model_path=self.workload.model_path,
@@ -1433,6 +1435,7 @@ class ExploreExecutor:
         kept, restated = filter_baseline_noop_variants(
             runnable,
             framework=setup.launch.framework,
+            build_variant_yaml=_build_variant_yaml,
             base_yaml_path=setup.workload.config_path,
             base_extra_args=setup.baseline.extra_args,
             base_extra_envs=setup.baseline.extra_envs,
@@ -1442,8 +1445,7 @@ class ExploreExecutor:
             model_path=setup.workload.model_path,
             gpu_type=setup.workload.gpu_type,
             benchmark_script=setup.workload.benchmark_script,
-            observed_server_config=observed.config,
-            observed_server_env=observed.env,
+            observed=observed,
         )
         kept_ids = {id(gv) for gv in kept}
         leading = next((i for i, gv in enumerate(runnable) if id(gv) in kept_ids), len(runnable))

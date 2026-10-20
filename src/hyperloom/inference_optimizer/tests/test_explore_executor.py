@@ -33,8 +33,10 @@ from hyperloom.orchestrator.actions.stop_attribution import (
     ORCHESTRATOR_CANCELLED_CLASS,
     SESSION_TIME_EXHAUSTED_CLASS,
 )
+from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
 from hyperloom.orchestrator.actions.executors._launch_evidence import build_launch_evidence
 from hyperloom.orchestrator.actions.executors._variant_grid import (
+    ObservedLaunch,
     _atom_default_grid,
     _default_grid_for_framework,
     _seed_lever_variants,
@@ -190,7 +192,12 @@ def _stack_config(**changes: object) -> dict[str, object]:
     return {"mem_fraction_static": 0.9, "max_running_requests": 512, **changes}
 
 
-def _noop_filter_kwargs(tmp_path: Path, **overrides: object) -> dict:
+def _noop_filter_kwargs(
+    tmp_path: Path,
+    observed_server_config: dict | None = None,
+    observed_server_env: dict | None = None,
+    **overrides: object,
+) -> dict:
     base_yaml = tmp_path / "base.yaml"
     base_yaml.write_text(
         yaml.safe_dump({"benchmark": {"framework": "sglang", "envs": {**_RECIPE_ENV, **_BASE_ARGS_ENV}}}),
@@ -198,6 +205,7 @@ def _noop_filter_kwargs(tmp_path: Path, **overrides: object) -> dict:
     )
     kwargs = {
         "framework": "sglang",
+        "build_variant_yaml": _build_variant_yaml,
         "base_yaml_path": base_yaml,
         "base_extra_args": "",
         "base_extra_envs": {},
@@ -207,8 +215,10 @@ def _noop_filter_kwargs(tmp_path: Path, **overrides: object) -> dict:
         "model_path": None,
         "gpu_type": None,
         "benchmark_script": None,
-        "observed_server_config": _stack_config(),
-        "observed_server_env": _stack_env(),
+        "observed": ObservedLaunch(
+            _stack_config() if observed_server_config is None else observed_server_config,
+            _stack_env() if observed_server_env is None else observed_server_env,
+        ),
     }
     kwargs.update(overrides)
     return kwargs
