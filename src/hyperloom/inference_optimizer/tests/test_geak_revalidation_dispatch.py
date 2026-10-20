@@ -69,7 +69,7 @@ def _record_revalidations(coordinator) -> list[str]:
     """Replace the 2b revalidation with a recorder of the reasons it was asked for."""
     reasons: list[str] = []
 
-    async def _record(*, reason: str) -> None:
+    async def _record(*, reason: str, handoff_cards: list[int] | None) -> None:
         reasons.append(reason)
 
     coordinator.phase_kernel._revalidate_geak_candidate = _record
@@ -658,7 +658,7 @@ async def test_same_config_geak_result_settles_without_measurement(coordinator, 
     st.geak_pending = {"status": "awaiting_rebench"}
     _forbid_rebench(c, monkeypatch)
 
-    await c.phase_kernel._revalidate_geak_candidate(reason="geak_e2e_win")
+    await c.phase_kernel._revalidate_geak_candidate(reason="geak_e2e_win", handoff_cards=None)
 
     assert st.current_best["action"] == "explore"
     assert st.current_best["tput"] == pytest.approx(110.0)
@@ -720,7 +720,7 @@ async def test_no_material_drop_does_not_claim_the_stack_was_revalidated(coordin
     st.geak_pending = {"status": "awaiting_rebench"}
     _forbid_rebench(c, monkeypatch)
 
-    await c.phase_kernel._revalidate_geak_candidate(reason="geak_e2e_win")
+    await c.phase_kernel._revalidate_geak_candidate(reason="geak_e2e_win", handoff_cards=None)
 
     assert st.geak_result["revalidation_status"] == "no_material"
     assert st.cumulative_gain_validated == pytest.approx(10.0)
@@ -1288,7 +1288,7 @@ async def test_a_geak_win_is_measured_and_promoted_inside_the_calling_task(coord
 
     c.sub.register_executor("explore", _explore)
 
-    await c.phase_kernel._revalidate_geak_candidate(reason="geak_e2e_win")
+    await c.phase_kernel._revalidate_geak_candidate(reason="geak_e2e_win", handoff_cards=None)
 
     assert st.current_best["action"] == "geak_e2e"
     assert st.current_best["tput"] == pytest.approx(120.0)
@@ -1309,7 +1309,7 @@ async def test_a_failed_revalidation_settles_the_verdict_and_keeps_the_stack(coo
 
     c.sub.register_executor("explore", _explore)
 
-    await c.phase_kernel._revalidate_geak_candidate(reason="geak_e2e_win")
+    await c.phase_kernel._revalidate_geak_candidate(reason="geak_e2e_win", handoff_cards=None)
 
     assert not st.geak_pending
     assert st.geak_result["revalidation_status"] == "failed"
@@ -1334,7 +1334,7 @@ async def test_a_cancelled_revalidation_is_recorded_before_it_propagates(coordin
     c.sub.register_executor("explore", _explore)
 
     with pytest.raises(FuturesCancelledError):
-        await c.phase_kernel._revalidate_geak_candidate(reason="geak_e2e_win")
+        await c.phase_kernel._revalidate_geak_candidate(reason="geak_e2e_win", handoff_cards=None)
 
     assert st.geak_pending["status"] == "rebench_cancelled"
     assert st.current_best["action"] == "baseline"
@@ -1370,7 +1370,7 @@ async def test_a_spent_kernel_budget_waits_for_the_rebench_and_keeps_the_win(coo
         }
 
     async def _kernel_agent(_ctx):
-        await c.phase_kernel._revalidate_geak_candidate(reason="geak_e2e_win")
+        await c.phase_kernel._revalidate_geak_candidate(reason="geak_e2e_win", handoff_cards=None)
         return {"status": "ok", "route": "geak"}
 
     c.sub.register_executor("explore", _explore)

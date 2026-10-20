@@ -1553,6 +1553,7 @@ class KernelPhase(CoordinatorCollaborator):
             state.save(self.session_dir)
             return True
 
+        handoff_cards = _resolve_handoff_physical_gpus(gpu_ids=_gpu_ids, gpu_ids_space=_gpu_ids_space, gpu_pin=gpu_pin)
         # Crash-recovery: a validated result.json written before a coordinator crash is promoted on resume, guarded by
         # ``_geak_win_already_recorded`` so a prior cycle's result.json does not short-circuit a fresh entry.
         result_path = out_dir / "result.json"
@@ -1565,10 +1566,9 @@ class KernelPhase(CoordinatorCollaborator):
             )
             if not _promote_recovered_result(recovered, recovered_from="existing_result_json"):
                 return
-            await self._revalidate_geak_candidate(reason="geak_e2e_win_recovered")
+            await self._revalidate_geak_candidate(reason="geak_e2e_win_recovered", handoff_cards=handoff_cards)
             return
 
-        handoff_cards = _resolve_handoff_physical_gpus(gpu_ids=_gpu_ids, gpu_ids_space=_gpu_ids_space, gpu_pin=gpu_pin)
         still_busy = await self._free_gpus_for_geak(handoff_cards)
         if still_busy:
             _finish_skip({"status": "error", "error_class": "gpus_busy_at_handoff", "error": still_busy})
@@ -1697,8 +1697,9 @@ class KernelPhase(CoordinatorCollaborator):
                     kill_timeout_s=kill_timeout,
                 ):
                     return
-                await self._wait_for_gpus_before_rebench(handoff_cards)
-                await self._revalidate_geak_candidate(reason="geak_e2e_win_sigterm_recovered")
+                await self._revalidate_geak_candidate(
+                    reason="geak_e2e_win_sigterm_recovered", handoff_cards=handoff_cards
+                )
                 return
             _finish_skip(
                 {
@@ -1800,13 +1801,11 @@ class KernelPhase(CoordinatorCollaborator):
         self._record_geak_kernel_journey(result)
         # The same-harness rebench is the only path that writes the headline.
         if str(result.get("status") or "") == "ok":
-            await self._wait_for_gpus_before_rebench(handoff_cards)
-            await self._revalidate_geak_candidate(reason="geak_e2e_win")
+            await self._revalidate_geak_candidate(reason="geak_e2e_win", handoff_cards=handoff_cards)
         elif _geak_has_accepted_kernel(result):
             # A no_gain headline over an accepted, parity-checked kernel still deserves the measurement — the rebench
             # is what decides, and without it the kernel is lost with no number attached to it.
-            await self._wait_for_gpus_before_rebench(handoff_cards)
-            await self._revalidate_geak_candidate(reason="geak_e2e_accepted_kernel")
+            await self._revalidate_geak_candidate(reason="geak_e2e_accepted_kernel", handoff_cards=handoff_cards)
         self._coord.phase_machine.record_phase_entry_evidence(
             geak={
                 "status": result.get("status"),
@@ -1834,21 +1833,19 @@ class KernelPhase(CoordinatorCollaborator):
         )
         state.save(self.session_dir)
 
-    async def _revalidate_geak_candidate(self, *, reason: str) -> None:
+    async def _revalidate_geak_candidate(self, *, reason: str, handoff_cards: list[int] | None) -> None:
         """Measure the GEAK candidate on the orchestrator harness and settle its verdict.
 
         The 2b rebench runs as a step of the ``kernel_agent`` task, under the
         lanes it holds, and its result goes through the same promotion a
         dispatched explore would. A candidate the grid cannot carry goes to the
-        GEAK-harness replay (2a) instead.
+        GEAK-harness replay (2a) instead. ``handoff_cards`` are drained only
+        when a measurement follows.
         """
         state = self.shared_state
         params = self._coord.writeback.geak_rebench_params(reason=reason)
         from .geak_native_revalidation import ORIGIN, finish_invalid_source, revalidate_source
 
-        if params.get("origin") == ORIGIN:
-            await revalidate_source(self._coord, params)
-            return
         if params.get("reason") == "geak_native_source_invalid":
             finish_invalid_source(self._coord, str(params["error"]))
             return
@@ -1858,6 +1855,10 @@ class KernelPhase(CoordinatorCollaborator):
         if skip_reason == "geak_no_material":
             self._coord.writeback.settle_geak_no_material()
             state.save(self.session_dir)
+            return
+        await self._wait_for_gpus_before_rebench(handoff_cards)
+        if params.get("origin") == ORIGIN:
+            await revalidate_source(self._coord, params)
             return
         if skip_reason is not None:
             await self._revalidate_on_geak_harness(decline_reason=str(skip_reason))
