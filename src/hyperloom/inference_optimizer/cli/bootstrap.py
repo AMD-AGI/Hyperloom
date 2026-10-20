@@ -328,6 +328,7 @@ def _established_gpu_power_settings(
         power_cap_w=declared.power_cap_w,
         perf_level=declared.perf_level or None,
         nodes=nodes,
+        just_applied=bool(applied),
     )
     if applied:
         record["applied"] = applied
@@ -414,6 +415,7 @@ def resolve_gpu_power_settings(
     perf_level: str | None,
     nodes: int,
     read: Any = None,
+    just_applied: bool = False,
 ) -> tuple[dict[str, Any], str]:
     """Read the cards' power settings and check the declared ones; ``(record, error)``.
 
@@ -466,10 +468,12 @@ def resolve_gpu_power_settings(
         gpus=gpus,
     )
     if problems:
-        return record, (
-            "the GPUs are not at the declared power settings (set them with amd-smi before launch): "
-            + "; ".join(problems)
+        why = (
+            "the GPUs did not take the power settings just applied"
+            if just_applied
+            else "the GPUs are not at the declared power settings (set them with amd-smi before launch)"
         )
+        return record, f"{why}: " + "; ".join(problems)
     return record, ""
 
 

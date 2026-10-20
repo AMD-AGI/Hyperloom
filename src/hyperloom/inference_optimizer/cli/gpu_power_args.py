@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import argparse
 
+from hyperloom.common.gpu_power_settings import PERF_LEVELS
+
 from .constraint_args import positive_watts_arg
 
 
@@ -29,11 +31,12 @@ def add_gpu_power_arguments(opt: argparse._ActionsContainer) -> None:
     )
     opt.add_argument(
         "--gpu-perf-level",
-        type=str,
+        type=str.lower,
+        choices=PERF_LEVELS,
         default=None,
         metavar="LEVEL",
         help=(
-            "Declare the DPM performance level the GPUs run at (e.g. auto, high, determinism). Asserted like "
+            f"Declare the DPM performance level the GPUs run at, one of {', '.join(PERF_LEVELS)}. Asserted like "
             "--gpu-power-cap-w, or set by the session with --apply-gpu-power-settings."
         ),
     )
@@ -49,7 +52,8 @@ def add_gpu_power_arguments(opt: argparse._ActionsContainer) -> None:
             "host-local storage before anything is set and restored when the session ends, including on SIGTERM "
             "or SIGHUP; after a SIGKILL the cards stay at the applied settings until the next launch that passes "
             "this flag with them in its mask restores them. Refuses without an integer mask, on multi-node, and on a card that holds "
-            "someone else's resident model or whose VRAM cannot be read, since a cap is card-wide, and on a "
+            "someone else's resident model, whose VRAM cannot be read, or that is not in SPX compute-partition "
+            "mode, since a cap is card-wide, and on a "
             "starting perf level a restore could not bring back (determinism or manual, when --gpu-perf-level is "
             "applied). "
             "Must be passed "

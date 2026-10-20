@@ -5,12 +5,14 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import signal
 import stat
 import subprocess
 import sys
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -65,9 +67,10 @@ def guard(monkeypatch):
         signal.signal(sig, handler)
 
 
-def _install(monkeypatch, ledger, *, observed=None, vram=None, mask=_MASK, smi=None) -> _AmdSmi:
-    """What the apply reads (cards, VRAM, mask, ledger); *smi* answers every ``amd-smi`` command it runs."""
+def _install(monkeypatch, ledger, *, observed=None, vram=None, mask=_MASK, smi=None, modes=None) -> _AmdSmi:
+    """What the apply reads (cards, VRAM, mask, partition modes, ledger); *smi* answers every ``amd-smi`` command it runs."""
     smi = smi or _AmdSmi()
+    monkeypatch.setattr(gpu_power_apply, "read_partition_modes", lambda: dict.fromkeys(range(8), "SPX") | (modes or {}))
     reads = list(observed or [_cards(), _cards()])
     resident = dict.fromkeys(range(8), 284.0) if vram is None else vram
     monkeypatch.setattr(
@@ -131,6 +134,33 @@ class TestLease:
         # All-or-nothing: the failed lease must not have kept card 6.
         PowerSettingsLease(tmp_path, {6}).release()
         first.release()
+
+    def test_a_lease_waits_out_the_brief_shared_lock_of_a_warning(self, tmp_path):
+        """A launch without the flag reads the record under a shared lock; a concurrent flagged launch must not refuse."""
+        PowerSettingsLease(tmp_path, {4}).release()
+        reader = os.open(tmp_path / "gpu4.json", os.O_RDONLY)
+        fcntl.flock(reader, fcntl.LOCK_SH)
+        timer = threading.Timer(0.3, lambda: os.close(reader))
+        timer.start()
+        try:
+            PowerSettingsLease(tmp_path, {4}).release()
+        finally:
+            timer.join()
+
+    def test_a_lock_error_other_than_held_closes_the_record(self, tmp_path, monkeypatch):
+        opened: list[int] = []
+        closed: list[int] = []
+        real_open, real_close = os.open, os.close
+        monkeypatch.setattr(
+            gpu_power_control.os, "open", lambda *a, **k: opened.append(real_open(*a, **k)) or opened[-1]
+        )
+        monkeypatch.setattr(gpu_power_control.os, "close", lambda fd: closed.append(fd) or real_close(fd))
+        monkeypatch.setattr(
+            gpu_power_control.fcntl, "flock", lambda fd, op: (_ for _ in ()).throw(OSError(37, "no locks"))
+        )
+        with pytest.raises(GpuPowerSettingsError, match="no locks"):
+            PowerSettingsLease(tmp_path, {4})
+        assert opened and set(opened) <= set(closed)
 
     def test_a_record_left_by_a_dead_holder_is_an_orphan(self, tmp_path):
         lease = PowerSettingsLease(tmp_path, {4})
@@ -282,6 +312,26 @@ class TestApplyDeclared:
             _apply(monkeypatch, tmp_path, vram=vram, smi=smi)
         assert smi.calls == []
 
+    @pytest.mark.parametrize("modes", [{6: "CPX"}, {6: "DPX"}, None], ids=["cpx", "dpx", "unreadable"])
+    def test_a_partitioned_card_is_refused_untouched(self, tmp_path, monkeypatch, modes):
+        """A cap is per socket: setting one partition's card would cap the sibling partitions other sessions use."""
+        smi = _install(monkeypatch, tmp_path, modes=modes)
+        if modes is None:
+
+            def _unreadable():
+                raise gpu_power_apply.PartitionError("amd-smi partition reported no compute-partition state")
+
+            monkeypatch.setattr(gpu_power_apply, "read_partition_modes", _unreadable)
+        with pytest.raises(GpuPowerSettingsError, match="compute-partition"):
+            apply_declared_gpu_power_settings(DeclaredPowerSettings(power_cap_w=1000.0), nodes=1, owner="s")
+        assert smi.calls == [] and list(tmp_path.iterdir()) == []
+
+    def test_a_fractional_cap_is_refused_before_anything_is_leased(self, tmp_path, monkeypatch):
+        """amd-smi set takes whole watts; finding that out after the lease and records would be too late."""
+        with pytest.raises(GpuPowerSettingsError, match="whole number of watts; 1000.5 W"):
+            _apply(monkeypatch, tmp_path, power_cap_w=1000.5)
+        assert list(tmp_path.iterdir()) == []
+
     def test_a_card_whose_vram_cannot_be_read_is_refused_untouched(self, tmp_path, monkeypatch):
         vram = {gpu: 284.0 for gpu in range(8) if gpu != 5}
         smi = _AmdSmi()
@@ -299,6 +349,22 @@ class TestApplyDeclared:
         assert smi.calls[0] == ["amd-smi", "set", "-g", "4", "-o", "ppt0", "1400"]
         assert record["originals"]["4"]["power_cap_w"] == 1400.0
         guard.run()
+
+    def test_a_stop_signal_cannot_cut_an_orphans_restore_short(self, tmp_path, monkeypatch):
+        dead = PowerSettingsLease(tmp_path, {4})
+        dead.record({4: {"power_cap_w": 1400}}, applied={"power_cap_w": 900}, owner="dead")
+        dead.release()
+        signal.signal(signal.SIGTERM, _RestoreGuard._exit_on_signal)
+
+        def _signal_then_restore(originals):
+            os.kill(os.getpid(), signal.SIGTERM)
+            return restore_gpu_power_settings(originals)
+
+        smi = _install(monkeypatch, tmp_path, observed=[_cards(cap=900.0), _cards(cap=900.0), _cards()])
+        monkeypatch.setattr(gpu_power_apply, "restore_gpu_power_settings", _signal_then_restore)
+        record = apply_declared_gpu_power_settings(DeclaredPowerSettings(power_cap_w=1000.0), nodes=1, owner="s")
+        assert record["recovered_from_orphan"] == [4]
+        assert smi.calls[0] == ["amd-smi", "set", "-g", "4", "-o", "ppt0", "1400"]
 
     def test_a_card_held_by_a_live_session_is_refused(self, tmp_path, monkeypatch):
         live = PowerSettingsLease(tmp_path, {5})
@@ -509,6 +575,15 @@ def test_orphan_warning_names_the_card_and_its_original(tmp_path, monkeypatch):
     assert _warning(monkeypatch, tmp_path, _cards(cap=900.0), mask={5}) == "", "not this session's card"
 
 
+def test_the_perf_level_is_one_amd_smi_accepts(capsys):
+    parser = _build_parser()
+    base = ["optimize", "--model", "m", "--framework", "vllm"]
+    assert parser.parse_args([*base, "--gpu-perf-level", "DETERMINISM"]).gpu_perf_level == "determinism"
+    with pytest.raises(SystemExit):
+        parser.parse_args([*base, "--gpu-perf-level", "turbo"])
+    assert "invalid choice: 'turbo'" in capsys.readouterr().err
+
+
 def test_parser_flag_is_off_by_default():
     parser = _build_parser()
     base = ["optimize", "--model", "m", "--framework", "vllm"]
@@ -617,6 +692,20 @@ class TestRestoreGuard:
             os.environ.clear()
             os.environ.update(saved)
         assert (exc.value.code, restored) == (3, [True])
+
+    def test_the_signals_are_held_before_the_restore_is_taken(self, guard, monkeypatch):
+        """A SIGTERM between taking the restore and holding the signals would drop it with nothing left to run it."""
+        guard.arm(list)
+        held_with_restore: list[bool] = []
+        real = signal.signal
+
+        def _spy(sig, handler):
+            held_with_restore.append(guard._restore is not None)
+            return real(sig, handler)
+
+        monkeypatch.setattr(gpu_power_apply.signal, "signal", _spy)
+        guard.run()
+        assert held_with_restore[0] is True
 
     def test_the_restore_runs_once_and_a_failure_is_loud(self, guard, capsys):
         calls: list[int] = []

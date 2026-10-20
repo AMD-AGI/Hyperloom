@@ -27,7 +27,10 @@ __all__ = [
     "GPU_POWER_SAMPLING_ENV",
     "GpuPowerSettingsError",
     "DeclaredPowerSettings",
+    "PERF_LEVEL",
+    "PERF_LEVELS",
     "PERF_LEVEL_MANUAL",
+    "POWER_CAP_W",
     "declared_setting_problems",
     "gpu_power_sampling_unavailable",
     "normalize_perf_level",
@@ -36,6 +39,21 @@ __all__ = [
 ]
 
 _PERF_LEVEL_PREFIX = "AMDSMI_DEV_PERF_LEVEL_"
+#: The setting keys a card's power settings, a declaration and a record share.
+POWER_CAP_W = "power_cap_w"
+PERF_LEVEL = "perf_level"
+#: The DPM performance levels ``amd-smi set --perf-level`` accepts, lowercased.
+PERF_LEVELS = (
+    "auto",
+    "low",
+    "high",
+    "manual",
+    "stable_std",
+    "stable_peak",
+    "stable_min_mclk",
+    "stable_min_sclk",
+    "determinism",
+)
 #: The perf level an operator sets to tune a card's clocks by hand.
 PERF_LEVEL_MANUAL = "manual"
 _UNREADABLE = "unreadable"
@@ -111,7 +129,7 @@ def _gpu_rows(payload: Any) -> list[dict[str, Any]]:
     return [row for row in rows or [] if isinstance(row, dict) and isinstance(row.get("gpu"), int)]
 
 
-def _watts(block: Any) -> float | None:
+def _value(block: Any) -> float | None:
     if isinstance(block, dict):
         block = block.get("value")
     return float(block) if isinstance(block, (int, float)) and not isinstance(block, bool) else None
@@ -123,10 +141,10 @@ def _power_cap_w(limit: Any) -> float | None:
         return None
     for key in ("ppt0", "ppt"):
         section = limit.get(key)
-        if isinstance(section, dict) and (cap := _watts(section.get("socket_power_limit"))) is not None:
+        if isinstance(section, dict) and (cap := _value(section.get("socket_power_limit"))) is not None:
             return cap
     for key in ("socket_power_limit", "power_cap"):
-        if (cap := _watts(limit.get(key))) is not None:
+        if (cap := _value(limit.get(key))) is not None:
             return cap
     return None
 

@@ -22,13 +22,16 @@ import os
 import socket
 import stat
 import subprocess  # nosec B404 - fixed amd-smi invocations.
+import time
 from pathlib import Path
 from typing import Any, Mapping, TypeGuard
 
 from hyperloom.common.gpu_power_settings import (
+    PERF_LEVEL,
+    POWER_CAP_W,
     GpuPowerSettingsError,
     _gpu_rows,
-    _watts,
+    _value,
     normalize_perf_level,
 )
 
@@ -51,9 +54,9 @@ _LEDGER_DIR_MODE = 0o755
 
 _BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
 _READ_TIMEOUT_SEC = 30.0
+#: How long a lease waits for a shared lock a launch without the flag holds while it reads a record for its warning.
+_LOCK_WAIT_SEC = 1.0
 _SET_TIMEOUT_SEC = 60.0
-_POWER_CAP_W = "power_cap_w"
-_PERF_LEVEL = "perf_level"
 _SET = "set"
 _BOOT_ID = "boot_id"
 _UTF8 = "utf-8"
@@ -90,7 +93,7 @@ def read_resident_vram_mb() -> dict[int, float]:
     for row in _gpu_rows(payload):
         mem_usage = row.get("mem_usage")
         mem = mem_usage if isinstance(mem_usage, dict) else {}
-        used = _watts(mem.get("used_vram"))
+        used = _value(mem.get("used_vram"))
         if used is not None:
             out[row["gpu"]] = used
     return out
@@ -101,10 +104,10 @@ def _set_commands(settings: Mapping[int, Mapping[str, Any]]) -> list[list[str]]:
     by_cap: dict[float, list[int]] = {}
     by_level: dict[str, list[int]] = {}
     for gpu, row in sorted(settings.items()):
-        cap = row.get(_POWER_CAP_W)
+        cap = row.get(POWER_CAP_W)
         if _is_number(cap):
             by_cap.setdefault(float(cap), []).append(gpu)
-        level = normalize_perf_level(row.get(_PERF_LEVEL))
+        level = normalize_perf_level(row.get(PERF_LEVEL))
         if level:
             by_level.setdefault(level, []).append(gpu)
     commands = [[_SET, "-g", *map(str, gpus), "-o", "ppt0", f"{cap:g}"] for cap, gpus in by_cap.items()]
@@ -193,6 +196,23 @@ def _open_record(path: Path, flags: int) -> int:
     return fd
 
 
+def _lock_exclusive(fd: int) -> None:
+    """``flock(LOCK_EX)``, waiting out a launch without the flag reading the record under its brief shared lock.
+
+    Raises:
+        BlockingIOError: the record is still locked after the wait, so a live session holds the card.
+    """
+    deadline = time.monotonic() + _LOCK_WAIT_SEC
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.05)
+
+
 class PowerSettingsLease:
     """Exclusive, crash-recoverable ownership of the power settings of a set of cards.
 
@@ -214,12 +234,15 @@ class PowerSettingsLease:
             for gpu in sorted(gpus):
                 fd = _open_record(self._dir / f"gpu{gpu}.json", os.O_RDWR | os.O_CREAT)
                 try:
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    _lock_exclusive(fd)
                 except BlockingIOError:
                     os.close(fd)
                     raise GpuPowerSettingsError(
                         f"GPU {gpu}'s power settings are held by another running Hyperloom session"
                     ) from None
+                except OSError:
+                    os.close(fd)
+                    raise
                 self._fds[gpu] = fd
         except OSError as exc:
             self.release()

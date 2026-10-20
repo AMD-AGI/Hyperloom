@@ -30,8 +30,11 @@ from hyperloom.common.gpu_power_control import (
     read_resident_vram_mb,
     restore_gpu_power_settings,
 )
+from hyperloom.common.gpu_partition import PartitionError, read_partition_modes
 from hyperloom.common.gpu_power_settings import (
+    PERF_LEVEL,
     PERF_LEVEL_MANUAL,
+    POWER_CAP_W,
     DeclaredPowerSettings,
     GpuPowerSettingsError,
     normalize_perf_level,
@@ -49,10 +52,8 @@ __all__ = [
 #: A card holding more than this much VRAM before the session has started anything has someone else's model resident,
 #: and a cap is card-wide: setting it would change that tenant's run too.
 _FOREIGN_RESIDENT_VRAM_MB = 2048.0
-_POWER_CAP_W = "power_cap_w"
-_PERF_LEVEL = "perf_level"
 _DETERMINISM = "determinism"
-_LABELS = {_POWER_CAP_W: "power cap", _PERF_LEVEL: "perf level"}
+_LABELS = {POWER_CAP_W: "power cap", PERF_LEVEL: "perf level"}
 #: Starting perf levels a perf-level restore cannot bring back: determinism's clock soft-max is set with
 #: ``amd-smi set -d``, and manual carries clock limits an operator tuned by hand, which setting a level resets.
 _UNRESTORABLE_LEVELS = (_DETERMINISM, PERF_LEVEL_MANUAL)
@@ -73,6 +74,20 @@ def _session_gpus(observed: Mapping[int, Any], mask: set[int] | None) -> set[int
             "could not be restored after the session"
         )
     return set(mask)
+
+
+def _refuse_partitioned_cards(gpus: set[int]) -> None:
+    """Refuse a card split into compute partitions: its cap is per socket, so it would cap the sibling partitions too."""
+    try:
+        modes = read_partition_modes()
+    except PartitionError as exc:
+        raise GpuPowerSettingsError(f"the compute-partition mode of the cards could not be read: {exc}") from exc
+    split = sorted(gpu for gpu in gpus if modes.get(gpu, "") != "SPX")
+    if split:
+        raise GpuPowerSettingsError(
+            f"GPU(s) {', '.join(map(str, split))} are not in SPX compute-partition mode; a power cap is per socket and "
+            "would change the sibling partitions, which other sessions may use"
+        )
 
 
 def _refuse_busy_cards(gpus: set[int], resident: Mapping[int, float]) -> None:
@@ -116,7 +131,7 @@ def _originals(observed: Mapping[int, Mapping[str, Any]], touched: Mapping[int, 
 
 def _refuse_unrestorable_levels(originals: Mapping[int, Mapping[str, Any]]) -> None:
     """Refuse cards whose starting perf level a restore could not bring back; checked before anything is set."""
-    levels = {gpu: normalize_perf_level(row.get(_PERF_LEVEL)) for gpu, row in originals.items() if _PERF_LEVEL in row}
+    levels = {gpu: normalize_perf_level(row.get(PERF_LEVEL)) for gpu, row in originals.items() if PERF_LEVEL in row}
     for level in _UNRESTORABLE_LEVELS:
         stuck = sorted(gpu for gpu, at in levels.items() if at == level)
         if stuck:
@@ -137,7 +152,7 @@ def _label(key: str) -> str:
 
 def _reads_as(got: Any, want: Any, key: str) -> bool:
     """Whether a card's reading of one setting is the given value."""
-    if key == _PERF_LEVEL:
+    if key == PERF_LEVEL:
         return normalize_perf_level(got) == normalize_perf_level(want)
     return isinstance(got, (int, float)) and not isinstance(got, bool) and abs(got - want) <= 0.5
 
@@ -230,8 +245,9 @@ def _recover_orphans(lease: PowerSettingsLease) -> list[int]:
     lease.clear(set(orphans) - set(live))
     if not live:
         return []
-    problems = _restore_and_verify(live)
-    lease.clear(set(live) - set(problems))
+    with _stop_signals_held():
+        problems = _restore_and_verify(live)
+        lease.clear(set(live) - set(problems))
     if problems:
         raise GpuPowerSettingsError(
             "a previous session left these cards at settings it applied and they could not be restored: "
@@ -256,7 +272,11 @@ def apply_declared_gpu_power_settings(declared: DeclaredPowerSettings, *, nodes:
         raise GpuPowerSettingsError("--apply-gpu-power-settings needs --gpu-power-cap-w and/or --gpu-perf-level")
     if nodes >= 2:
         raise GpuPowerSettingsError("--apply-gpu-power-settings cannot set the cards of a multi-node session")
+    cap = declared.power_cap_w
+    if cap is not None and not float(cap).is_integer():
+        raise GpuPowerSettingsError(f"--apply-gpu-power-settings sets a whole number of watts; {cap:g} W was declared")
     gpus = _session_gpus(read_gpu_power_settings(), visible_gpu_indices())
+    _refuse_partitioned_cards(gpus)
     lease = PowerSettingsLease(GPU_POWER_LEDGER_DIR, gpus)
     # Only what this session changes is recorded, so only that is put back: restoring a perf level nobody declared
     # would reset a card left in MANUAL clocks for reasons this session knows nothing about.
@@ -316,7 +336,7 @@ def apply_declared_gpu_power_settings(declared: DeclaredPowerSettings, *, nodes:
 
 
 def _describe(values: Mapping[str, Any]) -> str:
-    cap, level = values.get(_POWER_CAP_W), values.get(_PERF_LEVEL)
+    cap, level = values.get(POWER_CAP_W), values.get(PERF_LEVEL)
     parts = [f"cap {cap:g} W"] if isinstance(cap, (int, float)) and not isinstance(cap, bool) else []
     return ", ".join(parts + ([f"perf level {level}"] if level else []))
 
@@ -408,15 +428,16 @@ class _RestoreGuard:
 
     def run(self) -> list[str]:
         """Put the cards back, once; the problems it reported. A stop signal during the restore cannot cut it short."""
-        restore, self._restore = self._restore, None
-        if restore is None:
-            return []
+        # Held before the restore is taken: a signal between the two would otherwise drop it with nothing left to run.
         held = {sig: signal.signal(sig, signal.SIG_IGN) for sig in (*_RESTORE_SIGNALS, signal.SIGINT)}
         try:
-            problems = restore()
+            restore, self._restore = self._restore, None
+            problems = restore() if restore is not None else None
         finally:
             for sig, handler in held.items():
                 signal.signal(sig, self._previous.pop(sig, handler))
+        if problems is None:
+            return []
         if problems:
             print(
                 "WARNING: could not restore the GPU power settings this session applied: "

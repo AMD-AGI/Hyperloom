@@ -99,6 +99,20 @@ class TestResolve:
         assert error == ""
         assert list(record["observed"]) == ["1"]
 
+    def test_a_setting_that_did_not_take_after_an_apply_says_so(self, monkeypatch):
+        """The operator did not set these; telling them to set them by hand would send them the wrong way."""
+        from hyperloom.inference_optimizer.cli.bootstrap import resolve_gpu_power_settings
+
+        monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
+        monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
+        read = lambda: read_gpu_power_settings(run=_fake_run)  # noqa: E731
+        _, error = resolve_gpu_power_settings(
+            power_cap_w=1000.0, perf_level=None, nodes=1, read=read, just_applied=True
+        )
+        assert error.startswith("the GPUs did not take the power settings just applied: GPU 0 power cap is 1400.0 W")
+        _, error = resolve_gpu_power_settings(power_cap_w=1000.0, perf_level=None, nodes=1, read=read)
+        assert "(set them with amd-smi before launch)" in error
+
     def test_a_declaration_that_cannot_be_read_refuses(self, monkeypatch):
         def _unreadable():
             raise GpuPowerSettingsError("amd-smi is not on PATH")

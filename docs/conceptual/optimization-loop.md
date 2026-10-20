@@ -304,7 +304,18 @@ before it writes any power-settings record, with the cards unchanged. It also
 refuses, with nothing left changed:
 
 - without an integer `ROCR_VISIBLE_DEVICES` / `HIP_VISIBLE_DEVICES` mask. It
-  sets exactly the masked cards, never the whole host;
+  sets exactly the masked cards, never the whole host. A mask number is a ROCm
+  number, not an amd-smi index: ROCm numbers cards in KFD node order and amd-smi
+  in PCI order, and on MI300X/MI355X boards the two differ, so each masked card
+  is matched to amd-smi through the KFD node id `amd-smi list` reports, with
+  `HIP_VISIBLE_DEVICES` indexing into what `ROCR_VISIBLE_DEVICES` left. The
+  read-only assertion, the per-GPU budget and the power sampler use the same
+  translation. A mask that is not numeric (GPU UUIDs) or names a card that does
+  not exist is refused;
+- on a card not in SPX compute-partition mode: a cap is per socket, so it would
+  change the sibling partitions, which other sessions may use;
+- when the declared cap is not a whole number of watts, which `amd-smi set`
+  does not take;
 - on multi-node;
 - on a masked card `amd-smi` does not report, or whose current value cannot be
   read, since nothing could restore it;
@@ -340,32 +351,38 @@ the same card. A restore sets whatever a record says, as root, so the record
 directory and its parent are writable only by root, and records are readable by
 every account (for the warning below) but writable only by root; a launch with
 the flag creates both directories at mode 0755, and sets an existing one root
-owns (such as a mounted host directory) to 0755. A record that is a symlink or a
-hard link, or a record or directory owned by another unprivileged account or
-writable by others, is refused rather than read.
+owns (such as a mounted host directory) to 0755 unless other accounts can write
+it, which is refused instead. A record that is a symlink or a hard link, or a
+record or directory owned by another unprivileged account or writable by others,
+is refused rather than read. Any local account can still make a flagged launch
+refuse: by holding a lock on a card's record, which reads as a live session
+holding the card, or by creating `/var/tmp/hyperloom` first, which is then not
+root's and refused. Both fail safe, with nothing set, until an administrator
+removes them.
 
 The originals are restored when the session ends: at a stop reason, an operator
-stop, an error exit, or a SIGTERM / SIGHUP at any point after the cards were set,
-including startup and the close sequence. A stop signal during the restore
+stop, an error exit, or a SIGTERM / SIGHUP at any point after the cards were
+set, including startup and the close sequence. A stop signal during the restore
 itself is ignored so it cannot cut it short. A SIGKILL (an OOM kill, or a
 scheduler escalating after its grace period, such as Slurm's `KillWait`) cannot
 be caught: the cards stay at the applied settings, and the record is left with
 its lock free. The next launch on that host that passes the flag with those
-cards in its mask restores them before doing anything else; a launch without the flag warns that the
-cards were left changed and names their original values. Records are judged
-setting by setting: a setting that still reads at the applied value is put back
-(a restore that put back the cap but not the level gets the level restored),
-while a setting the card no longer reads at (an operator put it back, or set a
-value of their own) is left alone. A setting whose reading is missing is not
-taken as moved: the launch with the flag refuses with the record kept and names
-the record file to remove once the card has been checked by hand, and the
-warning reports the card as possibly still changed. A record none of whose settings still reads as applied is
-stale: it is cleared, not restored, and not warned about.
-Give a scheduler's grace period enough time for the session to close. On resume the flag must be
-passed again, since the settings were restored when the previous leg exited.
-A resume with the flag first stops the serving processes its previous leg left
-running (a leg that was SIGKILLed leaves its server up), so the check for other
-tenants' models does not refuse on the session's own server.
+cards in its mask restores them before setting anything; a launch without the
+flag warns that the cards were left changed and names their original values.
+Records are judged setting by setting: a setting that still reads at the applied
+value is put back (a restore that put back the cap but not the level gets the
+level restored), while a setting the card no longer reads at (an operator put it
+back, or set a value of their own) is left alone. A setting whose reading is
+missing is not taken as moved: the launch with the flag refuses with the record
+kept and names the record file to remove once the card has been checked by hand,
+and the warning reports the card as possibly still changed. A record none of
+whose settings still reads as applied is stale: it is cleared, not restored, and
+not warned about. Give a scheduler's grace period enough time for the session to
+close. On resume the flag must be passed again, since the settings were restored
+when the previous leg exited. A resume with the flag first stops the serving
+processes its previous leg left running (a leg that was SIGKILLed leaves its
+server up), so the check for other tenants' models does not refuse on the
+session's own server.
 
 ### Power budget (constraint on KEEP)
 
