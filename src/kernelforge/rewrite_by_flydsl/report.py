@@ -10,7 +10,7 @@ from dataclasses import asdict, dataclass, field
 
 from kernelforge.rewrite_by_flydsl import protocol
 from kernelforge.rewrite_by_flydsl.budget import DEFAULT_REWRITE_BUDGET, RewriteBudgetPolicy
-from kernelforge.durable_io import atomic_write_text
+from kernelforge.tools.durable_io import atomic_write_text
 
 # The nested forge-loop sentinel is suppressed while its stdout is streamed by rewrite_by_flydsl.optimize, so this is
 # the only one a caller sees.
