@@ -239,13 +239,6 @@ class _ProfileWindow(NamedTuple):
     num_prompts: int
 
 
-class _ProfileOsl(NamedTuple):
-    """The output length a profile serves, and the captured steps its steady state needs."""
-
-    osl_val: int
-    steady_floor: int
-
-
 def _profile_range_ratio(envs: Mapping[str, Any]) -> float:
     """The request-length spread the steady-state floor is computed against."""
     try:
@@ -263,7 +256,7 @@ def _steady_state_floor(*, osl_val: int, conc_val: int, range_ratio: float) -> i
     return math.ceil(max(osl_val, 1) * (1.0 + range_ratio) / (2.0 * max(conc_val, 1)))
 
 
-def _fit_profile_osl(*, osl_val: int, conc_val: int, range_ratio: float, cap: int) -> _ProfileOsl:
+def _fit_profile_osl(*, osl_val: int, conc_val: int, range_ratio: float, cap: int) -> int:
     """Resolve the profile-scoped OSL, lowering it until its steady state fits ``cap``.
 
     ``PROFILE_OSL`` (via ``--profile-osl``) is honored as-is and only warned about;
@@ -275,7 +268,7 @@ def _fit_profile_osl(*, osl_val: int, conc_val: int, range_ratio: float, cap: in
     osl_val = int(raw) if explicit else min(osl_val, _PROFILE_DEFAULT_OSL)
     steady_floor = _steady_state_floor(osl_val=osl_val, conc_val=conc_val, range_ratio=range_ratio)
     if steady_floor <= cap:
-        return _ProfileOsl(osl_val=osl_val, steady_floor=steady_floor)
+        return osl_val
     if explicit:
         log.warning(
             "PROFILE_OSL=%d needs %d captured steps to reach steady "
@@ -286,7 +279,7 @@ def _fit_profile_osl(*, osl_val: int, conc_val: int, range_ratio: float, cap: in
             steady_floor,
             cap,
         )
-        return _ProfileOsl(osl_val=osl_val, steady_floor=steady_floor)
+        return osl_val
     fitted_osl = max(1, int(cap * 2 * max(conc_val, 1) / (1.0 + range_ratio)))
     log.warning(
         "profile OSL %d would need %d captured steps to reach "
@@ -297,10 +290,7 @@ def _fit_profile_osl(*, osl_val: int, conc_val: int, range_ratio: float, cap: in
         cap,
         fitted_osl,
     )
-    return _ProfileOsl(
-        osl_val=fitted_osl,
-        steady_floor=_steady_state_floor(osl_val=fitted_osl, conc_val=conc_val, range_ratio=range_ratio),
-    )
+    return fitted_osl
 
 
 def _profile_prompt_count(*, osl_val: int, conc_val: int, captured_iters: int) -> int:
@@ -323,18 +313,14 @@ def _fit_profile_capture_window(envs: dict[str, Any], *, osl_val: int, conc_val:
     delay_iters, max_iters = _profile_capture_window(
         os.environ,
         cap=cap,
-        delay_iters=max(0, int(fitted.osl_val * (range_ratio + 1) * 3 - cap / 2)),
-        steady_floor=fitted.steady_floor,
+        delay_iters=max(0, int(fitted * (range_ratio + 1) * 3 - cap / 2)),
+        steady_floor=_steady_state_floor(osl_val=fitted, conc_val=conc_val, range_ratio=range_ratio),
     )
     return _ProfileWindow(
-        osl_val=fitted.osl_val,
+        osl_val=fitted,
         delay_iters=delay_iters,
         max_iters=max_iters,
-        num_prompts=_profile_prompt_count(
-            osl_val=fitted.osl_val,
-            conc_val=conc_val,
-            captured_iters=delay_iters + max_iters,
-        ),
+        num_prompts=_profile_prompt_count(osl_val=fitted, conc_val=conc_val, captured_iters=delay_iters + max_iters),
     )
 
 

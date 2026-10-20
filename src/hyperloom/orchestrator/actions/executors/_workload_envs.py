@@ -1559,18 +1559,19 @@ def _apply_eval_envs(
 
 
 class _LaunchIdentity(NamedTuple):
-    """What this run launches: the model, the GPU, the entrypoint and the checkout."""
+    """What this run launches: the model, the GPU, the entrypoint, the checkout and the client.
+
+    ``agentx_mode`` picks the client: the AgentX switch replaces the benchmark
+    script, so it settles the entrypoint alongside ``benchmark_script``.
+    ``grading`` is the session's own, and settles the axis and band the published
+    AgentX workload spec hands to GEAK.
+    """
 
     model_path: str | None
     gpu_type: str | None
     benchmark_script: str | None
     inferencex_path: str | None
-
-
-class _AgentxChoice(NamedTuple):
-    """The session's AgentX decision and the grading its workload spec publishes."""
-
-    mode: bool | None
+    agentx_mode: bool | None
     grading: Mapping[str, Any] | None
 
 
@@ -1605,18 +1606,12 @@ class _ComposedArgs(NamedTuple):
     overrides: _ArgOverrides
 
 
-class _BenchmarkConfig(NamedTuple):
-    """The YAML document being rendered, and the benchmark section inside it."""
-
-    document: dict[str, Any]
-    bench: dict[str, Any]
-
-
-def _read_benchmark_config(config_path: Path) -> _BenchmarkConfig:
-    """Read the source Magpie YAML and name the benchmark section it renders."""
+def _read_benchmark_config(config_path: Path) -> dict[str, Any]:
+    """Read the source Magpie YAML, with the benchmark section it renders present."""
     with config_path.open(encoding="utf-8") as f:
         document = yaml.safe_load(f) or {}
-    return _BenchmarkConfig(document=document, bench=document.setdefault("benchmark", {}))
+    document.setdefault("benchmark", {})
+    return document
 
 
 def _write_benchmark_config(document: dict[str, Any], materialized: Path) -> Path:
@@ -1665,7 +1660,7 @@ def _adopt_recipe_envs(bench: dict[str, Any], agentx_mode: bool | None) -> dict[
     return envs
 
 
-def _settle_benchmark_identity(bench: dict[str, Any], identity: _LaunchIdentity, agentx: _AgentxChoice) -> None:
+def _settle_benchmark_identity(bench: dict[str, Any], identity: _LaunchIdentity) -> None:
     """Settle what this run launches: its model, GPU, entrypoint and checkouts.
 
     The process env wins over the YAML defaults, and an explicit
@@ -1679,7 +1674,7 @@ def _settle_benchmark_identity(bench: dict[str, Any], identity: _LaunchIdentity,
     _apply_runner_type(bench, identity.gpu_type)
     if identity.benchmark_script:
         bench["benchmark_script"] = str(identity.benchmark_script)
-    envs = _adopt_recipe_envs(bench, agentx.mode)
+    envs = _adopt_recipe_envs(bench, identity.agentx_mode)
     runtime_path = os.environ.get("PATH", "").strip()
     if "PATH" in envs and runtime_path:
         envs["PATH"] = runtime_path
@@ -1689,7 +1684,7 @@ def _settle_benchmark_identity(bench: dict[str, Any], identity: _LaunchIdentity,
         gpu_type=identity.gpu_type,
         explicit_benchmark_script=bool(identity.benchmark_script),
     )
-    apply_agentx_switch(bench, identity.model_path, active=agentx.mode, grading=agentx.grading)
+    apply_agentx_switch(bench, identity.model_path, active=identity.agentx_mode, grading=identity.grading)
     _refuse_framework_script_mismatch(bench)
     _pin_inferencex_checkout(bench, identity.inferencex_path)
 
@@ -2098,18 +2093,17 @@ def materialize_config_with_envs(
         FrameworkScriptMismatchError: If ``benchmark_script`` targets a
             different known framework than the run's framework.
     """
-    config = _read_benchmark_config(config_path)
-    bench = config.bench
-    _settle_benchmark_identity(
-        bench,
-        _LaunchIdentity(
-            model_path=model_path,
-            gpu_type=gpu_type,
-            benchmark_script=benchmark_script,
-            inferencex_path=inferencex_path,
-        ),
-        _AgentxChoice(mode=agentx_mode, grading=grading),
+    document = _read_benchmark_config(config_path)
+    bench = document["benchmark"]
+    identity = _LaunchIdentity(
+        model_path=model_path,
+        gpu_type=gpu_type,
+        benchmark_script=benchmark_script,
+        inferencex_path=inferencex_path,
+        agentx_mode=agentx_mode,
+        grading=grading,
     )
+    _settle_benchmark_identity(bench, identity)
     envs = bench["envs"]
     shape = _resolve_workload_shape(envs, bench)
     profile = _apply_profile_config(envs, bench, shape)
@@ -2149,7 +2143,7 @@ def materialize_config_with_envs(
     _apply_vllm_source_runtime(bench, envs)
     _drop_benchmark_credentials(envs)
     seal_server_argv(envs, bench.get("framework"))
-    return _write_benchmark_config(config.document, output_dir / out_name)
+    return _write_benchmark_config(document, output_dir / out_name)
 
 
 __all__ = [
