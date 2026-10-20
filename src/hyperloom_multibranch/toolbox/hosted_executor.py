@@ -136,6 +136,10 @@ class HostedExecutor:
             return self._timed_out(request_id, started)
         return self._result(request, accepted, call, outcome, started)
 
+    def withdraw(self, request_id: str) -> None:
+        """End the running attempt of ``request_id``: its sandbox is closed and its cards go back to the pool."""
+        self._backend.withdraw(request_id)
+
     # -- verifying a recorded result again -------------------------------------------------------------------------
 
     def difference(self, result: TestResult) -> str | None:

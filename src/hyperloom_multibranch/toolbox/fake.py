@@ -158,6 +158,9 @@ class FakeExecutor:
         result = self._produced[request_id] = self._result(request, outcome, started, spent)
         return result
 
+    def withdraw(self, request_id: str) -> None:
+        """A faked attempt holds no card, so there is nothing to release."""
+
     async def reverify(self, result: TestResult) -> None:
         """What the result says of the measurement must be what this executor produced for its request; the runner's
         own bookkeeping (queue time, sandbox marks) is not part of it."""

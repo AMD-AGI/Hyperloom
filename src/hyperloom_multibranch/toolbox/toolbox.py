@@ -521,6 +521,7 @@ class RealToolbox:
         self._queue.remove(entry.request_id)
         task = self._tasks.pop(entry.request_id, None)
         if task is not None:
+            self._executor.withdraw(entry.request_id)  # the task's cancel cannot reach the thread that measures
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
         await self._record_and_write(entry, {"withdrawal": reason})

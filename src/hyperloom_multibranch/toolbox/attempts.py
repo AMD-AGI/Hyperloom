@@ -63,6 +63,15 @@ class Executor(Protocol):
         """Check a recorded ``result`` against the evidence of the attempt that made it; raises
         :class:`~hyperloom_multibranch.contracts.gate.ResultUnverified` when it does not match or cannot be checked."""
 
+    def withdraw(self, request_id: str) -> None:
+        """End the running attempt of ``request_id`` and release what it holds (its sandbox and cards); returns at
+        once, and does nothing for a request that is not running.
+
+        Cancelling the task that awaits :meth:`run` does not do this: the measurement runs in a worker thread no cancel
+        reaches, so a withdrawn test would keep its cards to the end. The toolbox calls it for a test it withdraws while
+        it runs, never when it only closes (a restart re-attaches to what is still measuring).
+        """
+
 
 NodeFailure = Callable[[str, str, bool], Awaitable[None]]
 """Hears ``(node, reason, reproduced)``: ``reproduced`` is False for an unclear failure that did not recur on its rerun

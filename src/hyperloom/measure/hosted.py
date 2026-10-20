@@ -155,6 +155,56 @@ class HostedConfig:
         return Path(self.session_dir) / HOSTED_DIR_NAME
 
 
+class _Stops:
+    """The stop switch of every test that is running: one per request, and closing the backend sets them all.
+
+    A test is told to stop by :meth:`withdraw`. The switch is read where the test waits (for a slot, for its sandbox's
+    result) so that a withdrawn test gives its sandbox, and with it its cards, back at once instead of measuring on
+    for minutes after nobody wants the result.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._running: dict[str, threading.Event] = {}
+        self._withdrawn: set[str] = set()
+        self._closed = False
+
+    def begin(self, request_id: str) -> threading.Event:
+        """The switch of ``request_id``'s run; already set when the backend closed or the test was withdrawn first."""
+        with self._lock:
+            switch = self._running[request_id] = threading.Event()
+            if self._closed or request_id in self._withdrawn:
+                switch.set()
+            return switch
+
+    def end(self, request_id: str) -> None:
+        """The run is over; its switch and a withdrawal that reached it are dropped."""
+        with self._lock:
+            self._running.pop(request_id, None)
+            self._withdrawn.discard(request_id)
+
+    def withdraw(self, request_id: str) -> None:
+        """Set the switch of ``request_id``'s run, or, when it has not begun yet (its worker thread may still be
+        queued), make it begin with the switch set. A withdrawal that arrives after the run ended is kept: one short
+        string, as a request id never runs again after it was withdrawn."""
+        with self._lock:
+            self._withdrawn.add(request_id)
+            switch = self._running.get(request_id)
+        if switch is not None:
+            switch.set()
+
+    def withdrawn(self, request_id: str) -> bool:
+        with self._lock:
+            return request_id in self._withdrawn
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
+            switches = list(self._running.values())
+        for switch in switches:
+            switch.set()
+
+
 @dataclass
 class _Attempt:
     """Everything one attempt needs while it runs."""
@@ -166,6 +216,7 @@ class _Attempt:
     spec_raw: bytes
     runner: RunnerSandbox
     started_unix: float
+    stop: threading.Event
 
 
 def _outcome(
@@ -230,7 +281,7 @@ class HostedMeasurementBackend:
             ),
         )
         self._journal: MeasurementJournal | None = None
-        self._stop = threading.Event()
+        self._stops = _Stops()
 
     # -- lifecycle ----------------------------------------------------------------------------------------------
 
@@ -248,7 +299,7 @@ class HostedMeasurementBackend:
 
     def close(self) -> None:
         """Stop accepting tests and close every authoritative sandbox still running."""
-        self._stop.set()
+        self._stops.close()
         self._pool.close()
 
     @property
@@ -268,18 +319,32 @@ class HostedMeasurementBackend:
 
         Returns the outcome; a failed measurement, a refused sheet and a rejected result are all outcomes with their
         own return code (``returncodes``). A timeout raises :class:`subprocess.TimeoutExpired`, as the local flow does.
+        A withdrawn test (:meth:`withdraw`) returns the stop code once its sandbox is closed.
         """
         journal = self.journal
-        previous = journal.latest(call.task_id)
-        if previous is not None and previous.state in (STATE_SUBMITTED, STATE_SENT):
-            resumed = self._resume(call, previous)
-            if resumed is not None:
-                return resumed
-        return self._fresh(call, journal.next_attempt(call.task_id))
+        stop = self._stops.begin(call.task_id)
+        try:
+            previous = journal.latest(call.task_id)
+            if previous is not None and previous.state in (STATE_SUBMITTED, STATE_SENT):
+                resumed = self._resume(call, previous, stop)
+                if resumed is not None:
+                    return resumed
+            return self._fresh(call, journal.next_attempt(call.task_id), stop)
+        finally:
+            self._stops.end(call.task_id)
+
+    def withdraw(self, request_id: str) -> None:
+        """Tell the test of ``request_id`` that nobody wants its result any more; it returns at once.
+
+        The test ends at its next poll (or leaves the wait for a slot): its sandbox is closed and its cards go back to
+        the pool, so the next test can have them. Without this a withdrawn test measures on to the end, holding its
+        card the whole time. Calling it for a test that is not running, or twice, changes nothing.
+        """
+        self._stops.withdraw(request_id)
 
     # -- a new attempt ------------------------------------------------------------------------------------------
 
-    def _fresh(self, call: TestCall, number: int) -> TestOutcome:
+    def _fresh(self, call: TestCall, number: int, stop: threading.Event) -> TestOutcome:
         try:
             spec = self._build(call)
             gpus = spec.hardware.gpu_count
@@ -288,16 +353,18 @@ class HostedMeasurementBackend:
             return _refusal(call, HOSTED_SPEC_REJECTED_RC, exc.reason, exc.detail)
         except NoRunnerTemplate as exc:
             return _refusal(call, HOSTED_SPEC_REJECTED_RC, "no_runner_template", str(exc))
-        acquired = self._acquire(call, gpus, number)
+        acquired = self._acquire(call, gpus, number, stop)
         if isinstance(acquired, TestOutcome):
             return acquired
         runner = acquired
         try:
+            if stop.is_set():  # told to stop while it waited for the sandbox: nothing is sent to it
+                return _refusal(call, STOPPED_RETURNCODE, STOPPED_REASON, "the test was stopped before it started")
             if not runner.public_key_pem:
                 return _refusal(
                     call, HOSTED_RESULT_REJECTED_RC, "no_signing_key", "the platform reported no signing key"
                 )
-            attempt = _Attempt(call, call.task_id, number, spec, spec.to_bytes(), runner, self._clock())
+            attempt = _Attempt(call, call.task_id, number, spec, spec.to_bytes(), runner, self._clock(), stop)
             self._submit(attempt)
             return self._finish(attempt)
         except SandboxError as exc:
@@ -310,7 +377,7 @@ class HostedMeasurementBackend:
         window = call.timeout_sec + self._config.timeout_slack_sec if remaining is None else remaining
         return build_spec(call, request_id=call.task_id, ctx=self._config.spec, deadline_unix=self._clock() + window)
 
-    def _acquire(self, call: TestCall, gpus: int, number: int) -> RunnerSandbox | TestOutcome:
+    def _acquire(self, call: TestCall, gpus: int, number: int, stop: threading.Event) -> RunnerSandbox | TestOutcome:
         remaining = None if call.session_deadline_sec is None else call.session_deadline_sec - time.monotonic()
         try:
             return self._pool.acquire(
@@ -318,7 +385,7 @@ class HostedMeasurementBackend:
                 AttemptTag(call.task_id, number, tuple(call.avoid_nodes), _meta_of(call)),
                 timeout_sec=call.timeout_sec,
                 remaining_sec=remaining,
-                stop=self._stop,
+                stop=stop,
             )
         except SandboxUnavailable as exc:
             return _infra(call, HOSTED_RUNNER_UNAVAILABLE_RC, "runner_start_timeout", str(exc))
@@ -354,14 +421,17 @@ class HostedMeasurementBackend:
 
     # -- a re-attached attempt ----------------------------------------------------------------------------------
 
-    def _resume(self, call: TestCall, previous: Record) -> TestOutcome | None:
+    def _resume(self, call: TestCall, previous: Record, stop: threading.Event) -> TestOutcome | None:
         """Re-attach to the sandbox of an unfinished attempt; ``None`` when it is gone and a new attempt must start."""
         try:
-            runner = self._pool.reattach(str(previous.sandbox_id), stop=self._stop)
+            runner = self._pool.reattach(str(previous.sandbox_id), stop=stop)
         except SandboxGone:
             self._mark_finished(previous, {"verdict": RUNNER_LOST, "reason": "sandbox gone on resume"})
             return None
         except PoolClosed:
+            if self._stops.withdrawn(call.task_id):  # nobody wants it: it is closed, where a closing run leaves it
+                self._pool.discard(str(previous.sandbox_id))
+                self._mark_finished(previous, {"verdict": "withdrawn"})
             return _refusal(call, STOPPED_RETURNCODE, STOPPED_REASON, "the pool is closed")
         try:
             try:
@@ -373,7 +443,7 @@ class HostedMeasurementBackend:
                     call, HOSTED_SPEC_REJECTED_RC, "resume_failed", f"the journalled sheet is unusable: {exc}"
                 )
             started = float(previous.extra.get("submitted_unix", self._clock()))
-            attempt = _Attempt(call, previous.request_id, previous.attempt, spec, raw, runner, started)
+            attempt = _Attempt(call, previous.request_id, previous.attempt, spec, raw, runner, started, stop)
             if not runner.public_key_pem:
                 return _refusal(
                     call, HOSTED_RESULT_REJECTED_RC, "no_signing_key", "the platform reported no signing key"
@@ -417,7 +487,7 @@ class HostedMeasurementBackend:
                 status = None
             if status is not None:
                 return status
-            if config.should_stop() or self._stop.is_set():
+            if config.should_stop() or attempt.stop.is_set():
                 self._save_logs(handle, Path(call.output_dir))
                 return _refusal(call, STOPPED_RETURNCODE, STOPPED_REASON, "the run is stopping")
             if self._timed_out(attempt):

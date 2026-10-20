@@ -134,6 +134,10 @@ class ScriptedExecutor:
     refuse: str | None = None
     unverified: str | None = None
     verified: list[TestResult] = field(default_factory=list)
+    withdrawn: list[str] = field(default_factory=list)
+
+    def withdraw(self, request_id: str) -> None:
+        self.withdrawn.append(request_id)
 
     async def reverify(self, result: TestResult) -> None:
         self.verified.append(result)

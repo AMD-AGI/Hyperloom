@@ -230,13 +230,23 @@ class SandboxPool:
         finally:
             self._forget(runner.sandbox_id)
 
+    def discard(self, sandbox_id: str) -> None:
+        """Close a ``measurement`` sandbox this pool does not hold, as one an earlier process left behind; a sandbox
+        that is already gone is fine."""
+        try:
+            self._provider.connect(sandbox_id, role=MEASUREMENT_ROLE).kill()
+        except SandboxGone:
+            pass
+        except SandboxError:
+            log.exception("sandbox %s could not be closed", sandbox_id)
+
     def close(self) -> None:
         """Close every ``measurement`` sandbox still running and refuse new tests."""
         with self._cond:
             self._closed = True
             self._cond.notify_all()
         for info in self._provider.find({}, role=MEASUREMENT_ROLE):
-            self._close_one(info.sandbox_id)
+            self.discard(info.sandbox_id)
         with self._cond:
             self._held.clear()
             self._claims = 0
@@ -315,14 +325,6 @@ class SandboxPool:
                 self._held.discard(sandbox_id)
                 self._claims = max(0, self._claims - 1)
             self._cond.notify_all()
-
-    def _close_one(self, sandbox_id: str) -> None:
-        try:
-            self._provider.connect(sandbox_id, role=MEASUREMENT_ROLE).kill()
-        except SandboxGone:
-            pass
-        except SandboxError:
-            log.exception("sandbox %s could not be closed on shutdown", sandbox_id)
 
     @staticmethod
     def _close_handle(sandbox: Sandbox) -> None:
