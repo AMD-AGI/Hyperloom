@@ -1747,3 +1747,16 @@ def test_finalize_patch_prints_logs_when_pod_json_is_unparseable(monkeypatch, ca
     captured = capsys.readouterr()
     assert captured.out == "pod traceback\n"
     assert "finalize-patch: could not parse per-pod JSON from dashboard logs" in captured.err
+
+
+@pytest.mark.parametrize("content", [b"not-a-pid", b"\xff\xfe"])
+def test_rank0_pid_from_log_is_none_for_an_unreadable_pid_file(tmp_path, content):
+    lm = _load_script_module("lm_rank0_pid_unreadable", "launch_multinode.py")
+    (tmp_path / "rank_0.pid").write_bytes(content)
+    assert lm._rank0_pid_from_log(str(tmp_path)) is None
+
+
+def test_rank0_pid_from_log_does_not_hide_a_non_path_argument():
+    lm = _load_script_module("lm_rank0_pid_bad_arg", "launch_multinode.py")
+    with pytest.raises(TypeError, match="PathLike"):
+        lm._rank0_pid_from_log(None)

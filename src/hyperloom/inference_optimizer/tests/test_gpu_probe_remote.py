@@ -219,3 +219,12 @@ def test_parse_gpu_type_prefers_specific_tag():
     # MI325X is not shadowed by the MI300X substring rule.
     assert gpu_probe._parse_gpu_type("AMD Instinct MI325X") == "mi325x"
     assert gpu_probe._parse_gpu_type("nothing here") is None
+
+
+def test_a_failing_state_build_propagates(monkeypatch):
+    def _boom():
+        raise RuntimeError("bad hand-off env")
+
+    monkeypatch.setattr(gpu_probe, "build_external_state_from_env", _boom)
+    with pytest.raises(RuntimeError, match="bad hand-off env"):
+        gpu_probe.remote_autodetect_gpu_type(timeout_s=1)
