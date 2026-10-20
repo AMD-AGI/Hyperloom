@@ -718,6 +718,7 @@ def run_opportunity_analysis(
         )
         return asyncio.run(agent.run(handoff=handoff, layout=layout))
     except Exception as error:  # noqa: BLE001 - agent backend failure is not enumerable
+        log.warning("opportunity analysis setup failed: %s", error)
         result = OpportunityAnalysisResult(
             status=ANALYSIS_STATUS_FAILED,
             reason=f"opportunity analysis setup failed: {error}",
