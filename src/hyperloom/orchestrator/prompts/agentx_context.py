@@ -1,19 +1,25 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The AgentX workload and grading blocks both prompts render."""
+"""The AgentX workload, grading and launch-ownership blocks both prompts render."""
 
 from __future__ import annotations
 
+import os
 from types import SimpleNamespace
 from typing import Any, Mapping
 
 from hyperloom.common.agentx_workload import BACKEND_ENV, is_mlperf_backend
 from hyperloom.common.perf_metric import AGENTX_KEEP_P50_THRESHOLD_PCT
 from hyperloom.inference_optimizer.grading import resolved_grading
+from hyperloom.inference_optimizer.session.paths import magpie_dir
 
 # Percentiles rendered per axis, in order.
 _RENDERED = ("p50", "p90", "p99")
+
+# The Magpie module that owns the native AgentX launch protocol: its protected server args and environment, and the
+# recipe-pinned speculative-decoding inputs.
+_MAGPIE_LAUNCH_MODULE = "Magpie.modes.benchmark.agentx_launch"
 
 
 def _shape_row(label: str, dist: Mapping[str, Any] | None) -> str:
@@ -50,12 +56,17 @@ def corpus_lines(shape: Mapping[str, Any] | None) -> list[str]:
     return lines
 
 
+def _is_mlperf(backend: str) -> bool:
+    """Whether the session's recorded ``agentx_backend`` is MLPerf; an unrecorded one falls back to the environment."""
+    return is_mlperf_backend({BACKEND_ENV: backend} if backend else None)
+
+
 def grading_lines(grading: Mapping[str, Any] | None = None, backend: str = "") -> list[str]:
     """Describe what an AgentX KEEP is decided on, from the session's recorded ``grading`` and ``agentx_backend``.
 
     A session recorded before the backend field existed falls back to the process environment for it.
     """
-    if is_mlperf_backend({BACKEND_ENV: backend} if backend else None):
+    if _is_mlperf(backend):
         return [
             "**Graded on output token throughput** — the MLPerf agentic harness replays a",
             "fixed trajectory set and publishes no per-request interactivity, so a KEEP is",
@@ -74,4 +85,32 @@ def grading_lines(grading: Mapping[str, Any] | None = None, backend: str = "") -
         f"KEEP needs >=+{AGENTX_KEEP_P50_THRESHOLD_PCT:.0f}% on it while the slow tail (P90) and output",
         "throughput each hold inside the noise band. Anything short of all three is REVERT.",
         "Total token throughput is still measured, and is not the objective.",
+    ]
+
+
+def _magpie_launch_protocol_path() -> str:
+    """The installed :data:`_MAGPIE_LAUNCH_MODULE` source file, or ``""`` when it is not found.
+
+    An operator who does not set ``MAGPIE_PATH`` gets it from preflight, which resolves it from the package the Magpie
+    interpreter imports, so this is the file Magpie validates candidates with. The prompt layer cannot ask that
+    interpreter itself: the executors that own it sit on the far side of an import cycle.
+    """
+    path = magpie_dir().joinpath(*_MAGPIE_LAUNCH_MODULE.split(".")).with_suffix(".py")
+    return str(path) if os.path.isfile(path) else ""
+
+
+def launch_ownership_lines(backend: str = "") -> list[str]:
+    """Point a native Magpie AgentX session at the launch rules Magpie enforces; ``[]`` on the MLPerf backend.
+
+    The rules are Magpie's to change, so the lines name where they live and never restate them.
+    """
+    if _is_mlperf(backend):
+        return []
+    path = _magpie_launch_protocol_path()
+    source = f"`{path}`" if path else f"the module `{_MAGPIE_LAUNCH_MODULE}` of the Magpie install"
+    return [
+        "**The recipe and Magpie own the launch protocol.** Before proposing any server-arg or",
+        f"environment change, read Magpie's protected lists and golden-acceptance lock in {source}.",
+        "Magpie rejects a candidate that violates them before it is benchmarked, which wastes the",
+        "variant and every other change bundled into it; spend variants on other knobs.",
     ]

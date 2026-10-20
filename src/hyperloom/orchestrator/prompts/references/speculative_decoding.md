@@ -34,10 +34,25 @@ Concretely:
   determined by the golden curve, and forcing it above golden invalidates the
   result.
 - Whether a variant may change a draft-length / gamma / method knob, or turn
-  synthetic acceptance on, depends on the base launch (see *Pinned when the base
-  simulates acceptance* below). Where a variant may use synthetic acceptance — a
-  base with no speculative decoding — its AL is looked up for the variant's own
-  draft length; it is never carried over or hand-set.
+  synthetic acceptance on, depends on who owns the launch (see *Native Magpie
+  AgentX runs* below) and, on a Hyperloom-managed launch, on the base launch (see
+  *Pinned when the base simulates acceptance* below). Where a variant may use
+  synthetic acceptance — a Hyperloom-managed base with no speculative decoding —
+  its AL is looked up for the variant's own draft length; it is never carried
+  over or hand-set.
+
+## Native Magpie AgentX runs: Magpie owns acceptance
+
+On a native Magpie AgentX run the recipe and Magpie own the launch protocol,
+including acceptance and the recipe-pinned speculative-decoding inputs. Do not
+add, change or unset any `SGLANG_SIMULATE_ACC_*` env or synthetic-acceptance
+value, and do not change a pinned speculative-decoding input. Magpie rejects such
+a candidate before it is benchmarked, and every other change bundled into it goes
+unmeasured. The exact rules are Magpie's: read `PROTECTED_*` and
+`_validate_golden_launch` in its `Magpie/modes/benchmark/agentx_launch.py` (the
+session prompt gives the installed path) rather than relying on a copy here. The
+golden-AL lookup below then only confirms the recipe's own cell; spend variants on
+other knobs.
 
 ## Do NOT guess the golden-AL filename from the model name
 
@@ -74,7 +89,9 @@ Apply to any framework whose recipe touches the speculative-decoding knobs:
   well as model, so a method change invalidates the previously matched row.
 - **TensorRT-LLM / ATOM**: their respective draft-length equivalents.
 
-**Pinned when the base simulates acceptance.** When the session's base launch
+**Pinned when the base simulates acceptance.** This and the next two paragraphs
+apply to a Hyperloom-managed launch (any run that is not native Magpie AgentX,
+such as the MLPerf agentic backend). When the session's base launch
 **simulates acceptance** (`SGLANG_SIMULATE_ACC_LEN`
 is set, `--speculative-config` carries `rejection_sample_method: synthetic` or a
 `synthetic_acceptance_length`, or an acceptance-length flag such as ATOM's
