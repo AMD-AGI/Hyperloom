@@ -1099,12 +1099,7 @@ async def _sweep_arm_option_b(
         try:
             sub = await run.run_rung(variant, _RungServer(serving_lease=serving_lease))
         except Exception as exc:  # noqa: BLE001
-            log.warning(
-                "conc_sweep option B: arm=%s conc=%s raised %r",
-                arm_name,
-                variant.extra_envs.get("CONC", "?"),
-                exc,
-            )
+            log.warning("conc_sweep option B: arm=%s variant=%s raised %r", arm_name, variant.name, exc)
             sub = [
                 VariantResult(
                     name=variant.name,
