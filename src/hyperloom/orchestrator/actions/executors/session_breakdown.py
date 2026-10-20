@@ -11,8 +11,6 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.timeutil import format_exc_brief
-
 log = logging.getLogger(__name__)
 
 
@@ -33,15 +31,8 @@ class SessionBreakdownExecutor:
 
         from hyperloom.inference_optimizer.breakdown import write_breakdown_json
 
-        try:
-            # The export also writes the session's Experiences to the local service; that I/O stays off the loop.
-            target = await asyncio.to_thread(write_breakdown_json, session_dir, output_path=output_path)
-        except Exception as exc:
-            log.exception("session_breakdown export failed")
-            return {
-                "status": "failed",
-                "error": format_exc_brief(exc),
-            }
+        # The export also writes the session's Experiences to the local service; that I/O stays off the loop.
+        target = await asyncio.to_thread(write_breakdown_json, session_dir, output_path=output_path)
 
         # Surface warnings + size to the bus event.
         doc = json.loads(target.read_text(encoding="utf-8"))
