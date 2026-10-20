@@ -210,8 +210,8 @@ def test_bench_once_rejects_scalar_only_result(monkeypatch):
 def test_bench_once_none_on_exception(monkeypatch):
     import kernelforge.evaluation.benchmark.runner as bench
 
-    async def boom(**_k):
-        raise RuntimeError("bench failed")
+    async def boom(*_a, **_k):
+        raise ValueError("bench failed")
 
     monkeypatch.setattr(bench, "bench_wallclock", boom)
     assert integ._bench_once("drv.py") is None
@@ -232,7 +232,7 @@ def test_correctness_once_false_on_exception(monkeypatch):
     import kernelforge.evaluation.correctness.driver as test_mod
 
     async def boom(**_k):
-        raise RuntimeError("correctness failed")
+        raise ValueError("correctness failed")
 
     monkeypatch.setattr(test_mod, "test_correctness", boom)
     assert integ._correctness_once("drv.py", 30.0) is False

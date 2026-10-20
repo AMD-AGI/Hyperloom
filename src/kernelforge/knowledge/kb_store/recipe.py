@@ -113,7 +113,7 @@ class KernelRecipeKB:
             return cls(None, reason="not_configured")
         try:
             canonical_id = kernel_recipe_canonical_id(identity)
-        except Exception as error:  # noqa: BLE001 - an invalid identity cold-starts
+        except ValueError as error:  # an invalid identity cold-starts
             return cls(
                 None,
                 reason=sanitize_read_error(error, secrets=kb_store_secrets(config)),

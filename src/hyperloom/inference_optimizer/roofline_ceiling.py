@@ -206,14 +206,14 @@ def _read_baseline_yaml_benchmark(state: Any) -> dict[str, Any]:
     cfg_path = extras.get("materialized_config") if isinstance(extras, dict) else ""
     if not cfg_path:
         return {}
-    try:
-        import yaml as _yaml  # type: ignore[reportMissingModuleSource]
+    import yaml as _yaml  # type: ignore[reportMissingModuleSource]
 
+    try:
         with open(cfg_path, "r", encoding="utf-8") as f:
             cfg = _yaml.safe_load(f) or {}
-        benchmark = cfg.get("benchmark") or {}
+        benchmark = cfg.get("benchmark") if isinstance(cfg, dict) else None
         return benchmark if isinstance(benchmark, dict) else {}
-    except Exception:  # noqa: BLE001 — yaml IO / parse is best-effort
+    except (OSError, ValueError, _yaml.YAMLError):  # an unreadable or malformed config falls back to env args
         return {}
 
 

@@ -52,11 +52,7 @@ def remote_autodetect_gpu_type(*, timeout_s: int = 60) -> str | None:
     """Detect the inference GPU type from the handed-over cluster."""
     if not external_service_url():
         return None
-    try:
-        state = build_external_state_from_env()
-    except Exception as exc:  # noqa: BLE001 - best-effort probe
-        log.warning("remote GPU probe: could not build external state: %s", exc)
-        return None
+    state = build_external_state_from_env()
     backend = str(state.get("backend") or "").lower()
     try:
         if backend == "rayjob":

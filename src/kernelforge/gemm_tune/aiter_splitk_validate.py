@@ -89,7 +89,7 @@ def max_supported_splitk(
     for sk in range(1, max(0, ceiling) + 1):
         try:
             ok = probe(m, n, k, sk, device=device)
-        except Exception:  # noqa: BLE001 — treat a hard error as "unsupported"
+        except RuntimeError:
             ok = False
         if not ok:
             break
