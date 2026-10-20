@@ -617,8 +617,8 @@ def _accuracy_gate_row(accuracy: _AccuracyVerdict) -> dict[str, Any]:
     }
 
 
-def _tested_row(explore_round: "_ExploreRound", run: _VariantRun, r: Any, verdict: _VariantVerdict) -> dict[str, Any]:
-    """The ledger row for a variant this round measured and ruled on."""
+def _variant_identity(run: _VariantRun) -> dict[str, Any]:
+    """Which variant a ledger row is about, as every row that records one states it."""
     return {
         "fingerprint": run.fingerprint,
         "name": run.gv.name,
@@ -626,6 +626,13 @@ def _tested_row(explore_round: "_ExploreRound", run: _VariantRun, r: Any, verdic
         "extra_envs": dict(run.gv.extra_envs),
         **run.control_fields,
         **_decision_fields(run.gv),
+    }
+
+
+def _tested_row(explore_round: "_ExploreRound", run: _VariantRun, r: Any, verdict: _VariantVerdict) -> dict[str, Any]:
+    """The ledger row for a variant this round measured and ruled on."""
+    return {
+        **_variant_identity(run),
         "outcome": verdict.outcome,
         "status": r.status,
         "tput": verdict.tput,
@@ -669,12 +676,7 @@ def _tested_row(explore_round: "_ExploreRound", run: _VariantRun, r: Any, verdic
 def _warmup_failure_row(explore_round: "_ExploreRound", run: _VariantRun, w: Any) -> dict[str, Any]:
     """The ledger row for a variant whose warmup round failed before anything graded it."""
     return {
-        "fingerprint": run.fingerprint,
-        "name": run.gv.name,
-        "extra_server_args": run.gv.extra_server_args,
-        "extra_envs": dict(run.gv.extra_envs),
-        **run.control_fields,
-        **_decision_fields(run.gv),
+        **_variant_identity(run),
         "outcome": TS_FAILED,
         "status": getattr(w, "status", "failed") if w is not None else "failed",
         "tput": None,
@@ -978,12 +980,7 @@ class _ExploreRound:
             self.ledger.name_index[run.gv.name] = run.fingerprint
         self.ledger.rejected.append(
             {
-                "fingerprint": run.fingerprint,
-                "name": run.gv.name,
-                "extra_server_args": run.gv.extra_server_args,
-                "extra_envs": dict(run.gv.extra_envs),
-                **run.control_fields,
-                **_decision_fields(run.gv),
+                **_variant_identity(run),
                 "reason": "warmup_failed",
                 "gain_pct": None,
                 "tput": None,
@@ -1006,12 +1003,7 @@ class _ExploreRound:
         """Record a variant this round measured and refused."""
         self.ledger.rejected.append(
             {
-                "fingerprint": run.fingerprint,
-                "name": run.gv.name,
-                "extra_server_args": run.gv.extra_server_args,
-                "extra_envs": dict(run.gv.extra_envs),
-                **run.control_fields,
-                **_decision_fields(run.gv),
+                **_variant_identity(run),
                 "reason": verdict.reason or "not_keep",
                 "gain_pct": verdict.gain,
                 "tput": verdict.tput,
