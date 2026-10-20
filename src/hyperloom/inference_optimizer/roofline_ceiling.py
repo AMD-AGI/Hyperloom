@@ -1275,29 +1275,22 @@ def compute_roofline_from_perfmodel(
     """Bottom-up decode + prefill roofline using inlined GEMM/SDPA formulas."""
     if meta is None:
         return None
-    if not meta.hidden_size or not meta.num_attention_heads:
-        return None
-    gpu_type, num_gpus, precision_tag = target.gpu_type, target.num_gpus, target.precision_tag
-    gpu_key = (gpu_type or "").strip().lower()
+    gpu_key = (target.gpu_type or "").strip().lower()
     spec = HW_SPECS_ACHIEVABLE.get(gpu_key) or HW_SPECS.get(gpu_key)
     if spec is None:
         return None
 
-    bw_gbps = spec["hbm_bw_gbps"] * max(num_gpus, 1)
-    bw_bps = bw_gbps * 1e9
-    tag = (precision_tag or "bf16").strip().lower()
-    f_peak_tflops = (_resolve_achievable_tflops(gpu_type, tag) or _resolve_peak_tflops(gpu_type, tag)) * max(
-        num_gpus, 1
-    )
+    n_gpus = max(target.num_gpus, 1)
+    bw_gbps = spec["hbm_bw_gbps"] * n_gpus
+    tag = (target.precision_tag or "bf16").strip().lower()
+    f_peak_tflops = (_resolve_achievable_tflops(gpu_key, tag) or _resolve_peak_tflops(gpu_key, tag)) * n_gpus
     if f_peak_tflops <= 0:
         return None
-    f_peak = f_peak_tflops * 1e12
     bpe = float(meta.weight_dtype_bytes or 2.0)
     # Routed-expert weights may be a distinct precision (e.g. DeepSeek-V4 fp4 experts under fp8 attention); size the
     # MoE reads with it.
     expert_bpe = float(meta.expert_weight_dtype_bytes)
-    # Activations (input/output) are at least bf16 even for quantized-weight models.
-    act_bpe = max(bpe, 2.0)
+    act_bpe = _activation_kv_dtype_bytes(meta)
 
     hidden = meta.hidden_size
     ffn = meta.intermediate_size
@@ -1340,8 +1333,8 @@ def compute_roofline_from_perfmodel(
 
     def _roofline_time(fl: float, by: float) -> tuple[float, str, float, float]:
         """Roofline time for one op given its FLOPs and byte traffic."""
-        t_cmp = fl / f_peak if f_peak > 0 else 1e30
-        t_mem = by / bw_bps if bw_bps > 0 else 1e30
+        t_cmp = fl / (f_peak_tflops * 1e12)
+        t_mem = by / (bw_gbps * 1e9)
         return max(t_cmp, t_mem), "compute" if t_cmp >= t_mem else "memory", t_mem, t_cmp
 
     def _forward(batch: int, s_q: int, s_kv: int) -> tuple[float, float, float, list[OpBreakdown]]:
@@ -1370,7 +1363,7 @@ def compute_roofline_from_perfmodel(
                 )
             )
         # MoE FFN: FusedMoE formula with batch-aware coupon E_active.
-        if is_moe and n_moe_layers > 0:
+        if n_moe_layers > 0:
             # Latent-MoE decoders run the experts below the residual width.
             moe_hidden = meta.moe_hidden_size or hidden
             moe = _MoeShape(
@@ -1412,34 +1405,21 @@ def compute_roofline_from_perfmodel(
                 pct_time=0.0,
             )
         )
-        # fill pct_time
-        if total_t > 0:
-            op_rows = [_dc.replace(op, pct_time=op.time_s / total_t) for op in op_rows]
+        op_rows = [_dc.replace(op, pct_time=op.time_s / total_t) for op in op_rows]
         return total_t, total_mem_t, total_cmp_t, op_rows
 
-    isl = shape.isl
+    # Every guard above leaves positive sizes, bandwidth and peak, so every forward time below is positive.
     batch = max(shape.concurrency, 1)
-    kv_seq = max(int(isl) + int(shape.osl) // 2, 1)
-    t_dec, t_dec_mem, t_dec_cmp, ops_dec = _forward(batch, 1, kv_seq)
-    t_pre, _, _, _ = _forward(1, max(int(isl), 1), max(int(isl), 1))
-
-    decode_tok = batch / t_dec if t_dec > 0 else 0.0
-    prefill_tok = max(int(isl), 1) / t_pre if t_pre > 0 else 0.0
-    decode_mem_tok = batch / t_dec_mem if t_dec_mem > 0 else 0.0
-    decode_cmp_tok = batch / t_dec_cmp if t_dec_cmp > 0 else 0.0
-
-    # dominant bound in decode
-    bound_kind = "memory" if t_dec_mem >= t_dec_cmp else "compute"
-    if t_dec <= 0:
-        bound_kind = "unknown"
-
+    prefill_len = max(int(shape.isl), 1)
+    t_dec, t_dec_mem, t_dec_cmp, ops_dec = _forward(batch, 1, max(int(shape.isl) + int(shape.osl) // 2, 1))
+    t_pre, _, _, _ = _forward(1, prefill_len, prefill_len)
     return PerfModelBreakdown(
-        decode_tok_per_s=decode_tok,
-        prefill_tok_per_s=prefill_tok,
-        decode_mem_tok_per_s=decode_mem_tok,
-        decode_cmp_tok_per_s=decode_cmp_tok,
+        decode_tok_per_s=batch / t_dec,
+        prefill_tok_per_s=prefill_len / t_pre,
+        decode_mem_tok_per_s=batch / t_dec_mem,
+        decode_cmp_tok_per_s=batch / t_dec_cmp,
         ops=ops_dec,
-        bound_kind=bound_kind,
+        bound_kind="memory" if t_dec_mem >= t_dec_cmp else "compute",
         hbm_bw_gbps=bw_gbps,
         peak_achievable_tflops=f_peak_tflops,
     )
