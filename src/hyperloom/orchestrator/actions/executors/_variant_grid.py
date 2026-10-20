@@ -302,6 +302,11 @@ def _stamp_canonical_fingerprints(
         )
 
 
+def canonical_fingerprint_of(variant: Any) -> str:
+    """The effective fingerprint ``_stamp_canonical_fingerprints`` left on ``variant``."""
+    return str(getattr(variant, "canonical_fp", "") or "")
+
+
 def _skip_baseline_noop(name: str, reason: str, skipped: list[dict[str, Any]]) -> None:
     """Record a variant skipped because it launches the server the stack is already running."""
     log.info("explore: skipping baseline-noop variant %s (%s)", name, reason)

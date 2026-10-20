@@ -105,6 +105,7 @@ from ._variant_grid import (
     _skip_baseline_noop,
     _stamp_canonical_fingerprints,
     _variant_control_fields,
+    canonical_fingerprint_of,
     ObservedLaunch,
     filter_baseline_noop_variants,
     filter_context_copy_drafts,
@@ -860,7 +861,7 @@ class _ExploreRound:
 
     def launched_already(self, gv: GridVariant) -> bool:
         """Whether this round already launched ``gv``'s fingerprint, recording the duplicate if so."""
-        fp = str(getattr(gv, "canonical_fp", "") or "")
+        fp = canonical_fingerprint_of(gv)
         if fp not in self.launched_fps:
             return False
         self.ledger.skipped.append({"name": gv.name, "fingerprint": fp, "reason": "round_dup"})
@@ -868,7 +869,7 @@ class _ExploreRound:
 
     def record_launch(self, gv: GridVariant) -> None:
         """Claim the launch for ``gv``'s fingerprint, so a later twin of it is a round duplicate."""
-        self.launched_fps.add(str(getattr(gv, "canonical_fp", "") or ""))
+        self.launched_fps.add(canonical_fingerprint_of(gv))
 
     def restates_the_stack(self, gv: GridVariant) -> bool:
         """Whether ``gv`` only restates the launch the stack runs as it stands, recording the skip if so.
@@ -915,7 +916,7 @@ class _ExploreRound:
         """
         if self.shared_state is None or self.is_revalidation or getattr(gv, "overlay_pythonpath", ""):
             return False
-        fp = str(getattr(gv, "canonical_fp", "") or "")
+        fp = canonical_fingerprint_of(gv)
         prior = measured_verdict(
             getattr(self.shared_state, "explore_search", None),
             fp,
@@ -1172,7 +1173,7 @@ class _ExploreRound:
         return _VariantRun(
             idx=idx,
             gv=gv,
-            fingerprint=getattr(gv, "canonical_fp", ""),
+            fingerprint=canonical_fingerprint_of(gv),
             provenance=getattr(gv, "provenance", "llm_direct"),
             scope=str(getattr(gv, "scope", "") or ""),
             control_fields=_variant_control_fields(gv),
@@ -1398,6 +1399,9 @@ class ExploreExecutor:
         _refresh_anchor_params(params, ss)
         baseline = _round_baseline(params, ss)
         setup = _RoundSetup(params, ss, workload, _launch_defaults(workload.config_path, baseline.args_mode), baseline)
+        # Read before the grid filters materialize anything: the signature is the
+        # workload the round opened on.
+        ws_sig = workload_signature()
         lever_payload = framework_lever_grid(ss)
         ledger = _RoundLedger()
         observed = ObservedLaunch(*observed_launch_from_state(ss))
@@ -1432,7 +1436,7 @@ class ExploreExecutor:
             grade_on_intvty=grade_on_intvty,
             on_the_synthetic_benchmark=not agentx_active(benchmark_mode=getattr(ss, "benchmark_mode", "")),
             is_revalidation=is_stack_revalidation(params),
-            workload_signature=workload_signature(),
+            workload_signature=ws_sig,
             observed=observed,
         )
 
