@@ -248,12 +248,7 @@ class ObservedLaunch(NamedTuple):
 
 
 def observed_launch_from_state(state: Any) -> tuple[dict[str, Any], dict[str, str]]:
-    """The running server's resolved config and env, empty unless ``current_best`` observed them.
-
-    A setting the engine rewrote after parsing it is left out of the config: its
-    resolved value is not the value a flag would pass, so it reads as unknown
-    and a variant touching it runs.
-    """
+    """The running server's resolved config and env, empty unless ``current_best`` observed them."""
     measurement = getattr(state, "current_best_measurement", None)
     if not isinstance(measurement, dict) or not measurement:
         return {}, {}
@@ -342,14 +337,7 @@ def _launch_delta(
     base_envs: Mapping[str, str],
     framework: str,
 ) -> tuple[dict[str, list[str]], dict[str, str]]:
-    """What a variant changes about the baseline launch, in argv settings and envs alike.
-
-    Only the delta is comparable to the running server. The rest is the
-    baseline's own request, which materialization, the recipe and the engine all
-    rewrite on the way to a launch -- a requested ``--watchdog-timeout 1800``
-    resolves to ``3600.0`` -- so weighing it would reject every variant. Those
-    rewrites hit base and variant alike, so the delta cancels them.
-    """
+    """What a variant changes about the baseline launch, in argv settings and envs alike."""
     base_settings = named_settings(base_argv, framework)
     settings = {
         name: values
@@ -361,11 +349,7 @@ def _launch_delta(
 
 
 def _settings_already_hold(settings: Mapping[str, list[str]], observed_config: Mapping[str, Any]) -> bool:
-    """Whether every named setting already holds that value in the running server.
-
-    Checked setting by setting rather than as one argv string: the observed side
-    is the engine's whole resolved config, which no config's argv can equal.
-    """
+    """Whether every named setting already holds that value in the running server."""
     return all(
         name in observed_config and _setting_already_holds(values, observed_config[name])
         for name, values in settings.items()
@@ -413,14 +397,7 @@ def _materialized_launch(
 def filter_context_copy_drafts(
     grid: list[GridVariant], *, base_yaml_path: Path, base_extra_args: str, **build: Any
 ) -> tuple[list[GridVariant], list[tuple[str, str]]]:
-    """Drop variants that introduce or change a context-copying speculative-decoding draft (synthetic sessions only).
-
-    Each variant and its base are materialized through ``_build_variant_yaml``, the way ``run_grid`` builds the round,
-    so a draft reached through args, replace mode, envs or a server-args env counts. A launch that cannot be
-    materialized is judged on the variant's own args and envs against an empty base.
-
-    Returns the variants still to run, plus ``(name, reason)`` for each drop.
-    """
+    """Drop variants that introduce or change a context-copying speculative-decoding draft (synthetic sessions only)."""
     if not grid:
         return [], []
     kept: list[GridVariant] = []
@@ -451,12 +428,7 @@ def filter_context_copy_drafts(
 
 
 def _only_restates_the_baseline(gv: GridVariant, base_argv: str, base_envs: dict[str, str], framework: str) -> bool:
-    """Whether a variant with no launch delta is one the baseline launch already holds.
-
-    A change the merged config hides leaves no delta either, so only a request
-    that itself restates the baseline marks the variant as a noop -- and only in
-    ``append`` mode, where the request is all the variant adds.
-    """
+    """Whether a variant with no launch delta is one the baseline launch already holds."""
     return gv.args_mode == "append" and restates_the_baseline(
         gv.extra_server_args, gv.extra_envs, base_argv, base_envs, framework
     )
@@ -472,31 +444,7 @@ def filter_baseline_noop_variants(
     observed_server_env: Mapping[str, str] | None = None,
     **build: Any,
 ) -> tuple[list[GridVariant], list[tuple[str, str]]]:
-    """Drop variants that would launch the server the stack is already running.
-
-    The baseline and each variant are materialized through ``_build_variant_yaml``
-    into throwaway configs, and which rule applies depends on whether the computed
-    settings and env delta of the variant against the baseline (``_launch_delta``)
-    is empty. That delta lists only what the variant sets differently, so a
-    ``"replace"`` variant that drops a baseline flag can still have an empty one:
-
-    1. Empty delta: the variant is dropped only when its ``args_mode`` is
-       ``"append"`` and its own request names only settings and envs the baseline
-       launch already holds (``restates_the_baseline``). This rule reads the
-       baseline config, not the observed launch. Every other empty-delta variant
-       -- a ``"replace"`` request, an empty request, or a change the merged config
-       hides -- is kept without consulting the observed launch.
-    2. Non-empty delta: only what the variant *changes* about the baseline is
-       judged, those settings against ``observed_server_config`` -- the engine's
-       own resolved settings -- and those envs against ``observed_server_env``.
-       The variant is dropped when both halves are already in effect.
-
-    A variant that removes something, or names a list-valued flag, is exempt:
-    neither is visible here, so both would read as a restatement of the stack.
-
-    Returns the variants still to run, plus ``(name, reason)`` for each drop.
-    Filters nothing when the stack's launch was never observed.
-    """
+    """Drop variants that would launch the server the stack is already running."""
     observed_config = dict(observed_server_config or {})
     if not observed_config or not grid:
         return list(grid), []
@@ -596,12 +544,7 @@ def _default_grid_for_framework(
 
 
 def _seed_lever_variants(grid_payload: Any, lever_payload: Any) -> Any:
-    """Put this round's framework-rewrite lever variants in front of the grid.
-
-    A lever already named by the grid is not seeded twice; the fresh ones go
-    first so a round that runs out of budget still measures what the rewrite
-    was for.
-    """
+    """Put this round's framework-rewrite lever variants in front of the grid."""
     if not lever_payload:
         return grid_payload
     existing_names = {str(v.get("name") or "") for v in grid_payload if isinstance(v, dict)}
@@ -626,12 +569,7 @@ def _seed_grid_payload(
     framework: str,
     yaml_envs: Mapping[str, str],
 ) -> list[dict[str, Any]]:
-    """Build the framework's programmatic seed grid for a round the LLM left empty.
-
-    A round with no variants of its own falls through to this rather than
-    failing the task; the concurrency and model class come from the params,
-    the launch yaml and the environment, in that order.
-    """
+    """Build the framework's programmatic seed grid for a round the LLM left empty."""
     seed_model_class = str(params.get("model_class") or "").strip() or os.environ.get("MODEL_CLASS", "").strip()
     seed_conc = 0
     try:

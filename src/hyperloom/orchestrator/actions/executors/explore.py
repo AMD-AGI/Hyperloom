@@ -268,11 +268,7 @@ class _ServerReuse(NamedTuple):
         )
 
     def lifecycle_params(self, slot: Path) -> dict[str, Any] | None:
-        """The ``server_lifecycle`` block a variant's warmup and decision rounds share.
-
-        Both rounds take ``slot`` as the pid dir, which is what lets the decision
-        round re-attach to the server the warmup left hot.
-        """
+        """The ``server_lifecycle`` block a variant's warmup and decision rounds share."""
         return {"cleanup": False, "pid_dir": str(slot), "port": self.port} if self.eligible else None
 
 
@@ -406,11 +402,7 @@ def _float_param(params: Mapping[str, Any], key: str) -> float:
 
 
 def _refresh_anchor_params(params: dict[str, Any], shared_state: Any) -> None:
-    """Re-read the anchor and the stack it was measured on, as a pair.
-
-    Params snapshot the two together, so a KEEP landing while this task queued
-    invalidates both. Revalidation reproduces the saved stack and never re-anchors.
-    """
+    """Re-read the anchor and the stack it was measured on, as a pair."""
     snapshot_tput = float(params.get("base_tput") or 0.0)
     anchor, anchor_drifted = (
         (snapshot_tput, False)
@@ -447,11 +439,7 @@ def _round_baseline(params: Mapping[str, Any], shared_state: Any) -> _RoundBasel
 
 
 def _launch_defaults(config_path: Path, base_args_mode: str) -> _Launch:
-    """Resolve the framework and the server args the materialized YAML already carries.
-
-    A ``replace`` stack discards the inherited args, so the compatibility filter
-    must not compose against them.
-    """
+    """Resolve the framework and the server args the materialized YAML already carries."""
     cfg: dict[str, Any] = {}
     try:
         with config_path.open(encoding="utf-8") as handle:
@@ -466,12 +454,7 @@ def _launch_defaults(config_path: Path, base_args_mode: str) -> _Launch:
 
 
 def _round_budget(params: Mapping[str, Any], extra: Mapping[str, Any], *, reuse_eligible: bool) -> _RoundBudget:
-    """What one variant of this round is expected to cost, and how long the round may keep spending.
-
-    The per-variant overtime kill is anchored on the baseline's wall-clock; a
-    round that reuses a server is admitted against the measured WARM duration
-    instead, because that is what its decision round costs.
-    """
+    """What one variant of this round is expected to cost, and how long the round may keep spending."""
     baseline_runtime_sec = _float_param(params, "baseline_runtime_sec")
     baseline_warm_runtime_sec = _float_param(params, "baseline_warm_runtime_sec")
     use_warm_decision = reuse_eligible and double_run_requested(params)
@@ -489,11 +472,7 @@ def _round_budget(params: Mapping[str, Any], extra: Mapping[str, Any], *, reuse_
 
 
 def _round_grading_anchor_perf(shared_state: Any) -> Any:
-    """The figure every variant of this round is graded against, on the interactivity axis.
-
-    Variants stack within a round, so a KEEP advances it; the session anchor
-    would grade every variant against the round's opening state.
-    """
+    """The figure every variant of this round is graded against, on the interactivity axis."""
     running_base_perf, anchor_reason = resolve_grading_anchor_perf(shared_state)
     if running_base_perf is None:
         # AgentX grading needs both axes on the round anchor. Without them every
@@ -529,12 +508,7 @@ def _graded_axes_moved(graded: Any) -> str:
 
 
 def _refused_by(graded: Any) -> str:
-    """Which guard refused the variant.
-
-    A vetoed variant is refused a round earlier than the promotion gate would, so
-    it is never folded onto the stack and never becomes the anchor the rest of
-    the batch is graded against.
-    """
+    """Which guard refused the variant."""
     if graded.veto_reason:
         return graded.veto_reason
     if graded.graded_on_intvty:
@@ -543,12 +517,7 @@ def _refused_by(graded: Any) -> str:
 
 
 def _graded_decision(graded: Any, r: Any, variant_name: str) -> _GradedVerdict:
-    """Rule on a variant's measurement, before the accuracy gate sees it.
-
-    ``gain`` stays ``None`` on a refusal so no consumer counts a refused variant's
-    gain as a win, while ``graded_gain`` still says the axis was measured:
-    rendered with neither, a guard-refused variant reads as unmeasured.
-    """
+    """Rule on a variant's measurement, before the accuracy gate sees it."""
     if r.status != "succeeded":
         return _GradedVerdict(TS_FAILED, (r.error or "")[-1200:] or "no_measurement", None, None)
     if graded.degrade_reason:
@@ -564,11 +533,7 @@ def _graded_decision(graded: Any, r: Any, variant_name: str) -> _GradedVerdict:
 
 
 def _graded_gate_row(graded: Any, reason: str, keep_threshold_pct: float) -> dict[str, Any]:
-    """The graded comparison's own verdict, as the decision-gate row it is.
-
-    The anchor is the reference; the floor the candidate has to clear belongs to
-    the gate, as the tolerance does for accuracy.
-    """
+    """The graded comparison's own verdict, as the decision-gate row it is."""
     on_intvty = graded.graded_on_intvty
     return {
         "gate": (
@@ -589,12 +554,7 @@ def _accuracy_refusal(value: Any) -> str:
 
 
 def _accuracy_verdict(slot: Path, *, framework: str, benchmark_mode: str, reference: float) -> _AccuracyVerdict:
-    """Rule on the variant's eval output, when there is a reference to rule it against.
-
-    Serving needs a measured baseline to compare against; a scriptable framework
-    maps its gate pass to ``1.0`` and fail to ``0.0``, so it compares against a
-    perfect reference instead.
-    """
+    """Rule on the variant's eval output, when there is a reference to rule it against."""
     from hyperloom.inference_optimizer import framework_registry
 
     scriptable = framework_registry.is_scriptable(framework)
@@ -779,12 +739,7 @@ class _ExploreRound:
         self.opening_stack = self.launched_stack()
 
     def launched_stack(self) -> dict[str, Any]:
-        """The stack as it launches: its args with the recipe's inherited ones and the removals applied.
-
-        A KEEP can switch the stack to ``replace`` mode, which carries those
-        inherited args in its own, so only the composed args say which settings a
-        KEEP changed.
-        """
+        """The stack as it launches: its args with the recipe's inherited ones and the removals applied."""
         stack = stack_of_measured(self.measured_against())
         stack["extra_server_args"] = compose_server_args(
             inherited_args=self.launch.inherited_args,
@@ -795,15 +750,7 @@ class _ExploreRound:
         return stack
 
     def measured_against(self) -> dict[str, Any]:
-        """The stack this variant launched on top of, as it stands now.
-
-        Read at each write rather than captured once: every KEEP advances the
-        stack, so a variant later in the round was measured against a different
-        one than the round opened with. Carried verbatim for the same reason
-        ``base_tput`` is -- a consumer that reconstructs the stack from the
-        session's current config gets whichever one is current, not the one this
-        variant was judged on.
-        """
+        """The stack this variant launched on top of, as it stands now."""
         return {
             "throughput": self.stack.tput,
             "accuracy": self.baseline.accuracy or None,
@@ -815,12 +762,7 @@ class _ExploreRound:
         }
 
     def variant_cost_sec(self) -> float:
-        """What admitting one more variant costs in wall-clock.
-
-        A warm-decision variant pays for both of its rounds, so admitting it on
-        the decision round alone would let it in and then strand it mid-variant
-        with a discarded warmup and no measurement.
-        """
+        """What admitting one more variant costs in wall-clock."""
         if self.budget.decision_expected_sec is None:
             from ._subprocess_kill import resolve_benchmark_timeouts
 
@@ -872,12 +814,7 @@ class _ExploreRound:
         self.launched_fps.add(canonical_fingerprint_of(gv))
 
     def restates_the_stack(self, gv: GridVariant) -> bool:
-        """Whether ``gv`` only restates the launch the stack runs as it stands, recording the skip if so.
-
-        The observed launch is what the server ran when the round opened; a KEEP
-        since then has made the observed value of whatever it changed stale, and
-        ``observed_launch_after`` leaves that out.
-        """
+        """Whether ``gv`` only restates the launch the stack runs as it stands, recording the skip if so."""
         config, env = observed_launch_after(
             self.observed.config,
             self.observed.env,
@@ -907,13 +844,7 @@ class _ExploreRound:
         return True
 
     def already_measured(self, gv: GridVariant) -> bool:
-        """Whether the session ledger already holds a verdict for ``gv`` on this stack, recording the skip if so.
-
-        The stack a KEEP earlier in the round advanced is what the variant would
-        launch on, so the check runs per variant rather than once for the round.
-        A stack revalidation exists to re-measure, and a kernel overlay changes
-        the launch without changing the fingerprint, so neither is ever skipped.
-        """
+        """Whether the session ledger already holds a verdict for ``gv`` on this stack, recording the skip if so."""
         if self.shared_state is None or self.is_revalidation or getattr(gv, "overlay_pythonpath", ""):
             return False
         fp = canonical_fingerprint_of(gv)
@@ -937,13 +868,7 @@ class _ExploreRound:
         return True
 
     def context_copy_refusal(self, gv: GridVariant) -> str:
-        """Why this draft's copied context is refused on the stack as it stands, or ``""``.
-
-        Only the synthetic benchmark refuses one, its repetition loops being what
-        a copied context would copy, and a revalidation re-measures the stack it
-        already carries. Judged against the stack as it stands now: a KEEP earlier
-        in this round may have changed it.
-        """
+        """Why this draft's copied context is refused on the stack as it stands, or ``""``."""
         if not self.on_the_synthetic_benchmark or self.is_revalidation:
             return ""
         _, copy_refused = filter_context_copy_drafts(
@@ -1018,11 +943,7 @@ class _ExploreRound:
         )
 
     def adopt(self, run: _VariantRun, r: Any, verdict: _VariantVerdict) -> None:
-        """Fold a KEEP'd variant onto the stack the rest of the round launches on.
-
-        The variant KEEPs on the round that graded it, so the adoption lands here
-        rather than waiting for the promotion gate.
-        """
+        """Fold a KEEP'd variant onto the stack the rest of the round launches on."""
         comp = self._keep_composition(run)
         self.ledger.winners.append(_keep_entry(self, run, r, verdict, comp))
         self.stack = _VariantStack(
@@ -1052,11 +973,7 @@ class _ExploreRound:
         )
 
     def _keep_composition(self, run: _VariantRun) -> _KeepComposition:
-        """Compose the server args and controls a KEEP'd variant leaves on the stack.
-
-        A native KEEP's edits remain relative to the verified recipe unless the
-        variant or the stack explicitly replaces it.
-        """
+        """Compose the server args and controls a KEEP'd variant leaves on the stack."""
         gv = run.gv
         effective_args = compose_server_args(
             inherited_args=self.launch.inherited_args,
@@ -1093,24 +1010,13 @@ class _ExploreRound:
         )
 
     def answered_its_grid(self) -> bool:
-        """Whether the round has a verdict for the grid it was given, winner or not.
-
-        A variant reaped by the overtime gate counts: ``KILLED_OVERTIME`` is a
-        real signal, not an absence of one. A round whose every variant already
-        had its verdict, or only restated the stack, is answered too, as if it
-        had measured them again.
-        """
+        """Whether the round has a verdict for the grid it was given, winner or not."""
         measured = any(t.get("outcome") in ("KEEP", "REVERT", TS_KILLED_OVERTIME) for t in self.ledger.tested.values())
         answered_otherwise = bool(self.runnable) and self.judged_without_measuring == len(self.runnable)
         return measured or bool(self.ledger.winners) or answered_otherwise
 
     async def measure_its_grid(self) -> None:
-        """Measure every variant the round can still afford, in the order the grid gives them.
-
-        One Ray serving lease (actor) spans the whole round; a per-variant
-        ``ray.kill`` churned raylet workers badly enough to destabilise the
-        single-node cluster.
-        """
+        """Measure every variant the round can still afford, in the order the grid gives them."""
         if not self.runnable:
             return
         self.serving_lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(self.workload.config_path))
@@ -1228,11 +1134,7 @@ class _ExploreRound:
         return warmup_results[0] if warmup_results else None
 
     async def _measure_variant(self, run: _VariantRun) -> None:
-        """Measure one variant and record what the round decided about it.
-
-        A run that stopped the round leaves it on the budget, which is what ends
-        the grid loop; the variant and the ones after it stay out of the ledger.
-        """
+        """Measure one variant and record what the round decided about it."""
         warm = self.budget.use_warm_decision
         ready_server_log = None
         if warm:
@@ -1268,11 +1170,7 @@ class _ExploreRound:
             self.reject(run, r, verdict)
 
     def _judge_variant(self, run: _VariantRun, r: Any) -> _VariantVerdict:
-        """Rule on one variant: the graded axes first, then the accuracy gate.
-
-        A variant KEEPs when it clears both. The axes and the threshold floor
-        belong to ``resolve_graded_comparison``, which every lane shares.
-        """
+        """Rule on one variant: the graded axes first, then the accuracy gate."""
         measured = _measured_axes(r, self.shared_state)
         graded = resolve_graded_comparison(
             self.shared_state,
@@ -1316,12 +1214,7 @@ class _ExploreRound:
         )
 
     def budget_error(self, status: str) -> dict[str, Any]:
-        """Why a round that measured nothing measured nothing, when the run stopped it.
-
-        As a bare ``failed`` with no error_class nothing downstream could tell a
-        stopped round from one whose variants failed, and the KB would learn that
-        these variants are bad.
-        """
+        """Why a round that measured nothing measured nothing, when the run stopped it."""
         if status != "failed" or self.budget.stop is None:
             return {}
         return {
@@ -1443,11 +1336,7 @@ class ExploreExecutor:
     def _materialize_workload(
         self, params: dict[str, Any], extra: Mapping[str, Any], shared_state: Any, *, task_id: str
     ) -> _Workload:
-        """Re-materialize the benchmark config so variant YAMLs honour the operator's workload.
-
-        CONC / ISL / OSL / TP / MAX_MODEL_LEN / PRECISION come from the task's
-        params rather than from whatever the baseline config was written with.
-        """
+        """Re-materialize the benchmark config so variant YAMLs honour the operator's workload."""
         config_path = Path(params.get("config_path") or self.default_config_path or default_baseline_config())
         if not config_path.exists():
             raise _RoundRefusal("missing_config", f"config not found: {config_path}")
@@ -1517,12 +1406,7 @@ class ExploreExecutor:
     def _runnable_variants(
         self, setup: _RoundSetup, grid: list[GridVariant], ledger: _RoundLedger, observed: ObservedLaunch
     ) -> list[GridVariant]:
-        """The variants worth launching, in the order the round will take them.
-
-        Every variant carries its fingerprint from here on. In-round duplicates
-        are judged at their turn, against what this round has actually launched:
-        a twin of a variant that was only skipped has not claimed the launch.
-        """
+        """The variants worth launching, in the order the round will take them."""
         _stamp_canonical_fingerprints(
             grid,
             base_remove_args=setup.baseline.remove_args,
@@ -1543,13 +1427,7 @@ class ExploreExecutor:
     def _past_the_opening_restatements(
         setup: _RoundSetup, runnable: list[GridVariant], ledger: _RoundLedger, observed: ObservedLaunch
     ) -> list[GridVariant]:
-        """The grid from its first variant that changes something, dropping the restatements ahead of it.
-
-        A variant that restates the stack's observed launch changes nothing while
-        the stack stays as observed. The ones ahead of every other variant can
-        only launch on it, so they go before a serving lease is taken; any other
-        is judged at its turn, against the stack a KEEP has moved.
-        """
+        """The grid from its first variant that changes something, dropping the restatements ahead of it."""
         if not runnable:
             return runnable
         kept, restated = filter_baseline_noop_variants(
@@ -1664,13 +1542,7 @@ class ExploreExecutor:
         *,
         task_id: str,
     ) -> list[dict[str, Any]]:
-        """Describe what each variant of this round did, flat, for the fact-write hook.
-
-        One row per variant whatever became of it: measured and ruled on, rejected
-        before it ran, or skipped as a duplicate of one already tested. The
-        rejection ledger is deduplicated by fingerprint first, so a variant that
-        was refused more than once is still one row.
-        """
+        """Describe what each variant of this round did, flat, for the fact-write hook."""
         reasons_by_fp: dict[str, str] = {
             str(r.get("fingerprint") or ""): str(r.get("reason") or "") for r in rejected_update
         }
@@ -1750,18 +1622,7 @@ class ExploreExecutor:
 
 
 def _measured_metrics(te: Mapping[str, Any]) -> dict[str, Any]:
-    """The figures a ledger row has, for the per-variant outcome the fact-write hook reads.
-
-    The anchor this variant's gain was measured against is carried verbatim
-    rather than left to be back-solved from the gain: each KEEP advances the
-    round's stack, so a consumer dividing the gain out of the final throughput
-    reconstructs whichever anchor happens to be current, not the one this
-    variant was judged on -- and for a FAILED or killed variant there is no gain
-    to divide. ``estimated_output_throughput`` is the rough decode throughput
-    salvaged from a killed-overtime variant's partial server.log, informational
-    only. The wall-clock and kill ratio are surfaced so the LLM/KB sees "ran too
-    slow -> early kill" instead of an opaque FAILED row.
-    """
+    """The figures a ledger row has, for the per-variant outcome the fact-write hook reads."""
     reported = (
         "tput",
         "gain_pct",
