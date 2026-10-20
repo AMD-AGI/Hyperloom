@@ -16,6 +16,7 @@ import math
 import os
 import shutil
 import signal
+import subprocess
 import tempfile
 import textwrap
 import time
@@ -1466,7 +1467,7 @@ class IterationLoop(AnalysisRuntimeMixin):
             return ""
         try:
             return git("diff", f"{commit_hash}~1", commit_hash, cwd=self.ic.workspace_dir).stdout
-        except Exception as e:  # noqa: BLE001 - git wrapper does not export its error type here
+        except (OSError, subprocess.SubprocessError) as e:
             log.debug("could not diff commit %s: %s", commit_hash, e)
             return ""
 
@@ -1645,7 +1646,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                 round_budget=self._round_budget_summary(),
             )
             return True
-        except Exception as error:
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
             first_failure = not self.persistence_degraded
             self.persistence_degraded = True
             self.persistence_errors.append(f"publish best iteration {result.iteration}: {error}")
@@ -2390,7 +2391,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                 result.commit_hash,
                 result=result,
             )
-        except Exception as error:
+        except (OSError, ValueError, RuntimeError) as error:
             self.persistence_degraded = True
             self.persistence_errors.append(f"rebuild candidate archive iteration {result.iteration}: {error}")
             self.persistence_errors = self.persistence_errors[-10:]
@@ -5288,7 +5289,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                 )
             )
             self.state_store.save(self.run_state)
-        except Exception:
+        except (OSError, subprocess.SubprocessError):
             log.debug("run_state: terminal save failed", exc_info=True)
         self.persistence_degraded = self.persistence_degraded or self.state_store.degraded
         self.persistence_errors = (self.persistence_errors + self.state_store.persistence_errors)[-10:]
@@ -5357,7 +5358,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                         )
                         self._persist_pending_keep(pending_keep)
                         commit_hash = self._git_commit(str(pending_keep["commit_message"]))
-                    except Exception as e:  # noqa: BLE001 - a KEEP that cannot be built is not a KEEP
+                    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as e:
                         result.kept = False
                         result.validation_passed = False
                         result.crashed = True
@@ -5732,7 +5733,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                 restore_errors.append("protected snapshot restore callback unavailable")
             try:
                 self._git_discard_worktree()
-            except Exception as error:  # noqa: BLE001
+            except (OSError, RuntimeError, subprocess.SubprocessError) as error:
                 restore_errors.append(f"tracked candidate restore failed: {type(error).__name__}: {error}")
             if not restore_errors:
                 try:
@@ -5786,7 +5787,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                 # The candidate itself may be sound, but nothing here can establish that, and HEAD has to stay
                 # at the last measured best rather than carry an unmeasured diff into the next iteration.
                 self._git_discard_worktree()
-            except Exception as error:  # noqa: BLE001
+            except (OSError, RuntimeError, subprocess.SubprocessError) as error:
                 summary += f" Candidate restore failed: {type(error).__name__}: {error}"
             session_sink["findings"] = "\n---\n".join(
                 part

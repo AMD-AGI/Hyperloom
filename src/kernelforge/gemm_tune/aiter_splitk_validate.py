@@ -83,7 +83,7 @@ def max_supported_splitk(
     try:
         if not probe(m, n, k, 0, device=device):
             return None
-    except Exception:  # noqa: BLE001 — no GPU / import error / tensor issue
+    except (ImportError, OSError, RuntimeError):
         return None
     best = 0
     for sk in range(1, max(0, ceiling) + 1):

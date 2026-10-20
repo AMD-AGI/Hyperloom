@@ -545,7 +545,7 @@ def _terminate_server(proc: subprocess.Popen | None) -> None:
             pass
     try:
         proc.wait(timeout=30)
-    except Exception:  # noqa: BLE001
+    except subprocess.TimeoutExpired:
         try:
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
         except (ProcessLookupError, PermissionError, OSError):

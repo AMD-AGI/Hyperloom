@@ -11,6 +11,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import time
 import uuid
 from dataclasses import dataclass, replace
@@ -728,7 +729,7 @@ def _adopt_measured_candidate(
         )
     except WarmStartRestoreError:
         raise
-    except Exception as error:  # noqa: BLE001 - reported as a rejected candidate
+    except (RuntimeError, subprocess.SubprocessError, OSError) as error:
         _git_discard_worktree(workspace_dir, pre_untracked=pre_untracked)
         print(
             f"  [kb] warm-start candidate rejected: commit failed ({error})",
@@ -781,6 +782,7 @@ def _record_measured_speedup(
         sanitize_read_error,
     )
     from kernelforge.knowledge.kb_store.recipe import KernelRecipeKB
+    from kernelforge.knowledge.kb_store.record_store import KBStoreError, RewriteRecordError
 
     solution_slug = str(sol.get("solution_slug") or "")
     canonical_id = str(sol.get("kernel_slug") or "")
@@ -793,7 +795,7 @@ def _record_measured_speedup(
                 canonical_id,
                 config,
             ).record_measured_speedup(session_id, measured_mean_case_speedup)
-        except Exception as error:  # noqa: BLE001 - reported below, never fatal
+        except (KBStoreError, RewriteRecordError, OSError, ValueError) as error:
             outcome = {
                 "recorded": False,
                 "reason": sanitize_read_error(

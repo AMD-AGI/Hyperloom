@@ -104,6 +104,42 @@ def test_git_commit_all_and_discard(tmp_path):
     assert (repo / "kernel.py").read_text() == "changed\n"
 
 
+def _adopt_with_failing_commit(monkeypatch, tmp_path, failure):
+    repo = _init_repo(tmp_path)
+    monkeypatch.setattr(integ, "_apply_candidate_patch", lambda *_a, **_k: "")
+    monkeypatch.setattr(integ, "_force_jit_rebuild", lambda *_a, **_k: None)
+
+    def fail(*_args, **_kwargs):
+        raise failure
+
+    monkeypatch.setattr(integ, "_git_commit_all", fail)
+    return integ._adopt_measured_candidate(
+        {"solution_slug": "s"},
+        kernel="kernel.py",
+        workspace_dir=str(repo),
+        source_files=[],
+        allowed_paths={"kernel.py"},
+    )
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        RuntimeError("git commit failed: hook rejected"),
+        subprocess.CalledProcessError(1, ["git", "commit"]),
+        OSError("git is not installed"),
+    ],
+    ids=lambda failure: type(failure).__name__,
+)
+def test_a_candidate_whose_commit_fails_is_rejected(monkeypatch, tmp_path, failure):
+    assert _adopt_with_failing_commit(monkeypatch, tmp_path, failure) == ("", "commit_failed")
+
+
+def test_an_unexpected_commit_error_propagates(monkeypatch, tmp_path):
+    with pytest.raises(TypeError, match="^commit signature drifted$"):
+        _adopt_with_failing_commit(monkeypatch, tmp_path, TypeError("commit signature drifted"))
+
+
 def test_git_commit_all_forces_the_approved_pathspec(monkeypatch):
     calls = []
 
