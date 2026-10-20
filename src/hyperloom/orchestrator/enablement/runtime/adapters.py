@@ -298,21 +298,19 @@ class _VenvProvisionMixin(BaseAdapter):
         """
         return purelib if (Path(purelib) / PurePosixPath(self.package_path).name).is_dir() else ""
 
-    def _create_venv(self, attempt_dir: Path) -> tuple[Path, Path]:
-        """Create ``attempt_dir/venv`` over this interpreter's packages; return (bin, python)."""
-        venv_root = attempt_dir / "venv"
-        create_venv(venv_root)
-        bin_dir = venv_root / "bin"
-        return bin_dir, bin_dir / "python"
-
-    def _write_rocm_constraints(self, python_path: Path, attempt_dir: Path) -> None:
-        """Write the pip constraints that hold the attempt's ROCm stack in place."""
+    def _prepare_attempt_venv(self, attempt_dir: Path) -> tuple[Path, Path]:
+        """Reset the provision log, create ``attempt_dir/venv`` and pin its ROCm stack; return (bin, python)."""
+        attempt_dir.mkdir(parents=True, exist_ok=True)
+        (attempt_dir / _PROVISION_LOG).write_bytes(b"")
+        bin_dir = attempt_dir / "venv" / "bin"
+        create_venv(bin_dir.parent)
         write_rocm_constraints(
-            str(python_path),
+            str(bin_dir / "python"),
             attempt_dir / ROCM_CONSTRAINTS_FILE,
             replacing=self.framework,
             run=lambda argv, **_kwargs: self._run(argv, dict(os.environ), None),
         )
+        return bin_dir, bin_dir / "python"
 
     def _logged_run(self, argv: list[str], attempt_dir: Path) -> subprocess.CompletedProcess:
         """Run ``argv`` and append its command, exit code and full output to the attempt's provision log."""
@@ -378,10 +376,7 @@ class VllmRocmAdapter(_VenvProvisionMixin):
         """
         log_path = str(attempt_dir / _PROVISION_LOG)
         try:
-            attempt_dir.mkdir(parents=True, exist_ok=True)
-            (attempt_dir / _PROVISION_LOG).write_bytes(b"")
-            bin_dir, python_path = self._create_venv(attempt_dir)
-            self._write_rocm_constraints(python_path, attempt_dir)
+            bin_dir, python_path = self._prepare_attempt_venv(attempt_dir)
         except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
             return ProvisionResult(ok=False, log_path=log_path, error=f"venv setup failed: {exc!r}")
 
@@ -447,10 +442,7 @@ class SglangAdapter(_VenvProvisionMixin):
         """
         log_path = str(attempt_dir / _PROVISION_LOG)
         try:
-            attempt_dir.mkdir(parents=True, exist_ok=True)
-            (attempt_dir / _PROVISION_LOG).write_bytes(b"")
-            bin_dir, python_path = self._create_venv(attempt_dir)
-            self._write_rocm_constraints(python_path, attempt_dir)
+            bin_dir, python_path = self._prepare_attempt_venv(attempt_dir)
         except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
             return ProvisionResult(ok=False, log_path=log_path, error=f"venv setup failed: {exc!r}")
 
