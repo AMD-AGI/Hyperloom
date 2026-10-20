@@ -217,7 +217,10 @@ def _build_failure_summary(
 _STOP_REASON_EXPLANATIONS: dict[str, str] = {
     # Terminal reasons the coordinator loop sets directly.
     "target_reached": "Target reached: a requested --target-gain / --target-tput / --target-roofline was met.",
-    "time_exhausted": "Wall-clock budget (--max-hours) was exhausted; the best validated result was kept.",
+    "time_exhausted": (
+        "Wall-clock budget (--max-hours) was exhausted, or too little of it remained for another macro-cycle; "
+        "the best validated result was kept."
+    ),
     "max_ticks": "The coordinator hit its max-ticks safety cap; the best validated result was kept.",
     "signal": "Stopped on an OS stop signal (e.g. SIGINT / SIGTERM).",
     "emergency": (
@@ -276,7 +279,10 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
     # sit in STOP_REASON_VOCAB at all, so these keys are a superset of the vocabulary rather than a mirror of it.
     "framework_agent_phase_done": "The framework-enablement agent completed its phase.",
     "framework_agent_plateau": "The framework-enablement agent plateaued with no further progress.",
-    "global_converged": "Cyclic phases converged: repeated macro-cycles stopped yielding new validated gain.",
+    "global_converged": (
+        "Cyclic phases converged: repeated macro-cycles stopped yielding new validated gain, or every steering "
+        "direction is saturated."
+    ),
     "enablement_stalled": "The enablement loop stopped without a baseline that boots: a revalidation the round depended on never promoted.",
     "plateau_explore": "The configuration search plateaued: no new leverage was found in the search space.",
     # Pre-flight gates (fail fast before booting a server).

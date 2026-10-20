@@ -582,6 +582,14 @@ sweep the orchestrator cancels stops its ladder at once and records
 `cancelled`, so the phase closes on whatever ordered the cancel rather than on
 `sweep_failed`.
 
+When SWEEP does not loop back, the close names what refused the next
+macro-cycle: `target_reached`, `global_converged` (consecutive cycles without
+gain, or every direction saturated) or `time_exhausted` (less session time
+left than the reloop floor). The refusing rule is kept in the transition
+evidence as `reloop_blocked`. A run without `FRAMEWORK_AGENT` has no next
+cycle to refuse, so it closes on the ladder's own reason unless the target was
+reached.
+
 ## CLOSE
 
 CLOSE drains the final artifacts:

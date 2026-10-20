@@ -991,11 +991,14 @@ def per_lever_dryness(state: Any) -> tuple[bool, dict[str, Any]]:
     }
 
 
-#: ``reloop_blocked`` values that name the terminal SWEEP closes on. A block for
-#: any other reason keeps the ladder's own exit reason.
+_STOP_TIME_EXHAUSTED = "time_exhausted"
+
+#: SWEEP's close reason per ``reloop_blocked`` value; too little time closes as ``skip_to_close`` would.
 _RELOOP_BLOCK_TERMINALS: dict[str, str] = {
     "global_converged": "global_converged",
+    "all_directions_saturated": "global_converged",
     "target_reached": "target_reached",
+    "insufficient_remaining": _STOP_TIME_EXHAUSTED,
 }
 
 
@@ -1567,7 +1570,7 @@ def _skip_to_close_reason(
     remaining = _number(global_inputs.get("session_remaining_sec"))
     if remaining is not None:
         evidence["session_remaining_seconds"] = round(remaining, 2)
-    reason = "time_exhausted" if remaining is not None and remaining < floor else "global_converged"
+    reason = _STOP_TIME_EXHAUSTED if remaining is not None and remaining < floor else "global_converged"
     # Both of those read as a normal closeout. A session that never measured a
     # baseline optimized nothing, so closing it early is a baseline failure
     # whatever budget is left. A record frozen before this fact existed carries
@@ -1621,7 +1624,7 @@ def _terminal_close_transition(
     if bool(global_inputs.get("closing_phase")):
         return _transition_result(
             PHASE_CLOSE,
-            "time_exhausted",
+            _STOP_TIME_EXHAUSTED,
             {"terminal": True, "reason_origin": "closing_phase"},
             inputs,
         )
@@ -1775,14 +1778,17 @@ def _sweep_transition(
     if exit_reason == "sweep_failed":
         return _transition_result(PHASE_CLOSE, exit_reason, exit_evidence, inputs)
     reloop, reloop_evidence = _reloop_decision(inputs)
-    if reloop and bool(flags.get("framework_agent_enabled")):
+    cycles_enabled = bool(flags.get("framework_agent_enabled"))
+    if reloop and cycles_enabled:
         return _transition_result(
             PHASE_FRAMEWORK_AGENT,
             "cycle_reloop",
             {**exit_evidence, **reloop_evidence, "loopback": True},
             inputs,
         )
-    terminal_reason = _RELOOP_BLOCK_TERMINALS.get(str(reloop_evidence.get("reloop_blocked") or ""))
+    blocked = str(reloop_evidence.get("reloop_blocked") or "")
+    # Without FRAMEWORK_AGENT no further cycle was possible, so only a reached target outranks the ladder's reason.
+    terminal_reason = _RELOOP_BLOCK_TERMINALS.get(blocked) if cycles_enabled or blocked == "target_reached" else None
     if terminal_reason is not None:
         return _transition_result(
             PHASE_CLOSE,
