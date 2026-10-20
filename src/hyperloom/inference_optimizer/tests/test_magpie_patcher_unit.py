@@ -852,53 +852,56 @@ fi
 """
 
 
-def _patch_client(tmp_path, text=_GENERIC_CLIENT):
-    from hyperloom.orchestrator.actions.executors import _magpie_patcher as mp
+_NATIVE_CLIENT = """#!/usr/bin/env bash
+CLIENT_TOKENIZER_MODE="${MAGPIE_CLIENT_TOKENIZER_MODE:-${HYPERLOOM_CLIENT_TOKENIZER_MODE:-}}"
+run_benchmark_serving \\
+    --model "$MODEL" \\
+    --result-dir "$WORKSPACE_DIR/" \\
+    --trust-remote-code || exit $?
+"""
 
-    script = tmp_path / "vllm_mi300x.sh"
-    script.write_text(text, encoding="utf-8")
-    applied = mp._apply_client_tokenizer_mode_patch_atomic(script)
-    return applied, script.read_text(encoding="utf-8")
-
-
-def test_the_generic_client_gains_a_tokenizer_hook(tmp_path):
-    """Without it the client dies in HF AutoConfig before its first request."""
-    applied, text = _patch_client(tmp_path)
-    assert applied
-    assert "HYPERLOOM_CLIENT_TOKENIZER_MODE:+--tokenizer-mode" in text
-    assert "--trust-remote-code || exit $?" in text
+_MULTIMODAL_CLIENT = (
+    '#!/usr/bin/env bash\nvllm bench serve --result-dir "$WORKSPACE_DIR/" --trust-remote-code || exit $?\n'
+)
 
 
-def test_the_hook_is_not_a_comment_inside_the_continuation(tmp_path):
-    """After a trailing backslash a ``#`` is an argument, not a comment.
+def test_the_runtime_entry_point_leaves_client_scripts_untouched(tmp_path, caplog):
+    """The eval-concurrency sweep must not rewrite, or warn about, client scripts.
 
-    A comment line spliced into the continuation would be handed to the client
-    as argv and break the call.
+    A script that cannot take the tokenizer hook is judged only where the config
+    names the model that needs it and the one script that will run it.
     """
-    _applied, text = _patch_client(tmp_path)
-    body = text[text.index("run_benchmark_serving") : text.index("|| exit $?")]
-    assert "#" not in body, body
-
-
-def test_patching_the_client_is_idempotent(tmp_path):
     from hyperloom.orchestrator.actions.executors import _magpie_patcher as mp
 
-    _applied, text = _patch_client(tmp_path)
-    script = tmp_path / "vllm_mi300x.sh"
-    assert mp._apply_client_tokenizer_mode_patch_atomic(script)
-    assert script.read_text(encoding="utf-8").count("HYPERLOOM_CLIENT_TOKENIZER_MODE:+--tokenizer-mode") == 1
+    scripts = tmp_path / "benchmarks"
+    scripts.mkdir()
+    texts = {
+        "vllm_mi300x.sh": _GENERIC_CLIENT,
+        "vllm_mi355x.sh": _NATIVE_CLIENT,
+        "vllm_mi355x_mm.sh": _MULTIMODAL_CLIENT,
+    }
+    for name, text in texts.items():
+        (scripts / name).write_text(text, encoding="utf-8")
+
+    with caplog.at_level("WARNING"):
+        mp.ensure_eval_concurrency_compat(None, scripts.parent)
+        mp.magpie_scripts_patch_status(None, scripts.parent)
+
+    for name, text in texts.items():
+        assert (scripts / name).read_text(encoding="utf-8") == text, name
+    assert "tokenizer-mode patch" not in caplog.text
 
 
-def test_a_script_with_no_client_shape_is_left_alone(tmp_path):
+def test_a_native_client_reports_installed(tmp_path):
     from hyperloom.orchestrator.actions.executors import _magpie_patcher as mp
 
-    script = tmp_path / "unrelated.sh"
-    script.write_text("#!/usr/bin/env bash\necho hi\n", encoding="utf-8")
-    assert mp._apply_client_tokenizer_mode_patch_atomic(script)
-    assert script.read_text(encoding="utf-8") == "#!/usr/bin/env bash\necho hi\n"
+    scripts = tmp_path / "benchmarks"
+    scripts.mkdir()
+    (scripts / "vllm_mi355x.sh").write_text(_NATIVE_CLIENT, encoding="utf-8")
+    assert mp.client_tokenizer_hook_installed("vllm_mi355x.sh", inferencex_dir=scripts.parent)
 
 
-def test_an_unpatchable_client_is_reported_not_merely_logged(tmp_path):
+def test_a_client_without_the_hook_is_reported(tmp_path):
     """A missing hook must not hide behind the fail-soft eval-concurrency status.
 
     That status deliberately returns True whenever no live --concurrent-requests
@@ -909,90 +912,14 @@ def test_an_unpatchable_client_is_reported_not_merely_logged(tmp_path):
 
     scripts = tmp_path / "benchmarks"
     scripts.mkdir()
-    # Carries the client shape this patch targets, but not the exact legacy block.
-    (scripts / "vllm_mi300x.sh").write_text(
-        '#!/usr/bin/env bash\nrun_benchmark_serving --result-dir "$WORKSPACE_DIR/" --drifted\n',
-        encoding="utf-8",
-    )
-    assert not mp._client_tokenizer_hook_installed(None, scripts.parent)
-    assert not mp.ensure_client_tokenizer_hook(None, scripts.parent)
-
-
-def test_a_patched_tree_reports_installed(tmp_path):
-    from hyperloom.orchestrator.actions.executors import _magpie_patcher as mp
-
-    scripts = tmp_path / "benchmarks"
-    scripts.mkdir()
     (scripts / "vllm_mi300x.sh").write_text(_GENERIC_CLIENT, encoding="utf-8")
-    assert mp.ensure_client_tokenizer_hook(None, scripts.parent)
-    assert mp._client_tokenizer_hook_installed(None, scripts.parent)
-
-
-def test_the_production_status_path_installs_the_hook(tmp_path):
-    """The install entry point must TRANSFORM an unpatched tree, not just grade it.
-
-    Verification alone would leave a fresh checkout unpatched forever while
-    faithfully reporting that it is unpatched.
-    """
-    from hyperloom.orchestrator.actions.executors import _magpie_patcher as mp
-
-    scripts = tmp_path / "benchmarks"
-    scripts.mkdir()
-    client = scripts / "vllm_mi300x.sh"
-    client.write_text(_GENERIC_CLIENT, encoding="utf-8")
-    assert "HYPERLOOM_CLIENT_TOKENIZER_MODE" not in client.read_text(encoding="utf-8")
-
-    status = mp.magpie_scripts_patch_status(None, scripts.parent)
-
-    assert status.client_tokenizer_ok
-    assert "HYPERLOOM_CLIENT_TOKENIZER_MODE:+--tokenizer-mode" in client.read_text(encoding="utf-8")
-
-
-def test_the_runtime_entry_point_installs_the_hook(tmp_path):
-    """``ensure_eval_concurrency_compat`` is what a run actually calls.
-
-    baseline.py and preflight.py call it; nothing in a run calls
-    magpie_scripts_patch_status. A hook installed only on the status path would
-    never reach a launch.
-    """
-    from hyperloom.orchestrator.actions.executors import _magpie_patcher as mp
-
-    scripts = tmp_path / "benchmarks"
-    scripts.mkdir()
-    client = scripts / "vllm_mi300x.sh"
-    client.write_text(_GENERIC_CLIENT, encoding="utf-8")
-
-    mp.ensure_eval_concurrency_compat(None, scripts.parent)
-
-    assert "HYPERLOOM_CLIENT_TOKENIZER_MODE:+--tokenizer-mode" in client.read_text(encoding="utf-8")
-
-
-def test_a_failed_hook_does_not_fail_the_eval_concurrency_result(tmp_path):
-    """The two are reported separately, and the runtime checks the hook on its own.
-
-    ``ensure_eval_concurrency_compat`` stays fail-soft about its own patch; it is
-    NOT the thing that decides whether a launch may proceed without the hook.
-    ``baseline._after_materialize_config`` calls ``ensure_client_tokenizer_hook``
-    separately and refuses the round with ``client_tokenizer_unpatchable`` when
-    the model is one whose tokenizer has to be named.
-    """
-    from hyperloom.orchestrator.actions.executors import _magpie_patcher as mp
-
-    scripts = tmp_path / "benchmarks"
-    scripts.mkdir()
-    # Client shape present, legacy block drifted: the hook cannot be installed.
-    (scripts / "vllm_mi300x.sh").write_text(
-        '#!/usr/bin/env bash\nrun_benchmark_serving --result-dir "$WORKSPACE_DIR/" --drifted\n',
-        encoding="utf-8",
-    )
     assert mp.ensure_eval_concurrency_compat(None, scripts.parent)
-    assert not mp._client_tokenizer_hook_installed(None, scripts.parent)
+    assert not mp.client_tokenizer_hook_installed("vllm_mi300x.sh", inferencex_dir=scripts.parent)
 
 
-def test_a_model_needing_a_named_tokenizer_refuses_an_unpatchable_checkout(tmp_path, monkeypatch):
-    """The runtime consequence: no hook, no round -- but only for such a model."""
+def _deepseek_v4_config_without_hook(tmp_path):
+    """A materialized config for a model that needs a named tokenizer, over a client script lacking the hook."""
     import yaml
-    from hyperloom.orchestrator.actions.executors import baseline as bl
 
     scripts = tmp_path / "ix" / "benchmarks"
     scripts.mkdir(parents=True)
@@ -1009,6 +936,14 @@ def test_a_model_needing_a_named_tokenizer_refuses_an_unpatchable_checkout(tmp_p
         yaml.safe_dump({"benchmark": {"model": str(model), "inferencex_path": str(tmp_path / "ix")}}),
         encoding="utf-8",
     )
+    return cfg
+
+
+def test_a_model_needing_a_named_tokenizer_refuses_an_unpatchable_checkout(tmp_path, monkeypatch):
+    """The runtime consequence: no hook, no round -- but only for such a model."""
+    from hyperloom.orchestrator.actions.executors import baseline as bl
+
+    cfg = _deepseek_v4_config_without_hook(tmp_path)
 
     ex = bl.BaselineExecutor(session_dir=tmp_path)
     monkeypatch.setattr(bl, "materialized_run_eval_disabled", lambda _p: False)
@@ -1021,6 +956,7 @@ def test_a_model_needing_a_named_tokenizer_refuses_an_unpatchable_checkout(tmp_p
     monkeypatch.setattr(bl, "_client_tokenizer_mode", lambda _model: "deepseek_v4")
     res = ex._after_materialize_config(cfg, tmp_path / "out")
     assert res is not None and res.get("error_class") == "client_tokenizer_unpatchable", res
+    assert "1eb3df69de" in res["error"], res
 
 
 def test_the_hook_is_required_even_with_evaluation_disabled(tmp_path, monkeypatch):
@@ -1029,24 +965,9 @@ def test_the_hook_is_required_even_with_evaluation_disabled(tmp_path, monkeypatc
     Gating it on eval would leave an eval-disabled DeepSeek-V4 run dying exactly
     as before, with correctness resting on a preflight side effect.
     """
-    import yaml
     from hyperloom.orchestrator.actions.executors import baseline as bl
 
-    scripts = tmp_path / "ix" / "benchmarks"
-    scripts.mkdir(parents=True)
-    (scripts / "benchmark_lib.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
-    (scripts / "vllm_mi300x.sh").write_text(
-        '#!/usr/bin/env bash\nrun_benchmark_serving --result-dir "$WORKSPACE_DIR/" --drifted\n',
-        encoding="utf-8",
-    )
-    model = tmp_path / "m"
-    model.mkdir()
-    (model / "config.json").write_text('{"model_type": "deepseek_v4"}', encoding="utf-8")
-    cfg = tmp_path / "bench.yaml"
-    cfg.write_text(
-        yaml.safe_dump({"benchmark": {"model": str(model), "inferencex_path": str(tmp_path / "ix")}}),
-        encoding="utf-8",
-    )
+    cfg = _deepseek_v4_config_without_hook(tmp_path)
 
     # Evaluation OFF: the eval probe and eval-concurrency checks must not run,
     # but the tokenizer hook still must.
@@ -1062,24 +983,22 @@ def test_the_hook_is_required_even_with_evaluation_disabled(tmp_path, monkeypatc
 def test_an_unrelated_client_shape_does_not_veto_the_round(tmp_path):
     """The multimodal variants carry the same marker with a different call.
 
-    Judging every sibling would refuse a workload whose own script is patched
-    and correct - which is what happened live: vllm_mi300x.sh was patched, and
+    Judging every sibling would refuse a workload whose own script is fine - which
+    is what happened live: vllm_mi300x.sh carried the hook, and
     vllm_mi300x_mm.sh / vllm_mi355x_mm.sh failed the check and stopped the round.
     """
     from hyperloom.orchestrator.actions.executors import _magpie_patcher as mp
 
     scripts = tmp_path / "benchmarks"
     scripts.mkdir()
-    (scripts / "vllm_mi300x.sh").write_text(_GENERIC_CLIENT, encoding="utf-8")
-    # Same marker, different client call: unpatchable by design.
+    (scripts / "vllm_mi300x.sh").write_text(_NATIVE_CLIENT, encoding="utf-8")
+    # Same marker, different client call, no hook.
     (scripts / "vllm_mi300x_mm.sh").write_text(
         '#!/usr/bin/env bash\nrun_benchmark_serving --result-dir "$WORKSPACE_DIR/" --multimodal\n',
         encoding="utf-8",
     )
 
-    assert mp.ensure_client_tokenizer_hook(None, scripts.parent, script_name="vllm_mi300x.sh")
-    # Unscoped, the sibling still vetoes - that is the behaviour being narrowed.
-    assert not mp.ensure_client_tokenizer_hook(None, scripts.parent)
+    assert mp.client_tokenizer_hook_installed("vllm_mi300x.sh", inferencex_dir=scripts.parent)
 
 
 def test_naming_an_unpatchable_script_still_refuses(tmp_path):
@@ -1092,7 +1011,7 @@ def test_naming_an_unpatchable_script_still_refuses(tmp_path):
         '#!/usr/bin/env bash\nrun_benchmark_serving --result-dir "$WORKSPACE_DIR/" --drifted\n',
         encoding="utf-8",
     )
-    assert not mp.ensure_client_tokenizer_hook(None, scripts.parent, script_name="vllm_mi300x.sh")
+    assert not mp.client_tokenizer_hook_installed("vllm_mi300x.sh", inferencex_dir=scripts.parent)
 
 
 def test_baseline_names_the_script_from_the_config(tmp_path):
@@ -1112,25 +1031,3 @@ def test_baseline_names_the_script_from_the_config(tmp_path):
 
     cfg.write_text(yaml.safe_dump({"benchmark": {}}), encoding="utf-8")
     assert bl.BaselineExecutor._client_script_from_config(cfg) is None
-
-
-def test_an_unfittable_sibling_script_does_not_fail_the_install():
-    """The hook is workload-specific; the install contract is not.
-
-    A Magpie layout carries sibling scripts -- the multimodal ``*_mm.sh`` among
-    them -- whose client shape this hook does not fit and was never meant to.
-    Folding ``client_tokenizer_ok`` into ``ok`` failed installation over a
-    script the run would never execute, on a layout the run would never touch.
-    The status still reports it; the hard failure lives where the config names
-    both the model that needs the hook and the one script that will run it.
-    """
-    from hyperloom.orchestrator.actions.executors._magpie_patcher import MagpiePatchStatus
-
-    status = MagpiePatchStatus(
-        remote_trust_ok=True,
-        eval_flag_ok=True,
-        client_tokenizer_ok=False,
-    )
-
-    assert status.ok is True, "an unfittable sibling must not fail the install"
-    assert status.client_tokenizer_ok is False, "it must still be reported"
