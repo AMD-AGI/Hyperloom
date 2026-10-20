@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import Mock
 
+import httpx
 import pytest
 
 from hyperloom.common import claude_oneshot
@@ -1879,10 +1880,14 @@ def test_probe_llm_catalog_retries_on_transient_error_then_succeeds(monkeypatch)
     def _flaky_get(url, **kwargs):
         attempt[0] += 1
         if attempt[0] <= 2:
-            raise RuntimeError(f"transient {attempt[0]}")
+            raise httpx.ConnectError(f"transient {attempt[0]}")
         return _FakeResp(200, {"data": [{"id": "claude-opus-4-7"}]})
 
-    fake_httpx = type("FakeHttpx", (), {"get": staticmethod(_flaky_get)})
+    fake_httpx = type(
+        "FakeHttpx",
+        (),
+        {"get": staticmethod(_flaky_get), "HTTPError": httpx.HTTPError, "InvalidURL": httpx.InvalidURL},
+    )
     monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
 
     ids = cli._probe_llm_catalog(
@@ -2054,6 +2059,14 @@ def test_smoke_test_codex_model_falls_back_to_next_rung(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "WARNING" in out
     assert "falling back" in out
+
+
+def test_smoke_test_codex_model_falls_back_from_the_default_to_the_previous_default(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: {"gpt-5.6-sol", "gpt-5.5"})
+    args = _make_args(codex_model="gpt-6-astra", critic_mock=False)
+    cli._smoke_test_codex_model(args, ("https://anthropic", "https://openai/v1"))
+
+    assert args.codex_model == "gpt-5.6-sol"
 
 
 def test_smoke_test_codex_model_ladder_skips_missing_rungs(monkeypatch, capsys):

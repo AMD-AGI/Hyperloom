@@ -1832,7 +1832,7 @@ def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
                     backup_map=backup_map,
                     records_by_host=records_by_host,
                 )
-            except Exception as exc:  # noqa: BLE001
+            except (OSError, subprocess.SubprocessError) as exc:
                 mn_revert = {"status": "failed", "error": str(exc)}
         if mn_revert and mn_revert.get("status") != "ok":
             revert_issues.append({"kind": "multinode_revert", **mn_revert})
@@ -2076,7 +2076,7 @@ def apply_kernel_patch(request: KernelPatchRequest) -> dict[str, Any]:
     try:
         strategy = _detect_strategy(target)
         _validate_patch_source(patch, target)
-    except Exception as exc:  # noqa: BLE001
+    except (ValueError, OSError, py_compile.PyCompileError) as exc:
         return {"status": "failed", "error": str(exc)}
 
     # Coerce/validate the rebuild_command BEFORE any file/pod mutation so an
@@ -2151,7 +2151,7 @@ def apply_kernel_patch(request: KernelPatchRequest) -> dict[str, Any]:
                     jit_build_dir=remote_jit_dir,
                 )
             )
-        except Exception as exc:  # noqa: BLE001
+        except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
             # Pod fan-out failed: revert sandbox copy.
             try:
                 shutil.copy2(source_backup["backup_path"], target)
@@ -2534,7 +2534,7 @@ def _apply_kernel_patch_snapshot(request: KernelPatchRequest) -> dict[str, Any]:
                     json.dumps(manifest, indent=2, sort_keys=True) + "\n",
                     encoding="utf-8",
                 )
-        except Exception as exc:  # noqa: BLE001
+        except (OSError, subprocess.SubprocessError, RuntimeError, ValueError) as exc:
             revert = revert_kernel_patch(manifest_path)
             return {
                 "status": "failed",

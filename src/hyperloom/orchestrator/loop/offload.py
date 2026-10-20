@@ -30,7 +30,7 @@ async def offload(
     label: str,
     default: Any = None,
 ) -> T | Any:
-    """Run ``work`` on a thread, returning ``default`` if it outlasts ``deadline``.
+    """Run ``work`` on a thread, returning ``default`` if it outlasts ``deadline``; its exceptions propagate.
 
     Args:
         work: The blocking callable. Must bound its own I/O; it keeps running
@@ -38,10 +38,10 @@ async def offload(
         deadline: When the caller stops waiting. ``None`` waits up to
             :data:`OFFLOAD_UNBOUNDED_CAP_SEC`.
         label: Short name for the work, used in the timeout warning.
-        default: Returned when the wait ends first, or when ``work`` raises.
+        default: Returned when the wait ends first.
 
     Returns:
-        The call's result, or ``default`` if it timed out or raised.
+        The call's result, or ``default`` if it timed out.
     """
     budget = seconds_until(deadline, unbounded_cap=OFFLOAD_UNBOUNDED_CAP_SEC)
     if budget <= 0.0:
@@ -55,7 +55,4 @@ async def offload(
             label,
             budget,
         )
-        return default
-    except Exception:
-        log.exception("offload: %s raised", label)
         return default

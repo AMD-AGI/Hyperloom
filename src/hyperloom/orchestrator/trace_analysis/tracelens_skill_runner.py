@@ -23,6 +23,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable
 
+import yaml
+from TraceLens.Agent.Analysis.utils.config_utils import check_config
+
 from hyperloom.common.codex_session import (
     CodexSessionConfig,
     CodexSessionError,
@@ -32,6 +35,7 @@ from hyperloom.common.codex_session import (
 )
 from hyperloom.common.llm_config import claude_sdk_env_options
 from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL
+from hyperloom.inference_optimizer import framework_registry
 
 from ._capture_shapes import is_capture_dir_name
 from ._io_utils import safe_float
@@ -47,6 +51,9 @@ from ._task_group_contract import (
 _log = logging.getLogger(__name__)
 
 DEFAULT_ALLOWED_TOOLS = ["Read", "Write", "Edit", "Bash", "Task"]
+
+# The run config the TraceLens skill reads.
+RUN_CONFIG_NAME = "run.yaml"
 
 # The Codex SDK has no literal Read/Write/Bash/Task tools, and this thread runs
 # without sub-agents, so the skill's tool names have to be mapped to Codex's
@@ -306,28 +313,60 @@ def write_local_cmd_prefix(output_dir: Path, tracelens_root: Path) -> Path:
     return prefix_path
 
 
-def infer_analysis_mode(framework: str, requested: str) -> str:
-    """Resolve the effective TraceLens analysis mode for a framework.
+def tracelens_analysis_mode(framework: str) -> str:
+    """Return the TraceLens analysis mode for ``framework``.
 
-    An explicit non-default ``requested`` mode always wins. Otherwise inference
-    frameworks (vllm/sglang/atom/xdit) default to ``"inference"`` grouping because
-    their traces share the chrome-trace shape produced by the torch profiler;
-    everything else falls back to the requested value or ``"default"``.
+    Serving frameworks (vllm/sglang/atom) and xDiT produce inference-shaped
+    traces; other scriptable workloads are analysed in the default mode.
 
     Args:
-        framework (str): The framework that produced the trace (e.g. ``vllm``).
-        requested (str): The caller-requested analysis mode, possibly empty or
-            ``"default"``.
+        framework (str): The framework that produced the trace.
 
     Returns:
-        str: The resolved analysis mode string.
+        str: ``"default"`` for scriptable frameworks (except xDiT),
+            else ``"inference"``.
     """
-    requested = (requested or "").strip().lower()
-    if requested and requested != "default":
-        return requested
-    if (framework or "").strip().lower() in {"vllm", "sglang", "atom", "xdit"}:
+    fw = (framework or "").strip().lower()
+    if fw == "xdit":
         return "inference"
-    return requested or "default"
+    return "default" if framework_registry.is_scriptable(framework) else "inference"
+
+
+def write_run_config(
+    *,
+    output_dir: Path,
+    trace_path: Path,
+    platform: str,
+    analysis_mode: str,
+    capture_folder: Path | None,
+) -> Path:
+    """Write the one-job standalone run config the TraceLens skill reads.
+
+    The config is checked with TraceLens's own ``check_config`` first, so a
+    rejected config raises ``ConfigError`` here rather than inside the agent
+    session. TraceLens requires absolute string paths.
+
+    Args:
+        output_dir (Path): Directory TraceLens writes to; the config lands in it.
+        trace_path (Path): The trace to analyse.
+        platform (str): The target platform name.
+        analysis_mode (str): ``"default"`` or ``"inference"``.
+        capture_folder (Path | None): Graph-capture folder; omitted when ``None``.
+
+    Returns:
+        Path: The path of the written ``run.yaml``.
+
+    Raises:
+        ConfigError: If TraceLens rejects the config.
+    """
+    job = {"trace_path": str(trace_path.resolve()), "platform": platform}
+    if capture_folder is not None:
+        job["capture_folder"] = str(capture_folder.resolve())
+    config = {"analysis_mode": analysis_mode, "output_dir": str(output_dir.resolve()), "jobs": [job]}
+    check_config(config, "standalone")
+    config_path = output_dir / RUN_CONFIG_NAME
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    return config_path
 
 
 def discover_capture_folder(trace_input: Path, trace_files: list[Path]) -> Path | None:
@@ -375,28 +414,21 @@ def discover_capture_folder(trace_input: Path, trace_files: list[Path]) -> Path 
 
 @dataclass(frozen=True)
 class TraceLensSkillRequest:
-    """The inputs one TraceLens skill run pins in its prompt.
+    """The inputs one TraceLens skill run reads besides its ``run.yaml``.
 
     Attributes:
         skill_path: Path to the TraceLens skill file to follow.
-        trace_path: Path to the trace file to analyze.
-        output_dir: Directory where TraceLens outputs are written.
+        output_dir: Directory holding ``run.yaml`` and receiving the outputs.
         tracelens_root: The TraceLens project root.
         tracelens_internal_root: The TraceLens-internal root, ``None`` in OSS-only mode.
-        platform: The target platform string.
-        framework: The framework that produced the trace.
-        analysis_mode: The requested analysis mode (resolved internally).
-        capture_folder: Graph-capture folder for inference runs.
+        capture_folder: Graph-capture folder, read only as the Codex runner's
+            write scope; the run config already names it.
     """
 
     skill_path: Path
-    trace_path: Path
     output_dir: Path
     tracelens_root: Path
     tracelens_internal_root: Path | None
-    platform: str
-    framework: str
-    analysis_mode: str
     capture_folder: Path | None
 
 
@@ -427,14 +459,12 @@ class _StreamIdleBounds:
 
 
 def build_orchestrator_prompt(request: TraceLensSkillRequest) -> str:
-    """Prompt an agent to execute the TraceLens standalone skill.
+    """Prompt an agent to run the TraceLens standalone skill from ``run.yaml``.
 
     Provider-neutral: the same prompt drives the Claude SDK runner and the
-    Codex SDK runner.
-
-    Assembles the full natural-language instruction that pins every required
-    input (paths, platform, framework, analysis/execution mode, capture folder)
-    so the agent can run the analysis-orchestrator workflow without prompting.
+    Codex SDK runner. The trace, platform, analysis mode and capture folder
+    live only in the run config; the prompt names it and supplies the
+    execution context the skill would otherwise ask for.
 
     Args:
         request (TraceLensSkillRequest): The run's inputs.
@@ -443,54 +473,39 @@ def build_orchestrator_prompt(request: TraceLensSkillRequest) -> str:
         str: The fully assembled orchestrator prompt text.
     """
 
-    tracelens_internal_root = request.tracelens_internal_root
-    framework = request.framework
-    capture_folder = request.capture_folder
-    analysis_mode = infer_analysis_mode(framework, request.analysis_mode)
-    if analysis_mode == "inference" and capture_folder is not None:
-        exec_mode = "graph_capture"
-    elif analysis_mode == "inference":
-        exec_mode = "eager"
-    else:
-        exec_mode = "default"
-
-    internal_root_text = str(tracelens_internal_root) if tracelens_internal_root else "(not installed; OSS-only mode)"
-    tl_extension_text = "TraceLens_internal" if tracelens_internal_root else "(unset)"
-
-    comparison_scope = "standalone"
-    capture_text = str(capture_folder) if capture_folder else "N/A"
+    output_dir = request.output_dir
+    run_config = (output_dir / RUN_CONFIG_NAME).resolve()
+    internal_root_text = (
+        str(request.tracelens_internal_root) if request.tracelens_internal_root else "(not installed; OSS-only mode)"
+    )
+    tl_extension_text = "TraceLens_internal" if request.tracelens_internal_root else "(unset)"
     return f"""You are running TraceLens standalone analysis for Hyperloom.
 
 Read and follow the FULL instructions in this skill file:
 {request.skill_path}
 
-All required Step 0 inputs are already provided below. Do not ask the user any
-questions; proceed with the analysis.
+Run it from config {run_config}, standalone.
+The execution context below answers the remaining Step 0 questions.
+Do not ask the user any questions; proceed with the analysis.
 
 Execution context:
 - Environment: local
 - TraceLens root: {request.tracelens_root}
 - TraceLens-internal root: {internal_root_text}
-- Command prefix cache: {request.output_dir / "cache" / "cmd_prefix.txt"}
-- Trace file path: {request.trace_path}
-- Output directory: {request.output_dir}
-- Platform: {request.platform}
-- Framework: {framework or "unknown"}
-- Comparison scope: {comparison_scope}
-- Analysis mode: {analysis_mode}
-- Inference execution mode: {exec_mode}
-- Capture folder path: {capture_text}
 - TL_EXTENSION: {tl_extension_text}
-
+- Command prefix cache: {output_dir / "cache" / "cmd_prefix.txt"}
+- Run config: {run_config}
+- Comparison scope: standalone
+- Output directory: {output_dir}
 
 Important requirements:
-1. Use the provided command prefix cache for all shell commands.
+1. Use the provided command prefix cache for all shell commands; do not rebuild it.
 2. Run the analysis-orchestrator workflow through Step 12.
-3. If analysis_mode is inference and execution mode is graph_capture, pass the
-   capture folder to the inference perf-report CLI exactly as the skill says.
+3. Take the trace, platform, analysis mode and capture folder from the run config
+   only. If the Step 0 config check fails, stop and report its error.
 4. Write all TraceLens outputs under the output directory above.
 5. Ensure this file exists before you finish:
-   - {request.output_dir / "analysis.md"}  (TraceLens final report; REQUIRED)
+   - {output_dir / "analysis.md"}  (TraceLens final report; REQUIRED)
 6. Do not run GEAK, kernel optimization, or modify model/framework source.
 
 When complete, respond with a short summary of the artifacts you wrote.
@@ -645,7 +660,7 @@ async def _drive_sdk_stream(
                     try:
                         await asyncio.wait_for(aclose(), timeout=10.0)
                     except (asyncio.TimeoutError, Exception):  # noqa: BLE001
-                        pass
+                        _log.debug("tracelens: stream aclose failed", exc_info=True)
                 break
             observe(message)
             in_flight.observe(message)
@@ -656,6 +671,7 @@ async def _drive_sdk_stream(
     except Exception as exc:  # noqa: BLE001
         # SDK may error after writing artifacts; treat artifact presence as truth.
         sdk_error = f"{type(exc).__name__}: {exc}"
+        _log.warning("tracelens: claude SDK stream failed: %s", sdk_error)
         if log:
             log(f"[claude-sdk] WARNING: {sdk_error}")
     return sdk_error
@@ -1347,6 +1363,7 @@ def aggregate_by_source_function(candidates: list[dict[str, Any]]) -> list[dict[
 
 
 __all__ = [
+    "RUN_CONFIG_NAME",
     "SdkEntryPoints",
     "TraceLensSkillRequest",
     "TraceLensSkillRunResult",
@@ -1359,8 +1376,9 @@ __all__ = [
     "extract_compute_pct_from_analysis_md",
     "extract_exposed_comm_pct_from_analysis_md",
     "extract_idle_pct_from_analysis_md",
-    "infer_analysis_mode",
     "normalize_upstream_category",
     "run_tracelens_skill",
+    "tracelens_analysis_mode",
     "write_local_cmd_prefix",
+    "write_run_config",
 ]

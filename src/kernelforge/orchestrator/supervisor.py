@@ -17,7 +17,7 @@ from typing import Awaitable, Callable
 from kernelforge.agent_backends import AgentRunSpec, watchdog_timeout_sec
 from kernelforge.agent_backends.session_resume import is_api_failure
 from kernelforge.config import Config, resolve_agent_model
-from kernelforge.durable_io import atomic_write_text
+from kernelforge.tools.durable_io import atomic_write_text
 
 log = logging.getLogger(__name__)
 
@@ -142,7 +142,7 @@ def persist_supervisor_ruling(
         persisted_interaction = interaction
         atomic_write_text(latest, reply)
         persisted_latest = latest
-    except Exception as error:  # noqa: BLE001 - persistence is best-effort
+    except OSError as error:
         log.debug(
             "supervisor: failed to persist injected ruling for iter %s: %s",
             iteration,
@@ -303,6 +303,7 @@ def make_supervisor_fn(
         except Exception as exc:  # noqa: BLE001 - supervisor is best-effort
             backend_name = selected_backend.name if selected_backend is not None else runtime.provider
             reply = ""
+            log.warning("supervisor %s call failed: %s", backend_name, exc)
             print(
                 f"  [supervisor] {backend_name} call failed ({exc}) — skipping",
                 file=sys.stderr,

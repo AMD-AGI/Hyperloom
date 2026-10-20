@@ -25,6 +25,7 @@ FORGE_E2E_EXCLUDED_PATHS = (
     "src/kernelforge/fusion/**",
     "src/kernelforge/gemm_tune/**",
     "src/kernelforge/tests/fusion/**",
+    "src/kernelforge/tests/gemm_tune/**",
 )
 
 

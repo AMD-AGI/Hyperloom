@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import shlex
+import subprocess
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
@@ -606,13 +607,8 @@ async def trigger_infera_engine_profile(
                 url,
                 resp.status_code,
             )
-        except Exception as exc:  # noqa: BLE001 — fail-soft
-            log.warning(
-                "infera profile %s -> %s failed (%s); continuing",
-                route,
-                url,
-                exc,
-            )
+        except _httpx.HTTPError as exc:
+            log.warning("infera profile %s -> %s failed (%s); continuing", route, url, exc)
 
 
 def _probe_generated_tokens(data: object) -> int:
@@ -735,7 +731,7 @@ async def _wait_for_workers_ready_async(timeout_s: int, poll_every_s: int = 10) 
                         log.info(
                             "worker /health OK (%s %s) after %ds [%d/%d]", role, ip, elapsed, len(ready), len(targets)
                         )
-                except Exception:  # noqa: BLE001
+                except _httpx.HTTPError:
                     pass
             if len(ready) == len(targets):
                 log.info(
@@ -863,7 +859,7 @@ def _collect_worker_server_logs(state: dict, reason: str) -> None:
                     if cp.stderr:
                         body += "\n--- ssh stderr ---\n" + cp.stderr
                     source = "ssh:" + str(remote)
-                except Exception:  # noqa: BLE001 - one pod's SSH must not stop the sweep
+                except (OSError, subprocess.TimeoutExpired, ValueError):
                     continue
             else:
                 continue
@@ -1018,7 +1014,7 @@ async def _wait_for_server_health_async(
                                         else:
                                             consecutive_completion_ok = 0
                                             last_err = f"completion_probe_http={cresp.status_code}"
-                                    except Exception as cexc:  # noqa: BLE001
+                                    except _httpx.HTTPError as cexc:
                                         consecutive_completion_ok = 0
                                         last_err = f"completion_probe {format_exc_brief(cexc, limit=80)}"
                             else:
@@ -1026,11 +1022,11 @@ async def _wait_for_server_health_async(
                                 consecutive_completion_ok = 0
                         else:
                             last_err = f"models_http_status={mresp.status_code}"
-                    except Exception as mexc:  # noqa: BLE001
+                    except _httpx.HTTPError as mexc:
                         last_err = f"models_probe {format_exc_brief(mexc, limit=80)}"
                 else:
                     last_err = f"http_status={resp.status_code}"
-            except Exception as exc:  # noqa: BLE001
+            except _httpx.HTTPError as exc:
                 last_err = format_exc_brief(exc, limit=120)
             if _models_empty_too_long(
                 elapsed=elapsed,
@@ -1161,7 +1157,7 @@ async def _wait_for_published_service_ready_async(
                 else:
                     ok_streak = 0
                     last_err = f"http_status={resp.status_code}"
-            except Exception as exc:  # noqa: BLE001
+            except _httpx.HTTPError as exc:
                 if _is_name_resolution_error(exc):
                     dns_failures += 1
                     if dns_failures >= dns_skip_after:

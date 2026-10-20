@@ -12,7 +12,7 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, NoReturn
 
 from hyperloom.common.env_safety import scrub_benchmark_process_env
 from hyperloom.common.visible_devices import COUNTING_VISIBLE_DEVICE_VARS
@@ -227,7 +227,7 @@ def _pdeathsig_preexec() -> None:
         # PR_SET_PDEATHSIG is option 1
         libc = ctypes.CDLL("libc.so.6", use_errno=True)
         libc.prctl(1, signal.SIGTERM)
-    except Exception:  # noqa: BLE001 — best-effort hardening only
+    except (OSError, AttributeError):
         pass
 
 
@@ -353,6 +353,34 @@ class ActorLaunch:
     stdin_path: str | None = None
 
 
+def _child_env_for(launch: ActorLaunch) -> dict[str, str]:
+    """Return the environment the serving subprocess runs in.
+
+    ``merge`` layers the launch's variables over this process's and leaves the
+    visible-device keys to Ray; ``replace`` starts from the launch's own and
+    carries those keys back in.
+    """
+    env = launch.env
+    env_mode = launch.env_mode
+    if env_mode == "merge":
+        child_env = dict(os.environ)
+        for key, value in (env or {}).items():
+            if key in _VISIBLE_DEVICE_ENV_KEYS:
+                continue
+            child_env[key] = value
+    elif env_mode == "replace":
+        child_env = dict(env or {})
+        for key in _VISIBLE_DEVICE_ENV_KEYS:
+            if key in os.environ:
+                child_env[key] = os.environ[key]
+    else:
+        raise ValueError(f"unsupported env_mode {env_mode!r}; expected 'merge' or 'replace'")
+    from ._ray_backend import align_hip_with_ray_rocr
+
+    align_hip_with_ray_rocr(child_env)
+    return child_env
+
+
 def _serving_actor_body() -> Any:
     """Build the ServingActor class (imports ray lazily so import is cheap)."""
     import ray
@@ -368,24 +396,7 @@ def _serving_actor_body() -> Any:
 
         def start(self, launch: ActorLaunch, *, scrub_benchmark_env=False) -> int:
             """Launch the serving subprocess; Ray has set visible devices."""
-            env = launch.env
-            env_mode = launch.env_mode
-            if env_mode == "merge":
-                child_env = dict(os.environ)
-                for key, value in (env or {}).items():
-                    if key in _VISIBLE_DEVICE_ENV_KEYS:
-                        continue
-                    child_env[key] = value
-            elif env_mode == "replace":
-                child_env = dict(env or {})
-                for key in _VISIBLE_DEVICE_ENV_KEYS:
-                    if key in os.environ:
-                        child_env[key] = os.environ[key]
-            else:
-                raise ValueError(f"unsupported env_mode {env_mode!r}; expected 'merge' or 'replace'")
-            from ._ray_backend import align_hip_with_ray_rocr
-
-            align_hip_with_ray_rocr(child_env)
+            child_env = _child_env_for(launch)
             if scrub_benchmark_env:
                 scrub_benchmark_process_env(child_env)
             start_kwargs = {
@@ -442,8 +453,8 @@ def _serving_actor_body() -> Any:
             """Reap the serving process when Ray tears the actor down."""
             try:
                 self._mgr.stop()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception:
+                log.debug("ServingActor: stop during Ray teardown failed", exc_info=True)
 
     return ServingActor
 
@@ -622,12 +633,9 @@ class ServingLease:
                 exc,
             )
             self._actor = None
-            try:
-                from ._ray_backend import mark_ray_backend_unhealthy
+            from ._ray_backend import mark_ray_backend_unhealthy
 
-                mark_ray_backend_unhealthy()
-            except Exception:  # noqa: BLE001 - failure recovery must not raise
-                pass
+            mark_ray_backend_unhealthy()
             return 1, "", f"ray_actor_error: {exc}"[:2000]
         except _task_err as exc:
             # Worker crash / unexpected error: surface as a benchmark failure so the caller's existing rc!=0 handling
@@ -758,44 +766,7 @@ class ServingLease:
                 # process-tree machinery, not to a timeout path; say plainly what may have been left behind so an
                 # operator can look.
                 if timed_out:
-                    # Deliberately NOT killing the actor. ``ray.kill`` runs
-                    # neither ``__ray_terminate__`` nor atexit, so a round that
-                    # really is still running keeps its server subprocesses --
-                    # but killing the actor hands its GPUs straight back to the
-                    # scheduler, and the next round would be placed on cards a
-                    # live server still maps. That trades a bounded wait for
-                    # concurrent GPU use, which corrupts quietly.
-                    #
-                    # Leaving the actor alive keeps those devices reserved, so
-                    # nothing else can be placed on them. The cost is that they
-                    # stay out of circulation until the session ends or an
-                    # operator intervenes -- the same asymmetry the lane leases
-                    # settle on: a resource stuck is recoverable, a resource
-                    # shared is not.
-                    self._abandon_ref(ref)
-                    # Declared here, honoured by ensure(), run_session_kill() and
-                    # close(). Declaring it without those would be the same
-                    # half-measure a prior revision shipped: the quarantine held
-                    # inside this method while the caller's finally: close() went
-                    # on to kill the actor anyway.
-                    self._quarantined = _round_label(cmd)
-                    # Outlives this lease object on purpose; see _QUARANTINED_ACTORS.
-                    if self._actor is not None and self._actor not in _QUARANTINED_ACTORS:
-                        _QUARANTINED_ACTORS.append(self._actor)
-                    log.warning(
-                        "ServingLease: abandoning round %s after %.0fs without a response, and KEEPING its actor "
-                        "alive on purpose: its subprocess tree cannot be confirmed gone, so its GPUs stay reserved "
-                        "rather than being returned to the scheduler. They will not be reusable until this session "
-                        "ends; if you need them sooner, confirm no server of that round survives and kill the actor "
-                        "by hand",
-                        _round_label(cmd),
-                        time.monotonic() - started_at,
-                    )
-                    raise subprocess.TimeoutExpired(
-                        cmd,
-                        wait_ceiling,
-                        stderr=_round_wait_timeout_stderr(time.monotonic() - started_at, wait_ceiling),
-                    )
+                    self._quarantine_unresponsive_round(ref, cmd, wait_ceiling=wait_ceiling, started_at=started_at)
                 # The cancel path keeps the behaviour it had on main: an operator
                 # or a shutdown asked for this, and the caller is waiting on the
                 # teardown rather than on a round.
@@ -811,19 +782,61 @@ class ServingLease:
                     f"{CANCEL_ROUND_GRACE_SEC:.0f}s without returning the round",
                 )
 
-    def _abandon_ref(self, ref: Any) -> None:
-        """Drop a round this lease will never collect. Never raises."""
-        try:
-            import ray
+    def _quarantine_unresponsive_round(
+        self,
+        ref: Any,
+        cmd: list[str],
+        *,
+        wait_ceiling: float,
+        started_at: float,
+    ) -> NoReturn:
+        """Give up on a round that outlived its ceiling, keeping its actor alive, and raise the caller's timeout.
 
+        Deliberately NOT killing the actor. ``ray.kill`` runs neither ``__ray_terminate__`` nor atexit, so a round
+        that really is still running keeps its server subprocesses -- but killing the actor hands its GPUs straight
+        back to the scheduler, and the next round would be placed on cards a live server still maps. That trades a
+        bounded wait for concurrent GPU use, which corrupts quietly. Leaving the actor alive keeps those devices
+        reserved, so nothing else can be placed on them. The cost is that they stay out of circulation until the
+        session ends or an operator intervenes -- the same asymmetry the lane leases settle on: a resource stuck is
+        recoverable, a resource shared is not.
+
+        Raises:
+            subprocess.TimeoutExpired: Always; the round is the caller's timeout.
+        """
+        self._abandon_ref(ref)
+        # Declared here, honoured by ensure(), run_session_kill() and close().
+        self._quarantined = _round_label(cmd)
+        # Outlives this lease object on purpose; see _QUARANTINED_ACTORS.
+        if self._actor is not None and self._actor not in _QUARANTINED_ACTORS:
+            _QUARANTINED_ACTORS.append(self._actor)
+        log.warning(
+            "ServingLease: abandoning round %s after %.0fs without a response, and KEEPING its actor "
+            "alive on purpose: its subprocess tree cannot be confirmed gone, so its GPUs stay reserved "
+            "rather than being returned to the scheduler. They will not be reusable until this session "
+            "ends; if you need them sooner, confirm no server of that round survives and kill the actor "
+            "by hand",
+            _round_label(cmd),
+            time.monotonic() - started_at,
+        )
+        raise subprocess.TimeoutExpired(
+            cmd,
+            wait_ceiling,
+            stderr=_round_wait_timeout_stderr(time.monotonic() - started_at, wait_ceiling),
+        )
+
+    def _abandon_ref(self, ref: Any) -> None:
+        """Drop a round this lease will never collect; Ray and OS errors are swallowed."""
+        import ray
+
+        try:
             # Recoverable cancels only: a task still queued for an actor we are about to kill has nothing to
             # interrupt, and ``force=True`` is rejected for actor tasks.
             ray.cancel(ref)
-        except Exception as exc:  # noqa: BLE001 — the actor kill below is what actually frees the resources
+        except (ray.exceptions.RayError, OSError) as exc:  # the actor kill below is what frees the resources
             log.warning("ServingLease: could not cancel the abandoned round: %r", exc)
 
     def _ask_actor_to_cancel(self, reason: str) -> bool:
-        """Tell the actor to stop the round it is running. Never raises."""
+        """Tell the actor to stop the round it is running; Ray and OS errors are swallowed."""
         import ray
 
         actor = self._actor
@@ -831,7 +844,7 @@ class ServingLease:
             return False
         try:
             return bool(ray.get(actor.cancel_round.remote(reason), timeout=_LEASE_PROBE_TIMEOUT_SEC))
-        except Exception as exc:  # noqa: BLE001 — an unreachable actor gets killed instead
+        except (ray.exceptions.RayError, OSError) as exc:  # an unreachable actor gets killed instead
             log.warning("ServingLease: could not reach the actor to cancel its round: %r", exc)
             return False
 
@@ -855,11 +868,11 @@ class ServingLease:
             return
         if self._actor is None:
             return
-        try:
-            import ray
+        import ray
 
+        try:
             ray.get(self._actor.stop.remote(), timeout=CLOSE_STOP_TIMEOUT_SEC)
-        except Exception as exc:  # noqa: BLE001 — the kill below is the backstop
+        except (ray.exceptions.RayError, OSError) as exc:  # the kill below is the backstop
             log.warning("ServingLease.close: the actor did not stop its server: %r", exc)
         self._kill_actor()
 
@@ -879,14 +892,14 @@ class ServingLease:
             )
 
     def _kill_actor(self) -> None:
-        """Kill the actor handle without waiting for it. Idempotent, never raises."""
+        """Kill the actor handle without waiting for it. Idempotent; Ray and OS errors are swallowed."""
         if self._actor is None:
             return
-        try:
-            import ray
+        import ray
 
+        try:
             ray.kill(self._actor)
-        except Exception:  # noqa: BLE001 — teardown must not raise
+        except (ray.exceptions.RayError, OSError):
             pass
         self._actor = None
 
@@ -991,7 +1004,7 @@ class GpuSpecialistLease:
             return bool(ray.get(self._actor.is_alive.remote(), timeout=_LEASE_PROBE_TIMEOUT_SEC))
         except ray.exceptions.GetTimeoutError:
             return True  # still-alive assumption on timeout (avoid premature kill)
-        except Exception:  # noqa: BLE001 — dead actor reads as not-alive
+        except (ray.exceptions.RayError, OSError):  # a dead actor reads as not alive
             return False
 
     def exit_code(self) -> int | None:
@@ -1002,7 +1015,7 @@ class GpuSpecialistLease:
 
         try:
             return ray.get(self._actor.exit_code.remote(), timeout=_LEASE_PROBE_TIMEOUT_SEC)
-        except Exception:  # noqa: BLE001
+        except (ray.exceptions.RayError, OSError):
             return None
 
     def stop(self) -> bool:

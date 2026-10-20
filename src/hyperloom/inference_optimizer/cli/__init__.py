@@ -119,7 +119,7 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
 )
 from hyperloom.inference_optimizer.breakdown.stop_reasons import SUPERVISOR_RESTART_REASON
 
-from ..session.lock import SessionAlreadyRunning, SessionLock
+from ..session.lock import SessionAlreadyRunning, SessionLock, SessionLockPathError
 from ..session.paths import (
     ENV_USER_DATA_PATH,
     asset_system_prompts_dir,
@@ -514,7 +514,7 @@ def _probe_llm_catalog(
                 headers=headers,
                 timeout=_CATALOG_REQUEST_TIMEOUT_SEC,
             )
-        except Exception as exc:  # noqa: BLE001
+        except (httpx.HTTPError, httpx.InvalidURL) as exc:
             last_err = f"{type(exc).__name__}: {exc}"
             print(f"Preflight: catalog probe attempt {i + 1}/{len(delays)} failed: {last_err}")
             continue
@@ -877,6 +877,7 @@ def _probe_critic_review_model(
                     max_completion_tokens=16,
                 )
         except Exception as exc:  # noqa: BLE001 — any failure means the review path is unusable
+            log.warning("critic model %r probe failed over the %s protocol: %s", model, protocol, exc)
             last_error = exc
             continue
         print(f"Preflight: critic model {model!r} answered over the {protocol} protocol")
@@ -1635,19 +1636,15 @@ def _persist_preflight_failure_artifacts(
 ) -> Path | None:
     """Best-effort materialize the failed install event and final SBD."""
     _mark_pending_install_event_failed(args, exc)
-    try:
-        session_dir = _new_preflight_failure_session_dir(
-            args,
-            failed_attempt=bool(str(getattr(args, "resume_from", "") or "").strip()),
-        )
-    except Exception:
-        log.warning("failed to create a session for SBD V6 preflight failure", exc_info=True)
-        return None
+    session_dir = _new_preflight_failure_session_dir(
+        args,
+        failed_attempt=bool(str(getattr(args, "resume_from", "") or "").strip()),
+    )
 
     session_lock = SessionLock(session_dir)
     try:
         session_lock.acquire()
-    except Exception:
+    except (SessionAlreadyRunning, SessionLockPathError, OSError):
         session_lock.release()
         log.warning("failed to lock SBD V6 preflight failure session", exc_info=True)
         return None
@@ -1671,15 +1668,9 @@ def _persist_preflight_failure_artifacts(
 
         record_close_safety_net(session_dir)
         record_stage_reached(session_dir, "install")
-        try:
-            from ..breakdown import write_breakdown_json
+        from ..breakdown import write_breakdown_json
 
-            write_breakdown_json(session_dir)
-        except Exception as write_exc:
-            log.warning("failed to write SBD V6 preflight failure breakdown", exc_info=True)
-            from ..session.sbd_v6 import record_write_warning
-
-            record_write_warning(session_dir, component="preflight_failure.breakdown", exc=write_exc)
+        write_breakdown_json(session_dir)
     finally:
         session_lock.release()
     print(f"Preflight failure artifacts: {session_dir}", file=sys.stderr)
