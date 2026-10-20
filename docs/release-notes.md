@@ -20,6 +20,11 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **The accuracy eval can no longer be turned off.** `--no-eval`, the
+  `RUN_EVAL` process-environment override and the `disable_run_eval` task
+  param are removed, and a baseline whose eval fails stops the run instead of
+  retrying with `RUN_EVAL=false`.
+
 ## Hyperloom 1.1.4 release
 
 The [1.1.4 release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.1.4)

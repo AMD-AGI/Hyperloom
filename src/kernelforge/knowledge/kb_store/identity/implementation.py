@@ -13,6 +13,8 @@ from typing import Iterable
 
 from packaging.version import InvalidVersion, Version
 
+from kernelforge.knowledge.kb_store.identity.kernel_names import derive_kernel_names
+
 
 _UNKNOWN = "unknown"
 _NO_FRAMEWORK_SENTINELS = {"", "standalone", "none", "unknown"}
@@ -262,8 +264,6 @@ def derive_implementation_symbols(
     )
     source_symbols: set[str] = set()
     try:
-        from kernelforge.mcp_server.tools.pmc import derive_kernel_names
-
         for source in sources:
             source_symbols.update(stable(derive_kernel_names(source)))
     except OSError:

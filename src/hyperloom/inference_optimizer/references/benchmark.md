@@ -96,7 +96,7 @@ and are recorded in `explore_search`.
 ## Workload-contract reuse (baseline → explore/sweep)
 
 `baseline` materializes its YAML once with the operator's process env (`CONC` /
-`ISL` / `OSL` / `TP` / `MAX_MODEL_LEN` / `PRECISION` / `RUN_EVAL` /
+`ISL` / `OSL` / `TP` / `MAX_MODEL_LEN` / `PRECISION` /
 `ROCR_VISIBLE_DEVICES` + adaptive `NUM_PROMPTS` / `NUM_WARMUPS`), saves it as
 `baseline_config.with_envs.yaml`, and forwards the path as
 `task.params["config_path"]` to every `explore` / `sweep` task — so variants

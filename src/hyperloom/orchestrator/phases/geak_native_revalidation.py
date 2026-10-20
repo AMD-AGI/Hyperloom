@@ -35,33 +35,49 @@ VALIDATED = "validated"
 NO_PROMOTE = "no_promote"
 
 
-def _patch_sources(result: dict[str, Any], *, overlay: str) -> list[Path]:
-    combined = str(result.get("final_patch") or "").strip()
-    kernels = [
+def _source_bearing_specs(result: dict[str, Any]) -> list[dict[str, Any]]:
+    """The accepted kernel and head specs whose product is source, not an environment."""
+    return [
         spec
         for spec in (result.get("accepted_kernels") or []) + (result.get("accepted_heads") or [])
         if isinstance(spec, dict) and not geak_spec_is_env(spec)
     ]
-    if (
-        not combined
-        and not overlay
-        and any(not (spec.get("final_patch") or spec.get("patch_path")) for spec in kernels)
-    ):
+
+
+def _spec_declares_source(spec: dict[str, Any]) -> bool:
+    """Whether a spec names a patch file at all."""
+    return bool(spec.get("final_patch") or spec.get("patch_path"))
+
+
+def _spec_patch_value(spec: dict[str, Any]) -> str:
+    """The patch path a spec declares, as written."""
+    return str(spec.get("final_patch") or spec.get("patch_path") or "").strip()
+
+
+def _declared_patch_values(result: dict[str, Any], *, overlay: str) -> list[str]:
+    """The patch paths a GEAK product declares; a combined patch stands for the whole product."""
+    combined = str(result.get("final_patch") or "").strip()
+    if combined:
+        return [combined]
+    specs = _source_bearing_specs(result)
+    if not overlay and not all(_spec_declares_source(spec) for spec in specs):
         raise ValueError("GEAK accepted kernel has no deployable source patch or overlay")
-    raw = (
-        [combined]
-        if combined
-        else [str(spec.get("final_patch") or spec.get("patch_path") or "").strip() for spec in kernels]
-    )
+    return [_spec_patch_value(spec) for spec in specs]
+
+
+def _readable_patch_under(value: str, root: Path) -> Path:
+    """Resolve a declared patch path to a non-empty file inside ``root``."""
+    path = Path(value).expanduser()
+    path = (path if path.is_absolute() else root / path).resolve()
+    if not path.is_relative_to(root) or not path.is_file() or not path.read_bytes().strip():
+        raise ValueError(f"GEAK source patch is missing, empty, or outside its eval directory: {path}")
+    return path
+
+
+def _patch_sources(result: dict[str, Any], *, overlay: str) -> list[Path]:
     root = Path(str(result.get("eval_dir") or "")).expanduser().resolve()
-    paths = []
-    for value in dict.fromkeys(item for item in raw if item):
-        path = Path(value).expanduser()
-        path = (path if path.is_absolute() else root / path).resolve()
-        if not path.is_relative_to(root) or not path.is_file() or not path.read_bytes().strip():
-            raise ValueError(f"GEAK source patch is missing, empty, or outside its eval directory: {path}")
-        paths.append(path)
-    return paths
+    declared = _declared_patch_values(result, overlay=overlay)
+    return [_readable_patch_under(value, root) for value in dict.fromkeys(item for item in declared if item)]
 
 
 def prepare_source_revalidation(
