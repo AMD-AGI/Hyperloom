@@ -6,7 +6,7 @@
 The candidates are the integration head and the specialist head with the highest recorded value, whatever stopped
 its branch. Each is validated through the toolbox as a session measurement: one ``SWEEP`` test over the workload's
 :attr:`~hyperloom_multibranch.scheduling.settings.Workload.final_concs`, read per conc from its rounds, and a
-cold-start reproduction the rule gate judges against the commit's own recorded value and holds to the accuracy gate,
+cold-start reproduction the rule gate measures against the commit's own recorded value and holds to the accuracy gate,
 and the regression set of the commit's own ancestry run on the commit itself. The toolbox measures a
 sweep over the concs its request names and the primary one alone when it names none, so FINAL names them. FINAL
 waits for every validation test it started, past its reserve and the session's deadline if need be.
@@ -26,7 +26,6 @@ from dataclasses import dataclass, field, replace
 
 from hyperloom.contracts.measurement import Purpose, TestKind, TestResult, Validity
 from hyperloom_multibranch.contracts.gate import NotMeasured
-from hyperloom_multibranch.contracts.judgement import Verdict
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.records import BranchProgress
 from hyperloom_multibranch.contracts.toolbox import RequestRejected, TestWithdrawn
@@ -42,6 +41,11 @@ from hyperloom_multibranch.scheduling.settings import Workload
 
 #: How far below the other candidate a non-primary sweep point may fall before the candidate is passed over.
 MB_SWEEP_DEGRADATION_PCT = 5.0
+
+#: How far below its commit's recorded value a cold start may measure and still reproduce it. The record is the best of
+#: the measurements that won the commit, so a cold start of the same recipe lands a little under it, often past the
+#: gain bar.
+MB_REPRODUCTION_TOLERANCE_PCT = 5.0
 
 MEASURE_PHASE = "measure"
 PRIMARY_POINT_ONLY = "measured at the primary operating point alone: the workload defines no conc sweep"
@@ -189,9 +193,9 @@ def pick_final(checks: tuple[CandidateCheck, ...], metric: str, conc: int) -> Fi
 
 @dataclass(frozen=True)
 class _Reproduction:
-    """A cold start of a candidate: ``reproduced`` when it holds the commit's own recorded value, that is neither a
-    regression past the bar nor refused by anything but the missing gain (dropped requests, a broken guard, a pair
-    that did not measure the same work), and ``accuracy_passed`` when it clears the accuracy gate."""
+    """A cold start of a candidate: ``reproduced`` when it measures within :data:`MB_REPRODUCTION_TOLERANCE_PCT` of the
+    commit's own recorded value and nothing but the missing gain refused it (not dropped requests, a broken guard, a
+    pair that did not measure the same work), and ``accuracy_passed`` when it clears the accuracy gate."""
 
     reproduced: bool
     accuracy_passed: bool
@@ -260,11 +264,13 @@ class FinalSelector:
 
     async def _judge_reproduction(self, request_id: str) -> _Reproduction:
         judgement = await self._gate.compare(request_id)
-        reproduced = judgement.verdict is not Verdict.REGRESSED and not defects_beyond_gain(judgement)
+        held = judgement.gain_pct >= -MB_REPRODUCTION_TOLERANCE_PCT
+        reproduced = held and not defects_beyond_gain(judgement)
         return _Reproduction(reproduced, await self._gate.accuracy_passes(request_id))
 
 
 __all__ = [
+    "MB_REPRODUCTION_TOLERANCE_PCT",
     "MB_SWEEP_DEGRADATION_PCT",
     "PRIMARY_POINT_ONLY",
     "CandidateCheck",

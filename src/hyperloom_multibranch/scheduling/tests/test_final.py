@@ -333,6 +333,20 @@ async def test_a_candidate_the_regression_set_fails_on_its_own_commit_is_not_eli
     assert sorted(bench.regression.calls) == sorted((bench.commits[tag], RecipeDelta(), ()) for tag in ("i1", "c7"))
 
 
+async def test_a_cold_start_within_the_reproduction_tolerance_of_its_record_is_reproduced(tmp_path: Path) -> None:
+    curves = {
+        frozenset({"i1"}): {MAIN_POINT: 1040.0, CONC: 1040.0},
+        frozenset({"c7"}): {MAIN_POINT: 1040.0, CONC: 1040.0},
+    }
+    bench = await Bench(tmp_path).build(curves)
+
+    choice = await bench.selector().select(bench.candidates())
+
+    best_branch = choice.checks[1]
+    assert best_branch.reproduced and best_branch.accuracy_passed and best_branch.regression_passed
+    assert choice.chosen is not None
+
+
 async def test_a_cold_start_that_dropped_requests_is_not_reproduced(tmp_path: Path) -> None:
     bench = await Bench(tmp_path).build({frozenset({"i1"}): {MAIN_POINT: 1040.0, CONC: 1040.0}})
     gate = bench.handle(Role.GATE)
