@@ -567,8 +567,8 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         # once per pass (a pure env-var read, zero cost). The actual slot probe
         # (serving_slot_busy()) is deferred to just before each GPU specialist
         # admit so we don't miss a serving start that happened after the pass
-        # began. Both reads are best-effort — any failure leaves the check False
-        # (no pause) so dispatch is never blocked.
+        # began. A failure to resolve the probe leaves the check False (no
+        # pause) so dispatch is never blocked.
         _ray_serving_priority_enabled = False
         _serving_slot_busy_fn = None
         try:
@@ -634,8 +634,8 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 if needs_gpu:
                     # Probe serving-slot state immediately before admitting
                     # this GPU specialist (not once per pass) so a serving start
-                    # that races the pass does not slip through. Still best-effort:
-                    # any probe failure is treated as False (no pause).
+                    # that races the pass does not slip through. A Ray or OS error
+                    # in the probe is treated as False (no pause).
                     _immediate_pause = False
                     if _ray_serving_priority_enabled and _serving_slot_busy_fn is not None:
                         _immediate_pause = _serving_slot_busy_fn()

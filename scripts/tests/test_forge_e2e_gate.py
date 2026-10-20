@@ -44,7 +44,7 @@ def test_fusion_and_gemm_only_changes_do_not_trigger() -> None:
             "src/kernelforge/fusion/loop.py",
             "src/kernelforge/tests/fusion/test_loop.py",
             "src/kernelforge/gemm_tune/router.py",
-            "src/kernelforge/gemm_tune/tests/test_router.py",
+            "src/kernelforge/tests/gemm_tune/test_router.py",
         ]
     )
 

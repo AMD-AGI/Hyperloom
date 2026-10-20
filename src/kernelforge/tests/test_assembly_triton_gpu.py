@@ -22,8 +22,8 @@ tl = pytest.importorskip("triton.language")
 
 from kernelforge.assembly.prepare import AssemblyPreparationError, AssemblyTask, prepare_assembly
 from kernelforge.config import Config
-from kernelforge.loop.validation import run_validation_pipeline
-from kernelforge.mcp_server.tools.bench import BenchRun, bench_wallclock
+from kernelforge.evaluation.benchmark.runner import BenchRun, bench_wallclock
+from kernelforge.evaluation.correctness.pipeline import run_validation_pipeline
 
 
 @pytest.mark.parametrize(

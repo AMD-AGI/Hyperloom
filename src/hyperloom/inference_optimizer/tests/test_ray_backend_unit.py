@@ -624,19 +624,23 @@ class _FakeActor:
     def __init__(self, ret):
         self.run_blocking = _FakeMethod(ret)
         self.pid = _FakeMethod(None)
+        self.stop = _FakeMethod(True)
 
 
 class _LeaseFakeRay:
     """Minimal fake ``ray`` for ServingLease: get() unwraps refs, kill() records."""
 
     class exceptions:
-        class RayTaskError(Exception):
+        class RayError(Exception):
             pass
 
-        class RayActorError(Exception):
+        class RayTaskError(RayError):
             pass
 
-        class GetTimeoutError(Exception):
+        class RayActorError(RayError):
+            pass
+
+        class GetTimeoutError(RayError):
             pass
 
     def __init__(self):
@@ -1151,13 +1155,16 @@ class _FakeGpuActor:
 
 class _FakeRayP2:
     class exceptions:
-        class RayTaskError(Exception):
+        class RayError(Exception):
             pass
 
-        class GetTimeoutError(Exception):
+        class RayTaskError(RayError):
             pass
 
-        class RayActorError(Exception):
+        class GetTimeoutError(RayError):
+            pass
+
+        class RayActorError(RayError):
             pass
 
     def __init__(self):
@@ -1800,7 +1807,7 @@ def test_serving_lease_close_swallows_kill_error(monkeypatch: pytest.MonkeyPatch
     """ServingLease.close swallows a ray.kill error and still clears the handle."""
     monkeypatch.setitem(sys.modules, "ray", _RaisingRay())  # kill() raises
     lease = rs.ServingLease(num_gpus=1)
-    lease._actor = object()
+    lease._actor = _FakeActor((0, "", ""))
     lease.close()  # except path swallowed
     assert lease._actor is None
 

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import Mock
 
+import httpx
 import pytest
 
 from hyperloom.common import claude_oneshot
@@ -1879,10 +1880,14 @@ def test_probe_llm_catalog_retries_on_transient_error_then_succeeds(monkeypatch)
     def _flaky_get(url, **kwargs):
         attempt[0] += 1
         if attempt[0] <= 2:
-            raise RuntimeError(f"transient {attempt[0]}")
+            raise httpx.ConnectError(f"transient {attempt[0]}")
         return _FakeResp(200, {"data": [{"id": "claude-opus-4-7"}]})
 
-    fake_httpx = type("FakeHttpx", (), {"get": staticmethod(_flaky_get)})
+    fake_httpx = type(
+        "FakeHttpx",
+        (),
+        {"get": staticmethod(_flaky_get), "HTTPError": httpx.HTTPError, "InvalidURL": httpx.InvalidURL},
+    )
     monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
 
     ids = cli._probe_llm_catalog(
