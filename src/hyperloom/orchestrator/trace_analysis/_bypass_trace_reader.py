@@ -13,9 +13,10 @@ import codecs
 import gzip
 import json
 import re
+from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Mapping
 
 # Stdlib-only sibling; keeps this reader independent of TraceLens while sharing one capture-vs-workload rule with the
 # TraceLens route.
@@ -71,20 +72,6 @@ def _backfill_shape_signature(meta: dict[str, Any]) -> tuple[tuple[tuple[int, ..
 # recorded any kernel: activity-buffer overflow drops whole replays, so recorded-launch coverage collapses toward
 # ~1/launch_count, whereas a fully-recorded (merely idle) workload keeps kernels on essentially every launch.
 _GRAPH_RECORDED_LAUNCH_COVERAGE_MAX = 0.5
-
-
-def _graph_under_recorded(
-    *,
-    graph_mode: bool,
-    graph_launch_count: int,
-    graph_launches_with_kernels: int,
-    graph_kernels: int,
-) -> bool:
-    """Return whether a graph-mode trace likely under-recorded replays."""
-    if not graph_mode or graph_launch_count < 2 or graph_kernels <= 0:
-        return False
-    coverage = graph_launches_with_kernels / graph_launch_count
-    return coverage < _GRAPH_RECORDED_LAUNCH_COVERAGE_MAX
 
 
 def _file_size(fp: Path) -> int:
@@ -455,6 +442,15 @@ def _union_ms(intervals: list[tuple[float, float]]) -> float:
     return total_us / 1000.0
 
 
+def _clipped(intervals: list[tuple[float, float]], window: tuple[float, float] | None) -> list[tuple[float, float]]:
+    """Clip intervals to the steady window so occupancy math (busy/idle) stays within the window span."""
+    if window is None:
+        return intervals
+    ws, we = window
+    clipped = ((max(ws, start), min(we, end)) for start, end in intervals)
+    return [(lo, hi) for lo, hi in clipped if hi > lo]
+
+
 class _Agg:
     """Mutable aggregation accumulator for a single streaming pass."""
 
@@ -467,6 +463,77 @@ class _Agg:
     def add(self, dur_us: float) -> None:
         self.dur_us += dur_us
         self.count += 1
+
+    def row(self, name: str, denom_us: float) -> dict[str, Any]:
+        """Report this aggregate as one ``ops``/``kernels`` row, with its share of ``denom_us``."""
+        return {
+            "name": name[:_MAX_EVENT_NAME_CHARS],
+            "gpu_time_us": round(self.dur_us, 3),
+            "gpu_time_ms": round(self.dur_us / 1000.0, 4),
+            "count": self.count,
+            "gpu_pct": round(self.dur_us / denom_us * 100.0, 4) if denom_us > 0 else 0.0,
+        }
+
+
+class _KernelAgg(_Agg):
+    """One kernel name's aggregate, with what its launches carried to name and shape it in the ``kernels`` table."""
+
+    __slots__ = ("op_us", "op_meta", "shape_us", "shape_meta", "launch_geom")
+
+    def __init__(self) -> None:
+        super().__init__()
+        # Launching op -> attributed GPU us (the majority op names the kernel), and that op's first-seen meta.
+        self.op_us: dict[str, float] = {}
+        self.op_meta: dict[str, dict[str, Any]] = {}
+        # Capture-time shape signature -> GPU us and first-seen meta: the majority shape is the backfill, and more than
+        # one signature marks it ambiguous.
+        self.shape_us: dict[tuple[tuple[tuple[int, ...], ...], tuple[str, ...]], float] = {}
+        self.shape_meta: dict[tuple[tuple[tuple[int, ...], ...], tuple[str, ...]], dict[str, Any]] = {}
+        # The first launch geometry (grid/block) any launch carried.
+        self.launch_geom: tuple[Any, Any] | None = None
+
+    def add_launch(
+        self, dur_us: float, op_name: str, meta: dict[str, Any], launch_geom: tuple[Any, Any] | None
+    ) -> None:
+        """Count one launch, crediting its launching op and keeping the op meta and launch geometry it carried."""
+        self.add(dur_us)
+        self.op_us[op_name] = self.op_us.get(op_name, 0.0) + dur_us
+        if meta and op_name != "(unlinked)":
+            self.op_meta.setdefault(op_name, meta)
+            sig = _backfill_shape_signature(meta)
+            if sig[0]:
+                self.shape_meta.setdefault(sig, meta)
+                self.shape_us[sig] = self.shape_us.get(sig, 0.0) + dur_us
+        self.launch_geom = self.launch_geom or launch_geom
+
+    def row(self, name: str, denom_us: float) -> dict[str, Any]:
+        """Report the kernel row, named by its majority launching op and carrying its shape fallbacks."""
+        real_ops = {op: us for op, us in self.op_us.items() if us > 0.0 and op not in ("(unlinked)", "(graph)")}
+        op_name = max(real_ops, key=real_ops.__getitem__, default="")
+        meta = self.op_meta.get(op_name, {})
+        backfill = self.shape_meta[max(self.shape_us, key=self.shape_us.__getitem__)] if self.shape_us else {}
+        grid, block = self.launch_geom or (None, None)
+        return {
+            **super().row(name, denom_us),
+            "op_name": op_name,
+            "op_shapes": meta.get("shapes") or [],
+            "op_dtypes": meta.get("dtypes") or [],
+            "op_kernel_file": meta.get("kernel_file") or "",
+            "op_kernel_backend": meta.get("kernel_backend") or "",
+            # Shape fallbacks for a kernel whose own launch had no cpu_op shape: (a) same-name capture-time shape,
+            # (b) launch geometry.
+            "backfill_shapes": backfill.get("shapes") or [],
+            "backfill_dtypes": backfill.get("dtypes") or [],
+            "backfill_ambiguous": len(self.shape_us) > 1,
+            "launch_grid": list(grid) if grid is not None else [],
+            "launch_block": list(block) if block is not None else [],
+        }
+
+
+def _top_rows(agg: Mapping[str, _Agg], denom_us: float, top_k: int) -> list[dict[str, Any]]:
+    """Return the rows of ``agg`` by descending GPU time, cut to the first ``top_k`` when it is positive."""
+    rows = sorted((a.row(name, denom_us) for name, a in agg.items()), key=lambda r: r["gpu_time_ms"], reverse=True)
+    return rows[:top_k] if top_k > 0 else rows
 
 
 # Anchored so real iteration markers match but substrings like "writer" do not.
@@ -542,6 +609,51 @@ class _TraceBuffers:
     # graph-attributed, not (unlinked).
     graph_launch_corrs: set[int] = field(default_factory=set)
 
+    def launching_op(self, corr: Any) -> tuple[str, dict[str, Any]]:
+        """Return the name and meta of the cpu_op that launched correlation ``corr``, both empty when unlinked."""
+        extid = self.corr_to_extid.get(corr)
+        return self.extid_to_opname.get(extid) or "", self.extid_to_opmeta.get(extid) or {}
+
+    def graph_coverage(self, graph_kernels: int, busy_fraction: float) -> dict[str, Any]:
+        """Report graph-replay recording health, flagging a trace that likely under-recorded replays."""
+        launch_count = len(self.graph_launch_corrs)
+        # Graph capture health is a WHOLE-TRACE property (activity-buffer overflow drops replays across the run), so the
+        # recorded-launch coverage is computed over every buffered kernel -- never the steady window -- to stay
+        # scope-consistent with the launch count (also whole-trace).
+        launches_with_kernels = len({e[2] for e in self.k_events if e[2] in self.graph_launch_corrs})
+        return {
+            "graph_mode": launch_count > 0,
+            "graph_launch_count": launch_count,
+            "graph_launches_with_kernels": launches_with_kernels,
+            "graph_attributed_kernels": graph_kernels,
+            "busy_fraction": busy_fraction,
+            "graph_under_recorded": (
+                launch_count >= 2
+                and graph_kernels > 0
+                and launches_with_kernels / launch_count < _GRAPH_RECORDED_LAUNCH_COVERAGE_MAX
+            ),
+        }
+
+    def kernel_launches(self, k_events: list[tuple[str, float, Any, float, float]]) -> list[dict[str, Any]]:
+        """Return time-ordered per-launch rows: fusion analysis needs the kernel adjacency name aggregation discards."""
+        launches = []
+        for name, dur, corr, ts, _end in k_events:
+            op_name, meta = self.launching_op(corr)
+            launches.append(
+                {
+                    "name": name[:_MAX_EVENT_NAME_CHARS],
+                    "op_name": op_name,
+                    "ts": ts,
+                    "dur": dur,
+                    "shapes": meta.get("shapes") or [],
+                    "dtypes": meta.get("dtypes") or [],
+                    "kernel_file": meta.get("kernel_file") or "",
+                    "kernel_backend": meta.get("kernel_backend") or "",
+                    "correlation": corr,
+                }
+            )
+        return sorted(launches, key=lambda r: r["ts"])
+
 
 def _finalize(
     buffers: _TraceBuffers,
@@ -551,259 +663,72 @@ def _finalize(
     emit_launches: bool = False,
 ) -> dict[str, Any]:
     """Build timeline + op/kernel aggregates from buffered device events."""
-    k_events = buffers.k_events
-    m_events = buffers.m_events
-    corr_to_extid = buffers.corr_to_extid
-    extid_to_opname = buffers.extid_to_opname
-    extid_to_opmeta = buffers.extid_to_opmeta
-    graph_launch_corrs = frozenset(buffers.graph_launch_corrs)
-    graph_launch_count = len(graph_launch_corrs)
-    # Graph capture health is a WHOLE-TRACE property (activity-buffer overflow drops replays across the run), so the
-    # recorded-launch coverage must be computed over the full event stream -- BEFORE any steady-window filter -- to
-    # stay scope-consistent with ``graph_launch_count`` (also whole-trace).
-    graph_launch_corrs_with_kernels: set[int] = {
-        e[2] for e in k_events if e[2] is not None and e[2] in graph_launch_corrs
-    }
-
-    ws = we = None
+    k_events, m_events = buffers.k_events, buffers.m_events
+    total_ms = 0.0
     if window is not None:
         ws, we = window
         k_events = [e for e in k_events if ws <= e[3] < we]
         m_events = [e for e in m_events if ws <= e[1] < we]
-
-    def _clip(a: float, b: float) -> tuple[float, float] | None:
-        """Clip an interval to the steady window so occupancy math (busy/idle) stays within the window span."""
-        if window is None:
-            return (a, b)
-        lo, hi = max(ws, a), min(we, b)
-        return (lo, hi) if hi > lo else None
-
-    kern_agg: dict[str, _Agg] = {}
-    kernel_intervals: list[tuple[float, float]] = []
-    memcpy_intervals: list[tuple[float, float]] = []
-    gpu_min_ts: float | None = None
-    gpu_max_end: float | None = None
-    memcpy_us = 0.0
-    memcpy_count = 0
-
-    for name, dur, _corr, ts, end in k_events:
-        gpu_min_ts = ts if gpu_min_ts is None or ts < gpu_min_ts else gpu_min_ts
-        gpu_max_end = end if gpu_max_end is None or end > gpu_max_end else gpu_max_end
-        iv = _clip(ts, end)
-        if iv is not None:
-            kernel_intervals.append(iv)
-        ka = kern_agg.get(name)
-        if ka is None:
-            ka = kern_agg[name] = _Agg()
-        ka.add(dur)
-    for dur, ts, end in m_events:
-        gpu_min_ts = ts if gpu_min_ts is None or ts < gpu_min_ts else gpu_min_ts
-        gpu_max_end = end if gpu_max_end is None or end > gpu_max_end else gpu_max_end
-        iv = _clip(ts, end)
-        if iv is not None:
-            memcpy_intervals.append(iv)
-        memcpy_us += dur
-        memcpy_count += 1
-
-    # --- op-level attribution (kernel -> cuda_runtime -> cpu_op) ---
-    op_agg: dict[str, _Agg] = {}
-    # Kernel name -> {launching op name -> attributed GPU us}, to pick a majority op name for each hot kernel.
-    kern_op: dict[str, dict[str, float]] = {}
-    # Kernel name -> {launching op name -> op meta} (first-seen shape/dtype/file).
-    kern_op_meta: dict[str, dict[str, dict[str, Any]]] = {}
-    attributed_us = 0.0
-    attributed_kernels = 0
-    unlinked_us = 0.0
-    unlinked_kernels = 0
-    # Graph-internal kernels launched via a captured CUDA/HIP graph: they carry a correlation matching a graph-launch
-    # runtime event (which has no External id), so they resolve to no cpu_op but are not a genuine attribution
-    # failure.
-    graph_kernels = 0
-    graph_gpu_us = 0.0
-    # Name-keyed shape backfill: accumulate GPU time per (kernel, shape) so the majority capture-time shape wins;
-    # multiple distinct shapes mark ambiguous.
-    kern_name_backfill_by_sig: dict[str, dict[tuple[tuple[tuple[int, ...], ...], tuple[str, ...]], dict[str, Any]]] = {}
-    # Name-keyed launch geometry (grid/block): first launch that actually carries geometry wins.
-    kern_name_launch_geom: dict[str, tuple[Any, Any]] = {}
-    for name, dur, corr, _ts, _end in k_events:
-        extid = corr_to_extid.get(corr) if corr is not None else None
-        op_name = extid_to_opname.get(extid) if extid is not None else None
-        if op_name:
-            attributed_us += dur
-            attributed_kernels += 1
-        elif corr is not None and corr in graph_launch_corrs:
-            op_name = "(graph)"
-            graph_kernels += 1
-            graph_gpu_us += dur
-        else:
-            op_name = "(unlinked)"
-            unlinked_us += dur
-            unlinked_kernels += 1
-        oa = op_agg.get(op_name)
-        if oa is None:
-            oa = op_agg[op_name] = _Agg()
-        oa.add(dur)
-        ko = kern_op.get(name)
-        if ko is None:
-            ko = kern_op[name] = {}
-        ko[op_name] = ko.get(op_name, 0.0) + dur
-        if op_name != "(unlinked)" and extid is not None:
-            meta = extid_to_opmeta.get(extid)
-            if meta:
-                kern_op_meta.setdefault(name, {}).setdefault(op_name, meta)
-                if meta.get("shapes"):
-                    sig = _backfill_shape_signature(meta)
-                    if sig[0]:
-                        by_sig = kern_name_backfill_by_sig.setdefault(name, {})
-                        entry = by_sig.get(sig)
-                        if entry is None:
-                            by_sig[sig] = {"meta": meta, "gpu_us": dur}
-                        else:
-                            entry["gpu_us"] += dur
-        if name not in kern_name_launch_geom:
-            g = buffers.corr_to_launch_geom.get(corr)
-            if g is not None and (g[0] is not None or g[1] is not None):
-                kern_name_launch_geom[name] = g
-
-    def _majority_op(kernel_name: str) -> str:
-        """Return the highest-GPU-time real launching op for a kernel name."""
-        best, best_dur = "", 0.0
-        for op, d in (kern_op.get(kernel_name) or {}).items():
-            if op not in ("(unlinked)", "(graph)") and d > best_dur:
-                best, best_dur = op, d
-        return best
-
-    def _majority_op_meta(kernel_name: str) -> dict[str, Any]:
-        """Return the op meta (shapes/dtypes/kernel_file) of the majority op."""
-        op = _majority_op(kernel_name)
-        if not op:
-            return {}
-        return (kern_op_meta.get(kernel_name) or {}).get(op, {})
-
-    kernel_union_ms = _union_ms(kernel_intervals)
-    busy_ms = _union_ms(kernel_intervals + memcpy_intervals)
-    if window is not None:
         # Steady scope: total is the representative step's wall span, so idle% reflects gaps within the step rather
         # than the active-kernel envelope.
-        total_ms = max(0.0, (window[1] - window[0]) / 1000.0)
-    elif gpu_min_ts is not None and gpu_max_end is not None:
-        total_ms = (gpu_max_end - gpu_min_ts) / 1000.0
-    else:
-        total_ms = 0.0
+        total_ms = max(0.0, (we - ws) / 1000.0)
+    kernel_intervals = _clipped([(e[3], e[4]) for e in k_events], window)
+    memcpy_intervals = _clipped([(e[1], e[2]) for e in m_events], window)
+    if window is None and (envelope := kernel_intervals + memcpy_intervals):
+        total_ms = (max(end for _, end in envelope) - min(start for start, _ in envelope)) / 1000.0
+    kernel_union_ms = _union_ms(kernel_intervals)
+    busy_ms = _union_ms(kernel_intervals + memcpy_intervals)
     idle_ms = max(0.0, total_ms - busy_ms)
 
-    # Graph coverage health: under continuous graph replay roctracer's activity buffer overflows, so only ~1 replay's
-    # kernels are recorded.
-    graph_mode = graph_launch_count > 0
-    busy_fraction = round(busy_ms / total_ms, 4) if total_ms > 0 else 0.0
-    graph_launches_with_kernels = len(graph_launch_corrs_with_kernels)
-    graph_under_recorded = _graph_under_recorded(
-        graph_mode=graph_mode,
-        graph_launch_count=graph_launch_count,
-        graph_launches_with_kernels=graph_launches_with_kernels,
-        graph_kernels=graph_kernels,
-    )
-    kern_name_backfill_meta: dict[str, dict[str, Any]] = {}
-    kern_name_backfill_ambiguous: set[str] = set()
-    for kern_name, by_sig in kern_name_backfill_by_sig.items():
-        if len(by_sig) > 1:
-            kern_name_backfill_ambiguous.add(kern_name)
-        best_sig = max(by_sig, key=lambda sig: by_sig[sig]["gpu_us"])
-        kern_name_backfill_meta[kern_name] = by_sig[best_sig]["meta"]
-
-    gpu_kernel_total_us = sum(a.dur_us for a in kern_agg.values())
-
-    def _top(agg: dict[str, _Agg], denom_us: float, *, attach_op: bool = False) -> list[dict[str, Any]]:
-        rows = []
-        for nm, a in agg.items():
-            row: dict[str, Any] = {
-                "name": nm[:_MAX_EVENT_NAME_CHARS],
-                "gpu_time_us": round(a.dur_us, 3),
-                "gpu_time_ms": round(a.dur_us / 1000.0, 4),
-                "count": a.count,
-                "gpu_pct": round(a.dur_us / denom_us * 100.0, 4) if denom_us > 0 else 0.0,
-            }
-            if attach_op:
-                row["op_name"] = _majority_op(nm)
-                meta = _majority_op_meta(nm)
-                row["op_shapes"] = meta.get("shapes") or []
-                row["op_dtypes"] = meta.get("dtypes") or []
-                row["op_kernel_file"] = meta.get("kernel_file") or ""
-                row["op_kernel_backend"] = meta.get("kernel_backend") or ""
-                # Shape fallbacks for a kernel whose own launch had no cpu_op shape: (a) same-name capture-time shape,
-                # (b) launch geometry.
-                bf = kern_name_backfill_meta.get(nm) or {}
-                row["backfill_shapes"] = bf.get("shapes") or []
-                row["backfill_dtypes"] = bf.get("dtypes") or []
-                row["backfill_ambiguous"] = nm in kern_name_backfill_ambiguous
-                lg = kern_name_launch_geom.get(nm)
-                row["launch_grid"] = list(lg[0]) if lg and lg[0] is not None else []
-                row["launch_block"] = list(lg[1]) if lg and lg[1] is not None else []
-            rows.append(row)
-        rows.sort(key=lambda r: r["gpu_time_ms"], reverse=True)
-        return rows if top_k is None or top_k <= 0 else rows[:top_k]
-
-    # Time-ordered per-launch sequence (opt-in) for fusion analysis, which needs the kernel adjacency the
-    # name-aggregation discards.
-    kernel_launches: list[dict[str, Any]] = []
-    if emit_launches:
-        for _name, _dur, _corr, _ts, _e in k_events:
-            _ex = corr_to_extid.get(_corr) if _corr is not None else None
-            _op = extid_to_opname.get(_ex) if _ex is not None else None
-            _meta = extid_to_opmeta.get(_ex) if _ex is not None else None
-            _meta = _meta or {}
-            kernel_launches.append(
-                {
-                    "name": _name[:_MAX_EVENT_NAME_CHARS],
-                    "op_name": _op or "",
-                    "ts": _ts,
-                    "dur": _dur,
-                    "shapes": _meta.get("shapes") or [],
-                    "dtypes": _meta.get("dtypes") or [],
-                    "kernel_file": _meta.get("kernel_file") or "",
-                    "kernel_backend": _meta.get("kernel_backend") or "",
-                    "correlation": _corr,
-                }
-            )
-        kernel_launches.sort(key=lambda r: r["ts"])
-
+    op_agg: defaultdict[str, _Agg] = defaultdict(_Agg)
+    kern_agg: defaultdict[str, _KernelAgg] = defaultdict(_KernelAgg)
+    attributed, graph, unlinked, memcpy = _Agg(), _Agg(), _Agg(), _Agg()
+    for name, dur, corr, _ts, _end in k_events:
+        op_name, meta = buffers.launching_op(corr)
+        if op_name:
+            attributed.add(dur)
+        elif corr in buffers.graph_launch_corrs:
+            op_name = "(graph)"
+            graph.add(dur)
+        else:
+            op_name = "(unlinked)"
+            unlinked.add(dur)
+        op_agg[op_name].add(dur)
+        kern_agg[name].add_launch(dur, op_name, meta, buffers.corr_to_launch_geom.get(corr))
+    for dur, _ts, _end in m_events:
+        memcpy.add(dur)
+    kernel_us = sum(a.dur_us for a in kern_agg.values())
+    coverage = buffers.graph_coverage(graph.count, round(busy_ms / total_ms, 4) if total_ms > 0 else 0.0)
     return {
-        "kernel_launches": kernel_launches,
+        "kernel_launches": buffers.kernel_launches(k_events) if emit_launches else [],
         "timeline": {
             "total_time_ms": round(total_ms, 4),
             "busy_time_ms": round(busy_ms, 4),
             "idle_time_ms": round(idle_ms, 4),
             "kernel_union_ms": round(kernel_union_ms, 4),
-            "gpu_memcpy_ms": round(memcpy_us / 1000.0, 4),
-            "gpu_kernel_sum_ms": round(gpu_kernel_total_us / 1000.0, 4),
+            "gpu_memcpy_ms": round(memcpy.dur_us / 1000.0, 4),
+            "gpu_kernel_sum_ms": round(kernel_us / 1000.0, 4),
             "idle_pct": round(idle_ms / total_ms * 100.0, 4) if total_ms > 0 else 0.0,
             "busy_pct": round(busy_ms / total_ms * 100.0, 4) if total_ms > 0 else 0.0,
         },
-        "ops": _top(op_agg, gpu_kernel_total_us),
-        "kernels": _top(kern_agg, gpu_kernel_total_us, attach_op=True),
+        "ops": _top_rows(op_agg, kernel_us, top_k),
+        "kernels": _top_rows(kern_agg, kernel_us, top_k),
         "attribution": {
             "kernel_count": len(k_events),
-            "attributed_kernels": attributed_kernels,
-            "unlinked_kernels": unlinked_kernels,
-            "attributed_gpu_ms": round(attributed_us / 1000.0, 4),
-            "unlinked_gpu_ms": round(unlinked_us / 1000.0, 4),
-            "attributed_pct": round(attributed_us / gpu_kernel_total_us * 100.0, 2) if gpu_kernel_total_us > 0 else 0.0,
-            "cuda_runtime_links": len(corr_to_extid),
-            "cpu_ops": len(extid_to_opname),
-            "gpu_memcpy_count": memcpy_count,
-            "graph_mode": graph_mode,
-            "graph_launch_count": graph_launch_count,
-            "graph_attributed_kernels": graph_kernels,
-            "graph_attributed_gpu_ms": round(graph_gpu_us / 1000.0, 4),
+            "attributed_kernels": attributed.count,
+            "unlinked_kernels": unlinked.count,
+            "attributed_gpu_ms": round(attributed.dur_us / 1000.0, 4),
+            "unlinked_gpu_ms": round(unlinked.dur_us / 1000.0, 4),
+            "attributed_pct": round(attributed.dur_us / kernel_us * 100.0, 2) if kernel_us > 0 else 0.0,
+            "cuda_runtime_links": len(buffers.corr_to_extid),
+            "cpu_ops": len(buffers.extid_to_opname),
+            "gpu_memcpy_count": memcpy.count,
+            "graph_mode": coverage["graph_mode"],
+            "graph_launch_count": coverage["graph_launch_count"],
+            "graph_attributed_kernels": graph.count,
+            "graph_attributed_gpu_ms": round(graph.dur_us / 1000.0, 4),
         },
-        "graph_coverage": {
-            "graph_mode": graph_mode,
-            "graph_launch_count": graph_launch_count,
-            "graph_launches_with_kernels": graph_launches_with_kernels,
-            "graph_attributed_kernels": graph_kernels,
-            "busy_fraction": busy_fraction,
-            "graph_under_recorded": graph_under_recorded,
-        },
+        "graph_coverage": coverage,
     }
 
 
