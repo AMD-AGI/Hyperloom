@@ -546,6 +546,20 @@ def test_profile_manual_max_iters_above_cap_warns(monkeypatch, tmp_path, caplog)
     assert any("exceeds the serialization-safe cap" in r.message for r in caplog.records)
 
 
+def test_profile_refuses_an_unreadable_shape_discovery_force(monkeypatch, tmp_path):
+    from hyperloom.common.env import EnvValueError
+
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    # The global switch already settles the answer; the escape hatch is still read
+    # strictly, so a typo in it cannot pass for "unset".
+    monkeypatch.setenv("HYPERLOOM_PROFILE_SHAPE_DISCOVERY", "0")
+    monkeypatch.setenv("HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE", "ture")
+    src = _write(tmp_path / "cfg.yaml", envs={"PROFILE": "1"})
+    with pytest.raises(EnvValueError, match="HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE"):
+        _materialize(src, tmp_path / "out")
+
+
 def _arm_sglang_shape_tool(monkeypatch, tmp_path) -> Path:
     """Route the SGLang profile through the kernel_shape_tool path and return the tool dir."""
     from hyperloom.orchestrator.actions.executors import _server_patcher

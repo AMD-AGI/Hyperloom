@@ -1236,10 +1236,14 @@ def _shape_discovery_enabled(bench: dict[str, Any]) -> bool:
     HYPERLOOM_PROFILE_SHAPE_DISCOVERY turns it off wholesale. Gemma2 crashes
     CUDA-graph capture with it, so the model gates it too;
     HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE=1 skips only that second gate.
+
+    Raises:
+        EnvValueError: the FORCE variable spells something that is not a boolean.
     """
+    forced = env_bool("HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE")
     if not env_flag("HYPERLOOM_PROFILE_SHAPE_DISCOVERY", default=True):
         return False
-    if env_bool("HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE"):
+    if forced:
         return True
     model = str(bench.get("model") or "")
     if not _model_is_gemma2(model):
