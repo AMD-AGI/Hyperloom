@@ -386,13 +386,13 @@ def _refused_warm_replay(patches: list[Any], failure: str) -> dict[str, Any]:
     }
 
 
-def _recorded_patch_roots(patches: list[Any], target_repo: str) -> list[str]:
+def _recorded_patch_roots(patches: list[Any]) -> list[str]:
     """The checkout each overlay was taken from.
 
     The recorded root is the tree the gain was measured on, so it outranks the locally resolved one rather
     than being checked against it.
     """
-    return [str((patch or {}).get("framework_root") or "").strip() or target_repo for patch in patches]
+    return [str((patch or {}).get("framework_root") or "").strip() for patch in patches]
 
 
 def _warm_patch_trees(patch_roots: list[str]) -> _WarmPatchTrees:
@@ -440,9 +440,12 @@ def _warm_patch_text(patch: Mapping[str, Any]) -> _OverlayText:
         return _OverlayText("", "missing_artifact")
     try:
         return _OverlayText(Path(patch_ref).read_text(encoding="utf-8", errors="replace"), "")
+    except FileNotFoundError:
+        log.warning("baseline_executor: patch_ref not found: %s", patch_ref)
+        return _OverlayText("", "missing_artifact")
     except OSError as exc:
         log.warning("baseline_executor: cannot read patch_ref %s: %s", patch_ref, exc)
-        return _OverlayText("", "missing_artifact" if not Path(patch_ref).is_file() else "artifact_read_failed")
+        return _OverlayText("", "artifact_read_failed")
 
 
 def _unusable_patch_reason(content: str, patch_file: str) -> str:
@@ -791,7 +794,6 @@ def _warm_replay_report(
 
 def _apply_warm_patches(
     params: dict[str, Any],
-    target_repo: str,
     output_dir: Path,
     *,
     before_mutation: Any = None,
@@ -801,7 +803,7 @@ def _apply_warm_patches(
     if not patches:
         return []
     required_timeline = bool(params.get("required_patch_timeline"))
-    patch_roots = _recorded_patch_roots(patches, target_repo)
+    patch_roots = _recorded_patch_roots(patches)
     if not any(patch_roots):
         return _refused_warm_replay(patches, "missing_target_repo") if required_timeline else []
     patch_log_dir = output_dir / "warm_patches"

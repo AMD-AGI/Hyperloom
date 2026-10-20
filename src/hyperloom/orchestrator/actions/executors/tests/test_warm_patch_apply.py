@@ -83,6 +83,13 @@ index 0000000..1111111 100644
 """
 
 
+def _rooted(params: dict, root) -> dict:
+    """The params a recorded replay carries: every overlay names the checkout it was taken from."""
+    for overlay in params.get("patches") or []:
+        overlay.setdefault("framework_root", str(root))
+    return params
+
+
 def _require_patch_cli() -> None:
     if not shutil.which("patch"):
         pytest.skip("patch CLI unavailable")
@@ -101,7 +108,7 @@ def test_apply_single_patch(fake_repo, output_dir):
             }
         ],
     }
-    result = _apply_warm_patches(params, str(fake_repo), output_dir)
+    result = _apply_warm_patches(_rooted(params, fake_repo), output_dir)
     assert len(result) == 1
     assert result[0]["patch_file"] == "vllm/fp8.py"
     # Verify file was patched
@@ -112,7 +119,7 @@ def test_apply_single_patch(fake_repo, output_dir):
 def test_no_patches_returns_empty(output_dir):
     """No patches -> empty result, no crash."""
     params = {"patches": []}
-    result = _apply_warm_patches(params, "/some/path", output_dir)
+    result = _apply_warm_patches(params, output_dir)
     assert result == []
 
 
@@ -123,7 +130,7 @@ def test_required_recipe_patch_fails_when_no_overlay_records_a_root(output_dir):
         "patches": [{"patch_file": "framework/p.patch", "patch_content": VALID_PATCH}],
     }
 
-    result = _apply_warm_patches(params, "", output_dir)
+    result = _apply_warm_patches(params, output_dir)
 
     assert result["status"] == "failed"
     assert result["failure"] == "missing_target_repo"
@@ -169,7 +176,7 @@ def test_overlays_from_two_trees_each_apply_into_their_own(tmp_path, output_dir)
         ],
     }
 
-    result = _apply_warm_patches(params, "", output_dir)
+    result = _apply_warm_patches(params, output_dir)
 
     assert result["status"] == "prepared"
     assert (sglang / "python" / "sglang" / "layer.py").read_text() == "patched\n"
@@ -200,7 +207,7 @@ def test_one_overlay_failing_restores_every_tree_already_patched(tmp_path, outpu
         ],
     }
 
-    result = _apply_warm_patches(params, "", output_dir)
+    result = _apply_warm_patches(params, output_dir)
 
     assert result["status"] == "failed"
     assert result["failure"] == "git_apply_failed"
@@ -232,7 +239,7 @@ def test_two_roots_in_one_checkout_collapse_to_that_checkout(tmp_path, output_di
         ],
     }
 
-    result = _apply_warm_patches(params, "", output_dir)
+    result = _apply_warm_patches(params, output_dir)
 
     assert result["status"] == "prepared"
     assert [tree["root"] for tree in result["trees"]] == [str(outer)]
@@ -265,7 +272,7 @@ def test_an_absent_recorded_root_fails_the_whole_replay(tmp_path, output_dir):
         ],
     }
 
-    result = _apply_warm_patches(params, "", output_dir)
+    result = _apply_warm_patches(params, output_dir)
 
     assert result["status"] == "failed"
     assert result["failure"] == "apply_root_absent"
@@ -290,7 +297,6 @@ def test_no_root_is_ever_probed_for(tmp_path, output_dir, monkeypatch):
             "required_patch_timeline": True,
             "patches": [{"patch_file": "patch/overlays/000000/00-a.patch", "patch_content": VALID_PATCH}],
         },
-        "",
         output_dir,
     )
 
@@ -303,7 +309,7 @@ def test_empty_target_repo_returns_empty(output_dir):
     params = {
         "patches": [{"patch_file": "x.py", "patch_content": "diff...", "patch_ref": ""}],
     }
-    result = _apply_warm_patches(params, "", output_dir)
+    result = _apply_warm_patches(params, output_dir)
     assert result == []
 
 
@@ -320,7 +326,7 @@ def test_invalid_patch_skipped(fake_repo, output_dir):
             }
         ],
     }
-    result = _apply_warm_patches(params, str(fake_repo), output_dir)
+    result = _apply_warm_patches(_rooted(params, fake_repo), output_dir)
     assert result == []
 
 
@@ -339,7 +345,7 @@ def test_patch_ref_fallback(fake_repo, output_dir, tmp_path):
             }
         ],
     }
-    result = _apply_warm_patches(params, str(fake_repo), output_dir)
+    result = _apply_warm_patches(_rooted(params, fake_repo), output_dir)
     assert len(result) == 1
     content = (fake_repo / "vllm" / "fp8.py").read_text()
     assert "patched = True" in content
@@ -358,7 +364,7 @@ def test_patch_ref_missing_file_skipped(fake_repo, output_dir):
             }
         ],
     }
-    result = _apply_warm_patches(params, str(fake_repo), output_dir)
+    result = _apply_warm_patches(_rooted(params, fake_repo), output_dir)
     assert result == []
 
 
@@ -375,7 +381,7 @@ def test_no_content_no_ref_skipped(fake_repo, output_dir):
             }
         ],
     }
-    result = _apply_warm_patches(params, str(fake_repo), output_dir)
+    result = _apply_warm_patches(_rooted(params, fake_repo), output_dir)
     assert result == []
 
 
@@ -393,7 +399,7 @@ def test_git_apply_timeout_skipped(fake_repo, output_dir):
         ],
     }
     with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="git", timeout=30)):
-        result = _apply_warm_patches(params, str(fake_repo), output_dir)
+        result = _apply_warm_patches(_rooted(params, fake_repo), output_dir)
     assert result == []
 
 
@@ -413,7 +419,7 @@ def test_patch_ref_read_oserror_skipped(fake_repo, output_dir, tmp_path):
             }
         ],
     }
-    result = _apply_warm_patches(params, str(fake_repo), output_dir)
+    result = _apply_warm_patches(_rooted(params, fake_repo), output_dir)
     # Skipped or read-succeeds depending on privileges; must not crash.
     assert isinstance(result, list)
     ref_file.chmod(0o644)  # cleanup
@@ -440,7 +446,7 @@ def test_multiple_patches_partial_success(fake_repo, output_dir):
             },
         ],
     }
-    result = _apply_warm_patches(params, str(fake_repo), output_dir)
+    result = _apply_warm_patches(_rooted(params, fake_repo), output_dir)
     assert len(result) == 1
     assert result[0]["patch_file"] == "vllm/fp8.py"
 
@@ -465,7 +471,7 @@ def test_a_best_effort_timeline_reports_why_each_patch_that_failed_did(fake_repo
             },
         ],
     }
-    applied = _apply_warm_patches(params, str(fake_repo), output_dir)
+    applied = _apply_warm_patches(_rooted(params, fake_repo), output_dir)
 
     round_result: dict = {}
     _stamp_warm_patch_outcome(round_result, applied, params, "")
@@ -493,7 +499,7 @@ def test_non_diff_patch_content_is_skipped(fake_repo, output_dir):
             }
         ],
     }
-    result = _apply_warm_patches(params, str(fake_repo), output_dir)
+    result = _apply_warm_patches(_rooted(params, fake_repo), output_dir)
     assert result == []
     assert "patched = True" not in (fake_repo / "vllm" / "fp8.py").read_text()
 
@@ -511,7 +517,7 @@ def test_tree_escaping_patch_content_is_skipped(fake_repo, output_dir):
             }
         ],
     }
-    result = _apply_warm_patches(params, str(fake_repo), output_dir)
+    result = _apply_warm_patches(_rooted(params, fake_repo), output_dir)
     assert result == []
 
 
@@ -520,14 +526,14 @@ def test_required_patch_present_only_in_dirty_index_is_republished(fake_repo, ou
         "patches": [{"patch_file": "p.patch", "patch_content": VALID_PATCH}],
         "required_patch_timeline": True,
     }
-    first = _apply_warm_patches(params, str(fake_repo), output_dir)
+    first = _apply_warm_patches(_rooted(params, fake_repo), output_dir)
     subprocess.run(
         ["git", "add", "vllm/fp8.py"],
         cwd=fake_repo,
         capture_output=True,
         check=True,
     )
-    second = _apply_warm_patches(params, str(fake_repo), output_dir)
+    second = _apply_warm_patches(_rooted(params, fake_repo), output_dir)
 
     assert first["status"] == "prepared"
     assert second["status"] == "prepared"
@@ -551,11 +557,13 @@ def test_required_patch_contained_in_committed_head_is_already_present(fake_repo
     )
 
     result = _apply_warm_patches(
-        {
-            "patches": [{"patch_file": "p.patch", "patch_content": VALID_PATCH}],
-            "required_patch_timeline": True,
-        },
-        str(fake_repo),
+        _rooted(
+            {
+                "patches": [{"patch_file": "p.patch", "patch_content": VALID_PATCH}],
+                "required_patch_timeline": True,
+            },
+            fake_repo,
+        ),
         output_dir,
     )
 
@@ -590,11 +598,13 @@ def test_required_patch_uses_three_way_after_checks_fail(fake_repo, output_dir, 
 
     monkeypatch.setattr(subprocess, "run", _run)
     result = _apply_warm_patches(
-        {
-            "patches": [{"patch_file": "p.patch", "patch_content": VALID_PATCH}],
-            "required_patch_timeline": True,
-        },
-        str(fake_repo),
+        _rooted(
+            {
+                "patches": [{"patch_file": "p.patch", "patch_content": VALID_PATCH}],
+                "required_patch_timeline": True,
+            },
+            fake_repo,
+        ),
         output_dir,
     )
 
@@ -607,15 +617,17 @@ def test_required_patch_uses_three_way_after_checks_fail(fake_repo, output_dir, 
 def test_required_patch_failure_rolls_back_and_stops(fake_repo, output_dir):
     later = VALID_PATCH.replace("patched = True", "later = True")
     result = _apply_warm_patches(
-        {
-            "patches": [
-                {"patch_file": "first.patch", "patch_content": VALID_PATCH},
-                {"patch_file": "bad.patch", "patch_content": "not a diff"},
-                {"patch_file": "later.patch", "patch_content": later},
-            ],
-            "required_patch_timeline": True,
-        },
-        str(fake_repo),
+        _rooted(
+            {
+                "patches": [
+                    {"patch_file": "first.patch", "patch_content": VALID_PATCH},
+                    {"patch_file": "bad.patch", "patch_content": "not a diff"},
+                    {"patch_file": "later.patch", "patch_content": later},
+                ],
+                "required_patch_timeline": True,
+            },
+            fake_repo,
+        ),
         output_dir,
     )
 
@@ -632,11 +644,13 @@ def test_pending_state_persist_failure_needs_no_file_rollback(
     output_dir,
 ) -> None:
     result = _apply_warm_patches(
-        {
-            "patches": [{"patch_file": "p.patch", "patch_content": VALID_PATCH}],
-            "required_patch_timeline": True,
-        },
-        str(fake_repo),
+        _rooted(
+            {
+                "patches": [{"patch_file": "p.patch", "patch_content": VALID_PATCH}],
+                "required_patch_timeline": True,
+            },
+            fake_repo,
+        ),
         output_dir,
         before_mutation=lambda _manifest: False,
     )
@@ -736,7 +750,7 @@ def test_required_timeline_applies_in_a_repo_with_no_head(tmp_path, output_dir):
         "required_patch_timeline": True,
     }
 
-    result = _apply_warm_patches(params, str(repo), output_dir)
+    result = _apply_warm_patches(_rooted(params, repo), output_dir)
 
     assert result["status"] == "prepared"
     assert [entry["status"] for entry in result["applied"]] == ["applied_nogit"]
@@ -756,7 +770,7 @@ def test_required_timeline_applies_on_a_non_git_install_tree(tmp_path, output_di
         "required_patch_timeline": True,
     }
 
-    result = _apply_warm_patches(params, str(install_root), output_dir)
+    result = _apply_warm_patches(_rooted(params, install_root), output_dir)
 
     assert result["status"] == "prepared"
     assert [entry["status"] for entry in result["applied"]] == ["applied_nogit"]
@@ -775,8 +789,7 @@ def test_the_record_persisted_before_the_apply_reads_as_written_to(fake_repo, ou
     }
 
     _apply_warm_patches(
-        params,
-        str(fake_repo),
+        _rooted(params, fake_repo),
         output_dir,
         before_mutation=lambda records: persisted.append(records) or True,
     )
@@ -795,7 +808,7 @@ def test_required_timeline_on_a_non_git_tree_reverts_whole(tmp_path, output_dir)
         "patches": [{"patch_file": "vllm/fp8.py", "patch_content": VALID_PATCH}],
         "required_patch_timeline": True,
     }
-    result = _apply_warm_patches(params, str(install_root), output_dir)
+    result = _apply_warm_patches(_rooted(params, install_root), output_dir)
 
     restore = _revert_warm_patch_trees(result["trees"])
 
@@ -812,8 +825,7 @@ def test_nogit_still_serves_the_legacy_list(tmp_path, output_dir):
     target.write_text("# fp8 module\noriginal = True\n")
 
     applied = _apply_warm_patches(
-        {"patches": [{"patch_file": "vllm/fp8.py", "patch_content": VALID_PATCH}]},
-        str(install_root),
+        _rooted({"patches": [{"patch_file": "vllm/fp8.py", "patch_content": VALID_PATCH}]}, install_root),
         output_dir,
     )
 
@@ -831,7 +843,7 @@ def test_nogit_apply_hands_teardown_the_backups_it_needs(tmp_path, output_dir):
     target.write_text("# fp8 module\noriginal = True\n")
     params = {"patches": [{"patch_file": "vllm/fp8.py", "patch_content": VALID_PATCH}]}
 
-    applied = _apply_warm_patches(params, str(install_root), output_dir)
+    applied = _apply_warm_patches(_rooted(params, install_root), output_dir)
 
     assert [p["status"] for p in applied] == ["applied_nogit"]
     restore = _revert_legacy_warm_patch_trees(params)
@@ -848,11 +860,13 @@ def test_teardown_undoes_a_nogit_apply(tmp_path, output_dir, backup_intact, capl
     target.parent.mkdir(parents=True)
     target.write_text("# fp8 module\noriginal = True\n")
     result = _apply_warm_patches(
-        {
-            "patches": [{"patch_file": "vllm/fp8.py", "patch_content": VALID_PATCH}],
-            "required_patch_timeline": True,
-        },
-        str(install_root),
+        _rooted(
+            {
+                "patches": [{"patch_file": "vllm/fp8.py", "patch_content": VALID_PATCH}],
+                "required_patch_timeline": True,
+            },
+            install_root,
+        ),
         output_dir,
     )
     backups = result["trees"][0]["nogit_backups"]
@@ -889,15 +903,17 @@ def test_legacy_patch_skips_when_rollback_snapshot_fails(
     )
 
     result = _apply_warm_patches(
-        {
-            "patches": [
-                {
-                    "patch_file": "vllm/fp8.py",
-                    "patch_content": VALID_PATCH,
-                }
-            ]
-        },
-        str(fake_repo),
+        _rooted(
+            {
+                "patches": [
+                    {
+                        "patch_file": "vllm/fp8.py",
+                        "patch_content": VALID_PATCH,
+                    }
+                ]
+            },
+            fake_repo,
+        ),
         output_dir,
     )
 
@@ -928,11 +944,13 @@ def test_three_way_residue_fails_and_rolls_back(fake_repo, output_dir, monkeypat
 
     monkeypatch.setattr(subprocess, "run", _run)
     result = _apply_warm_patches(
-        {
-            "patches": [{"patch_file": "p.patch", "patch_content": VALID_PATCH}],
-            "required_patch_timeline": True,
-        },
-        str(fake_repo),
+        _rooted(
+            {
+                "patches": [{"patch_file": "p.patch", "patch_content": VALID_PATCH}],
+                "required_patch_timeline": True,
+            },
+            fake_repo,
+        ),
         output_dir,
     )
 
@@ -966,17 +984,19 @@ diff --git a/missing.py b/missing.py
 +new
 """
     result = _apply_warm_patches(
-        {
-            "patches": [
-                {"patch_file": "first.patch", "patch_content": VALID_PATCH},
-                {
-                    "patch_file": "second.patch",
-                    "patch_content": missing_target_patch,
-                },
-            ],
-            "required_patch_timeline": True,
-        },
-        str(fake_repo),
+        _rooted(
+            {
+                "patches": [
+                    {"patch_file": "first.patch", "patch_content": VALID_PATCH},
+                    {
+                        "patch_file": "second.patch",
+                        "patch_content": missing_target_patch,
+                    },
+                ],
+                "required_patch_timeline": True,
+            },
+            fake_repo,
+        ),
         output_dir,
     )
 
@@ -1010,17 +1030,19 @@ diff --git a/missing.py b/missing.py
 +new
 """
     result = _apply_warm_patches(
-        {
-            "patches": [
-                {"patch_file": "upstream.patch", "patch_content": VALID_PATCH},
-                {
-                    "patch_file": "missing.patch",
-                    "patch_content": missing_target_patch,
-                },
-            ],
-            "required_patch_timeline": True,
-        },
-        str(fake_repo),
+        _rooted(
+            {
+                "patches": [
+                    {"patch_file": "upstream.patch", "patch_content": VALID_PATCH},
+                    {
+                        "patch_file": "missing.patch",
+                        "patch_content": missing_target_patch,
+                    },
+                ],
+                "required_patch_timeline": True,
+            },
+            fake_repo,
+        ),
         output_dir,
     )
 
@@ -1091,11 +1113,13 @@ def test_real_git_three_way_merge_succeeds(tmp_path, output_dir):
     )
 
     result = _apply_warm_patches(
-        {
-            "patches": [{"patch_file": "real.patch", "patch_content": patch_content}],
-            "required_patch_timeline": True,
-        },
-        str(repo),
+        _rooted(
+            {
+                "patches": [{"patch_file": "real.patch", "patch_content": patch_content}],
+                "required_patch_timeline": True,
+            },
+            repo,
+        ),
         output_dir,
     )
 

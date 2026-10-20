@@ -1962,7 +1962,7 @@ class BenchmarkRunExecutor:
                 return False
             return True
 
-        application = _apply_warm_patches(setup.params, "", setup.output_dir, before_mutation=_persist_recipe_snapshot)
+        application = _apply_warm_patches(setup.params, setup.output_dir, before_mutation=_persist_recipe_snapshot)
         settlement = self._settle_patch_application(
             application,
             params=setup.params,
