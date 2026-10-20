@@ -30,7 +30,7 @@ from hyperloom_multibranch.contracts.notebook.records import (
 from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, Conclusion, DedupStatus
 from hyperloom_multibranch.notebook.changes import NO_CHANGE
 from hyperloom_multibranch.notebook import LocalNotebook
-from hyperloom_multibranch.contracts.notebook.records import REPLAY_TOOL, WarmReplay
+from hyperloom_multibranch.contracts.notebook.records import REPLAY_TOOL, PeerReplay, WarmReplay
 from hyperloom_multibranch.notebook.learning_search import LEARNINGS_LOG, RetrievalLog, SessionLearnings
 from hyperloom_multibranch.notebook.tests.factories import FakeClock, intent, request, result
 from hyperloom_multibranch.notebook.tests.sessions import scripted_session
@@ -89,6 +89,33 @@ async def test_the_replay_tool_names_the_intent_to_claim_and_the_change_on_the_b
     assert REPLAY_TOOL in tools
     assert (await _call(tools, "replay", canonical_id="inference:none")).startswith(ERROR)
     assert (await _call(tools_of("s1"), "replay", canonical_id="inference:older")).startswith(ERROR)
+
+
+async def test_the_replay_tool_replays_another_branchs_test_by_its_request_id_on_the_branch_head(
+    tools_of: Tools,
+) -> None:
+    tested = RecipeDelta(config=ConfigDelta(server_args="--max-num-seqs 256"))
+    on_head = PeerReplay("r1", "s1", "c3", tested, IntentLayer.CONFIG)
+
+    async def peer_replay(request_id: str) -> PeerReplay:
+        if request_id != on_head.request_id:
+            raise ValueError(f"{request_id} was measured without a change")
+        return on_head
+
+    tools = tools_of("s3", SimpleNamespace(peer_replay=peer_replay))
+
+    first, claim, change = (await _call(tools, "replay", request_id="r1")).splitlines()
+
+    assert first == "replay of r1, the change s1 tested, on your head c3"
+    assert claim == (
+        'claim with parent_commit "c3", target "warm start", mechanism "r1" and layer "config", then submit this '
+        "change on that commit:"
+    )
+    assert RecipeDelta.from_document(json.loads(change)) == tested
+    assert await _call(tools, "replay", request_id="r9") == f"{ERROR} ValueError: r9 was measured without a change"
+    for both_or_neither in ({"request_id": "r1", "canonical_id": "inference:older"}, {}):
+        assert (await _call(tools, "replay", **both_or_neither)).startswith(f"{ERROR} name a champion's canonical_id")
+    assert (await _call(tools_of("s3"), "replay", request_id="r1")).startswith(f"{ERROR} no replay of r1")
 
 
 async def test_every_tool_is_named_for_the_notebook_and_takes_only_its_declared_arguments(tools_of: Tools) -> None:

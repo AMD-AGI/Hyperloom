@@ -145,7 +145,7 @@ class PreparedReplay:
         delta = delta_between(head, wanted)
         if delta == RecipeDelta():
             return None
-        return WarmReplay(self.canonical_id, parent_commit, delta, _layer(delta), self.reason)
+        return WarmReplay(self.canonical_id, parent_commit, delta, delta_layer(delta), self.reason)
 
     def describe(self) -> str:
         what = "the whole recipe" if self.recipe is not None else f"its launch config only, {self.reason}"
@@ -382,7 +382,9 @@ def _keep(blobs: BlobStore, path: Path, sha256: str) -> None:
         raise RecipeError(f"{path.name} has sha256 {found}; the record pins {sha256}")
 
 
-def _layer(delta: RecipeDelta) -> IntentLayer:
+def delta_layer(delta: RecipeDelta) -> IntentLayer:
+    """The deepest layer ``delta`` reaches, the one a replay of it claims."""
+
     if delta.add_kernels or delta.remove_kernels:
         return IntentLayer.KERNEL
     return IntentLayer.SOURCE if delta.components else IntentLayer.CONFIG
@@ -398,6 +400,7 @@ __all__ = [
     "ReplayTarget",
     "WarmLead",
     "candidates",
+    "delta_layer",
     "identity_labels",
     "lead_of",
     "replay",

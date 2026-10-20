@@ -33,12 +33,13 @@ from dataclasses import dataclass, field, replace
 from itertools import zip_longest
 from typing import Protocol
 
-from hyperloom.contracts.recipe import Recipe
+from hyperloom.contracts.recipe import Recipe, RecipeDelta, RecipeError, apply
 from hyperloom_multibranch.contracts.notebook.interfaces import Notebook, StartupBriefProvider
 from hyperloom_multibranch.contracts.notebook.peers import IntentLayer
 from hyperloom_multibranch.contracts.notebook.records import (
     LearningRecord,
     NotebookSnapshot,
+    PeerReplay,
     StartupBrief,
     WarmReplay,
 )
@@ -53,7 +54,7 @@ from hyperloom_multibranch.notebook.knowledge.recall import (
     RecallTier,
     recall_experiences,
 )
-from hyperloom_multibranch.notebook.knowledge.warm_start import WarmLead
+from hyperloom_multibranch.notebook.knowledge.warm_start import WarmLead, delta_layer
 from hyperloom_multibranch.notebook.learning_search import (
     Retrieval,
     RetrievalSource,
@@ -204,6 +205,27 @@ class CrossSessionBriefing(StartupBriefProvider):
             return None
         head = await self.repo.head(self.branch)
         return prepared.on(await self.repo.read_recipe(head), head)
+
+    async def peer_replay(self, request_id: str) -> PeerReplay:
+        """The change another branch's test ``request_id`` tried, to test on this branch's head; ``ValueError`` says
+        why there is none: the test is this branch's own or changed nothing, or this head has or cannot take it."""
+
+        request = (await self.notebook.record(request_id)).request
+        if request.branch == self.branch:
+            raise ValueError(f"{request_id} is this branch's own test")
+        if request.delta == RecipeDelta():
+            raise ValueError(f"{request_id} was measured without a change; there is nothing to replay")
+        if self.repo is None or not self.branch:
+            raise ValueError("this brief reads no experiment repository, so it has no head to replay on")
+        head = await self.repo.head(self.branch)
+        recipe = await self.repo.read_recipe(head)
+        try:
+            replayed = apply(recipe, request.delta)
+        except RecipeError as exc:
+            raise ValueError(f"the change {request_id} tested no longer applies to your head {head}: {exc}") from exc
+        if replayed == recipe:
+            raise ValueError(f"your head {head} already has the change {request_id} tested")
+        return PeerReplay(request_id, request.branch, head, request.delta, delta_layer(request.delta))
 
     async def _recall(self, snapshot: NotebookSnapshot) -> Recall | None:
         if self.experiences is None or snapshot.profile is None:

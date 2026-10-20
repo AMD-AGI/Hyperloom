@@ -499,6 +499,21 @@ class WarmReplay:
 
 
 @dataclass(frozen=True)
+class PeerReplay:
+    """The change another branch's test ``request_id`` tried, to test on ``parent_commit``, the caller's head.
+
+    It is that test's own delta, not the difference between the two heads, which would carry ``branch``'s earlier
+    commits too. ``layer`` is the deepest layer the change reaches, the one its intent claims.
+    """
+
+    request_id: str
+    branch: str
+    parent_commit: str
+    delta: RecipeDelta
+    layer: IntentLayer
+
+
+@dataclass(frozen=True)
 class StartupBrief:
     """What a fill specialist reads at start; ``leads`` and ``lessons`` come from cross-session recall (MB2).
 
@@ -690,6 +705,7 @@ __all__ = [
     "MergeState",
     "NotebookSnapshot",
     "OpShares",
+    "PeerReplay",
     "QuarantineEvent",
     "RecordedValue",
     "RegressionCase",

@@ -53,6 +53,7 @@ from hyperloom_multibranch.contracts.notebook.records import (
     REPLAY_TARGET,
     StartupBrief,
     TestRecord,
+    PeerReplay,
     TriedDirection,
     WarmReplay,
     amdahl_ceiling_pct,
@@ -236,18 +237,36 @@ class WarmReplays(Protocol):
     async def warm_replay(self, canonical_id: str) -> WarmReplay | None: ...
 
 
+@runtime_checkable
+class PeerReplays(Protocol):
+    """A briefing that replays another branch's tested change on its branch's head, as
+    ``rsi.briefing.CrossSessionBriefing`` does."""
+
+    async def peer_replay(self, request_id: str) -> PeerReplay: ...
+
+
+def _claim_and_change(source: str, parent_commit: str, layer: IntentLayer, delta: RecipeDelta) -> tuple[str, str]:
+    return (
+        f'claim with parent_commit "{parent_commit}", target "{REPLAY_TARGET}", mechanism "{source}" and layer '
+        f'"{layer.value}", then submit this change on that commit:',
+        json.dumps(delta.to_document(), sort_keys=True, separators=(",", ":")),
+    )
+
+
 def render_replay(replay: WarmReplay) -> str:
     """How to test a champion's replay: the intent to claim, then the change to submit on the branch's head."""
 
     what = "the whole recipe" if not replay.reason else f"its launch config only: {replay.reason}"
-    return "\n".join(
-        (
-            f"replay of {replay.canonical_id} on your head {replay.parent_commit}, {what}",
-            f'claim with parent_commit "{replay.parent_commit}", target "{REPLAY_TARGET}", mechanism '
-            f'"{replay.canonical_id}" and layer "{replay.layer.value}", then submit this change on that commit:',
-            json.dumps(replay.delta.to_document(), sort_keys=True, separators=(",", ":")),
-        )
-    )
+    found = _claim_and_change(replay.canonical_id, replay.parent_commit, replay.layer, replay.delta)
+    return "\n".join((f"replay of {replay.canonical_id} on your head {replay.parent_commit}, {what}", *found))
+
+
+def render_peer_replay(replay: PeerReplay) -> str:
+    """How to test another branch's change on this branch's head: the intent to claim, then the change to submit."""
+
+    found = _claim_and_change(replay.request_id, replay.parent_commit, replay.layer, replay.delta)
+    first = f"replay of {replay.request_id}, the change {replay.branch} tested, on your head {replay.parent_commit}"
+    return "\n".join((first, *found))
 
 
 def _key(arguments: Arguments) -> ClaimKey:
@@ -355,15 +374,23 @@ class _SpecialistTools:
         return render_brief(await self.briefing.startup_brief(str(arguments["start_commit"])))
 
     async def replay(self, arguments: Arguments) -> str:
-        canonical_id = str(arguments["canonical_id"])
-        found = await self.briefing.warm_replay(canonical_id) if isinstance(self.briefing, WarmReplays) else None
-        if found is None:
-            return (
-                f"{ERROR} no replay of {canonical_id} on your head: the startup brief's leads name the champions "
-                "that have one, and a champion your head already matches has nothing to replay"
-            )
-        text = render_replay(found)
-        return text if len(text) <= MAX_REPLY_CHARS else f"{ERROR} the replay of {canonical_id} does not fit a reply"
+        canonical_id, request_id = str(arguments.get("canonical_id") or ""), str(arguments.get("request_id") or "")
+        if bool(canonical_id) == bool(request_id):
+            return f"{ERROR} name a champion's canonical_id or another branch's test's request_id, one of the two"
+        if request_id:
+            if not isinstance(self.briefing, PeerReplays):
+                return f"{ERROR} no replay of {request_id}: this specialist's brief reads no experiment repository"
+            text = render_peer_replay(await self.briefing.peer_replay(request_id))
+        else:
+            found = await self.briefing.warm_replay(canonical_id) if isinstance(self.briefing, WarmReplays) else None
+            if found is None:
+                return (
+                    f"{ERROR} no replay of {canonical_id} on your head: the startup brief's leads name the champions "
+                    "that have one, and a champion your head already matches has nothing to replay"
+                )
+            text = render_replay(found)
+        source = request_id or canonical_id
+        return text if len(text) <= MAX_REPLY_CHARS else f"{ERROR} the replay of {source} does not fit a reply"
 
 
 def _guarded(handler: Handler) -> Handler:
@@ -499,10 +526,14 @@ _SPECS = (
     ),
     _Spec(
         "replay",
-        "A Recipe KB champion the startup brief names, replayed on your branch's head: the intent to claim and the "
-        "change to submit there, its patch and kernel files already in the session's blob store.",
+        "A Recipe KB champion the startup brief names, or the change of another branch's test a peer_outcome inbox "
+        "item names, replayed on your branch's head: the intent to claim and the change to submit there. Give one of "
+        "the two; a champion's patch and kernel files are already in the session's blob store.",
         _schema(
-            {"canonical_id": _text(description="The champion's Recipe KB id, as the brief names it.")}, "canonical_id"
+            {
+                "canonical_id": _text(description="The champion's Recipe KB id, as the brief names it."),
+                "request_id": _text(description="The other branch's test, as a peer_outcome inbox item names it."),
+            }
         ),
     ),
 )
@@ -537,6 +568,7 @@ __all__ = [
     "MAX_REPLY_CHARS",
     "TOOL_PREFIX",
     "NotebookTool",
+    "PeerReplays",
     "WarmReplays",
     "notebook_tools",
     "outcome",
@@ -546,5 +578,6 @@ __all__ = [
     "render_claim",
     "render_log",
     "render_record",
+    "render_peer_replay",
     "render_replay",
 ]

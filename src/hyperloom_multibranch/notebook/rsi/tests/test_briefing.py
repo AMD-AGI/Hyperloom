@@ -7,12 +7,14 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import re
 from pathlib import Path
 
+import pytest
 from hyperloom_kb import RemoteReadResult
 
 from hyperloom.contracts.recipe import ConfigDelta, LaunchConfig, Recipe, RecipeDelta
-from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
+from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, UnknownRequest, Writer
 from hyperloom_multibranch.contracts.notebook.peers import IntentLayer, Verdict
 from hyperloom_multibranch.contracts.notebook.records import (
     BaselineRecord,
@@ -36,7 +38,7 @@ from hyperloom_multibranch.notebook.knowledge.tests.fakes import (
     completed_read,
     experience_summary,
 )
-from hyperloom_multibranch.contracts.notebook.records import WarmReplay
+from hyperloom_multibranch.contracts.notebook.records import PeerReplay, WarmReplay
 from hyperloom_multibranch.notebook.knowledge.warm_start import PreparedReplay, WarmLead
 from hyperloom_multibranch.notebook.learning_search import LEARNINGS_LOG, RetrievalLog
 from hyperloom_multibranch.notebook.rsi.briefing import CrossSessionBriefing, SessionBriefs
@@ -228,6 +230,44 @@ async def test_a_lead_with_a_replay_says_how_to_replay_it_and_the_briefing_repla
     )
     assert await briefing.warm_replay("inference:none") is None
     assert await CrossSessionBriefing(notebook, warm=warm, branch="s3").warm_replay(LEAD.canonical_id) is None
+
+
+async def test_another_branchs_tested_change_is_replayed_on_the_branch_head_as_it_was_tested(tmp_path: Path) -> None:
+    notebook = await scripted_session(tmp_path / "notebook", FakeClock())
+    head = Recipe("sha256:" + "a" * 64, LaunchConfig("--max-num-seqs 128"))
+    briefing = CrossSessionBriefing(notebook, branch="s3", repo=_Repo({"s3": "c3"}, {"c3": head}))
+
+    replayed = await briefing.peer_replay("r1")
+
+    tested = RecipeDelta(config=ConfigDelta(server_args="--max-num-seqs 256"))
+    assert replayed == PeerReplay("r1", "s1", "c3", tested, IntentLayer.CONFIG)
+
+
+async def test_a_peer_replay_says_why_when_there_is_nothing_to_replay_on_the_branch_head(tmp_path: Path) -> None:
+    root = tmp_path / "notebook"
+    notebook = await scripted_session(root, FakeClock())
+    toolbox = LocalNotebook(root, Writer(Role.TOOLBOX, "toolbox"), clock=FakeClock())
+    dropped = RecipeDelta(remove_kernels=("kernel/gemm/old.csv",))
+    await toolbox.write_request(request("r8", SPLIT_KV, dropped))
+    await toolbox.write_request(request("r9", SPLIT_KV, RecipeDelta()))
+    plain = Recipe("sha256:" + "a" * 64, LaunchConfig("--max-num-seqs 128"))
+    tuned = dataclasses.replace(plain, launch=LaunchConfig("--max-num-seqs 256"))
+
+    def replaying(branch: str, recipe: Recipe | None = plain) -> CrossSessionBriefing:
+        repo = _Repo({branch: "c3"}, {"c3": recipe}) if recipe is not None else None
+        return CrossSessionBriefing(notebook, branch=branch, repo=repo)
+
+    for briefing, request_id, why in (
+        (replaying("s3"), "r8", "no longer applies to your head c3: the recipe loads no kernel artifacts"),
+        (replaying("s3"), "r9", "r9 was measured without a change"),
+        (replaying("s1"), "r1", "r1 is this branch's own test"),
+        (replaying("s3", tuned), "r1", "your head c3 already has the change r1 tested"),
+        (replaying("s3", None), "r1", "reads no experiment repository"),
+    ):
+        with pytest.raises(ValueError, match=re.escape(why)):
+            await briefing.peer_replay(request_id)
+    with pytest.raises(UnknownRequest):
+        await replaying("s3").peer_replay("r404")
 
 
 async def test_recalled_leads_take_turns_by_the_layer_they_change(tmp_path: Path) -> None:
