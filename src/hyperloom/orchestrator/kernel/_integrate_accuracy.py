@@ -27,9 +27,8 @@ _EVAL_DEFAULT_MAX_TOKENS = 4096
 def _eval_generation_budget() -> int:
     """Completion tokens the eval harness reserves per sample.
 
-    Mirrors the clamp installed by the inferencex shim: ``HYPERLOOM_EVAL_MAX_TOKENS``
-    when it parses as a positive integer, else the shim's own default. ``0``
-    means the operator disabled the clamp, so no budget can be assumed.
+    Mirrors the clamp installed by the inferencex shim: ``HYPERLOOM_EVAL_MAX_TOKENS`` when it parses as a
+    positive integer, else the shim's own default.
     """
     raw = (os.environ.get("HYPERLOOM_EVAL_MAX_TOKENS") or "").strip()
     if not raw:
@@ -51,20 +50,7 @@ class _EvalScore(NamedTuple):
 
 
 def _integrate_eval_score(bench_result: dict[str, Any], workspace: Path) -> _EvalScore:
-    """Read back the serving-eval score of a re-baseline.
-
-    The staged accuracy round attaches its score to the result. Older runs ran
-    eval in the warmup slot and left it only in the workspace, so a result
-    without a score is looked up there.
-
-    Args:
-        bench_result: The re-baseline result dict from ``BaselineExecutor``.
-        workspace: The integrate task workspace holding both round slots.
-
-    Returns:
-        The score and its provenance; ``accuracy`` is ``None`` when neither
-        source recorded one.
-    """
+    """Read back the serving-eval score of a re-baseline."""
     from ..actions.executors._accuracy_gate import parse_eval_results
 
     measured = bench_result.get("accuracy")
@@ -98,32 +84,8 @@ def _grade_integrate_accuracy(
 ) -> dict[str, Any]:
     """Grade a kernel re-baseline's accuracy against the session baseline.
 
-    The staged re-baseline already ran the serving eval after hot throughput
-    passed, so the score is read back rather than re-measured. A measured drop
-    beyond ``ACCURACY_THRESHOLD`` blocks the KEEP. A missing verdict blocks only
-    when a positive baseline accuracy proves eval works in this environment;
-    otherwise the gate degrades to throughput-only so eval-less setups are not
-    universally blocked.
-
-    The preferred path is the accuracy attached by BaselineExecutor's staged
-    accuracy round. Workspace parsing remains as a compatibility fallback for
-    older runs where eval lived in the warmup slot.
-
-    Args:
-        bench_result: The re-baseline result dict from ``BaselineExecutor``.
-        baseline_accuracy: The session's recorded baseline accuracy; ``0.0``
-            when no baseline has established one, which is what makes a missing
-            verdict degrade rather than block.
-        workspace: The integrate task workspace holding both round slots.
-        strict: Grade an artifact whose correctness has only ever been proven
-            against a reference. This serving run is its first and only
-            end-to-end evidence, so the operator opt-out does not apply and a
-            gate that produced no verdict blocks instead of degrading.
-
-    Returns:
-        ``{"blocked": bool, "accuracy_pass": bool | None, "reason": str,
-        "degraded": bool, "accuracy": float | None, "baseline_accuracy": float,
-        "task": str, "metric": str, "source_file": str}``.
+    The staged re-baseline already ran the serving eval after hot throughput passed, so the score is read
+    back rather than re-measured.
     """
     from ..actions.executors._accuracy_gate import (
         accuracy_keep_block,

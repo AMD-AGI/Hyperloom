@@ -305,11 +305,7 @@ class AmbiguousIntegrationTarget(Exception):
 
 
 def _is_paired_gemm_measurement(payload: Mapping[str, Any]) -> bool:
-    """Whether this integrate measures a GEMM candidate against an explicit paired reference.
-
-    It applies no artifact and earns no KEEP of its own: the pair of runs is the
-    measurement, and the caller compares them.
-    """
+    """Whether this integrate measures a GEMM candidate against an explicit paired reference."""
     return payload.get("source") == "forge_gemm_paired"
 
 
@@ -364,15 +360,7 @@ def _fill_integrate_defaults_from_state(
 
 
 def _anchor_on_paired_reference(resolved: dict) -> None:
-    """Grade a GEMM paired measurement against the entry reference the request carries.
-
-    Args:
-        resolved: The integrate request being filled in; its ``base_tput`` is set.
-
-    Raises:
-        ValueError: the request does not carry both an explicit reference
-            throughput and the recipe that reference was measured under.
-    """
+    """Grade a GEMM paired measurement against the entry reference the request carries."""
     reference = resolved.get("paired_reference")
     if (
         not isinstance(reference, dict)
@@ -386,12 +374,7 @@ def _anchor_on_paired_reference(resolved: dict) -> None:
 
 
 def _pending_record_for_integrate(state: Any, resolved: Mapping[str, Any]) -> dict | None:
-    """The pending integration record an integrate request binds to, by id or by kernel.
-
-    Raises:
-        AmbiguousIntegrationTarget: the request names no ``integration_id`` that
-            resolves and its ``kernel_id`` matches several queued records.
-    """
+    """The pending integration record an integrate request binds to, by id or by kernel."""
     records = state.pending_kernel_integration_records()
     record = _pending_integration_record(records, str(resolved.get("integration_id") or ""))
     if record is not None or not resolved.get("kernel_id"):
@@ -400,13 +383,7 @@ def _pending_record_for_integrate(state: Any, resolved: Mapping[str, Any]) -> di
 
 
 def _sole_pending_record_for_kernel(records: list[dict], resolved: Mapping[str, Any]) -> dict | None:
-    """The one queued record a bare ``kernel_id`` names, or ``None`` when none does.
-
-    Raises:
-        AmbiguousIntegrationTarget: siblings of one nomination round share a
-            kernel_id, so picking any of them would bind the verdict to a record
-            nobody named.
-    """
+    """The one queued record a bare ``kernel_id`` names, or ``None`` when none does."""
     requested_kernel_id = str(resolved.get("kernel_id") or "")
     requested_task_key = str(resolved.get("task_group_key") or "")
     candidates = [
@@ -428,11 +405,9 @@ def _sole_pending_record_for_kernel(records: list[dict], resolved: Mapping[str, 
 def _fill_fusion_sibling_defaults(resolved: dict, pending_record: Mapping[str, Any]) -> None:
     """Carry a fusion sibling's env flags, keep bar and action label into its integrate.
 
-    The generic drain cannot infer any of the three: the env flags gate the fused
-    path, so leaving them unset measures the eager path and REVERTs a real win;
-    the keep bar is fusion-specific; the action label routes the promoted stack
-    row. They land before the ``extra_envs`` merge so the fused path is active
-    during the end-to-end run.
+    The generic drain cannot infer any of the three: the env flags gate the fused path, so leaving them
+    unset measures the eager path and REVERTs a real win; the keep bar is fusion-specific; the action label
+    routes the promoted stack row.
     """
     if str(pending_record.get("source") or "") != "forge_fusion":
         return
@@ -458,8 +433,8 @@ def _fill_integrate_recipe_from_current_best(
 ) -> None:
     """Default an integrate's grading anchor and serving recipe to the session's current best.
 
-    The server args come from the current best, so the anchor the candidate is
-    graded against has to be the throughput that recipe reached.
+    The server args come from the current best, so the anchor the candidate is graded against has to be the
+    throughput that recipe reached.
     """
     from ..state.shared_state import resolve_grading_anchor_tput
 
@@ -509,9 +484,9 @@ def _merge_integrate_extra_envs(
 def _fill_integrate_kernel_attempt_defaults(resolved: dict, state: Any) -> None:
     """Fill an integrate's task group from the kernel's attempt ledger and stamp a refused deploy.
 
-    The vendor-playbook stamp mirrors the pending queue's own refusal, which an
-    LLM-initiated request naming the kernel_id directly would otherwise bypass
-    through the ``last_kernel_opt.best_artifact_path`` backfill.
+    The vendor-playbook stamp mirrors the pending queue's own refusal, which an LLM-initiated request naming
+    the kernel_id directly would otherwise bypass through the ``last_kernel_opt.best_artifact_path``
+    backfill.
     """
     kernel_id = str(resolved.get("kernel_id") or "")
     if not kernel_id:
@@ -637,12 +612,7 @@ def _ledger_kernel_artifact(attempt: Mapping[str, Any]) -> _ArtifactRecord:
 
 
 def _fill_integrate_from_artifact(resolved: dict, record: _ArtifactRecord) -> None:
-    """Backfill an integrate from a recorded artifact, leaving anything the request named alone.
-
-    A snapshot's own patch and repo root are adopted only together with the
-    snapshot directory they belong to, so a multi-file write set never lands
-    half from one record and half from another.
-    """
+    """Backfill an integrate from a recorded artifact, leaving anything the request named alone."""
     _fill_integrate_snapshot_from_bundle(resolved, record.bundle)
     if not resolved.get("snapshot_dir") and record.snapshot_dir:
         resolved["snapshot_dir"] = record.snapshot_dir
@@ -670,11 +640,7 @@ def _pending_integration_record(records: list[dict], integration_id: str) -> dic
 
 
 def _fill_pending_record_identity(resolved: dict, pending_record: Mapping[str, Any]) -> None:
-    """Carry a pending record's routing and provenance into the integrate it is bound to.
-
-    Provenance travels with the artifact so the serving verdict can tell a
-    reference-only apply-back from one already proven in place.
-    """
+    """Carry a pending record's routing and provenance into the integrate it is bound to."""
     for key in ("task_group_key", "identity_route", "artifact_kind", "integration_validation_status"):
         resolved.setdefault(key, str(pending_record.get(key) or ""))
 
@@ -787,17 +753,7 @@ def _requested_framework(payload: dict, state: Any, fallback: str = "") -> str:
 
 
 def _requested_setting(payload: dict, state: Any, key: str, fallback: str = "") -> str:
-    """What this request names for ``key``, else what the session carries, else ``fallback``.
-
-    Args:
-        payload: The request payload.
-        state: SharedState snapshot; a field it does not carry reads as unset.
-        key: The field name, identical in the payload and in SharedState.
-        fallback: Used when neither names the field.
-
-    Returns:
-        The resolved value, trimmed.
-    """
+    """What this request names for ``key``, else what the session carries, else ``fallback``."""
     return str(payload.get(key) or getattr(state, key, "") or fallback).strip()
 
 
@@ -1254,16 +1210,7 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
 
 
 def _precision_only_names_the_checkpoint_format(precision: str, model_path: str) -> bool:
-    """Whether the session precision says no more than the checkpoint's own nested format.
-
-    Args:
-        precision: The session-level precision label.
-        model_path: Local directory or repo id of the served checkpoint.
-
-    Returns:
-        ``True`` when the label merely repeats the checkpoint's quantization
-        format, so it cannot tell forge how any individual lane is stored.
-    """
+    """Whether the session precision says no more than the checkpoint's own nested format."""
     if not precision:
         return False
     return precision == checkpoint_format((_read_model_config(model_path) or {}).get("quantization_config"))
@@ -1556,11 +1503,7 @@ def _profile_shapes_are_fresh(state: Any) -> bool:
 
 
 def _trace_shape_artifacts(last_trace: dict[str, Any]) -> list[str]:
-    """The shapes-JSON paths the latest TraceLens analysis points at, best first.
-
-    The fields TraceLens exposes come first; the ``shapes.json`` it leaves beside
-    the candidates file is the fallback, because nothing announces that one.
-    """
+    """The shapes-JSON paths the latest TraceLens analysis points at, best first."""
     named = [str(last_trace.get(key) or "").strip() for key in ("shapes_json", "shapes_path")]
     artifact_paths = last_trace.get("artifact_paths")
     if isinstance(artifact_paths, dict):
@@ -2593,13 +2536,7 @@ def _bridge_forge_decision(
     raw_model_path: str,
     session_dir: Path,
 ) -> None:
-    """Read forge's micro_decision as a coordinator decision, in place.
-
-    A "candidate" with a recommended env becomes a KEEP whose tuned CSV is made
-    durable and recipe-portable, so it survives with the recipe instead of
-    referencing the ephemeral tuner workspace; every other micro_decision is a
-    REVERT, named by what forge found.
-    """
+    """Read forge's micro_decision as a coordinator decision, in place."""
     micro = str(result.get("micro_decision") or "").strip().lower()
     if micro == "candidate" and result.get("recommended_env"):
         result.setdefault("decision", "KEEP")
@@ -2694,22 +2631,13 @@ class _CapturedForgeShapes(NamedTuple):
 
 
 def _requested_existing_file(payload: dict, key: str) -> str:
-    """The path this request names for ``key``, or empty when it is not a file on disk.
-
-    A caller may hand inline content or a stale path; forge reads every one of
-    these as an input file.
-    """
+    """The path this request names for ``key``, or empty when it is not a file on disk."""
     path = str(payload.get(key) or "").strip()
     return path if _path_is_existing_file(path) else ""
 
 
 def _forge_gemm_run(state: Any, payload: dict, session_dir: Path) -> _ForgeGemmRun:
-    """Open a workspace and settle what one forge GEMM tuning run tunes for.
-
-    ``model_dir`` is empty when the model cannot be resolved to a local
-    directory, and ``model_id`` when the request names no model at all; the
-    routing and the server log are filled in afterwards.
-    """
+    """Open a workspace and settle what one forge GEMM tuning run tunes for."""
     from hyperloom.common.model_paths import resolve_serving_model_path
     from hyperloom.common.visible_devices import detect_gpu_count
     from hyperloom.inference_optimizer.model_config_utils import resolve_local_model_dir
@@ -2770,8 +2698,8 @@ async def _route_forge_gemm_run(run: _ForgeGemmRun, state: Any, payload: dict) -
 async def _forge_tuning_tokens(payload: dict, server_log: str) -> str:
     """The M values forge tunes for: the request's own, else the ones the serving log observed.
 
-    forge's own fallback derives ``--tokens`` from ``conc``, which is a guess
-    about M; the serving log records the M values the model actually ran.
+    forge's own fallback derives ``--tokens`` from ``conc``, which is a guess about M; the serving log
+    records the M values the model actually ran.
     """
     tokens = _normalize_tokens(payload.get("tokens"))
     if tokens or not server_log:
@@ -2785,11 +2713,9 @@ async def _forge_tuning_tokens(payload: dict, server_log: str) -> str:
 def _forge_dense_shapes(state: Any, payload: dict, run: _ForgeGemmRun) -> _DenseShapes:
     """Where forge reads this run's dense GEMM shapes: the request's own, else the session's evidence.
 
-    Automatic SGLang priority is the latest TraceLens runtime profile, then
-    Forge's config-derived fallback CSV -- a specialist checkout is not
-    sufficient evidence that its static CSV came from the active benchmark.
-    vLLM instead requires native TunableOp rows or a workload-matched block-FP8
-    profile, so it is left without a dense source here.
+    Automatic SGLang priority is the latest TraceLens runtime profile, then Forge's config-derived fallback
+    CSV -- a specialist checkout is not sufficient evidence that its static CSV came from the active
+    benchmark.
     """
     shapes_json = _normalize_forge_shapes_json(payload.get("shapes_json"), run.workspace)
     untuned_csv = _requested_existing_file(payload, "untuned_csv")
@@ -2807,10 +2733,9 @@ def _forge_dense_shapes(state: Any, payload: dict, run: _ForgeGemmRun) -> _Dense
 def _forge_moe_shape_table(payload: dict, server_log: str, tokens: str, workspace: Path) -> _MoeShapeTable:
     """The MoE shape table forge tunes against, read off the runtime rather than inferred.
 
-    The dispatch tuple in the server log states the quantisation pair, the
-    per-partition inter_dim and the EP-inflated expert/topk counts; none of the
-    three is recoverable from the model config, and guessing them is what
-    produced tuned tables no runtime lookup could reach.
+    The dispatch tuple in the server log states the quantisation pair, the per-partition inter_dim and the
+    EP-inflated expert/topk counts; none of the three is recoverable from the model config, and guessing
+    them is what produced tuned tables no runtime lookup could reach.
     """
     requested = _requested_existing_file(payload, "moe_untuned_csv")
     if requested:
@@ -2821,10 +2746,9 @@ def _forge_moe_shape_table(payload: dict, server_log: str, tokens: str, workspac
 async def _forge_shape_sources(state: Any, payload: dict, run: _ForgeGemmRun) -> _ForgeShapeSources:
     """Everything this forge run can tune from before any shape-capture pass.
 
-    The tokens are settled first because ``_write_fmoe_untuned_csv_from_log``
-    consumes them directly and falls back to ``[1]`` for an empty one: built the
-    other way round, the MoE lane gets a table with a single M=1 row, which
-    misses on every prefill and large-batch lookup and is reverted as
+    The tokens are settled first because ``_write_fmoe_untuned_csv_from_log`` consumes them directly and
+    falls back to ``[1]`` for an empty one: built the other way round, the MoE lane gets a table with a
+    single M=1 row, which misses on every prefill and large-batch lookup and is reverted as
     ``no_shape_key_matched``.
     """
     tokens = await _forge_tuning_tokens(payload, run.server_log)
@@ -2851,16 +2775,9 @@ def _profiled_block_fp8_shapes(
 ) -> _ForgeShapeSources:
     """Block-FP8 shapes the session already profiled, so no capture pass has to be paid for.
 
-    Decode steps replay inside a CUDA Graph and therefore emit no Kineto *op*
-    events, so every profile-derived block-FP8 shape set structurally carries
-    prefill M only -- measured on a real capture, the decode-only trace split
-    yields zero block-FP8 events while the prefill splits yield M=2095. Tuning
-    that alone optimizes an operating point the workload barely uses. TraceLens
-    candidates are built from the device kernel timeline, which does see through
-    the graph and carries the decode M that dominates throughput, so prefer
-    them. ``require_fresh_profile`` keeps the vLLM rule that shapes must be
-    workload-matched, and ``precision`` keeps BF16 heads out of an FP8 tuner's
-    input.
+    Decode steps replay inside a CUDA Graph and therefore emit no Kineto *op* events, so every
+    profile-derived block-FP8 shape set structurally carries prefill M only -- measured on a real capture,
+    the decode-only trace split yields zero block-FP8 events while the prefill splits yield M=2095.
     """
     if not _vllm_block_fp8_profile_capture_required(
         framework=run.framework,
@@ -2957,13 +2874,9 @@ async def _forge_dense_shape_manifest(
 ) -> str:
     """The trace shape manifest forge ranks above ``shapes_json``, when this run produced nothing better.
 
-    forge ranks the manifest at priority 0 on the premise that it was explicitly
-    supplied; a manifest found by walking the session tree carries no such
-    promise -- it can come from an earlier run at a different precision or with
-    different server args, and there is no consistency check to catch that.
-    Letting it win would discard a block-FP8 profile capture or a TunableOp
-    shape capture that deliberately cleared ``untuned_csv`` so the fresh result
-    would be used, and would bypass :func:`_align_forge_shapes_for_aiter` too.
+    forge ranks the manifest at priority 0 on the premise that it was explicitly supplied; a manifest found
+    by walking the session tree carries no such promise -- it can come from an earlier run at a different
+    precision or with different server args, and there is no consistency check to catch that.
     """
     requested = str(payload.get("shapes_manifest") or "").strip()
     if requested:
@@ -2982,11 +2895,7 @@ async def _forge_dense_shape_manifest(
 
 
 def _forge_tuner_ceiling(payload: dict, lane: LaneAllocation) -> int:
-    """How many routed tuners the lane's share pays for; ``0`` leaves forge's own routing intact.
-
-    An explicit payload value stays an operator/test escape hatch; a named
-    ``tuner`` already narrows the set to one, so no ceiling is needed then.
-    """
+    """How many routed tuners the lane's share pays for; ``0`` leaves forge's own routing intact."""
     if str(payload.get("tuner") or "").strip():
         return 0
     requested_tuners = _positive_int(payload.get("max_tuners"))
@@ -3040,10 +2949,7 @@ def _stamp_forge_gemm_provenance(
     run: _ForgeGemmRun,
     tuning_framework: str = "",
 ) -> HandlerResult:
-    """Say which forge run produced a result, where it worked and what it tuned for.
-
-    The engine tag is what makes the breakdown attribute the run to forge.
-    """
+    """Say which forge run produced a result, where it worked and what it tuned for."""
     result.setdefault("backend", "forge")
     result.setdefault("engine", "forge")
     result.setdefault("workspace", str(run.workspace))
@@ -3060,12 +2966,7 @@ def _report_forge_shape_provenance(
     sources: _ForgeShapeSources,
     shape_alignment: dict[str, Any] | None,
 ) -> None:
-    """Record where this run's shapes came from, so a missing MoE problem and an untunable one read apart.
-
-    The MoE key report is kept even when nothing was tunable: "no MoE problem
-    was observed" and "the observed pair is one aiter cannot tune" lead to
-    different actions, and neither is visible from the tuner's own status.
-    """
+    """Record where this run's shapes came from, so a missing MoE problem and an untunable one read apart."""
     if sources.moe_key_report:
         result.setdefault("moe_key_source", sources.moe_key_report)
     if shape_alignment is not None:
@@ -3089,11 +2990,9 @@ def _report_forge_shape_provenance(
 def _fill_forge_tuner_outcomes(result: HandlerResult, workspace: Path) -> None:
     """Surface why forge skipped and which of its tuners crashed, from the sentinel or from disk.
 
-    forge lists every failure in ``failed_tuners`` regardless of the overall
-    decision; dropped here, a dense tuner winning would hide a MoE tuner's
-    crash, and a KEEP would read as "no headroom elsewhere" when siblings had in
-    fact hard-failed. The failure is logged as well, so it is never silent even
-    when the session is kept.
+    forge lists every failure in ``failed_tuners`` regardless of the overall decision; dropped here, a dense
+    tuner winning would hide a MoE tuner's crash, and a KEEP would read as "no headroom elsewhere" when
+    siblings had in fact hard-failed.
     """
     if not result.get("tuners_skipped"):
         disk_skipped = _read_forge_result_json(workspace).get("tuners_skipped")
@@ -3114,10 +3013,8 @@ def _fill_forge_tuner_outcomes(result: HandlerResult, workspace: Path) -> None:
 def _lift_forge_tuner_error(result: HandlerResult) -> None:
     """Carry the first tuner's own error class and message onto the run's envelope.
 
-    The breakdown and the stack read the envelope, not the jsonl audit row, and
-    a specific class has to outrank the generic wording the bridge would write.
-    ``tuners_run`` is forge's JSON and may be any shape; this is bookkeeping and
-    must not raise.
+    The breakdown and the stack read the envelope, not the jsonl audit row, and a specific class has to
+    outrank the generic wording the bridge would write.
     """
     rows = result.get("tuners_run")
     rows = rows if isinstance(rows, list) else []
@@ -3908,9 +3805,8 @@ def _integrate_extra_envs(ctx: Any) -> dict[str, str] | None:
 def _lock_cleanup_allows_retry(cleanup: dict[str, Any]) -> bool:
     """Whether an AITER lock sweep left the round safe to retry.
 
-    A live compiler may legitimately own the observed lock, and when liveness is
-    unknown a fresh skipped lock is not safe to remove either. Only a sweep that
-    deleted something, or that confirmed the lock had already gone, clears a retry.
+    A live compiler may legitimately own the observed lock, and when liveness is unknown a fresh skipped
+    lock is not safe to remove either.
     """
     if cleanup.get("skipped_live") or cleanup.get("errors"):
         return False
@@ -4071,12 +3967,7 @@ def _integrate_failure(
     decision: str,
     **extra: Any,
 ) -> HandlerResult:
-    """What an integrate reports when it cannot fairly score the patch it applied.
-
-    Every one of these abandons the measurement with the patch on disk, so the
-    revert happens here rather than at each site, and ``decision`` says what the
-    candidate itself is left owing.
-    """
+    """What an integrate reports when it cannot fairly score the patch it applied."""
     return {
         "status": "failed",
         "error_class": error_class,
@@ -4099,9 +3990,9 @@ def _unmeasured_integration_failure(
 ) -> HandlerResult:
     """Report a re-baseline that produced no usable measurement, and revert the patch.
 
-    The patch was never fairly scored, so the fault is surfaced at the top level
-    -- the re-baseline's own error class when it has one -- and routed through the
-    fault retry budget rather than discarded as a genuine REVERT.
+    The patch was never fairly scored, so the fault is surfaced at the top level -- the re-baseline's own
+    error class when it has one -- and routed through the fault retry budget rather than discarded as a
+    genuine REVERT.
     """
     rebaseline_error_class = (
         str((bench_result or {}).get("error_class") or "").strip() if isinstance(bench_result, dict) else ""
@@ -4133,13 +4024,7 @@ def _confirm_source_import(
     workspace: Any,
     decision: str,
 ) -> _SourceImport:
-    """Grade whether the served process imported and compiled the patched source.
-
-    Only the strict sub-flag enforces it, and only on positive non-import
-    evidence: an unknown never penalizes a decision. The whole write set is
-    graded, with the single target as the fallback for a bundle that declared
-    none.
-    """
+    """Grade whether the served process imported and compiled the patched source."""
     if not _honest_flag("HL_CONFIRM_SOURCE_IMPORTED"):
         return _SourceImport(confirmed=None, evidence={}, decision=decision, downgraded=False)
     source_import_confirmed: bool | None = None
@@ -4206,9 +4091,8 @@ class _IntegrateVerdict(NamedTuple):
 def _request_overrides_serving_controls(payload: Mapping[str, Any]) -> bool:
     """Whether the request itself asks to remove args, unset envs or replace the recipe.
 
-    Read before the SharedState defaults land: once the current best's own
-    removals are folded in, an inherited one is indistinguishable from one this
-    request asked for.
+    Read before the SharedState defaults land: once the current best's own removals are folded in, an
+    inherited one is indistinguishable from one this request asked for.
     """
     return (
         bool(to_str_list(payload.get("remove_args")))
@@ -4218,12 +4102,7 @@ def _request_overrides_serving_controls(payload: Mapping[str, Any]) -> bool:
 
 
 def _integrate_request_refusal(payload: dict, *, requested_controls: bool) -> HandlerResult | None:
-    """The failure that refuses an integrate before anything is applied, else ``None``.
-
-    Raises:
-        ValueError: a GEMM paired measurement also names a kernel artifact, so
-            it would measure a patch rather than the recipe it is paired with.
-    """
+    """The failure that refuses an integrate before anything is applied, else ``None``."""
     if payload.get("_vendor_playbook_deploy_blocked"):
         # A vendor-playbook KEEP (e.g. mori dispatch/combine launch-config
         # tuning) has no deployable artifact: best_artifact_path is a copy of
@@ -4274,8 +4153,8 @@ def _integrate_request_refusal(payload: dict, *, requested_controls: bool) -> Ha
 def _unapplied_patch_failure(payload: dict, apply_result: dict) -> HandlerResult | None:
     """Why the re-baseline must not run when the patch did not land, else ``None``.
 
-    An apply crash carries a top-level fault ``error_class`` so SharedState
-    routes it through the fault retry budget rather than the patch's own.
+    An apply crash carries a top-level fault ``error_class`` so SharedState routes it through the fault
+    retry budget rather than the patch's own.
     """
     status = apply_result.get("status")
     if status == "ok":
@@ -4368,9 +4247,8 @@ def _integrate_rebaseline(
 def _forced_cpp_itfs_rebuild(apply_result: dict) -> Iterator[None]:
     """Make the re-baseline server rebuild a patched cpp_itfs kernel, then restore ``AITER_REBUILD``.
 
-    aiter cpp_itfs kernels recompile at runtime and its cache hashes params, not
-    source, so a warm cache would serve the pre-patch kernel. Off the cpp_itfs
-    path this changes nothing.
+    aiter cpp_itfs kernels recompile at runtime and its cache hashes params, not source, so a warm cache
+    would serve the pre-patch kernel.
     """
     if not (apply_result.get("cpp_itfs_cache_backup") or {}).get("is_cpp_itfs"):
         yield
@@ -4393,8 +4271,7 @@ async def _multi_node_restart_failure(
 ) -> HandlerResult | None:
     """Restart a multi-node server so it re-imports the patched modules, or report why it could not.
 
-    A resume would measure the pre-patch process. ``mn_round_restarted`` stops a
-    double restart; ``force_full_restart`` scopes the resume override to here.
+    A resume would measure the pre-patch process.
     """
     from ..actions.executors._multi_node_env import is_multi_node
 
@@ -4430,10 +4307,8 @@ async def _multi_node_restart_failure(
 def _cpp_itfs_rebuild_check(apply_result: dict) -> HandlerResult:
     """Whether the re-baseline really rebuilt the runtime-compiled kernel it measured.
 
-    A reused params-hashed lib.so would measure the PRE-patch kernel, so
-    ``gain_pct`` cannot be trusted until a fresh one is on disk. Single-node
-    only: in multi-node the served cache lives on the serving pod, where
-    ``AITER_REBUILD`` on the pod restart is the mechanism instead.
+    A reused params-hashed lib.so would measure the PRE-patch kernel, so ``gain_pct`` cannot be trusted
+    until a fresh one is on disk.
     """
     from ..actions.executors._multi_node_env import is_multi_node
 
@@ -4446,10 +4321,8 @@ def _cpp_itfs_rebuild_check(apply_result: dict) -> HandlerResult:
 def _applyback_verdict_pending(payload: Mapping[str, Any]) -> bool:
     """Whether a framework apply-back still owes an end-to-end correctness verdict.
 
-    An apply-back carries only reference correctness, so this serving run is the
-    sole end-to-end evidence it will ever get. Anything other than a recorded
-    pass still owes the verdict, so an absent or unrecognised status keeps the
-    gate armed rather than disarming it.
+    An apply-back carries only reference correctness, so this serving run is the sole end-to-end evidence it
+    will ever get.
     """
     return (
         str(payload.get("artifact_kind") or "") == _FRAMEWORK_APPLYBACK_ARTIFACT_KIND
@@ -4466,11 +4339,7 @@ def _integrate_accuracy_verdict(
 ) -> _AccuracyVerdict:
     """Grade the accuracy of a candidate that already cleared the throughput bar.
 
-    A kernel patch only KEEPs if it also holds accuracy. Grading only a
-    candidate that cleared the bar keeps a regressing patch from spending a
-    verdict on itself, and reading the re-baseline's own eval output costs no
-    extra GPU time. It runs ahead of the optional source-import pass so a patch
-    that loses accuracy short-circuits before that.
+    A kernel patch only KEEPs if it also holds accuracy.
     """
     if performance.decision != "KEEP":
         return _AccuracyVerdict(None, performance.decision)
@@ -4491,9 +4360,9 @@ def _integrate_accuracy_verdict(
 def _settled_patch(decision: str, apply_result: dict, *, caller_owns_durability: bool) -> _PatchCleanup:
     """Revert or keep the applied patch now the verdict is known, and say how that went.
 
-    ``caller_owns_durability`` belongs to a pre-applied KEEP: only the caller's
-    own commit makes one durable, and dropping the backups here would strand the
-    fanned-out pod-side patch if that commit then failed.
+    ``caller_owns_durability`` belongs to a pre-applied KEEP: only the caller's own commit makes one
+    durable, and dropping the backups here would strand the fanned-out pod-side patch if that commit then
+    failed.
     """
     if decision != "KEEP":
         finalize_result: HandlerResult = {"status": "skipped", "reason": "non-KEEP decision"}
@@ -4571,12 +4440,7 @@ def _integrate_result(verdict: _IntegrateVerdict) -> HandlerResult:
 
 
 def _explain_integrate_decision(result: HandlerResult, verdict: _IntegrateVerdict) -> None:
-    """Record why this candidate got the verdict it did.
-
-    A blocking accuracy verdict is recorded last and owns ``decision_reason``:
-    it is the reason the candidate lost its KEEP, which outranks the
-    throughput-side annotations.
-    """
+    """Record why this candidate got the verdict it did."""
     performance = verdict.performance
     graded = performance.graded
     source_import = verdict.source_import

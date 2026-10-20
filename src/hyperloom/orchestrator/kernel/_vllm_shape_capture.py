@@ -402,9 +402,8 @@ def _benchmark_failure_detail(benchmark_result: Mapping[str, Any]) -> str:
 def _fill_capture_workload_envs(envs: dict[str, str], state: Any, payload: dict) -> None:
     """Pin the workload a capture serves: parallelism, concurrency and sequence lengths.
 
-    The request wins over anything the inherited recipe already set, which in
-    turn wins over the session's own figures; a value that does not read as a
-    positive integer leaves the name alone.
+    The request wins over anything the inherited recipe already set, which in turn wins over the session's
+    own figures; a value that does not read as a positive integer leaves the name alone.
     """
     for env_name, state_name in (
         ("TP", "tp"),
@@ -427,12 +426,7 @@ def _fill_capture_workload_envs(envs: dict[str, str], state: Any, payload: dict)
 
 
 def _shape_capture_run(state: Any, payload: dict, workspace: Path, session_dir: Path) -> _ShapeCaptureRun:
-    """Open a capture directory and inherit the recipe its serving run uses.
-
-    The shapes are only worth tuning if they are the ones the session's current
-    best really runs, so the capture serves that recipe, with anything the
-    request names of its own on top.
-    """
+    """Open a capture directory and inherit the recipe its serving run uses."""
     capture_dir = workspace / "shape_capture" / f"attempt-{time.time_ns()}"
     capture_dir.mkdir(parents=True, exist_ok=True)
     current_best = getattr(state, "current_best", None) or {}
@@ -498,9 +492,8 @@ def _capture_timeout_sec(payload: dict) -> int:
 def _tunableop_recording_envs(inherited: Mapping[str, str], port: int, capture_dir: Path) -> dict[str, str]:
     """The server environment that makes PyTorch TunableOp write down the GEMMs it is asked for.
 
-    The recording pass owns every TunableOp name, so an inherited one is dropped
-    rather than merged: a tuning mode carried in from the session would make the
-    server tune the shapes instead of recording them.
+    The recording pass owns every TunableOp name, so an inherited one is dropped rather than merged: a
+    tuning mode carried in from the session would make the server tune the shapes instead of recording them.
     """
     envs = {
         key: value for key, value in inherited.items() if not key.startswith(("PYTORCH_TUNABLEOP_", "HL_TUNABLEOP_"))
@@ -525,9 +518,9 @@ def _tunableop_recording_envs(inherited: Mapping[str, str], port: int, capture_d
 def _tunableop_recording_unset_envs(inherited: list[str]) -> list[str]:
     """Which env names the recording server still unsets.
 
-    ``unset_envs`` is applied after ``extra_envs``, so any ``PYTORCH_TUNABLEOP_``
-    name left here -- hard-coded or inherited from the payload or the current
-    best -- strips the recording and the capture records nothing.
+    ``unset_envs`` is applied after ``extra_envs``, so any ``PYTORCH_TUNABLEOP_`` name left here --
+    hard-coded or inherited from the payload or the current best -- strips the recording and the capture
+    records nothing.
     """
     kept = [name for name in inherited if not name.startswith("PYTORCH_TUNABLEOP_")]
     return [*kept, "HL_TUNABLEOP_MODE", "HL_TUNABLEOP_FILE", "HL_TUNABLEOP_VERBOSE"]
