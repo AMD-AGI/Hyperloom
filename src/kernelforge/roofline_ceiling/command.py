@@ -60,7 +60,7 @@ def _resolve_performance_command(explicit: str, document: dict[str, Any], config
     """Resolve the command that runs the timed benchmark.
 
     ``config.yaml`` declares commands as a list of shell command strings -- the
-    same contract ``loop.canonical_correctness`` reads -- so they are run through
+    same contract ``evaluation.correctness.canonical`` reads -- so they are run through
     a shell rather than exec'd as argv.
     """
     if explicit.strip():

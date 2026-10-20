@@ -959,24 +959,54 @@ async def test_send_message_to_specialist_prefers_worktree_inbox(coordinator_wit
 
 
 @pytest.mark.asyncio
-async def test_send_message_with_a_list_recipient_is_denied_not_crashed(coordinator_with_mocks):
-    """A ``to`` array is refused by the gate instead of faulting the phase event.
+async def test_send_message_to_a_list_writes_one_message_per_recipient(coordinator_with_mocks):
+    """A ``to`` array is fanned out: one events row per recipient, and each specialist's copy in its inbox.
 
-    Before the check the raw list reached the events INSERT as ``to_agent``
-    and sqlite3.ProgrammingError escaped handle_intent, marking the running
-    phase event failed.
+    Before the gate's check the raw list reached the events INSERT as ``to_agent`` and
+    sqlite3.ProgrammingError escaped handle_intent, marking the running phase event failed.
     """
+    import json as _json
+
+    from hyperloom.inference_optimizer.session.session_paths import runs_dir
+
     c = coordinator_with_mocks
+    body = "redirecting both duplicates at once"
     try:
         await c.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.SEND_MESSAGE,
                 payload={
-                    "to": ["critic", "kernel_agent"],
+                    "to": ["specialist:dup-a", "specialist:dup-b", "critic", "specialist:dup-a"],
                     "topic": "observation",
-                    "body_md": "addressing several agents at once",
+                    "body_md": body,
                 },
+            ),
+        )
+        for name in ("specialist:dup-a", "specialist:dup-b", "critic"):
+            mine = [
+                m for m in c.bus.inbox_context_sync(name) if m.to_agent == name and m.payload.get("body_md") == body
+            ]
+            assert len(mine) == 1, name
+        for task_id in ("dup-a", "dup-b"):
+            inbox = runs_dir(c.session_dir, "specialist", task_id) / "inbox.json"
+            entries = _json.loads(inbox.read_text(encoding="utf-8"))
+            assert [e["body"]["body_md"] for e in entries] == [body]
+        assert not any(m.payload.get("kind") == "policy_denied" for m in c.bus.inbox_context_sync("orchestration"))
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_send_message_to_a_list_with_an_empty_name_is_denied_not_crashed(coordinator_with_mocks):
+    """A list holding an empty name is refused by the gate instead of faulting the phase event."""
+    c = coordinator_with_mocks
+    try:
+        await c.router.handle_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.SEND_MESSAGE,
+                payload={"to": ["critic", ""], "topic": "observation", "body_md": "one name is blank"},
             ),
         )
         denials = c.bus.inbox_context_sync("orchestration")

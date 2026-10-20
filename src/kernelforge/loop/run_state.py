@@ -22,7 +22,7 @@ from kernelforge.loop.search_policy import (
     SEARCH_MODE_EXPLOIT,
     SEARCH_MODES,
 )
-from kernelforge.durable_io import atomic_write_text
+from kernelforge.tools.durable_io import atomic_write_text
 
 log = logging.getLogger(__name__)
 
