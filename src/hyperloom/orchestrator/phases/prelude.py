@@ -1230,12 +1230,7 @@ class PreludePhase(CoordinatorCollaborator):
         )
         return None
 
-    def _refuse_framework_roots(
-        self,
-        reason: str,
-        roots: Sequence[str],
-        rollback: dict[str, Any] | None,
-    ) -> None:
+    def _refuse_framework_roots(self, reason: str, roots: Sequence[str], rollback: dict[str, Any] | None) -> None:
         """Publish the refusal of a replay whose overlays name a checkout this host cannot use."""
         self._skip_warm_replay(
             code=SKIP_FRAMEWORK_ROOT_MISSING,
@@ -1960,9 +1955,7 @@ class PreludePhase(CoordinatorCollaborator):
             return self._fail_warm_replay(settlement, "non_dict_result")
         status = str(result.get("status") or "")
         if status != "succeeded":
-            outcome["error_class"] = str(result.get("error_class") or "")
-            log.info("warm-replay failed (status=%s, error_class=%s)", status, outcome.get("error_class"))
-            return self._fail_warm_replay(settlement, str(result.get("error") or result.get("reason") or "")[:240])
+            return self._fail_warm_replay_on_task_error(settlement, status)
         measurement = self._warm_replay_measurement(settlement)
         if measurement.tput <= 0 or measurement.baseline_tput <= 0:
             reason = f"invalid_tput tput={measurement.tput} baseline={measurement.baseline_tput}"
@@ -2034,10 +2027,7 @@ class PreludePhase(CoordinatorCollaborator):
             )
 
     @staticmethod
-    def _record_replay_measurement(
-        settlement: _WarmReplaySettlement,
-        measurement: _ReplayMeasurement,
-    ) -> None:
+    def _record_replay_measurement(settlement: _WarmReplaySettlement, measurement: _ReplayMeasurement) -> None:
         """Put the numbers the replay was judged on, and any score read onto the outcome, on the timeline.
 
         The anchor goes on record here, where it is used: back-solving it from
@@ -2065,6 +2055,17 @@ class PreludePhase(CoordinatorCollaborator):
         settlement.outcome["status"] = "failed"
         settlement.outcome["reason"] = reason
         return self._conclude_warm_replay(settlement.outcome, Verdict.FAILED)
+
+    def _fail_warm_replay_on_task_error(self, settlement: _WarmReplaySettlement, status: str) -> Verdict:
+        """Unwind a replay whose task reported a failure and settle it under the class it failed with."""
+        if not self._require_combined_warm_rollback(settlement):
+            return Verdict.FAILED
+        result, outcome = settlement.result, settlement.outcome
+        outcome["status"] = "failed"
+        outcome["error_class"] = str(result.get("error_class") or "")
+        outcome["reason"] = str(result.get("error") or result.get("reason") or "")[:240]
+        log.info("warm-replay failed (status=%s, error_class=%s)", status, outcome.get("error_class"))
+        return self._conclude_warm_replay(outcome, Verdict.FAILED)
 
     def _judge_warm_replay_quality(self, settlement: _WarmReplaySettlement) -> Verdict | None:
         """Rule on the replayed config's image quality against the baseline reference.
@@ -2097,11 +2098,7 @@ class PreludePhase(CoordinatorCollaborator):
         log.info("warm-replay REJECTED by quality gate: %s", qg)
         return self._conclude_warm_replay(outcome, Verdict.REVERTED)
 
-    def _grade_warm_replay(
-        self,
-        settlement: _WarmReplaySettlement,
-        measurement: _ReplayMeasurement,
-    ) -> Verdict:
+    def _grade_warm_replay(self, settlement: _WarmReplaySettlement, measurement: _ReplayMeasurement) -> Verdict:
         """Rule the measured round against the session's keep threshold and constraints."""
         state = self.shared_state
         keep_threshold = _phase_state.resolve_keep_threshold(state)
