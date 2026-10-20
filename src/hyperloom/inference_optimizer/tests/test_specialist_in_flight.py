@@ -1,0 +1,119 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""A catalogue domain holds at most one queued or running specialist, whatever gap each dispatch names."""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+
+from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+from hyperloom.inference_optimizer.session.paths import make_session_dir
+from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.policy.specialist_in_flight import SPECIALIST_DOMAIN_IN_FLIGHT
+from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
+from hyperloom.orchestrator.specialists.in_flight import in_flight_domains
+
+_SYSTEM = "system_specialist"
+
+
+@pytest.fixture
+async def coord(tmp_path, monkeypatch):
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    silent = ScriptedPlan(turns=[])
+    c = Coordinator(
+        make_session_dir(),
+        backends={"orchestration": MockBackend(silent, name="o"), "critic": MockBackend(silent, name="c")},
+    )
+    c.shared_state.phase = "FRAMEWORK_AGENT"
+    yield c
+    await c.stop()
+
+
+async def _delegate(c: Coordinator, **params: Any) -> None:
+    payload = {"action_name": "specialist", "params": {"mode": "research", **params}}
+    await c.router.handle_delegate("orchestration", Intent(type=IntentType.DELEGATE, payload=payload))
+
+
+async def _queued_domains(c: Coordinator) -> list[str]:
+    return [str(t.params.get("domain") or t.params.get("tags")) for t in await c.tasks.by_state("queued")]
+
+
+async def _in_flight_denials(c: Coordinator) -> int:
+    observed = await c.bus.tail(topic="observation")
+    return sum(
+        m.payload.get("kind") == "policy_denied" and m.payload.get("rule") == SPECIALIST_DOMAIN_IN_FLIGHT
+        for m in observed
+    )
+
+
+async def test_a_second_delegate_for_a_queued_domain_is_refused_whatever_gap_it_names(coord):
+    await _delegate(coord, domain=_SYSTEM, gap_canonical_id="gap.system.gpu_idle_85pct_host_pacing")
+    await _delegate(coord, domain=_SYSTEM, gap_canonical_id="gap.launch_overhead.idle_85pct_conc4_decode")
+
+    assert await _queued_domains(coord) == [_SYSTEM]
+    assert await _in_flight_denials(coord) == 1
+
+
+async def test_a_running_specialist_holds_its_domain(coord):
+    await _delegate(coord, domain=_SYSTEM, gap_canonical_id="gap.a")
+    (first,) = await coord.tasks.by_state("queued")
+    await coord.tasks.transition(first.task_id, "running", evidence={})
+
+    await _delegate(coord, domain=_SYSTEM, gap_canonical_id="gap.b")
+
+    assert await coord.tasks.by_state("queued") == []
+    assert await _in_flight_denials(coord) == 1
+
+
+async def test_a_finished_holder_frees_its_domain_and_other_domains_stay_open(coord):
+    await _delegate(coord, domain=_SYSTEM, gap_canonical_id="gap.a")
+    await _delegate(coord, domain="compiler_specialist", gap_canonical_id="gap.c")
+    holder = next(t for t in await coord.tasks.by_state("queued") if t.params["domain"] == _SYSTEM)
+    await coord.tasks.transition(holder.task_id, "running", evidence={})
+    await coord.tasks.transition(holder.task_id, "succeeded", evidence={})
+
+    await _delegate(coord, domain=_SYSTEM, gap_canonical_id="gap.b")
+
+    assert sorted(await _queued_domains(coord)) == ["compiler_specialist", _SYSTEM]
+    assert await _in_flight_denials(coord) == 0
+
+
+async def test_a_tag_only_dispatch_holds_the_domain_its_tag_resolves_to(coord):
+    await _delegate(coord, tags=["systems"], gap_canonical_id="gap.a")
+    await _delegate(coord, domain=_SYSTEM, gap_canonical_id="gap.b")
+
+    assert len(await coord.tasks.by_state("queued")) == 1
+    assert await _in_flight_denials(coord) == 1
+
+
+async def test_freeform_dispatches_hold_no_domain(coord):
+    await _delegate(coord, scope="freeform", task_description="trace the decode host gap")
+    await _delegate(coord, scope="freeform", task_description="audit the attention backend choice")
+
+    assert len(await coord.tasks.by_state("queued")) == 2
+    assert await _in_flight_denials(coord) == 0
+
+
+async def test_orchestration_sees_which_domains_queued_specialists_hold(coord):
+    await _delegate(coord, domain=_SYSTEM, gap_canonical_id="gap.a")
+    (holder,) = await coord.tasks.by_state("queued")
+
+    in_flight = coord.conversation._context_running_tasks_reader()
+
+    assert f"queued specialists (each holds its domain): {_SYSTEM} task_id={holder.task_id}" in in_flight
+
+
+def test_the_first_specialist_of_each_domain_holds_it():
+    first = SimpleNamespace(kind="specialist", params={"domain": _SYSTEM})
+    tasks = [
+        SimpleNamespace(kind="explore", params={"domain": "compiler_specialist"}),
+        first,
+        SimpleNamespace(kind="specialist", params={"tags": ["systems"]}),
+        SimpleNamespace(kind="specialist", params={"scope": "freeform", "task_description": "x"}),
+    ]
+
+    assert in_flight_domains(tasks) == {_SYSTEM: first}

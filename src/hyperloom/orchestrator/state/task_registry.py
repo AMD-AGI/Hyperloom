@@ -536,6 +536,11 @@ class TaskRegistry:
         )
         return [Task.from_row(row) for row in rows]
 
+    def queued_context_sync(self) -> list[Task]:
+        """Read queued tasks oldest-first off the sync path."""
+        rows = self.db.fetchall_sync("SELECT * FROM tasks WHERE state='queued' ORDER BY created_at ASC", ())
+        return [Task.from_row(row) for row in rows]
+
     def queued_kind_counts_sync(self) -> dict[str, int]:
         """Return {kind: count} for queued tasks, synchronously."""
         rows = self.db.fetchall_sync(

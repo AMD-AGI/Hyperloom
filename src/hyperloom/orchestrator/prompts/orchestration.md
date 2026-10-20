@@ -553,6 +553,12 @@ admitted against. A `bench` / enablement specialist admits against
 whenever serving owns every card — in that case dispatch CPU specialists, or
 use `bench` when the work genuinely needs to measure.
 
+A domain holds at most one queued or running specialist, whatever gap each
+names: a second `scope=domain` / `domains` delegate for it is refused
+(`specialist_domain_in_flight`) until the first finishes. Fold new evidence into
+that domain's next dispatch; the in-flight block lists the domains queued
+specialists hold. `freeform` dispatches hold no domain.
+
 **Domain-anchored example:**
 ```
 intent_type: "delegate"

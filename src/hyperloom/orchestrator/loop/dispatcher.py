@@ -40,6 +40,7 @@ from ..policy.gate import (
     PolicyDenied,
     SPECIALIST_FROM_AGENT_PREFIX,
 )
+from ..policy.specialist_in_flight import specialist_in_flight_denial
 from ..bus.gpu_pool import (
     GPU_LEASE_TTL_GRACE,
 )
@@ -1436,13 +1437,12 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         Returns:
             The first :class:`PolicyDenied` that fires, else ``None``.
         """
-        denied = self._phase_denial_for_action(action_name)
-        if denied is not None:
-            return denied
-        denied = self._sequence_denial_for_action(action_name)
-        if denied is not None:
-            return denied
-        return self.time_budget_denial_for_action(action_name, params=params)
+        return (
+            self._phase_denial_for_action(action_name)
+            or self._sequence_denial_for_action(action_name)
+            or specialist_in_flight_denial(action_name, params, self.tasks)
+            or self.time_budget_denial_for_action(action_name, params=params)
+        )
 
     async def _cancel_queued_task_over_budget(self, task: Task) -> bool:
         """Drop a queued task the budget can no longer fit, before it takes a lane.

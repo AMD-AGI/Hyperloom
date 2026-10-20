@@ -35,6 +35,7 @@ from hyperloom.inference_optimizer.grid_server_args import (
     tokenize_server_args_preserving_json,
 )
 from ..actions.executors.integrate_patch import PATCH_SOURCE_UPSTREAM_PR, RESULT_BENCHED
+from ..specialists.in_flight import in_flight_domains
 from ..specialists.profile import is_authoring_specialist
 from hyperloom.common.framework_arm import LOCAL_EXPLORE_CANDIDATE_PREFIX
 from hyperloom.orchestrator.lever import LEVER_SOURCE_PATCH, LEVER_UPSTREAM_PR, patch_lever_kind, patch_owner_phase
@@ -2645,13 +2646,8 @@ class FrameworkPhase(ProposalBench):
 
     async def _candidate_discovery_inflight(self) -> bool:
         """True while a candidate-discovery specialist is queued or running."""
-        queued = await self.tasks.queued()
-        running = await self.tasks.running()
-        return any(
-            getattr(t, "kind", "") == "specialist"
-            and bool((getattr(t, "params", None) or {}).get("candidate_discovery"))
-            for t in (*queued, *running)
-        )
+        held = in_flight_domains([*await self.tasks.queued(), *await self.tasks.running()])
+        return "candidate_discovery_specialist" in held
 
     async def _maybe_enqueue_candidate_discovery(self, *, reason: str) -> bool:
         """Dispatch the candidate-discovery specialist when the pool is empty."""

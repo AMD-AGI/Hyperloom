@@ -274,6 +274,20 @@ def normalize_dispatch_tags(params: dict) -> list[str]:
     return list(dict.fromkeys(tags))
 
 
+def dispatch_domain_key(params: dict) -> str:
+    """The domain a dispatch names: its ``domain`` key, else its first knowledge-domain tag."""
+    named = str(params.get("domain") or "").strip()
+    if named:
+        return named
+    tags = normalize_dispatch_tags(params)
+    return tags[0] if tags else ""
+
+
+def dispatch_domain(params: dict) -> "SpecialistDomain | None":
+    """The catalogue entry :func:`dispatch_domain_key` resolves to, by KB anchor first and then by key."""
+    return domain_for_tag(dispatch_domain_key(params))
+
+
 def is_custom_specialist_dispatch(params: dict) -> bool:
     """Whether a dispatch names ``custom_specialist`` as its domain or as a tag."""
     if str(params.get("domain") or "").strip() == CUSTOM_SPECIALIST_KEY:
@@ -337,6 +351,8 @@ __all__ = [
     "SPECIALIST_MAX_TURNS_HARD_CAP",
     "SpecialistDomain",
     "custom_specialist_key",
+    "dispatch_domain",
+    "dispatch_domain_key",
     "domain_for_tag",
     "get_domain",
     "is_custom_specialist_dispatch",
