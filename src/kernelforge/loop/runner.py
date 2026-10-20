@@ -1083,11 +1083,11 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         """Classify a pending KEEP as uncommitted or the exact expected child."""
         if state.session_status == SESSION_COMPLETED:
             raise ValueError("completed campaign cannot be resumed")
-        base_head = str(pending.get("base_head") or "")
+        base_head = pending["base_head"]
         patch = str(pending.get("patch") or "")
-        iteration = int(pending.get("iteration", 0) or 0)
-        expected_hash = str(pending.get("patch_sha256") or "")
-        if not base_head or not patch or iteration <= 0:
+        iteration = int(pending["iteration"])
+        expected_hash = pending["patch_sha256"]
+        if not base_head or not patch:
             raise ValueError("pending KEEP metadata is incomplete")
         if hashlib.sha256(patch.encode()).hexdigest() != expected_hash:
             raise ValueError("pending KEEP metadata patch checksum mismatch")
