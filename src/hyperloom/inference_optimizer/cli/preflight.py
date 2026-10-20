@@ -52,8 +52,11 @@ from hyperloom.common.provenance import (
 )
 from hyperloom.common.timeutil import now_iso
 from hyperloom.common.visible_devices import hip_mask_within_rocr
+from hyperloom.common.model_paths import resolve_serving_model_path
 
 from .. import inferencex_checkout
+from .bootstrap import parse_operator_extra_env
+from .server_args import validate_server_args
 
 from .credentials import (
     _is_stale_proxy_url,
@@ -2352,6 +2355,24 @@ def _check_kernel_and_tracelens_clis(install_event: Any, args: argparse.Namespac
     )
 
 
+def _validate_explicit_server_limits(args: argparse.Namespace | None) -> None:
+    effective = argparse.Namespace(**vars(args)) if args is not None else argparse.Namespace()
+    state = _resumed_session_state(args) or {}
+    pins = parse_operator_extra_env(effective) or state.get("operator_extra_env", {})
+    if state:
+        effective.server_args = str(getattr(args, "server_args", "") or "").strip() or state.get(
+            "operator_server_args", ""
+        )
+        if getattr(args, "max_model_len", None) is None:
+            effective.max_model_len = (
+                pins["MAX_MODEL_LEN"]
+                if "MAX_MODEL_LEN" in pins
+                else state.get("max_model_len") or os.environ.get("MAX_MODEL_LEN", "").strip() or None
+            )
+    model = str(state.get("model_path") or getattr(args, "model", None) or os.environ.get("MODEL_PATH", ""))
+    validate_server_args(effective, resolve_serving_model_path(model, model_base=pins.get("HL_MODEL_BASE")))
+
+
 def _preflight(
     args: argparse.Namespace | None = None,
 ) -> tuple[str, str] | None:
@@ -2376,6 +2397,12 @@ def _preflight(
     )
     if framework_arg := getattr(args, "framework", None):
         os.environ["FRAMEWORK"] = framework_arg.strip().lower()
+    _run_install_step(
+        install_event,
+        step_id="validate_server_args",
+        category="check",
+        action=lambda: _validate_explicit_server_limits(args),
+    )
     _derive_runtime_paths()
     _restore_provider_only_mode(provider_mode, provider_snapshot)
     _run_install_step(
