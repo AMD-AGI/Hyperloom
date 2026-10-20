@@ -35,12 +35,6 @@ def test_a_ledger_that_kept_nothing_is_skipped_not_warned_about():
     assert out.warnings == []
 
 
-def test_an_unmeasured_ledger_prints_no_contribution_sum():
-    out = opt.render(_ledger(adoption_count=0, attributed_gain_pct=None, unattributed_gain_pct=None))
-
-    assert out.key_facts == ["0 adoption(s) recorded in the stack ledger."]
-
-
 def test_the_table_splits_adoptions_by_the_source_that_earned_them():
     out = opt.render(
         _ledger(

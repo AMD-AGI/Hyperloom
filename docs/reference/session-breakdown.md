@@ -37,7 +37,8 @@ recorded-timeline wire shape:
 "schema_version": "hyperloom.session_breakdown.v7.0"
 ```
 
-V7 is a breaking cutover for one rename: `throughput_tok_s_per_gpu` in
+V7 is a breaking cutover: it renames one key, removes keys no producer populated
+and reports two unmeasured figures as null, each listed below. `throughput_tok_s_per_gpu` in
 `outcome.baseline`, `outcome.final` and the `baseline` event's `measurement` is
 now `output_throughput`. The value is unchanged: the whole-server output
 throughput, not a per-GPU figure. Archived V6 documents carry the old key and

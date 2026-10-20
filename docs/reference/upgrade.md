@@ -260,7 +260,8 @@ controlled by the CLI flag `--enable-roofline`, which defaults **on**. Pass
 ### Schema compatibility
 
 `session_breakdown.json` emits `hyperloom.session_breakdown.v7.0`. V7 is a
-breaking cutover for one rename: `throughput_tok_s_per_gpu` in
+breaking cutover: it renames one key, removes never-populated keys and reports
+unmeasured figures as null. `throughput_tok_s_per_gpu` in
 `outcome.baseline`, `outcome.final` and the `baseline` event's `measurement` is
 now `output_throughput`; archived V6 documents keep the old key.
 Re-exporting a session directory created before V7 emits a null
