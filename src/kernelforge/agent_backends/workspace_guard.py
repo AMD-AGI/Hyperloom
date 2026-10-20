@@ -178,13 +178,10 @@ class WorkspaceGuard:
             self.driver_path = self._resolve_path(self.spec.driver_script)
 
         unstaged, staged, untracked = self._current_changes()
-        if self.spec.read_only_resume:
-            policy = self.spec.tool_policy
-            if self.spec.writable or policy is None or policy.write or policy.shell:
-                raise WorkspaceSafetyError(
-                    "a read-only resume requires writable=False and a tool policy with write=False and shell=False"
-                )
-        elif self._guards_dirty_baseline():
+        # The caller owns whether untracked state is expected: the loop writes its own experiment ledger into the
+        # workspace it hands the implementer, so every iteration would otherwise be refused for the caller's files.
+        refused_untracked = [] if self.spec.allow_untracked else untracked
+        if self._guards_dirty_baseline():
             # Nothing to validate up front: this state was inherited, not produced by the turn, and refusing it here
             # would make the phase unrunnable in the only worktrees it ever runs in. verify() judges the deviations.
             pass
@@ -195,8 +192,8 @@ class WorkspaceGuard:
             violations: list[str] = []
             if staged:
                 violations.append(f"staged changes: {', '.join(staged)}")
-            if untracked and not self.spec.allow_untracked:
-                violations.append(f"untracked files: {', '.join(untracked)}")
+            if refused_untracked:
+                violations.append(f"untracked files: {', '.join(refused_untracked)}")
             if unexpected:
                 violations.append(f"non-target changes: {', '.join(unexpected)}")
             if violations:
@@ -207,12 +204,8 @@ class WorkspaceGuard:
             blocking = [
                 *(f"staged: {relative}" for relative in staged),
                 *(f"modified: {relative}" for relative in unstaged),
+                *(f"untracked: {relative}" for relative in refused_untracked),
             ]
-            # The caller owns whether untracked state is expected here, exactly as it does in the resume branch above:
-            # the loop writes its own experiment ledger into the workspace it hands the implementer, so every
-            # iteration would otherwise be refused for the caller's files.
-            if not self.spec.allow_untracked:
-                blocking.extend(f"untracked: {relative}" for relative in untracked)
             if blocking:
                 raise WorkspaceSafetyError(
                     "the workspace guard requires a clean tracked and non-ignored "
@@ -220,10 +213,9 @@ class WorkspaceGuard:
                 )
 
         for path in self.target_paths:
-            exists = path.is_file()
-            content = path.read_bytes() if exists else b""
-            mode = path.stat().st_mode & 0o777 if exists else 0
-            self.target_snapshots[path] = (exists, content, mode)
+            self.target_snapshots[path] = (
+                (True, path.read_bytes(), path.stat().st_mode & 0o777) if path.is_file() else (False, b"", 0)
+            )
 
         self.head = _git_output(self.root, "rev-parse", "HEAD").strip()
         self.branch = _git_output(self.root, "rev-parse", "--abbrev-ref", "HEAD").strip()
