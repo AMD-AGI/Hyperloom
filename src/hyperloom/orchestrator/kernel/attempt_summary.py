@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -26,9 +25,6 @@ from ._kernel_agent_results import (
     _load_kernel_result,
 )
 from ._kernel_decisions import _forge_loop_entries_by_operator_in_optimization_stack
-
-
-log = logging.getLogger(__name__)
 
 
 # Per-kernel outcome bucket (closed set).

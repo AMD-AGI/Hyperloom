@@ -10,9 +10,8 @@ import json
 import logging
 import re
 import shlex
-from enum import Enum
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any
 
 from hyperloom.common.env_safety import (
     filter_untrusted_env_mapping,
@@ -225,71 +224,42 @@ def geak_spec_is_env(spec: Any) -> bool:
     return geak_spec_kind(spec) == "env"
 
 
-class _TwinVerdict(Enum):
-    """What to do with an accepted entry reporting the same op kind and gain as one already kept."""
-
-    REPLACE = "replace"
-    DROP = "drop"
-    KEEP_BOTH = "keep_both"
-
-
-class _GeakKernelGain(NamedTuple):
-    """One accepted GEAK entry that names an authored kernel and measured a gain."""
-
-    spec: dict[str, Any]
-    name: str
-    #: Op kind plus rounded gain: two entries sharing it describe the same measurement.
-    twin: tuple[str, str]
-
-
-def _geak_kernel_gain(spec: Any) -> _GeakKernelGain | None:
-    """Read one accepted entry as a named kernel gain, ``None`` when it is not one."""
-    if not isinstance(spec, dict) or geak_spec_is_env(spec):
-        return None
-    try:
-        delta = float(spec.get("e2e_delta_pct") or 0.0)
-    except (TypeError, ValueError):
-        return None
-    if delta <= 0.0:
-        return None
-    name = geak_spec_name(spec)
-    if not name:
-        return None
-    return _GeakKernelGain(spec, name, (str(spec.get("op_kind") or ""), f"{delta:.4f}"))
-
-
-def _twin_verdict(kept_name: str, candidate_name: str) -> _TwinVerdict:
-    """Choose between two accepted entries that describe the same measurement."""
-    kept_is_tag = geak_is_cand_tag(kept_name)
-    candidate_is_tag = geak_is_cand_tag(candidate_name)
-    if kept_is_tag and not candidate_is_tag:
-        return _TwinVerdict.REPLACE
-    if candidate_is_tag and not kept_is_tag:
-        return _TwinVerdict.DROP
-    return _TwinVerdict.DROP if candidate_name == kept_name else _TwinVerdict.KEEP_BOTH
-
-
 def _geak_accepted_kernel_specs(result: Any) -> list[dict[str, Any]]:
     """Return the authored kernels a GEAK result accepted, both lanes, deduped."""
     if not isinstance(result, dict):
         return []
-    lanes = (result.get("accepted_kernels") or []) + (result.get("accepted_heads") or [])
     out: list[dict[str, Any]] = []
     index: dict[tuple[str, str], int] = {}
-    for entry in lanes:
-        gain = _geak_kernel_gain(entry)
-        if gain is None:
+    lanes = (result.get("accepted_kernels") or []) + (result.get("accepted_heads") or [])
+    for k in lanes:
+        if not isinstance(k, dict):
             continue
-        pos = index.get(gain.twin)
+        if geak_spec_is_env(k):
+            continue
+        try:
+            delta = float(k.get("e2e_delta_pct") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if delta <= 0.0:
+            continue
+        name = str(k.get("short_name") or k.get("kernel_id") or k.get("cand_tag") or "").strip()
+        if not name:
+            continue
+        twin = (str(k.get("op_kind") or ""), f"{delta:.4f}")
+        pos = index.get(twin)
         if pos is None:
-            index[gain.twin] = len(out)
-            out.append(gain.spec)
+            index[twin] = len(out)
+            out.append(k)
             continue
-        verdict = _twin_verdict(geak_spec_name(out[pos]), gain.name)
-        if verdict is _TwinVerdict.REPLACE:
-            out[pos] = gain.spec
-        elif verdict is _TwinVerdict.KEEP_BOTH:
-            out.append(gain.spec)
+        existing_name = geak_spec_name(out[pos])
+        if _GEAK_CAND_TAG_RE.match(existing_name) and not _GEAK_CAND_TAG_RE.match(name):
+            out[pos] = k
+            continue
+        if _GEAK_CAND_TAG_RE.match(name) and not _GEAK_CAND_TAG_RE.match(existing_name):
+            continue
+        if name == existing_name:
+            continue
+        out.append(k)
     return out
 
 

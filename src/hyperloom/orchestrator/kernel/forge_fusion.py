@@ -329,7 +329,7 @@ def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
         result.update(abort_fields)
         return result
 
-    artifacts = read.manifest.get("artifacts") or {}
+    artifacts = manifest.raw.get("artifacts") or {}
     patch = artifacts.get("patch")
     source_file = _fusion_source_file(manifest)
     kept = manifest.kept
@@ -355,7 +355,7 @@ def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
             "source_file": source_file,
             # The root the patch was exported against, which may be a site-packages dir.
             "kernel_repo": str(artifacts.get("repo_root") or ""),
-            "verdict": read.manifest.get("verdict"),
+            "verdict": manifest.raw.get("verdict"),
             # KernelForge validated this on its own -- kernel parity plus a serving smoke for an authored fusion, a
             # serving A/B for a claimed compile pass -- but integrate is what confirms the real e2e gain here.
             "requires_e2e_validation": kept,
@@ -365,7 +365,7 @@ def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
     if manifest.multi_patch:
         # Carry the sibling envelopes through untouched so the consumer can enqueue each independently.
         result["patches"] = [dict(p) for p in manifest.patches]
-        nomination = read.manifest.get("nomination")
+        nomination = manifest.raw.get("nomination")
         result["nomination"] = dict(nomination) if isinstance(nomination, dict) else None
 
     return result
