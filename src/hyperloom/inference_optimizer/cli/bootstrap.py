@@ -345,16 +345,23 @@ def _per_gpu_launch_error(args: Any, available_gpus: set[int] | None) -> str:
 def resolve_launch_gpu_power(args: Any, *, nodes: int, owner: str) -> dict[str, Any]:
     """The launch's GPU power settings record; exits 2 before anything runs when the declared settings cannot be
     applied or a requested power budget cannot be measured or checked. Nothing is applied when a budget is refused."""
-    from hyperloom.common.gpu_power_settings import DeclaredPowerSettings, visible_gpu_indices
+    from hyperloom.common.gpu_power_settings import DeclaredPowerSettings, GpuPowerSettingsError, visible_gpu_indices
 
-    mask = visible_gpu_indices()
     gpu_power: dict[str, Any] = {}
+    mask: set[int] | None = None
     error = power_budget_unmeasurable_error(
         total_w=getattr(args, _MAX_POWER_W, None),
         per_gpu_w=getattr(args, _MAX_PER_GPU_POWER_W, None),
         nodes=nodes,
         framework=_requested_framework(args),
-    ) or (_per_gpu_launch_error(args, mask) if mask is not None else "")
+    )
+    if not error and getattr(args, _MAX_PER_GPU_POWER_W, None):
+        try:
+            mask = visible_gpu_indices()
+        except GpuPowerSettingsError as exc:
+            error = f"--max-per-gpu-power-w cannot be checked against the visible cards: {exc}"
+        else:
+            error = _per_gpu_launch_error(args, mask) if mask is not None else ""
     if not error:
         gpu_power, error = _established_gpu_power_settings(
             DeclaredPowerSettings(
@@ -442,7 +449,12 @@ def resolve_gpu_power_settings(
         if declared:
             return {_DECLARED: declared}, f"the declared GPU power settings cannot be checked: {exc}"
         return {}, ""
-    gpus = visible_gpu_indices()
+    try:
+        gpus = visible_gpu_indices()
+    except GpuPowerSettingsError as exc:
+        if declared:
+            return {_DECLARED: declared}, f"the declared GPU power settings cannot be checked: {exc}"
+        gpus = None
     record = {
         _DECLARED: declared,
         "observed": {str(gpu): row for gpu, row in sorted(observed.items()) if gpus is None or gpu in gpus},

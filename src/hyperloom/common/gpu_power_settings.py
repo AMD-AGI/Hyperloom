@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
 from hyperloom.common.env import env_flag
+from hyperloom.common.visible_devices import HIP_LEVEL_VARS, ROCR_LEVEL_VARS, effective_mask_tokens
 
 __all__ = [
     "GPU_POWER_SAMPLING_ENV",
@@ -64,18 +65,45 @@ def normalize_perf_level(value: Any) -> str:
     return text.lower()
 
 
-def visible_gpu_indices(env: Mapping[str, str] | None = None) -> set[int] | None:
-    """Card indices the session may use, from ``ROCR_VISIBLE_DEVICES`` / ``HIP_VISIBLE_DEVICES``; ``None`` for all."""
-    source = os.environ if env is None else env
-    for name in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES"):
+def _first_mask(source: Mapping[str, str], names: tuple[str, ...]) -> list[int] | None:
+    """The visible-device ordinals of the first of *names* that is set; ``None`` when none is."""
+    for name in names:
         raw = str(source.get(name) or "").strip()
         if not raw:
             continue
-        try:
-            return {int(part) for part in raw.split(",") if part.strip()}
-        except ValueError:
-            return None
+        tokens = effective_mask_tokens(raw)
+        if not all(token.isdigit() for token in tokens):
+            raise GpuPowerSettingsError(f"{name}={raw} is not a list of device numbers, so its cards cannot be named")
+        return [int(token) for token in tokens]
     return None
+
+
+def visible_gpu_indices(env: Mapping[str, str] | None = None) -> set[int] | None:
+    """The amd-smi indices of the cards the session's visible-device masks expose; ``None`` when no mask is set.
+
+    ROCm numbers GPUs in KFD node order and amd-smi in PCI order, and the two differ on MI300X/MI355X boards, so a mask
+    number is never an amd-smi index. ``ROCR_VISIBLE_DEVICES`` picks from the KFD-ordered cards and
+    ``HIP_VISIBLE_DEVICES`` then indexes into what it left; each resulting card is matched to amd-smi through its KFD
+    node id.
+
+    Raises:
+        GpuPowerSettingsError: a mask is not numeric, names a card that does not exist, or amd-smi cannot say which
+            KFD node each card is.
+    """
+    source = os.environ if env is None else env
+    rocr = _first_mask(source, ROCR_LEVEL_VARS)
+    hip = _first_mask(source, HIP_LEVEL_VARS)
+    if rocr is None and hip is None:
+        return None
+    by_node = [gpu for gpu, _ in sorted(_read_gpu_kfd_nodes().items(), key=lambda item: item[1])]
+    visible = list(range(len(by_node))) if rocr is None else rocr
+    if hip is not None:
+        if any(index >= len(visible) for index in hip):
+            raise GpuPowerSettingsError(f"HIP_VISIBLE_DEVICES names a card beyond the {len(visible)} visible")
+        visible = [visible[index] for index in hip]
+    if any(ordinal >= len(by_node) for ordinal in visible):
+        raise GpuPowerSettingsError(f"the visible-device mask names a card beyond the {len(by_node)} amd-smi lists")
+    return {by_node[ordinal] for ordinal in visible}
 
 
 def _gpu_rows(payload: Any) -> list[dict[str, Any]]:
@@ -118,6 +146,34 @@ class DeclaredPowerSettings:
         return {"power_cap_w": self.power_cap_w, "perf_level": self.perf_level}
 
 
+def _amd_smi_json(run: Callable[..., subprocess.CompletedProcess], timeout: float, *args: str) -> Any:
+    if shutil.which("amd-smi") is None and run is subprocess.run:
+        raise GpuPowerSettingsError("amd-smi is not on PATH")
+    try:
+        done = run(["amd-smi", *args, "--json"], capture_output=True, text=True, timeout=timeout, check=False)  # nosec B603 B607
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise GpuPowerSettingsError(f"amd-smi {' '.join(args)} could not run: {exc}") from exc
+    if done.returncode != 0:
+        raise GpuPowerSettingsError(f"amd-smi {' '.join(args)} exited {done.returncode}: {done.stderr.strip()[:200]}")
+    try:
+        return json.loads(done.stdout)
+    except ValueError as exc:
+        raise GpuPowerSettingsError(f"amd-smi {' '.join(args)} printed no JSON") from exc
+
+
+def _read_gpu_kfd_nodes() -> dict[int, int]:
+    """``{amd-smi index: KFD node id}`` for every card ``amd-smi list`` reports.
+
+    Raises:
+        GpuPowerSettingsError: ``amd-smi`` failed, or reported a card without its KFD node.
+    """
+    rows = _gpu_rows(_amd_smi_json(subprocess.run, 30.0, "list"))
+    nodes = {row["gpu"]: row["node_id"] for row in rows if isinstance(row.get("node_id"), int)}
+    if len(nodes) != len(rows):
+        raise GpuPowerSettingsError("amd-smi list reports a card without its KFD node, so its ROCm number is unknown")
+    return nodes
+
+
 def read_gpu_power_settings(
     *,
     run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
@@ -128,27 +184,10 @@ def read_gpu_power_settings(
     Raises:
         GpuPowerSettingsError: ``amd-smi`` is absent, failed, or printed something that is not its JSON.
     """
-    if shutil.which("amd-smi") is None and run is subprocess.run:
-        raise GpuPowerSettingsError("amd-smi is not on PATH")
-
-    def _query(*args: str) -> Any:
-        try:
-            done = run(["amd-smi", *args, "--json"], capture_output=True, text=True, timeout=timeout, check=False)  # nosec B603 B607
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise GpuPowerSettingsError(f"amd-smi {' '.join(args)} could not run: {exc}") from exc
-        if done.returncode != 0:
-            raise GpuPowerSettingsError(
-                f"amd-smi {' '.join(args)} exited {done.returncode}: {done.stderr.strip()[:200]}"
-            )
-        try:
-            return json.loads(done.stdout)
-        except ValueError as exc:
-            raise GpuPowerSettingsError(f"amd-smi {' '.join(args)} printed no JSON") from exc
-
     settings: dict[int, dict[str, Any]] = {}
-    for row in _gpu_rows(_query("static", "--limit")):
+    for row in _gpu_rows(_amd_smi_json(run, timeout, "static", "--limit")):
         settings.setdefault(row["gpu"], {})["power_cap_w"] = _power_cap_w(row.get("limit"))
-    for row in _gpu_rows(_query("metric", "--perf-level")):
+    for row in _gpu_rows(_amd_smi_json(run, timeout, "metric", "--perf-level")):
         settings.setdefault(row["gpu"], {})["perf_level"] = normalize_perf_level(row.get("perf_level"))
     for entry in settings.values():
         entry.setdefault("power_cap_w", None)

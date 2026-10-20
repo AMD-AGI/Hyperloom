@@ -361,7 +361,11 @@ def orphaned_power_settings_warning(
     A setting a card no longer reads at was put back or reset since, and is not reported; one whose reading is
     missing is, since it may still be applied. When the cards cannot be read at all, every record is reported.
     """
-    orphans = orphaned_power_records(ledger_dir, visible_gpu_indices())
+    try:
+        gpus = visible_gpu_indices()
+    except GpuPowerSettingsError:
+        gpus = None
+    orphans = orphaned_power_records(ledger_dir, gpus)
     if not orphans:
         return ""
     try:
