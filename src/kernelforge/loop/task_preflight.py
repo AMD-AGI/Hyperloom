@@ -617,17 +617,8 @@ class _PreflightWork:
                 snr_threshold=snr_threshold,
                 timeout_sec=int(_deadline_timeout(deadline_unix, PREFLIGHT_CORRECTNESS_TIMEOUT_S)),
             )
-            self.details["correctness"] = {
-                k: cres.get(k)
-                for k in (
-                    "passed",
-                    "outcome",
-                    "snr_db",
-                    "allclose",
-                    "max_diff",
-                    "message",
-                )
-            }
+            keys = ("passed", "outcome", "snr_db", "allclose", "max_diff", "message")
+            self.details["correctness"] = {k: cres.get(k) for k in keys}
             self.details["correctness"]["seconds"] = _stage_seconds(stage_started)
             has_metric = (
                 cres.get("snr_db") is not None or cres.get("allclose") is not None or cres.get("max_diff") is not None
@@ -660,29 +651,29 @@ class _PreflightWork:
             self.details["bench"]["missing_cases"] = missing_cases
             self.details["bench"]["undeclared_cases"] = undeclared_cases
             if not bres.get("success") or not reported_cases:
-                self.reasons.append(
-                    f"bench mode must produce an aggregate and case_ms timing for every suite case ({bres.get('message')})"
+                reason = (
+                    "bench mode must produce an aggregate and case_ms timing for every "
+                    f"suite case ({bres.get('message')})"
                 )
-                _record_stage_output(self.diagnostics, "bench", bres)
             elif missing_cases:
-                self.reasons.append(
+                reason = (
                     "bench mode reported "
                     f"{len(reported_cases)} of the {len(expected_case_ids or ())} cases "
                     "this task declares; no case_ms line for "
                     f"{', '.join(missing_cases)} — print one line per declared case "
                     "using its CASE_ID verbatim"
                 )
-                _record_stage_output(self.diagnostics, "bench", bres)
             elif undeclared_cases:
-                self.reasons.append(
+                reason = (
                     "bench mode reported case_ms for "
                     f"{', '.join(undeclared_cases)}, which this task does not declare; "
                     "measure the declared suite exactly, because every case printed "
                     "here is scored"
                 )
-                _record_stage_output(self.diagnostics, "bench", bres)
             else:
                 return True
+            self.reasons.append(reason)
+            _record_stage_output(self.diagnostics, "bench", bres)
         except Exception as exc:  # noqa: BLE001
             log.warning("preflight bench run raised: %s", exc)
             self.reasons.append(f"bench run raised {type(exc).__name__}: {exc}")
@@ -712,14 +703,12 @@ class _PreflightWork:
         }
         if replays >= iters:
             return True, True
+        self.diagnostics["graph"] = tail
         if replays == PROBE_DISTRIBUTED_VIOLATION:
-            self.diagnostics["graph"] = tail
             self.reasons.append(f"distributed measurement contract violated: {tail}")
         elif replays < 0:
-            self.diagnostics["graph"] = tail
             self.reasons.append(f"could not verify graph timing (probe failed): {tail[-160:]}")
         else:
-            self.diagnostics["graph"] = tail
             self.reasons.append(
                 f"benchmark did not run under a CUDA/HIP graph (observed {replays} "
                 f"graph replays over {iters} timed iterations): {tail[-160:]}"
