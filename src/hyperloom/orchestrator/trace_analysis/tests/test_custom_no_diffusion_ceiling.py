@@ -66,7 +66,6 @@ def _write_reports_for(tmp_path, framework):
         model_name="whatever-the-operator-shipped",
         framework=framework,
         target_platform="MI300X",
-        analysis_mode="inference",
         dry_run=False,
     )
     return tl.write_reports(
