@@ -776,6 +776,7 @@ def test_preflight_records_install_steps_in_execution_order(tmp_path, monkeypatc
     assert [step["step_id"] for step in event["ext"]["steps"]] == [
         "load_dotenv",
         "load_kernel_agent_env",
+        "validate_server_args",
         "normalize_legacy_deepseek_env",
         "validate_credentials",
         "prepare_kb_environment",
