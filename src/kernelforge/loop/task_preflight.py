@@ -520,7 +520,7 @@ async def _count_graph_replays(
         cleanup_current_owned_aiter_locks()
         _cleanup_probe(out_path, probe_dir)
         raise
-    except Exception as exc:  # noqa: BLE001
+    except OSError as exc:
         _cleanup_probe(out_path, probe_dir)
         return PROBE_FAILED, f"{type(exc).__name__}: {exc}"
     tail = ((out.decode(errors="replace") if out else "") + (err.decode(errors="replace") if err else ""))[-400:]
@@ -803,9 +803,7 @@ def _kill_process_group(proc) -> None:
         try:
             os.killpg(pid, signal.SIGKILL)
             signalled = True
-        except (ProcessLookupError, PermissionError):
-            pass
-        except Exception:  # noqa: BLE001 - group may already be gone
+        except OSError:  # group may already be gone
             pass
     if not signalled:
         with contextlib.suppress(ProcessLookupError, PermissionError):

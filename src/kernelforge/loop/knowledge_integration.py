@@ -444,7 +444,7 @@ def _bench_once(driver: str, bench_repeat: int = 1) -> dict | None:
         if not isinstance(res, dict) or not res.get("success") or not res.get("case_times"):
             return None
         return res
-    except Exception as e:  # noqa: BLE001 - a failed probe just disables warm-start
+    except (OSError, ValueError) as e:  # a failed probe just disables warm-start
         print(f"  [kb] bench probe failed: {e}", flush=True)
         return None
 
@@ -462,7 +462,7 @@ def _correctness_once(driver: str, snr_threshold: float) -> bool:
             )
         )
         return bool(res.get("passed")) if isinstance(res, dict) else False
-    except Exception as e:  # noqa: BLE001 - a failed probe just rejects warm-start
+    except (OSError, ValueError) as e:  # a failed probe just rejects warm-start
         print(f"  [kb] correctness probe failed: {e}", flush=True)
         return False
 
@@ -1374,76 +1374,68 @@ def write_experience_to_kb(
     usage=None,
 ) -> dict:
     """Gather the run's outcome and mirror the best solution into the KB Store."""
-    try:
-        from kernelforge.knowledge.kb_store.writer import RunOutcome, write_run_experience
+    from kernelforge.knowledge.kb_store.writer import RunOutcome, write_run_experience
 
-        checkpoint_experiment_id = getattr(loop_runner.experiment, "experiment_id", "") or ""
-        kb_experience_id = publication.experience_id or checkpoint_experiment_id
-        baseline_ms = (
-            publication.pristine_baseline_ms
-            or getattr(loop_runner.ic, "pristine_baseline_wall_ms", None)
-            or getattr(loop_runner.ic, "baseline_wall_ms", None)
-        )
-        best_ms = getattr(loop_runner, "best_wall_ms", None)
-        mean_case_speedup = getattr(loop_runner, "best_mean_case_speedup", None)
-        cumulative_diff = _git_cumulative_diff(kernel.workspace, publication.base_sha)
+    checkpoint_experiment_id = getattr(loop_runner.experiment, "experiment_id", "") or ""
+    kb_experience_id = publication.experience_id or checkpoint_experiment_id
+    baseline_ms = (
+        publication.pristine_baseline_ms
+        or getattr(loop_runner.ic, "pristine_baseline_wall_ms", None)
+        or getattr(loop_runner.ic, "baseline_wall_ms", None)
+    )
+    best_ms = getattr(loop_runner, "best_wall_ms", None)
+    mean_case_speedup = getattr(loop_runner, "best_mean_case_speedup", None)
+    cumulative_diff = _git_cumulative_diff(kernel.workspace, publication.base_sha)
 
-        snr_db = None
-        digest = ""
-        archive = getattr(loop_runner, "archive", None)
-        if archive is not None:
-            with contextlib.suppress(OSError, ValueError, KeyError):
-                keeps = [entry for entry in archive.load_index() if entry.get("decision") == "KEEP"]
-                scored_keeps = [entry for entry in keeps if entry.get("mean_case_speedup") is not None]
-                if scored_keeps:
-                    best_entry = max(
-                        scored_keeps,
-                        key=lambda entry: entry["mean_case_speedup"],
-                    )
-                    snr_db = best_entry.get("snr_db")
-                digest = archive.render_digest()
-        if publication.snr_db_override is not None:
-            snr_db = publication.snr_db_override
+    snr_db = None
+    digest = ""
+    archive = getattr(loop_runner, "archive", None)
+    if archive is not None:
+        with contextlib.suppress(OSError, ValueError, KeyError):
+            keeps = [entry for entry in archive.load_index() if entry.get("decision") == "KEEP"]
+            scored_keeps = [entry for entry in keeps if entry.get("mean_case_speedup") is not None]
+            if scored_keeps:
+                best_entry = max(
+                    scored_keeps,
+                    key=lambda entry: entry["mean_case_speedup"],
+                )
+                snr_db = best_entry.get("snr_db")
+            digest = archive.render_digest()
+    if publication.snr_db_override is not None:
+        snr_db = publication.snr_db_override
 
-        kernel_source = ""
-        with contextlib.suppress(OSError):
-            kernel_source = Path(kernel.kernel_path).read_text(errors="replace")
+    kernel_source = ""
+    with contextlib.suppress(OSError):
+        kernel_source = Path(kernel.kernel_path).read_text(errors="replace")
 
-        summary_override = (
-            None if publication.llm_summary else publication.incremental_summary or _cheap_summary(archive)
-        )
-        pristine_signature = getattr(loop_runner.ic, "implementation_signature", "")
-        pristine_identity = getattr(loop_runner.ic, "implementation_identity", None)
+    summary_override = None if publication.llm_summary else publication.incremental_summary or _cheap_summary(archive)
+    pristine_signature = getattr(loop_runner.ic, "implementation_signature", "")
+    pristine_identity = getattr(loop_runner.ic, "implementation_identity", None)
 
-        status = write_run_experience(
-            config=config,
-            kernel=replace(kernel, kernel_source=kernel_source),
-            outcome=RunOutcome(
-                experiment_id=kb_experience_id,
-                gpu_target=publication.gpu_target,
-                baseline_wall_ms=baseline_ms,
-                best_wall_ms=best_ms,
-                cumulative_diff=cumulative_diff,
-                digest=digest,
-                mean_case_speedup=mean_case_speedup,
-                snr_db=snr_db,
-                reused_speedup=publication.reused_speedup,
-                implementation_signature=pristine_signature,
-                implementation_identity=pristine_identity,
-            ),
-            summary_override=summary_override,
-            usage=usage,
-        )
-        if status.get("written"):
-            print(
-                f"  [kb] experience written: {status.get('solution')} (speedup {status.get('speedup'):.3f})", flush=True
-            )
-        else:
-            print(f"  [kb] experience not written: {status.get('reason')}", flush=True)
-        return status
-    except Exception as e:  # noqa: BLE001 - never let KB write affect the run
-        print(f"  [kb] experience write skipped ({e})", flush=True)
-        return {"written": False, "reason": f"error:{e!r}"}
+    status = write_run_experience(
+        config=config,
+        kernel=replace(kernel, kernel_source=kernel_source),
+        outcome=RunOutcome(
+            experiment_id=kb_experience_id,
+            gpu_target=publication.gpu_target,
+            baseline_wall_ms=baseline_ms,
+            best_wall_ms=best_ms,
+            cumulative_diff=cumulative_diff,
+            digest=digest,
+            mean_case_speedup=mean_case_speedup,
+            snr_db=snr_db,
+            reused_speedup=publication.reused_speedup,
+            implementation_signature=pristine_signature,
+            implementation_identity=pristine_identity,
+        ),
+        summary_override=summary_override,
+        usage=usage,
+    )
+    if status.get("written"):
+        print(f"  [kb] experience written: {status.get('solution')} (speedup {status.get('speedup'):.3f})", flush=True)
+    else:
+        print(f"  [kb] experience not written: {status.get('reason')}", flush=True)
+    return status
 
 
 def kb_read_status(warm: dict) -> dict:
