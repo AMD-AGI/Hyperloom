@@ -23,15 +23,17 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from hyperloom.inference_optimizer import framework_paths
 
 from ...enablement.recipe import keep_probe, keep_records
 from ...enablement.recipe.projections import project_launch_evidence
 from . import _patch_snapshot
-from ._integrate_attempt import IntegrateAttempt
 from ._nogit_patch import _is_git_tree
+
+if TYPE_CHECKING:
+    from ._integrate_attempt import IntegrateAttempt
 
 log = logging.getLogger(__name__)
 
@@ -46,7 +48,6 @@ class _StackTargets(NamedTuple):
 class _RootIdentity(NamedTuple):
     """Which trees the accepted stack contributes to, and the commit each one is bound to."""
 
-    contributions: dict[str, Any]
     base_sha_by_root: dict[str, str]
     records: list[dict[str, Any]]
 
@@ -70,7 +71,6 @@ def _bind_roots(attempt: IntegrateAttempt, patch_roots: dict[str, str], artifact
     captured = attempt.base_sha_by_root
     base_sha_by_root = {root: inherited_sha.get(root, "") or captured.get(root, "") for root in git_roots}
     return _RootIdentity(
-        contributions=contributions,
         base_sha_by_root=base_sha_by_root,
         records=keep_records.build_root_records(
             contributions=contributions,

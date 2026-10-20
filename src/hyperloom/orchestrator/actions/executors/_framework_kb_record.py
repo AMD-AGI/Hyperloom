@@ -83,8 +83,6 @@ class _Attribution:
 
 def _environment_of(shared_state: Any) -> _Environment:
     """The hardware and model identity every record in this session is indexed under."""
-    if shared_state is None:
-        return _Environment("", "", "", "")
     return _Environment(
         session_id=str(getattr(shared_state, "recipe_kb_session_id", "") or ""),
         model_class=str(getattr(shared_state, "model_class", "") or "").strip(),

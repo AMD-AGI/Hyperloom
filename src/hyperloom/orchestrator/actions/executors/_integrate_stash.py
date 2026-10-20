@@ -31,9 +31,7 @@ def _find_hyperloom_auto_stash(framework_root: Path) -> str:
         ["-C", str(framework_root), "stash", "list", "--format=%gd:%gs"],
         timeout=30.0,
     )
-    if cp is None:
-        return ""
-    if cp.returncode != 0:
+    if cp is None or cp.returncode != 0:
         return ""
     for line in cp.stdout.splitlines():
         ref, _sep, msg = line.partition(":")
