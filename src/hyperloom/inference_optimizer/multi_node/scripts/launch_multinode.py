@@ -402,7 +402,7 @@ def _rank0_pid_from_log(pid_dir: str) -> int | None:
         if not pid_path.is_file():
             pid_path = pathlib.Path(tempfile.gettempdir()) / "multi_node_pids" / "rank_0.pid"
         return int(pid_path.read_text().strip())
-    except Exception:  # noqa: BLE001
+    except (OSError, ValueError):
         return None
 
 

@@ -647,7 +647,7 @@ def package_session_artifacts(
                 len(copied),
                 root,
             )
-        except Exception:
+        except OSError:
             log.exception("session package: loose copy failed (non-fatal)")
 
     return target
