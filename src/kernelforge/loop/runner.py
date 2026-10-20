@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import contextlib
+import functools
 import hashlib
 import inspect
 import json
@@ -6185,47 +6186,32 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             )
         )
 
-    async def _run_locked(
+    async def _begin_locked_run(
         self,
         agents: LoopAgents,
         *,
         callbacks: LoopCallbacks,
         usage=None,
-    ) -> list[IterationResult]:
-        """Run the autonomous iteration loop."""
-        import functools
-
+    ) -> LoopAgents:
+        """Load durable state, open the session segment, and seed the campaign clock."""
         self._search_actors = agents.search_actors
-
         global print
         print = functools.partial(print, flush=True)  # noqa: A001 - deliberate flush-on-print rebind
-
         self._initialize_campaign_runtime(usage)
-
-        # Durable, file-backed run state + append-only event log.
         self.state_store = LoopStateStore(self.ic.workspace_dir)
         state_exists = self.state_store.state_path.exists()
         self.run_state = self.state_store.load()
         actors = _with_search_actor(agents, self._session_start_bundle())
-        agent_fn, agent_factory, supervisor_fn = actors.agent_fn, actors.agent_factory, actors.supervisor_fn
-        analysis_service, orchestration_service = actors.analysis_service, actors.orchestration_service
-        current_ruling_path = latest_supervisor_ruling_path(self.ic.workspace_dir)
         self._supervisor_ruling = load_latest_supervisor_ruling(self.ic.workspace_dir) if self.resume else ""
-
-        # Ownership boundary for anything a candidate creates, taken before this loop touches the workspace.
         self._pre_untracked = self._untracked_snapshot()
-
         self._restore_or_begin_campaign(
             state_exists=state_exists,
-            current_ruling_path=current_ruling_path,
-            agent_fn=agent_fn,
-            orchestration_service=orchestration_service,
+            current_ruling_path=latest_supervisor_ruling_path(self.ic.workspace_dir),
+            agent_fn=actors.agent_fn,
+            orchestration_service=actors.orchestration_service,
             on_best_committed=callbacks.on_best_committed,
         )
-
-        # Anchor the campaign clock now that the state carrying what earlier sessions spent is loaded.
         self._campaign_started_at = self.start_time - max(0.0, float(self.run_state.round_costs.campaign_sec))
-
         if state_exists and reconcile_stale_running_session(self.run_state):
             self.state_store.append_event(
                 make_event(
@@ -6235,7 +6221,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                 )
             )
             self.state_store.save(self.run_state)
-
+        # Captured before start_session, which increments session_index and clears last_experiment_id.
         parent_experiment_id = self.run_state.last_experiment_id
         next_segment_index = self.run_state.session_index + 1
         self._set_state_identity(self.run_state)
@@ -6254,65 +6240,102 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             ),
         )
         self.run_state.last_experiment_id = self.experiment.experiment_id
-        self.state_store.append_event(
-            make_event(
-                "session_started",
-                self.run_state.iteration,
-            )
-        )
+        self.state_store.append_event(make_event("session_started", self.run_state.iteration))
         self.state_store.save(self.run_state)
-
         self._persist_pr_knowledge()
-        self._announce_run(supervisor_fn)
-
+        self._announce_run(actors.supervisor_fn)
         await self._anchor_speedup_reporting()
-
-        # Seed the run state's baseline and, guardedly, resume a prior best from a reused workspace (only when the
-        # recorded best commit is still HEAD).
         self._seed_and_hydrate_run_state()
         self._adopt_validated_warm_start()
-
         self._verify_baseline_anchor()
-
-        # Once the anchor is settled and verified, so the estimate is handed the case set the objective scores and
-        # latencies from the campaign's own clock.
         await self._establish_ceiling()
-
-        # A crash immediately after a verified commit can leave the KEEP's archive unfinished.
         await self._finish_recovered_pending_keep()
-
-        # Candidates an earlier round bought and never measured.
         self._restore_lane_queue()
-
-        # The previous round's verdict, for the same reason: a REPLACE is spent on the round after the one it judged,
-        # and the budget often ends between the two.
         self._restore_critic_ruling()
+        if actors.analysis_service is not None:
+            await self._resolve_analysis_context(actors.analysis_service)
+        return actors
 
-        # Analyze the baseline canonical commit once before any specialist or Implementer session.
-        if analysis_service is not None:
-            await self._resolve_analysis_context(analysis_service)
+    async def _settle_locked_attempt(
+        self,
+        attempt,
+        frame: _IterationFrame,
+        *,
+        session_sink: dict,
+        agent_fn,
+        callbacks: LoopCallbacks,
+    ) -> None:
+        """Measure one sourced attempt, stamp it, rule on it, and close the iteration."""
+        (
+            unmeasured_result,
+            commit_hash,
+            rationale,
+            _attempt_source,
+            _attempt_diff,
+            reusable_benchmark,
+            _optimization_plan_path,
+            optimization_plan_executable,
+        ) = attempt
+        frame = replace(
+            frame,
+            best_before=self.best_wall_ms,
+            best_mean_case_speedup_before=self.best_mean_case_speedup,
+        )
+        if unmeasured_result is not None:
+            result = unmeasured_result
+        else:
+            try:
+                run_kwargs = {}
+                if reusable_benchmark is not None:
+                    run_kwargs["benchmark_measurement"] = reusable_benchmark
+                result = await self.run_one_iteration(
+                    frame.iteration,
+                    plan=session_sink.get("plan", ""),
+                    **run_kwargs,
+                )
+            except Exception as e:  # noqa: BLE001
+                print(f"  [CRASH] iteration {frame.iteration} crashed during run: {e}")
+                result = IterationResult(
+                    iteration=frame.iteration,
+                    duration_sec=0.0,
+                    validation_passed=False,
+                    validation_summary=f"iteration crashed: {e}",
+                    error_output=traceback.format_exc()[-4000:],
+                    kept=False,
+                    crashed=True,
+                )
+        result.commit_hash = commit_hash
+        result.agent_rationale = rationale
+        self._stamp_result_profile(result, session_sink)
+        result.session_end_reason = session_sink.get("end_reason", "")
+        result.turns = session_sink.get("turns")
+        if agent_fn is not None:
+            self._apply_iteration_planning_state(
+                optimization_plan_created=optimization_plan_executable,
+            )
+        ruling = self._rule_on_attempt(result, attempt, frame, on_best_committed=callbacks.on_best_committed)
+        await self._close_iteration(result, attempt, frame, ruling=ruling, callbacks=callbacks)
 
+    async def _run_locked(
+        self,
+        agents: LoopAgents,
+        *,
+        callbacks: LoopCallbacks,
+        usage=None,
+    ) -> list[IterationResult]:
+        """Run the autonomous iteration loop."""
+        actors = await self._begin_locked_run(agents, callbacks=callbacks, usage=usage)
+        analysis_service = actors.analysis_service
         iteration = self.run_state.next_iteration - 1
         while True:
             iteration += 1
-
-            # Build the lineage digest once per iteration — reused by BOTH the supervisor (trajectory to review) and
-            # the implementer (prompt history).
-            digest = ""
-            if getattr(self, "archive", None) is not None:
-                digest = self.archive.render_digest()
-
-            # Ruled on once per iteration, with the other conditions that decide whether this iteration may run at
-            # all -- and after them, so a run that was stopping anyway never touches the device.
+            digest = self.archive.render_digest()
             stop, hazard = self._stop_condition_met(iteration)
             if stop:
                 break
-
             actors = _with_search_actor(actors, self._iteration_bundle(iteration))
             agent_fn, agent_factory, supervisor_fn = actors.agent_fn, actors.agent_factory, actors.supervisor_fn
             orchestration_service = actors.orchestration_service
-
-            # Price the round before anything is spent on it.
             self._close_round()
             round_lanes = self.ic.lanes
             if not self._lane_queue:
@@ -6321,18 +6344,13 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                     break
                 round_lanes = admitted_lanes
                 self._open_round(iteration, lanes=round_lanes)
-
             await self._open_iteration(
                 iteration=iteration,
                 digest=digest,
                 supervisor_fn=supervisor_fn,
                 analysis_service=analysis_service,
             )
-
-            # Agent proposes modification
             session_sink: dict = {}
-            # What a fan-out round leaves this iteration holding, so the single-session path below spends it instead
-            # of buying it again.
             fan_out_plan: HeldRound | None = None
             if hazard is None and (
                 not self._lane_queue
@@ -6347,18 +6365,14 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                     agent_factory=agent_factory,
                     lanes=round_lanes,
                 )
-                # The round's own lanes share one device with the canonical measurement, so a lane whose teardown
-                # could not clear it has just refused this iteration -- whatever its siblings produced.
                 hazard = self.device_hazard.live
                 if self._refused_round:
-                    # Planning cost more than the round had left.
                     break
             merge = self._stage_merge(
                 iteration=iteration,
                 hazard=hazard,
                 fan_out_plan=fan_out_plan,
             )
-            # A fan-out round already paid for these candidates, so they are measured before anything new is planned.
             queued_lane = None if hazard or merge.diff else self._take_lane_candidate()
             frame = _IterationFrame(iteration, session_sink, merge)
             attempt = await self._source_attempt(
@@ -6372,74 +6386,15 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                 if self._refused_round:
                     break
                 continue
-            (
-                unmeasured_result,
-                commit_hash,
-                rationale,
-                attempt_source,
-                attempt_diff,
-                reusable_benchmark,
-                optimization_plan_path,
-                optimization_plan_executable,
-            ) = attempt
-
-            # Snapshot the best-so-far BEFORE this iteration is measured, so the archive can record the true delta vs
-            # the standard it had to beat (run_one_iteration mutates self.best_wall_ms on an improvement).
-            best_before = self.best_wall_ms
-            best_mean_case_speedup_before = self.best_mean_case_speedup
-            frame = replace(
+            await self._settle_locked_attempt(
+                attempt,
                 frame,
-                best_before=best_before,
-                best_mean_case_speedup_before=best_mean_case_speedup_before,
+                session_sink=session_sink,
+                agent_fn=agent_fn,
+                callbacks=callbacks,
             )
-
-            # Run validation + bench.
-            if unmeasured_result is not None:
-                result = unmeasured_result
-            else:
-                try:
-                    run_kwargs = {}
-                    if reusable_benchmark is not None:
-                        run_kwargs["benchmark_measurement"] = reusable_benchmark
-                    result = await self.run_one_iteration(
-                        iteration,
-                        plan=session_sink.get("plan", ""),
-                        **run_kwargs,
-                    )
-                except Exception as e:  # noqa: BLE001
-                    # Turn the crash into a FAILED result (crashed=True) and let it flow through the same
-                    # verdict/ledger/archive path.
-                    print(f"  [CRASH] iteration {iteration} crashed during run: {e}")
-                    result = IterationResult(
-                        iteration=iteration,
-                        duration_sec=0.0,
-                        validation_passed=False,
-                        validation_summary=f"iteration crashed: {e}",
-                        error_output=traceback.format_exc()[-4000:],
-                        kept=False,
-                        crashed=True,
-                    )
-            result.commit_hash = commit_hash
-            result.agent_rationale = rationale
-            self._stamp_result_profile(result, session_sink)
-            # Session end reason + turns spent (from the in-session gate / SDK via session_sink) — persisted so a
-            # run's end-reason distribution (edit cap / turn cap / converged / …) is analyzable.
-            result.session_end_reason = session_sink.get("end_reason", "")
-            result.turns = session_sink.get("turns")
-
-            if agent_fn is not None:
-                self._apply_iteration_planning_state(
-                    optimization_plan_created=optimization_plan_executable,
-                )
-
-            ruling = self._rule_on_attempt(result, attempt, frame, on_best_committed=callbacks.on_best_committed)
-
-            await self._close_iteration(result, attempt, frame, ruling=ruling, callbacks=callbacks)
-
         self._persist_terminal_state()
-
         self._print_final_report()
-
         return self.results
 
 
