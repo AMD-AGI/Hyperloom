@@ -483,7 +483,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
                 "task_id": str(task_id),
             }
             append_jsonl(path, row, make_parents=True, fmt=JsonLineFormat(sort_keys=True))
-        except Exception:
+        except OSError:
             log.debug(
                 "full-trace: proposal_task_map append failed for msg_id=%s task_id=%s",
                 proposal_msg_id,

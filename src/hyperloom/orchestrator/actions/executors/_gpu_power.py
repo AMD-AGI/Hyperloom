@@ -29,7 +29,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from hyperloom.common.env import env_float
+from hyperloom.common.env import EnvValueError, env_float
 from hyperloom.common.gpu_power_settings import gpu_power_sampling_unavailable
 
 log = logging.getLogger(__name__)
@@ -314,7 +314,8 @@ class GpuPowerRecorder:
         try:
             payload = self._query(*_SAMPLE_METRICS)
             reading = parse_power_sample(payload)
-        except Exception as exc:  # noqa: BLE001 - telemetry must not fail the round
+        except Exception as exc:
+            log.debug("gpu_power: amd-smi query failed", exc_info=True)
             with self._lock:
                 self._errors += 1
                 self._last_error = str(exc)[:200]
@@ -427,7 +428,7 @@ class GpuPowerRecorder:
             from hyperloom.common.io import atomic_write_json
 
             atomic_write_json(Path(self._output_path), payload)
-        except Exception:
+        except (OSError, TypeError, ValueError):
             log.warning("gpu_power: could not write %s", self._output_path, exc_info=True)
         return payload
 
@@ -516,7 +517,7 @@ def build_gpu_power_recorder(server_log_path: str | None, env: dict[str, str] | 
             gpus=visible_gpu_indices(env or {}),
             interval_sec=env_float(_INTERVAL_ENV, _DEFAULT_INTERVAL_SEC),
         )
-    except Exception:
+    except EnvValueError:
         log.warning("gpu_power: recorder could not be built; this round samples nothing", exc_info=True)
         return None
 
