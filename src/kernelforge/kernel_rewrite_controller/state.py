@@ -9,7 +9,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from kernelforge.durable_io import atomic_write_text
+from kernelforge.tools.durable_io import atomic_write_text
 from kernelforge.kernel_rewrite_controller.contracts import (
     TASK_STATUS_FAILED,
     TASK_STATUS_READY,

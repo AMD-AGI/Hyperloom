@@ -16,7 +16,7 @@ from kernelforge.llm.git import git
 from kernelforge.kernel_backends.constants import resolve_language_dirs
 from kernelforge.orchestrator.contracts import EvidenceRef
 from kernelforge.orchestrator.supervisor import latest_supervisor_ruling_path
-from kernelforge.durable_io import atomic_write_text
+from kernelforge.tools.durable_io import atomic_write_text
 
 
 log = logging.getLogger(__name__)

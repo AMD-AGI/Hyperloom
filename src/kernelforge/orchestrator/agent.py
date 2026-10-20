@@ -22,10 +22,10 @@ from kernelforge.agent_backends import (
 from kernelforge.agent_backends.session_resume import run_session_with_api_resume
 from kernelforge.config import Config, resolve_agent_model
 from kernelforge.llm.workspace_policy import TOOL_OWNED_UNTRACKED_GLOBS
-from kernelforge.mcp_server.pr_stdio_server import TOOL_NAMES as PR_TOOL_NAMES
+from kernelforge.knowledge.pr_knowledge.agent_tools import TOOL_NAMES as PR_TOOL_NAMES
 from kernelforge.loop.insession_gate import GateMeasurement, GateScope, InSessionGate
 from kernelforge.loop.lessons import SessionEnd
-from kernelforge.loop.scoring import (
+from kernelforge.evaluation.scoring import (
     KEEP_MEASUREMENT_COUNT,
     KEEP_MIN_MARGIN_FRACTION,
     keep_t_critical,
@@ -526,7 +526,7 @@ prints the tables). If this environment lacks rocprof-compute's deps the script 
     if pr_kb_repo and backend.capabilities.mcp:
         pr_mcp_servers["pr_monitor"] = StdioMcpServer(
             command=sys.executable,
-            args=("-m", "kernelforge.mcp_server.pr_stdio_server"),
+            args=("-m", "kernelforge.knowledge.pr_knowledge.mcp_server"),
             env={"PR_KB_REPO": pr_kb_repo, **_pr_kb_child_env()},
             startup_timeout_sec=15,
             # Claude ignores this field; the REST client also enforces a budget.

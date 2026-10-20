@@ -895,6 +895,121 @@ def test_yaml_lifecycle_reuse_round_teardown(tmp_path, monkeypatch, framework):
     assert teardown["called"] is True  # cleanup=true -> torn down
 
 
+class _BootRound:
+    """What a lifecycle round did to the server and to the benchmark client, as seen through the runner's seams."""
+
+    def __init__(self, tmp_path, monkeypatch, *, round_envs, server_up=False, owned=True):
+        inferencex = tmp_path / "InferenceX"
+        (inferencex / "utils" / "bench_serving").mkdir(parents=True)
+        (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
+        self.pid_dir = tmp_path / "pids"
+        self.pid_dir.mkdir()
+        cfg_path = _write_cfg_lifecycle(tmp_path, inferencex, cleanup=False, pid_dir=self.pid_dir)
+        cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+        cfg["benchmark"]["envs"].update({"RUN_EVAL": "true", **round_envs})
+        cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+        self.out = tmp_path / "out"
+        self.launched = 0
+        self.subprocess_tags: list[str] = []
+
+        if server_up and owned:
+            bypass_engine.write_lifecycle_files(
+                str(self.pid_dir),
+                bypass_engine.LifecycleRecord(framework="sglang", port=8888, pid=4321, pgid=4321, model="/models/x"),
+            )
+        monkeypatch.setattr(bypass_engine, "server_health_ok", lambda *a, **k: server_up)
+        monkeypatch.setattr(bypass_engine, "wait_for_server_ready", lambda *a, **k: True)
+        monkeypatch.setattr(bypass_runner.os, "getpgid", lambda pid: pid)
+        monkeypatch.setattr(bypass_runner, "_launch_server", self._launch_server)
+        monkeypatch.setattr(bypass_runner, "_terminate_server", lambda proc: None)
+        monkeypatch.setattr(bypass_runner, "_ensure_eval_deps", lambda python_exe: None)
+        monkeypatch.setattr(bypass_runner, "_run_subprocess", self._run_subprocess)
+        # The argv BypassBackend.build_command hands the runner: no --phase.
+        self.argv = [
+            "benchmark",
+            "--benchmark-config",
+            str(cfg_path),
+            "--output-dir",
+            str(self.out),
+            "--run-mode",
+            "local",
+        ]
+
+    def _launch_server(self, cmd, env, log):
+        self.launched += 1
+
+        class _FakeServer:
+            pid = 5555
+
+        return _FakeServer()
+
+    def _run_subprocess(self, cmd, timeout_s, workspace, tag):
+        self.subprocess_tags.append(tag)
+        if tag == "client":
+            (workspace / "inferencex_result.json").write_text(
+                json.dumps({"output_throughput": 700.0, "completed": 40, "duration": 30.0}), encoding="utf-8"
+            )
+        return 0
+
+    def run(self) -> int:
+        return bypass_runner.main(self.argv)
+
+    @property
+    def pid_file(self) -> Path:
+        return bypass_engine.lifecycle_pid_file(str(self.pid_dir), "sglang", 8888)
+
+    @property
+    def workspace(self) -> Path:
+        (workspace,) = self.out.glob("benchmark_sglang_*")
+        return workspace
+
+
+def test_boot_only_round_boots_the_server_and_runs_no_client(tmp_path, monkeypatch):
+    """run_grid's boot-only round (MAGPIE_RUN_PHASE=server in benchmark.envs) must not benchmark or evaluate."""
+    boot = _BootRound(tmp_path, monkeypatch, round_envs={"MAGPIE_RUN_PHASE": "server"})
+
+    assert boot.run() == 0
+
+    assert boot.launched == 1
+    assert boot.pid_file.read_text(encoding="utf-8").split()[0] == "5555"
+    assert boot.subprocess_tags == []
+    assert not (boot.workspace / "inferencex_result.json").exists()
+    assert not (boot.workspace / "benchmark_report.json").exists()
+
+
+def test_round_without_a_phase_still_boots_benchmarks_and_evaluates(tmp_path, monkeypatch):
+    boot = _BootRound(tmp_path, monkeypatch, round_envs={})
+
+    assert boot.run() == 0
+
+    assert boot.launched == 1
+    assert boot.pid_file.exists()
+    assert boot.subprocess_tags == ["client", "eval"]
+    report = json.loads((boot.workspace / "benchmark_report.json").read_text(encoding="utf-8"))
+    assert report["success"] is True
+
+
+def test_boot_only_round_leaves_an_owned_running_server_alone(tmp_path, monkeypatch):
+    boot = _BootRound(tmp_path, monkeypatch, round_envs={"MAGPIE_RUN_PHASE": "server"}, server_up=True)
+    pid_before = boot.pid_file.read_text(encoding="utf-8")
+
+    assert boot.run() == 0
+
+    assert boot.launched == 0
+    assert boot.pid_file.read_text(encoding="utf-8") == pid_before
+    assert boot.subprocess_tags == []
+
+
+def test_boot_only_round_refuses_a_port_held_by_a_foreign_server(tmp_path, monkeypatch):
+    boot = _BootRound(tmp_path, monkeypatch, round_envs={"MAGPIE_RUN_PHASE": "server"}, server_up=True, owned=False)
+
+    assert boot.run() == 1
+
+    assert boot.launched == 0
+    assert boot.subprocess_tags == []
+    assert not boot.pid_file.exists()
+
+
 def test_lifecycle_server_ready_timeout_honored(tmp_path, monkeypatch):
     """server_lifecycle.server_ready_timeout_s bounds server-boot, not the client."""
     import yaml

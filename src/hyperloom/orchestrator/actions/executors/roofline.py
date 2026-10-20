@@ -1278,8 +1278,6 @@ class RooflineExecutor:
 
         parent_task = parent_ctx.task
         params = dict(parent_task.params or {})
-        # Accuracy is gated by baseline and explore; a profile run only needs the trace.
-        params["disable_run_eval"] = True
         if disable_cuda_graph:
             from .baseline import _with_cuda_graph_disabled
 

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from kernelforge.llm.git import git
-from kernelforge.durable_io import atomic_write_text
+from kernelforge.tools.durable_io import atomic_write_text
 from kernelforge.loop.reporting import (
     BestResultPublisher,
     KeepBundle,
@@ -19,7 +19,7 @@ from kernelforge.loop.reporting import (
     KeepScore,
     is_best_manifest,
 )
-from kernelforge.loop.scoring import warm_start_improvement_flags
+from kernelforge.evaluation.scoring import warm_start_improvement_flags
 
 
 def atomic_write_json(path: str | Path, payload: dict) -> None:

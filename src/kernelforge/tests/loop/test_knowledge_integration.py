@@ -18,7 +18,7 @@ from kernelforge.rewrite_by_flydsl.flydsl_rewrite_driver_preparation import (
 from kernelforge.rewrite_by_flydsl.port_loop import PortResult
 from kernelforge.rewrite_by_flydsl.ingest import RewriteSubject
 from kernelforge.rewrite_by_flydsl.request import DriverSetup, RewriteRun, RewriteWorkspace
-from kernelforge.conftest import kb_store_run_config as _kb_store_config
+from kernelforge.tests.conftest import kb_store_run_config as _kb_store_config
 from kernelforge.knowledge.kb_store.identity.run import LoopKernel
 from kernelforge.loop.knowledge_integration import ExperiencePublication, WarmStartHarness
 
