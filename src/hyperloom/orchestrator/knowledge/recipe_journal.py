@@ -30,7 +30,6 @@ from hyperloom.orchestrator.lever import LEVER_CONFIG, lever_kind_for_task
 
 from ..collaborator import CoordinatorCollaborator
 from ..state.attempt_ledger import AttemptRow, record_attempt_row
-from ..state.failure_evidence import UNMEASURED_OUTCOMES, classify_failure_attribution
 
 if TYPE_CHECKING:
     from ..loop.coordinator import Coordinator
@@ -186,14 +185,6 @@ def _record_config_attempts(
         accuracy_gate = next((gate for gate in gates if str(gate.get("gate") or "") == "accuracy"), {})
         error_class = str(row.get("error_class") or "")
         error_excerpt = str(row.get("error_excerpt") or "")
-        failure_attribution = ""
-        if outcome in UNMEASURED_OUTCOMES:
-            failure_attribution = classify_failure_attribution(
-                error_class=error_class,
-                error_excerpt=error_excerpt,
-                reason=row.get("reason"),
-                explicit=row.get("failure_attribution"),
-            )
         recorder.record_attempt(
             attempt_id,
             arm=ARM_CONFIG,
@@ -236,7 +227,7 @@ def _record_config_attempts(
             failure={
                 "error_class": error_class,
                 "error_excerpt": error_excerpt,
-                "attribution": failure_attribution,
+                "attribution": str(row.get("failure_attribution") or ""),
             },
             artifacts={
                 "workspace": str(row.get("workspace") or ""),

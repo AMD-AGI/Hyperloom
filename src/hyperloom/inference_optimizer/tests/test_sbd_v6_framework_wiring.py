@@ -349,6 +349,7 @@ def test_config_attempts_record_the_pair_and_the_verbatim_outcome(session_dir: P
                 "outcome": "KILLED_OVERTIME",
                 "fingerprint": "fp2",
                 "provenance": "default_grid",
+                "failure_attribution": "unknown",
                 "metrics": {"base_tput": 112.0, "estimated_output_throughput": 40.0},
                 "variant": {},
             },
@@ -360,6 +361,7 @@ def test_config_attempts_record_the_pair_and_the_verbatim_outcome(session_dir: P
                 "reason": "warmup_failed",
                 "error_class": "capability_unsupported",
                 "error_excerpt": "the requested attention backend is unsupported",
+                "failure_attribution": "candidate_caused",
                 "metrics": {"base_tput": 112.0},
                 "variant": {
                     "extra_server_args": "--attention-backend unsupported",
