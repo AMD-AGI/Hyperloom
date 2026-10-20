@@ -619,6 +619,17 @@ def test_the_payload_constraints_are_rendered_separately():
     assert "extend_lease.reason is optional" in rendered
 
 
+def test_the_payload_constraints_state_the_extend_lease_step_cap():
+    """An agent asking for more than one step at a time is told the cap before the gate denies it."""
+    from hyperloom.inference_optimizer.protocol.intent import EXTEND_LEASE_MAX_SEC, IntentType
+    from hyperloom.orchestrator.roles.mcp_emit_intent import payload_constraints
+
+    rendered = payload_constraints(IntentType)
+
+    assert f"extend_lease.extra_sec ≤ {EXTEND_LEASE_MAX_SEC} per call" in rendered
+    assert "before the lease expires" in rendered
+
+
 def test_both_provider_descriptions_carry_the_constraints():
     """Claude's tool description and Codex's output block say the same thing."""
     from hyperloom.inference_optimizer.protocol.intent import IntentType

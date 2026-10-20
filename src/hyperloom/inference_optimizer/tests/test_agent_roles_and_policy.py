@@ -10,6 +10,7 @@ import pytest
 from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.inference_optimizer.protocol.intent import (
+    EXTEND_LEASE_MAX_SEC,
     Intent,
     IntentType,
     IntentValidationError,
@@ -302,6 +303,37 @@ def test_gate_critic_delegate_rejected_by_role(gate):
             ),
         )
     assert exc.value.rule == "role"
+
+
+def test_gate_role_denial_names_the_intents_the_role_may_emit(gate):
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.REVIEW_VERDICT,
+                payload={"target_proposal_msg_id": "p1", "verdict": "approve"},
+            ),
+        )
+    assert exc.value.rule == "role"
+    assert exc.value.hint
+    for intent_type in default_role_registry()["orchestration"].allowed_intents:
+        assert intent_type.value in exc.value.hint
+    assert "review_verdict" not in exc.value.hint
+
+
+def test_gate_extend_lease_bounds_hint_states_the_step_cap(gate):
+    """The hint says how far one call reaches and how to go further."""
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.EXTEND_LEASE,
+                payload={"task_id": "t1", "extra_sec": EXTEND_LEASE_MAX_SEC + 1},
+            ),
+        )
+    assert exc.value.rule == "extend_lease_bounds"
+    assert f"at most {EXTEND_LEASE_MAX_SEC}s per call" in exc.value.hint
+    assert "before the lease expires" in exc.value.hint
 
 
 def test_gate_orchestration_prune_branch_requires_family(gate):

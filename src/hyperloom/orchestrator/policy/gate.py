@@ -27,7 +27,7 @@ from hyperloom.inference_optimizer.framework_paths import (
 from hyperloom.common.env import env_bool
 from hyperloom.common.framework_arm import verdict_subject
 from hyperloom.common.visible_devices import detect_gpu_count
-from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+from hyperloom.inference_optimizer.protocol.intent import EXTEND_LEASE_MAX_SEC, Intent, IntentType
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
     COORDINATOR_OWNED_KERNEL_REQUEST_KINDS,
@@ -192,9 +192,6 @@ PRUNE_BRANCH_ALLOWED_SCOPES: frozenset[str] = frozenset(
     }
 )
 
-# Ceiling on a single extend_lease step; repeated extensions are allowed.
-EXTEND_LEASE_MAX_SEC: int = 3600
-
 # SESSION_DIR path containment: PATH_LIKE_FIELDS must point inside session_dir
 # (checked recursively). SOURCE_LIKE_FIELDS are exempt -- they name framework
 # source, which lives outside it by construction.
@@ -299,6 +296,7 @@ class PolicyGate:
             raise PolicyDenied(
                 f"role={role.name!r} cannot emit intent_type={intent.type.value!r}",
                 rule="role",
+                hint=f"role {role.name!r} may emit: {', '.join(t.value for t in IntentType if t in role.allowed_intents)}.",
             )
 
         payload = intent.payload or {}
@@ -1183,8 +1181,8 @@ class PolicyGate:
                 f"extend_lease extra_sec={extra_sec} outside (0, {EXTEND_LEASE_MAX_SEC}]",
                 rule="extend_lease_bounds",
                 hint=(
-                    "Extend in bounded steps and re-check get_running_tasks; "
-                    "a lease must not outlive the session budget."
+                    f"Extend at most {EXTEND_LEASE_MAX_SEC}s per call; call again before the lease expires to extend "
+                    "further. Re-check get_running_tasks between steps."
                 ),
             )
         live = self.resources.live_task_ids
@@ -1561,7 +1559,6 @@ def validate_freeform_wave_task(task: Any, *, index: int) -> str:
 
 
 __all__ = [
-    "EXTEND_LEASE_MAX_SEC",
     "INTEGRATE_PATCH_PERMISSIVE_VERDICTS",
     "KERNEL_AGENT_OWNED_ACTIONS",
     "PATH_LIKE_FIELDS",
