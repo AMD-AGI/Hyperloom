@@ -83,24 +83,6 @@ def _schema_ref(value: Any) -> str:
     return text
 
 
-def _limits(value: Mapping[RetrievalCapability, int]) -> dict[RetrievalCapability, int]:
-    limits = dict(value)
-    if set(limits) != set(RetrievalCapability):
-        raise RetrievalPolicyError("limits must cover every retrieval capability")
-    if any(isinstance(limit, bool) or not isinstance(limit, int) or limit < 1 for limit in limits.values()):
-        raise RetrievalPolicyError("retrieval limits must be positive integers")
-    return limits
-
-
-def _provider_refs(value: Mapping[RetrievalCapability, str]) -> dict[RetrievalCapability, str]:
-    provider_refs = dict(value)
-    if any(capability not in {RetrievalCapability.FUZZY, RetrievalCapability.SEMANTIC} for capability in provider_refs):
-        raise RetrievalPolicyError("provider_refs may pin only fuzzy or semantic providers")
-    if any(not str(ref or "").strip() for ref in provider_refs.values()):
-        raise RetrievalPolicyError("provider_refs must be non-empty")
-    return provider_refs
-
-
 @dataclass(frozen=True)
 class RetrievalConfiguration:
     configuration_id: str
@@ -126,8 +108,20 @@ class RetrievalConfiguration:
         if set(capabilities) != set(RetrievalCapability) or len(capabilities) != len(RetrievalCapability):
             raise RetrievalPolicyError("capabilities must enumerate exact, filter, fuzzy, and semantic once")
         object.__setattr__(self, "capabilities", capabilities)
-        object.__setattr__(self, "limits", _limits(self.limits))
-        object.__setattr__(self, "provider_refs", _provider_refs(self.provider_refs))
+        limits = dict(self.limits)
+        if set(limits) != set(RetrievalCapability):
+            raise RetrievalPolicyError("limits must cover every retrieval capability")
+        if any(isinstance(limit, bool) or not isinstance(limit, int) or limit < 1 for limit in limits.values()):
+            raise RetrievalPolicyError("retrieval limits must be positive integers")
+        object.__setattr__(self, "limits", limits)
+        provider_refs = dict(self.provider_refs)
+        if any(
+            capability not in {RetrievalCapability.FUZZY, RetrievalCapability.SEMANTIC} for capability in provider_refs
+        ):
+            raise RetrievalPolicyError("provider_refs may pin only fuzzy or semantic providers")
+        if any(not str(ref or "").strip() for ref in provider_refs.values()):
+            raise RetrievalPolicyError("provider_refs must be non-empty")
+        object.__setattr__(self, "provider_refs", provider_refs)
         if self.ranking_policy_ref not in _RANKING_POLICIES:
             raise RetrievalPolicyError("ranking_policy_ref is not implemented")
         if not isinstance(self.representative_policy, RepresentativePolicy):

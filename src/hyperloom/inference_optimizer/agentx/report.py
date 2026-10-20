@@ -38,7 +38,7 @@ def agentx_measurement(report: dict[str, Any]) -> dict[str, Any]:
     identity = {key: metrics.get(key) for key in ("mode", "scenario_type", "dataset", "recipe")}
     identity_hash = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     output = throughput.get("output_tokens_per_second")
-    return {
+    result: dict[str, Any] = {
         "benchmark_backend": "magpie_agentx",
         "workload_identity": identity_hash,
         "reported_success": report.get("success"),
@@ -68,18 +68,12 @@ def agentx_measurement(report: dict[str, Any]) -> dict[str, Any]:
         "ttft_e2el_source": "magpie_report",
         "tpot_source": "magpie_report",
         "nonfatal_warnings": [],
-        **_latency_ms(latency),
     }
-
-
-def _latency_ms(latency: dict[str, Any]) -> dict[str, float | None]:
-    """The TTFT, TPOT and E2E latency percentiles of a report, converted to milliseconds."""
-    fields: dict[str, float | None] = {}
     for name in ("ttft", "tpot", "e2el"):
         for percentile in ("mean", "p50", "p90", "p99"):
             value = (latency.get(name) or {}).get(percentile)
-            fields[f"{name}_{percentile}_ms"] = None if value is None else value * 1000
-    return fields
+            result[f"{name}_{percentile}_ms"] = None if value is None else value * 1000
+    return result
 
 
 def native_launch_evidence(

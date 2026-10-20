@@ -185,16 +185,6 @@ class RepeatGroup:
         )
 
 
-def _field_lookup_from_dict(lookup: dict[str, Any]) -> dict[str, dict[str, tuple[str, ...]]]:
-    return {
-        str(field): {
-            str(encoded): tuple(str(item) for item in ids) for encoded, ids in values.items() if isinstance(ids, list)
-        }
-        for field, values in lookup.items()
-        if isinstance(values, dict)
-    }
-
-
 @dataclass(frozen=True)
 class QueryView:
     ref: QueryViewRef
@@ -260,7 +250,15 @@ class QueryView:
             experience_hashes={
                 str(experience_id): str(content_hash) for experience_id, content_hash in experience_hashes.items()
             },
-            field_lookup=_field_lookup_from_dict(lookup),
+            field_lookup={
+                str(field): {
+                    str(encoded): tuple(str(item) for item in ids)
+                    for encoded, ids in values.items()
+                    if isinstance(ids, list)
+                }
+                for field, values in lookup.items()
+                if isinstance(values, dict)
+            },
             groups={str(key): RepeatGroup.from_dict(group) for key, group in groups.items() if isinstance(group, dict)},
             experience_groups={
                 str(experience_id): str(group_key) for experience_id, group_key in experience_groups.items()

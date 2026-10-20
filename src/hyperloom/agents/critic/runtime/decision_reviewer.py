@@ -6,9 +6,8 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Any, NamedTuple
+from typing import Any
 
 from hyperloom.common.framework_arm import is_upstream_pr_prescreen
 from hyperloom.common.timeutil import now_iso
@@ -232,102 +231,6 @@ def _review_verdict(item: dict[str, Any], target: str, verdict: str, advice_text
     )
 
 
-class _ValidatedVerdict(NamedTuple):
-    """One ``review.review_verdicts`` item that passed validation, and the intent it becomes."""
-
-    item: dict[str, Any]
-    target: str
-    verdict: str
-    intent: Intent
-
-
-def _advice_by_target(advisories: Iterable[Any]) -> dict[str, list[str]]:
-    """The advice bodies aimed at a proposal, keyed by its message id; untargeted advice is left out."""
-    advice_by_target: dict[str, list[str]] = {}
-    for advisory in advisories:
-        if not isinstance(advisory, dict):
-            continue
-        body = advisory.get("body_md")
-        advice_target = advisory.get("target_proposal_msg_id")
-        if not body or not isinstance(advice_target, str) or not advice_target:
-            continue
-        advice_by_target.setdefault(advice_target, []).append(body)
-    return advice_by_target
-
-
-def _validated_verdicts(verdicts_raw: list[Any], advice_by_target: dict[str, list[str]]) -> list[_ValidatedVerdict]:
-    """Validate every ``review.review_verdicts`` item and build its intent, with its targeted advice merged in."""
-    seen_targets: set[str] = set()
-    validated: list[_ValidatedVerdict] = []
-    for i, item in enumerate(verdicts_raw):
-        if not isinstance(item, dict):
-            raise ReviewValidationError(f"review.review_verdicts[{i}] must be an object")
-        target = item.get("target_proposal_msg_id")
-        verdict = item.get("verdict")
-        if verdict not in ALLOWED_VERDICTS:
-            raise ReviewValidationError(f"review.review_verdicts[{i}].verdict {verdict!r} is not valid")
-        if not isinstance(target, str) or not target:
-            raise ReviewValidationError(f"review.review_verdicts[{i}].target_proposal_msg_id missing")
-        if target in seen_targets:
-            raise ReviewValidationError(
-                f"review.review_verdicts[{i}].target_proposal_msg_id {target!r} appears more than once"
-            )
-        seen_targets.add(target)
-        advice_parts = [
-            part
-            for part in [item.get("advice_text", ""), *advice_by_target.get(target, [])]
-            if isinstance(part, str) and part.strip()
-        ]
-        advice_text = "\n\n".join(advice_parts)
-        try:
-            intent = build_review_verdict_intent(_review_verdict(item, target, verdict, advice_text))
-        except IntentEnvelopeValidationError as exc:
-            raise ReviewValidationError(str(exc)) from exc
-        validated.append(_ValidatedVerdict(item, target, verdict, intent))
-    return validated
-
-
-def _advice_intents(advisories: Iterable[Any]) -> list[Intent]:
-    """One standalone advice intent per advisory that carries a body, targeted or not."""
-    intents: list[Intent] = []
-    for advisory in advisories:
-        if not isinstance(advisory, dict):
-            continue
-        body = advisory.get("body_md")
-        if not body:
-            continue
-        intents.append(build_advice_intent(body, target_proposal_msg_id=advisory.get("target_proposal_msg_id")))
-    return intents
-
-
-@dataclass
-class _PriorLookups:
-    """The KB prior lookups of one prepare-review pass, and the trail of requests they leave."""
-
-    kb_writer: KBWriter
-    scope_filter: dict[str, Any]
-    ctx: WriteContext
-    limit: int
-    requests: list[dict[str, Any]] = field(default_factory=list)
-
-    def fetch(self, msg_id: str | None, topic: str) -> list[dict[str, Any]]:
-        """Look up the priors for *topic*, recording the request in :attr:`requests`."""
-        priors = self.kb_writer.list_priors(
-            scope=self.scope_filter,
-            kind=None,
-            topic=topic,
-            limit=self.limit,
-            ctx=self.ctx,
-        )
-        hits = priors.get("priors") or []
-        self.requests.append({"msg_id": msg_id, "topic": topic, "cache": priors.get("cache"), "count": len(hits)})
-        return hits
-
-    def found_kb_unreachable(self) -> bool:
-        """Whether any lookup found the KB service unreachable."""
-        return any(request["cache"] == "kb_unreachable" for request in self.requests)
-
-
 class DecisionReviewer:
     """Orchestrator for the Critic prepare/commit lifecycle."""
 
@@ -370,57 +273,83 @@ class DecisionReviewer:
         if isinstance(known, list) and known:
             bundle.review_constraints["known_actions"] = sorted(str(a) for a in known if isinstance(a, str))
 
-        if self._record_kb_read_skip(req, merge.merged, bundle):
-            return bundle
-        self._read_kb_priors(req, merge.merged, bundle)
-        return bundle
-
-    def _record_kb_read_skip(self, req: CriticRequest, merged: dict[str, Any], bundle: JudgeBundle) -> bool:
-        """Record on *bundle* why KB priors are not read for *req*, if they are not; return whether they are not."""
         # If model/framework unknown, skip KB reads and fall back to needs_review.
-        critical_missing = [k for k in CRITICAL_CONTEXT_KEYS if merged.get(k) in (None, "", "unknown")]
+        critical_missing = [k for k in CRITICAL_CONTEXT_KEYS if merge.merged.get(k) in (None, "", "unknown")]
         if critical_missing:
             bundle.required_context = critical_missing
             bundle.kb_read_skipped_reason = "missing_critical_context"
             bundle.notes.append("model and/or framework unknown — KB priors not fetched")
-            return True
+            return bundle
 
         # Skip KB reads only if explicitly disabled or inappropriate kind.
         if req.kind in (KB_DRAFT_REQUEST,):
             bundle.kb_read_skipped_reason = "kb_draft_does_not_need_priors"
-            return True
+            return bundle
 
         # KB reads disabled wholesale (operator switch) → reflect in bundle.
         if not self.kb_writer.read_enabled:
             bundle.kb_read_skipped_reason = "kb_read_disabled"
             bundle.notes.append("KB_READ_ENABLED=false — proceeding without priors")
-            return True
+            return bundle
 
         # Breaker open from an earlier failure → skip another timeout.
         if self.kb_writer.is_kb_unreachable():
             bundle.kb_read_skipped_reason = "kb_unreachable"
             bundle.notes.append("KB service unreachable (circuit breaker open); proceeding without priors")
             bundle.review_constraints["kb_breaker"] = self.kb_writer.kb_breaker_state()
-            return True
-        return False
+            return bundle
 
-    def _read_kb_priors(self, req: CriticRequest, merged: dict[str, Any], bundle: JudgeBundle) -> None:
-        """Attach the KB priors for the request's proposals, or for its decision, and the trail of the lookups."""
-        scope = build_scope(req.context, session_context=merged, require_critical=False)
+        scope = build_scope(req.context, session_context=merge.merged, require_critical=False)
         # Hide "unknown" so the service doesn't filter to literal "unknown" rows.
         scope_filter = {k: v for k, v in scope.items() if v != "unknown"}
 
-        lookups = _PriorLookups(
-            kb_writer=self.kb_writer,
-            scope_filter=scope_filter,
-            ctx=WriteContext(session_id=req.session_id, review_id=req.decision_id),
-            limit=int(os.environ.get("CRITIC_KB_PRIOR_LIMIT", "5")),
-        )
+        topic_hits: dict[str, list[dict[str, Any]]] = {}
+        ctx = WriteContext(session_id=req.session_id, review_id=req.decision_id)
+        any_kb_unreachable = False
+        prior_limit = int(os.environ.get("CRITIC_KB_PRIOR_LIMIT", "5"))
+        priors_requests: list[dict[str, Any]] = []
         if req.proposals:
             for p in req.proposals:
-                bundle.kb_priors_by_proposal[p.msg_id] = lookups.fetch(p.msg_id, self._topic_for_proposal(p))
+                topic = self._topic_for_proposal(p)
+                priors = self.kb_writer.list_priors(
+                    scope=scope_filter,
+                    kind=None,
+                    topic=topic,
+                    limit=prior_limit,
+                    ctx=ctx,
+                )
+                topic_hits[p.msg_id] = priors.get("priors") or []
+                if priors.get("cache") == "kb_unreachable":
+                    any_kb_unreachable = True
+                priors_requests.append(
+                    {
+                        "msg_id": p.msg_id,
+                        "topic": topic,
+                        "cache": priors.get("cache"),
+                        "count": len(topic_hits[p.msg_id]),
+                    }
+                )
+            bundle.kb_priors_by_proposal = topic_hits
         else:
-            bundle.kb_priors_for_decision = lookups.fetch(None, self._topic_for_decision(req))
+            topic = self._topic_for_decision(req)
+            priors = self.kb_writer.list_priors(
+                scope=scope_filter,
+                kind=None,
+                topic=topic,
+                limit=prior_limit,
+                ctx=ctx,
+            )
+            bundle.kb_priors_for_decision = priors.get("priors") or []
+            if priors.get("cache") == "kb_unreachable":
+                any_kb_unreachable = True
+            priors_requests.append(
+                {
+                    "msg_id": None,
+                    "topic": topic,
+                    "cache": priors.get("cache"),
+                    "count": len(bundle.kb_priors_for_decision),
+                }
+            )
 
         # Audit trail for the historical KB prior reads (always injected).
         bundle.kb_priors_trace = {
@@ -428,11 +357,11 @@ class DecisionReviewer:
             "mode": "per_proposal" if req.proposals else "per_decision",
             "client_mode": os.environ.get("CRITIC_KB_CLIENT_MODE", ""),
             "scope_filter": dict(scope_filter),
-            "limit": lookups.limit,
-            "requests": lookups.requests,
+            "limit": prior_limit,
+            "requests": priors_requests,
         }
 
-        if lookups.found_kb_unreachable():
+        if any_kb_unreachable:
             bundle.kb_read_skipped_reason = "kb_unreachable"
             bundle.notes.append("KB service unreachable for at least one lookup — priors may be incomplete")
             bundle.review_constraints["kb_breaker"] = self.kb_writer.kb_breaker_state()
@@ -440,6 +369,8 @@ class DecisionReviewer:
         if scope.get("model") == "unknown" or scope.get("framework") == "unknown":
             bundle.notes.append("scope partially unknown — proceed with caution")
         bundle.notes.append(f"scope_cache_key={scope_cache_key(scope_filter)}")
+
+        return bundle
 
     # Phase 2: commit-review
     def commit_review(
@@ -550,8 +481,43 @@ class DecisionReviewer:
         if not isinstance(verdicts_raw, list):
             raise ReviewValidationError("coordinator_inbox commit expects review.review_verdicts to be a list")
 
-        advisories = review.get("advice") or []
-        validated = _validated_verdicts(verdicts_raw, _advice_by_target(advisories))
+        advice_by_target: dict[str, list[str]] = {}
+        for advisory in review.get("advice") or []:
+            if not isinstance(advisory, dict):
+                continue
+            body = advisory.get("body_md")
+            advice_target = advisory.get("target_proposal_msg_id")
+            if not body or not isinstance(advice_target, str) or not advice_target:
+                continue
+            advice_by_target.setdefault(advice_target, []).append(body)
+
+        seen_targets: set[str] = set()
+        validated: list[tuple[dict[str, Any], str, str, Intent]] = []
+        for i, item in enumerate(verdicts_raw):
+            if not isinstance(item, dict):
+                raise ReviewValidationError(f"review.review_verdicts[{i}] must be an object")
+            target = item.get("target_proposal_msg_id")
+            verdict = item.get("verdict")
+            if verdict not in ALLOWED_VERDICTS:
+                raise ReviewValidationError(f"review.review_verdicts[{i}].verdict {verdict!r} is not valid")
+            if not isinstance(target, str) or not target:
+                raise ReviewValidationError(f"review.review_verdicts[{i}].target_proposal_msg_id missing")
+            if target in seen_targets:
+                raise ReviewValidationError(
+                    f"review.review_verdicts[{i}].target_proposal_msg_id {target!r} appears more than once"
+                )
+            seen_targets.add(target)
+            advice_parts = [
+                part
+                for part in [item.get("advice_text", ""), *advice_by_target.get(target, [])]
+                if isinstance(part, str) and part.strip()
+            ]
+            advice_text = "\n\n".join(advice_parts)
+            try:
+                intent = build_review_verdict_intent(_review_verdict(item, target, verdict, advice_text))
+            except IntentEnvelopeValidationError as exc:
+                raise ReviewValidationError(str(exc)) from exc
+            validated.append((item, target, verdict, intent))
 
         intents: list[Intent] = []
         for item, target, verdict, intent in validated:
@@ -573,7 +539,13 @@ class DecisionReviewer:
 
         # Every advisory also goes out as a standalone advice message, whatever the target's verdict (or if
         # untargeted); targeted bodies are already inlined into the verdict's ``advice_text`` above.
-        intents.extend(_advice_intents(advisories))
+        for advisory in review.get("advice") or []:
+            if not isinstance(advisory, dict):
+                continue
+            body = advisory.get("body_md")
+            if not body:
+                continue
+            intents.append(build_advice_intent(body, target_proposal_msg_id=advisory.get("target_proposal_msg_id")))
 
         # Nothing to review — still report in.
         if not intents:

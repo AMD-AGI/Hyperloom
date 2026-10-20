@@ -230,111 +230,6 @@ def print_plan(plan: dict[str, Any]) -> None:
 
 
 # Real ingest (needs the langfuse SDK)
-def _emit_agent_span(phase_span: Any, phase: str, agent: str, gens: list[dict], floor: datetime | None) -> Any:
-    """Emit one agent's span and its generations; ``floor`` stands in for timestamps the generations lack."""
-    a_lo, a_hi = _time_bounds(gens)
-    agent_span = _start_obs(
-        phase_span,
-        name=f"agent:{agent}",
-        as_type="span",
-        start_time=a_lo or floor,
-        metadata={"phase": phase, "agent": agent, "generation_count": len(gens)},
-    )
-    for g in gens:
-        g_start = lfmap.parse_ts(g["ts"])
-        row = g["row"]
-        gen = _start_obs(
-            agent_span,
-            name=lfmap.generation_name(row),
-            as_type="generation",
-            start_time=g_start,
-            model=row.get("model"),
-            input=g.get("input"),
-            output=g.get("output"),
-            metadata=lfmap.generation_metadata(
-                row,
-                phase=phase,
-                has_text=g["has_text"],
-            ),
-            usage_details=lfmap.usage_details(row),
-        )
-        _end_obs(gen, g_start)
-    _end_obs(agent_span, a_hi or a_lo or floor)
-    return agent_span
-
-
-def _emit_recipe_audit(
-    root: Any, recipe_audit: list[dict], last_end: datetime | None, trace_start: datetime | None
-) -> None:
-    """Emit the recipe-KB reads and writes as spans under one ``agent:recipe_kb`` span."""
-    ra_times = [lfmap.parse_ts(r.get("ts")) for r in recipe_audit]
-    ra_times = [t for t in ra_times if t is not None]
-    ra_lo = min(ra_times) if ra_times else last_end
-    write_count = sum(1 for r in recipe_audit if lfmap.recipe_audit_is_write(r))
-    ra_span = _start_obs(
-        root,
-        name="agent:recipe_kb",
-        as_type="span",
-        start_time=ra_lo or trace_start,
-        metadata={
-            "phase": UNPHASED,
-            "agent": "recipe_kb",
-            "read_count": len(recipe_audit) - write_count,
-            "write_count": write_count,
-        },
-    )
-    for r in recipe_audit:
-        r_start = lfmap.parse_ts(r.get("ts"))
-        # Rows predating the write-audit event carry no ``op`` -> read.
-        if lfmap.recipe_audit_is_write(r):
-            name, metadata = lfmap.recipe_write_span(r)
-        else:
-            name, metadata = lfmap.recipe_read_span(r)
-        obs = _start_obs(
-            ra_span,
-            name=name,
-            as_type="span",
-            start_time=r_start,
-            input=None,
-            output=r,
-            metadata=metadata,
-        )
-        _end_obs(obs, r_start)
-    _end_obs(ra_span, (max(ra_times) if ra_times else None) or trace_start)
-
-
-def _emit_decision_scores(
-    client: Any, decisions: list[dict], agent_spans: dict[tuple[str, str], Any], trace_id: str
-) -> None:
-    """Score each decision on the agent span that produced it, falling back to the trace."""
-    for i, drow in enumerate(decisions):
-        for score in lfmap.decision_to_scores(drow):
-            meta = score.get("metadata") or {}
-            phase = str(meta.get("phase") or lfmap.UNPHASED)
-            agent = lfmap.span_agent_for(str(meta.get("component") or ""))
-            span = agent_spans.get((phase, agent))
-            try:
-                if span is not None and hasattr(span, "score"):
-                    span.score(
-                        name=score["name"],
-                        value=score["value"],
-                        data_type=score["data_type"],
-                        comment=score.get("comment") or "",
-                        metadata=meta,
-                    )
-                else:
-                    client.create_score(
-                        name=score["name"],
-                        value=score["value"],
-                        trace_id=trace_id,
-                        data_type=score["data_type"],
-                        comment=score.get("comment") or "",
-                        metadata=meta,
-                    )
-            except Exception:
-                log.exception("create_score failed for decision %d", i)
-
-
 def ingest(plan: dict[str, Any]) -> int:
     """Emit a backfill plan to Langfuse as a full trace tree."""
     try:
@@ -373,24 +268,111 @@ def ingest(plan: dict[str, Any]) -> int:
     last_end = trace_start
     for phase, agents in plan["phases"].items():
         p_lo, p_hi = _phase_time_bounds(agents)
-        phase_start = p_lo or trace_start
         phase_span = _start_obs(
             root,
             name=f"phase:{phase}",
             as_type="span",
-            start_time=phase_start,
+            start_time=p_lo or trace_start,
             metadata={"phase": phase, "agent_count": len(agents)},
         )
         for agent, gens in agents.items():
-            agent_spans[(phase, agent)] = _emit_agent_span(phase_span, phase, agent, gens, phase_start)
-        _end_obs(phase_span, p_hi or phase_start)
+            a_lo, a_hi = _time_bounds(gens)
+            agent_span = _start_obs(
+                phase_span,
+                name=f"agent:{agent}",
+                as_type="span",
+                start_time=a_lo or p_lo or trace_start,
+                metadata={"phase": phase, "agent": agent, "generation_count": len(gens)},
+            )
+            agent_spans[(phase, agent)] = agent_span
+            for g in gens:
+                g_start = lfmap.parse_ts(g["ts"])
+                row = g["row"]
+                gen = _start_obs(
+                    agent_span,
+                    name=lfmap.generation_name(row),
+                    as_type="generation",
+                    start_time=g_start,
+                    model=row.get("model"),
+                    input=g.get("input"),
+                    output=g.get("output"),
+                    metadata=lfmap.generation_metadata(
+                        row,
+                        phase=phase,
+                        has_text=g["has_text"],
+                    ),
+                    usage_details=lfmap.usage_details(row),
+                )
+                _end_obs(gen, g_start)
+            _end_obs(agent_span, a_hi or a_lo or p_lo or trace_start)
+        _end_obs(phase_span, p_hi or p_lo or trace_start)
         if p_hi is not None:
             last_end = p_hi
 
+    # Recipe-KB reads + writes -> spans under a recipe_kb agent.
     recipe_audit = plan.get("recipe_audit") or []
     if recipe_audit:
-        _emit_recipe_audit(root, recipe_audit, last_end, trace_start)
-    _emit_decision_scores(client, plan["decisions"], agent_spans, trace_id)
+        ra_times = [lfmap.parse_ts(r.get("ts")) for r in recipe_audit]
+        ra_times = [t for t in ra_times if t is not None]
+        ra_lo = min(ra_times) if ra_times else last_end
+        write_count = sum(1 for r in recipe_audit if lfmap.recipe_audit_is_write(r))
+        ra_span = _start_obs(
+            root,
+            name="agent:recipe_kb",
+            as_type="span",
+            start_time=ra_lo or trace_start,
+            metadata={
+                "phase": UNPHASED,
+                "agent": "recipe_kb",
+                "read_count": len(recipe_audit) - write_count,
+                "write_count": write_count,
+            },
+        )
+        for r in recipe_audit:
+            r_start = lfmap.parse_ts(r.get("ts"))
+            # Rows predating the write-audit event carry no ``op`` -> read.
+            if lfmap.recipe_audit_is_write(r):
+                name, metadata = lfmap.recipe_write_span(r)
+            else:
+                name, metadata = lfmap.recipe_read_span(r)
+            obs = _start_obs(
+                ra_span,
+                name=name,
+                as_type="span",
+                start_time=r_start,
+                input=None,
+                output=r,
+                metadata=metadata,
+            )
+            _end_obs(obs, r_start)
+        _end_obs(ra_span, (max(ra_times) if ra_times else None) or trace_start)
+
+    for i, drow in enumerate(plan["decisions"]):
+        for score in lfmap.decision_to_scores(drow):
+            meta = score.get("metadata") or {}
+            phase = str(meta.get("phase") or lfmap.UNPHASED)
+            agent = lfmap.span_agent_for(str(meta.get("component") or ""))
+            span = agent_spans.get((phase, agent))
+            try:
+                if span is not None and hasattr(span, "score"):
+                    span.score(
+                        name=score["name"],
+                        value=score["value"],
+                        data_type=score["data_type"],
+                        comment=score.get("comment") or "",
+                        metadata=meta,
+                    )
+                else:
+                    client.create_score(
+                        name=score["name"],
+                        value=score["value"],
+                        trace_id=trace_id,
+                        data_type=score["data_type"],
+                        comment=score.get("comment") or "",
+                        metadata=meta,
+                    )
+            except Exception:
+                log.exception("create_score failed for decision %d", i)
 
     _end_obs(root, last_end)
     client.flush()

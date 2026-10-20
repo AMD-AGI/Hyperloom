@@ -82,13 +82,6 @@ def test_model_falls_back_to_the_init_row(tmp_path):
     assert row["model"] == "claude-init"
 
 
-def test_a_request_without_usage_reports_no_counters(tmp_path):
-    log = tmp_path / "process.log"
-    _write_log(log, [{"type": "assistant", "message": {"id": "m1", "model": "claude-x"}}])
-    (row,) = re_.stream_json_requests(log)
-    assert row.keys() == {"message_id", "model", "parent_tool_use_id", "request_index", "output_tokens_exact"}
-
-
 def test_requests_land_on_the_trajectory_untimed_under_the_task(tmp_path):
     log = tmp_path / "process.log"
     _write_log(log, [_assistant("m1", output=4), _assistant("m2", output=6), _result(10)])

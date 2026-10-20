@@ -12,7 +12,6 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import NamedTuple
 
 from server_args_safety import find_denied_flags, find_unsafe_flag_values
 from sglang_shape_gate import activate_kernel_shape_tool
@@ -159,15 +158,18 @@ def _proc_tree(root: int) -> list[int]:
     return out
 
 
-def _stale_engine_pids() -> list[int]:
-    """Return the PIDs whose /proc cmdline names an sglang / infera engine (never pid 1 or this process)."""
+def _reap_stale_engines_by_cmdline() -> None:
+    """SIGKILL any residual sglang / infera engine process matched by cmdline via /proc, before a fresh launch."""
+    import signal as _sig
+
+    kill_wait_s = float(os.environ.get("HYPERLOOM_MN_KILL_WAIT_S", "120") or 120)
     pats = ("sglang.launch_server", "infera.engine.sglang", "infera.engine.vllm", "sglang::sched")
     me = os.getpid()
     victims: list[int] = []
     try:
         entries = os.listdir("/proc")
     except OSError:
-        return victims
+        return
     for e in entries:
         if not e.isdigit():
             continue
@@ -181,41 +183,22 @@ def _stale_engine_pids() -> list[int]:
             continue
         if any(pat in cl for pat in pats):
             victims.append(xpid)
-    return victims
-
-
-def _term_then_kill(pids: list[int], kill_wait_s: float, *, pgid: int | None = None) -> list[int]:
-    """SIGTERM then SIGKILL ``pids`` (and group ``pgid``) until none is alive; return those alive after SIGKILL."""
-    import signal as _sig
-
+    if not victims:
+        return
     for sig in (_sig.SIGTERM, _sig.SIGKILL):
-        for pid in pids:
+        for v in victims:
             try:
-                os.kill(pid, sig)
-            except (ProcessLookupError, PermissionError):
-                pass
-        if pgid is not None:
-            try:
-                os.killpg(pgid, sig)
+                os.kill(v, sig)
             except (ProcessLookupError, PermissionError):
                 pass
         deadline = time.monotonic() + (5.0 if sig == _sig.SIGTERM else kill_wait_s)
         while time.monotonic() < deadline:
-            if not any(_pid_alive(p) for p in pids):
+            if not any(_pid_alive(v) for v in victims):
                 break
             time.sleep(0.5)
-        if not any(_pid_alive(p) for p in pids):
+        if not any(_pid_alive(v) for v in victims):
             break
-    return [p for p in pids if _pid_alive(p)]
-
-
-def _reap_stale_engines_by_cmdline() -> None:
-    """SIGKILL any residual sglang / infera engine process matched by cmdline via /proc, before a fresh launch."""
-    kill_wait_s = float(os.environ.get("HYPERLOOM_MN_KILL_WAIT_S", "120") or 120)
-    victims = _stale_engine_pids()
-    if not victims:
-        return
-    remaining = _term_then_kill(victims, kill_wait_s)
+    remaining = [v for v in victims if _pid_alive(v)]
     if remaining:
         _log("reaper: stale engine pids still alive after SIGKILL: " + str(remaining))
     else:
@@ -239,7 +222,25 @@ def _kill_prior(pid_file: Path) -> None:
             pgid = os.getpgid(pid)
         except ProcessLookupError:
             pgid = None
-        alive = _term_then_kill(targets, kill_wait_s, pgid=pgid)
+        for sig in (15, 9):
+            for t in targets:
+                try:
+                    os.kill(t, sig)
+                except (ProcessLookupError, PermissionError):
+                    pass
+            if pgid is not None:
+                try:
+                    os.killpg(pgid, sig)
+                except (ProcessLookupError, PermissionError):
+                    pass
+            deadline = time.monotonic() + (5.0 if sig == 15 else kill_wait_s)
+            while time.monotonic() < deadline:
+                if not any(_pid_alive(t) for t in targets):
+                    break
+                time.sleep(0.5)
+            if not any(_pid_alive(t) for t in targets):
+                break
+        alive = [t for t in targets if _pid_alive(t)]
         if alive:
             raise RuntimeError(
                 "prior server pids "
@@ -482,13 +483,6 @@ def _ray_start(role: str, leader: str, env: dict[str, str]) -> None:
     _log(f"ray start ({role}) rc={cp.returncode} {(stderr or stdout).strip()[:300]}")
 
 
-def _ray_stop(env: dict[str, str]) -> None:
-    """Tear down this pod's local ray node so its GPUs are freed."""
-    subprocess.run(
-        ["/bin/bash", "-lc", "ray stop --force || true"], env=env, capture_output=True, text=True, timeout=60
-    )
-
-
 def _wait_health(port: int, timeout_s: int, pid: int | None) -> bool:
     """Poll http://127.0.0.1:<port>/health until 200 or the pid dies."""
     import urllib.error
@@ -572,37 +566,8 @@ def _kill_gpu_sampler(pid_file: Path) -> None:
         pass
 
 
-class _GpuSamplerFiles(NamedTuple):
-    """Where this pod's GPU sampler writes its CSV and records its PID."""
-
-    csv: Path
-    pid_file: Path
-
-
-def _gpu_sampler_files(shared_log_dir: Path | None, env: dict[str, str]) -> _GpuSamplerFiles | None:
-    """Return this pod's GPU sampler files in the shared server-log dir (None without one)."""
-    if shared_log_dir is None:
-        return None
-    host = _resolve_pod_ip(env)
-    return _GpuSamplerFiles(shared_log_dir / f"gpu_metrics_{host}.csv", shared_log_dir / f"gpu_sampler_{host}.pid")
-
-
-def _start_optional_gpu_sampler(sampler: _GpuSamplerFiles) -> bool:
-    """Start this pod's GPU sampler; a failure is logged and returns False, as the sampler is optional telemetry."""
-    try:
-        _start_gpu_sampler(
-            sampler.csv,
-            sampler.pid_file,
-            int(os.environ.get("HYPERLOOM_MN_GPU_SAMPLE_INTERVAL_S", "5") or "5"),
-        )
-    except Exception as exc:  # noqa: BLE001 - sampler is optional telemetry
-        _log(f"GPU sampler start failed: {exc}")
-        return False
-    return True
-
-
-def _build_parser() -> argparse.ArgumentParser:
-    """The launcher's command line."""
+def main() -> int:
+    """Launch (or kill) this pod's Infera multi-node server rank."""
     p = argparse.ArgumentParser(prog="launch_infera_node.py")
     p.add_argument("--framework", required=True, choices=("sglang", "vllm"))
     p.add_argument("--model", default="")
@@ -618,79 +583,53 @@ def _build_parser() -> argparse.ArgumentParser:
         "--health-wait-sec", type=int, default=0, help="leader-only: seconds to wait for local /health (0=skip)"
     )
     p.add_argument("--kill-only", action="store_true", help="kill the prior server via PID file and exit (frees GPU)")
-    return p
+    args = p.parse_args()
 
-
-def _rendezvous_leader(env: dict[str, str]) -> str:
-    """Return the rendezvous leader host: the LWS leader address, else this pod's own IP."""
+    env = _recover_container_env()
+    node_rank = int(env.get("LWS_WORKER_INDEX", "0") or "0")
     lws_leader = (env.get("LWS_LEADER_ADDRESS", "") or "").strip()
     if lws_leader:
         # Multi-pod LWS role (TP > one pod's GPUs): the controller-injected leader address is the torch.distributed
         # rendezvous host.
-        return lws_leader
-    # Single-pod role (no LWS rendezvous).
-    return _resolve_pod_ip(env)
-
-
-def _shared_server_log_dir() -> Path | None:
-    """Return the forwarded shared-FS server-log dir, or None unless it is absolute with no unexpanded ``$``."""
-    log_dir = os.environ.get("HYPERLOOM_MN_SERVER_LOG_DIR", "").strip()
-    if log_dir.startswith("/") and "$" not in log_dir:
-        return Path(log_dir)
-    return None
-
-
-def _launch_args_error(args: argparse.Namespace) -> str:
-    """Return the ERROR line for incomplete launch arguments or denied server flags, "" when there is none."""
-    if not args.model or args.tp <= 0:
-        return "ERROR --model and --tp are required unless --kill-only"
-    denied = find_denied_flags(args.extra_args) + find_unsafe_flag_values(args.extra_args)
-    if denied:
-        return f"ERROR denied server flags in --extra-args: {denied}"
-    return ""
-
-
-def _leader_health(port: int, timeout_s: int, pid: int, log_file: Path) -> dict[str, object]:
-    """Wait for the leader's local /health; return ``health_ok``, plus the server-log tail when it failed."""
-    ok = _wait_health(port, timeout_s, pid)
-    health: dict[str, object] = {"health_ok": ok}
-    if not ok:
-        try:
-            health["log_tail"] = log_file.read_text(errors="replace")[-2000:]
-        except OSError:
-            pass
-    return health
-
-
-def main() -> int:
-    """Launch (or kill) this pod's Infera multi-node server rank."""
-    args = _build_parser().parse_args()
-
-    env = _recover_container_env()
-    node_rank = int(env.get("LWS_WORKER_INDEX", "0") or "0")
-    leader = _rendezvous_leader(env)
+        leader = lws_leader
+    else:
+        # Single-pod role (no LWS rendezvous).
+        leader = _resolve_pod_ip(env)
     pid_file = Path(args.pid_file)
     log_file = Path(args.log_file)
-    shared_log_dir = _shared_server_log_dir()
-    sampler = _gpu_sampler_files(shared_log_dir, env)
+    # GPU metrics sampler paths (shared-FS, per-pod).
+    _samp_dir = os.environ.get("HYPERLOOM_MN_SERVER_LOG_DIR", "").strip()
+    _samp_csv = ""
+    _samp_pid_file = ""
+    if _samp_dir.startswith("/") and "$" not in _samp_dir:
+        _samp_host = _resolve_pod_ip(env)
+        _samp_csv = str(Path(_samp_dir) / f"gpu_metrics_{_samp_host}.csv")
+        _samp_pid_file = str(Path(_samp_dir) / f"gpu_sampler_{_samp_host}.pid")
 
     try:
         _kill_prior(pid_file)
-        if sampler:
-            _kill_gpu_sampler(sampler.pid_file)
+        if _samp_pid_file:
+            _kill_gpu_sampler(Path(_samp_pid_file))
     except RuntimeError as exc:
         _log(f"ERROR {exc}")
         print(json.dumps({"status": "error", "action": "kill", "node_rank": node_rank, "error": str(exc)}))
         return 3
     if args.kill_only:
+        # vllm: also tear down the local ray node so GPUs are freed.
         if args.framework == "vllm":
-            _ray_stop(env)
+            subprocess.run(
+                ["/bin/bash", "-lc", "ray stop --force || true"], env=env, capture_output=True, text=True, timeout=60
+            )
         print(json.dumps({"status": "ok", "action": "kill", "node_rank": node_rank}))
         return 0
 
-    launch_error = _launch_args_error(args)
-    if launch_error:
-        _log(launch_error)
+    if not args.model or args.tp <= 0:
+        _log("ERROR --model and --tp are required unless --kill-only")
+        return 2
+
+    denied = find_denied_flags(args.extra_args) + find_unsafe_flag_values(args.extra_args)
+    if denied:
+        _log(f"ERROR denied server flags in --extra-args: {denied}")
         return 2
 
     _log(
@@ -701,8 +640,9 @@ def main() -> int:
     advertise_host = _resolve_pod_ip(env)
     # When a shared-FS (WekaFS) server-log dir is forwarded, write server.log there with a per-pod suffix so the
     # client can read it and prefill/decode do not collide.
-    if shared_log_dir:
-        log_file = shared_log_dir / f"mn_infera_server_{advertise_host}_r{node_rank}.log"
+    _shared_log_dir = os.environ.get("HYPERLOOM_MN_SERVER_LOG_DIR", "").strip()
+    if _shared_log_dir.startswith("/") and "$" not in _shared_log_dir:
+        log_file = Path(_shared_log_dir) / f"mn_infera_server_{advertise_host}_r{node_rank}.log"
     if args.framework == "sglang":
         activate_kernel_shape_tool(env)
         cmd = _build_sglang_cmd(args, node_rank, leader, advertise_host=advertise_host)
@@ -729,12 +669,26 @@ def main() -> int:
 
     # Self-contained GPU metrics: run rocm-smi sampling on this GPU pod (same fields as the single-node Magpie
     # GPUMonitor) and stream to shared FS for the client to harvest.
-    if sampler and _start_optional_gpu_sampler(sampler):
-        summary["gpu_metrics_csv"] = str(sampler.csv)
+    if _samp_csv:
+        try:
+            _start_gpu_sampler(
+                Path(_samp_csv),
+                Path(_samp_pid_file),
+                int(os.environ.get("HYPERLOOM_MN_GPU_SAMPLE_INTERVAL_S", "5") or "5"),
+            )
+            summary["gpu_metrics_csv"] = _samp_csv
+        except Exception as exc:  # noqa: BLE001 - sampler is optional telemetry
+            _log(f"GPU sampler start failed: {exc}")
 
     # Only the leader serves a local HTTP endpoint; workers have none.
     if node_rank == 0 and args.health_wait_sec > 0:
-        summary.update(_leader_health(args.health_port, args.health_wait_sec, pid, log_file))
+        ok = _wait_health(args.health_port, args.health_wait_sec, pid)
+        summary["health_ok"] = ok
+        if not ok:
+            try:
+                summary["log_tail"] = log_file.read_text(errors="replace")[-2000:]
+            except OSError:
+                pass
 
     print(json.dumps(summary, indent=2))
     return 0

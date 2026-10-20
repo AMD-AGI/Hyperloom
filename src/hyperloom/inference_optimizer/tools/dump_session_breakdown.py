@@ -114,12 +114,6 @@ def _setup_logging(verbose: int) -> None:
     )
 
 
-def _geak_keep_count(validation: dict) -> int:
-    """Count the validated KEEPs attributed to GEAK kernels."""
-    by_source = (validation.get("attribution") or {}).get("by_source") or {}
-    return int((((by_source.get("kernel") or {}).get("by_backend") or {}).get("geak") or {}).get("keep_count") or 0)
-
-
 def _summary_line(breakdown: dict) -> str:
     """Format a one-line summary of a session breakdown.
 
@@ -134,7 +128,8 @@ def _summary_line(breakdown: dict) -> str:
     outcome = breakdown.get("outcome") or {}
     final = outcome.get("final") or {}
     validation = outcome.get("validation") or {}
-    geak_n = _geak_keep_count(validation)
+    by_source = (validation.get("attribution") or {}).get("by_source") or {}
+    geak_n = int((((by_source.get("kernel") or {}).get("by_backend") or {}).get("geak") or {}).get("keep_count") or 0)
     timeline = breakdown.get("timeline") or []
     close = breakdown.get("close") or {}
     warnings = (breakdown.get("metadata") or {}).get("warnings") or []
