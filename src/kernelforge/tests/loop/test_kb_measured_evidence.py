@@ -10,7 +10,7 @@ import pytest
 from kernelforge.config import Config
 from kernelforge.loop import knowledge_integration as integration
 from kernelforge.knowledge.kb_store import writer as sink
-from kernelforge.loop.scoring import passes_keep_threshold
+from kernelforge.evaluation.scoring import passes_keep_threshold
 from kernelforge.knowledge.kb_store.config import (
     KnowledgeConfig,
     knowledge_config_from_runtime,
@@ -24,7 +24,7 @@ from kernelforge.knowledge.kb_store.record_store import (
 )
 
 from kernelforge.tests.test_rewrite_by_flydsl_kb import InMemoryKBStore, _remote_config
-from kernelforge.conftest import kb_store_run_config as _remote_config_with_token
+from kernelforge.tests.conftest import kb_store_run_config as _remote_config_with_token
 from kernelforge.knowledge.kb_store.identity.run import LoopKernel
 from kernelforge.loop.knowledge_integration import WarmStartHarness
 

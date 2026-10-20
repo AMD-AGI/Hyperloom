@@ -585,7 +585,7 @@ def test_keep_gate_sized_move_alone_no_longer_counts_as_coverage():
 
 
 def test_floor_ratio_is_configurable_and_not_read_off_the_keep_gate():
-    from kernelforge.loop.scoring import KEEP_MIN_MARGIN_FRACTION
+    from kernelforge.evaluation.scoring import KEEP_MIN_MARGIN_FRACTION
 
     assert runner_module.CONFIG_COVERAGE_MIN_MOVE_RATIO != KEEP_MIN_MARGIN_FRACTION
     loop = _coverage_loop({"decode-t64": 10.0})
