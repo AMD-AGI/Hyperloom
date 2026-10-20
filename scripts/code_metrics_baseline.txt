@@ -613,7 +613,7 @@ function-lines src/hyperloom/orchestrator/enablement/params.py::EnablementParams
 function-lines src/hyperloom/orchestrator/enablement/params.py::EnablementParams.build_enablement_specialist_params 114
 function-lines src/hyperloom/orchestrator/enablement/recipe/sufficiency.py::_patch_step_reasons 92
 function-lines src/hyperloom/orchestrator/enablement/runtime/targeted_build.py::run_aiter_build 218
-function-lines src/hyperloom/orchestrator/enablement/runtime/targeted_build.py::run_sgl_kernel_build 172
+function-lines src/hyperloom/orchestrator/enablement/runtime/targeted_build.py::run_sgl_kernel_build 159
 function-lines src/hyperloom/orchestrator/enablement/runtime/targeted_build.py::run_vllm_source_build 220
 function-lines src/hyperloom/orchestrator/kernel/_kernel_decisions.py::_queue_kernel_keep 99
 function-lines src/hyperloom/orchestrator/kernel/_kernel_decisions.py::enqueue_nominated_patch 105

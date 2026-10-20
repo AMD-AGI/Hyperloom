@@ -19,7 +19,7 @@ from hyperloom.common.failure_signature import CapabilityGap
 from hyperloom.inference_optimizer import framework_registry
 
 from .build_actions import resolve_build_ref
-from .build_utils import ROCM_CONSTRAINTS_FILE, write_rocm_constraints
+from .build_utils import ROCM_CONSTRAINTS_FILE, sglang_rocm_install_target, write_rocm_constraints
 from .stack_actions import EnablementStackAction, FrameworkRuntime, ProvisionResult, RuntimeRequest
 
 
@@ -476,13 +476,18 @@ class SglangAdapter(_VenvProvisionMixin):
                     log_path=log_path,
                     error=f"git checkout of {action.ref} failed: {_failure_tail(fetched)}",
                 )
-            cp = self._pip_install(
-                python_path,
-                list(action.packages),
-                constraints=constraints,
-                log_path=log_file,
-                editable=str(checkout / "python"),
-            )
+            torch_version = _installed_version(str(python_path), "torch", run=self._run)
+            try:
+                with sglang_rocm_install_target(checkout / "python", torch_version) as target:
+                    cp = self._pip_install(
+                        python_path,
+                        list(action.packages),
+                        constraints=constraints,
+                        log_path=log_file,
+                        editable=target,
+                    )
+            except (OSError, ValueError) as exc:
+                return ProvisionResult(ok=False, log_path=log_path, error=f"no ROCm install of {action.ref}: {exc}")
             pythonpath_prefix = str(checkout / "python")
             # The editable install imports straight out of the clone, and its
             # diffs are cut against the repo root that holds ``python/sglang``.
