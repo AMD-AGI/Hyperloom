@@ -208,8 +208,6 @@ cognitive-complexity src/kernelforge/agent_backends/codex.py::_normalize_sdk_res
 cognitive-complexity src/kernelforge/agent_backends/workspace_guard.py::WorkspaceGuard.prepare 39
 cognitive-complexity src/kernelforge/assembly/capture.py::bind_compile 60
 cognitive-complexity src/kernelforge/cli/forge_loop_command.py::forge_loop 31
-cognitive-complexity src/kernelforge/evaluation/benchmark/runner.py::aggregate_benchmark_measurements 38
-cognitive-complexity src/kernelforge/evaluation/benchmark/runner.py::sweep_case 51
 cognitive-complexity src/kernelforge/evaluation/correctness/canonical.py::_run_canonical_suite 31
 cognitive-complexity src/kernelforge/evaluation/correctness/numerical.py::judge_evidence 42
 cognitive-complexity src/kernelforge/fusion/author.py::_AuthorWorkspaceGuard.__init__ 37
@@ -230,9 +228,7 @@ cognitive-complexity src/kernelforge/gemm_tune/cli.py::run 34
 cognitive-complexity src/kernelforge/gemm_tune/tier3/contract.py::validate_output_csv 44
 cognitive-complexity src/kernelforge/gemm_tune/tune_robustness.py::run_isolated 34
 cognitive-complexity src/kernelforge/gemm_tune/tuners/_aiter_dense_common.py::_augment_with_config_m_values 33
-cognitive-complexity src/kernelforge/gemm_tune/tuners/vllm_dense_tunableop.py::VllmDenseTunableopTuner._input_from_demand 33
 cognitive-complexity src/kernelforge/kernel_rewrite_controller/opportunity_agent.py::OpportunityAnalysisAgent.run 34
-cognitive-complexity src/kernelforge/knowledge/pr_knowledge/references.py::collect_references 39
 cognitive-complexity src/kernelforge/loop/analysis_evidence.py::AnalysisEvidenceMixin._apply_last_analysis_evidence 46
 cognitive-complexity src/kernelforge/loop/analysis_runtime.py::AnalysisRuntimeMixin._resolve_analysis_context 41
 cognitive-complexity src/kernelforge/loop/archive.py::CandidateArchive._reconcile_storage 32
@@ -253,14 +249,11 @@ cognitive-complexity src/kernelforge/orchestrator/analysis.py::AnalysisAgentServ
 cognitive-complexity src/kernelforge/orchestrator/analysis.py::AnalysisAgentService.ensure_bundle 39
 cognitive-complexity src/kernelforge/orchestrator/orchestration.py::OrchestrationAgent._bind_dispatch 39
 cognitive-complexity src/kernelforge/orchestrator/orchestration.py::OrchestrationService.run 33
-cognitive-complexity src/kernelforge/orchestrator/specialist_probe.py::probe_variant 34
 cognitive-complexity src/kernelforge/rewrite_by_flydsl/applyback.py::_validate_worktree_changes 35
 cognitive-complexity src/kernelforge/rewrite_by_flydsl/applyback.py::generate_applyback_patch 33
 cognitive-complexity src/kernelforge/rewrite_by_flydsl/flydsl_rewrite_driver_preparation.py::prepare_rewrite_driver 37
 cognitive-complexity src/kernelforge/rewrite_by_flydsl/ingest.py::discover_source_entry 31
 cognitive-complexity src/kernelforge/rewrite_by_flydsl/kb.py::try_flydsl_kb_warmstart 71
-cognitive-complexity src/kernelforge/rewrite_by_flydsl/port_loop.py::check_flydsl_port 35
-cognitive-complexity src/kernelforge/rewrite_by_flydsl/port_loop.py::run_port_loop 52
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_framework_switch_manifest.py::parse_manifest 27
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_grid_runner.py::run_grid 61
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_kv_metrics.py::_read_aiperf_aggregate_json 22
@@ -814,9 +807,7 @@ function-lines src/kernelforge/agent_backends/codex.py::_normalize_sdk_result 89
 function-lines src/kernelforge/agent_backends/session_resume.py::run_session_with_api_resume 98
 function-lines src/kernelforge/assembly/prepare.py::prepare_assembly 110
 function-lines src/kernelforge/cli/forge_loop_command.py::forge_loop 530
-function-lines src/kernelforge/evaluation/benchmark/runner.py::aggregate_benchmark_measurements 97
 function-lines src/kernelforge/evaluation/benchmark/runner.py::bench_wallclock 110
-function-lines src/kernelforge/evaluation/benchmark/runner.py::sweep_case 178
 function-lines src/kernelforge/evaluation/correctness/canonical.py::_run_canonical_suite 95
 function-lines src/kernelforge/fusion/author.py::_AuthorWorkspaceGuard.__init__ 118
 function-lines src/kernelforge/fusion/author.py::_AuthorWorkspaceGuard.enforce 92
@@ -847,9 +838,6 @@ function-lines src/kernelforge/gemm_tune/tune_robustness.py::run_isolated 108
 function-lines src/kernelforge/gemm_tune/tuners/_aiter_dense_common.py::_cap_splitk_to_serve_safe 96
 function-lines src/kernelforge/gemm_tune/tuners/_aiter_dense_common.py::run_aiter_dense_tuner 165
 function-lines src/kernelforge/gemm_tune/tuners/fmoe_ck.py::FmoeCKTuner.run 137
-function-lines src/kernelforge/gemm_tune/tuners/sglang_dense_bf16.py::SglangDenseBf16Tuner.run 213
-function-lines src/kernelforge/gemm_tune/tuners/vllm_dense_tunableop.py::VllmDenseTunableopTuner._input_from_demand 88
-function-lines src/kernelforge/gemm_tune/tuners/vllm_dense_tunableop.py::VllmDenseTunableopTuner.run 108
 function-lines src/kernelforge/gemm_tune/tuners/vllm_dense_tunableop.py::_generate_tunableop_script 108
 function-lines src/kernelforge/gemm_tune/tuners/vllm_moe_triton.py::VllmMoeTritonTuner.run 111
 function-lines src/kernelforge/gemm_tune/tuners/vllm_moe_triton.py::_generate_sweep_script 238
@@ -867,9 +855,6 @@ function-lines src/kernelforge/kernel_rewrite_controller/recovery.py::recover_ta
 function-lines src/kernelforge/kernel_rewrite_controller/scheduler.py::dispatch_prepared_tasks 101
 function-lines src/kernelforge/kernel_rewrite_controller/task.py::parse_task_payload 113
 function-lines src/kernelforge/knowledge/kb_store/reader.py::_read_top_solutions_impl 113
-function-lines src/kernelforge/knowledge/kb_store/writer.py::_write_run_experience_impl 166
-function-lines src/kernelforge/knowledge/pr_knowledge/references.py::collect_references 143
-function-lines src/kernelforge/knowledge/pr_knowledge/search.py::discover 86
 function-lines src/kernelforge/loop/analysis_evidence.py::AnalysisEvidenceMixin._apply_last_analysis_evidence 160
 function-lines src/kernelforge/loop/analysis_evidence.py::AnalysisEvidenceMixin._build_orchestration_context 160
 function-lines src/kernelforge/loop/analysis_evidence.py::AnalysisEvidenceMixin._render_analysis_evidence_for_implementer 84
@@ -910,7 +895,6 @@ function-lines src/kernelforge/orchestrator/orchestration.py::OrchestrationAgent
 function-lines src/kernelforge/orchestrator/orchestration.py::OrchestrationAgent.plan_dispatch 83
 function-lines src/kernelforge/orchestrator/orchestration.py::OrchestrationService._revise_round 82
 function-lines src/kernelforge/orchestrator/orchestration.py::OrchestrationService.run 149
-function-lines src/kernelforge/orchestrator/specialist_probe.py::probe_variant 247
 function-lines src/kernelforge/orchestrator/specialists.py::SpecialistAgent.run 104
 function-lines src/kernelforge/rewrite_by_flydsl/applyback.py::_publish_patch 115
 function-lines src/kernelforge/rewrite_by_flydsl/applyback.py::generate_applyback_patch 209
@@ -918,8 +902,6 @@ function-lines src/kernelforge/rewrite_by_flydsl/flydsl_rewrite_driver_preparati
 function-lines src/kernelforge/rewrite_by_flydsl/kb.py::try_flydsl_kb_warmstart 166
 function-lines src/kernelforge/rewrite_by_flydsl/kb.py::write_flydsl_kb_solution 85
 function-lines src/kernelforge/rewrite_by_flydsl/optimize.py::run_optimize 125
-function-lines src/kernelforge/rewrite_by_flydsl/port_loop.py::run_port_loop 166
-function-lines src/kernelforge/rewrite_by_flydsl/runner.py::run_rewrite 303
 module-lines src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py 2168
 module-lines src/hyperloom/inference_optimizer/breakdown/schema.py 2681
 module-lines src/hyperloom/inference_optimizer/cli/__init__.py 2569
