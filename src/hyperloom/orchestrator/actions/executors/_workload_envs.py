@@ -586,6 +586,14 @@ def prepare_agentx_runtime(
         return None
     if os.environ.get("PYTEST_CURRENT_TEST"):
         return None
+    # The generic SGLang scripts inject ``--disable-radix-cache``, which an
+    # agentic replay must not carry. This is the one AgentX preparation step
+    # every launch path reaches -- baseline and profile shell out without going
+    # through the grid runner -- so it is where the scripts can be kept honest
+    # for all of them.
+    from ._magpie_patcher import ensure_agentic_prefix_cache
+
+    ensure_agentic_prefix_cache(runtime_env.get("MAGPIE_PATH") or None, inferencex_path or None)
     try:
         from hyperloom.inference_optimizer.agentx.preflight import AgentXPreflightError
         from hyperloom.inference_optimizer.agentx.runtime import maybe_prepare_agentx
