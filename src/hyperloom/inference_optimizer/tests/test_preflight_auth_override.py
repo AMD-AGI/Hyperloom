@@ -2056,6 +2056,14 @@ def test_smoke_test_codex_model_falls_back_to_next_rung(monkeypatch, capsys):
     assert "falling back" in out
 
 
+def test_smoke_test_codex_model_falls_back_from_the_default_to_the_previous_default(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: {"gpt-5.6-sol", "gpt-5.5"})
+    args = _make_args(codex_model="gpt-6-astra", critic_mock=False)
+    cli._smoke_test_codex_model(args, ("https://anthropic", "https://openai/v1"))
+
+    assert args.codex_model == "gpt-5.6-sol"
+
+
 def test_smoke_test_codex_model_ladder_skips_missing_rungs(monkeypatch, capsys):
     monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: {"gpt-5.4", "gpt-4.1"})
     args = _make_args(codex_model="gpt-5.6-sol", critic_mock=False)
