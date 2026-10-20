@@ -912,14 +912,11 @@ def _splitk_support_fn(script_key: str, ctx: TuneContext):
     """
     if os.environ.get("FORGE_SPLITK_TRIAL", "1") == "0":
         return None
-    try:
-        from ..aiter_splitk_validate import make_support_fn
+    from ..aiter_splitk_validate import make_support_fn
 
-        # Pin the in-process trial dispatch to the tuner's assigned card; on a shared node the assigned GPU
-        # may not be device 0.
-        return make_support_fn(op=script_key, gpu_ids=getattr(ctx, "gpu_ids", "") or "")
-    except Exception:  # noqa: BLE001 — fall back to the static cap
-        return None
+    # Pin the in-process trial dispatch to the tuner's assigned card; on a shared node the assigned GPU
+    # may not be device 0.
+    return make_support_fn(op=script_key, gpu_ids=getattr(ctx, "gpu_ids", "") or "")
 
 
 def _apply_splitk_cap(artifact: str, profile_csv: Path, *, script_key: str, ctx: TuneContext) -> bool:
@@ -1344,10 +1341,7 @@ def _shape_splitk_ceiling(support_fn, max_splitk: int, shape: tuple[int, int, in
     """The highest splitK this shape may ship, trialled per shape where a trial exists."""
     if support_fn is None:
         return max_splitk
-    try:
-        supported = support_fn(*shape)
-    except Exception:  # noqa: BLE001 — trial failure must not abort the cap
-        return max_splitk  # degrade to the static cap, never crash the tuner
+    supported = support_fn(*shape)
     return max_splitk if supported is None else int(supported)
 
 

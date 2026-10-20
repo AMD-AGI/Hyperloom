@@ -84,6 +84,17 @@ def test_exception_mid_scan_treated_as_unsupported(monkeypatch):
     assert max_supported_splitk((64, 5120, 5120), ceiling=6) == 1
 
 
+def test_unexpected_error_mid_scan_propagates(monkeypatch):
+    def buggy(m, n, k, sk, device="cuda"):
+        if sk >= 2:
+            raise TypeError("probe signature drifted")
+        return True
+
+    _probe(monkeypatch, buggy)
+    with pytest.raises(TypeError, match="^probe signature drifted$"):
+        max_supported_splitk((64, 5120, 5120), ceiling=6)
+
+
 def test_make_support_fn_memoizes_per_shape(monkeypatch):
     calls = []
 
