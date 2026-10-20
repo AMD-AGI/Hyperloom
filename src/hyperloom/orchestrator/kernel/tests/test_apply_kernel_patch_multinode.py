@@ -5,6 +5,11 @@
 
 from __future__ import annotations
 
+import subprocess
+from dataclasses import replace
+
+import pytest
+
 from hyperloom.orchestrator.kernel import apply_kernel_patch as akp
 
 
@@ -126,3 +131,127 @@ def test_invalid_rebuild_command_rejected_before_snapshot_mutation(tmp_path, mon
     assert res.get("error_class") == "invalid_rebuild_command"
     # The live target must be untouched (all-or-nothing).
     assert target.read_text(encoding="utf-8") == orig_bytes
+
+
+# -- multi-node fan-out failures -------------------------------------------
+_ORIGINAL_KERNEL = "// ORIGINAL kernel\nint main() { return 0; }\n"
+_PATCHED_KERNEL = "// PATCHED kernel\nint main() { return 1; }\n"
+_DIFF = (
+    "diff --git a/kernel.cpp b/kernel.cpp\n--- a/kernel.cpp\n+++ b/kernel.cpp\n@@ -1 +1 @@\n"
+    "-int main() { return 0; }\n+int main() { return 1; }\n"
+)
+_FAN_OUT_FAILURES = (
+    RuntimeError("pod exploded"),
+    subprocess.TimeoutExpired(cmd="multi-node apply-patch", timeout=180),
+    OSError("cannot spawn"),
+)
+_FAN_OUT_IDS = ("runtimeerror", "timeout", "oserror")
+
+
+def _raising(exc):
+    def _fn(*_args, **_kwargs):
+        raise exc
+
+    return _fn
+
+
+def _request(tmp_path, *, snapshot=False, repo_root=lambda repo: repo):
+    """A legacy copy request, or a snapshot request whose repo root is ``repo_root(repo)``."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    target = repo / "kernel.cpp"
+    target.write_text(_ORIGINAL_KERNEL, encoding="utf-8")
+    patch = tmp_path / "patched.cpp"
+    patch.write_text(_DIFF if snapshot else _PATCHED_KERNEL, encoding="utf-8")
+    extra = {}
+    if snapshot:
+        snapshot_dir = tmp_path / "snapshot"
+        snapshot_dir.mkdir()
+        (snapshot_dir / "kernel.cpp").write_text(_PATCHED_KERNEL, encoding="utf-8")
+        extra = {"snapshot_dir": str(snapshot_dir), "repo_root": str(repo_root(repo))}
+    request = akp.KernelPatchRequest(
+        patch_path=str(patch),
+        target_file=str(target),
+        backup_root=str(tmp_path / "backups"),
+        kernel_id="k001",
+        **extra,
+    )
+    return request, target
+
+
+def _applied_on_a_pod(tmp_path, monkeypatch):
+    monkeypatch.setattr(akp, "_is_multi_node", lambda: True)
+    monkeypatch.setattr(
+        akp,
+        "_dispatch_multinode_apply",
+        lambda apply: {"status": "ok", "per_node": [{"host": "pod-a", "backup_path": "/var/kernel_patch_backups/a"}]},
+    )
+    request, _target = _request(tmp_path)
+    applied = akp.apply_kernel_patch(replace(request, skip_rebuild=True))
+    assert applied["status"] == "ok", applied
+    return applied["manifest_path"]
+
+
+@pytest.mark.parametrize("snapshot", [False, True], ids=["copy", "snapshot"])
+@pytest.mark.parametrize("failure", _FAN_OUT_FAILURES, ids=_FAN_OUT_IDS)
+def test_a_failed_fan_out_restores_the_local_target(tmp_path, monkeypatch, snapshot, failure):
+    monkeypatch.setattr(akp, "_is_multi_node", lambda: True)
+    monkeypatch.setattr(akp, "_dispatch_multinode_apply", _raising(failure))
+    request, target = _request(tmp_path, snapshot=snapshot)
+
+    result = akp.apply_kernel_patch(request)
+
+    assert result["status"] == "failed"
+    assert result["error"].startswith("multi-node apply fan-out failed; ")
+    assert result["error"].endswith(f": {failure}")
+    assert target.read_text(encoding="utf-8") == _ORIGINAL_KERNEL
+
+
+def test_a_repo_root_that_does_not_contain_the_resolved_target_fails_the_fan_out(tmp_path, monkeypatch):
+    monkeypatch.setattr(akp, "_is_multi_node", lambda: True)
+
+    def _link_to(repo):
+        link = tmp_path / "repo-link"
+        link.symlink_to(repo, target_is_directory=True)
+        return link
+
+    request, target = _request(tmp_path, snapshot=True, repo_root=_link_to)
+
+    result = akp.apply_kernel_patch(request)
+
+    assert result["status"] == "failed"
+    assert result["error"].startswith("multi-node apply fan-out failed; repo restored: ")
+    assert "is not in the subpath of" in result["error"]
+    assert target.read_text(encoding="utf-8") == _ORIGINAL_KERNEL
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [subprocess.TimeoutExpired(cmd="multi-node revert-patch", timeout=120), OSError("cannot spawn")],
+    ids=["timeout", "oserror"],
+)
+def test_a_failed_pod_revert_is_recorded_as_a_revert_issue(tmp_path, monkeypatch, failure):
+    manifest_path = _applied_on_a_pod(tmp_path, monkeypatch)
+    monkeypatch.setattr(akp, "_dispatch_multinode_revert", _raising(failure))
+
+    result = akp.revert_kernel_patch(manifest_path)
+
+    failed = {"status": "failed", "error": str(failure)}
+    assert result["status"] == "partial"
+    assert result["multinode_revert"] == failed
+    assert result["revert_issues"] == [{"kind": "multinode_revert", **failed}]
+
+
+@pytest.mark.parametrize("kind", ["apply", "snapshot_apply", "revert"])
+def test_an_unexpected_fan_out_failure_propagates(tmp_path, monkeypatch, kind):
+    if kind == "revert":
+        manifest_path = _applied_on_a_pod(tmp_path, monkeypatch)
+        monkeypatch.setattr(akp, "_dispatch_multinode_revert", _raising(TypeError("bad pod spec")))
+        call = lambda: akp.revert_kernel_patch(manifest_path)  # noqa: E731
+    else:
+        monkeypatch.setattr(akp, "_is_multi_node", lambda: True)
+        monkeypatch.setattr(akp, "_dispatch_multinode_apply", _raising(TypeError("bad pod spec")))
+        request, _target = _request(tmp_path, snapshot=kind == "snapshot_apply")
+        call = lambda: akp.apply_kernel_patch(request)  # noqa: E731
+    with pytest.raises(TypeError, match="bad pod spec"):
+        call()

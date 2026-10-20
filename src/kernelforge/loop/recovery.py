@@ -241,7 +241,7 @@ def publish_warm_start_recovery(
     if caller.caller_experiment_id:
         try:
             tracker.set_checkpoint(caller.caller_experiment_id, checkpoint)
-        except Exception as error:  # noqa: BLE001 - collected into persistence_errors
+        except (OSError, TypeError, ValueError) as error:
             persistence_errors.append(f"checkpoint: {error}")
     if persistence_errors:
         result["persistence_degraded"] = True
@@ -249,7 +249,7 @@ def publish_warm_start_recovery(
     if caller.result_json:
         try:
             atomic_write_json(caller.result_json, result)
-        except Exception as error:  # noqa: BLE001 - collected into persistence_errors
+        except (OSError, TypeError, ValueError) as error:
             persistence_errors.append(f"result-json: {error}")
     if persistence_errors:
         result["persistence_degraded"] = True

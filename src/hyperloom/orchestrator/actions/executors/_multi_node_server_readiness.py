@@ -90,13 +90,15 @@ async def _workers_passing_health(
     port: int,
 ) -> set[str]:
     """The worker IPs passing their own /health after one more sweep over the ones still pending."""
+    import httpx as _httpx
+
     ready = set(ready)
     for target in targets:
         if target.ip in ready:
             continue
         try:
             resp = await client.get("http://" + target.ip + ":" + str(port) + "/health")
-        except Exception:  # noqa: BLE001
+        except _httpx.HTTPError:
             continue
         if resp.status_code != 200:
             continue
@@ -292,6 +294,8 @@ async def _run_serving_probe(
     state: _ServingReadiness,
 ) -> int:
     """Run one tiny completion, move the consecutive-success streak, and return how many tokens it generated."""
+    import httpx as _httpx
+
     try:
         cresp = await client.post(
             url,
@@ -304,7 +308,7 @@ async def _run_serving_probe(
                 "stream": False,
             },
         )
-    except Exception as cexc:  # noqa: BLE001
+    except _httpx.HTTPError as cexc:
         state.consecutive_completion_ok = 0
         state.last_err = f"completion_probe {format_exc_brief(cexc, limit=80)}"
         return 0
@@ -338,9 +342,11 @@ async def _models_serve_traffic(
     elapsed: int,
 ) -> bool:
     """Whether /v1/models lists a worker the serving probe can now reach often enough to call the server ready."""
+    import httpx as _httpx
+
     try:
         mresp = await client.get(urls.models)
-    except Exception as mexc:  # noqa: BLE001
+    except _httpx.HTTPError as mexc:
         state.last_err = f"models_probe {format_exc_brief(mexc, limit=80)}"
         return False
     if mresp.status_code != 200:
@@ -390,9 +396,11 @@ async def _probe_server_ready(
     elapsed: int,
 ) -> bool:
     """Whether the restarted server now meets every readiness rule its backend asks for."""
+    import httpx as _httpx
+
     try:
         resp = await client.get(urls.health)
-    except Exception as exc:  # noqa: BLE001
+    except _httpx.HTTPError as exc:
         state.last_err = format_exc_brief(exc, limit=120)
         return False
     if resp.status_code != 200:
@@ -604,7 +612,7 @@ async def _wait_for_published_service_ready_async(
                 else:
                     ok_streak = 0
                     last_err = f"http_status={resp.status_code}"
-            except Exception as exc:  # noqa: BLE001
+            except _httpx.HTTPError as exc:
                 if _is_name_resolution_error(exc):
                     dns_failures += 1
                     if dns_failures >= dns_skip_after:

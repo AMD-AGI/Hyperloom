@@ -605,57 +605,25 @@ def _framework_call_candidates(
     return out
 
 
-def build_evidence(reports: list[dict[str, Any]]) -> dict[str, Any]:
-    """Build the merged rewrite-evidence document from per-rank reports."""
-    generated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    if not reports:
-        return {
-            "schema": SCHEMA,
-            "generated_at": generated_at,
-            "ranks_merged": 0,
-            "wall_seconds": 0.0,
-            "roots": [],
-            "candidates": [],
-            "deep_probe_ran": False,
-            "notes": [
-                "no host-probe reports found; the probe was not enabled for this "
-                "run, or every rank exited before writing its report"
-            ],
-        }
-
-    wall_seconds = max((float(r.get("wall_seconds") or 0.0) for r in reports), default=0.0)
+def _merged_roots(reports: list[dict[str, Any]]) -> list[str]:
+    """Every probe root any rank reported, in first-seen order."""
     roots: list[str] = []
     for report in reports:
         for root in report.get("roots") or []:
             if root not in roots:
                 roots.append(str(root))
+    return roots
 
-    host_merged = _merge_host_calls(reports)
-    framework_merged = _merge_framework_calls(reports)
 
-    hot_loop_start = _hot_loop_start(host_merged, framework_merged)
-    candidates = _host_call_candidates(host_merged, wall_seconds, hot_loop_start)
-    candidates.extend(_framework_call_candidates(framework_merged, wall_seconds, hot_loop_start))
-    timestamped = any(
-        isinstance(entry.get("first_s"), (int, float)) and float(entry["first_s"]) >= 0
-        for table in (host_merged, framework_merged)
-        for entry in table.values()
-    )
-    # Hot-path work first, then wall time, then call count.
-    candidates.sort(
-        key=lambda row: (
-            0 if row.get("setup_phase") else 1,
-            row["wall_s_per_rank"],
-            row["count_per_rank"],
-        ),
-        reverse=True,
-    )
-    truncated = len(candidates) > MAX_CANDIDATES
-    candidates = candidates[:MAX_CANDIDATES]
-    for index, row in enumerate(candidates, start=1):
-        row["rank"] = index
-
-    deep_ran = any(bool(r.get("framework_calls")) for r in reports)
+def _evidence_notes(
+    reports: list[dict[str, Any]],
+    *,
+    deep_ran: bool,
+    truncated: bool,
+    timestamped: bool,
+    hot_loop_start: float | None,
+) -> list[str]:
+    """The caveats a reader needs to judge what this evidence does and does not cover."""
     notes: list[str] = []
     if not deep_ran:
         notes.append(
@@ -698,16 +666,69 @@ def build_evidence(reports: list[dict[str, Any]]) -> dict[str, Any]:
             text = f"rank {report.get('rank')}: {probe_note}"
             if text not in notes:
                 notes.append(text)
+    return notes
 
+
+def build_evidence(reports: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build the merged rewrite-evidence document from per-rank reports."""
+    generated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    if not reports:
+        return {
+            "schema": SCHEMA,
+            "generated_at": generated_at,
+            "ranks_merged": 0,
+            "wall_seconds": 0.0,
+            "roots": [],
+            "candidates": [],
+            "deep_probe_ran": False,
+            "notes": [
+                "no host-probe reports found; the probe was not enabled for this "
+                "run, or every rank exited before writing its report"
+            ],
+        }
+
+    wall_seconds = max((float(r.get("wall_seconds") or 0.0) for r in reports), default=0.0)
+    host_merged = _merge_host_calls(reports)
+    framework_merged = _merge_framework_calls(reports)
+
+    hot_loop_start = _hot_loop_start(host_merged, framework_merged)
+    candidates = _host_call_candidates(host_merged, wall_seconds, hot_loop_start)
+    candidates.extend(_framework_call_candidates(framework_merged, wall_seconds, hot_loop_start))
+    timestamped = any(
+        isinstance(entry.get("first_s"), (int, float)) and float(entry["first_s"]) >= 0
+        for table in (host_merged, framework_merged)
+        for entry in table.values()
+    )
+    # Hot-path work first, then wall time, then call count.
+    candidates.sort(
+        key=lambda row: (
+            0 if row.get("setup_phase") else 1,
+            row["wall_s_per_rank"],
+            row["count_per_rank"],
+        ),
+        reverse=True,
+    )
+    truncated = len(candidates) > MAX_CANDIDATES
+    candidates = candidates[:MAX_CANDIDATES]
+    for index, row in enumerate(candidates, start=1):
+        row["rank"] = index
+
+    deep_ran = any(bool(r.get("framework_calls")) for r in reports)
     return {
         "schema": SCHEMA,
         "generated_at": generated_at,
         "ranks_merged": len(reports),
         "wall_seconds": _round(wall_seconds, 3),
-        "roots": roots,
+        "roots": _merged_roots(reports),
         "candidates": candidates,
         "deep_probe_ran": deep_ran,
-        "notes": notes,
+        "notes": _evidence_notes(
+            reports,
+            deep_ran=deep_ran,
+            truncated=truncated,
+            timestamped=timestamped,
+            hot_loop_start=hot_loop_start,
+        ),
     }
 
 

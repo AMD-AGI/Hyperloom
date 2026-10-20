@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -143,7 +144,7 @@ def _pod_server_log(pod: dict, ip: str, access: _SshAccess | None) -> _Collected
             "tail -c 2000000 " + access.remote_path + " 2>/dev/null",
             timeout=60,
         )
-    except Exception:  # noqa: BLE001 - one pod's SSH must not stop the sweep
+    except (OSError, subprocess.TimeoutExpired, ValueError):
         return None
     body = cp.stdout or ""
     if cp.stderr:

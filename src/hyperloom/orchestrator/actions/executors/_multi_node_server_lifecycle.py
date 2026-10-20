@@ -706,13 +706,8 @@ async def trigger_infera_engine_profile(
                 url,
                 resp.status_code,
             )
-        except Exception as exc:  # noqa: BLE001 — fail-soft
-            log.warning(
-                "infera profile %s -> %s failed (%s); continuing",
-                route,
-                url,
-                exc,
-            )
+        except _httpx.HTTPError as exc:
+            log.warning("infera profile %s -> %s failed (%s); continuing", route, url, exc)
 
 
 __all__ = [

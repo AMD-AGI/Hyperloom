@@ -33,6 +33,10 @@ class _Reply:
         return self._payload
 
 
+class _TransportError(Exception):
+    """Stand-in for ``httpx.HTTPError``: the one failure class the readiness gates poll through."""
+
+
 class _ScriptedClient:
     """An httpx-like async client answering each route from its own queue, keyed by a URL fragment."""
 
@@ -69,6 +73,7 @@ def _serve(monkeypatch: pytest.MonkeyPatch, routes: dict[str, list[object]]) -> 
     client = _ScriptedClient(routes)
     module = types.ModuleType("httpx")
     module.AsyncClient = lambda *_a, **_k: client  # type: ignore[attr-defined]
+    module.HTTPError = _TransportError  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "httpx", module)
     return client
 
@@ -339,7 +344,7 @@ def test_models_that_never_register_fail_before_the_whole_budget_is_spent(monkey
 def test_a_frontend_that_never_answers_fails_on_its_own_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
     _reachable(monkeypatch, "rayjob")
     _clock_advances_only_on_sleep(monkeypatch)
-    _serve(monkeypatch, {"/health": [ConnectionRefusedError(111, "Connection refused")]})
+    _serve(monkeypatch, {"/health": [_TransportError("Connection refused")]})
 
     with pytest.raises(readiness.ServerRestartFailed, match="did not return 200 within"):
         asyncio.run(readiness._wait_for_server_health_async(timeout_s=30, poll_every_s=10))
@@ -353,7 +358,7 @@ def test_a_models_probe_that_errors_leaves_the_gate_waiting(monkeypatch: pytest.
         monkeypatch,
         {
             "/health": [_Reply(200)],
-            "/v1/models": [OSError("reset"), _Reply(500), _Reply(200, {"data": [{"id": "m"}]})],
+            "/v1/models": [_TransportError("reset"), _Reply(500), _Reply(200, {"data": [{"id": "m"}]})],
             "/v1/completions": [_Reply(200, {"usage": {"completion_tokens": 8}})],
         },
     )
