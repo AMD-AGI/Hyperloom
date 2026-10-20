@@ -258,6 +258,9 @@ def _capabilities_split(
     return sorted(kept), sorted(not_attempted)
 
 
+_PAIR_TOLERANCE = 0.005
+
+
 def _graded_axis_headline(outcome: dict[str, Any], gain: float) -> str:
     """The headline on the interactivity axis the gain was measured on; ``""`` when it is not one."""
     axis = as_dict(outcome.get("final")).get("graded_on")
@@ -265,7 +268,9 @@ def _graded_axis_headline(outcome: dict[str, Any], gain: float) -> str:
         return ""
     before = to_float(as_dict(as_dict(outcome.get("baseline")).get("perf")).get(axis))
     after = to_float(as_dict(as_dict(outcome.get("final")).get("perf")).get(axis))
-    if not (before and after):
+    # The gain is measured against the ledger's own baseline, which a re-anchored session no longer shares with
+    # ``outcome.baseline``; a pair that does not reproduce the gain is not the one that produced it.
+    if not (before and after) or abs(before * (1 + gain / 100) - after) > _PAIR_TOLERANCE * after:
         return ""
     sign = "+" if gain > 0 else ""
     return f"{axis} {before:.2f} → {after:.2f} = {sign}{gain:.2f}% validated gain"
@@ -292,12 +297,6 @@ def _headline(breakdown: dict[str, Any]) -> str:
     if b and not f:
         return f"baseline {framework_registry.format_primary_metric(fw, b, precision=2)} (no validated final)"
     return "no validated throughput recorded"
-
-
-def _graded_on(breakdown: dict[str, Any]) -> str:
-    """The axis the final verdict was graded on, from the outcome or else the grading metadata."""
-    graded = as_dict(outcome_of(breakdown).get("final")).get("graded_on")
-    return str(graded or as_dict(as_dict(as_dict(breakdown).get("metadata")).get("grading")).get("objective") or "")
 
 
 def build_global_facts(
@@ -328,7 +327,7 @@ def build_global_facts(
         stop_reason=stop_reason_of(breakdown),
         elapsed_minutes=total if total is not None else to_float(session.get("elapsed_minutes")),
         elapsed_is_total=total is not None,
-        graded_on=_graded_on(breakdown),
+        graded_on=str(as_dict(outcome_of(breakdown).get("final")).get("graded_on") or ""),
         stop_target=stop_target_text(workload.get("objective")),
         workload_summary=_workload_summary(workload),
         gain_attribution_lines=attribution_lines,

@@ -817,6 +817,18 @@ def test_headline_on_an_interactivity_session_quotes_the_graded_axis() -> None:
     assert f"- **Headline**: {expected}" in result.markdown.splitlines()
 
 
+def test_headline_drops_the_axis_pair_when_the_baseline_was_re_anchored() -> None:
+    """The gain is measured against the ledger's baseline; a later anchor makes the pair contradict it."""
+    b = _graded_breakdown()
+    b["outcome"]["baseline"]["perf"] = {"e2e_norm_intvty_p50": 150.51}
+    b["outcome"]["final"]["perf"] = {"e2e_norm_intvty_p50": 149.54}
+    b["outcome"]["final"]["gain_pct"] = 44.52
+
+    headline = render_session_report(b).global_facts.headline
+
+    assert headline == "baseline 2205.00 tok/s → final 2447.50 tok/s = +44.52% validated gain"
+
+
 def test_headline_keeps_the_throughput_sentence_when_the_graded_axis_is_throughput() -> None:
     b = _graded_breakdown()
     b["outcome"]["final"]["graded_on"] = "output_throughput"
@@ -888,12 +900,17 @@ def test_summary_names_the_graded_axis_and_labels_the_stop_target() -> None:
     assert "graded_on=e2e_norm_intvty_p50, stop target gain_pct>=30)." in result.markdown
 
 
-def test_graded_axis_falls_back_to_the_grading_metadata() -> None:
+def test_graded_axis_is_unset_without_a_recorded_verdict_axis() -> None:
+    """The configured axis says what was asked for, not what the verdict was taken on."""
     b = _fixture_breakdown()
-    b["metadata"]["grading"] = {"objective": "output_throughput"}
+    b["metadata"]["grading"] = {"objective": "e2e_norm_intvty_p90"}
+    result = render_session_report(b)
 
-    assert render_session_report(b).global_facts.graded_on == "output_throughput"
-    assert render_session_report(_fixture_breakdown()).global_facts.graded_on == ""
+    assert result.global_facts.graded_on == ""
+    stop_line = next(line for line in result.markdown.splitlines() if line.startswith("- **Stop reason**"))
+    assert stop_line == (
+        "- **Stop reason**: `time_exhausted` · elapsed `720.0 min` · graded on `unset` · stop target `gain_pct>=30`"
+    )
 
 
 def test_workload_labels_the_objective_as_the_stop_target() -> None:
