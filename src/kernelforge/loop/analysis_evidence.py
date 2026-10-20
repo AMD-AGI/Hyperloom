@@ -161,26 +161,26 @@ class AnalysisEvidenceMixin:
                 log.debug("failed to build orchestration knowledge index", exc_info=True)
 
         context = OrchestrationContext(
-                analysis_commit=canonical_commit,
-                workspace=str(workspace),
-                gpu_target=self.config.gpu_target,
-                objective=(
-                    "Preserve correctness and complete benchmark case coverage while "
-                    "maximizing equal-weight mean incumbent-to-candidate case speedup."
-                ),
-                program_context=(self.ic.program_md or f"Optimize the kernel at {self.ic.kernel_file}."),
-                source_map_path=str(source_map_path),
-                editable_sources=tuple(self._target_source_files()),
-                cases=cases,
-                knowledge_index=knowledge_index,
-                supervisor_guidance=self._supervisor_ruling,
-                last_critic_verdict=self._last_critic_verdict,
-                last_critic_review=self._last_critic_review,
-                search_mode=self.run_state.search_mode,
-                search_reason_codes=tuple(self.run_state.search_reason_codes),
-                search_objective=self.run_state.search_objective,
-                search_mode_residence_remaining=(self.run_state.search_mode_residence_remaining),
-                evidence_refs=evidence_refs,
+            analysis_commit=canonical_commit,
+            workspace=str(workspace),
+            gpu_target=self.config.gpu_target,
+            objective=(
+                "Preserve correctness and complete benchmark case coverage while "
+                "maximizing equal-weight mean incumbent-to-candidate case speedup."
+            ),
+            program_context=(self.ic.program_md or f"Optimize the kernel at {self.ic.kernel_file}."),
+            source_map_path=str(source_map_path),
+            editable_sources=tuple(self._target_source_files()),
+            cases=cases,
+            knowledge_index=knowledge_index,
+            supervisor_guidance=self._supervisor_ruling,
+            last_critic_verdict=self._last_critic_verdict,
+            last_critic_review=self._last_critic_review,
+            search_mode=self.run_state.search_mode,
+            search_reason_codes=tuple(self.run_state.search_reason_codes),
+            search_objective=self.run_state.search_objective,
+            search_mode_residence_remaining=(self.run_state.search_mode_residence_remaining),
+            evidence_refs=evidence_refs,
         )
         state = self.run_state.analysis
         commit = context.analysis_commit

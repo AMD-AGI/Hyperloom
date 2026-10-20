@@ -150,19 +150,22 @@ def _warm_start_keep_bundle(
     ]
     if not patch.strip() or not changed_files:
         raise ValueError("validated warm-start produced no publishable diff")
-    return keep, score, KeepBundle(
-        validation_text=("validated KB warm-start passed canonical correctness"),
-        benchmark={
-            "median_ms": score.best_wall_ms,
-            "mean_case_speedup": score.mean_case_speedup,
-            "case_times": dict(warm.get("case_times") or {}),
-            "unscored_cases": list(warm.get("unscored_cases") or []),
-            "warm_start": True,
-        },
-        changed_files=changed_files,
-        patch=patch,
+    return (
+        keep,
+        score,
+        KeepBundle(
+            validation_text=("validated KB warm-start passed canonical correctness"),
+            benchmark={
+                "median_ms": score.best_wall_ms,
+                "mean_case_speedup": score.mean_case_speedup,
+                "case_times": dict(warm.get("case_times") or {}),
+                "unscored_cases": list(warm.get("unscored_cases") or []),
+                "warm_start": True,
+            },
+            changed_files=changed_files,
+            patch=patch,
+        ),
     )
-
 
 
 def _persist_warm_recovery(caller: CallerRecovery, tracker, checkpoint: dict, result: dict) -> dict:

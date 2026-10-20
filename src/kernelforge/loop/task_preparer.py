@@ -625,7 +625,9 @@ class _PrepareDrive:
         self.driver_rel = os.path.relpath(driver_path, agent_workspace)
         self.evidence = _build_evidence(task, workspace=workspace, driver=str(driver_path), preflight=preflight)
         self.ref_dir = _materialize_reference(workspace)
-        reference_prefix = (_EXTERNAL_DRIVER_PREFIX.format(driver_access_dir=driver_access_dir) if driver_external else "")
+        reference_prefix = (
+            _EXTERNAL_DRIVER_PREFIX.format(driver_access_dir=driver_access_dir) if driver_external else ""
+        )
         spec_path, canonical_spec = _materialize_invocation_spec(task.invocation_spec_file, driver_path.parent)
         if task.invocation_spec_file and spec_path is None:
             log.warning(
@@ -697,9 +699,7 @@ class _PrepareDrive:
             self.scaffold_error = str(exc)
         finally:
             _safe_rmtree(self.ref_dir)
-            self.external_rollback_error = _close_external_transaction(
-                layout.external_transaction, layout.guard
-            )
+            self.external_rollback_error = _close_external_transaction(layout.external_transaction, layout.guard)
         layout.guard.rollback()
         return PrepareResult(
             ok=False,
@@ -762,16 +762,9 @@ class _PrepareDrive:
         except asyncio.TimeoutError:
             return await self._after_timeout()
         except Exception as exc:  # noqa: BLE001
-            log.warning("task preparation agent attempt %d failed: %s", self.attempts, exc)
-            self.audit.driver(f"{self._attempt_dir}/driver_at_exception.py")
-            driver_edited = self.audit.driver_edited(self._digest_before)
-            self.edited_any_attempt = self.edited_any_attempt or driver_edited
-            self.audit.json(f"{self._attempt_dir}/agent_event.json", {"status": "error", "exception_type": type(exc).__name__, "exception": str(exc), "elapsed_s": round(time.monotonic() - self._agent_started, 3), "budget_s": round(self._attempt_timeout, 3), "driver_edited": driver_edited})
-            self.audit.text(f"{self._attempt_dir}/agent_progress.txt", "\n".join(self._progress_log))
-            self.prior_failure = f"Agent invocation error: {type(exc).__name__}: {exc}"
-            self.prior_failure_heading = RETRY_HEADING_DEFAULT
-            self.scaffold.reset()
+            self._after_agent_error(exc)
             return None
+
         self.audit.text(f"{self._attempt_dir}/agent_output.txt", str(agent_output or ""))
         self.audit.text(f"{self._attempt_dir}/agent_progress.txt", "\n".join(self._progress_log))
         self.audit.driver(f"{self._attempt_dir}/driver_after.py")
@@ -788,7 +781,10 @@ class _PrepareDrive:
         )
         self.scaffold.reset()
         self.last_pf = await _preflight_async(
-            layout.driver_path.as_posix(), self.contract, PREFLIGHT_WARMUP, PREFLIGHT_ITERS,
+            layout.driver_path.as_posix(),
+            self.contract,
+            PREFLIGHT_WARMUP,
+            PREFLIGHT_ITERS,
             deadline_unix=self.preflight_deadline_unix,
         )
         self.audit.driver(f"{self._attempt_dir}/driver_at_preflight.py")
@@ -796,8 +792,32 @@ class _PrepareDrive:
         if self.last_pf.ok:
             return _finish_prepared_task(self.last_pf, self.attempts, layout, provided_harness=self.provided_harness)
         self.prior_failure_heading = RETRY_HEADING_DEFAULT if driver_edited else RETRY_HEADING_NO_EDIT
-        self.prior_failure = _preflight_retry_prompt(self.last_pf, driver_rel=self.driver_rel, driver_edited=driver_edited)
+        self.prior_failure = _preflight_retry_prompt(
+            self.last_pf, driver_rel=self.driver_rel, driver_edited=driver_edited
+        )
         return None
+
+    def _after_agent_error(self, exc: BaseException) -> None:
+        """Record an agent exception and retire the scaffold for the next attempt."""
+        log.warning("task preparation agent attempt %d failed: %s", self.attempts, exc)
+        self.audit.driver(f"{self._attempt_dir}/driver_at_exception.py")
+        driver_edited = self.audit.driver_edited(self._digest_before)
+        self.edited_any_attempt = self.edited_any_attempt or driver_edited
+        self.audit.json(
+            f"{self._attempt_dir}/agent_event.json",
+            {
+                "status": "error",
+                "exception_type": type(exc).__name__,
+                "exception": str(exc),
+                "elapsed_s": round(time.monotonic() - self._agent_started, 3),
+                "budget_s": round(self._attempt_timeout, 3),
+                "driver_edited": driver_edited,
+            },
+        )
+        self.audit.text(f"{self._attempt_dir}/agent_progress.txt", "\n".join(self._progress_log))
+        self.prior_failure = f"Agent invocation error: {type(exc).__name__}: {exc}"
+        self.prior_failure_heading = RETRY_HEADING_DEFAULT
+        self.scaffold.reset()
 
     async def _after_timeout(self) -> PrepareResult | None:
         """Salvage-preflight after an authoring timeout and decide whether to retry."""
@@ -827,9 +847,7 @@ class _PrepareDrive:
         audit.driver(f"{attempt_dir}/driver_after_timeout_preflight.py")
         audit.json(f"{attempt_dir}/preflight.json", asdict(self.last_pf))
         if self.last_pf.ok:
-            return _finish_prepared_task(
-                self.last_pf, self.attempts, layout, provided_harness=self.provided_harness
-            )
+            return _finish_prepared_task(self.last_pf, self.attempts, layout, provided_harness=self.provided_harness)
         self.prior_failure_heading = RETRY_HEADING_DEFAULT if driver_edited else RETRY_HEADING_NO_EDIT
         self.prior_failure = _timeout_retry_prompt(
             self.last_pf,
@@ -838,9 +856,7 @@ class _PrepareDrive:
             elapsed_s=elapsed_s,
             progress_log=self._progress_log,
         )
-        retry, starved = _retry_after_timeout(
-            self.attempts, deadline_sec=self.deadline_sec, start=self._loop_start
-        )
+        retry, starved = _retry_after_timeout(self.attempts, deadline_sec=self.deadline_sec, start=self._loop_start)
         if not retry:
             self.starved_retry_sec = starved
             self.stop = True
