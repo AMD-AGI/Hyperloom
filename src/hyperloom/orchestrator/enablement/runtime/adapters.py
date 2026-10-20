@@ -379,7 +379,7 @@ class VllmRocmAdapter(_VenvProvisionMixin):
         log_path = str(attempt_dir / _PROVISION_LOG)
         try:
             attempt_dir.mkdir(parents=True, exist_ok=True)
-            (attempt_dir / _PROVISION_LOG).write_text("", encoding="utf-8")
+            (attempt_dir / _PROVISION_LOG).write_bytes(b"")
             bin_dir, python_path = self._create_venv(attempt_dir)
             self._write_rocm_constraints(python_path, attempt_dir)
         except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
@@ -448,7 +448,7 @@ class SglangAdapter(_VenvProvisionMixin):
         log_path = str(attempt_dir / _PROVISION_LOG)
         try:
             attempt_dir.mkdir(parents=True, exist_ok=True)
-            (attempt_dir / _PROVISION_LOG).write_text("", encoding="utf-8")
+            (attempt_dir / _PROVISION_LOG).write_bytes(b"")
             bin_dir, python_path = self._create_venv(attempt_dir)
             self._write_rocm_constraints(python_path, attempt_dir)
         except (OSError, subprocess.SubprocessError, RuntimeError) as exc:

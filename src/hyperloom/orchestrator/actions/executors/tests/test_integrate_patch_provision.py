@@ -408,11 +408,12 @@ def test_opt_venv_path_never_replaced(tmp_path):
 def test_accepted_runtime_records_only_when_provision_succeeded(tmp_path):
     """Kept and advanced verdicts share this payload; nothing is recorded without a successful provision."""
     action = EnablementStackAction.from_state(_candidate())
-    ok = _ok_result(str(tmp_path / "venv"))
-    records = ip._accepted_runtime_records(action, ok)
+    attempt = ip.IntegrateAttempt(task_id="t", stack_action=action, provision_result=_ok_result(str(tmp_path / "venv")))
+    records = attempt.accepted_runtime_records()
     assert records["enablement_active_runtime"]["venv_root"] == str(tmp_path / "venv")
     assert records["enablement_kept_stack_action"]["packages"] == ["vllm"]
-    assert ip._accepted_runtime_records(action, ProvisionResult(ok=False)) == {}
+    attempt.provision_result = ProvisionResult(ok=False)
+    assert attempt.accepted_runtime_records() == {}
 
 
 @pytest.mark.asyncio

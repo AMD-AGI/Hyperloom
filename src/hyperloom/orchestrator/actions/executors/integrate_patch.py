@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from collections.abc import Mapping
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from hyperloom.common.coerce import to_str_list
 from hyperloom.inference_optimizer.session.session_paths import enablement_stacks_dir
@@ -105,7 +105,6 @@ from ._nogit_patch import (
     _is_within,
 )
 from ...enablement.lane import bind_integrate_to_lane
-from ...enablement.recipe.credentials import detect_credential_channels
 from ...enablement.recipe.projections import project_launch_evidence
 from ._patch_snapshot import _git_commit_kept, _patch_touched_paths
 from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
@@ -138,9 +137,6 @@ from ._workload_envs import (
     FrameworkScriptMismatchError,
     default_baseline_config,
 )
-
-if TYPE_CHECKING:
-    from ...enablement.runtime.stack_actions import EnablementStackAction, ProvisionResult
 
 
 log = logging.getLogger(__name__)
@@ -203,25 +199,6 @@ def _acquiring_round(params: dict[str, Any]) -> bool:
     acquire nothing of its own.
     """
     return bool(params.get("enablement")) and not params.get("enablement_launch_only")
-
-
-def _accepted_runtime_records(
-    stack_action: EnablementStackAction | None,
-    provision_result: ProvisionResult | None,
-) -> dict[str, Any]:
-    """Runtime an accepted round booted on, for rearm to re-activate; empty when none was provisioned."""
-    if stack_action is None or provision_result is None or not provision_result.ok:
-        return {}
-    return {
-        "enablement_kept_stack_action": {
-            **stack_action.to_state(),
-            "resolved_ref": provision_result.resolved_ref,
-            "resolved_packages": {str(k): dict(v) for k, v in provision_result.resolved_packages.items()},
-            "credential_channels": detect_credential_channels(os.environ),
-        },
-        "enablement_active_runtime": provision_result.runtime.to_state(),
-        "installed_versions": dict(provision_result.installed_versions),
-    }
 
 
 def _enablement_gap(params: dict[str, Any]) -> CapabilityGap | None:
@@ -3080,8 +3057,6 @@ class IntegratePatchExecutor:
         applied_artifacts = attempt.applied_artifacts
         extra_envs_applied = attempt.extra_envs_applied
         extra_server_args_applied = attempt.extra_server_args_applied
-        stack_action = attempt.stack_action
-        provision_result = attempt.provision_result
 
         from hyperloom.common.failure_signature import runnable_decision
 
@@ -3200,7 +3175,7 @@ class IntegratePatchExecutor:
                 "bench_result": bench_result,
                 "workspace": str(output_root),
                 **eval_provenance,
-                **_accepted_runtime_records(stack_action, provision_result),
+                **attempt.accepted_runtime_records(),
             }
 
         provisional = correctness_ok is None
@@ -3236,7 +3211,7 @@ class IntegratePatchExecutor:
             "enablement_effective_config": dict(bench_result.get("effective_config") or {}),
             **eval_provenance,
         }
-        kept_result.update(_accepted_runtime_records(stack_action, provision_result))
+        kept_result.update(attempt.accepted_runtime_records())
         # Snapshot a manifest of the localized closure that survives rearm, so
         # the closure is recorded and not re-fetched.
         manifest = await asyncio.to_thread(
