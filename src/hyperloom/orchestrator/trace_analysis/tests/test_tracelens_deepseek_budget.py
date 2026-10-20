@@ -51,3 +51,26 @@ async def test_tracelens_forwards_its_budget_to_the_harness(tmp_path: Path, monk
     assert seen["owed"] is not None and seen["owed"].done()
     assert result.runner == "deepseek"
     assert result.raw_text == "report written"
+
+
+async def test_tracelens_on_the_harness_ignores_the_claude_model_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The caller's model comes from ANTHROPIC_MODEL / CLAUDE_MODEL; the gateway rejects it as a harness model."""
+    seen: dict[str, Any] = {}
+
+    async def _fake_drive(
+        request: agent_sdk_runner.AgentSessionRequest, owed: agent_sdk_runner.OwedArtifact | None = None
+    ) -> agent_sdk_runner.AgentSdkTurnResult:
+        seen["model"] = request.model
+        (tmp_path / "out" / "analysis.md").write_text("done")
+        return agent_sdk_runner.AgentSdkTurnResult()
+
+    monkeypatch.delenv("DEEPSEEK_MODEL", raising=False)
+    monkeypatch.delenv("DSH_MODEL", raising=False)
+    monkeypatch.setattr(llm_config, "resolve_agent_backend", lambda: llm_config.AGENT_BACKEND_DEEPSEEK)
+    monkeypatch.setattr(tracelens_deepseek, "drive_agent_session", _fake_drive)
+
+    await tlr.run_tracelens_skill(_skill_request(tmp_path), budget_minutes=10.0, model="claude-opus-5")
+
+    assert seen["model"] == llm_config.resolve_forge_llm_model(llm_config.AGENT_BACKEND_DEEPSEEK)

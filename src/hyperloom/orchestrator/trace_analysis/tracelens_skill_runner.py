@@ -780,7 +780,8 @@ async def run_tracelens_skill(
             SDK message by a stream-idle timeout instead.
         model (str | None): Optional model override. Defaults to
             :data:`DEFAULT_CLAUDE_MODEL` on the Claude SDK path, or ``$CODEX_MODEL`` /
-            :data:`DEFAULT_CODEX_MODEL` on the Codex SDK path.
+            :data:`DEFAULT_CODEX_MODEL` on the Codex SDK path. The DeepSeek
+            Harness path ignores it and runs the harness model.
         sdk (SdkEntryPoints): Optional injected query factory, options class
             and Codex turn entry point (used by tests); the query factory and
             options class are imported from the SDK when ``None``, and the
@@ -815,7 +816,7 @@ async def run_tracelens_skill(
             prompt=prompt,
             system_prompt=_CODEX_DEVELOPER_INSTRUCTIONS.replace("Codex", "DeepSeek Harness"),
             cwd=tracelens_root,
-            model=resolved_model or llm_config.DEFAULT_DEEPSEEK_HARNESS_MODEL,
+            model=llm_config.resolve_forge_llm_model(llm_config.AGENT_BACKEND_DEEPSEEK),
             max_turns=_MAX_AGENT_TURNS,
             allowed_tools=DEFAULT_ALLOWED_TOOLS,
             log=log,
