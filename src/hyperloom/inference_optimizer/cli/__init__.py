@@ -215,7 +215,8 @@ def _apply_operator_supplied_paths(args: Any, framework: str) -> None:
 
 
 def _restore_operator_supplied_paths_from_state(args: Any, state: SharedState) -> None:
-    """Fill custom-workload env from persisted state when this resume omitted it."""
+    """Re-export operator-supplied paths from ``state`` when this resume omitted them."""
+    from hyperloom.inference_optimizer.framework_paths import point_session_framework_root
     from hyperloom.orchestrator.actions.executors.benchmark_backend import (
         BENCHMARK_BACKEND_ENV,
     )
@@ -225,8 +226,6 @@ def _restore_operator_supplied_paths_from_state(args: Any, state: SharedState) -
     if not cli_repo and not os.environ.get("FRAMEWORK_REPO_PATH", "").strip():
         archived = str(getattr(state, "framework_repo_path", "") or "").strip()
         if archived:
-            from hyperloom.inference_optimizer.framework_paths import point_session_framework_root
-
             point_session_framework_root(
                 archived,
                 framework=str(getattr(state, "framework", "") or ""),

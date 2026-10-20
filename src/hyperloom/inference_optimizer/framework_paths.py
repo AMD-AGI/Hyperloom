@@ -416,14 +416,7 @@ def point_session_framework_root(root: str, *, framework: str = "") -> str:
 
     Writes :data:`GENERIC_FRAMEWORK_ROOT_ENV` and, when ``framework`` (or
     ``$FRAMEWORK``) is set, the prefixed ``_REPO_PATH`` / ``_DIR`` aliases so
-    every resolver that prefers the prefix still names the same tree. Resume
-    restores the same channel through ``state.framework_repo_path``. The path
-    is published even when it is not on disk yet — a resume may re-export the
-    pin before the tree is remounted; resolvers still require a live directory.
-
-    Args:
-        root: Checkout the session now optimises.
-        framework: Registered framework name; defaults to ``$FRAMEWORK``.
+    every resolver names the same tree.
 
     Returns:
         The stored path, or ``""`` when ``root`` is blank.

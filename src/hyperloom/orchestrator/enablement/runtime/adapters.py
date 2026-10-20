@@ -95,7 +95,7 @@ def _stdout(argv: list[str], *, run: RunFn) -> str:
 
 def _failure_tail(cp: subprocess.CompletedProcess) -> str:
     """The end of ``cp``'s stderr, which carries the error."""
-    return (getattr(cp, "stderr", "") or "").strip()[-_FAILURE_TAIL_CHARS:]
+    return (cp.stderr or "").strip()[-_FAILURE_TAIL_CHARS:]
 
 
 def _resolved_clone_ref(checkout: str, *, run: RunFn = _default_run) -> str:
@@ -318,8 +318,8 @@ class _VenvProvisionMixin(BaseAdapter):
         """Run ``argv`` and append its command, exit code and full output to ``log_path``."""
         cp = self._run(argv, dict(os.environ), None)
         with log_path.open("a", encoding="utf-8") as fh:
-            fh.write(f"$ {shlex.join(argv)}\nrc={getattr(cp, 'returncode', None)}\n")
-            fh.write(f"{getattr(cp, 'stdout', '') or ''}{getattr(cp, 'stderr', '') or ''}\n")
+            fh.write(f"$ {shlex.join(argv)}\nrc={cp.returncode}\n")
+            fh.write(f"{cp.stdout or ''}{cp.stderr or ''}\n")
         return cp
 
     def _pip_install(

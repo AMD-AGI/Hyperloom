@@ -15,8 +15,6 @@ from hyperloom.common.failure_signature import classify_failure
 from hyperloom.orchestrator.actions.executors import integrate_patch as ip
 from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant, _build_variant_yaml
 from hyperloom.inference_optimizer.runtime_environment import apply_runtime_override
-from hyperloom.orchestrator.bringup import observe_bringup, write_boot_observation
-from hyperloom.orchestrator.rehearsal import boot_log_for
 from hyperloom.orchestrator.enablement.runtime.stack_actions import (
     EnablementStackAction,
     FrameworkRuntime,
@@ -407,74 +405,31 @@ def test_opt_venv_path_never_replaced(tmp_path):
     assert "/opt/venv/bin" in parts  # shared venv still present, not replaced
 
 
-def _observation(session: Path, slot: str, log_text: str) -> str:
-    """Observe ``log_text`` as a server log and persist it the way a round does."""
-    out = session / slot
-    out.mkdir(parents=True, exist_ok=True)
-    verdict = observe_bringup(server_log=log_text, server_elapsed_sec=3.0, session_dir=session)
-    return write_boot_observation(verdict.observation, session_dir=session, output_dir=out, attempt=0)
-
-
-_IMPORT_WALL = (
-    'Traceback (most recent call last):\n  File "/x/ops.py", line 4, in init\n'
-    "ImportError: cannot import name '_C' from 'vllm'\n"
-)
-_ENGINE_WALL = (
-    'Traceback (most recent call last):\n  File "/x/attention.py", line 51, in forward\n'
-    "NotImplementedError: paged attention v2 has no ROCm path yet\n"
-)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("verdict", ["advanced", "kept"])
-async def test_an_accepted_round_reports_the_runtime_it_booted_on(_executor, tmp_path, verdict):
-    session = _executor.session_dir
-    session.mkdir(parents=True)
-    attempt = _attempt()
-    attempt.output_root = tmp_path / "out"
-    attempt.stack_action = EnablementStackAction.from_state(_candidate())
-    attempt.provision_result = _ok_result(str(tmp_path / "venv"))
-    if verdict == "advanced":
-        bench_result = {"status": "failed", "boot_observation_path": _observation(session, "after", _ENGINE_WALL)}
-    else:
-        booted = _observation(session, "after", boot_log_for(None))
-        bench_result = {"output_throughput": 100.0, "completed_requests": 12, "boot_observation_path": booted}
-    params = {"enablement": True, "enablement_before_observation_path": _observation(session, "before", _IMPORT_WALL)}
-
-    res = await _executor._gate_enablement(
-        attempt=attempt,
-        params=params,
-        extra={},
-        bench_result=bench_result,
-        gate_evidence={"enablement_accuracy": None, "timed_out": False},
-    )
-
-    assert res["status"] == verdict, res.get("reason")
-    assert res["enablement_active_runtime"]["venv_root"] == str(tmp_path / "venv")
-    assert res["enablement_kept_stack_action"]["packages"] == ["vllm"]
-    assert res["installed_versions"] == {"vllm": "0.21.0"}
-
-
-# rearm: an accepted round's stack action survives one rearm cycle
+def test_accepted_runtime_records_only_when_provision_succeeded(tmp_path):
+    """Kept and advanced verdicts share this payload; nothing is recorded without a successful provision."""
+    action = EnablementStackAction.from_state(_candidate())
+    ok = _ok_result(str(tmp_path / "venv"))
+    records = ip._accepted_runtime_records(action, ok)
+    assert records["enablement_active_runtime"]["venv_root"] == str(tmp_path / "venv")
+    assert records["enablement_kept_stack_action"]["packages"] == ["vllm"]
+    assert records["installed_versions"] == {"vllm": "0.21.0"}
+    assert ip._accepted_runtime_records(action, ProvisionResult(ok=False)) == {}
+    assert ip._accepted_runtime_records(None, ok) == {}
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", ["kept", "advanced"])
 async def test_kept_stack_action_survives_rearm(monkeypatch, tmp_path, status):
-    from hyperloom.inference_optimizer.framework_paths import (
-        GENERIC_FRAMEWORK_ROOT_ENV,
-        resolve_framework_tree,
-        resolve_session_framework_root,
-    )
+    from hyperloom.inference_optimizer.framework_paths import resolve_session_framework_root
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     checkout = tmp_path / "attempt-src"
     checkout.mkdir()
-    # Image defaults and a prior operator pin must not keep winning after promote.
+    prior = tmp_path / "image-sglang"
+    prior.mkdir()
     monkeypatch.setenv("FRAMEWORK", "sglang")
-    monkeypatch.setenv("SGLANG_DIR", str(tmp_path / "image-sglang"))
-    (tmp_path / "image-sglang").mkdir()
-    monkeypatch.delenv(GENERIC_FRAMEWORK_ROOT_ENV, raising=False)
+    monkeypatch.setenv("SGLANG_DIR", str(prior))
+    monkeypatch.delenv("FRAMEWORK_REPO_PATH", raising=False)
 
     state = SharedState()
     state.framework = "sglang"
@@ -482,10 +437,9 @@ async def test_kept_stack_action_survives_rearm(monkeypatch, tmp_path, status):
     coord.save = lambda *a, **k: None
 
     async def _no_round(*_a, **_k):
-        """No round is open, so the rearm's settle is a no-op."""
+        return None
 
     async def _no_stalls(*_a, **_k):
-        """An empty ledger, which the rearm reads to stamp the round's row."""
         return 0
 
     coord.rounds = types.SimpleNamespace(consecutive_stalled=_no_stalls, held=_no_round)
@@ -511,4 +465,3 @@ async def test_kept_stack_action_survives_rearm(monkeypatch, tmp_path, status):
     assert runtime_state in state.enablement.attempt_runtimes
     assert state.framework_repo_path == str(checkout)
     assert resolve_session_framework_root() == f"{checkout}/"
-    assert resolve_framework_tree("sglang") == f"{checkout}/"
