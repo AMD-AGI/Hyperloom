@@ -9,7 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.contracts.recipe import ComponentPatches, LaunchConfig, Recipe
+from hyperloom.contracts.measurement import Purpose, TestKind
+from hyperloom.contracts.recipe import ComponentPatches, LaunchConfig, Recipe, RecipeDelta
 from hyperloom.measure.compile import LocalBlobStore, PackageBase
 from hyperloom.orchestrator.specialists.agent_runner import AgentEnded, AgentHandle, AgentStatus, LocalAgentRunner
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
@@ -259,6 +260,27 @@ async def test_a_cli_that_exits_as_it_is_woken_ends_its_launch_as_any_exit(rig):
     await asyncio.wait_for(running, 1)
 
     assert rig.runner.sent == [] and "ended: its model finished its turn" in rig.runner.prompts[1]
+
+
+async def test_a_profile_of_its_head_that_another_branch_runs_keeps_the_cli_waiting_and_wakes_it(rig):
+    shared = request(
+        "p1", intent(INTEGRATION_BRANCH, rig.root), RecipeDelta(), kind=TestKind.PROFILE, purpose=Purpose.PROFILE
+    )
+    await rig.toolbox_notebook.write_request(shared)
+    session = rig.session()
+    running = asyncio.create_task(session.run())
+    await _until(lambda: len(rig.runner.specs) == 1, "the launch")
+
+    _end_turn(rig)
+    beats = rig.runner.beats
+    await _until(lambda: rig.runner.beats > beats + 2, "the turn's end to be waited out")
+    assert rig.runner.sent == []
+    await rig.toolbox_notebook.write_result(result("p1"))
+    await _until(lambda: len(rig.runner.sent) == 1, "the shared profile's result to wake the CLI")
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+
+    assert "p1" in rig.runner.sent[0] and "profile of your head" in rig.runner.sent[0]
 
 
 async def test_a_runtime_notice_written_while_the_turn_is_over_reaches_the_cli(rig):

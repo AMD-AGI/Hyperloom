@@ -27,11 +27,12 @@ import json
 import logging
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Protocol
 
 from hyperloom.common.llm_config import AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX
+from hyperloom.contracts.measurement import TestKind
 from hyperloom.orchestrator.specialists.agent_runner import (
     LONG_RUNNING_SESSION_SEC,
     PROCESS_LOG,
@@ -47,8 +48,8 @@ from hyperloom.orchestrator.specialists.agent_runner import (
 )
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts, price_of
 from hyperloom_multibranch.contracts.notebook.interfaces import BranchLogStore, Inbox, UsageSink
-from hyperloom_multibranch.contracts.notebook.records import LlmUsage, NotebookSnapshot
-from hyperloom_multibranch.contracts.notebook.vocab import UsageSource
+from hyperloom_multibranch.contracts.notebook.records import InboxItem, LlmUsage, NotebookSnapshot, TestRecord
+from hyperloom_multibranch.contracts.notebook.vocab import InboxKind, UsageSource
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST, SpecialistGrant, SpecialistTokens
 from hyperloom_multibranch.specialist.judging import NOTICE
@@ -285,9 +286,14 @@ class AgentSession:
             log = await notebook.branch_log(branch)
             notices = [record for record in log[seen.logged :] if record.entry.content.startswith(NOTICE)]
             seen.cursor, seen.logged = page.cursor, len(log)
-            if page.items or notices:
-                return wake_message(page.items, notices)
-            if not await self._tests_in_flight():
+            shared = await self._shared_profiles()
+            landed = [
+                _landed(record) for record in shared if record.request_id in seen.profiles and not record.in_flight
+            ]
+            seen.profiles = {record.request_id for record in shared if record.in_flight}
+            if page.items or notices or landed:
+                return wake_message((*page.items, *landed), notices)
+            if not seen.profiles and not await self._tests_in_flight():
                 return ""
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(self._stopped.wait(), self._setup.poll_seconds)
@@ -297,6 +303,20 @@ class AgentSession:
         branch = self._start.branch
         records = (await self._place.notebook.snapshot()).records
         return any(record.request.branch == branch and record.in_flight for record in records)
+
+    async def _shared_profiles(self) -> list[TestRecord]:
+        """Other branches' profiles of this branch's head: a specialist whose own profile was refused as
+        profile_exists waits on one of them, and its result reaches only that branch's inbox."""
+        branch = self._start.branch
+        head = await self._setup.repo.head(branch)
+        records = (await self._place.notebook.snapshot()).records
+        return [
+            record
+            for record in records
+            if record.request.kind is TestKind.PROFILE
+            and record.request.parent_commit == head
+            and record.request.branch != branch
+        ]
 
     async def _until_tests_land(self) -> None:
         """Wait, without a CLI running, until the branch has no test in flight or the session is stopped."""
@@ -404,10 +424,18 @@ class AgentSession:
 
 @dataclass
 class _Seen:
-    """What a launch has shown its CLI: the inbox cursor it read up to, and how many branch-log entries."""
+    """What a launch has shown its CLI: the inbox cursor it read up to, how many branch-log entries, and the other
+    branches' profiles of its head that were still running."""
 
     cursor: str
     logged: int
+    profiles: set[str] = field(default_factory=set)
+
+
+def _landed(record: TestRecord) -> InboxItem:
+    request = record.request
+    summary = f"the profile of your head by {request.branch} has its result; its analysis brings the op shares"
+    return InboxItem(InboxKind.RESULT, request.branch, record.request_id, summary, 0.0)
 
 
 class TurnLog:
