@@ -11,15 +11,15 @@ from kernelforge.resources import resource_path
 
 from kernelforge.tests.conftest import PACKAGE_ROOT
 
-RUNNER = PACKAGE_ROOT / "loop" / "runner.py"
+LOOP_PACKAGE = PACKAGE_ROOT / "loop"
 
 
-def _calls_in_runner(name: str) -> int:
-    """How many times ``name`` is called in runner.py, ignoring its own def."""
-    tree = ast.parse(RUNNER.read_text())
+def _calls_in_loop(name: str) -> int:
+    """How many times ``name`` is called across the loop package, ignoring its own def."""
     return sum(
         1
-        for node in ast.walk(tree)
+        for module in sorted(LOOP_PACKAGE.glob("*.py"))
+        for node in ast.walk(ast.parse(module.read_text()))
         if isinstance(node, ast.Call)
         and (
             (isinstance(node.func, ast.Attribute) and node.func.attr == name)
@@ -34,7 +34,7 @@ def _calls_in_runner(name: str) -> int:
 )
 def test_scoring_helpers_are_reachable(helper):
     """A guard nobody calls protects nothing."""
-    assert _calls_in_runner(helper) > 0, f"{helper} has no call site"
+    assert _calls_in_loop(helper) > 0, f"{helper} has no call site"
 
 
 def _load_example_driver(monkeypatch, ranks: str = "8"):

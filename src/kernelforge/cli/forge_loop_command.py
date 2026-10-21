@@ -76,7 +76,7 @@ from kernelforge.tracker.schema import ExperimentSubject
 
 if TYPE_CHECKING:
     from kernelforge.loop.campaign_config import CampaignConfig, CampaignConfigStore
-    from kernelforge.loop.runner import IterationConfig
+    from kernelforge.loop.iteration_types import IterationConfig
     from kernelforge.loop.task_preparer import PrepareResult
     from kernelforge.roofline_ceiling.command import AnalystAgent
     from kernelforge.tracker import ExperimentTracker, UsageAccumulator
@@ -1678,8 +1678,8 @@ def forge_loop(request: ForgeLoopRequest):
             f" from {seed_stats['src'] or 'n/a'}"
         )
 
-    from kernelforge.loop.runner import IterationLoop, LoopAgents, LoopCallbacks
-    from kernelforge.loop.runner import IterationConfig
+    from kernelforge.loop.iteration_types import IterationConfig, LoopAgents, LoopCallbacks
+    from kernelforge.loop.runner import IterationLoop
     from kernelforge.tracker import ExperimentTracker, UsageAccumulator, UsageLedgerFile
     from kernelforge.loop.gate_settings import GateMeasurement
     from kernelforge.orchestrator.agent import ImplementerSetup, ImplementerTask, SessionOptions

@@ -112,10 +112,7 @@ cognitive-complexity src/kernelforge/loop/insession_gate.py::_python_command_pay
 cognitive-complexity src/kernelforge/loop/knowledge_integration.py::kb_warmstart 54
 cognitive-complexity src/kernelforge/loop/lessons.py::parse_scope_line 33
 cognitive-complexity src/kernelforge/loop/reporting.py::BestResultPublisher.publish 32
-cognitive-complexity src/kernelforge/loop/runner.py::IterationLoop._inspect_pending_keep 33
-cognitive-complexity src/kernelforge/loop/runner.py::IterationLoop._record_iteration_outcome 40
 cognitive-complexity src/kernelforge/loop/runner.py::IterationLoop._run_locked 39
-cognitive-complexity src/kernelforge/loop/runner.py::IterationLoop.run_one_iteration 39
 cognitive-complexity src/kernelforge/loop/task_preparer.py::prepare_task 37
 cognitive-complexity src/kernelforge/orchestrator/agent.py::make_agent_fn 72
 cognitive-complexity src/kernelforge/orchestrator/analysis.py::AnalysisAgentService._write_artifact_catalog 32
@@ -572,13 +569,7 @@ function-lines src/kernelforge/loop/knowledge_integration.py::kb_warmstart 234
 function-lines src/kernelforge/loop/lessons.py::build_summary_prompt 111
 function-lines src/kernelforge/loop/reporting.py::BestResultPublisher.publish 161
 function-lines src/kernelforge/loop/runner.py::IterationLoop.__init__ 100
-function-lines src/kernelforge/loop/runner.py::IterationLoop._adopt_validated_warm_start 82
-function-lines src/kernelforge/loop/runner.py::IterationLoop._reconcile_best_publication 89
-function-lines src/kernelforge/loop/runner.py::IterationLoop._record_iteration_outcome 107
-function-lines src/kernelforge/loop/runner.py::IterationLoop._record_lesson 124
-function-lines src/kernelforge/loop/runner.py::IterationLoop._resolve_keep_sigma 96
 function-lines src/kernelforge/loop/runner.py::IterationLoop._run_locked 256
-function-lines src/kernelforge/loop/runner.py::IterationLoop.run_one_iteration 206
 function-lines src/kernelforge/loop/task_preflight.py::_count_graph_replays 85
 function-lines src/kernelforge/loop/task_preparer.py::prepare_task 340
 function-lines src/kernelforge/orchestrator/agent.py::make_agent_fn 312
@@ -638,7 +629,6 @@ module-lines src/kernelforge/fusion/validate.py 1513
 module-lines src/kernelforge/gemm_tune/tuners/_aiter_dense_common.py 1399
 module-lines src/kernelforge/loop/insession_gate.py 1218
 module-lines src/kernelforge/loop/knowledge_integration.py 1457
-module-lines src/kernelforge/loop/runner.py 6051
 module-lines src/kernelforge/loop/task_preparer.py 1299
 module-lines src/kernelforge/orchestrator/analysis.py 1952
 module-lines src/kernelforge/orchestrator/orchestration.py 1831

@@ -18,6 +18,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
+from kernelforge.tests.conftest import silence_jit_rebuild
 from kernelforge.llm import process_reaping
 from kernelforge.llm.process_reaping import ReapReport
 from kernelforge.agent_backends import AgentRunResult
@@ -25,6 +26,14 @@ from kernelforge.llm.git import GitError
 from kernelforge.loop import analysis_evidence
 from kernelforge.loop import fanout
 from kernelforge.loop import runner as runner_module
+from kernelforge.loop import attempt_verdict as attempt_verdict_module
+from kernelforge.loop import iteration_phases as phases_module
+from kernelforge.loop import lane_runtime as lane_module
+from kernelforge.loop import round_admission as admission_module
+from kernelforge.loop import scoring_runtime as scoring_module
+from kernelforge.loop import workspace_git as workspace_module
+from kernelforge.agent_backends.session_resume import EXHAUSTED_END_REASON
+from kernelforge.loop.keep_checkpoint import PENDING_KEEP_FIELDS
 from kernelforge.loop.analysis_refresh_policy import AnalysisRefreshDecision
 from kernelforge.loop.archive import CandidateRecord
 from kernelforge.loop.device_hazard import MAX_BLOCKED_ITERATIONS
@@ -53,17 +62,14 @@ from kernelforge.loop.run_state import (
     apply_round_cost,
     apply_supervisor_intervention,
     make_event,
+    pin_iteration,
 )
 from kernelforge.loop.merge_candidates import (
     MERGE_ATTEMPT_STALL_THRESHOLD,
     MERGE_PRECEDENCE_STREAK_LIMIT,
 )
-from kernelforge.loop.runner import (
-    IterationConfig,
-    IterationLoop,
-    IterationResult,
-    WindowGain,
-)
+from kernelforge.loop.iteration_types import IterationConfig, IterationResult, WindowGain
+from kernelforge.loop.runner import IterationLoop
 from kernelforge.evaluation.scoring import passes_keep_threshold
 from kernelforge.loop.search_policy import (
     MARGINAL_GAIN_WINDOW,
@@ -137,7 +143,7 @@ def _make_loop(
         capture_output=True,
     )
 
-    monkeypatch.setattr(runner_module, "force_jit_rebuild", lambda _files: None)
+    silence_jit_rebuild(monkeypatch)
 
     config = IterationConfig(
         kernel_file=str(kernel),
@@ -194,7 +200,7 @@ def test_working_tree_diff_failure_is_not_treated_as_empty(tmp_path, monkeypatch
     def _unreadable_index(*_args, **_kwargs):
         raise GitError(128, ["git", "diff"], "", "fatal: unable to read index")
 
-    monkeypatch.setattr(runner_module, "git", _unreadable_index)
+    monkeypatch.setattr(workspace_module, "git", _unreadable_index)
 
     with pytest.raises(GitError, match="unable to read index"):
         loop._working_tree_diff()
@@ -278,7 +284,7 @@ def test_pending_keep_publication_patch_is_cumulative(tmp_path, monkeypatch):
         kernel_source=kernel.read_text(),
     )
 
-    assert set(pending) == runner_module.PENDING_KEEP_FIELDS
+    assert set(pending) == PENDING_KEEP_FIELDS
     assert pending["changed_files"] == ["kernel.py"]
     assert set(pending["publication_changed_files"]) == {"driver.py", "kernel.py"}
     assert "prior kept optimization" in pending["publication_patch"]
@@ -477,7 +483,7 @@ def test_a_run_of_near_misses_cannot_evict_the_best_lineage_pin(
         commit_hash="kept",
         source="iteration",
     )
-    runner_module.pin_iteration(loop.run_state, 3)
+    pin_iteration(loop.run_state, 3)
 
     for iteration in range(4, 14):
         loop._record_iteration_outcome(
@@ -493,7 +499,7 @@ def test_a_run_of_near_misses_cannot_evict_the_best_lineage_pin(
         commit_hash="newer",
         source="iteration",
     )
-    runner_module.pin_iteration(loop.run_state, 14)
+    pin_iteration(loop.run_state, 14)
 
     assert while_best == [3, 7, 8, 9, 10, 11, 12, 13]
     assert loop.run_state.pinned_iterations == [7, 8, 9, 10, 11, 12, 13, 14]
@@ -855,7 +861,7 @@ def test_lanes_that_produced_nothing_do_not_buy_the_round_again(tmp_path, monkey
     async def _no_candidates(**_kwargs):
         return []
 
-    monkeypatch.setattr(runner_module, "run_lanes", _no_candidates)
+    monkeypatch.setattr(lane_module, "run_lanes", _no_candidates)
 
     decisions = _fan_out_iteration(tmp_path, monkeypatch, rounds)
 
@@ -880,7 +886,7 @@ def test_candidates_refused_at_intake_do_not_buy_the_round_again(tmp_path, monke
             runner_module.LaneResult(lane_id="2", plan="b", diff=tampered),
         ]
 
-    monkeypatch.setattr(runner_module, "run_lanes", _rejected_candidates)
+    monkeypatch.setattr(lane_module, "run_lanes", _rejected_candidates)
 
     decisions = _fan_out_iteration(tmp_path, monkeypatch, rounds)
 
@@ -900,7 +906,7 @@ def test_a_lane_infrastructure_failure_does_not_buy_the_round_again(tmp_path, mo
     async def _no_room(**_kwargs):
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(runner_module, "run_lanes", _no_room)
+    monkeypatch.setattr(lane_module, "run_lanes", _no_room)
 
     decisions = _fan_out_iteration(tmp_path, monkeypatch, rounds)
 
@@ -1204,7 +1210,7 @@ async def test_a_lane_infrastructure_failure_falls_back_to_one_session(
         raise OSError(28, "No space left on device")
 
     monkeypatch.setattr(loop, "_run_orchestration", _lane_plans_available(loop, ["a", "b"]))
-    monkeypatch.setattr(runner_module, "run_lanes", _no_room)
+    monkeypatch.setattr(lane_module, "run_lanes", _no_room)
 
     await loop._fan_out_round(
         iteration=3,
@@ -1227,7 +1233,7 @@ async def test_a_programming_error_in_a_fan_out_round_is_not_swallowed(
         raise TypeError("session() got an unexpected keyword argument")
 
     monkeypatch.setattr(loop, "_run_orchestration", _lane_plans_available(loop, ["a", "b"]))
-    monkeypatch.setattr(runner_module, "run_lanes", _wrong_call)
+    monkeypatch.setattr(lane_module, "run_lanes", _wrong_call)
 
     with pytest.raises(TypeError):
         await loop._fan_out_round(
@@ -1248,7 +1254,7 @@ async def test_lane_copies_are_made_beside_the_workspace(tmp_path, monkeypatch):
         seen["driver"] = driver
         return []
 
-    monkeypatch.setattr(runner_module, "run_lanes", _capture)
+    monkeypatch.setattr(lane_module, "run_lanes", _capture)
 
     await loop._fill_lane_queue(agent_factory=None, lane_plans=["a", "b"])
 
@@ -1360,7 +1366,7 @@ def test_a_lane_candidate_is_rejected_when_the_driver_stops_being_canonical(
     )
     diff = _diff_of(workspace, lambda: driver.write_text("print('bypass')\n"))
     loop._lane_queue = [runner_module.LaneResult(lane_id="1", plan="tamper", diff=diff)]
-    monkeypatch.setattr(runner_module, "is_protected_path", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(lane_module, "is_protected_path", lambda *_args, **_kwargs: False)
 
     assert loop._take_lane_candidate() is None
     assert loop._validate_driver_integrity(loop.run_state)
@@ -1546,7 +1552,7 @@ def test_a_stack_does_not_take_an_iteration_that_is_holding_a_plan(tmp_path, mon
     async def _no_candidates(**_kwargs):
         return []
 
-    monkeypatch.setattr(runner_module, "run_lanes", _no_candidates)
+    monkeypatch.setattr(lane_module, "run_lanes", _no_candidates)
 
     asyncio.run(
         loop.run(
@@ -2333,8 +2339,8 @@ def test_the_finalize_reserve_is_its_own_bound_not_a_term_inside_admission(
 
         return _wrapped
 
-    monkeypatch.setattr(runner_module, "admit_round", _spy(admit_round))
-    monkeypatch.setattr(runner_module, "admit_dispatch", _spy(admit_dispatch))
+    monkeypatch.setattr(admission_module, "admit_round", _spy(admit_round))
+    monkeypatch.setattr(admission_module, "admit_dispatch", _spy(admit_dispatch))
 
     # Halfway between "clears each bound on its own" and "covers their sum".
     between = 0.5 * (clears_both + stacked)
@@ -2391,10 +2397,10 @@ def _measurement_loop(monkeypatch, benchmark_result, workspace_dir="."):
     async def fake_registers(**_kwargs):
         return {"success": False}
 
-    monkeypatch.setattr(runner_module, "run_validation_pipeline", fake_validation)
-    monkeypatch.setattr(runner_module, "measure_wallclock", fake_benchmark)
-    monkeypatch.setattr(runner_module, "check_registers", fake_registers)
-    monkeypatch.setattr(runner_module, "force_jit_rebuild", lambda _files: None)
+    monkeypatch.setattr(attempt_verdict_module, "run_validation_pipeline", fake_validation)
+    monkeypatch.setattr(attempt_verdict_module, "measure_wallclock", fake_benchmark)
+    monkeypatch.setattr(attempt_verdict_module, "check_registers", fake_registers)
+    monkeypatch.setattr(attempt_verdict_module, "force_jit_rebuild", lambda _files: None)
 
     loop = object.__new__(IterationLoop)
     loop.ic = SimpleNamespace(
@@ -2943,7 +2949,7 @@ def test_a_hazard_outlives_the_iteration_that_found_it(tmp_path, monkeypatch):
     """
     loop, workspace = _make_loop(tmp_path, monkeypatch, session_count=3)
     holders = _fake_device(monkeypatch, {4321: 99})
-    monkeypatch.setattr(runner_module, "processes_under", lambda _dir: {4321})
+    monkeypatch.setattr(phases_module, "processes_under", lambda _dir: {4321})
     sessions: list[int] = []
 
     async def agent(kernel_path, history, session_sink):
@@ -2990,7 +2996,7 @@ def test_a_hazard_nothing_clears_stops_the_run_rather_than_spinning(
     """
     loop, workspace = _make_loop(tmp_path, monkeypatch, session_count=20)
     _fake_device(monkeypatch, {4321: 99})
-    monkeypatch.setattr(runner_module, "processes_under", lambda _dir: {4321})
+    monkeypatch.setattr(phases_module, "processes_under", lambda _dir: {4321})
 
     asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_contended_agent, supervisor_fn=_unused_supervisor)))
 
@@ -4027,7 +4033,7 @@ def test_api_outage_does_not_break_the_empty_diff_streak(tmp_path, monkeypatch):
         session_sink["plan"] = plans[attempt]
         observed_modes.append(loop.run_state.search_mode)
         if attempt == 1:
-            session_sink["end_reason"] = runner_module.EXHAUSTED_END_REASON
+            session_sink["end_reason"] = EXHAUSTED_END_REASON
             return "agent session ended with an API error"
         return "No source change was needed."
 
@@ -4099,7 +4105,7 @@ def test_an_outage_run_cannot_push_the_first_empty_diff_out_of_the_window(
         observed_modes.append(loop.run_state.search_mode)
         observed_streaks.append(loop._consecutive_no_changes(loop.state_store.recent_results(NO_CHANGES_STREAK_WINDOW)))
         if 1 <= len(loop.results) <= 5:
-            session_sink["end_reason"] = runner_module.EXHAUSTED_END_REASON
+            session_sink["end_reason"] = EXHAUSTED_END_REASON
             return "agent session ended with an API error"
         return "No source change was needed."
 
@@ -5379,7 +5385,7 @@ def test_baseline_crash_reports_the_driver_failure_not_the_output_format(
     """A crashed driver must be diagnosed by its own exit code and output."""
     loop, _workspace = _make_loop(tmp_path, monkeypatch)
     monkeypatch.setattr(
-        runner_module,
+        scoring_module,
         "measure_wallclock",
         _static_bench(
             {
@@ -5406,7 +5412,7 @@ def test_baseline_timeout_reports_the_timeout(tmp_path, monkeypatch, capsys):
     """A timed-out driver reports no output tail, only its verdict."""
     loop, _workspace = _make_loop(tmp_path, monkeypatch)
     monkeypatch.setattr(
-        runner_module,
+        scoring_module,
         "measure_wallclock",
         _static_bench({"success": False, "message": "TIMEOUT after 300s"}),
     )
@@ -5426,7 +5432,7 @@ def test_baseline_without_case_lines_names_the_missing_contract(
     """A driver that ran but reported no per-case timings is a distinct fault."""
     loop, _workspace = _make_loop(tmp_path, monkeypatch)
     monkeypatch.setattr(
-        runner_module,
+        scoring_module,
         "measure_wallclock",
         _static_bench(
             {
@@ -5454,7 +5460,7 @@ def test_baseline_without_aggregate_line_is_not_silent(
     """A missing aggregate must be reported, not returned as a bare ``None``."""
     loop, _workspace = _make_loop(tmp_path, monkeypatch)
     monkeypatch.setattr(
-        runner_module,
+        scoring_module,
         "measure_wallclock",
         _static_bench(
             {
@@ -5487,7 +5493,7 @@ def test_baseline_case_coverage_drift_names_the_cases(
             "message": ("MEASUREMENT CASE COVERAGE MISMATCH: expected=['case_001', 'case_002'], got=['case_001']"),
         }
 
-    monkeypatch.setattr(runner_module, "measure_wallclock", bench)
+    monkeypatch.setattr(scoring_module, "measure_wallclock", bench)
 
     assert asyncio.run(loop._measure_baseline()) is None
 
@@ -7787,7 +7793,7 @@ def test_record_lesson_falls_back_when_summary_cannot_be_persisted(tmp_path, mon
 
 
 def test_decision_label_matches_every_outcome():
-    from kernelforge.loop.runner import _decision_label
+    from kernelforge.loop.iteration_types import _decision_label
 
     assert _decision_label(_lesson_result(crashed=True)) == "CRASH"
     assert (
@@ -7868,9 +7874,9 @@ def _stub_measurement(monkeypatch, walls):
     async def fake_registers(**_kwargs):
         return {"success": False}
 
-    monkeypatch.setattr(runner_module, "run_validation_pipeline", fake_validation)
-    monkeypatch.setattr(runner_module, "measure_wallclock", fake_bench)
-    monkeypatch.setattr(runner_module, "check_registers", fake_registers)
+    monkeypatch.setattr(attempt_verdict_module, "run_validation_pipeline", fake_validation)
+    monkeypatch.setattr(attempt_verdict_module, "measure_wallclock", fake_bench)
+    monkeypatch.setattr(attempt_verdict_module, "check_registers", fake_registers)
 
 
 def test_lesson_flows_from_one_iteration_into_the_next_prompt(tmp_path, monkeypatch):
@@ -8145,7 +8151,7 @@ def _bare_loop(tmp_path, monkeypatch, *, running: bool = False):
 
 def _site_full_diff(tmp_path, monkeypatch, failure):
     loop, _workspace = _make_loop(tmp_path, monkeypatch)
-    monkeypatch.setattr(runner_module, "git", _raiser(failure))
+    monkeypatch.setattr(workspace_module, "git", _raiser(failure))
     return loop._full_diff("c0ffee")
 
 

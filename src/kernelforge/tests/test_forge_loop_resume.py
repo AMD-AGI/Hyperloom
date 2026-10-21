@@ -42,7 +42,8 @@ from kernelforge.loop.run_state import (
     RunState,
     WorkspaceLockError,
 )
-from kernelforge.loop.runner import IterationConfig, IterationLoop
+from kernelforge.loop.iteration_types import IterationConfig
+from kernelforge.loop.runner import IterationLoop
 
 
 # The forge-loop CLI activates per-workspace aiter cache isolation, which writes AITER_ROOT_DIR / AITER_JIT_DIR (and

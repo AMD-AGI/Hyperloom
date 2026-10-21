@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 
 from kernelforge.evaluation.correctness.pipeline import run_validation_pipeline
-from kernelforge.loop.runner import IterationConfig
+from kernelforge.loop.iteration_types import IterationConfig
 
 
 def test_full_suite_timeout_default_matches_cold_jit_budget():
