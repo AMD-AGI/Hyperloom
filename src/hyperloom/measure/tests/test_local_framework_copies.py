@@ -104,8 +104,10 @@ def server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Server:
     return fake
 
 
-def _point(tmp_path: Path, **envs: str) -> Path:
-    path = tmp_path / "point.yaml"
+def _point(directory: Path, **envs: str) -> Path:
+    """A point of its own in ``directory``: tests that run at once in other processes must not share one file."""
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / "point.yaml"
     benchmark = {"framework": "sglang", "envs": {"TP": 1, "CONC": 4, "RUN_EVAL": "false", **envs}}
     path.write_text(yaml.safe_dump({"benchmark": benchmark}), encoding="utf-8")
     return path
@@ -115,7 +117,7 @@ def _run(tmp_path: Path, name: str, point: Path | None = None, **kwargs: Any) ->
     """One test through the local backend's entry point; its ``framework_base.json``, if it left one."""
     out = tmp_path / "out" / name
     call = TestCall(
-        points=(point or _point(tmp_path),),
+        points=(point or _point(tmp_path / "points" / name),),
         output_dir=out,
         timeout_sec=900,
         cwd=str(tmp_path),
