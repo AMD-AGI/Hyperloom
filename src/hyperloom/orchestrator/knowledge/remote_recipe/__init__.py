@@ -325,10 +325,7 @@ class RemoteWarmRecipeAdapter:
     ) -> list[dict[str, Any]]:
         """Scan bounded candidate metadata while leaving ranking to T0."""
         translated: dict[str, str] = {}
-        aliases = {
-            "hardware": "hardware",
-            "framework": "framework_name",
-        }
+        aliases = {"framework": "framework_name"}
         for raw_key, raw_value in (label_match or {}).items():
             value = str(raw_value or "").strip()
             if not value:
@@ -337,12 +334,11 @@ class RemoteWarmRecipeAdapter:
             translated[key] = value
 
         page_size = min(100, max(1, int(limit or 10)))
+        if len(self._scanned_candidate_ids) >= self.search_candidate_cap:
+            return []
         offset = 0
-        pages_scanned = 0
-        has_more = False
         rows: list[dict[str, Any]] = []
-        while len(self._scanned_candidate_ids) < self.search_candidate_cap and pages_scanned < self.search_page_cap:
-            has_more = False
+        for _ in range(self.search_page_cap):
             result = self._remote_kb.search_identities(
                 scheme=self._scope.identity_scheme,
                 match=translated,
@@ -350,54 +346,12 @@ class RemoteWarmRecipeAdapter:
                 offset=offset,
                 limit=page_size,
             )
-            pages_scanned += 1
             items = result.get("items")
             if not isinstance(items, list):
                 raise RemoteRecipeValidationError("KB Store identity search items must be a list")
             if not items:
                 break
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
-                canonical_id = str(item.get("canonical_id") or "").strip()
-                if not canonical_id.startswith(f"{self._scope.identity_scheme}:"):
-                    continue
-                cached = self._candidate_rows.get(canonical_id)
-                if cached is not None:
-                    rows.append(dict(cached))
-                    continue
-                if len(self._scanned_candidate_ids) >= self.search_candidate_cap:
-                    break
-                self._scanned_candidate_ids.add(canonical_id)
-                try:
-                    envelope = self._remote_kb.get_view(
-                        canonical_id,
-                        self._scope,
-                    )
-                    if envelope is None:
-                        continue
-                    row = knowledge_to_warm_recipe(envelope)
-                except (
-                    KBStoreError,
-                    OSError,
-                    RemoteRecipeValidationError,
-                    ValueError,
-                ) as exc:
-                    log.warning(
-                        "remote Recipe candidate rejected %s: %s",
-                        canonical_id,
-                        exc,
-                    )
-                    continue
-                dimensions = item.get("dimensions")
-                if isinstance(dimensions, dict):
-                    for key, value in dimensions.items():
-                        row[str(key)] = str(value)
-                row["updated_at"] = str(item.get("updated_at") or "")
-                row["identity_source"] = str(item.get("source") or "")
-                self._candidate_views[canonical_id] = envelope
-                self._candidate_rows[canonical_id] = dict(row)
-                rows.append(dict(row))
+            rows.extend(self._page_rows(items))
             if len(self._scanned_candidate_ids) >= self.search_candidate_cap:
                 break
             next_offset = result.get("next_offset")
@@ -412,12 +366,58 @@ class RemoteWarmRecipeAdapter:
             if resolved_offset <= offset:
                 raise RemoteRecipeValidationError("KB Store identity search pagination did not advance")
             offset = resolved_offset
-            has_more = True
-        if pages_scanned >= self.search_page_cap and has_more:
+        else:
             log.warning(
                 "remote Recipe candidate search stopped after %d pages",
                 self.search_page_cap,
             )
+        return rows
+
+    def _page_rows(self, items: list[Any]) -> list[dict[str, Any]]:
+        """Project one page of identity hits onto warm rows, fetching each new candidate's view until the scan cap."""
+        rows: list[dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            canonical_id = str(item.get("canonical_id") or "").strip()
+            if not canonical_id.startswith(f"{self._scope.identity_scheme}:"):
+                continue
+            cached = self._candidate_rows.get(canonical_id)
+            if cached is not None:
+                rows.append(dict(cached))
+                continue
+            if len(self._scanned_candidate_ids) >= self.search_candidate_cap:
+                break
+            self._scanned_candidate_ids.add(canonical_id)
+            try:
+                envelope = self._remote_kb.get_view(
+                    canonical_id,
+                    self._scope,
+                )
+                if envelope is None:
+                    continue
+                row = knowledge_to_warm_recipe(envelope)
+            except (
+                KBStoreError,
+                OSError,
+                RemoteRecipeValidationError,
+                ValueError,
+            ) as exc:
+                log.warning(
+                    "remote Recipe candidate rejected %s: %s",
+                    canonical_id,
+                    exc,
+                )
+                continue
+            dimensions = item.get("dimensions")
+            if isinstance(dimensions, dict):
+                for key, value in dimensions.items():
+                    row[str(key)] = str(value)
+            row["updated_at"] = str(item.get("updated_at") or "")
+            row["identity_source"] = str(item.get("source") or "")
+            self._candidate_views[canonical_id] = envelope
+            self._candidate_rows[canonical_id] = dict(row)
+            rows.append(dict(row))
         return rows
 
     def select_candidate(self, row: Mapping[str, Any]) -> bool:

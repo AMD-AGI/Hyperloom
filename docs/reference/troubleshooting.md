@@ -346,10 +346,10 @@ See [Environment variables](environment-variables.md) for
 
 **Symptom.** `trace_analyze` returns `TraceLens root not found`,
 `incomplete (not a git checkout)`, or
-`TraceLens_generate_perf_report_pytorch_inference: command not found`.
+`TraceLens_generate_perf_report_from_config: command not found`.
 
-**Cause**: `TraceLens-internal` isn't installed, or the legacy
-training-mode CLI is being looked for (no longer accepted as of v0.4).
+**Cause**: `TraceLens-internal` isn't installed, or the pinned TraceLens
+(which provides the config-driven report CLI) isn't the installed one.
 
 **Fix**:
 
@@ -368,7 +368,7 @@ training-mode CLI is being looked for (no longer accepted as of v0.4).
    export TRACELENS_ROOT="${TRACELENS_ROOT:-${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/TraceLens}"
    cd "$TRACELENS_ROOT"
    pip install -e .
-   TraceLens_generate_perf_report_pytorch_inference --help
+   TraceLens_generate_perf_report_from_config --help
    ```
 3. The optional internal extension is enabled only when
    `TRACELENS_INTERNAL_ROOT` is set to your own existing checkout

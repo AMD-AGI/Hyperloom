@@ -257,7 +257,7 @@ def classify_attempt(
         if phase_outcome is not None:
             return phase_outcome
 
-    # (4) MUST-have files on the quantized directory.
+    # (4) MUST-have files on the quantized directory, then (5) validator results.
     if art.manifest_present and not art.manifest_parse_error:
         if not art.quantized_dir_exists or not art.has_weights:
             return OutcomeId.must_have_weights_missing
@@ -265,21 +265,18 @@ def classify_attempt(
             return OutcomeId.must_have_config_missing_or_invalid
         if not art.has_tokenizer:
             return OutcomeId.must_have_tokenizer_missing
-
-    # (5) Validator results.
-    if art.manifest_present and not art.manifest_parse_error:
         if not art.validation_report_present:
             return OutcomeId.validation_report_absent
         steps = art.validation_steps
-        if steps.md5 == "FAIL":
-            return OutcomeId.must_validate_md5_mismatch
-        if steps.config == "FAIL":
-            return OutcomeId.must_validate_config_mismatch
-        if steps.fuzzy == "FAIL":
-            return OutcomeId.fuzzy_check_failed
-        if steps.auxiliary == "FAIL":
-            return OutcomeId.should_have_aux_missing
-        if steps.md5 == "skipped" or steps.config == "skipped":
+        for status, outcome in (
+            (steps.md5, OutcomeId.must_validate_md5_mismatch),
+            (steps.config, OutcomeId.must_validate_config_mismatch),
+            (steps.fuzzy, OutcomeId.fuzzy_check_failed),
+            (steps.auxiliary, OutcomeId.should_have_aux_missing),
+        ):
+            if status == "FAIL":
+                return outcome
+        if "skipped" in (steps.md5, steps.config):
             # Tier mapping (strict/lenient) is the retry loop's job.
             return OutcomeId.must_validate_skipped
 
