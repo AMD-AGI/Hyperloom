@@ -62,19 +62,24 @@ from hyperloom_multibranch.contracts.notebook.records import (
 from hyperloom_multibranch.contracts.notebook.vocab import (
     ClaimStatus,
     Conclusion,
+    LearningKind,
     LineageKind,
     QuarantineAction,
     UsageSource,
 )
 from hyperloom_multibranch.contracts.toolbox import CancelOutcome, MeasurementCapacity
 from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.notebook.knowledge.learning_recall import LearningRecall
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV, SKIPPED
 from hyperloom_multibranch.notebook.rsi.briefing import SessionBriefs
 from hyperloom_multibranch.notebook.rsi.calibration import DEFAULT_POLICY, PolicyChoice
 from hyperloom_multibranch.notebook.rsi import scorers
 from hyperloom_multibranch.notebook.rsi.authoring import NO_ARCHIVE
 from hyperloom_multibranch.notebook.rsi.frontier import FRONTIER_V1_LABEL, SETTLED_TESTS, Estimate, FrontierPolicy
+from hyperloom_multibranch.notebook.rsi.lesson_recall import LessonRecall
+from hyperloom_multibranch.notebook.rsi.lessons import LessonPool, LessonRevision, lesson_id_for, revision_id_for
 from hyperloom_multibranch.notebook.rsi.session import FRONTIER_LOG
+from hyperloom_multibranch.notebook.rsi.similarity import TaskConditions
 from hyperloom_multibranch.notebook.tests.factories import delta, intent, request
 from hyperloom_multibranch.rulegate.critic import (
     CriticReply,
@@ -109,6 +114,7 @@ from hyperloom_multibranch.scheduling.lifecycle import (
     FORCED_DEFAULT_EVIDENCE,
     FRONTIER_SCORER_KEY,
     GRACE_KEY,
+    LESSONS_KEY,
     SCORER_FALLBACK_REASON,
     PINNED_EVIDENCE,
     FRONTIER_POLICY_KEY,
@@ -318,6 +324,7 @@ class Stage:
     repo_type: type[HeldGitRepo] = HeldGitRepo
     critic: Callable[[UsageSink], FixReviewer] = lambda _usage: NoCritic()
     scorer_author: ScriptedCompletion = field(default_factory=ScriptedCompletion)
+    learnings: LearningRecall | None = None
     toolbox: RecordingToolbox = field(init=False)
     sessions: RecordedSessions = field(init=False)
     repo: HeldGitRepo = field(init=False)
@@ -365,7 +372,7 @@ class Stage:
         )
         runtime.refusing = self.refusing
         self.toolbox, self.repo, self.setup = toolbox, repo, setup
-        self.briefs = SessionBriefs(self.handle(Role.OBSERVER), repo=repo)
+        self.briefs = SessionBriefs(self.handle(Role.OBSERVER), repo=repo, learnings=self.learnings)
         mcp = McpServer(McpServerConfig(host_token="t" * MIN_TOKEN_LENGTH), campaign=setup.layout.session_id)
         gate = session_gate(
             self.handle(Role.GATE), toolbox, rule, polling=Polling(VIRTUAL_POLL_SECONDS, self.time.sleep)
@@ -501,6 +508,7 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
     assert fingerprint.policy_versions[FRONTIER_POLICY_KEY] == DEFAULT_POLICY
     assert fingerprint.policy_versions[FRONTIER_SCORER_KEY] == FRONTIER_V1_LABEL
     assert fingerprint.policy_versions[GRACE_KEY] == str(SETTLED_TESTS)
+    assert fingerprint.policy_versions[LESSONS_KEY] == ""
     [policy] = [row for row in _decisions(stage) if row["kind"] == "prelude" and row["reason"] == "scheduling policy"]
     assert policy["detail"] == {"values": dict(SCHEDULING_POLICY)}
     assert dict(fingerprint.sockets) == socket_versions()
@@ -794,6 +802,31 @@ async def test_a_challenger_session_scores_with_the_challenger_the_notebook_offe
     else:
         assert len(champion) == 1 and manifest[FRONTIER_POLICY_KEY] == CHOSEN_LABEL
         assert (manifest[CHALLENGER_KEY], decided["detail"]["challenger"]) == ("0", False)
+
+
+async def test_the_manifest_names_the_lesson_pool_as_the_specialists_recall_read_it(tmp_path: Path) -> None:
+    pool = LessonPool(tmp_path / "pool")
+    pool.write(
+        LessonRevision(
+            revision_id_for("past"),
+            lesson_id_for("past"),
+            LearningKind.PITFALL,
+            "the bare --cuda-graph-max-bs is ambiguous; use the -decode form",
+            TaskConditions(),
+            "specialist:past-1/b05",
+            0.0,
+            session_id="past-1",
+        )
+    )
+    read = pool.digest()
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.learnings = LessonRecall(pool=pool)
+    _script(stage)
+
+    outcome = await stage.run()
+
+    assert outcome.exit_code == 0 and read != ""
+    assert json.loads(stage.layout.manifest.read_text())["policy_versions"][LESSONS_KEY] == read
 
 
 async def test_a_pinned_scorer_is_never_a_challenger_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

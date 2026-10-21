@@ -34,12 +34,17 @@ from hyperloom.measure import compile as compile_module
 from hyperloom.measure.compile import ComponentLayout, LocalBlobStore, PackageBase, UnsupportedComponentError
 from hyperloom.measure.hosted_spec import SpecContext
 from hyperloom.measure.pins import ActiveImage, pinned_tool_commits
+from hyperloom_kb import ReadStatus
 from hyperloom_multibranch.contracts.gate import RegressionOutcome
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent
-from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, InboxKind, LineageKind
+from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, InboxKind, LearningKind, LineageKind
 from hyperloom_multibranch.notebook import STALL_TESTS, LocalNotebook
-from hyperloom_multibranch.notebook.tests.factories import intent, judgement, request, result
+from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV, TreeArchive
+from hyperloom_multibranch.notebook.rsi.lesson_recall import LessonRecall
+from hyperloom_multibranch.notebook.rsi.lessons import LessonPool, LessonRevision, lesson_id_for, revision_id_for
+from hyperloom_multibranch.notebook.rsi.similarity import task_conditions
+from hyperloom_multibranch.notebook.tests.factories import START, intent, judgement, profile, request, result
 from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST, SpecialistGrant
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.rulegate.critic import NoCritic
@@ -64,6 +69,7 @@ from hyperloom_multibranch.scheduling.local_peers import (
     measurement_host,
     require_framework_package,
     specialist_command,
+    specialist_recall,
     workload_environment,
     workload_rule,
     _specialist_role,
@@ -459,11 +465,43 @@ async def test_an_agentx_session_measures_the_agentx_benchmark_its_prelude_child
         )
 
 
+def test_the_specialists_recall_no_past_learnings_whatever_experience_kb_the_environment_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HYPERLOOM_KB_URL", "http://127.0.0.1:9/kb")
+    monkeypatch.delenv(ARCHIVE_ENV, raising=False)
+
+    past = specialist_recall(tmp_path).past(profile(), "kv cache", limit=5)
+
+    assert (past.status, past.items) == (ReadStatus.DISABLED.value, ())
+
+
+def test_the_specialists_recall_past_sessions_lessons_from_the_pool_beside_the_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(ARCHIVE_ENV, str(tmp_path / "archive"))
+    lesson = LessonRevision(
+        revision_id_for("past"),
+        lesson_id_for("past"),
+        LearningKind.PITFALL,
+        "the bare --cuda-graph-max-bs is ambiguous; use the -decode form",
+        task_conditions(profile()),
+        "specialist:past-1/b05",
+        START,
+        session_id="past-1",
+    )
+    LessonPool.beside(TreeArchive(tmp_path / "archive")).write(lesson)
+
+    recall = specialist_recall(tmp_path / "reports")
+
+    assert recall.knows(lesson.lesson_id) and recall.past_revision() != ""
+
+
 async def test_the_real_peers_live_inside_the_session_directory(built: _Built) -> None:
     layout, setup, peers, wiring = built.layout, built.setup, built.peers, built.wiring
     assert (wiring.setup, wiring.repo, wiring.briefs) == (setup, peers.repo, peers.briefs)
     assert isinstance(peers.lifecycle, SpecialistRuntime) and peers.briefs.warm == ()
-    assert peers.briefs.repo is peers.repo
+    assert peers.briefs.repo is peers.repo and isinstance(peers.briefs.learnings, LessonRecall)
     assert isinstance(peers.toolbox, LocalHostedToolbox) and isinstance(peers.repo, GitExperimentRepo)
     canonical = yaml.safe_load((layout.toolbox / "canonical" / "canonical.yaml").read_text())["benchmark"]
     assert (canonical["model"], canonical["runner_type"], canonical["inferencex_path"]) == (
