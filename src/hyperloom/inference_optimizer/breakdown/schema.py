@@ -184,12 +184,9 @@ class V6GradingTputGuard(TypedDict, total=False):
 class V6Grading(TypedDict, total=False):
     """The grading mode this session was started in.
 
-    ``objective`` is a mode marker written at session start: an interactivity
-    session always carries ``e2e_norm_intvty_p90``, which is not the axis a
-    promotion is decided on. That axis is ``outcome.validation.graded_on`` /
-    ``outcome.final.graded_on``, read off the promotion itself. A session that
-    adopted nothing has none; one that adopted but never validated reports the
-    adoption axis.
+    ``objective`` is a start-time mode marker (``e2e_norm_intvty_p90`` on an interactivity session), not the
+    promotion axis: that is ``outcome.validation.graded_on`` / ``outcome.final.graded_on``, absent when nothing
+    was adopted and the adoption axis when nothing was validated.
     """
 
     benchmark_mode: str
@@ -2047,6 +2044,7 @@ class V6KernelRewriteE2E(TypedDict, total=False):
     decision: str | None
     patch_path: str | None
     target_file: str | None
+    graded_objective: str | None
 
 
 class V6KernelRebenchEngagement(TypedDict, total=False):
@@ -2357,6 +2355,7 @@ class V6KernelAttempt(TypedDict, total=False):
     backends_tried: list[str]
     speedup: float | None
     gain_pct: float | None
+    gain_axis: str | None  # kernel_micro, output_throughput or the gate's graded axis
     compile_status: str
     correctness: bool | None
     artifact_path: str
@@ -2385,6 +2384,7 @@ class V6KernelDeliveredRow(TypedDict, total=False):
     ref: str
     kernel_id: str
     gain_pct: float | None
+    gain_axis: str | None
     settled_by: str
 
 

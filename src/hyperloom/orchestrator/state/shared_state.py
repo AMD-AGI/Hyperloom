@@ -1656,22 +1656,19 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         return entry
 
     def _record_integrate_verdict_on_timeline(self, entry: dict[str, Any] | None) -> None:
-        """Mirror one settled integrate verdict onto the KERNEL timeline.
-
-        Args:
-            entry (dict[str, Any] | None): The attempts entry the settlement
-                produced, or ``None`` when nothing settled.
-        """
+        """Mirror one settled integrate verdict onto the KERNEL timeline."""
         if not isinstance(entry, dict):
             return
-        from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import record_integrate_verdict
+        from hyperloom.inference_optimizer.breakdown.recorder import kernel_event
 
         last = (entry.get("attempts") or [{}])[-1]
         last = last if isinstance(last, dict) else {}
         rejected = entry.get("rejected")
-        record_integrate_verdict(
-            macro_cycle=int(getattr(self, "macro_cycle", 0) or 0),
-            integration_id=str(entry.get("integration_id") or ""),
+        cycle = int(getattr(self, "macro_cycle", 0) or 0)
+        integration_id = str(entry.get("integration_id") or "")
+        kernel_event.record_integrate_verdict(
+            macro_cycle=cycle,
+            integration_id=integration_id,
             kernel_id=str(entry.get("kernel_id") or ""),
             decision=str(entry.get("last_decision") or ""),
             status=str(entry.get("last_status") or ""),
@@ -1689,9 +1686,11 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             extra_server_args=str(entry.get("extra_server_args") or ""),
             basis=str(entry.get("basis") or ""),
             alignment_status=str(entry.get("alignment_status") or ""),
-            # Absent means attributable: every writer that cannot pin the
-            # gain on this one kernel says so explicitly.
+            # Absent means attributable; a writer that cannot pin the gain on this kernel says so.
             gain_attributed=bool(entry.get("validated", True)),
+        )
+        kernel_event.record_integrate_axis(
+            macro_cycle=cycle, integration_id=integration_id, graded_objective=str(last.get("graded_objective") or "")
         )
 
     def record_gemm_tuning(self, result: dict[str, Any]) -> None:
