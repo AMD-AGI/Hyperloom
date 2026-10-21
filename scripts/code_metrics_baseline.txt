@@ -533,7 +533,7 @@ function-lines src/hyperloom/inference_optimizer/cli/model_gate.py::_preflight_c
 function-lines src/hyperloom/inference_optimizer/cli/model_gate.py::_preflight_unsupported_model_arch 165
 function-lines src/hyperloom/inference_optimizer/cli/multi_node.py::_prepare_multi_node_state 90
 function-lines src/hyperloom/inference_optimizer/cli/multi_node.py::_replay_kernel_patches_for_multi_node 82
-function-lines src/hyperloom/inference_optimizer/cli/parser.py::_build_parser 981
+function-lines src/hyperloom/inference_optimizer/cli/parser.py::_build_parser 961
 function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_check_serving_framework 162
 function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_preflight 203
 function-lines src/hyperloom/inference_optimizer/multi_node/cli.py::build_parser 266

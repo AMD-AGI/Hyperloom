@@ -69,7 +69,8 @@ configuration.
 
 See [`src/hyperloom/inference_optimizer/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/SKILL.md)
 for the full prompt field reference (every field maps to a CLI flag defined in
-`cli/parser.py`, or in `cli/constraint_args.py` for the latency and power budgets).
+`cli/parser.py`, in `cli/constraint_args.py` for the latency and power budgets,
+or in `cli/gpu_power_args.py` for the GPU power settings).
 
 ## Monitor the run
 
