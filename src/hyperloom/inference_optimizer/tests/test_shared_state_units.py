@@ -300,6 +300,27 @@ class TestProfileWorkloadContext:
             "extra_envs": {"A": "1", "B": "2"},
         }
 
+    @pytest.mark.parametrize(
+        "args,rendered",
+        [
+            (
+                '--speculative-config {"method":"mtp","num_speculative_tokens":3} --max-num-seqs 64',
+                '--speculative-config {"method":"mtp","num_speculative_tokens":3} --max-num-seqs 64',
+            ),
+            (
+                "  --foo   bar --tool-call-parser 'kimi_k3' --quantization=\"fp8\" ",
+                "--foo bar --tool-call-parser kimi_k3 --quantization=fp8",
+            ),
+            ('--chat-template "unterminated', '--chat-template "unterminated'),
+            ('--speculative-config {"method":"mtp"', '--speculative-config {"method":"mtp"'),
+        ],
+        ids=["json", "plain", "unbalanced-quote", "unbalanced-json"],
+    )
+    def test_server_args_render_without_losing_json_quotes(self, args, rendered):
+        state = SharedState()
+        assert state.profile_workload_context({"extra_server_args": args})["server_args"] == rendered
+        assert state.profile_workload_context({"extra_server_args": rendered})["server_args"] == rendered
+
 
 class TestPolicyDenialAndPruned:
     def test_add_pruned_family_is_idempotent(self):

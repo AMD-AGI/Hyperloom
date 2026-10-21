@@ -8,7 +8,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import shlex
 import time
 import traceback
 from collections.abc import Callable, Iterator, Mapping
@@ -853,6 +852,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         overrides: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Return the normalized workload and runtime identity for a profile trace."""
+        from hyperloom.inference_optimizer.grid_server_args import normalize_server_args
+
         params = overrides if isinstance(overrides, dict) else {}
         context: dict[str, Any] = {}
         # benchmark_mode distinguishes AgentX from synthetic traces with the
@@ -889,11 +890,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             params.get("extra_server_args") if "extra_server_args" in params else params.get("base_extra_args")
         )
         server_args = str(raw_server_args or "").strip()
-        server_args = sanitize_profile_server_args(server_args)
-        try:
-            context["server_args"] = shlex.join(shlex.split(server_args)) if server_args else ""
-        except ValueError:
-            context["server_args"] = " ".join(server_args.split())
+        context["server_args"] = normalize_server_args(sanitize_profile_server_args(server_args))
 
         raw_envs = params.get("extra_envs") if "extra_envs" in params else params.get("base_extra_envs")
         if isinstance(raw_envs, dict):
