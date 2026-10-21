@@ -326,6 +326,10 @@ class FakeToolbox(RealToolbox):
             self.record_cold_start(self.config.attempt_seconds)
         return await super().queue_state()
 
+    @property
+    def single_node(self) -> bool:
+        return len(self.config.nodes) == 1
+
     async def measurement_capacity(self) -> MeasurementCapacity:
         """Cards of the fake fleet: ``gpu_count`` per node. The fake refuses every test once all nodes are
         quarantined, so the cards of a quarantined node are not usable here (the real toolbox keeps them usable)."""

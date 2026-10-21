@@ -110,6 +110,21 @@ async def test_a_leaked_card_does_not_quarantine_the_node(tmp_path: Path) -> Non
         await toolbox.close()
 
 
+async def test_a_local_toolbox_is_one_node_and_never_quarantines_it(tmp_path: Path) -> None:
+    notebook = LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"))
+    toolbox = _local_toolbox(tmp_path, notebook)
+    try:
+        await toolbox.start()
+        assert toolbox.single_node
+        await toolbox._node_failed(NODE, "infra failure", reproduced=True)
+        await toolbox._node_failed(NODE, "unclear failure", reproduced=False)
+        await toolbox._node_failed(NODE, "unclear failure", reproduced=False)
+        assert toolbox.quarantined == frozenset() and await notebook.quarantined() == ()
+        assert toolbox.node_failures == {NODE: 3}
+    finally:
+        await toolbox.close()
+
+
 async def test_node_quarantine_leaves_usable_cards_unchanged(tmp_path: Path) -> None:
     notebook = LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"))
     toolbox = _local_toolbox(tmp_path, notebook)

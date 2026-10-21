@@ -557,7 +557,28 @@ class RealToolbox:
 
     # --- quarantine ----------------------------------------------------------------------------------------------
 
+    @property
+    def single_node(self) -> bool:
+        """Whether every test of this toolbox runs on one node, which a quarantine would only mark ``same_node``.
+
+        A toolbox that does not know its nodes says ``False`` and quarantines as the rule has it.
+        """
+
+        return False
+
+    @property
+    def node_failures(self) -> dict[str, int]:
+        """The failures reported against each node this session, quarantined or not."""
+
+        return dict(self._quarantine.failures)
+
     async def _node_failed(self, node: str, reason: str, reproduced: bool) -> None:
+        failures = self._quarantine.count_failure(node)
+        if self.single_node:
+            logger.info(
+                "node %s not quarantined: single node (%d failures counted; latest: %s)", node, failures, reason
+            )
+            return
         if reproduced:
             await self._quarantine.add(node, reason)
         else:

@@ -320,6 +320,37 @@ async def test_a_second_unclear_failure_that_did_not_reproduce_on_one_node_quara
     assert await _reran_clear(box, _request("b2", avoid_nodes=(other,))) == node
     assert box.quarantined == {node}
     assert [e.node for e in book.of("quarantine")] == [node]
+    assert box.node_failures == {node: 2}
+
+
+async def test_two_non_reproducing_failures_on_the_only_node_are_counted_and_do_not_quarantine_it(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    book = Notebook()
+    box = _toolbox(notebook=book, nodes=("a",))
+    assert box.single_node
+    with caplog.at_level("INFO", logger="hyperloom_multibranch.toolbox.toolbox"):
+        assert await _reran_clear(box) == "a"
+        assert await _reran_clear(box, _request("b2")) == "a"
+    assert box.quarantined == set() and book.of("quarantine") == []
+    assert box.node_failures == {"a": 2}
+    assert [r.getMessage().split(" (")[0] for r in caplog.records] == ["node a not quarantined: single node"] * 2
+    result = await _run_one(box, _request("b3"))
+    assert result.validity is Validity.SUCCEEDED and result.attempts[0].sandbox.same_node is False
+
+
+async def test_an_infra_failure_on_the_only_node_is_counted_and_does_not_quarantine_it() -> None:
+    book = Notebook()
+    box = _toolbox(notebook=book, nodes=("a",))
+    box.script(lambda r: True, [Fate.INFRA, Fate.OK])
+    result = await _run_one(box)
+    assert result.validity is Validity.SUCCEEDED and result.attempts[0].failure_class is FailureClass.INFRA
+    assert box.quarantined == set() and book.of("quarantine") == []
+    assert box.node_failures == {"a": 1}
+
+
+def test_a_fleet_of_several_nodes_is_not_a_single_node() -> None:
+    assert not _toolbox(nodes=("a", "b")).single_node and _toolbox(nodes=("a",)).single_node
 
 
 async def test_unclear_failures_that_did_not_reproduce_on_different_nodes_quarantine_none() -> None:

@@ -74,6 +74,12 @@ class LocalHostedToolbox(RealToolbox):
     sandboxes: Path
     _reported_cards: frozenset[int] = frozenset()
 
+    @property
+    def single_node(self) -> bool:
+        """Every test runs in a sandbox of the one machine the local provider stands for."""
+
+        return True
+
     async def measurement_capacity(self) -> MeasurementCapacity:
         """The provider's card pool, less the cards it lost for good (``provider.quarantined``); node quarantine does
         not reduce it."""

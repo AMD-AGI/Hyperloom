@@ -5,13 +5,16 @@
 
 A node enters the list when an attempt on it fails with an infrastructure failure the executor classified, or when a
 second unclear failure that did not reproduce on its rerun happens on it within the session (the toolbox's lifetime;
-the count is not persisted). A single non-reproducing unclear failure does not quarantine a node. Quarantine only widens ``avoid_nodes``; it never blocks a test: on a single node, avoiding it
-still creates the sandbox there and the result is marked same-node (design 4.9.3).
+the count is not persisted). A single non-reproducing unclear failure does not quarantine a node. Quarantine only widens
+``avoid_nodes``; it never blocks a test: on a single node, avoiding it still creates the sandbox there and the result is
+marked same-node (design 4.9.3), so a toolbox with one node counts the failures of its node (:meth:`count_failure`) and
+never quarantines it.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections import Counter
+from collections.abc import Iterable, Mapping
 
 from hyperloom_multibranch.contracts.notebook.records import QuarantineEvent
 from hyperloom_multibranch.contracts.notebook.vocab import QuarantineAction
@@ -23,6 +26,7 @@ class Quarantine:
         self._health = health
         self._nodes: set[str] = set()
         self._suspected: set[str] = set()
+        self._failures: Counter[str] = Counter()
 
     async def load(self) -> None:
         """Read the list the notebook holds; called once when the toolbox starts."""
@@ -37,6 +41,18 @@ class Quarantine:
     @property
     def nodes(self) -> frozenset[str]:
         return frozenset(self._nodes)
+
+    @property
+    def failures(self) -> Mapping[str, int]:
+        """How many failures were reported against each node this session, quarantined or not."""
+
+        return dict(self._failures)
+
+    def count_failure(self, node: str) -> int:
+        """Count one failure reported against ``node`` and return how many it has now."""
+
+        self._failures[node] += 1
+        return self._failures[node]
 
     async def add(self, node: str, reason: str, request_ids: Iterable[str] = ()) -> bool:
         """Quarantine ``node``; ``False`` when it already was (nothing is written twice)."""
