@@ -276,7 +276,8 @@ def read_bringup_log(path: Path) -> BringupLog:
     Neither what the ladder looks for nor where it lies is bounded: a build that
     logs per kernel shape pushes the later milestones megabytes in, and a worker's
     root traceback can sit megabytes above the engine-dead consequence that ends
-    the log.
+    the log. The read is linear in the log's size, so callers run it off the
+    event loop.
 
     A log that was never written and a log the mount refuses to serve are
     different answers, and both are answers: an ESTALE or EIO on the session
@@ -3494,7 +3495,7 @@ class BenchmarkRunExecutor:
         except subprocess.TimeoutExpired as exc:
             # A reaped timeout carries no wrapper streams; the server log is
             # the whole of the evidence.
-            record_bringup()
+            await asyncio.to_thread(record_bringup)
             timeout_destination = select_run_workspace(output_dir, known_before=workspaces_before) or output_dir
             timeout_harvested = harvest_leaked_artifacts(
                 timeout_destination,
@@ -3510,9 +3511,8 @@ class BenchmarkRunExecutor:
                 **capture_meta,
             }
 
-        server_log_text = record_bringup(
-            wrapper_stderr=proc_stderr or "",
-            wrapper_stdout=proc_stdout or "",
+        server_log_text = await asyncio.to_thread(
+            record_bringup, wrapper_stderr=proc_stderr or "", wrapper_stdout=proc_stdout or ""
         )
         boot_observation_ref = capture_meta["boot_observation_path"]
 
