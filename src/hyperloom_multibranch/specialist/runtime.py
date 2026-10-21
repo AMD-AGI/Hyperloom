@@ -9,11 +9,14 @@ sweeping the same settings.
 
 A session that crashes is restarted on its branch, at most ``MAX_RESTARTS`` times within ``RESTART_WINDOW_S``, and a
 lost one at most ``MAX_LOSS_RESTARTS`` times in a row with no session working in between: a loss takes the heartbeat
-timeout, so losses alone never fill the window. Past either the branch keeps its judge, which settles what was already measured,
-and the scheduler stops it as it stops any branch that makes no progress; ``status`` tells it. A judge that fails is a defect of this code, not of the specialist: it is not
-restarted, and the branch's session is stopped so no candidate is measured that nothing would judge. Both leave a
-notice in the branch log. While the specialist writes a change, the runtime renews the claims it holds, so a claim does
-not lapse while a model thinks; once a test carries a claim, the toolbox renews it.
+timeout, so losses alone never fill the window. A session that ends idle, its model finding nothing to test, is no
+crash: it is restarted, and it ends a run of losses as a session that worked does, but ``MAX_IDLE_SESSIONS`` of them
+in a row with no test requested in any are not restarted. Past any of these the branch keeps its judge, which settles
+what was already measured, and the scheduler stops it as it stops any branch that makes no progress; ``status`` tells
+it. A judge that fails is a defect of this code, not of the specialist: it is not restarted, and the branch's session
+is stopped so no candidate is measured that nothing would judge. Both leave a notice in the branch log. While the
+specialist writes a change, the runtime renews the claims it holds, so a claim does not lapse while a model thinks;
+once a test carries a claim, the toolbox renews it.
 """
 
 from __future__ import annotations
@@ -39,6 +42,7 @@ logger = logging.getLogger(__name__)
 MAX_RESTARTS = 3
 RESTART_WINDOW_S = 600.0
 MAX_LOSS_RESTARTS = 2
+MAX_IDLE_SESSIONS = 3
 
 
 class RuntimeNotebook(JudgeNotebook, ClaimService, Protocol):
@@ -56,9 +60,20 @@ class SessionCrashed(RuntimeError):
         self.lost, self.worked = lost, worked
 
 
+class SessionIdle(RuntimeError):
+    """A run of a branch's specialist ended because its model kept finding nothing to test.
+
+    ``tested`` says the branch requested a test during that run.
+    """
+
+    def __init__(self, reason: str, *, tested: bool) -> None:
+        super().__init__(reason)
+        self.tested = tested
+
+
 class Session(Protocol):
-    """One run of a branch's specialist: ``run`` returns once its work is done and raises when it crashed, a
-    :class:`SessionCrashed` when it can say how."""
+    """One run of a branch's specialist: ``run`` returns once its work is done, raises :class:`SessionIdle` when its
+    model kept finding nothing to test, and raises when it crashed, a :class:`SessionCrashed` when it can say how."""
 
     async def run(self) -> None: ...
 
@@ -174,13 +189,24 @@ class SpecialistRuntime:
 
     async def _supervise(self, state: _Branch) -> None:
         crashes: deque[float] = deque()
-        losses = 0
+        losses = idle = 0
         while True:
             start = SessionStart(state.name, state.start_commit, state.k, state.task)
             state.session = self._sessions(start)
             try:
                 await state.session.run()
                 return
+            except SessionIdle as error:
+                await state.session.stop()
+                losses, idle = 0, 0 if error.tested else idle + 1
+                if idle >= MAX_IDLE_SESSIONS:
+                    why = f"found nothing to test in {idle} sessions in a row"
+                    logger.warning("the specialist of %s %s", state.name, why)
+                    state.session, state.gave_up = None, True
+                    await _notice(state, f"the specialist {why}; it is not restarted")
+                    return
+                logger.info("the specialist of %s ended idle: %s", state.name, error)
+                await _notice(state, f"the specialist ended idle ({error}) and is restarted on this branch")
             except Exception as error:
                 logger.exception("the specialist of %s crashed", state.name)
                 await state.session.stop()
@@ -244,12 +270,14 @@ def _log_failure(task: asyncio.Task[None]) -> None:
 
 
 __all__ = [
+    "MAX_IDLE_SESSIONS",
     "MAX_LOSS_RESTARTS",
     "MAX_RESTARTS",
     "RESTART_WINDOW_S",
     "RuntimePacing",
     "Session",
     "SessionCrashed",
+    "SessionIdle",
     "SessionFactory",
     "SessionStart",
     "SpecialistRuntime",

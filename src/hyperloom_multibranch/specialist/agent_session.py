@@ -8,7 +8,8 @@ Every session starts at the branch head, with the worktree synced to it and a la
 rebuilt at that head when the setup can, and the branch log. A Claude CLI keeps its stdin open and lives across turns:
 when a turn ends, the session waits, keeping its heartbeat, until something arrives for the branch (an inbox item or a
 runtime notice) and sends it to the CLI as the next message, so the model goes on with its whole conversation. A turn
-that ends with no test of the branch running and nothing arrived is nudged; ``IDLE_TURNS`` such turns in a row raise.
+that ends with no test of the branch running waits a patience for something to arrive, and is nudged when nothing did;
+``IDLE_TURNS`` such turns in a row end the session with :class:`SessionIdle`, which is no crash.
 A session that ends as a session should, its CLI exiting or its deadline reached, is followed by a fresh one: a
 branch runs until the scheduler stops it. One that ends within ``min_session_seconds`` while its branch has a test in
 flight ended to wait for it: the next launch starts once that test has its result. One that is lost, exits with an
@@ -54,7 +55,7 @@ from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST, Specialist
 from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.llm_usage import launch_usage
 from hyperloom_multibranch.specialist.prompts import launch_prompt, nudge_message, wake_message
-from hyperloom_multibranch.specialist.runtime import SessionCrashed, SessionStart
+from hyperloom_multibranch.specialist.runtime import SessionCrashed, SessionIdle, SessionStart
 from hyperloom_multibranch.specialist.tools import sync_to_head
 from hyperloom_multibranch.specialist.worktree import BranchWorktree
 
@@ -67,9 +68,12 @@ MIN_SESSION_S = 120.0
 #: A launch's own deadline, past any session: the scheduler ends a branch that stops gaining, and the liveness check
 #: ends a CLI that hangs, so a deadline would only cut a working conversation short.
 SPECIALIST_SESSION_S = 14 * 24 * 3600.0
-#: Turns in a row a model may end with no test of its branch running and nothing arrived, each nudged, before its
-#: session raises: a model that keeps stopping must not be woken forever.
-IDLE_TURNS = 3
+#: How long a turn that ended with no test of its branch running waits for something to arrive before it counts as
+#: idle, one patience per idle turn in a row: a result or a notice often lands minutes after a model stops.
+NUDGE_WAITS_S = (60.0, 180.0, 300.0)
+#: Idle turns in a row that end a session, all but the last nudged: a model that keeps stopping must not be woken
+#: forever.
+IDLE_TURNS = len(NUDGE_WAITS_S)
 #: A session silent this long, with no log growth, CPU work or tool call in flight, is hung: a test takes about eight
 #: minutes and one reasoning step can take as long, and Claude streams its reasoning into the log.
 SPECIALIST_LOST_AFTER_S = 600.0
@@ -160,7 +164,8 @@ class AgentSetup:
 
     ``env`` is the environment the CLI runs with, the branch's MCP token added; the session decides nothing about it.
     ``briefs(branch, head)`` rebuilds a branch's brief at the head a launch starts at; without it, every launch shows
-    the brief the branch was started with.
+    the brief the branch was started with. ``nudge_waits_s`` are the patiences of idle turns in a row; there are as
+    many idle turns as patiences.
     """
 
     command: AgentCommand
@@ -174,6 +179,7 @@ class AgentSetup:
     session_seconds: float = SPECIALIST_SESSION_S
     min_session_seconds: float = MIN_SESSION_S
     poll_seconds: float = 5.0
+    nudge_waits_s: tuple[float, ...] = NUDGE_WAITS_S
     clock: Callable[[], float] = time.time
 
 
@@ -194,7 +200,8 @@ class BranchPlace:
 
 
 class AgentSession:
-    """One run of a model-backed specialist: CLI sessions on its branch until it is stopped or one crashes."""
+    """One run of a model-backed specialist: CLI sessions on its branch until it is stopped or one crashes or
+    ends idle."""
 
     def __init__(self, start: SessionStart, setup: AgentSetup, place: BranchPlace) -> None:
         self._start, self._setup, self._place = start, setup, place
@@ -202,8 +209,10 @@ class AgentSession:
         self._handle: AgentHandle | None = None
         self._beat: Beat | None = None
         self._recorded: Mapping[str, TokenCounts] = {}
+        self._began = 0.0
 
     async def run(self) -> None:
+        self._began = self._setup.clock()
         grant = self._setup.tokens.issue(self._start.branch, frozenset({SCOPE_SPECIALIST}))
         last_end = ""
         while not self._stopped.is_set():
@@ -221,7 +230,8 @@ class AgentSession:
         self._setup.tokens.revoke(self._start.branch)
 
     async def _session(self, grant: SpecialistGrant, last_end: str) -> str:
-        """Run one CLI session to its end and say how it ended; raises :class:`SessionCrashed` when it did not work.
+        """Run one CLI session to its end and say how it ended; raises :class:`SessionCrashed` when it did not work and
+        :class:`SessionIdle` when its model kept finding nothing to test.
 
         ``last_end`` is how the previous session of this run ended, empty until one ended well."""
         branch, worktree, clock = self._start.branch, self._place.worktree, self._setup.clock
@@ -251,36 +261,40 @@ class AgentSession:
         return "it reached its deadline" if status.timed_out else "its model finished its turn"
 
     async def _converse(self, handle: AgentHandle, logged: int) -> AgentStatus:
-        """Wait for the CLI to end; an interactive one whose turn ended is sent what arrived since, or a nudge.
+        """Wait for the CLI to end; an interactive one whose turn ended is sent what arrived since, or a nudge, and
+        raises :class:`SessionIdle` once its turns ended idle as many times in a row as it has patiences.
 
         ``logged`` is how many branch-log entries the launch prompt was built from: notices past it are new."""
         turns = TurnLog(self._place.workspace / PROCESS_LOG) if self._setup.command.interactive else None
         seen = _Seen((await self._place.notebook.poll(self._start.branch)).cursor, logged)
+        waits = self._setup.nudge_waits_s
         sent = idle = 0
         while True:
             status = await self._wait(handle, turns, sent + 1)
             if status is not None:
                 return status
             await self._record_cost()
-            message = await self._wake(handle, seen)
+            message = await self._wake(handle, seen, waits[idle])
             if message is None:
                 return await self._setup.runner.poll(handle)
             idle = 0 if message else idle + 1
-            if idle > IDLE_TURNS:
+            if idle == len(waits):
                 self._handle = None
                 await self._finish(handle, cancel=True)
-                raise SessionCrashed(f"its model ended {IDLE_TURNS} turns in a row with nothing to test", worked=True)
+                tested = await self._tested_since(self._began)
+                raise SessionIdle(f"its model ended {idle} turns in a row with nothing to test", tested=tested)
             try:
                 await self._setup.runner.send(handle, self._setup.command.message(message or nudge_message()).encode())
             except AgentEnded:
                 return await self._setup.runner.poll(handle)
             sent += 1
 
-    async def _wake(self, handle: AgentHandle, seen: _Seen) -> str | None:
+    async def _wake(self, handle: AgentHandle, seen: _Seen, patience: float) -> str | None:
         """Wait, beating the heartbeat, until something arrives for the branch, and move ``seen`` past it. An empty
-        message asks for a nudge: nothing arrived and nothing of the branch runs. ``None`` once the session is stopped
-        or the CLI ended."""
-        notebook, branch = self._place.notebook, self._start.branch
+        message asks for a nudge: nothing arrived while nothing of the branch ran for ``patience`` seconds. ``None``
+        once the session is stopped or the CLI ended."""
+        notebook, branch, loop = self._place.notebook, self._start.branch, asyncio.get_running_loop()
+        quiet_since: float | None = None
         while not self._stopped.is_set() and (await self._setup.runner.poll(handle)).state == _RUNNING:
             if self._beat is not None:
                 self._beat()
@@ -295,8 +309,12 @@ class AgentSession:
             seen.profiles = {record.request_id for record in shared if record.in_flight}
             if page.items or notices or landed:
                 return wake_message((*page.items, *landed), notices)
-            if not seen.profiles and not await self._tests_in_flight():
-                return ""
+            if seen.profiles or await self._tests_in_flight():
+                quiet_since = None
+            else:
+                quiet_since = loop.time() if quiet_since is None else quiet_since
+                if loop.time() - quiet_since >= patience:
+                    return ""
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(self._stopped.wait(), self._setup.poll_seconds)
         return None
@@ -305,6 +323,11 @@ class AgentSession:
         branch = self._start.branch
         records = (await self._place.notebook.snapshot()).records
         return any(record.request.branch == branch and record.in_flight for record in records)
+
+    async def _tested_since(self, since: float) -> bool:
+        branch = self._start.branch
+        records = (await self._place.notebook.snapshot()).records
+        return any(record.request.branch == branch and record.requested_at >= since for record in records)
 
     async def _shared_profiles(self) -> list[TestRecord]:
         """Other branches' profiles of this branch's head: a specialist whose own profile was refused as
@@ -478,6 +501,7 @@ def _describe(status: AgentStatus, seconds: float) -> str:
 
 __all__ = [
     "IDLE_TURNS",
+    "NUDGE_WAITS_S",
     "SPECIALIST_SESSION_S",
     "MCP_SERVER",
     "MIN_SESSION_S",

@@ -18,7 +18,7 @@ judge opens after the opening batch starts from the integration head, briefed on
 frontier-scored progress, how similar archived sessions went, which running branches made much the same change, the
 events since its last call, how far each branch lies behind the integration head, whether a profile of the integration
 head runs, the GPU hours and the LLM dollars the specialists and the scheduler itself spent so far, and what is known of
-each running branch's specialist (given up after its crashes, stopped because its judging failed, its heartbeat lost
+each running branch's specialist (given up, stopped because its judging failed, its heartbeat lost
 again and again), and decides what to stop; a judge call that has not answered by the EXPLORE deadline counts as failed,
 and a branch that has not opened by then is withdrawn, so neither eats into FINAL. The integrator merges in a background
 task of its own, in rounds as wide as the integration branch's K. When EXPLORE ends that task is cancelled and the

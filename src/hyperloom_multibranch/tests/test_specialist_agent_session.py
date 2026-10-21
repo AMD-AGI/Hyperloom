@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -25,6 +26,7 @@ from hyperloom_multibranch.notebook.tests.factories import intent, request, resu
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.specialist.agent_session import (
     IDLE_TURNS,
+    NUDGE_WAITS_S,
     SPECIALIST_SESSION_S,
     WAITED_END,
     AgentCommand,
@@ -33,7 +35,7 @@ from hyperloom_multibranch.specialist.agent_session import (
     BranchPlace,
 )
 from hyperloom_multibranch.specialist.judging import NOTICE
-from hyperloom_multibranch.specialist.runtime import SessionCrashed, SessionStart
+from hyperloom_multibranch.specialist.runtime import SessionCrashed, SessionIdle, SessionStart
 from hyperloom_multibranch.specialist.worktree import SourceBase
 
 BRANCH, TOKEN_ENV, FIRST_PID = "s1", "HYPERLOOM_SPECIALIST_MCP_TOKEN", 4000
@@ -43,6 +45,7 @@ ROOT = Recipe(
     components=(ComponentPatches("vllm", "https://github.com/vllm-project/vllm", "1" * 40),),
 )
 EXITED_WELL = AgentStatus("exited", 0, None)
+NO_WAITS = (0.0,) * IDLE_TURNS
 LOST = AgentStatus("lost", None, None, error="no heartbeat for more than 300s")
 
 
@@ -302,26 +305,67 @@ async def test_a_runtime_notice_written_while_the_turn_is_over_reaches_the_cli(r
     assert "you may now have 3 tests running at once" in rig.runner.sent[0]
 
 
-async def test_turns_that_end_with_nothing_running_are_nudged_until_too_many_in_a_row_raise(rig):
-    session = rig.session()
+async def test_idle_turns_in_a_row_with_nothing_running_end_the_session_idle_with_a_nudge_between(rig):
+    await rig.toolbox_notebook.write_request(request("r0", intent(BRANCH, rig.root)))
+    await rig.toolbox_notebook.write_result(result("r0"))
+    rig.clock.now = time.time()
+    session = rig.session(nudge_waits_s=NO_WAITS)
     running = asyncio.create_task(session.run())
     await _until(lambda: len(rig.runner.specs) == 1, "the launch")
 
-    for nudged in range(1, IDLE_TURNS + 1):
+    for nudged in range(1, IDLE_TURNS):
         _end_turn(rig)
         await _until(lambda n=nudged: len(rig.runner.sent) == n, f"nudge {nudged}")
     _end_turn(rig)
 
-    with pytest.raises(SessionCrashed, match=f"{IDLE_TURNS} turns in a row") as raised:
+    with pytest.raises(SessionIdle, match=f"{IDLE_TURNS} turns in a row") as raised:
         await asyncio.wait_for(running, 1)
-    assert not raised.value.lost
+    assert not raised.value.tested
+    assert IDLE_TURNS == len(NUDGE_WAITS_S) and len(rig.runner.sent) == IDLE_TURNS - 1
     assert all("nothing new for your branch" in text for text in rig.runner.sent)
     assert (rig.runner.cancelled, rig.runner.collected) == ([1], [1])
 
 
+async def test_an_idle_session_that_requested_a_test_says_it_tested(rig):
+    rig.clock.now = time.time()
+    session = rig.session(nudge_waits_s=NO_WAITS)
+    running = asyncio.create_task(session.run())
+    await _until(lambda: len(rig.runner.specs) == 1, "the launch")
+    await rig.toolbox_notebook.write_request(request("r1", intent(BRANCH, rig.root)))
+    await rig.toolbox_notebook.write_result(result("r1"))
+
+    _end_turn(rig)
+    await _until(lambda: len(rig.runner.sent) == 1, "the result to wake the CLI")
+    for _ in range(IDLE_TURNS):
+        _end_turn(rig)
+
+    with pytest.raises(SessionIdle) as raised:
+        await asyncio.wait_for(running, 1)
+    assert raised.value.tested
+
+
+async def test_what_arrives_within_the_patience_wakes_the_model_instead_of_a_nudge(rig):
+    session = rig.session(nudge_waits_s=(30.0,) * IDLE_TURNS)
+    running = asyncio.create_task(session.run())
+    await _until(lambda: len(rig.runner.specs) == 1, "the launch")
+
+    _end_turn(rig)
+    beats = rig.runner.beats
+    await _until(lambda: rig.runner.beats > beats + 2, "the patience to be waited, beating")
+    assert rig.runner.sent == []
+    await rig.notebook.append_branch_log(
+        BranchLogEntry(BRANCH, BranchLogType.RESULT, f"{NOTICE} you may now have 3 tests running at once")
+    )
+    await _until(lambda: len(rig.runner.sent) == 1, "the notice to wake the CLI")
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+
+    assert "3 tests running at once" in rig.runner.sent[0] and "nothing new" not in rig.runner.sent[0]
+
+
 async def test_each_turn_records_the_tokens_it_added(rig):
     await rig.toolbox_notebook.write_request(request("r1", intent(BRANCH, rig.root)))
-    session = rig.session(command=AgentCommand("claude", "claude", model="claude-opus-5-5"))
+    session = rig.session(command=AgentCommand("claude", "claude", model="claude-opus-5-5"), nudge_waits_s=NO_WAITS)
     running = asyncio.create_task(session.run())
     await _until(lambda: len(rig.runner.specs) == 1, "the launch")
     init = {"type": "system", "subtype": "init", "session_id": "sess-1"}

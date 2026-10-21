@@ -124,11 +124,12 @@ max_llm_usd is the specialist_llm_usd plus scheduler_llm_usd at which the sessio
 or null when it is not limited: as that sum nears it, a branch opened now has few launches left.
 A specialist branch's specialist, shown only when the specialist runtime reports it, says whether its specialist is
 running, how many times it crashed (crashes) and how many times it was restarted after its heartbeat was lost (lost),
-whether the runtime gave up restarting it after repeated crashes or after several sessions in a row lost their
-heartbeat (gave_up), and whether it was stopped because judging its tests failed (judge_failed). A branch whose
-specialist gave up or whose judging failed makes no more progress but holds its slot until you stop it: stop it, and
-open a branch in its place if one would still pay off. Each lost heartbeat costs minutes: weigh a specialist's lost
-count against its progress, and stop it when it keeps losing its heartbeat without gaining.
+whether the runtime gave up restarting it after repeated crashes, after several sessions in a row lost their
+heartbeat or after several sessions in a row found nothing to test (gave_up), and whether it was stopped because
+judging its tests failed (judge_failed). A branch whose specialist gave up or whose judging failed makes no more
+progress but holds its slot until you stop it: stop it, and open a branch in its place if one would still pay off.
+Each lost heartbeat costs minutes: weigh a specialist's lost count against its progress, and stop it when it keeps
+losing its heartbeat without gaining.
 A branch of origin user follows a direction the user wrote; such branches open from the root commit ahead of the
 opening batch, and the opening batch fills the slots they leave. Every specialist branch, of any origin, has a grace:
 while its grace is true, until {SETTLED_TESTS} of its explore tests ended with a result, a failed one included, a
