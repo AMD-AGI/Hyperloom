@@ -242,7 +242,7 @@ def _geak_accepted_kernel_specs(result: Any) -> list[dict[str, Any]]:
             continue
         if delta <= 0.0:
             continue
-        name = str(k.get("short_name") or k.get("kernel_id") or k.get("cand_tag") or "").strip()
+        name = geak_spec_name(k)
         if not name:
             continue
         twin = (str(k.get("op_kind") or ""), f"{delta:.4f}")
