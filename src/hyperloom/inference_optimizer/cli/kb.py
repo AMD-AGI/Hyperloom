@@ -136,6 +136,7 @@ def _bootstrap_recipe_kb(
     extra_attrs = {
         "framework_name": state.framework or manifest.get("framework", ""),
         "model_class": state.model_class or "",
+        # Operator traceability.
         "claw_session_id": manifest.get("claw_session_id") or "",
         "sandbox_user_id": manifest.get("sandbox_user_id") or "",
     }

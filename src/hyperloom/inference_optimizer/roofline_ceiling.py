@@ -1289,6 +1289,7 @@ def compute_roofline_from_perfmodel(
     # Routed-expert weights may be a distinct precision (e.g. DeepSeek-V4 fp4 experts under fp8 attention); size the
     # MoE reads with it.
     expert_bpe = float(meta.expert_weight_dtype_bytes)
+    # Activations (input/output) are at least bf16 even for quantized-weight models.
     act_bpe = _activation_kv_dtype_bytes(meta)
 
     hidden = meta.hidden_size

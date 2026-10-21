@@ -328,7 +328,10 @@ def _apply_on_pod(
     sglang_version_pin: str | None,
     patch_set: str | None = None,
 ) -> dict[str, Any]:
-    """Apply or verify the TraceLens SGLang patch set on this pod; failures become ``status=failed``."""
+    """Apply (or verify) the TraceLens SGLang patch set on this pod; never raises (failures become ``status=failed``).
+
+    ``patch_set`` is the controller's choice and wins over the pod-side gate.
+    """
     started = time.time()
     result: dict[str, Any] = {
         "host": socket.gethostname(),
