@@ -5,19 +5,21 @@
 
 An iteration's archive is its candidate (``candidates/iter_NNN``), the plan it was built from, among the planning
 files of its round (``orchestration/iter_NNN``), the reasoning log the implementer kept beside that plan
-(``<plan>.reasoning.md``), its handoff (``handoffs/iter_NNN.json``), and its lesson (``lessons/iter_NNN.md``). An
-Experience keeps the whole reasoning log, which ``implementer_fields`` reads, and excerpts of the rest of the prose:
-``plan_text`` for a plan, which keeps the whole Summary line a plan opens with, and ``first_sentences`` for the
-others.
+(``<plan>.reasoning.md``), the report of the Analysis generation the round planned on
+(``analysis/<commit>/generation-NNN/report.md``), its handoff (``handoffs/iter_NNN.json``), and its lesson
+(``lessons/iter_NNN.md``). An Experience keeps the whole reasoning log, which ``implementer_fields`` reads, the whole
+Analysis report, which ``analysis_report`` finds, and excerpts of the rest of the prose: ``plan_text`` for a plan,
+which keeps the whole Summary line a plan opens with, and ``first_sentences`` for the others.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
+from hyperloom_kb.schema import TEXT_MAX_BYTES
 from kernelforge.knowledge.kb_store.identity.normalization import UNKNOWN_SEGMENT
 from kernelforge.knowledge.kb_store.identity.run import LoopKernel, resolve_loop_identity
 from kernelforge.orchestrator.summary_line import read_summary, reasoning_log_path
@@ -34,6 +36,8 @@ _FALLBACK_DRAFT = "\n## Original draft\n"
 _HEADING = re.compile(r"^#{1,6} (\S.*)$")
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=[A-Z`*\"'(\[])")
 _LIST_MARKER = re.compile(r"^(?:[-*+]|\d+[.)])\s+")
+#: A published Analysis generation's directory; an Analysis still at work writes under ``analysis/work/`` instead.
+_GENERATION = re.compile(r"^generation-\d{3,}$")
 
 
 def first_sentences(text: str, count: int = _EXCERPT_SENTENCES) -> str | None:
@@ -201,3 +205,57 @@ def implementer_fields(plan_file: Path | None) -> dict[str, Any]:
     log = reasoning_log_path(plan_file) if plan_file is not None else None
     record = read_text(log).strip() if log is not None and log.is_file() else ""
     return {"reasoning": record} if record else {}
+
+
+@dataclass(frozen=True)
+class AnalysisReport:
+    """The report.md of a published Analysis generation: the generation, ``analysis/<commit>/generation-NNN`` under
+    ``forge_experiments``, and the report's text."""
+
+    generation: str
+    text: str
+
+    @property
+    def fits(self) -> bool:
+        """Whether a text field holds the whole report."""
+
+        return len(self.text.encode()) <= TEXT_MAX_BYTES
+
+    def provenance(self) -> dict[str, str]:
+        """The generation the report comes from, and why its text is left out when a text field cannot hold it."""
+
+        record = {"analysis_generation": self.generation}
+        if not self.fits:
+            size = len(self.text.encode())
+            record["analysis_report_omitted"] = (
+                f"report.md is {size} bytes, over the {TEXT_MAX_BYTES} a text field holds"
+            )
+        return record
+
+
+def analysis_report(experiments: Path, plan_file: Path | None) -> AnalysisReport | None:
+    """The report of the published Analysis generation the round that wrote ``plan_file`` planned on.
+
+    The round's ``context.json``, beside its plans, names that generation as its first ``analysis_bundle`` evidence,
+    the bundle Kernel Forge itself takes a context's to be (``kernelforge/loop/analysis_evidence.py``). It names it by
+    the path it had where the run was made, so the path's last three components, ``analysis/<commit>/generation-NNN``,
+    are looked up under the run's own ``forge_experiments``. A merge, which no round planned, has no plan file and so
+    no report.
+    """
+
+    if plan_file is None:
+        return None
+    context = read_json(plan_file.parent / "context.json") or {}
+    bundle = next(
+        (
+            str(ref.get("path") or "")
+            for ref in context.get("evidence_refs") or []
+            if isinstance(ref, dict) and ref.get("kind") == "analysis_bundle"
+        ),
+        "",
+    )
+    tail = PurePosixPath(bundle).parts[-3:]
+    if len(tail) < 3 or tail[0] != "analysis" or not _GENERATION.match(tail[2]):
+        return None
+    report = experiments.joinpath(*tail, "report.md")
+    return AnalysisReport("/".join(tail), read_text(report).strip()) if report.is_file() else None

@@ -29,7 +29,13 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from kernelforge.loop.merge_candidates import MERGE_PLAN_PREFIX
-from kernelforge.run_export.archive import IterationArchive, campaign_identity, first_sentences, implementer_fields
+from kernelforge.run_export.archive import (
+    IterationArchive,
+    analysis_report,
+    campaign_identity,
+    first_sentences,
+    implementer_fields,
+)
 from kernelforge.run_export.files import FileRecord, inventory, read_json, read_text
 from kernelforge.run_export.units import CandidateOrigin, Run, read_error
 
@@ -224,6 +230,7 @@ class _PlainRun:
         origin = _origin(meta)
         plan = str(meta.get("plan") or "").strip()
         plan_file = archive.plan_file(origin, plan)
+        report = analysis_report(self.experiments, plan_file)
         stamp = _iso(meta.get("timestamp"))
         kb_record = self.kb_records.get(seq) if meta.get("kept") else None
         unit = self.run.unit(
@@ -232,6 +239,7 @@ class _PlainRun:
             kb_record=kb_record,
             candidate_origin=origin.value,
             meta=meta,
+            **(report.provenance() if report is not None else {}),
         )
         unit.update(
             started_at=self.times.get((_STARTED, seq), stamp),
@@ -243,6 +251,8 @@ class _PlainRun:
         unit.update(archive.fields(meta, plan_file))
         unit.update(_origin_fields(origin, meta, plan))
         unit.update(implementer_fields(plan_file))
+        if report is not None and report.fits:
+            unit["analysis_report"] = report.text
         return unit
 
 

@@ -523,7 +523,10 @@ malformed, is one entry saying why, which collection skips with that reason.
 An entry names three files: the candidate's plan, the kernel KernelForge
 measured, and the iteration's lesson. Its reasoning is the whole reasoning log
 the Implementer kept beside that plan or, for a single session that kept none,
-the rationale its `meta.json` records. It carries the candidate's whole
+the rationale its `meta.json` records. It holds the text of the `report.md` of
+the Analysis generation the candidate's planning round read, which its
+`orchestration/iter_NNN/context.json` names, and names that generation in its
+metadata. It carries the candidate's whole
 `meta.json` as its metadata, and the run's operator, the kernel name
 KernelForge files its KB records under, its framework, backend and GPU from
 `campaign_config.json`. The run's `forge-loop.log` gives the Implementer's

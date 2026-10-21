@@ -15,6 +15,7 @@ import pytest
 from click.testing import CliRunner
 
 from hyperloom_kb.collect import collect
+from hyperloom_kb.schema import TEXT_MAX_BYTES
 from kernelforge.cli import main
 from kernelforge.run_export.document import normalize
 
@@ -56,6 +57,10 @@ Step one.
 SESSION_LOG = "Summary: Each row was read twice. I fused the two passes into one sweep.\n\n## Evidence\nThe profile.\n"
 LANE_LOG = "Summary: The loads were 32-bit. I widened them to 128-bit.\n\n## Measurements\nSmall rows gained.\n"
 KB_RECORD = "kernel:forge-loop:softmax:unknown:unknown:triton:mi300x/rewrite-softmax-92fe883d6dc2-e45ae0d5646e"
+BASELINE_COMMIT = "ce146831869e122424b2a67038ae466565882a3d"
+KEPT_COMMIT = "761247d9b335287cd89902de285dbee4c0e0d96b"
+BASELINE_REPORT = "# Analysis report\n\nEach row is read twice; both passes are bound by memory bandwidth."
+KEPT_REPORT = "# Analysis report\n\nThe fused sweep reads each row once; small rows are now bound by launch latency."
 
 
 def _write(path: Path, content: str) -> Path:
@@ -194,6 +199,48 @@ def _meta(experiments: Path, iteration: int) -> dict[str, Any]:
 def _ref(path: Path) -> dict[str, Any]:
     data = path.read_bytes()
     return {"name": path.name, "sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)}
+
+
+def _generation(experiments: Path, commit: str, report: str) -> Path:
+    """A published Analysis generation for ``commit``, ``analysis/<commit>/generation-001``, with its report."""
+
+    directory = experiments / "analysis" / commit / "generation-001"
+    _write(directory / "report.md", f"\n{report}\n")
+    _write_json(experiments / "analysis" / commit / "published.json", {"generation_root": directory.name})
+    return directory
+
+
+def _made_elsewhere(relative: str) -> str:
+    """The absolute path ``forge_experiments/<relative>`` had where the fixture's run was made."""
+
+    return f"/home/someone/kernelforge-runs/{WORKSPACE}/forge_experiments/{relative}"
+
+
+def _planned_on(experiments: Path, iteration: int, bundle: str) -> None:
+    """The context round ``iteration`` planned with, naming ``bundle`` as its Analysis bundle after the report it
+    summarizes."""
+
+    refs = [{"kind": "analysis_summary", "path": f"{bundle}/report.md"}, {"kind": "analysis_bundle", "path": bundle}]
+    _write_json(experiments / "orchestration" / f"iter_{iteration:03d}" / "context.json", {"evidence_refs": refs})
+
+
+def _round_after_the_keep(experiments: Path) -> None:
+    """Round 4, planned after iteration 1's KEEP: a single session's plan, its handoff, and the candidate it built."""
+
+    _write(
+        experiments / "orchestration" / "iter_004" / "optimization_plan.md", "# Widen the loads\n\nUse 128-bit loads.\n"
+    )
+    plan_path = "forge_experiments/orchestration/iter_004/optimization_plan.md"
+    _write_json(experiments / "handoffs" / "iter_004.json", {"optimization_plan_path": plan_path})
+    _candidate(
+        experiments,
+        4,
+        decision="REVERT_PERF",
+        wall_ms=0.046,
+        best_wall_ms_before=0.044,
+        plan="Widen the loads",
+        rationale="Wider loads cut the instruction count.",
+    )
 
 
 def test_a_single_session_candidate_becomes_a_complete_unit(tmp_path: Path) -> None:
@@ -421,6 +468,97 @@ def test_a_plan_is_summarized_from_its_draft_and_a_session_without_a_reasoning_l
 
     assert session["plan"] == "Small rows are bound by launch latency. This plan fuses the passes."
     assert session["reasoning"] == reasoning
+
+
+def test_each_candidate_carries_the_report_of_the_analysis_its_round_planned_on(tmp_path: Path) -> None:
+    experiments = _plain_run(tmp_path)
+    _round_after_the_keep(experiments)
+    _generation(experiments, BASELINE_COMMIT, BASELINE_REPORT)
+    _generation(experiments, KEPT_COMMIT, KEPT_REPORT)
+    _planned_on(experiments, 1, _made_elsewhere(f"analysis/{BASELINE_COMMIT}/generation-001"))
+    _planned_on(experiments, 4, _made_elsewhere(f"analysis/{KEPT_COMMIT}/generation-001"))
+
+    units = _units(tmp_path)
+
+    reports = {
+        seq: (unit.get("analysis_report"), unit["provenance"].get("analysis_generation"))
+        for seq, unit in ((seq, units[f"{WORKSPACE}/iteration-{seq}"]) for seq in (1, 2, 3, 4))
+    }
+    assert reports == {
+        1: (BASELINE_REPORT, f"analysis/{BASELINE_COMMIT}/generation-001"),
+        2: (BASELINE_REPORT, f"analysis/{BASELINE_COMMIT}/generation-001"),
+        3: (None, None),
+        4: (KEPT_REPORT, f"analysis/{KEPT_COMMIT}/generation-001"),
+    }
+
+
+@pytest.mark.parametrize(
+    ("report", "omitted"),
+    [
+        pytest.param("x" * TEXT_MAX_BYTES, None, id="at-the-limit"),
+        pytest.param(
+            "é" * (TEXT_MAX_BYTES // 2) + "x",
+            f"report.md is {TEXT_MAX_BYTES + 1} bytes, over the {TEXT_MAX_BYTES} a text field holds",
+            id="one-byte-over",
+        ),
+    ],
+)
+def test_a_report_a_text_field_cannot_hold_is_left_out_and_its_provenance_says_why(
+    tmp_path: Path, report: str, omitted: str | None
+) -> None:
+    experiments = _plain_run(tmp_path)
+    _generation(experiments, BASELINE_COMMIT, report)
+    _planned_on(experiments, 1, _made_elsewhere(f"analysis/{BASELINE_COMMIT}/generation-001"))
+
+    session = _units(tmp_path)[f"{WORKSPACE}/iteration-1"]
+
+    assert session.get("analysis_report") == (report if omitted is None else None)
+    assert session["provenance"]["analysis_generation"] == f"analysis/{BASELINE_COMMIT}/generation-001"
+    assert session["provenance"].get("analysis_report_omitted") == omitted
+
+
+@pytest.mark.parametrize(
+    "bundle",
+    [
+        pytest.param(None, id="no-context"),
+        pytest.param(_made_elsewhere(f"analysis/work/{BASELINE_COMMIT}"), id="analysis-still-at-work"),
+        pytest.param(_made_elsewhere(f"analysis/{KEPT_COMMIT}/generation-001"), id="generation-not-in-this-run"),
+    ],
+)
+def test_a_round_that_planned_on_no_published_generation_gives_no_report(tmp_path: Path, bundle: str | None) -> None:
+    experiments = _plain_run(tmp_path)
+    _generation(experiments, BASELINE_COMMIT, BASELINE_REPORT)
+    if bundle is not None:
+        _planned_on(experiments, 1, bundle)
+
+    session = _units(tmp_path)[f"{WORKSPACE}/iteration-1"]
+
+    assert "analysis_report" not in session
+    assert "analysis_generation" not in session["provenance"]
+
+
+def test_the_report_collects_as_text_and_no_analysis_file_is_linked(tmp_path: Path) -> None:
+    logs = tmp_path / "logs"
+    experiments = _plain_run(logs)
+    generation = _generation(experiments, BASELINE_COMMIT, BASELINE_REPORT)
+    _write(generation / "cases" / "M1024_N256-2bb066cf" / "profile" / "pmc_perf.csv", "Dispatch_ID,SQ_WAVES\n0,64\n")
+    _planned_on(experiments, 1, _made_elsewhere(f"analysis/{BASELINE_COMMIT}/generation-001"))
+    output = tmp_path / "runs.json"
+    assert CliRunner().invoke(main, ["export-runs", str(logs), "-o", str(output)]).exit_code == 0
+
+    [row] = collect("kernelforge-v1", output, dry_run=True).to_dict()["collected"]
+
+    experience = row["experience"]
+    assert experience["reflection"]["analysis_report"] == BASELINE_REPORT
+    assert experience["provenance"]["extra"]["analysis_generation"] == f"analysis/{BASELINE_COMMIT}/generation-001"
+    linked = [
+        value["name"]
+        for category in ("rationale", "change", "reflection")
+        for value in experience[category].values()
+        if isinstance(value, dict)
+    ]
+    assert linked == ["optimization_plan.md", "softmax_kernel.py", "iter_001.md"]
+    assert "raw_logs" not in experience
 
 
 def test_export_runs_writes_the_document(tmp_path: Path) -> None:

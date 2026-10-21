@@ -17,6 +17,8 @@ from hyperloom_kb.schema import CATEGORIES, TEXT_MAX_BYTES, FieldKind, FieldRole
 MAPPING = "kernelforge-v1"
 CAMPAIGN = "5f1c0a9e2b7d4c38a6e0f1b2c3d4e5f6"
 REASONING = "Summary: Two passes over each row cost a second read.\n\n## Evidence\nFusing them halves the traffic."
+ANALYSIS_REPORT = "# Analysis report\n\nEach row is read twice; both passes are bound by memory bandwidth."
+GENERATION = "analysis/ce146831869e122424b2a67038ae466565882a3d/generation-001"
 
 
 def _file(path: Path, content: str) -> Path:
@@ -59,6 +61,7 @@ def _session_unit(files: dict[str, Path], **fields: Any) -> dict[str, Any]:
                 "bench": {"measurements": [{"median_ms": 0.044, "all_times_ms": [0.043, 0.044, 0.045]}]},
                 "vgpr": None,
             },
+            "analysis_generation": GENERATION,
         },
         "started_at": "2026-10-15T10:00:00",
         "completed_at": "2026-10-15T10:04:30",
@@ -71,6 +74,7 @@ def _session_unit(files: dict[str, Path], **fields: Any) -> dict[str, Any]:
         "source_code": str(files["kernel"]),
         "lesson_file": str(files["lesson"]),
         "lesson": "One sweep saved a global read.",
+        "analysis_report": ANALYSIS_REPORT,
         "reasoning": f"{REASONING}\n",
     }
     unit.update(fields)
@@ -106,6 +110,11 @@ def test_the_mapping_produces_the_packaged_kernelforge_declaration() -> None:
         if field.kind is FieldKind.FILE
     ]
     assert linked == [("rationale", "plan_file"), ("change", "source_code"), ("reflection", "lesson_file")]
+    assert [(field.name, field.kind.value, field.required) for field in declaration.fields("reflection")] == [
+        ("lesson", "text", False),
+        ("lesson_file", "file", False),
+        ("analysis_report", "text", False),
+    ]
 
 
 def test_a_session_unit_projects_a_complete_experience(files: dict[str, Path]) -> None:
@@ -139,10 +148,18 @@ def test_a_session_unit_projects_a_complete_experience(files: dict[str, Path]) -
     assert experience["reflection"] == {
         "lesson": "One sweep saved a global read.",
         "lesson_file": _ref(files["lesson"]),
+        "analysis_report": ANALYSIS_REPORT,
     }
     assert experience["provenance"]["source_ref"] == "forge_loop_triton_softmax/iteration-1"
     assert experience["provenance"]["extra"] == unit["provenance"]
     assert "raw_logs" not in experience
+
+
+def test_a_unit_without_an_analysis_report_projects_none(files: dict[str, Path]) -> None:
+    report = collect(MAPPING, {"runs": [_session_unit(files, analysis_report=None)]}, dry_run=True).to_dict()
+
+    [row] = report["collected"]
+    assert "analysis_report" not in row["experience"]["reflection"]
 
 
 @pytest.mark.parametrize(

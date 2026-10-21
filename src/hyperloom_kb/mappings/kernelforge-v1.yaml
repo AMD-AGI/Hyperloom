@@ -1,9 +1,9 @@
 format: hyperloom-kb.collect.v2
 description: >-
   KernelForge forge-loop runs, one Experience per candidate kernel a run archived, so each lane of a fan-out round
-  gets its own, each holding the time it was measured against, the agent's reasoning and plan, the kernel it
-  measured, and what KernelForge measured and decided; from the document kernelforge export-runs writes from a run's
-  forge_experiments directory and its forge-loop.log
+  gets its own, each holding the time it was measured against, the agent's reasoning and plan, the Analysis report
+  the plan was built on, the kernel it measured, and what KernelForge measured and decided; from the document
+  kernelforge export-runs writes from a run's forge_experiments directory and its forge-loop.log
 declaration: kernelforge-run-v1
 producer:
   name: kernelforge
@@ -50,6 +50,7 @@ experience:
   reflection:
     lesson: {text: $run.lesson}
     lesson_file: $run.lesson_file
+    analysis_report: {text: $run.analysis_report}
   provenance:
     source_ref: {text: $run.unit_id}
     extra: $run.provenance
