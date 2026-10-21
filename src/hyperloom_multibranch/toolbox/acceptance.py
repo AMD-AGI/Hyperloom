@@ -29,6 +29,18 @@ from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import RequestRejected, WorkloadKind
 
 
+#: PyTorch tunes a GEMM shape the first time a server runs it when TunableOp is switched on (the value ``1``, nothing else
+#: enables it) and tuning is not switched off (the value ``0``, nothing else disables it).
+_TUNABLEOP_ENABLED = "PYTORCH_TUNABLEOP_ENABLED"
+_TUNABLEOP_TUNING = "PYTORCH_TUNABLEOP_TUNING"
+ONLINE_TUNING_CODE = "online_tuning_unsupported"
+ONLINE_TUNING_REASON = (
+    f"{_TUNABLEOP_ENABLED}=1 without {_TUNABLEOP_TUNING}=0 tunes every GEMM shape the first time the server runs it: at "
+    "boot, in the warmup, and for each new prompt length of the evaluation. The test then takes a time no candidate "
+    "controls and ends at the attempt timeout, and the tuned results file is lost with the server. For tuned GEMMs "
+    "put an offline-tuned table with put_kernel_artifact (kind gemm, an aiter table such as AITER_CONFIG_GEMM_BF16)"
+)
+
 # Every purpose whose result the InferenceX rule gate reads an eval score from: explore and confirm are compared,
 # integration and final are checked (accuracy_passes), baseline sets the accuracy bar (write_inferencex_baseline).
 _ACCURACY_PURPOSES = (Purpose.BASELINE, Purpose.EXPLORE, Purpose.CONFIRM, Purpose.INTEGRATION, Purpose.FINAL)
@@ -58,6 +70,13 @@ def _check_explore_changes_something(request: TestRequest) -> None:
     """An explore measures a change; with an empty delta it would re-measure the parent and record the intent as tried."""
     if request.purpose is Purpose.EXPLORE and request.delta.fingerprint() == RecipeDelta().fingerprint():
         raise RequestRejected("an explore test must change something, and its delta is empty", "empty_delta")
+
+
+def _check_online_tuning(candidate: Recipe) -> None:
+    """Refuse a candidate that tunes GEMMs while its test runs: its length follows the shapes the test happens to meet."""
+    envs = candidate.launch.envs
+    if envs.get(_TUNABLEOP_ENABLED) == "1" and envs.get(_TUNABLEOP_TUNING) != "0":
+        raise RequestRejected(ONLINE_TUNING_REASON, ONLINE_TUNING_CODE)
 
 
 def _check_upstream_label(parent: Recipe, request: TestRequest) -> None:
@@ -166,6 +185,8 @@ class Acceptance:
             _check_upstream_label(recipe, request)
         candidate = self._check_delta(recipe, request)
         self._check_fake_gain(recipe, candidate)
+        if not replay:
+            _check_online_tuning(candidate)
         return Prepared(self._plan(recipe, request))
 
     def _check_profile_exists(self, request: TestRequest) -> None:

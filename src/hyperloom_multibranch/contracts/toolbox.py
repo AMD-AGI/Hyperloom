@@ -87,6 +87,7 @@ REJECTION_CODES = (
     "profile_exists",  # a PROFILE of this commit and recipe is already queued, running or measured: ``existing_request_id``
     "empty_delta",  # an explore test whose delta changes nothing
     "upstream_label_unsupported",  # a delta moves the upstream_ref or upstream_repo of a component the parent has
+    "online_tuning_unsupported",  # the candidate runs TunableOp with tuning on: its test never ends in a bounded time
     "attachment_too_large",  # ``put_attachment``: the data, or what a directory archive expands to, passes the cap
     "attachment_unreadable",  # ``put_attachment``: a ``dir`` attachment is not a tar archive
     "attachment_unsafe",  # ``put_attachment``: a ``dir`` archive has a path that escapes, a link, or too many entries
