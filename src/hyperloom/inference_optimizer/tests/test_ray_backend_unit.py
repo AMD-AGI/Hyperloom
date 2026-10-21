@@ -1690,6 +1690,8 @@ def test_serving_actor_run_blocking_timeout_sentinel(monkeypatch: pytest.MonkeyP
 # ── coverage: RayExecutionBackend.ensure (reuses _ray_runtime) ───────────────
 def test_backend_ensure_reuses_kernel_runtime(monkeypatch: pytest.MonkeyPatch):
     """ensure() calls ensure_ray_cluster + quiet_ray_init once, then is idempotent."""
+    from types import SimpleNamespace
+
     from hyperloom.orchestrator.actions.executors import _ray_runtime as rr
 
     calls: dict = {"ensure": 0, "init": 0, "num_gpus": None}
@@ -1703,6 +1705,7 @@ def test_backend_ensure_reuses_kernel_runtime(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr(rr, "ensure_ray_cluster", _fake_ensure)
     monkeypatch.setattr(rr, "quiet_ray_init", _fake_init)
+    monkeypatch.setitem(sys.modules, "ray", SimpleNamespace(cluster_resources=lambda: {"GPU": 3}))
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_NUM_GPUS", "3")
 
     backend = rb.RayExecutionBackend()
@@ -1710,6 +1713,40 @@ def test_backend_ensure_reuses_kernel_runtime(monkeypatch: pytest.MonkeyPatch):
     assert calls == {"ensure": 1, "init": 1, "num_gpus": 3}
     backend.ensure()  # idempotent: no second call
     assert calls["ensure"] == 1
+
+
+def test_backend_ensure_fails_fast_on_zero_gpu_cluster(monkeypatch: pytest.MonkeyPatch):
+    """ensure() raises immediately when the cluster it just connected to has no GPU.
+
+    Covers the rocm-sdk-wheel-venv failure mode where Ray's native AMD-GPU
+    detector silently reports 0 GPUs (see _assert_gpu_resources docstring) --
+    this must surface as a loud, immediate error, not a cluster that looks
+    healthy while every GPU action downstream is quietly infeasible.
+    """
+    from types import SimpleNamespace
+
+    from hyperloom.orchestrator.actions.executors import _ray_runtime as rr
+
+    monkeypatch.setattr(rr, "ensure_ray_cluster", lambda *, num_gpus=None, log_path=None: None)
+    monkeypatch.setattr(rr, "quiet_ray_init", lambda *, num_gpus=None, log_path=None: None)
+    monkeypatch.setitem(sys.modules, "ray", SimpleNamespace(cluster_resources=lambda: {"GPU": 0}))
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_RAY_NUM_GPUS", raising=False)
+
+    backend = rb.RayExecutionBackend()
+    with pytest.raises(RuntimeError, match="reports 0 GPU"):
+        backend.ensure()
+
+
+def test_backend_ensure_skips_gpu_check_when_explicitly_zero(monkeypatch: pytest.MonkeyPatch):
+    """An operator who explicitly asks for num_gpus=0 gets a CPU-only cluster, not an error."""
+    from hyperloom.orchestrator.actions.executors import _ray_runtime as rr
+
+    monkeypatch.setattr(rr, "ensure_ray_cluster", lambda *, num_gpus=None, log_path=None: None)
+    monkeypatch.setattr(rr, "quiet_ray_init", lambda *, num_gpus=None, log_path=None: None)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_NUM_GPUS", "0")
+
+    backend = rb.RayExecutionBackend()
+    backend.ensure()  # must not raise, and must not even need `ray` importable
 
 
 # ── coverage: ServingLease ensure/context-manager/close + make_serving_actor ─
