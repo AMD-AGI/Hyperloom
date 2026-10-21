@@ -101,10 +101,6 @@ def test_classify_succeeded():
     assert classify_specialist_failure("succeeded", "") == (SpecialistFailureType.NONE, False)
 
 
-def test_classify_tool_violation():
-    assert classify_specialist_failure("tool_violation", "x") == (SpecialistFailureType.TOOL_VIOLATION, False)
-
-
 def test_classify_stale_variants():
     assert classify_specialist_failure("stale", "request timeout")[0] == SpecialistFailureType.TIMEOUT
     assert classify_specialist_failure("stale", "stale_heartbeat 200s")[0] == SpecialistFailureType.STALE_HEARTBEAT

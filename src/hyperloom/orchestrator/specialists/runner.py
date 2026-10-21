@@ -399,7 +399,7 @@ class SpecialistRunResult:
     task_id: str
     domain: str
     gap_canonical_id: str
-    status: str  # "succeeded" / "partial" / "stale" / "empty_synthesised" / "tool_violation"
+    status: str  # "succeeded" / "partial" / "stale" / "empty_synthesised"
     specialist_done: dict[str, Any]
     turns_used: int = 0
     workspace: str = ""
@@ -422,7 +422,6 @@ class SpecialistFailureType(str, enum.Enum):
     STALE_HEARTBEAT = "stale_heartbeat"  # heartbeat went silent (hang)
     CRASH = "crash"  # nonzero exit / backend error
     NO_OUTPUT = "no_output"  # ran clean but emitted no done / empty
-    TOOL_VIOLATION = "tool_violation"  # emitted a forbidden intent
     CONFIG = "config"  # unknown domain / no workspace
     UNKNOWN = "unknown"
 
@@ -451,8 +450,6 @@ def classify_specialist_failure(
     err = (error or "").strip().lower()
     if status == "succeeded":
         return SpecialistFailureType.NONE, False
-    if status == "tool_violation":
-        return SpecialistFailureType.TOOL_VIOLATION, False
     if status == "partial":
         # Salvaged work: classify the failure but never retry over it.
         if "timeout" in err:
