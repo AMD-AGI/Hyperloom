@@ -15,7 +15,7 @@ import pytest
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.lifecycle import SpecialistStatus
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
-from hyperloom.contracts.measurement import TestKind, Validity
+from hyperloom.contracts.measurement import Purpose, TestKind, Validity
 from hyperloom_multibranch.contracts.notebook.records import (
     BranchProgress,
     FrontierScore,
@@ -25,14 +25,13 @@ from hyperloom_multibranch.contracts.notebook.records import (
 from hyperloom_multibranch.contracts.notebook.vocab import FrontierBasis
 from hyperloom_multibranch.notebook import STALL_TESTS
 from hyperloom_multibranch.notebook.rsi.calibration import PolicyChoice
-from hyperloom_multibranch.notebook.rsi.frontier import FrontierPolicy
+from hyperloom_multibranch.notebook.rsi.frontier import SETTLED_TESTS, FrontierPolicy
 from hyperloom_multibranch.notebook.tests.factories import intent, request, result
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.events import MB_BIG_GAIN_BARS, MB_BOTTLENECK_SHIFT_PP, EventKind, SessionEvent
 from hyperloom_multibranch.scheduling.judge import (
     JUDGE_PROMPT_VERSION,
     JUDGE_SYSTEM_PROMPT,
-    MB_USER_BRANCH_GRACE_TESTS,
     HeldOrder,
     HoldReason,
     Judge,
@@ -610,24 +609,24 @@ USER_ROSTER = (
 )
 
 
-def test_a_user_branch_in_its_grace_is_neither_stopped_nor_lowered_and_one_past_it_is() -> None:
+def test_a_branch_in_its_grace_is_neither_stopped_nor_lowered_and_one_past_it_is() -> None:
     decision = JudgeDecision(
         k=(KOrder("b01", 1), KOrder("b02", 1)),
         stop=(StopOrder("b01", STOP_REASON),),
     )
     capped = cap_decision(decision, _view(roster=USER_ROSTER))
 
-    assert hold_decision(capped, dict.fromkeys(("b01", "b02"), HoldReason.USER_GRACE), USER_ROSTER) == JudgeDecision(
-        held=(HeldOrder("b01", HoldReason.USER_GRACE), HeldOrder("b02", HoldReason.USER_GRACE))
+    assert hold_decision(capped, dict.fromkeys(("b01", "b02"), HoldReason.GRACE), USER_ROSTER) == JudgeDecision(
+        held=(HeldOrder("b01", HoldReason.GRACE), HeldOrder("b02", HoldReason.GRACE))
     )
-    assert hold_decision(capped, {"b02": HoldReason.USER_GRACE}, USER_ROSTER) == JudgeDecision(
-        stop=(StopOrder("b01", STOP_REASON),), held=(HeldOrder("b02", HoldReason.USER_GRACE),)
+    assert hold_decision(capped, {"b02": HoldReason.GRACE}, USER_ROSTER) == JudgeDecision(
+        stop=(StopOrder("b01", STOP_REASON),), held=(HeldOrder("b02", HoldReason.GRACE),)
     )
 
 
-def test_a_user_branch_in_its_grace_takes_a_higher_k_and_the_last_order_for_it_counts() -> None:
+def test_a_branch_in_its_grace_takes_a_higher_k_and_the_last_order_for_it_counts() -> None:
     view = _view(roster=USER_ROSTER)
-    held = {"b01": HoldReason.USER_GRACE}
+    held = {"b01": HoldReason.GRACE}
 
     assert hold_decision(cap_decision(JudgeDecision(k=(KOrder("b01", 3),)), view), held, USER_ROSTER).k == (
         KOrder("b01", 2),
@@ -637,53 +636,71 @@ def test_a_user_branch_in_its_grace_takes_a_higher_k_and_the_last_order_for_it_c
 
 
 def test_the_opening_call_opens_none_by_default_once_user_branches_opened() -> None:
-    view = _view(
-        opening=True, roster=USER_ROSTER, free_slots=2, held=dict.fromkeys(("b01", "b02"), HoldReason.USER_GRACE)
-    )
+    view = _view(opening=True, roster=USER_ROSTER, free_slots=2, held=dict.fromkeys(("b01", "b02"), HoldReason.GRACE))
 
     assert cap_decision(JudgeDecision(open_count=0), view).open_count == 0
     assert cap_decision(JudgeDecision(open_count=2), view).open_count == 2
 
 
-def _judged(branch: str, number: int, *, judged: bool = True, kind: TestKind = TestKind.TEST) -> TestRecord:
+def _ended(
+    branch: str,
+    number: int,
+    *,
+    validity: Validity | None = Validity.SUCCEEDED,
+    kind: TestKind = TestKind.TEST,
+    purpose: Purpose = Purpose.EXPLORE,
+) -> TestRecord:
+    """An unjudged test of ``branch``; ``validity`` ``None`` leaves it without a result, withdrawn."""
+
     request_id = f"{branch}-r{number}"
-    return TestRecord(
-        request(request_id, intent(branch, "c-root"), kind=kind),
-        result(request_id),
-        judged_at=10.0 if judged else None,
-    )
+    test = request(request_id, intent(branch, "c-root"), kind=kind, purpose=purpose)
+    if validity is None:
+        return TestRecord(test, withdrawn_at=10.0, withdrawal_reason="branch stopped")
+    return TestRecord(test, result(request_id, validity=validity))
 
 
-def test_a_user_branch_keeps_its_grace_until_enough_of_its_tests_were_judged() -> None:
-    roster = (*USER_ROSTER, _entry("b03"), _entry("b04", origin=BranchOrigin.USER, stopped=True))
-    early = [_judged("b01", n) for n in range(MB_USER_BRANCH_GRACE_TESTS - 1)]
-    unjudged = [_judged("b01", 90, judged=False), _judged("b01", 91, kind=TestKind.PROFILE)]
-    failed = TestRecord(
-        request("b01-r92", intent("b01", "c-root")),
-        result("b01-r92", validity=Validity.MEASUREMENT_FAILED),
-        judged_at=10.0,
-    )
-    done = [_judged("b02", n) for n in range(MB_USER_BRANCH_GRACE_TESTS)]
+def test_a_specialist_branch_keeps_its_grace_until_enough_of_its_explore_tests_ended() -> None:
+    roster = (*ROSTER, _entry("b04", origin=BranchOrigin.USER), _entry("b05", origin=BranchOrigin.FORK))
+    early = [_ended("b01", n) for n in range(SETTLED_TESTS - 1)]
+    not_ended = [
+        _ended("b01", 90, validity=None),
+        _ended("b01", 91, kind=TestKind.PROFILE, purpose=Purpose.PROFILE),
+        _ended("b01", 92, purpose=Purpose.INTEGRATION),
+        TestRecord(request("b01-r93", intent("b01", "c-root"))),
+    ]
+    failed = [
+        _ended("b02", 0, validity=Validity.CANDIDATE_FAILED),
+        _ended("b04", 0, validity=Validity.MEASUREMENT_FAILED),
+    ]
+    done = [_ended(branch, n) for branch in ("b02", "b04", "b05") for n in range(1, SETTLED_TESTS)]
+    integration = [_ended(INTEGRATION_BRANCH, n) for n in range(SETTLED_TESTS - 1)]
 
-    assert held_branches(roster, (), [*early, *unjudged, failed, *done], {}) == {"b01": HoldReason.USER_GRACE}
+    assert held_branches(roster, (), [*early, *not_ended, *failed, *done, *integration], {}) == {
+        "b01": HoldReason.GRACE,
+        "b05": HoldReason.GRACE,
+    }
 
 
 @pytest.mark.parametrize("state", [{"gave_up": True}, {"judge_failed": True}])
-def test_a_user_branch_whose_specialist_is_out_of_service_has_no_grace(state: dict[str, bool]) -> None:
+def test_a_branch_whose_specialist_is_out_of_service_has_no_grace(state: dict[str, bool]) -> None:
     status = replace(SpecialistStatus(running=False, crashes=3, lost=0, gave_up=False, judge_failed=False), **state)
 
-    assert held_branches(USER_ROSTER, (), [], {"b01": status}) == {"b02": HoldReason.USER_GRACE}
+    assert held_branches(ROSTER, (), [], {"b01": status}) == {"b02": HoldReason.GRACE}
 
 
-def test_a_user_branch_row_shows_its_grace_and_the_prompt_explains_it() -> None:
-    view = _view(roster=USER_ROSTER, held={"b01": HoldReason.USER_GRACE})
-    rows = {row["branch"]: row for row in _state(view)["branches"]}
-    plain = {row["branch"]: row for row in _state(_view())["branches"]}
+def test_every_specialist_branch_row_shows_its_grace_and_the_prompt_explains_it() -> None:
+    view = _view(
+        roster=(*ROSTER, _entry("b04", origin=BranchOrigin.USER)),
+        held={"b01": HoldReason.GRACE, "b04": HoldReason.GRACE},
+    )
+    rows = {row["branch"]: row.get("grace") for row in _state(view)["branches"]}
 
-    assert (rows["b01"]["origin"], rows["b01"]["grace"], rows["b02"]["grace"]) == ("user", True, False)
-    assert "grace" not in plain["b01"]
+    assert rows == {INTEGRATION_BRANCH: None, "b01": True, "b02": False, "b03": False, "b04": True}
     prose = " ".join(JUDGE_SYSTEM_PROMPT.split())
-    assert f"until {MB_USER_BRANCH_GRACE_TESTS} of its tests were judged, a stop or a lower K you give it" in prose
+    assert (
+        f"Every specialist branch, of any origin, has a grace: while its grace is true, until {SETTLED_TESTS} of its "
+        "explore tests ended with a result, a failed one included, a stop or a lower K you give it is not applied"
+    ) in prose
 
 
 CANDIDATE = PendingCandidate("b01-r7", "b01-r7-confirm", "c-b01", METRIC, 116.6, 6.04321)
@@ -700,12 +717,15 @@ def test_a_branch_with_a_pending_candidate_is_held_until_its_confirm_is_judged_u
     progress = (_waiting("b01"), _waiting("b02", pending=False), _waiting("b03"), _waiting("b04"))
     failed = SpecialistStatus(running=False, crashes=0, lost=0, gave_up=False, judge_failed=True)
     gave_up = replace(failed, gave_up=True, judge_failed=False)
+    settled = [_ended(branch, n) for branch in ("b01", "b02", "b03") for n in range(SETTLED_TESTS)]
 
-    assert held_branches(roster, progress, [], {}) == {
+    assert held_branches(roster, progress, settled, {}) == {
         "b01": HoldReason.PENDING_CONFIRM,
-        "b04": HoldReason.USER_GRACE,
+        "b04": HoldReason.GRACE,
     }
-    assert held_branches(roster, progress, [], {"b01": failed, "b04": gave_up}) == {"b04": HoldReason.PENDING_CONFIRM}
+    assert held_branches(roster, progress, settled, {"b01": failed, "b04": gave_up}) == {
+        "b04": HoldReason.PENDING_CONFIRM
+    }
 
 
 def test_a_judge_stop_or_lower_k_of_a_branch_with_a_pending_candidate_is_refused_and_named_until_it_clears() -> None:

@@ -128,8 +128,7 @@ class TestRecord:
 
     @property
     def judged(self) -> bool:
-        """A test the gate judged after measuring it: what a branch's stall count counts, and the judge's grace
-        for a user branch."""
+        """A test the gate judged after measuring it: what a branch's stall count counts."""
 
         return self.request.kind is TestKind.TEST and self.measured and self.judged_at is not None
 

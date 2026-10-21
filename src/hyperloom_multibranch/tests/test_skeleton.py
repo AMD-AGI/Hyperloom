@@ -70,7 +70,7 @@ from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.notebook.rsi.briefing import SessionBriefs
 from hyperloom_multibranch.notebook.rsi.calibration import DEFAULT_POLICY, PolicyChoice
-from hyperloom_multibranch.notebook.rsi.frontier import FrontierPolicy
+from hyperloom_multibranch.notebook.rsi.frontier import SETTLED_TESTS, FrontierPolicy
 from hyperloom_multibranch.notebook.rsi.session import FRONTIER_LOG
 from hyperloom_multibranch.notebook.tests.factories import delta, intent, request
 from hyperloom_multibranch.rulegate.critic import (
@@ -95,6 +95,7 @@ from hyperloom_multibranch.scheduling import branches
 from hyperloom_multibranch.scheduling.events import PROFILE_UNAVAILABLE
 from hyperloom_multibranch.scheduling.explore import EXPLORE_TICK_SECONDS, FORK_NOT_LANDED, OPEN_CUT_REASON
 from hyperloom_multibranch.scheduling.final import INTEGRATION_LABEL, PRIMARY_POINT_ONLY
+from hyperloom_multibranch.scheduling import judge
 from hyperloom_multibranch.scheduling.judge import JUDGE_PROMPT_VERSION, HoldReason
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
 from hyperloom_multibranch.scheduling import lifecycle
@@ -221,6 +222,14 @@ def no_knowledge_targets(monkeypatch: pytest.MonkeyPatch) -> None:
     """CLOSE's knowledge steps find no archive: a test session leaves no knowledge behind."""
 
     monkeypatch.delenv(ARCHIVE_ENV, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def no_branch_grace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The scripted branches end fewer explore tests than a grace lasts, so the judge's grace would refuse the stops
+    these sessions script; the test of the grace sets it back."""
+
+    monkeypatch.setattr(judge, "SETTLED_TESTS", 0)
 
 
 def _measured(repo: Path) -> Callable[[TestRequest], float]:
@@ -1256,9 +1265,10 @@ def _judged_rows(prompt: str) -> dict[str, dict[str, Any]]:
 USER_DIRECTION = "Fuse the MoE gate into the router kernel."
 
 
-async def test_a_user_branch_opens_first_at_the_root_and_the_judge_neither_stops_it_in_its_grace_nor_reopens_it(
-    tmp_path: Path,
+async def test_a_user_branch_opens_first_at_the_root_and_the_judge_neither_stops_a_branch_in_its_grace_nor_reopens_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(judge, "SETTLED_TESTS", SETTLED_TESTS)
     stage = _stage(tmp_path, child=child_with_patch(tmp_path))
     stage.settings = replace(SETTINGS, user_directions=(USER_DIRECTION,))
     stops = [{"branch": "b01", "reason": STOP_REASON}, {"branch": "b02", "reason": STOP_REASON}]
@@ -1267,25 +1277,29 @@ async def test_a_user_branch_opens_first_at_the_root_and_the_judge_neither_stops
     outcome = await stage.run()
 
     assert (outcome.stop_reason, outcome.error) == (SessionStopReason.TIME_EXHAUSTED, "")
-    assert _origins(stage) == {"b01": "user", "b02": "first_batch", "b03": "first_batch", "b04": "refill"}
+    assert _origins(stage) == {"b01": "user", "b02": "first_batch", "b03": "first_batch"}
     root = await stage.root()
     assert stage.sessions.started["b01"] == stage.sessions.started["b02"] == root
     directions = {branch: set(runs) for branch, runs in stage.sessions.directions.items()}
     assert directions.pop("b01") == {USER_DIRECTION}
-    assert sorted(directions) == ["b02", "b03", "b04"]
+    assert sorted(directions) == ["b02", "b03"]
     assert all(len(runs) == 1 and runs <= set(DIRECTIONS) for runs in directions.values())
     opening, steering, *_ = [_judge_state(prompt) for prompt in _judge_prompts(stage)]
     assert opening["free_branch_slots"] == 2
     assert [(row["origin"], row["grace"]) for row in opening["branches"] if row["branch"] == "b01"] == [("user", True)]
-    assert {row["branch"]: row.get("grace") for row in steering["branches"]}["b01"] is True
+    assert {row["branch"]: row.get("grace") for row in steering["branches"]} == {
+        INTEGRATION_BRANCH: None,
+        "b01": True,
+        "b02": True,
+        "b03": True,
+    }
     decisions = _decisions(stage)
     [opened] = [row for row in decisions if row["kind"] == "open" and row["branch"] == "b01"]
     assert (opened["reason"], opened["detail"]["direction"]) == ("user branch started", USER_DIRECTION)
     steered = [row for row in decisions if row["kind"] == "judge"][1]
-    assert steered["detail"]["held"] == {"b01": HoldReason.USER_GRACE.value}
+    assert steered["detail"]["held"] == dict.fromkeys(("b01", "b02"), HoldReason.GRACE.value)
     stopped = {row["branch"]: row["reason"] for row in decisions if row["kind"] == "stop"}
-    assert stopped["b02"] == f"judge: {STOP_REASON}"
-    assert stopped["b01"].startswith("session_end")
+    assert stopped["b01"].startswith("session_end") and stopped["b02"].startswith("session_end")
 
 
 def _candidate_waits_on_b02(monkeypatch: pytest.MonkeyPatch, waits: Callable[[], bool]) -> None:

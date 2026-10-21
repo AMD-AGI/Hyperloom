@@ -11,7 +11,7 @@ tokens the session has used, and what is known of each running branch's speciali
 object, which :func:`parse_decision` reads and :func:`cap_decision` cuts to the caps and to the branches that are
 still live. A failed call or an unreadable reply gives ``None``, and the scheduler keeps the status quo. The judge
 never calls a peer; the scheduler applies its decision. The judge may neither stop nor lower the K of a held branch
-(:func:`held_branches`): a user branch until :data:`MB_USER_BRANCH_GRACE_TESTS` of its tests were judged, unless its
+(:func:`held_branches`): a specialist branch until :data:`SETTLED_TESTS` of its explore tests ended, unless its
 specialist gave up or its judging failed, and a branch with a candidate waiting for its confirm, unless its judging
 failed. The scheduler finds the held branches again as it applies the decision, since a candidate can start waiting
 while the judge answers, and :func:`hold_decision` refuses their orders and names them in the decision.
@@ -29,16 +29,18 @@ from pathlib import Path
 
 from hyperloom.common.io import append_jsonl
 from hyperloom.common.jsonio import extract_last_json_with_key
+from hyperloom.contracts.measurement import Purpose, TestKind
 from hyperloom_multibranch.contracts.lifecycle import SpecialistStatus
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.records import BranchProgress, PendingCandidate, TestRecord
 from hyperloom_multibranch.notebook import STALL_TESTS
 from hyperloom_multibranch.notebook.rsi.calibration import PolicyChoice
+from hyperloom_multibranch.notebook.rsi.frontier import SETTLED_TESTS
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.events import MB_BIG_GAIN_BARS, MB_BOTTLENECK_SHIFT_PP, SessionEvent
 from hyperloom_multibranch.scheduling.forks import PendingBranch
 from hyperloom_multibranch.scheduling.llm import Completion, CompletionFailed
-from hyperloom_multibranch.scheduling.roster import BranchEntry, BranchKind, BranchOrigin, RosterCaps, specialist_open
+from hyperloom_multibranch.scheduling.roster import BranchEntry, BranchKind, RosterCaps, specialist_open
 from hyperloom_multibranch.scheduling.similarity import SimilarBranch
 from hyperloom_multibranch.scheduling.widening import WideningSignals
 from hyperloom_multibranch.specialist.prompts import VERSION_HEX
@@ -55,8 +57,6 @@ _KEY_REASON = "reason"
 _GPU_HOURS_DIGITS = 3
 #: Decimals the dollars in the judge's view are rounded to.
 _USD_DIGITS = 2
-#: Judged tests of a user branch before the judge may stop it or lower its K: the session owner's decision (board #77).
-MB_USER_BRANCH_GRACE_TESTS = 2
 
 JUDGE_SYSTEM_PROMPT = f"""You are the scheduler's judge in a multi-branch LLM inference optimization session.
 Specialist branches explore optimizations in parallel; the integration branch merges their kept commits.
@@ -130,9 +130,9 @@ specialist gave up or whose judging failed makes no more progress but holds its 
 open a branch in its place if one would still pay off. Each lost heartbeat costs minutes: weigh a specialist's lost
 count against its progress, and stop it when it keeps losing its heartbeat without gaining.
 A branch of origin user follows a direction the user wrote; such branches open from the root commit ahead of the
-opening batch, and the opening batch fills the slots they leave. While its grace is true, until
-{MB_USER_BRANCH_GRACE_TESTS} of its tests were judged, a stop or a lower K you give it is not applied, unless its
-specialist gave up or its judging failed.
+opening batch, and the opening batch fills the slots they leave. Every specialist branch, of any origin, has a grace:
+while its grace is true, until {SETTLED_TESTS} of its explore tests ended with a result, a failed one included, a
+stop or a lower K you give it is not applied, unless its specialist gave up or its judging failed.
 A branch's pending_candidates are its measured candidates that beat its head by at least the bar while their confirm
 runs, each with its gain_over_head_pct. A branch with a pending candidate cannot be stopped or narrowed until its
 confirm is judged: a stop or a lower K you give it is not applied, unless its judging failed.
@@ -154,10 +154,10 @@ JUDGE_PROMPT_VERSION = hashlib.sha256(f"{JUDGE_SYSTEM_PROMPT}\n{_REPLY_FORMAT}".
 
 
 class HoldReason(str, Enum):
-    """Why the judge may neither stop a branch nor lower its K: a user branch in its grace, or a branch with a
+    """Why the judge may neither stop a branch nor lower its K: a specialist branch in its grace, or a branch with a
     candidate waiting for its confirm."""
 
-    USER_GRACE = "user_grace"
+    GRACE = "grace"
     PENDING_CONFIRM = "pending_confirm"
 
 
@@ -222,12 +222,18 @@ def held_branches(
 ) -> dict[str, HoldReason]:
     """The live branches the judge may neither stop nor lower the K of, with why.
 
-    A user branch is in its grace while fewer than :data:`MB_USER_BRANCH_GRACE_TESTS` of its tests are
-    :attr:`TestRecord.judged` and its specialist neither gave up nor was stopped for a failed judging. A branch whose
-    progress row holds a pending candidate is held until its confirm is judged, unless its judging failed: the
-    confirm's verdict does not need the specialist."""
+    A specialist branch is in its grace while fewer than :data:`SETTLED_TESTS` of its explore tests have a result,
+    whatever its validity, and its specialist neither gave up nor was stopped for a failed judging; a withdrawn test
+    has no result. A branch whose progress row holds a pending candidate is held until its confirm is judged, unless
+    its judging failed: the confirm's verdict does not need the specialist."""
 
-    judged = Counter(record.request.branch for record in records if record.judged)
+    ended = Counter(
+        record.request.branch
+        for record in records
+        if record.request.kind is TestKind.TEST
+        and record.request.purpose is Purpose.EXPLORE
+        and record.result is not None
+    )
     waiting = {row.branch for row in progress if row.pending}
     held: dict[str, HoldReason] = {}
     for entry in roster:
@@ -235,11 +241,11 @@ def held_branches(
         if entry.stop is not None or (state is not None and state.judge_failed):
             continue
         if (
-            entry.origin is BranchOrigin.USER
-            and judged[entry.branch] < MB_USER_BRANCH_GRACE_TESTS
+            entry.kind is BranchKind.SPECIALIST
+            and ended[entry.branch] < SETTLED_TESTS
             and not (state is not None and state.gave_up)
         ):
-            held[entry.branch] = HoldReason.USER_GRACE
+            held[entry.branch] = HoldReason.GRACE
         elif entry.branch in waiting:
             held[entry.branch] = HoldReason.PENDING_CONFIRM
     return held
@@ -342,8 +348,8 @@ def _branch_row(entry: BranchEntry, progress: BranchProgress | None, view: Judge
         row["behind_integration_pct"] = round(behind, 2)
     if entry.stop is not None:
         row["stopped"] = entry.stop.summary
-    if entry.origin is BranchOrigin.USER:
-        row["grace"] = view.held.get(entry.branch) is HoldReason.USER_GRACE
+    if entry.kind is BranchKind.SPECIALIST:
+        row["grace"] = view.held.get(entry.branch) is HoldReason.GRACE
     specialist = view.specialists.get(entry.branch)
     if specialist is not None:
         row["specialist"] = asdict(specialist)
@@ -564,7 +570,6 @@ class Judge:
 __all__ = [
     "JUDGE_PROMPT_VERSION",
     "JUDGE_SYSTEM_PROMPT",
-    "MB_USER_BRANCH_GRACE_TESTS",
     "HeldOrder",
     "HoldReason",
     "Judge",
