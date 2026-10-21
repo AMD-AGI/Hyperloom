@@ -81,7 +81,6 @@ def _isolated_provider_env(monkeypatch):
     """Every case in this module resolves backends from the environment, so the machine running the suite must not be able to change the answer."""
     _clear_provider_env(monkeypatch)
     # An operator override outranks the credential rule every case here exercises.
-    monkeypatch.delenv(clib.ORCHESTRATION_BACKEND_ENV, raising=False)
     monkeypatch.delenv(llm_config.AGENT_BACKEND_ENV, raising=False)
     # Orchestration selection ranks the installed SDKs after the credential, and which extras the suite happens to
     # run with is exactly the kind of machine state this fixture exists to hold still.
@@ -304,12 +303,23 @@ def test_an_operator_override_outranks_the_credential_rule(monkeypatch) -> None:
     """The harness returns unenforced intents, so only an explicit ask selects it."""
     _clear_provider_env(monkeypatch)
     _set_dual_protocol_gateway(monkeypatch)
-    monkeypatch.setenv(clib.ORCHESTRATION_BACKEND_ENV, "deepseek")
+    monkeypatch.setenv(llm_config.AGENT_BACKEND_ENV, "deepseek")
 
     name, kwargs = _build()["orchestration"]
     assert name == "deepseek"
     # The role only reads state and answers with intents.
     assert kwargs["permission_mode"] == "read-only"
+
+
+def test_an_explicit_codex_pins_both_orchestration_and_the_critic_side(monkeypatch) -> None:
+    """One resolver answers both: naming Codex must not leave the critic on the side the credentials rank first."""
+    _clear_provider_env(monkeypatch)
+    _set_dual_protocol_gateway(monkeypatch)
+    monkeypatch.setenv(llm_config.AGENT_BACKEND_ENV, "codex")
+
+    built = _build(critic_choice="agent", critic_agent_root=Path("/tmp/critic"))
+    assert built["orchestration"][0] == "codex"
+    assert built["critic"][1]["protocol"] == "openai"
 
 
 def test_the_harness_is_never_selected_by_credentials_alone(monkeypatch) -> None:
@@ -324,7 +334,7 @@ def test_asking_for_the_harness_without_its_sdk_fails_at_launch(monkeypatch) -> 
     """Naming a backend whose SDK cannot import must not be answered hours in."""
     _clear_provider_env(monkeypatch)
     _set_dual_protocol_gateway(monkeypatch)
-    monkeypatch.setenv(clib.ORCHESTRATION_BACKEND_ENV, "deepseek")
+    monkeypatch.setenv(llm_config.AGENT_BACKEND_ENV, "deepseek")
     monkeypatch.setattr(llm_config, "deepseek_harness_sdk_installed", lambda: False)
 
     with pytest.raises(ValueError, match="requires the DeepSeek Harness SDK"):
@@ -335,7 +345,7 @@ def test_an_unknown_orchestration_backend_is_rejected(monkeypatch) -> None:
     """Silently falling back would hide a typo behind a whole run on the wrong CLI."""
     _clear_provider_env(monkeypatch)
     _set_dual_protocol_gateway(monkeypatch)
-    monkeypatch.setenv(clib.ORCHESTRATION_BACKEND_ENV, "clause")
+    monkeypatch.setenv(llm_config.AGENT_BACKEND_ENV, "clause")
 
     with pytest.raises(ValueError, match="not in"):
         _build()

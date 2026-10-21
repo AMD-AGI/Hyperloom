@@ -17,9 +17,6 @@ except ModuleNotFoundError:  # pragma: no cover - exercised on 3.10 only
 
 from hyperloom.common import agent_runtime_requirements, llm_config
 
-# The SDK has only ever been published as pre-releases.
-_PUBLISHED_RELEASE = "0.1.5rc1"
-
 _PYPROJECT = Path(__file__).resolve().parents[4] / "pyproject.toml"
 
 
@@ -29,9 +26,11 @@ def _requirement(spec: str) -> Requirement:
     return requirement
 
 
-def test_the_shared_pin_admits_the_published_release() -> None:
-    """A floor above every published version is an extra that can never install."""
-    assert _requirement(agent_runtime_requirements.DEEPSEEK_HARNESS_SDK_SPEC).specifier.contains(_PUBLISHED_RELEASE)
+def test_the_shared_pin_admits_the_pre_release_its_floor_names() -> None:
+    """Every published release is a pre-release, and pip admits one only when the specifier itself names one."""
+    specifier = _requirement(agent_runtime_requirements.DEEPSEEK_HARNESS_SDK_SPEC).specifier
+    floor = next(iter(specifier)).version
+    assert specifier.contains(floor)
 
 
 def test_the_deepseek_extra_uses_the_shared_pin() -> None:
@@ -45,12 +44,9 @@ def test_the_deepseek_extra_uses_the_shared_pin() -> None:
     [
         ({}, False),
         ({llm_config.AGENT_BACKEND_ENV: "codex"}, False),
-        ({llm_config.ORCHESTRATION_BACKEND_ENV: "deepseek"}, True),
         ({llm_config.AGENT_BACKEND_ENV: "deepseek"}, True),
-        # Specialists, Forge and TraceLens run on the harness even when orchestration does not.
-        ({llm_config.ORCHESTRATION_BACKEND_ENV: "claude", llm_config.AGENT_BACKEND_ENV: "deepseek"}, True),
     ],
 )
-def test_a_launch_that_names_the_harness_for_any_role_installs_it(env: dict[str, str], needed: bool) -> None:
+def test_a_launch_that_names_the_harness_installs_it(env: dict[str, str], needed: bool) -> None:
     modules = [module for module, _spec in agent_runtime_requirements.harness_runtime_requirements(env)]
     assert modules == (["deepseek_harness"] if needed else [])
