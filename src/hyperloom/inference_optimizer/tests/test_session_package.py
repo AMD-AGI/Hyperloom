@@ -489,7 +489,6 @@ def _build_pressure_session(sd: Path) -> None:
         _write(sd / rel, "{}")
     # Curated but not must-ship, and above the bulk in the priority order.
     _write(sd / "current_setting.sh", "#!/usr/bin/env bash\nvllm serve $MODEL\n")
-    _write(sd / "reports" / "session_terminal.pre.json", "{}")
     _write(sd / "reports" / "bringup" / "measure_round-abc123def456-000.json", "{}")
     # Low-priority bulk: the last entries in the glob order.
     for i in range(4):
@@ -519,7 +518,6 @@ def test_must_ship_artifacts_survive_both_caps(tmp_path: Path, monkeypatch: pyte
     assert "manifest.json" in names
     assert "reports/final.json" in names
     assert "session_breakdown.json" in names
-    assert "reports/session_terminal.json" in names
     for rel in RESERVED_PATHS:
         assert rel in names, f"must-ship artifact dropped: {rel}"
 
@@ -532,7 +530,6 @@ def test_must_ship_artifacts_survive_both_caps(tmp_path: Path, monkeypatch: pyte
 
     # The curated non-bulk files ahead of the blobs kept their slots.
     assert "current_setting.sh" in names
-    assert "reports/session_terminal.pre.json" in names
     assert "reports/bringup/measure_round-abc123def456-000.json" in names
 
     included = {e["path"] for e in manifest["included_files"]}
@@ -631,8 +628,8 @@ def test_single_star_stays_within_one_segment(tmp_path: Path) -> None:
     assert "reports/trace/nested/deep.jsonl" not in names
 
 
-def test_bringup_and_terminal_artifacts_are_collected(tmp_path: Path) -> None:
-    """The bring-up tree and both terminal verdicts are in the curated set."""
+def test_bringup_artifacts_are_collected(tmp_path: Path) -> None:
+    """The bring-up tree is in the curated set; unproduced terminal files are not."""
     sd = tmp_path / "session"
     _write(sd / "session_breakdown.json", "{}")
     _write(sd / "reports" / "bringup" / "trees.json", '{"trees":[]}')
@@ -643,11 +640,10 @@ def test_bringup_and_terminal_artifacts_are_collected(tmp_path: Path) -> None:
     out = package_session_artifacts(sd, session_id="sid-bringup", dest_root=tmp_path / "ws")
 
     assert out is not None
-    names = _zip_names(out)
-    assert "reports/bringup/trees.json" in names
-    assert "reports/bringup/measure_round-abc123def456-001.json" in names
-    assert "reports/session_terminal.json" in names
-    assert "reports/session_terminal.pre.json" in names
+    assert {n for n in _zip_names(out) if n.startswith("reports/")} == {
+        "reports/bringup/trees.json",
+        "reports/bringup/measure_round-abc123def456-001.json",
+    }
 
 
 def test_per_attempt_server_logs_are_gzip(tmp_path: Path) -> None:

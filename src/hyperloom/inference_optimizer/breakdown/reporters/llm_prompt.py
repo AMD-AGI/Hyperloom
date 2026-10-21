@@ -54,9 +54,9 @@ You MUST:
 - State ``global_facts.variant_funnel`` in the executive summary: how many
   bench runs over how many distinct changes, and how many were kept,
   reverted and failed.
-- Reflect the ``attribution_method`` honestly: any value other than
-  ``"validated"`` (for example ``"unattributed"`` or ``"missing"``)
-  MUST be described in plain language as not validated.
+- Reflect the ``attribution_method`` honestly: ``"stack_ledger"`` is the only method backed by the
+  stack ledger; any other value (``"unattributed"``, ``"unattributed (stack listed for reference,
+  not verified as KEEP)"`` or ``"missing"``) MUST be described in plain language as not validated.
 """
 
 

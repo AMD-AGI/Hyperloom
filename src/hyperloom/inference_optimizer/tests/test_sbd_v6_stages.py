@@ -211,7 +211,7 @@ def _baseline_action(
         "end_time": end_time,
         "request": {"task_id": task_id, "establishes_quality_ref": establishes_quality_ref},
         "measurement": {
-            "throughput_tok_s_per_gpu": throughput,
+            "output_throughput": throughput,
             "accuracy": 0.81,
             "ttft_mean_ms": 120.0,
             "e2el_mean_ms": 900.0,
@@ -245,7 +245,7 @@ def test_outcome_baseline_reads_the_anchoring_measurement_off_the_timeline():
     outcome = _v6_outcome([_baseline_event(_baseline_action(task_id="b-1", throughput=800.0))])
 
     assert outcome["baseline"] == {
-        "throughput_tok_s_per_gpu": 800.0,
+        "output_throughput": 800.0,
         "accuracy": 0.81,
         "ttft_mean_ms": 120.0,
         "e2el_mean_ms": 900.0,
@@ -285,7 +285,7 @@ def test_outcome_baseline_ignores_a_kernel_probe_that_anchors_nothing():
         ],
     )
 
-    assert outcome["baseline"]["throughput_tok_s_per_gpu"] == 800.0
+    assert outcome["baseline"]["output_throughput"] == 800.0
 
 
 def test_outcome_baseline_re_anchors_on_the_latest_anchoring_measurement():
@@ -296,16 +296,50 @@ def test_outcome_baseline_re_anchors_on_the_latest_anchoring_measurement():
         ],
     )
 
-    assert outcome["baseline"]["throughput_tok_s_per_gpu"] == 845.0
+    assert outcome["baseline"]["output_throughput"] == 845.0
+
+
+def test_outcome_final_names_the_recipe_throughput_as_the_whole_server_output_axis():
+    outcome = v6_collectors.collect_v6_outcome(
+        v6_collectors.OutcomeSources(
+            session={"stop_reason": "target_reached"},
+            close={"final_recipe": {"throughput": 910.0}},
+            state={"phase": "CLOSE"},
+            timeline=[],
+        )
+    )
+
+    assert outcome["final"]["output_throughput"] == 910.0
+    assert sorted(outcome["final"]) == [
+        "action_path",
+        "e2el_mean_ms",
+        "extra_envs",
+        "extra_server_args",
+        "gain_pct",
+        "graded_on",
+        "invocation",
+        "output_throughput",
+        "perf",
+        "ttft_mean_ms",
+    ]
+    assert sorted(outcome["baseline"]) == [
+        "accuracy",
+        "e2el_mean_ms",
+        "output_throughput",
+        "perf",
+        "submission_invalid_reasons",
+        "submission_valid",
+        "ttft_mean_ms",
+    ]
 
 
 def test_outcome_baseline_keeps_a_degraded_anchor_and_drops_a_failed_one():
     degraded = _v6_outcome([_baseline_event(_baseline_action(task_id="b-1", throughput=770.0, status="degraded"))])
     failed = _v6_outcome([_baseline_event(_baseline_action(task_id="b-1", throughput=770.0, status="failed"))])
 
-    assert degraded["baseline"]["throughput_tok_s_per_gpu"] == 770.0
+    assert degraded["baseline"]["output_throughput"] == 770.0
     assert failed["baseline"] == {
-        "throughput_tok_s_per_gpu": None,
+        "output_throughput": None,
         "accuracy": None,
         "ttft_mean_ms": None,
         "e2el_mean_ms": None,

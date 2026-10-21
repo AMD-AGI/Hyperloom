@@ -182,12 +182,12 @@ def test_gate_orchestration_propose_action_ok(gate):
 
 
 @pytest.mark.parametrize("precision", ["bf16", "fp8"])
-@pytest.mark.parametrize("backend_order", [None, "forge"])
-def test_gate_refuses_a_model_requested_gemm_tuning_run(monkeypatch, precision, backend_order):
+@pytest.mark.parametrize("kernel_optimizer", ["geak", "forge"])
+def test_gate_refuses_a_model_requested_gemm_tuning_run(precision, kernel_optimizer):
     """Refused by channel, not by applicability."""
-    if backend_order:
-        monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", backend_order)
-    state = SharedState(phase="KERNEL_AGENT", precision=precision, framework="sglang")
+    state = SharedState(
+        phase="KERNEL_AGENT", precision=precision, framework="sglang", kernel_optimizer=kernel_optimizer
+    )
     gate = PolicyGate(role_registry=default_role_registry(), shared_state=state)
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent(

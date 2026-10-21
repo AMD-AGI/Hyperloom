@@ -125,7 +125,7 @@ def failure_from_variant_outcome(
     round_id: str,
     vo: dict[str, Any],
 ) -> dict[str, Any]:
-    """Build a failure evidence packet from a per-variant-outcome row."""
+    """Build a failure evidence packet from a per-variant-outcome row, carrying the attribution its producer classified."""
     fp = str(vo.get("fingerprint") or "")
     variant_name = str(vo.get("variant_name") or "")
     variant = vo.get("variant") or {}
@@ -138,12 +138,7 @@ def failure_from_variant_outcome(
         "stage": str(vo.get("stage") or FAILURE_STAGE_DECISION),
         "outcome": str(vo.get("outcome") or ""),
         "error_class": str(vo.get("error_class") or ""),
-        "attribution": classify_failure_attribution(
-            error_class=vo.get("error_class"),
-            error_excerpt=vo.get("error_excerpt"),
-            reason=vo.get("reason"),
-            explicit=vo.get("failure_attribution"),
-        ),
+        "attribution": str(vo.get("failure_attribution") or ""),
         "error_excerpt": vo.get("error_excerpt") or "",
         "reason": str(vo.get("reason") or ""),
         "server_log_path": vo.get("server_log_path"),
