@@ -880,10 +880,6 @@ async def run_tracelens_skill(
     return _skill_result(run, runner="claude_agent_sdk", label="SDK", raw_text="\n".join(chunks), error=sdk_error)
 
 
-# Shared numeric coercion (see _io_utils.safe_float).
-_safe_float = safe_float
-
-
 _IDLE_PCT_TABLE_RE = re.compile(
     r"^\|\s*Idle\s*%\s*\|\s*([0-9]+(?:\.[0-9]+)?)\s*%\s*\|",
     re.IGNORECASE | re.MULTILINE,
@@ -1185,6 +1181,31 @@ def _is_native_source(path: str) -> bool:
     return str(path).lower().endswith(_NATIVE_SOURCE_SUFFIXES)
 
 
+def _pitem_prose(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return one prose entry per TraceLens P-item ``(rank, title)`` named by ``rows``, P1 first.
+
+    The first row naming a P-item supplies its prose, so ``build_prompt`` renders every P-item once; an entry with
+    no rank and no prose is dropped.
+    """
+    entries: dict[tuple[int, str], dict[str, Any]] = {}
+    for row in rows:
+        rank = int(row.get("tracelens_pitem_rank") or 0)
+        title = str(row.get("tracelens_pitem_title") or "")
+        if (rank, title) in entries:
+            continue
+        entries[rank, title] = {
+            "rank": rank,
+            "title": title,
+            "identification": str(row.get("identification") or "").strip(),
+            "reasoning_for_slowdown": str(row.get("reasoning_for_slowdown") or "").strip(),
+            "resolution": str(row.get("resolution") or "").strip(),
+            "impact_low_e2e_pct": safe_float(row.get("impact_low_e2e_pct")),
+            "impact_high_e2e_pct": safe_float(row.get("impact_high_e2e_pct")),
+        }
+    ordered = sorted(entries.values(), key=lambda e: (e["rank"], e["title"]))
+    return [e for e in ordered if e["rank"] or e["identification"] or e["reasoning_for_slowdown"] or e["resolution"]]
+
+
 def aggregate_by_source_function(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Group TraceLens candidates into per-kernel ``task_group`` dicts.
 
@@ -1203,54 +1224,33 @@ def aggregate_by_source_function(candidates: list[dict[str, Any]]) -> list[dict[
         The task-group dicts. Unparseable candidates are left out for legacy
         per-kernel dispatch.
     """
-    if not candidates:
-        return []
-    # Versioned identity builder. Operation normalization keeps different
-    # kernels in one source separate while template/shape instances of one
-    # operator merge.
     groups: dict[str, dict[str, Any]] = {}
     for cand in candidates:
-        if not isinstance(cand, dict):
-            continue
         target = _resolve_source_target(cand)
         if target is None:
             continue
         operation = str(cand.get("name") or "").strip()
-        src_norm = os.path.normpath(str(target["source_path"]))
-        reported_source = src_norm
-        function_name = str(target["function_name"])
-        source_kind = "native" if _is_native_source(src_norm) else "py"
-        identity = build_operator_identity(
-            source_kind=source_kind,
-            source_path=reported_source,
-            operation=operation,
-            function_name=function_name,
-        )
-        src_norm = str(identity["source_path"])
-        norm_op = str(identity["operation"])
-        key = operator_identity_key(
-            source_kind=source_kind,
-            source_path=reported_source,
-            operation=operation,
-            function_name=function_name,
-        )
-        legacy_keys = legacy_operator_identity_keys(
-            source_kind=source_kind,
-            source_path=reported_source,
-            operation=operation,
-            function_name=function_name,
-        )
+        reported_source = os.path.normpath(str(target["source_path"]))
+        identity_args = {
+            "source_kind": "native" if _is_native_source(reported_source) else "py",
+            "source_path": reported_source,
+            "operation": operation,
+            "function_name": str(target["function_name"]),
+        }
+        identity = build_operator_identity(**identity_args)
+        key = operator_identity_key(**identity_args)
+        legacy_keys = legacy_operator_identity_keys(**identity_args)
         bucket = groups.get(key)
         if bucket is None:
-            bucket = {
+            bucket = groups[key] = {
                 "task_group_id": "",  # filled below after sorting
                 "task_group_key": key,
                 "operator_identity": identity,
                 "identity_route": "skill",
                 "legacy_task_group_keys": legacy_keys,
                 "operation": operation,
-                "operation_key": norm_op,
-                "source_path": src_norm,
+                "operation_key": str(identity["operation"]),
+                "source_path": str(identity["source_path"]),
                 "definition_line": target["definition_line"],
                 "function_name": target["function_name"],
                 "ast_resolved": bool(target.get("ast_resolved")),
@@ -1261,86 +1261,28 @@ def aggregate_by_source_function(candidates: list[dict[str, Any]]) -> list[dict[
                 "aggregate_duration_us": 0.0,
                 "aggregate_call_count": 0,
                 "aggregate_gpu_pct": 0.0,
-                # Per-P-item prose (deduped by (rank, title)) so build_prompt renders every P-item.
                 "all_pitem_prose": [],
-                "_pitem_prose_seen": set(),  # popped before return
             }
-            groups[key] = bucket
         else:
-            bucket["legacy_task_group_keys"] = list(
-                dict.fromkeys(
-                    [
-                        *(bucket.get("legacy_task_group_keys") or []),
-                        *legacy_keys,
-                    ]
-                )
-            )
+            bucket["legacy_task_group_keys"] = list(dict.fromkeys([*bucket["legacy_task_group_keys"], *legacy_keys]))
         kid = str(cand.get("kernel_id") or "") or cand.get("name") or ""
         if kid and kid not in bucket["kernel_ids"]:
             bucket["kernel_ids"].append(kid)
         bucket["rows"].append(cand)
-        # Collect P-item prose deduped by (rank, title).
-        try:
-            pitem_rank = int(cand.get("tracelens_pitem_rank") or 0)
-        except (TypeError, ValueError):
-            pitem_rank = 0
-        pitem_title = str(cand.get("tracelens_pitem_title") or "")
-        pitem_key = (pitem_rank, pitem_title)
-        if pitem_key not in bucket["_pitem_prose_seen"]:
-            bucket["_pitem_prose_seen"].add(pitem_key)
-            bucket["all_pitem_prose"].append(
-                {
-                    "rank": pitem_rank,
-                    "title": pitem_title,
-                    "identification": str(cand.get("identification") or "").strip(),
-                    "reasoning_for_slowdown": str(cand.get("reasoning_for_slowdown") or "").strip(),
-                    "resolution": str(cand.get("resolution") or "").strip(),
-                    "impact_low_e2e_pct": _safe_float(cand.get("impact_low_e2e_pct")),
-                    "impact_high_e2e_pct": _safe_float(cand.get("impact_high_e2e_pct")),
-                }
-            )
-        try:
-            bucket["aggregate_duration_us"] += float(cand.get("duration_us") or 0.0)
-        except (TypeError, ValueError):
-            # Malformed metric value; skip this contribution.
-            pass
-        try:
-            bucket["aggregate_call_count"] += int(cand.get("call_count") or 0)
-        except (TypeError, ValueError):
-            # Malformed metric value; skip this contribution.
-            pass
-        try:
-            bucket["aggregate_gpu_pct"] += float(cand.get("gpu_pct") or 0.0)
-        except (TypeError, ValueError):
-            # Malformed metric value; skip this contribution.
-            pass
+        bucket["aggregate_duration_us"] += float(cand.get("duration_us") or 0.0)
+        bucket["aggregate_call_count"] += int(cand.get("call_count") or 0)
+        bucket["aggregate_gpu_pct"] += float(cand.get("gpu_pct") or 0.0)
 
-    ordered = sorted(
-        groups.values(),
-        key=lambda g: g["aggregate_duration_us"],
-        reverse=True,
-    )
+    ordered = sorted(groups.values(), key=lambda g: g["aggregate_duration_us"], reverse=True)
     for idx, group in enumerate(ordered, start=1):
         group["task_group_id"] = f"tg{idx:03d}"
-        # Heaviest row (by duration) becomes primary; the rest are supplementary.
-        group["rows"].sort(
-            key=lambda r: float(r.get("duration_us") or 0.0),
-            reverse=True,
-        )
-        if group["rows"]:
-            primary = group["rows"][0]
-            group["primary_kernel_id"] = str(primary.get("kernel_id") or primary.get("name") or "")
+        # Prose takes rows in arrival order (first row per P-item wins); the duration sort then picks the primary.
+        group["all_pitem_prose"] = _pitem_prose(group["rows"])
+        group["rows"].sort(key=lambda r: float(r.get("duration_us") or 0.0), reverse=True)
+        primary = group["rows"][0]
+        group["primary_kernel_id"] = str(primary.get("kernel_id") or primary.get("name") or "")
         group["aggregate_duration_us"] = round(group["aggregate_duration_us"], 3)
         group["aggregate_gpu_pct"] = round(group["aggregate_gpu_pct"], 3)
-        # Sort prose by rank (P1 first); drop entirely-empty entries.
-        group["all_pitem_prose"].sort(key=lambda e: (e["rank"], e["title"]))
-        group["all_pitem_prose"] = [
-            e
-            for e in group["all_pitem_prose"]
-            if e["rank"] or e["identification"] or e["reasoning_for_slowdown"] or e["resolution"]
-        ]
-        # ``_pitem_prose_seen`` is a set (not JSON-serializable); pop before return.
-        group.pop("_pitem_prose_seen", None)
         group["shape_cases"] = build_task_group_shape_cases(group)
     return ordered
 
