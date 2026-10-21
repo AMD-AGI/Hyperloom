@@ -748,7 +748,7 @@ def test_top_three_are_tried_and_failures_become_references(tmp_path, monkeypatc
     Path(spec.flydsl_kernel).write_text("def skeleton():\n    pass\n")
 
     restored = asyncio.run(
-        kb.try_flydsl_kb_warmstart(kb.RewriteKbTarget(spec, str(driver), config), source_case_ms={_CASE: 10.0}, top_k=3)
+        kb.try_flydsl_kb_warmstart(kb.RewriteKbTarget(spec, str(driver), config), source_case_ms={_CASE: 10.0})
     )
 
     assert restored.applied is True
@@ -917,6 +917,36 @@ def test_a_candidate_whose_benchmark_failed_is_not_adopted(tmp_path, monkeypatch
     assert restored.applied is False
     assert Path(spec.flydsl_kernel).read_text() == seed
     assert [attempt["reason"] for attempt in restored.attempts] == ["unscorable_measurement"]
+
+
+def test_a_candidate_whose_validation_crashes_becomes_a_reference(tmp_path, monkeypatch):
+    """A trial that raises is rejected under the error's type and handed to the agent as a reference."""
+    _use_in_memory_kb_store(monkeypatch)
+    spec, driver = _spec(tmp_path)
+    config = _remote_config(tmp_path)
+
+    _publish_ranked_candidates(spec, driver, config, [(1, 10.0, 2.0)])
+
+    async def crashing_validation(**_kwargs):
+        raise RuntimeError("driver crashed")
+
+    def unexpected_benchmark(*args, **kwargs):
+        raise AssertionError("a crashed trial must not be benchmarked")
+
+    monkeypatch.setattr(kb, "run_validation_pipeline", crashing_validation)
+    monkeypatch.setattr(kb.driver_contract, "preflight_candidate", unexpected_benchmark)
+    seed = "def skeleton():\n    pass\n"
+    Path(spec.flydsl_kernel).write_text(seed)
+
+    restored = asyncio.run(
+        kb.try_flydsl_kb_warmstart(kb.RewriteKbTarget(spec, str(driver), config), source_case_ms={_CASE: 10.0})
+    )
+
+    assert restored.applied is False
+    assert restored.read_reason == "candidates_rejected"
+    assert Path(spec.flydsl_kernel).read_text() == seed
+    assert [attempt["reason"] for attempt in restored.attempts] == ["validation_error:RuntimeError"]
+    assert "- Rejection reason: validation_error:RuntimeError" in restored.reference_context
 
 
 def test_a_candidate_claiming_less_than_the_floor_is_never_tried(tmp_path, monkeypatch):

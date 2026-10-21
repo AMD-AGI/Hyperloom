@@ -138,14 +138,17 @@ def create_venv(venv_dir: Path) -> None:
     ``--system-site-packages`` reaches only the base installation, so when this
     interpreter is itself a venv its packages -- the image's ROCm torch among
     them -- would be missing and pip would fetch replacements. Its site
-    directories are appended through a ``.pth`` instead.
+    directories are appended through a ``.pth`` instead, as site directories:
+    eggs and editable installs reach ``sys.path`` only through the ``.pth``
+    files inside them.
     """
     if venv_dir.exists():
         shutil.rmtree(venv_dir)
     log.info("create_venv: %s", venv_dir)
     _run_subprocess([sys.executable, "-m", "venv", "--system-site-packages", str(venv_dir)], timeout_sec=600)
     purelib = venv_dir / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
-    (purelib / _INHERITED_SITE_PTH).write_text("\n".join(site.getsitepackages()) + "\n", encoding="utf-8")
+    adds = "".join(f"; site.addsitedir({d!r})" for d in site.getsitepackages())
+    (purelib / _INHERITED_SITE_PTH).write_text(f"import site{adds}\n", encoding="utf-8")
 
 
 # Per-candidate workspace lifecycle
