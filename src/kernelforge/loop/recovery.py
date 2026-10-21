@@ -105,8 +105,14 @@ class CallerRecovery:
     result_json: str | None
 
 
-def _warm_start_scores(warm: dict) -> KeepScore:
-    """KeepScore for a validated improving warm-start, or raise ValueError."""
+@dataclass(frozen=True)
+class _WarmStartMeasurements:
+    score: KeepScore
+    case_times: dict[str, float]
+    unscored_cases: list[str]
+
+
+def _warm_start_measurements(warm: dict) -> _WarmStartMeasurements:
     baseline_ms = warm.get("pristine_ms")
     best_ms = warm.get("keep_baseline_ms")
     mean_case_speedup = warm.get("mean_case_speedup")
@@ -122,23 +128,16 @@ def _warm_start_scores(warm: dict) -> KeepScore:
     baseline_ms = float(baseline_ms)
     best_ms = float(best_ms)
     mean_case_speedup = float(mean_case_speedup)
-    return KeepScore(
-        baseline_wall_ms=baseline_ms,
-        best_wall_ms=best_ms,
-        mean_case_speedup=mean_case_speedup,
-        search_start_mean_case_speedup=mean_case_speedup,
-        search_start_ms=best_ms,
-    )
-
-
-def _warm_start_improvement(score: KeepScore) -> dict[str, str | bool]:
-    """The improvement ``score`` may claim.
-
-    The manifest publish() just wrote withholds the improvement badge when the aggregate wall times contradict the
-    score.
-    """
-    return warm_start_improvement_flags(
-        pristine_ms=score.baseline_wall_ms, best_ms=score.best_wall_ms, mean_case_speedup=score.mean_case_speedup
+    return _WarmStartMeasurements(
+        score=KeepScore(
+            baseline_wall_ms=baseline_ms,
+            best_wall_ms=best_ms,
+            mean_case_speedup=mean_case_speedup,
+            search_start_mean_case_speedup=mean_case_speedup,
+            search_start_ms=best_ms,
+        ),
+        case_times=dict(warm.get("case_times") or {}),
+        unscored_cases=list(warm.get("unscored_cases") or []),
     )
 
 
@@ -159,9 +158,9 @@ def _warm_start_identity(workspace_dir: str, base_commit: str, warm: dict, exter
 
 
 def _warm_start_bundle(
-    workspace_dir: str, base_commit: str, keep: KeepIdentity, score: KeepScore, warm: dict
+    workspace_dir: str, base_commit: str, keep: KeepIdentity, measurements: _WarmStartMeasurements
 ) -> KeepBundle:
-    """KeepBundle for the non-empty warm-start diff from ``base_commit`` to ``keep.commit_hash``."""
+    score = measurements.score
     patch = git("diff", base_commit, keep.commit_hash, "--", ".", cwd=workspace_dir).stdout
     changed_files = [
         line.strip()
@@ -177,8 +176,8 @@ def _warm_start_bundle(
         benchmark={
             "median_ms": score.best_wall_ms,
             "mean_case_speedup": score.mean_case_speedup,
-            "case_times": dict(warm.get("case_times") or {}),
-            "unscored_cases": list(warm.get("unscored_cases") or []),
+            "case_times": measurements.case_times,
+            "unscored_cases": measurements.unscored_cases,
             "warm_start": True,
         },
         changed_files=changed_files,
@@ -215,12 +214,11 @@ def publish_warm_start_recovery(
     """Publish a validated warm-start as a kill-recoverable local best."""
     if warm.get("applied") is not True:
         return None
-    score = _warm_start_scores(warm)
-    case_times = dict(warm.get("case_times") or {})
-    unscored_cases = list(warm.get("unscored_cases") or [])
+    measurements = _warm_start_measurements(warm)
+    score = measurements.score
     external_id = caller.caller_experiment_id or caller.experience_id or "warm-start"
     keep = _warm_start_identity(workspace_dir, base_commit, warm, external_id)
-    bundle = _warm_start_bundle(workspace_dir, base_commit, keep, score, warm)
+    bundle = _warm_start_bundle(workspace_dir, base_commit, keep, measurements)
     errors: list[str] = []
     try:
         manifest = BestResultPublisher(workspace_dir).publish(keep, score, bundle)
@@ -236,7 +234,10 @@ def publish_warm_start_recovery(
         if manifest is None:
             raise
         errors.append(f"derived-best-view: {error}")
-    improvement = _warm_start_improvement(score)
+    # The manifest publish above withholds improvement when aggregate wall times contradict the case score.
+    improvement = warm_start_improvement_flags(
+        pristine_ms=score.baseline_wall_ms, best_ms=score.best_wall_ms, mean_case_speedup=score.mean_case_speedup
+    )
     scores = {
         "baseline_ms": score.baseline_wall_ms,
         "best_ms": score.best_wall_ms,
@@ -256,13 +257,13 @@ def publish_warm_start_recovery(
         "validation_passed": True,
         "validation_summary": "validated KB warm-start",
         "snr_db": None,
-        "case_times": case_times,
-        "unscored_cases": unscored_cases,
+        "case_times": measurements.case_times,
+        "unscored_cases": measurements.unscored_cases,
     }
     result = {
         **scores,
-        "case_times": case_times,
-        "unscored_cases": unscored_cases,
+        "case_times": measurements.case_times,
+        "unscored_cases": measurements.unscored_cases,
         **improvement,
         "experiment_id": caller.caller_experiment_id or None,
         "campaign_id": manifest["campaign_id"],

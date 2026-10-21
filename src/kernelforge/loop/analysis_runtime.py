@@ -76,15 +76,18 @@ class AnalysisRuntimeMixin(AnalysisEvidenceMixin):
 
     def _finish_successful_refresh(self, context, decision, planning_iteration, analysis_service) -> None:
         """Record the just-built bundle on run_state and emit its analysis_result event."""
-        outcome = getattr(self._analysis_bundle, "outcome", None)
+        outcome = self._analysis_bundle.outcome
         published = (
             outcome is not None and outcome.checkpoint_level == "published"
         ) or self._published_analysis_bundle_root(context.analysis_commit) is not None
-        manifest = getattr(self._analysis_bundle, "manifest", {}) or {}
-        manifest_status = str(manifest.get("status") or "READY").upper()
-        available_tier = str(getattr(outcome, "available_tier", "") or "")
-        upgrade_exhausted = bool(getattr(outcome, "upgrade_exhausted", False))
-        if not getattr(analysis_service, "profiling_enabled", True):
+        manifest_status = str(self._analysis_bundle.manifest.get("status") or "READY").upper()
+        if outcome is None:
+            available_tier = ""
+            upgrade_exhausted = False
+        else:
+            available_tier = str(outcome.available_tier or "")
+            upgrade_exhausted = bool(outcome.upgrade_exhausted)
+        if not analysis_service.profiling_enabled:
             evidence_status, attempt_status = available_tier or "static", "success"
         elif manifest_status != "PARTIAL":
             evidence_status, attempt_status = available_tier or "ready", "success"
@@ -118,7 +121,7 @@ class AnalysisRuntimeMixin(AnalysisEvidenceMixin):
         analysis_state.last_attempt_iteration = planning_iteration
         stale_context = self._apply_last_analysis_evidence(context)
         self._analysis_bundle = None
-        requested_tier = "profiled" if getattr(analysis_service, "profiling_enabled", True) else "static"
+        requested_tier = "profiled" if analysis_service.profiling_enabled else "static"
         try:
             self._analysis_bundle = await analysis_service.ensure_bundle(
                 context,
