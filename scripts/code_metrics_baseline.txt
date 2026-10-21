@@ -4,16 +4,10 @@
 # A file is judged only when a change touches it; the label baseline-raise waives growth.
 cognitive-complexity scripts/platform_audit_bmc.py::main 44
 cognitive-complexity src/hyperloom/inference_optimizer/baseline_comparison/inferencex_client.py::fetch_agentic_interactivity 31
-cognitive-complexity src/hyperloom/inference_optimizer/breakdown/collectors/v6.py::_validation_from_timeline 35
-cognitive-complexity src/hyperloom/inference_optimizer/breakdown/collectors/v6.py::collect_v6_metadata 32
-cognitive-complexity src/hyperloom/inference_optimizer/breakdown/critic_reviews.py::normalize_framework_reviews 37
-cognitive-complexity src/hyperloom/inference_optimizer/breakdown/recorder/framework_event.py::FrameworkEventRecorder.record_attempt 68
-cognitive-complexity src/hyperloom/inference_optimizer/breakdown/recorder/instrument.py::_mirror_backend_attempts_to_kernel_timeline 53
 cognitive-complexity src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py::_merge_acceptances 31
 cognitive-complexity src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py::assemble_kernel_ext 50
 cognitive-complexity src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py::record_geak_attempts 31
 cognitive-complexity src/hyperloom/inference_optimizer/breakdown/reporters/_renderers/final.py::render 42
-cognitive-complexity src/hyperloom/inference_optimizer/breakdown/reporters/_renderers/kernel_lifecycle.py::render 59
 cognitive-complexity src/hyperloom/inference_optimizer/cli/__init__.py::_run_optimize 43
 cognitive-complexity src/hyperloom/inference_optimizer/cli/model_gate.py::_detect_unsupported_model 32
 cognitive-complexity src/hyperloom/inference_optimizer/framework_paths.py::_discover_installed_framework_roots 43
@@ -203,11 +197,7 @@ cognitive-complexity src/kernelforge/orchestrator/analysis.py::AnalysisAgentServ
 cognitive-complexity src/kernelforge/orchestrator/analysis.py::AnalysisAgentService.ensure_bundle 39
 cognitive-complexity src/kernelforge/orchestrator/orchestration.py::OrchestrationAgent._bind_dispatch 39
 cognitive-complexity src/kernelforge/orchestrator/orchestration.py::OrchestrationService.run 33
-cognitive-complexity src/kernelforge/rewrite_by_flydsl/applyback.py::_validate_worktree_changes 35
-cognitive-complexity src/kernelforge/rewrite_by_flydsl/applyback.py::generate_applyback_patch 33
-cognitive-complexity src/kernelforge/rewrite_by_flydsl/flydsl_rewrite_driver_preparation.py::prepare_rewrite_driver 37
 cognitive-complexity src/kernelforge/rewrite_by_flydsl/ingest.py::discover_source_entry 31
-cognitive-complexity src/kernelforge/rewrite_by_flydsl/kb.py::try_flydsl_kb_warmstart 71
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_grid_runner.py::run_grid 61
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_kv_metrics.py::_read_aiperf_aggregate_json 22
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::_wait_for_server_health_async 23
@@ -454,20 +444,13 @@ function-lines scripts/platform_audit_bmc.py::main 131
 function-lines src/hyperloom/agents/critic/runtime/kb_writer.py::KBWriter.write_kb_drafts 110
 function-lines src/hyperloom/agents/quantization/driver/retry.py::quantize_via_prompt 102
 function-lines src/hyperloom/agents/quantization/driver/runner.py::run_one_attempt 83
-function-lines src/hyperloom/inference_optimizer/breakdown/collectors/v6.py::_validation_from_timeline 88
-function-lines src/hyperloom/inference_optimizer/breakdown/collectors/v6.py::collect_v6_metadata 90
-function-lines src/hyperloom/inference_optimizer/breakdown/critic_reviews.py::normalize_framework_reviews 133
 function-lines src/hyperloom/inference_optimizer/breakdown/exporter.py::build 132
-function-lines src/hyperloom/inference_optimizer/breakdown/recorder/framework_event.py::FrameworkEventRecorder.record_attempt 111
-function-lines src/hyperloom/inference_optimizer/breakdown/recorder/framework_event.py::assemble_framework_ext 93
-function-lines src/hyperloom/inference_optimizer/breakdown/recorder/instrument.py::_mirror_backend_attempts_to_kernel_timeline 107
 function-lines src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py::assemble_kernel_ext 206
 function-lines src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py::record_geak_attempts 102
 function-lines src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py::record_integrate_verdict 89
 function-lines src/hyperloom/inference_optimizer/breakdown/reporters/_renderers/attribution.py::render 85
 function-lines src/hyperloom/inference_optimizer/breakdown/reporters/_renderers/baseline.py::render 134
 function-lines src/hyperloom/inference_optimizer/breakdown/reporters/_renderers/final.py::render 178
-function-lines src/hyperloom/inference_optimizer/breakdown/reporters/_renderers/kernel_lifecycle.py::render 156
 function-lines src/hyperloom/inference_optimizer/breakdown/reporters/_renderers/session.py::render 93
 function-lines src/hyperloom/inference_optimizer/breakdown/session_package.py::package_session_artifacts 87
 function-lines src/hyperloom/inference_optimizer/cli/__init__.py::_export_partition_shape 101
@@ -794,9 +777,6 @@ function-lines src/kernelforge/orchestrator/orchestration.py::OrchestrationServi
 function-lines src/kernelforge/orchestrator/orchestration.py::OrchestrationService.run 149
 function-lines src/kernelforge/orchestrator/specialists.py::SpecialistAgent.run 104
 function-lines src/kernelforge/rewrite_by_flydsl/applyback.py::_publish_patch 115
-function-lines src/kernelforge/rewrite_by_flydsl/applyback.py::generate_applyback_patch 209
-function-lines src/kernelforge/rewrite_by_flydsl/flydsl_rewrite_driver_preparation.py::prepare_rewrite_driver 231
-function-lines src/kernelforge/rewrite_by_flydsl/kb.py::try_flydsl_kb_warmstart 166
 function-lines src/kernelforge/rewrite_by_flydsl/kb.py::write_flydsl_kb_solution 85
 function-lines src/kernelforge/rewrite_by_flydsl/optimize.py::run_optimize 125
 module-lines src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py 2168
@@ -866,4 +846,3 @@ nested-blocks src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py::m
 nested-blocks src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py::write_reports 8
 nested-blocks src/kernelforge/fusion/discover.py::_salvage_objects 6
 nested-blocks src/kernelforge/gemm_tune/model_analyzer.py::_extract_quant_info 6
-nested-blocks src/kernelforge/rewrite_by_flydsl/kb.py::try_flydsl_kb_warmstart 7
