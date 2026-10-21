@@ -11,11 +11,13 @@ import os
 import re
 import subprocess
 import sys
+from functools import partial
 from pathlib import Path
 from typing import Any
 
 from hyperloom.common.codex_session import CodexSessionError
 from hyperloom.common.env import is_truthy
+from hyperloom.common.jsonio import read_json
 
 from ..actions.executors._kernel_agent_tool import _run_subprocess
 
@@ -418,51 +420,38 @@ def _campaign_patches_on_disk(root: Path) -> list[dict[str, Any]]:
 
 def salvage_forge_fusion_from_workspace(output_dir: str) -> dict[str, Any] | None:
     """Rebuild a KEEP result from pre-smoke checkpoint + patch after a kill."""
-    root = Path(output_dir or "")
+    root = Path(output_dir)
     if not root.is_dir():
         return None
-    ckpt_path = root / "kernel_keep_checkpoint.json"
+    # A killed run leaves either file truncated or mid-write, so neither is read strictly.
+    read = partial(read_json, default={}, require_dict=True, errors="replace")
+    manifest = read(root / "fusion_manifest.json")
+    # Only a checkpoint that kept says anything about the run.
+    ckpt = read(root / "kernel_keep_checkpoint.json")
+    ckpt = ckpt if ckpt.get("kept") else {}
+    loop, compile_pass, artifacts, fusion = (
+        manifest.get(block) or {} for block in ("fusion_loop", "compile_pass", "artifacts", "fusion")
+    )
+    kept = bool(ckpt or loop.get("kept") or compile_pass.get("kept"))
+    speedup = ckpt.get("kernel_speedup")
+    if manifest:
+        # A checkpointed ``kernel_speedup`` of 0 is a measurement, so the manifest answers
+        # for it only when the manifest is there to answer.
+        speedup = speedup or (loop.get("best") or {}).get("kernel_speedup") or compile_pass.get("speedup")
+    env_flag, source_file, repo_root = (
+        str(ckpt.get(key) or fallback or "")
+        for key, fallback in (
+            ("env_flag", loop.get("best_env_flag")),
+            ("source_file", fusion.get("source_file")),
+            ("repo_root", artifacts.get("repo_root")),
+        )
+    )
+    patch = str(artifacts.get("patch") or "")
+    siblings = manifest.get("patches")
     patch_path = root / "fusion.patch"
-    manifest_path = root / "fusion_manifest.json"
-    kept = False
-    speedup = None
-    env_flag = ""
-    source_file = ""
-    repo_root = ""
-    patch = None
-    siblings = None
-    if ckpt_path.is_file():
-        try:
-            ckpt = json.loads(ckpt_path.read_text(encoding="utf-8", errors="replace"))
-        except (OSError, json.JSONDecodeError):
-            ckpt = {}
-        if isinstance(ckpt, dict) and ckpt.get("kept"):
-            kept = True
-            speedup = ckpt.get("kernel_speedup")
-            env_flag = str(ckpt.get("env_flag") or "")
-            source_file = str(ckpt.get("source_file") or "")
-            repo_root = str(ckpt.get("repo_root") or "")
-    if manifest_path.is_file():
-        try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8", errors="replace"))
-        except (OSError, json.JSONDecodeError):
-            manifest = {}
-        if isinstance(manifest, dict):
-            loop = manifest.get("fusion_loop") or {}
-            compile_pass = manifest.get("compile_pass") or {}
-            if loop.get("kept") or compile_pass.get("kept"):
-                kept = True
-            speedup = speedup or (loop.get("best") or {}).get("kernel_speedup") or compile_pass.get("speedup")
-            env_flag = env_flag or str(loop.get("best_env_flag") or "")
-            source_file = source_file or str((manifest.get("fusion") or {}).get("source_file") or "")
-            artifacts = manifest.get("artifacts") or {}
-            if artifacts.get("patch"):
-                patch = artifacts.get("patch")
-            repo_root = repo_root or str(artifacts.get("repo_root") or "")
-            siblings = manifest.get("patches")
     if patch_path.is_file():
         patch = str(patch_path)
-    if not kept or not patch or not Path(str(patch)).is_file():
+    if not kept or not Path(patch).is_file():
         campaign = _campaign_patches_on_disk(root)
         if not campaign:
             return None
@@ -470,12 +459,13 @@ def salvage_forge_fusion_from_workspace(output_dir: str) -> dict[str, Any] | Non
         siblings = campaign
         patch = strongest["patch_path"]
         speedup = strongest["micro_speedup"]
-        source_file = source_file or strongest["target_file"]
-        repo_root = repo_root or strongest["kernel_repo"]
         # There is no checkpoint and no aggregate on this path, so the top-level flags are
         # empty too; the strongest row read its own out of the campaign's driver.
-        env_flag = env_flag or strongest["env_flag"]
-    flags = [f for f in env_flag.split() if f]
+        env_flag, source_file, repo_root = (
+            current or strongest[key]
+            for current, key in ((env_flag, "env_flag"), (source_file, "target_file"), (repo_root, "kernel_repo"))
+        )
+    flags = env_flag.split()
     result: dict[str, Any] = {
         "status": "ok",
         "engine": "forge_fusion",

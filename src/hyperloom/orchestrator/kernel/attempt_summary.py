@@ -314,13 +314,23 @@ def _synthetic_gemm_tuning_attempt(stack_entry: dict[str, Any]) -> dict[str, Any
     }
 
 
-def _gemm_tuning_entries_in_optimization_stack(state: Any) -> list[dict[str, Any]]:
-    """``optimization_stack`` entries a gemm_tuning KEEP landed, in stack order."""
-    entries = []
-    for e in getattr(state, "optimization_stack", []) or []:
-        if isinstance(e, dict) and e.get("action") == "gemm_tuning":
-            entries.append(e)
-    return entries
+def _stack_entries(state: Any, action: str) -> list[dict[str, Any]]:
+    """``optimization_stack`` entries one action landed, in stack order."""
+    stack = getattr(state, "optimization_stack", []) or []
+    return [e for e in stack if isinstance(e, dict) and e.get("action") == action]
+
+
+def _latest_attempt_per_kernel(state: Any) -> dict[str, dict[str, Any]]:
+    """Attempts-ledger rows keyed by the kernel they now describe, newest ``last_ts`` winning."""
+    latest: dict[str, dict[str, Any]] = {}
+    for ledger_id, attempt in dict(getattr(state, "kernel_opt_task_attempts", {}) or {}).items():
+        if not isinstance(attempt, dict):
+            continue
+        kernel_id = str(attempt.get("current_kernel_id") or attempt.get("kernel_id") or ledger_id)
+        previous = latest.get(kernel_id)
+        if previous is None or str(attempt.get("last_ts") or "") >= str(previous.get("last_ts") or ""):
+            latest[kernel_id] = attempt
+    return latest
 
 
 def _classify_attempted(
@@ -423,36 +433,29 @@ def _gemm_tuning_lane_totals(state: Any) -> dict[str, Any]:
     """Summarize GEMM micro-tuning without treating candidates as E2E wins."""
     attempts = list(getattr(state, "gemm_tuning_attempts", []) or [])
     if not attempts:
-        last = getattr(state, "last_gemm_tuning", {}) or {}
-        if isinstance(last, dict) and last:
-            attempts = [last]
+        attempts = [getattr(state, "last_gemm_tuning", None)]
     attempted = success = unvalidated = failed = 0
     for result in attempts:
+        # The list round-trips through state.json and SharedState.from_dict does not validate its elements.
         if not isinstance(result, dict):
             continue
         rows = [row for row in (result.get("tuners_run") or []) if isinstance(row, dict)]
         if rows:
+            tried = len(rows)
             winners = sum(
                 1 for row in rows if row.get("kept") is True or (_to_float(row.get("best_micro_speedup")) or 0.0) > 1.0
             )
-            attempted += len(rows)
-            if result.get("requires_e2e_validation"):
-                unvalidated += winners
-            else:
-                success += winners
-            failed += len(rows) - winners
+        elif str(result.get("status") or "").strip().lower() in ("", OUTCOME_SKIP, "skipped"):
             continue
-        status = str(result.get("status") or "").strip().lower()
-        if not status or status in (OUTCOME_SKIP, "skipped"):
-            continue
-        attempted += 1
-        kept = str(result.get("decision") or "").upper() == "KEEP"
-        if kept and result.get("requires_e2e_validation"):
-            unvalidated += 1
-        elif kept:
-            success += 1
         else:
-            failed += 1
+            tried = 1
+            winners = 1 if str(result.get("decision") or "").upper() == "KEEP" else 0
+        attempted += tried
+        if result.get("requires_e2e_validation"):
+            unvalidated += winners
+        else:
+            success += winners
+        failed += tried - winners
     return _lane_totals(attempted, success, unvalidated, failed)
 
 
@@ -561,95 +564,45 @@ def _summary_one_line(
     return handling.summary(entry, backend_ladder, artifact_error)
 
 
-def build_kernel_optimization_summary(state: Any, session_dir: Path | str) -> dict[str, Any]:
-    """Build the full summary block for one session."""
-    sd_path = Path(session_dir)
-    session_id = str(getattr(state, "session_id", "") or "")
-    results_dir = _backend_results_dir(sd_path, session_id)
-    where = ResultsLocation(results_dir=results_dir, session_dir=sd_path)
-
-    top15: list[dict[str, Any]] = list(
-        (getattr(state, "last_trace_analyze", {}) or {}).get("kernel_roofline_top15") or []
-    )
-
-    raw_attempts: dict[str, dict[str, Any]] = dict(getattr(state, "kernel_opt_task_attempts", {}) or {})
-    attempts_map: dict[str, dict[str, Any]] = {}
-    for ledger_id, attempt in raw_attempts.items():
-        if not isinstance(attempt, dict):
-            continue
-        current_kernel_id = str(attempt.get("current_kernel_id") or attempt.get("kernel_id") or ledger_id)
-        previous = attempts_map.get(current_kernel_id)
-        if previous is None or str(attempt.get("last_ts") or "") >= str(previous.get("last_ts") or ""):
-            attempts_map[current_kernel_id] = attempt
+def _attempted_rows(state: Any, top15: list[dict[str, Any]], where: ResultsLocation) -> list[dict[str, Any]]:
+    """Summary rows for every kernel some lane recorded an attempt for, hottest top15 rows first."""
+    attempts_map = _latest_attempt_per_kernel(state)
     rejected_ids: set[str] = {str(x) for x in (getattr(state, "rejected_kernel_ids", []) or [])}
-    integrated_ids: set[str] = set()
-    for entry in getattr(state, "optimization_stack", []) or []:
-        if not isinstance(entry, dict):
-            continue
-        kid = str(entry.get("kernel_id") or "")
-        if kid and entry.get("action") == "integrate":
-            integrated_ids.add(kid)
+    integrated_ids: set[str] = {str(e["kernel_id"]) for e in _stack_entries(state, "integrate") if e.get("kernel_id")}
     # A kernel-recipe lane (forge-loop/flydsl/fusion) lands its optimization_stack entry under its own long-form
     # recipe id, which never equals a top15 row's synthetic kNNN id and never touches kernel_opt_task_attempts —
     # so without this, an integrated kernel silently reads as "never attempted" (see
     # _forge_loop_entries_by_operator_in_optimization_stack's docstring for why the operator name is the shared
     # identity).
     forge_loop_entries_by_operator = _forge_loop_entries_by_operator_in_optimization_stack(state)
-    last_kernel_opt = dict(getattr(state, "last_kernel_opt", {}) or {})
-    keep_pending_kid = ""
-    if str(last_kernel_opt.get("decision") or "").upper() == "KEEP":
-        cand_kid = str(last_kernel_opt.get("kernel_id") or "")
-        if cand_kid and cand_kid not in integrated_ids and cand_kid not in rejected_ids:
-            keep_pending_kid = cand_kid
+    last_kernel_opt = getattr(state, "last_kernel_opt", None) or {}
+    keep_pending_kid = str(last_kernel_opt.get("kernel_id") or "")
+    if str(last_kernel_opt.get("decision")).upper() != "KEEP" or keep_pending_kid in integrated_ids | rejected_ids:
+        keep_pending_kid = ""
 
-    by_kernel: list[dict[str, Any]] = []
-    rejection_breakdown: dict[str, int] = dict.fromkeys(KNOWN_REJECTION_REASONS, 0)
-    rejection_breakdown["other"] = 0
-    counts = {
-        "top_candidates": len(top15),
-        "attempted": 0,
-        "integrated": 0,
-        "keep_pending": 0,
-        "rejected": 0,
-        "in_flight": 0,
-    }
+    # Ledger rows outside top15 carry no roofline facts, so they enter the same pass as a bare id.
+    entries = {str(row.get("kernel_id") or ""): row for row in top15 if isinstance(row, dict)}
+    entries.pop("", None)
+    for ledger_kid in attempts_map:
+        entries.setdefault(ledger_kid, {"kernel_id": ledger_kid})
 
-    # Process top15 kernels first (pre-sorted by gpu_pct desc).
-    processed_kids: set[str] = set()
-    for top_entry in top15:
-        if not isinstance(top_entry, dict):
-            continue
-        kid = str(top_entry.get("kernel_id") or "")
-        if not kid:
-            continue
-        processed_kids.add(kid)
+    rows: list[dict[str, Any]] = []
+    for kid, top_entry in entries.items():
         attempt = attempts_map.get(kid)
-        forge_loop_entry = (
-            forge_loop_entries_by_operator.get(normalize_operator_name(str(top_entry.get("name") or "")))
-            if attempt is None
-            else None
-        )
-        if attempt is None and forge_loop_entry is not None:
-            attempt = _synthetic_forge_loop_attempt(forge_loop_entry)
         if attempt is None:
-            # A hot kernel none of the recorded lanes touched.
-            continue
-        counts["attempted"] += 1
-        category = (
-            CATEGORY_INTEGRATED
-            if forge_loop_entry is not None
-            else _classify_attempted(
+            stack_entry = forge_loop_entries_by_operator.get(normalize_operator_name(str(top_entry.get("name") or "")))
+            if stack_entry is None:
+                # A hot kernel none of the recorded lanes touched.
+                continue
+            attempt, category = _synthetic_forge_loop_attempt(stack_entry), CATEGORY_INTEGRATED
+        else:
+            category = _classify_attempted(
                 attempt,
                 integrated_ids=integrated_ids,
                 rejected_ids=rejected_ids,
                 kernel_id=kid,
             )
-        )
-        counts[_category_count_key(category)] += 1
-        if category == CATEGORY_ATTEMPTED_REJECTED:
-            bucket = _rejection_bucket(_rejected_reason_of(attempt))
-            rejection_breakdown[bucket] = rejection_breakdown.get(bucket, 0) + 1
-        by_kernel.append(
+        rows.append(
             _render_attempted_row(
                 top_entry,
                 attempt,
@@ -658,41 +611,42 @@ def build_kernel_optimization_summary(state: Any, session_dir: Path | str) -> di
                 last_kernel_opt=last_kernel_opt if kid == keep_pending_kid else None,
             )
         )
+    return rows
 
-    # Kernels with a ledger row but not in top15.
-    for kid, attempt in attempts_map.items():
-        if kid in processed_kids:
-            continue
-        counts["attempted"] += 1
-        category = _classify_attempted(
-            attempt,
-            integrated_ids=integrated_ids,
-            rejected_ids=rejected_ids,
-            kernel_id=kid,
-        )
-        counts[_category_count_key(category)] += 1
-        # Same accounting as the top15 loop above: a rejected kernel that only has a ledger row must land in the
-        # breakdown too, or the totals and the per-reason split disagree.
-        if category == CATEGORY_ATTEMPTED_REJECTED:
-            bucket = _rejection_bucket(_rejected_reason_of(attempt))
-            rejection_breakdown[bucket] = rejection_breakdown.get(bucket, 0) + 1
-        by_kernel.append(
-            _render_attempted_row(
-                {"kernel_id": kid},
-                attempt,
-                category,
-                where,
-                last_kernel_opt=None,
-            )
-        )
+
+def _tally(rows: list[dict[str, Any]], top_candidates: int) -> tuple[dict[str, int], dict[str, int]]:
+    """Derive the ``totals`` counters and the per-reason rejection split from the rendered rows."""
+    counts = {
+        "top_candidates": top_candidates,
+        "attempted": len(rows),
+        "integrated": 0,
+        "keep_pending": 0,
+        "rejected": 0,
+        "in_flight": 0,
+    }
+    breakdown = dict.fromkeys([*KNOWN_REJECTION_REASONS, "other"], 0)
+    for row in rows:
+        counts[_category_count_key(row["category"])] += 1
+        if row["category"] == CATEGORY_ATTEMPTED_REJECTED:
+            breakdown[_rejection_bucket(str(row["rejected_reason"]))] += 1
+    return counts, breakdown
+
+
+def build_kernel_optimization_summary(state: Any, session_dir: Path | str) -> dict[str, Any]:
+    """Build the full summary block for one session."""
+    sd_path = Path(session_dir)
+    session_id = str(getattr(state, "session_id", "") or "")
+    where = ResultsLocation(results_dir=_backend_results_dir(sd_path, session_id), session_dir=sd_path)
+    top15: list[dict[str, Any]] = list(
+        (getattr(state, "last_trace_analyze", {}) or {}).get("kernel_roofline_top15") or []
+    )
+    by_kernel = _attempted_rows(state, top15, where)
 
     # gemm_tuning KEEPs: no roofline top15 row to match against (one campaign retunes many GEMM
     # shapes at once, not one named kernel), so each lands as its own standalone entry rather than
     # silently reading as "never attempted".
-    for gemm_entry in _gemm_tuning_entries_in_optimization_stack(state):
+    for gemm_entry in _stack_entries(state, "gemm_tuning"):
         gemm_kid = str(gemm_entry.get("variant_name") or "gemm_tuning")
-        counts["attempted"] += 1
-        counts["integrated"] += 1
         by_kernel.append(
             _render_attempted_row(
                 {"kernel_id": gemm_kid, "name": gemm_kid, "kernel_category": "gemm_tuning"},
@@ -703,6 +657,7 @@ def build_kernel_optimization_summary(state: Any, session_dir: Path | str) -> di
             )
         )
 
+    counts, rejection_breakdown = _tally(by_kernel, len(top15))
     failure_reason_breakdown = _aggregate_failure_reasons(by_kernel)
     top_takeaways = _build_top_takeaways(
         counts=counts,
@@ -760,6 +715,29 @@ class ResultsLocation(NamedTuple):
     session_dir: Path
 
 
+#: ``results/<kid>.json`` verification fields that override the ledger's own, for kernels
+#: that never populate the ledger's compile/correctness fields.
+_VERIFICATION_DETAIL_KEYS = (
+    "compile_passed",
+    "correctness_passed",
+    "correctness_source",
+    "micro_speedup",
+    "micro_speedup_source",
+    "verification_status",
+    "best_artifact_path",
+    "best_backend",
+    "best_attempt_id",
+)
+
+#: ``last_kernel_opt`` fields that win over both the ledger and the detail file.
+_VERIFICATION_DECISION_KEYS = (
+    "compile_passed",
+    "correctness_passed",
+    "best_artifact_path",
+    "reasons",
+)
+
+
 def _render_attempted_row(
     top_entry: dict[str, Any],
     attempt: dict[str, Any],
@@ -770,7 +748,7 @@ def _render_attempted_row(
 ) -> dict[str, Any]:
     """Build a summary row for a kernel that was attempted."""
     results_dir, session_dir = where
-    kid = str(top_entry.get("kernel_id") or attempt.get("kernel_id") or "")
+    kid = str(top_entry["kernel_id"])
     ladder, ladder_unavailable = _load_backend_ladder(results_dir, kid)
     kernel_result, _ = _load_kernel_result(results_dir, kid)
 
@@ -778,40 +756,15 @@ def _render_attempted_row(
         "compile_passed": attempt.get("compile_passed"),
         "correctness_passed": attempt.get("correctness_passed"),
     }
-    # Detail-file passthrough for kernels that don't populate ledger compile/correctness fields.
-    if isinstance(kernel_result, dict):
-        ver_block = kernel_result.get("verification")
-        if isinstance(ver_block, dict):
-            for key in (
-                "compile_passed",
-                "correctness_passed",
-                "correctness_source",
-                "micro_speedup",
-                "micro_speedup_source",
-                "verification_status",
-                "best_artifact_path",
-                "best_backend",
-                "best_attempt_id",
-            ):
-                v = ver_block.get(key)
-                if v is not None:
-                    verification[key] = v
-    # last_kernel_opt wins over ledger + detail file.
-    if isinstance(last_kernel_opt, dict) and last_kernel_opt:
-        for key in (
-            "compile_passed",
-            "correctness_passed",
-            "best_artifact_path",
-            "reasons",
-        ):
-            v = last_kernel_opt.get(key)
-            if v is not None:
-                verification[key] = v
+    detail = (kernel_result or {}).get("verification")
+    for source, keys in ((detail, _VERIFICATION_DETAIL_KEYS), (last_kernel_opt, _VERIFICATION_DECISION_KEYS)):
+        for key in keys if isinstance(source, dict) else ():
+            value = source.get(key)
+            if value is not None:
+                verification[key] = value
     artifact_error = ""
-    if verification.get("compile_passed") is False and ladder:
-        artifact_error = "no usable backend attempt"
-    elif verification.get("compile_passed") is False:
-        artifact_error = "ladder unavailable; compile_passed=false"
+    if verification.get("compile_passed") is False:
+        artifact_error = "no usable backend attempt" if ladder else "ladder unavailable; compile_passed=false"
 
     summary_text = _summary_one_line(
         category=category,
@@ -819,38 +772,35 @@ def _render_attempted_row(
         backend_ladder=ladder,
         artifact_error=artifact_error,
     )
+    result_path = ""
+    if results_dir is not None and (results_dir / f"{kid}.json").is_file():
+        result_path = _relative_to_session(results_dir / f"{kid}.json", session_dir)
 
     row: dict[str, Any] = {
         "kernel_id": kid,
-        "kernel_name": str(top_entry.get("name") or ""),
-        "kernel_category": str(top_entry.get("kernel_category") or ""),
+        **{
+            row_key: str(top_entry.get(key) or "")
+            for row_key, key in (("kernel_name", "name"), ("kernel_category",) * 2, ("bound_type",) * 2)
+        },
         "source_file": str(top_entry.get("source_file") or attempt.get("last_source_file") or ""),
         "gpu_pct": _to_float(top_entry.get("gpu_pct")),
         "efficiency_pct": _to_float(top_entry.get("efficiency_percent")),
-        "bound_type": str(top_entry.get("bound_type") or ""),
         "arithmetic_intensity": _to_float(top_entry.get("arithmetic_intensity")),
         "category": category,
         "outcome_class": _kernel_outcome_class(category, ladder),
         "rejected_reason": _rejected_reason_of(attempt),
         "summary": summary_text,
         "attempts_total": int(attempt.get("attempts") or 0),
-        "partial_count": int(attempt.get("partial_count") or 0),
-        "failure_count": int(attempt.get("failure_count") or 0),
-        "last_decision": str(attempt.get("last_decision") or ""),
-        "last_status": str(attempt.get("last_status") or ""),
+        **{key: int(attempt.get(key) or 0) for key in ("partial_count", "failure_count")},
         # Absent stays absent: a row for a kernel never benchmarked at the micro level (see
         # _synthetic_forge_loop_attempt / _synthetic_gemm_tuning_attempt) must not publish 0.0
         # beside a category of INTEGRATED, which reads as "measured and zero".
         "last_micro_speedup": _to_float(attempt.get("last_micro_speedup")),
-        "last_ts": str(attempt.get("last_ts") or ""),
+        **{key: str(attempt.get(key) or "") for key in ("last_decision", "last_status", "last_ts")},
         "verification": verification,
         "backend_ladder": ladder,
         "backend_ladder_unavailable_reason": ladder_unavailable,
-        "kernel_agent_result_path": (
-            _relative_to_session(results_dir / f"{kid}.json", session_dir)
-            if results_dir is not None and (results_dir / f"{kid}.json").is_file()
-            else ""
-        ),
+        "kernel_agent_result_path": result_path,
     }
     return row
 
@@ -884,28 +834,26 @@ def _aggregate_failure_reasons(by_kernel: list[dict[str, Any]]) -> dict[str, int
     for row in by_kernel:
         if row.get("category") != CATEGORY_ATTEMPTED_REJECTED:
             continue
-        ladder = row.get("backend_ladder") or []
-        ladder_unavail = row.get("backend_ladder_unavailable_reason") or ""
+        ladder = row["backend_ladder"]
         if not ladder:
-            breakdown["ladder_unavailable" if ladder_unavail else "other"] += 1
+            breakdown["ladder_unavailable" if row["backend_ladder_unavailable_reason"] else "other"] += 1
             continue
 
         # error_class wins: pick the most common failure mode.
         ec_counts: dict[str, int] = {}
         for r in ladder:
-            ec = str(r.get("error_class") or "")
+            ec = r.get("error_class")
             if ec and ec != ERROR_CLASS_UNKNOWN:
                 ec_counts[ec] = ec_counts.get(ec, 0) + 1
         if ec_counts:
             top_ec = max(ec_counts.items(), key=lambda kv: kv[1])[0]
-            bucket = _ERROR_CLASS_TO_BUCKET.get(top_ec, "other")
-            breakdown[bucket] += 1
+            breakdown[_ERROR_CLASS_TO_BUCKET.get(top_ec, "other")] += 1
             continue
 
         # Structural fallback: classify via produced artifacts and verification.
         any_artifact = any(r.get("produced_artifact") for r in ladder)
         all_failed = all(r.get("status") == "failed" for r in ladder)
-        verification = row.get("verification") or {}
+        verification = row["verification"]
         if all_failed and not any_artifact:
             breakdown["ladder_all_failed"] += 1
         elif not any_artifact:
