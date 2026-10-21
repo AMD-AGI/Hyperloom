@@ -458,8 +458,7 @@ def discover(
     candidates, failure_reason = _collect_candidates(client, context, deadline=deadline, stats=stats)
     stats["candidates"] = len(candidates)
     if not candidates:
-        reason = failure_reason or REASON_NO_CANDIDATE
-        return SearchOutcome(reason=reason, stats=stats)
+        return SearchOutcome(reason=failure_reason or REASON_NO_CANDIDATE, stats=stats)
 
     numbers = _order_candidates(candidates, candidate_cap)
 
@@ -468,10 +467,7 @@ def discover(
         # Enrichment without time returns nothing but still costs the caller its finalization reserve.
         stats["degraded_reason"] = REASON_SKIPPED_DEADLINE
         return SearchOutcome(reason=REASON_SKIPPED_DEADLINE, stats=stats)
-    outcomes = client.get_many(
-        [client.pr_request(context.repo, number) for number in numbers],
-        budget_sec=remaining,
-    )
+    outcomes = client.get_many([client.pr_request(context.repo, number) for number in numbers], budget_sec=remaining)
     stats["http_calls"] += len(outcomes)
 
     references: list[PRReference] = []
@@ -482,8 +478,7 @@ def discover(
             failure_reason = REASON_CONTRACT_ERROR
             continue
         if outcome.error is not None:
-            if not failure_reason:
-                failure_reason = REASON_SERVICE_UNREACHABLE
+            failure_reason = failure_reason or REASON_SERVICE_UNREACHABLE
             continue
         if outcome.payload is None:
             continue
@@ -514,10 +509,5 @@ def discover(
     if failure_reason:
         stats["degraded_reason"] = failure_reason
     if not ranked:
-        reason = failure_reason or REASON_NO_CANDIDATE
-        return SearchOutcome(reason=reason, stats=stats)
-    return SearchOutcome(
-        references=tuple(ranked[:top_k]),
-        surfaced_references=tuple(ranked),
-        stats=stats,
-    )
+        return SearchOutcome(reason=failure_reason or REASON_NO_CANDIDATE, stats=stats)
+    return SearchOutcome(references=tuple(ranked[:top_k]), surfaced_references=tuple(ranked), stats=stats)

@@ -228,3 +228,9 @@ def test_a_failing_state_build_propagates(monkeypatch):
     monkeypatch.setattr(gpu_probe, "build_external_state_from_env", _boom)
     with pytest.raises(RuntimeError, match="bad hand-off env"):
         gpu_probe.remote_autodetect_gpu_type(timeout_s=1)
+
+
+def test_parse_gpu_type_preserves_exact_r9700_for_topology_validation():
+    assert gpu_probe._parse_gpu_type("AMD Radeon AI PRO R9700") == "r9700"
+    assert gpu_probe._parse_gpu_type("AMD Radeon AI PRO R9700S") is None
+    assert gpu_probe._parse_gpu_type("gfx1201") is None
