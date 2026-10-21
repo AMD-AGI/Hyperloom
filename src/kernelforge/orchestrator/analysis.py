@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import hashlib
 import json
 import logging
@@ -1828,8 +1827,8 @@ Update analysis incrementally:
         if not profiling_enabled:
             flags.append("analysis_static_only")
         if bottleneck_path.is_file() and analysis_path.is_file():
-            with contextlib.suppress(OSError, ValueError):
-                bottleneck = str(json.loads(bottleneck_path.read_text()).get("classification") or bottleneck)
+            case_bottleneck = AnalysisAgentService._case_bottleneck(bottleneck_path)
+            bottleneck = str(case_bottleneck.get("classification") or bottleneck)
             summary_path = str(analysis_path.resolve())
             flags.append(
                 "analysis_checkpoint_profile_interpretation"
@@ -1859,7 +1858,7 @@ Update analysis incrementally:
             return {}
         try:
             loaded = json.loads(bottleneck_path.read_text())
-        except (OSError, json.JSONDecodeError):
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             return {}
         return loaded if isinstance(loaded, dict) else {}
 
