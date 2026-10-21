@@ -123,10 +123,10 @@ class KnowledgeClose:
     lessons: CloseStep = CloseStep(SKIPPED, NO_ARCHIVE)
     lesson_standings: CloseStep = CloseStep(SKIPPED, NO_ARCHIVE)
 
-    def document(self) -> dict[str, object]:
-        """The steps as JSON-ready data: the breakdown's ``close.knowledge``."""
+    def steps(self) -> dict[str, CloseStep]:
+        """The steps by their names in the breakdown's ``close.knowledge``."""
 
-        steps = {
+        return {
             "experiences": self.experiences,
             "multibranch_experiences": self.multibranch_experiences,
             "learnings": self.learnings,
@@ -135,7 +135,11 @@ class KnowledgeClose:
             "lessons": self.lessons,
             "lesson_standings": self.lesson_standings,
         }
-        return {name: encode(step) for name, step in steps.items()}
+
+    def document(self) -> dict[str, object]:
+        """The steps as JSON-ready data: the breakdown's ``close.knowledge``."""
+
+        return {name: encode(step) for name, step in self.steps().items()}
 
 
 def _failed(what: str, exc: Exception) -> CloseStep:
