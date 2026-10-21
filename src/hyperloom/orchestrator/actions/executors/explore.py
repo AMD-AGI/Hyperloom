@@ -772,9 +772,9 @@ def _anchor_the_params(params: dict[str, Any], ss: Any) -> None:
         params.update(stack_base_params(cb))
 
 
-def _lever_seeded_payload(payload: list[Any], ss: Any) -> list[Any]:
+def _lever_seeded_payload(payload: list[Any], levers: list[dict[str, Any]]) -> list[Any]:
     named = {str(v.get("name") or "") for v in payload if isinstance(v, dict)}
-    fresh = [v for v in framework_lever_grid(ss) if str(v.get("name") or "") not in named]
+    fresh = [v for v in levers if str(v.get("name") or "") not in named]
     if not fresh:
         return payload
     log.info("explore: seeding %d framework-rewrite lever variant(s) for attribution", len(fresh))

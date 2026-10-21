@@ -3131,6 +3131,97 @@ async def test_explore_executor_sglang_empty_grid_still_fails_with_empty_grid(
     assert res.result["error_class"] == "empty_grid"
 
 
+def _lever_state() -> SharedState:
+    """A session whose specialist has authored two dormant, dependency-chained rewrite levers."""
+    from hyperloom.orchestrator.actions.executors import _framework_switch_manifest as manifest
+
+    switches, problems = manifest.parse_manifest(
+        [
+            {"switch": "HL_HOIST", "category": "hoist_loop_invariant", "enables": ["HL_CACHE"]},
+            {"switch": "HL_CACHE", "category": "memoize_invariant"},
+        ]
+    )
+    assert problems == []
+    state = SharedState(framework="sglang")
+    assert state.record_authored_framework_levers(switches, default_on=False)
+    return state
+
+
+def _capture_grid_names(monkeypatch) -> list[str]:
+    """Record the variant names the round actually hands to ``run_grid``."""
+    from hyperloom.orchestrator.actions.executors import explore as explore_mod
+
+    seen: list[str] = []
+
+    async def _capture(**kwargs):
+        seen.extend(v.name for v in (kwargs.get("grid") or []))
+        return []
+
+    monkeypatch.setattr(explore_mod, "run_grid", _capture)
+    return seen
+
+
+@pytest.mark.asyncio
+async def test_explore_executor_seeds_lever_variants_when_the_llm_proposed_a_grid(
+    sub_agent_runner,
+    tmp_path,
+    monkeypatch,
+):
+    """Authored rewrite levers are benched alongside the LLM's own variants.
+
+    Driven through the executor on purpose: ``framework_lever_grid`` can be entirely
+    correct while the round hands it the wrong argument, so only the grid that reaches
+    ``run_grid`` says whether the levers were seeded.
+    """
+    sub, tr, _ = sub_agent_runner
+    base = tmp_path / "base_lever_grid.yaml"
+    _write_baseline_yaml(base)
+    sub.shared_state = _lever_state()
+    seen = _capture_grid_names(monkeypatch)
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "base_tput": 800.0,
+            "grid": [{"name": "llm_proposal", "extra_server_args": "--max-num-seqs 256"}],
+        },
+        idempotency_key="ex-fwlever-seeded-with-llm-grid",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    await sub.run_task(task)
+
+    assert seen, "run_grid was not invoked"
+    # Levers lead, so the attribution legs are measured against the stack the round opened on.
+    assert [n for n in seen if n.startswith("fwlever_")] == ["fwlever_hl_hoist", "fwlever_hl_cache"]
+    assert seen.index("llm_proposal") > seen.index("fwlever_hl_cache")
+
+
+@pytest.mark.asyncio
+async def test_explore_executor_lever_variants_are_a_grid_of_their_own(
+    sub_agent_runner,
+    tmp_path,
+    monkeypatch,
+):
+    """A round with no LLM proposals still benches the levers instead of refusing as ``empty_grid``."""
+    sub, tr, _ = sub_agent_runner
+    base = tmp_path / "base_lever_only.yaml"
+    _write_baseline_yaml(base)
+    sub.shared_state = _lever_state()
+    seen = _capture_grid_names(monkeypatch)
+
+    task = await tr.create(
+        kind="explore",
+        params={"config_path": str(base), "base_tput": 800.0, "grid": []},
+        idempotency_key="ex-fwlever-only-grid",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    res = await sub.run_task(task)
+
+    assert res.result.get("error_class") != "empty_grid"
+    assert [n for n in seen if n.startswith("fwlever_")] == ["fwlever_hl_hoist", "fwlever_hl_cache"]
+
+
 @pytest.mark.asyncio
 async def test_explore_rejects_unsafe_aiter_unified_attn_before_benchmark(
     sub_agent_runner,
