@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import gzip
 import json
 import logging
 import os
@@ -22,7 +21,7 @@ from kernelforge.agent_backends.base import AgentRunSpec, AgentToolPolicy, watch
 from kernelforge.agent_backends.session_resume import is_api_failure
 from kernelforge.resources import resource_path
 
-from .diagnose import LAUNCH_BOUND_CATEGORIES, categories_in_text, categorize_kernel_name
+from .diagnose import LAUNCH_BOUND_CATEGORIES, _load_trace_events, categories_in_text, categorize_kernel_name
 from .llm_failure import (
     API_ERROR,
     DEFAULT_ATTEMPTS,
@@ -135,21 +134,10 @@ def hot_kernels_from_trace(
     trace_path: str | Path, *, top_n: int = 15, launch_bound_only: bool = True
 ) -> list[dict[str, Any]]:
     """Top GPU kernels from a kineto trace by total-duration share."""
-    p = Path(trace_path)
-    try:
-        opener = gzip.open if (p.suffix == ".gz" or p.name.endswith(".json.gz")) else open
-        with opener(p, "rt", encoding="utf-8") as fh:
-            data = json.load(fh)
-    except (OSError, ValueError):
-        return []
-    events = data.get("traceEvents") if isinstance(data, dict) else None
-    if not isinstance(events, list):
-        return []
-
     agg: dict[str, list[float]] = {}
     total = 0.0
-    for ev in events:
-        if not isinstance(ev, dict) or ev.get("cat") != "kernel":
+    for ev in _load_trace_events(trace_path):
+        if ev.get("cat") != "kernel":
             continue
         try:
             dur = float(ev.get("dur"))
@@ -181,20 +169,6 @@ def hot_kernels_from_trace(
         )
     rows.sort(key=lambda r: r["share"], reverse=True)
     return rows[:top_n]
-
-
-def _load_trace_events(trace_path: str | Path) -> list[dict[str, Any]]:
-    path = Path(trace_path)
-    try:
-        opener = gzip.open if path.suffix == ".gz" or path.name.endswith(".json.gz") else open
-        with opener(path, "rt", encoding="utf-8") as handle:
-            payload = json.load(handle)
-    except (OSError, ValueError):
-        return []
-    events = payload.get("traceEvents") if isinstance(payload, dict) else None
-    if not isinstance(events, list):
-        return []
-    return [event for event in events if isinstance(event, dict)]
 
 
 def kernel_names_from_trace(trace_path: str | Path, *, top_n: int = 40) -> list[str]:
