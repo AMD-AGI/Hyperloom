@@ -1439,13 +1439,24 @@ def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
     if not isinstance(manifest, dict):
         raise ValueError(f"manifest is not a JSON object: {manifest_file}")
     if str(manifest.get("status") or "") == "reverted":
-        return _already_reverted_result(manifest_file, manifest)
+        # An apply that reverted itself and is then unwound again by the stack would
+        # otherwise report restoring-from-nothing as an unfinished teardown, on a tree
+        # that is in fact clean, and every retry would repeat it.
+        return {
+            "status": "skipped",
+            "manifest_path": str(manifest_file),
+            "restored_paths": list(manifest.get("restored_paths") or []),
+            "reverted_at": manifest.get("reverted_at"),
+            "already_reverted": True,
+        }
     # The manifest is untrusted at revert time: confine every copy source to
     # the apply-time backup tree (this manifest's own directory).
     backup_root = manifest_file.resolve().parent
     steps = [
         _restore_backed_up_artifacts(manifest, backup_root),
-        _restore_patched_sources(manifest, backup_root),
+        _restore_source_backup_set(manifest, backup_root)
+        if manifest.get("source_backups")
+        else _restore_primary_source_backup(manifest, backup_root),
         _restore_jit_build_state(manifest, backup_root),
         _restore_cpp_itfs_cache_state(manifest),
         _revert_on_patched_pods(manifest),
@@ -1460,28 +1471,6 @@ class _RestoreTally(NamedTuple):
     untrusted: list[dict[str, str]]
     issues: list[dict[str, Any]]
     reported: dict[str, Any]
-
-
-def _nothing_restored() -> _RestoreTally:
-    """An empty tally, for a revert step whose manifest recorded nothing to undo."""
-    return _RestoreTally([], [], [], {})
-
-
-def _already_reverted_result(manifest_file: Path, manifest: dict[str, Any]) -> dict[str, Any]:
-    """Report a manifest whose backups are already back in place as having nothing left to undo.
-
-    An apply that reverted itself (failed JIT invalidation) and is then unwound
-    again by the stack would otherwise report restoring-from-nothing as an
-    unfinished teardown, on a tree that is in fact clean, and every retry would
-    repeat it.
-    """
-    return {
-        "status": "skipped",
-        "manifest_path": str(manifest_file),
-        "restored_paths": list(manifest.get("restored_paths") or []),
-        "reverted_at": manifest.get("reverted_at"),
-        "already_reverted": True,
-    }
 
 
 def _restore_backed_up_artifacts(manifest: dict[str, Any], backup_root: Path) -> _RestoreTally:
@@ -1506,13 +1495,6 @@ def _restore_backed_up_artifacts(manifest: dict[str, Any], backup_root: Path) ->
             shutil.copy2(src, dst)
             restored.append(str(dst))
     return _RestoreTally(restored, untrusted, [], {})
-
-
-def _restore_patched_sources(manifest: dict[str, Any], backup_root: Path) -> _RestoreTally:
-    """Put every patched source file back, from whichever backup shape the apply wrote."""
-    if manifest.get("source_backups"):
-        return _restore_source_backup_set(manifest, backup_root)
-    return _restore_primary_source_backup(manifest, backup_root)
 
 
 def _restore_source_backup_set(manifest: dict[str, Any], backup_root: Path) -> _RestoreTally:
@@ -1550,7 +1532,7 @@ def _restore_primary_source_backup(manifest: dict[str, Any], backup_root: Path) 
     """Undo a whole-file apply from the single ``source_backup`` record it wrote."""
     source_backup = manifest.get("source_backup") or {}
     if not source_backup:
-        return _nothing_restored()
+        return _RestoreTally([], [], [], {})
     src = Path(source_backup["backup_path"])
     dst = Path(source_backup["path"])
     if not _revert_backup_trusted(source_backup.get("backup_path", ""), backup_root):
@@ -1567,7 +1549,7 @@ def _restore_primary_source_backup(manifest: dict[str, Any], backup_root: Path) 
         ]
         return _RestoreTally([], untrusted, [], {})
     if not src.exists():
-        return _nothing_restored()
+        return _RestoreTally([], [], [], {})
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dst)
     if dst.suffix.lower() in PYTHON_SOURCE_SUFFIXES:
@@ -1575,24 +1557,20 @@ def _restore_primary_source_backup(manifest: dict[str, Any], backup_root: Path) 
     return _RestoreTally([str(dst)], [], [], {})
 
 
-def _manifest_jit_build_dir(strategy: dict[str, Any]) -> str:
-    """The JIT build dir a manifest's strategy pins, when it pins exactly one."""
-    # Singular key is retained for manifests created by earlier releases.
-    pinned = str(strategy.get("jit_build_dir") or "").strip()
-    if pinned:
-        return pinned
-    snapshot_jit_dirs = list(strategy.get("jit_build_dirs") or [])
-    return str(snapshot_jit_dirs[0]) if len(snapshot_jit_dirs) == 1 else ""
-
-
 def _restore_jit_build_state(manifest: dict[str, Any], backup_root: Path) -> _RestoreTally:
     """Put the AITER build state and serving modules back before any multi-node fan-out."""
     jit_build_backup = manifest.get("jit_build_backup") or {}
     if jit_build_backup.get("status") not in {"ok", "clean"}:
-        return _nothing_restored()
+        return _RestoreTally([], [], [], {})
+    strategy = manifest.get("strategy") or {}
+    # Singular key is retained for manifests created by earlier releases.
+    pinned = str(strategy.get("jit_build_dir") or "").strip()
+    snapshot_jit_dirs = list(strategy.get("jit_build_dirs") or [])
+    if not pinned and len(snapshot_jit_dirs) == 1:
+        pinned = str(snapshot_jit_dirs[0])
     jit_build_restore = _restore_aiter_jit_build(
         jit_build_backup,
-        expected_jit_build_dir=_manifest_jit_build_dir(manifest.get("strategy") or {}) or None,
+        expected_jit_build_dir=pinned or None,
         backup_root=backup_root,
     )
     reported = {"jit_build_restore": jit_build_restore}
@@ -1606,11 +1584,11 @@ def _restore_cpp_itfs_cache_state(manifest: dict[str, Any]) -> _RestoreTally:
     """Put the aiter cpp_itfs runtime cache moved aside during apply back in place."""
     cpp_itfs_cache_backup = manifest.get("cpp_itfs_cache_backup") or {}
     if cpp_itfs_cache_backup.get("status") != "ok":
-        return _nothing_restored()
+        return _RestoreTally([], [], [], {})
     cpp_itfs_cache_restore = _restore_aiter_cpp_itfs_cache(cpp_itfs_cache_backup)
     manifest["cpp_itfs_cache_restore"] = cpp_itfs_cache_restore
     if cpp_itfs_cache_restore.get("status") != "ok":
-        return _nothing_restored()
+        return _RestoreTally([], [], [], {})
     return _RestoreTally(list(cpp_itfs_cache_restore.get("restored", [])), [], [], {})
 
 
@@ -1618,7 +1596,7 @@ def _revert_on_patched_pods(manifest: dict[str, Any]) -> _RestoreTally:
     """Fan a best-effort revert out to every pod that received the apply."""
     multinode_info = manifest.get(_MANIFEST_MULTINODE) or {}
     if not (multinode_info.get("records_by_host") or multinode_info.get("host_backup_map")):
-        return _nothing_restored()
+        return _RestoreTally([], [], [], {})
     source_backup = manifest.get("source_backup") or {}
     target_path = multinode_info.get("target_path") or (source_backup.get("path") if source_backup else "")
     backup_map = multinode_info.get("host_backup_map") or {}
@@ -1634,7 +1612,7 @@ def _revert_on_patched_pods(manifest: dict[str, Any]) -> _RestoreTally:
         except (OSError, subprocess.SubprocessError) as exc:
             mn_revert = {"status": "failed", "error": str(exc)}
     if not mn_revert:
-        return _nothing_restored()
+        return _RestoreTally([], [], [], {})
     failed = [] if mn_revert.get("status") == "ok" else [{"kind": "multinode_revert", **mn_revert}]
     return _RestoreTally([], [], failed, {"multinode_revert": mn_revert})
 
@@ -1921,13 +1899,6 @@ class _PodFanout:
         }
 
 
-class _PreparedApply(NamedTuple):
-    """A written ``prepared`` manifest and the count of artifact backups taken with it."""
-
-    deployment: _PatchDeployment
-    artifact_count: int
-
-
 class _RebuildPlan(NamedTuple):
     """How a landed patch is rebuilt: the roots to rebuild and the caches to clear first."""
 
@@ -1947,16 +1918,6 @@ class _RebuildRecords(NamedTuple):
     rebuild: dict[str, Any]
     jit_build_backup: dict[str, Any]
     cpp_itfs_cache_backup: dict[str, Any]
-
-
-class _ApplyOutcome(NamedTuple):
-    """What an apply produced once every phase has run."""
-
-    records: _RebuildRecords
-    cache_clear: dict[str, Any]
-    compiled: bool
-    artifact_count: int
-    multinode: dict[str, Any]
 
 
 def _rebuild_not_run() -> _RebuildRecords:
@@ -2068,14 +2029,19 @@ def _rebuild_patched_roots(deployment: _PatchDeployment, plan: _RebuildPlan) -> 
     return record
 
 
-def _finish_apply(deployment: _PatchDeployment, outcome: _ApplyOutcome) -> dict[str, Any]:
+def _finish_apply(
+    deployment: _PatchDeployment,
+    records: _RebuildRecords,
+    cache_clear: dict[str, Any],
+    compiled: bool,
+    multinode: dict[str, Any],
+) -> dict[str, Any]:
     """Mark the manifest applied and report the apply to its caller."""
-    records = outcome.records
     manifest = deployment.manifest
     manifest["status"] = "applied"
     manifest["applied_at"] = now_iso(timespec="auto")
     manifest["rebuild"] = records.rebuild
-    manifest["cache_clear"] = outcome.cache_clear
+    manifest["cache_clear"] = cache_clear
     # Surface skipped reasons too, for manifest auditing and integrate verification.
     if records.jit_build_backup.get("status") in {"ok", "clean", "remote", "skipped"}:
         manifest["jit_build_backup"] = records.jit_build_backup
@@ -2087,57 +2053,21 @@ def _finish_apply(deployment: _PatchDeployment, outcome: _ApplyOutcome) -> dict[
         "manifest_path": str(deployment.manifest_path),
         "target_file": str(deployment.target),
         "backup_dir": str(deployment.backup_dir),
-        "compiled": outcome.compiled,
-        "artifact_count": outcome.artifact_count,
-        "cache_clear": outcome.cache_clear,
+        "compiled": compiled,
+        "artifact_count": len(deployment.manifest["artifacts"]),
+        "cache_clear": cache_clear,
         "rebuild": records.rebuild,
         "jit_build_backup": records.jit_build_backup,
         "cpp_itfs_cache_backup": records.cpp_itfs_cache_backup,
     }
     # Only attach the multinode key when fan-out actually ran.
-    if outcome.multinode:
-        result[_MANIFEST_MULTINODE] = outcome.multinode
+    if multinode:
+        result[_MANIFEST_MULTINODE] = multinode
     return result
-
-
-class _WholeFilePreflight(NamedTuple):
-    """What a whole-file apply validated before touching anything."""
-
-    patch: Path
-    target: Path
-    strategy: dict[str, Any]
-    command_override: list[str]
 
 
 def _apply_whole_file_patch(request: KernelPatchRequest) -> dict[str, Any]:
     """Replace one target file with the patch, rebuild its root, and publish it to every pod."""
-    preflight = _whole_file_preflight(request)
-    strategy = preflight.strategy
-    prepared = _prepare_whole_file_apply(request, preflight)
-    deployment = prepared.deployment
-    if request.dry_run:
-        return {"status": "ok", "dry_run": True, "manifest_path": str(deployment.manifest_path)}
-
-    shutil.copy2(preflight.patch, preflight.target)
-    cache_clear = (
-        _clear_python_kernel_caches(preflight.target)
-        if preflight.target.suffix.lower() in PYTHON_SOURCE_SUFFIXES
-        else {"status": "skipped", "reason": "not a python source target"}
-    )
-    multinode = _fan_whole_file_out_to_pods(request, deployment, preflight) if _is_multi_node() else {}
-
-    compiled = bool(strategy["compiled"])
-    records = _rebuild_not_run()
-    if compiled and not request.skip_rebuild:
-        records = _invalidate_and_rebuild(deployment, _whole_file_rebuild_plan(request, preflight, multinode))
-    return _finish_apply(
-        deployment,
-        _ApplyOutcome(records, cache_clear, compiled, prepared.artifact_count, multinode),
-    )
-
-
-def _whole_file_preflight(request: KernelPatchRequest) -> _WholeFilePreflight:
-    """Validate the patch, the target and the rebuild command before any file or pod is touched."""
     patch = Path(request.patch_path).resolve()
     target = Path(request.target_file).resolve()
     if not patch.is_file():
@@ -2155,13 +2085,36 @@ def _whole_file_preflight(request: KernelPatchRequest) -> _WholeFilePreflight:
     command_override = _patch_rebuild_argv(request)
     if not request.skip_rebuild and not _is_multi_node():
         _refuse_untrusted_jit_strategies([strategy])
-    return _WholeFilePreflight(patch, target, strategy, command_override)
+
+    deployment = _prepare_whole_file_apply(request, patch, target, strategy)
+    if request.dry_run:
+        return {"status": "ok", "dry_run": True, "manifest_path": str(deployment.manifest_path)}
+
+    shutil.copy2(patch, target)
+    cache_clear = (
+        _clear_python_kernel_caches(target)
+        if target.suffix.lower() in PYTHON_SOURCE_SUFFIXES
+        else {"status": "skipped", "reason": "not a python source target"}
+    )
+    multinode = (
+        _fan_whole_file_out_to_pods(request, deployment, patch, strategy) if _is_multi_node() else {}
+    )
+
+    compiled = bool(strategy["compiled"])
+    records = _rebuild_not_run()
+    if compiled and not request.skip_rebuild:
+        plan = _whole_file_rebuild_plan(request, target, strategy, command_override, multinode)
+        records = _invalidate_and_rebuild(deployment, plan)
+    return _finish_apply(deployment, records, cache_clear, compiled, multinode)
 
 
-def _prepare_whole_file_apply(request: KernelPatchRequest, preflight: _WholeFilePreflight) -> _PreparedApply:
+def _prepare_whole_file_apply(
+    request: KernelPatchRequest,
+    patch: Path,
+    target: Path,
+    strategy: dict[str, Any],
+) -> _PatchDeployment:
     """Back up the target and its compiled artifacts, and write the ``prepared`` manifest."""
-    strategy = preflight.strategy
-    target = preflight.target
     backup_dir = _claim_backup_dir(Path(request.backup_root), request.kernel_id, target)
     source_backup = _copy_to_backup(target, backup_dir, "source")
     artifacts: list[dict[str, str]] = []
@@ -2171,7 +2124,7 @@ def _prepare_whole_file_apply(request: KernelPatchRequest, preflight: _WholeFile
     manifest: dict[str, Any] = {
         "status": "prepared",
         "kernel_id": request.kernel_id,
-        "patch_path": str(preflight.patch),
+        "patch_path": str(patch),
         "target_file": str(target),
         "source_backup": source_backup,
         "artifacts": artifacts,
@@ -2189,29 +2142,32 @@ def _prepare_whole_file_apply(request: KernelPatchRequest, preflight: _WholeFile
     backup_dir.mkdir(parents=True, exist_ok=True)
     deployment = _PatchDeployment(target, backup_dir, backup_dir / "manifest.json", manifest)
     deployment.persist()
-    return _PreparedApply(deployment, len(artifacts))
+    return deployment
 
 
 def _fan_whole_file_out_to_pods(
     request: KernelPatchRequest,
     deployment: _PatchDeployment,
-    preflight: _WholeFilePreflight,
+    patch: Path,
+    strategy: dict[str, Any],
 ) -> dict[str, Any]:
     """Push the patched file to every RayJob pod, restoring the sandbox copy if one refuses it."""
     pod_backup_dir = os.environ.get(
         "HYPERLOOM_MN_KERNEL_BACKUP_DIR",
         _MN_POD_BACKUP_DIR_DEFAULT,
     )
+    jit_build_dir = str(strategy.get("jit_build_dir") or "").strip()
+    remote_jit_dir = jit_build_dir if (strategy["compiled"] and not request.skip_rebuild) else ""
     fanout = _PodFanout()
     try:
         fanout.absorb(
             _dispatch_multinode_apply(
                 PodPatchApply(
-                    target_file=preflight.target,
-                    patch_path=preflight.patch,
+                    target_file=deployment.target,
+                    patch_path=patch,
                     kernel_id=request.kernel_id,
                     backup_dir_on_pod=pod_backup_dir,
-                    jit_build_dir=_whole_file_remote_jit_dir(request, preflight.strategy),
+                    jit_build_dir=remote_jit_dir,
                 )
             )
         )
@@ -2219,7 +2175,7 @@ def _fan_whole_file_out_to_pods(
         # Pod fan-out failed: revert sandbox copy.
         backup_path = deployment.manifest["source_backup"]["backup_path"]
         try:
-            shutil.copy2(backup_path, preflight.target)
+            shutil.copy2(backup_path, deployment.target)
         except OSError:
             pass
         raise _PatchRefused(
@@ -2230,34 +2186,27 @@ def _fan_whole_file_out_to_pods(
             }
         ) from exc
     # Persist multinode info now so a later rebuild failure reverts pod-side patches too.
-    block = fanout.block("ok", preflight.target, pod_backup_dir)
+    block = fanout.block("ok", deployment.target, pod_backup_dir)
     deployment.record(_MANIFEST_MULTINODE, block)
     return block
 
 
-def _whole_file_remote_jit_dir(request: KernelPatchRequest, strategy: dict[str, Any]) -> str:
-    """The JIT build dir each pod invalidates, empty when this apply rebuilds nothing."""
-    jit_build_dir = str(strategy.get("jit_build_dir") or "").strip()
-    if strategy["compiled"] and jit_build_dir and not request.skip_rebuild:
-        return jit_build_dir
-    return ""
-
-
 def _whole_file_rebuild_plan(
     request: KernelPatchRequest,
-    preflight: _WholeFilePreflight,
+    target: Path,
+    strategy: dict[str, Any],
+    command_override: list[str],
     multinode: dict[str, Any],
 ) -> _RebuildPlan:
     """How the single patched file's framework root is rebuilt."""
-    strategy = preflight.strategy
     jit_build_dir = str(strategy.get("jit_build_dir") or "").strip()
     return _RebuildPlan(
         strategies=[strategy],
         jit_strategy=strategy,
-        jit_target=preflight.target,
+        jit_target=target,
         jit_build_dir=Path(jit_build_dir) if jit_build_dir else None,
-        cpp_itfs_target=preflight.target,
-        command_override=preflight.command_override,
+        cpp_itfs_target=target,
+        command_override=command_override,
         timeout_sec=request.rebuild_timeout_sec,
         pod_records=multinode.get("records_by_host") if (multinode and jit_build_dir) else None,
     )
@@ -2291,23 +2240,22 @@ def _apply_kernel_patch_snapshot(request: KernelPatchRequest) -> dict[str, Any]:
         _PatchRefused: When the patch cannot be validated, landed or rebuilt.
     """
     plan = _snapshot_plan(request)
-    prepared = _prepare_snapshot_apply(request, plan)
-    deployment = prepared.deployment
+    deployment = _prepare_snapshot_apply(request, plan)
     if request.dry_run:
         return {"status": "ok", "dry_run": True, "manifest_path": str(deployment.manifest_path)}
 
     touched = _land_snapshot(request, deployment, plan)
-    cache_clear = _clear_caches_for_patched_python(plan.write_paths)
+    cache_clear: dict[str, Any] = {"status": "skipped", "reason": "no python source target"}
+    for path in plan.write_paths:
+        if path.suffix.lower() in PYTHON_SOURCE_SUFFIXES:
+            cache_clear = _clear_python_kernel_caches(path)
     multinode = _fan_snapshot_out_to_pods(request, deployment, plan) if _is_multi_node() else {}
 
     compiled = bool(plan.rebuild_strategies)
     records = _rebuild_not_run()
     if compiled and not request.skip_rebuild:
         records = _invalidate_and_rebuild(deployment, _snapshot_rebuild_plan(request, plan, multinode))
-    result = _finish_apply(
-        deployment,
-        _ApplyOutcome(records, cache_clear, compiled, prepared.artifact_count, multinode),
-    )
+    result = _finish_apply(deployment, records, cache_clear, compiled, multinode)
     result["touched"] = touched
     return result
 
@@ -2392,7 +2340,7 @@ def _snapshot_write_paths(
     return write_paths
 
 
-def _prepare_snapshot_apply(request: KernelPatchRequest, plan: _SnapshotPlan) -> _PreparedApply:
+def _prepare_snapshot_apply(request: KernelPatchRequest, plan: _SnapshotPlan) -> _PatchDeployment:
     """Back up the compiled artifacts the patch invalidates and write the ``prepared`` manifest."""
     backup_dir = _claim_backup_dir(Path(request.backup_root), request.kernel_id, plan.target)
     backup_dir.mkdir(parents=True, exist_ok=True)
@@ -2426,7 +2374,7 @@ def _prepare_snapshot_apply(request: KernelPatchRequest, plan: _SnapshotPlan) ->
         manifest["producer_manifest"] = str(Path(request.producer_manifest).resolve())
     deployment = _PatchDeployment(plan.target, backup_dir, backup_dir / "manifest.json", manifest)
     deployment.persist()
-    return _PreparedApply(deployment, len(artifacts))
+    return deployment
 
 
 def _land_snapshot(request: KernelPatchRequest, deployment: _PatchDeployment, plan: _SnapshotPlan) -> list[str]:
@@ -2480,15 +2428,6 @@ def _snapshot_mismatch(request: KernelPatchRequest, plan: _SnapshotPlan) -> str:
         elif dest.read_bytes() != src.read_bytes():
             return f"post-verify content mismatch: {desc.path}"
     return ""
-
-
-def _clear_caches_for_patched_python(write_paths: list[Path]) -> dict[str, Any]:
-    """Clear the Python, Triton and Inductor caches around every patched Python source."""
-    cleared: dict[str, Any] = {"status": "skipped", "reason": "no python source target"}
-    for path in write_paths:
-        if path.suffix.lower() in PYTHON_SOURCE_SUFFIXES:
-            cleared = _clear_python_kernel_caches(path)
-    return cleared
 
 
 def _snapshot_jit_build_dir(plan: _SnapshotPlan) -> str:
