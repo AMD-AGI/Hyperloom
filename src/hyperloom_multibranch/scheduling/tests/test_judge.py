@@ -25,7 +25,7 @@ from hyperloom_multibranch.contracts.notebook.records import (
 from hyperloom_multibranch.contracts.notebook.vocab import FrontierBasis
 from hyperloom_multibranch.notebook import STALL_TESTS
 from hyperloom_multibranch.notebook.rsi.calibration import PolicyChoice
-from hyperloom_multibranch.notebook.rsi.frontier import SETTLED_TESTS, FrontierPolicy
+from hyperloom_multibranch.notebook.rsi.frontier import FRONTIER_V1_LABEL, SETTLED_TESTS, FrontierPolicy
 from hyperloom_multibranch.notebook.tests.factories import intent, request, result
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.events import MB_BIG_GAIN_BARS, MB_BOTTLENECK_SHIFT_PP, EventKind, SessionEvent
@@ -159,6 +159,7 @@ def _view(
         specialists=specialists or {},
         held=held or {},
         frontier_policy=CHOSEN,
+        frontier_scorer=FRONTIER_V1_LABEL,
     )
 
 
@@ -166,8 +167,13 @@ def _text(reply: str) -> CompletionReply:
     return CompletionReply(reply, TokenCounts(), 0.0)
 
 
-def test_the_prompt_names_the_frontier_policy_and_the_evidence_it_was_chosen_on() -> None:
-    assert _state(_view())["frontier_policy"] == {"label": CHOSEN.label, "evidence": CHOSEN.evidence}
+def test_the_prompt_names_the_frontier_policy_the_evidence_it_was_chosen_on_and_the_scorer_scoring_now() -> None:
+    assert _state(_view())["frontier_policy"] == {
+        "label": CHOSEN.label,
+        "evidence": CHOSEN.evidence,
+        "scorer": FRONTIER_V1_LABEL,
+    }
+    assert "frontier_policy's scorer" in JUDGE_SYSTEM_PROMPT
     assert "frontier_policy names the scoring's variation" in " ".join(JUDGE_SYSTEM_PROMPT.split())
 
 

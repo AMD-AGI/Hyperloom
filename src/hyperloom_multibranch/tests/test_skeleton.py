@@ -697,7 +697,8 @@ async def test_a_session_scores_its_frontier_with_the_policy_the_calibration_cho
     assert decided["detail"] == {"label": CHOSEN_LABEL, "evidence": CHOSEN_EVIDENCE}
     states = [_judge_state(prompt) for prompt in _judge_prompts(stage)]
     assert states and all(
-        state["frontier_policy"] == {"label": CHOSEN_LABEL, "evidence": CHOSEN_EVIDENCE} for state in states
+        state["frontier_policy"] == {"label": CHOSEN_LABEL, "evidence": CHOSEN_EVIDENCE, "scorer": FRONTIER_V1_LABEL}
+        for state in states
     )
     assert all(state["min_useful_seconds"] == round(CHOSEN_WINDOW_SECONDS) for state in states)
     lines = _frontier_lines(stage)
@@ -722,6 +723,7 @@ async def test_a_pinned_frontier_scorer_scores_the_session_without_asking_the_ca
     assert decided["detail"] == {"label": BANDIT_LABEL, "evidence": f"{BANDIT_LABEL}: {PINNED_EVIDENCE}"}
     lines = _frontier_lines(stage)
     assert lines and all(line["scorer"] == BANDIT_LABEL for line in lines)
+    assert all(_judge_state(prompt)["frontier_policy"]["scorer"] == BANDIT_LABEL for prompt in _judge_prompts(stage))
 
 
 class _Failing:
@@ -766,6 +768,7 @@ async def test_frontier_policy_default_keeps_the_defaults_without_asking_the_cal
     assert _judge_state(_judge_prompts(stage)[0])["frontier_policy"] == {
         "label": DEFAULT_POLICY,
         "evidence": FORCED_DEFAULT_EVIDENCE,
+        "scorer": FRONTIER_V1_LABEL,
     }
     defaults = FrontierPolicy.for_budget(GRADED_OUTPUT, SETTINGS.max_hours * MB_SECONDS_PER_HOUR)
     assert all(line["new_branch_floor_pct"] == defaults.new_branch_floor_pct for line in _frontier_lines(stage))

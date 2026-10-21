@@ -77,7 +77,9 @@ observing a slow-paying direction is a candidate to stop or to lower K; keep K w
 A branch's basis says what its expected gain rests on: its own trend, a prior from similar past sessions, the floor
 of a direction still being observed, the floor of a branch too new to have a trend, or the roofline headroom that
 capped it; trust a measured trend over a floor. frontier_policy names the scoring's variation and the evidence it was
-chosen on: default, or the one that ranked the branches of similar past sessions better.
+chosen on: default, or the one that ranked the branches of similar past sessions better. frontier_policy's scorer is
+the formula behind every expected_gain_pct now: frontier-v1, or another scorer the calibration or the user chose,
+which falls back to frontier-v1 for the rest of the session once it has failed too often.
 A branch's judged_since_commit counts its tests judged since its last commit (since it opened, before any). When it
 reaches {STALL_TESTS}, its specialist is asked to read its brief again and reconsider its direction: a branch whose
 count runs well past that is stalling, a candidate to stop or to lower K unless its frontier still expects a gain.
@@ -183,7 +185,8 @@ class JudgeView:
     maps a running specialist branch to what the specialist runtime knows of its specialist; a branch whose
     specialist's state is not known is not in it. ``held`` maps each branch the judge may neither stop nor lower the
     K of to why, as :func:`held_branches` finds them when the view is built; it is what the prompt shows.
-    ``frontier_policy`` is the policy the frontier scores rest on, with its label and evidence.
+    ``frontier_policy`` is the policy the frontier scores rest on, with its label and evidence, and
+    ``frontier_scorer`` the label of the scorer that scores now, ``frontier-v1`` once the chosen one fell back.
     """
 
     now: float
@@ -213,6 +216,7 @@ class JudgeView:
     specialists: Mapping[str, SpecialistStatus]
     held: Mapping[str, HoldReason]
     frontier_policy: PolicyChoice
+    frontier_scorer: str
 
 
 def held_branches(
@@ -378,7 +382,11 @@ def render_prompt(view: JudgeView) -> str:
     progress = {row.branch: row for row in view.progress}
     state = {
         "metric": view.metric,
-        "frontier_policy": {"label": view.frontier_policy.label, "evidence": view.frontier_policy.evidence},
+        "frontier_policy": {
+            "label": view.frontier_policy.label,
+            "evidence": view.frontier_policy.evidence,
+            "scorer": view.frontier_scorer,
+        },
         "opening": view.opening,
         "caps": asdict(view.caps),
         "free_branch_slots": view.free_slots,

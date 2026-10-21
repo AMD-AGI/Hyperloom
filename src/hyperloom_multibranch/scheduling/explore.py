@@ -313,6 +313,7 @@ class Explorer:
             specialists=specialists,
             held=await self._held(specialists),
             frontier_policy=self._frontier_policy,
+            frontier_scorer=self._progress.guard.label,
         )
         try:
             decision = await self._clock.wait_for(self._judge.decide(view), window.explore_end - now)
