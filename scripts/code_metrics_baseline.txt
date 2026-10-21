@@ -162,6 +162,7 @@ cognitive-complexity src/kernelforge/loop/runner.py::IterationLoop._inspect_pend
 cognitive-complexity src/kernelforge/loop/runner.py::IterationLoop._record_iteration_outcome 40
 cognitive-complexity src/kernelforge/loop/runner.py::IterationLoop._run_locked 39
 cognitive-complexity src/kernelforge/loop/runner.py::IterationLoop.run_one_iteration 39
+cognitive-complexity src/kernelforge/loop/task_preparer.py::prepare_task 37
 cognitive-complexity src/kernelforge/orchestrator/agent.py::make_agent_fn 72
 cognitive-complexity src/kernelforge/orchestrator/analysis.py::AnalysisAgentService._write_artifact_catalog 32
 cognitive-complexity src/kernelforge/orchestrator/analysis.py::AnalysisAgentService.apply_checkpoint 39
@@ -694,6 +695,7 @@ function-lines src/kernelforge/loop/runner.py::IterationLoop._resolve_keep_sigma
 function-lines src/kernelforge/loop/runner.py::IterationLoop._run_locked 256
 function-lines src/kernelforge/loop/runner.py::IterationLoop.run_one_iteration 206
 function-lines src/kernelforge/loop/task_preflight.py::_count_graph_replays 85
+function-lines src/kernelforge/loop/task_preparer.py::prepare_task 340
 function-lines src/kernelforge/orchestrator/agent.py::make_agent_fn 312
 function-lines src/kernelforge/orchestrator/agent.py::make_agent_fn.agent_fn 194
 function-lines src/kernelforge/orchestrator/analysis.py::AnalysisAgentService._prompts 227
