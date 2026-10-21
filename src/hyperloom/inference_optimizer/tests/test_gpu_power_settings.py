@@ -15,8 +15,10 @@ from hyperloom.common import gpu_power_settings
 from hyperloom.common.gpu_power_settings import (
     GpuPowerSettingsError,
     _read_gpu_kfd_nodes as _real_read_gpu_kfd_nodes,
+    declared_node_problems,
     declared_setting_problems,
     read_gpu_power_settings,
+    read_node_power_settings,
     visible_gpu_indices,
 )
 
@@ -36,9 +38,24 @@ _PERF = {
 }
 
 
+def _node_payload(status="ENABLED", limit=8000):
+    return [{"node": {"power_management": {"limit": {"value": limit, "unit": "W"}, "status": status}}}]
+
+
 def _fake_run(cmd, **_kwargs):
-    payload = _LIMIT if "--limit" in cmd else _PERF
+    payload = _LIMIT if "--limit" in cmd else _node_payload() if "node" in cmd else _PERF
     return subprocess.CompletedProcess(cmd, 0, json.dumps(payload), "")
+
+
+def _node_reader(status="ENABLED", limit=8000):
+    def _run(cmd, **_kwargs):
+        return subprocess.CompletedProcess(cmd, 0, json.dumps(_node_payload(status, limit)), "")
+
+    return lambda: read_node_power_settings(run=_run)
+
+
+def _no_node_command():
+    raise GpuPowerSettingsError("amd-smi node --power-management exited 2: invalid choice: 'node'")
 
 
 def test_the_settings_are_read_from_amd_smi_json():
@@ -67,6 +84,33 @@ def test_declared_settings_are_checked_per_card():
     ]
 
 
+def test_the_node_settings_are_read_from_amd_smi_json():
+    assert read_node_power_settings(run=_fake_run) == {"npm": "enabled", "node_power_limit_w": 8000.0}
+    assert _node_reader("DISABLED", 0)() == {"npm": "disabled", "node_power_limit_w": 0.0}
+
+
+def test_an_amd_smi_without_the_node_command_is_an_error_not_a_disabled_node():
+    def _old_amd_smi(cmd, **_kwargs):
+        return subprocess.CompletedProcess(cmd, 2, "", "invalid choice: 'node'")
+
+    with pytest.raises(GpuPowerSettingsError):
+        read_node_power_settings(run=_old_amd_smi)
+
+
+def test_declared_node_settings_are_checked():
+    node = {"npm": "enabled", "node_power_limit_w": 8000.0}
+    assert declared_node_problems(node, npm="enabled", node_power_limit_w=8000.0) == []
+    assert declared_node_problems(node) == []
+    assert declared_node_problems(node, npm="disabled", node_power_limit_w=6000.0) == [
+        "node power management is 'enabled', declared 'disabled'",
+        "node power limit is 8000.0 W, declared 6000 W",
+    ]
+    assert declared_node_problems({"npm": "", "node_power_limit_w": None}, npm="enabled", node_power_limit_w=1.0) == [
+        "node power management is 'unreadable', declared 'enabled'",
+        "node power limit is unreadable W, declared 1 W",
+    ]
+
+
 class TestResolve:
     def _resolve(self, monkeypatch, **kw):
         from hyperloom.inference_optimizer.cli.bootstrap import resolve_gpu_power_settings
@@ -77,7 +121,49 @@ class TestResolve:
         kw.setdefault("power_cap_w", None)
         kw.setdefault("perf_level", None)
         kw.setdefault("read", lambda: read_gpu_power_settings(run=_fake_run))
+        kw.setdefault("read_node", _node_reader())
         return resolve_gpu_power_settings(**kw)
+
+    def test_the_node_npm_state_is_recorded_without_a_declaration(self, monkeypatch):
+        record, error = self._resolve(monkeypatch)
+        assert error == ""
+        assert record["node"] == {"npm": "enabled", "node_power_limit_w": 8000.0}
+
+    def test_a_node_without_npm_support_records_no_node_and_does_not_refuse(self, monkeypatch):
+        record, error = self._resolve(monkeypatch, read_node=_no_node_command)
+        assert error == ""
+        assert "node" not in record
+
+    def test_a_declared_npm_state_the_node_is_at_holds(self, monkeypatch):
+        record, error = self._resolve(monkeypatch, npm="enabled", node_power_limit_w=8000.0)
+        assert error == ""
+        assert record["declared"] == {"npm": "enabled", "node_power_limit_w": 8000.0}
+
+    def test_a_declared_npm_state_the_node_is_not_at_refuses_and_points_at_the_bmc(self, monkeypatch):
+        _, error = self._resolve(monkeypatch, npm="enabled", read_node=_node_reader("DISABLED", 0))
+        assert error == (
+            "the node is not at the declared power management settings (NPM is set on the BMC): "
+            "node power management is 'disabled', declared 'enabled'"
+        )
+
+    def test_a_declared_node_limit_firmware_clamped_refuses(self, monkeypatch):
+        """The BMC may be asked for 8400 W while firmware enforces 8000 W; the enforced limit is the contract."""
+        _, error = self._resolve(monkeypatch, node_power_limit_w=8400.0)
+        assert "node power limit is 8000.0 W, declared 8400 W" in error
+
+    def test_a_declared_npm_state_that_cannot_be_read_refuses(self, monkeypatch):
+        _, error = self._resolve(monkeypatch, npm="disabled", read_node=_no_node_command)
+        assert "the node power management settings cannot be read" in error
+
+    def test_card_and_node_mismatches_are_reported_together(self, monkeypatch):
+        _, error = self._resolve(monkeypatch, power_cap_w=1000.0, npm="disabled")
+        assert error.startswith("the GPUs are not at the declared power settings")
+        assert "GPU 0 power cap is 1400.0 W" in error
+        assert "node power management is 'enabled', declared 'disabled'" in error
+
+    def test_a_multi_node_npm_declaration_refuses(self, monkeypatch):
+        _, error = self._resolve(monkeypatch, npm="enabled", nodes=2)
+        assert "multi-node" in error
 
     def test_nothing_declared_records_what_the_cards_report(self, monkeypatch):
         record, error = self._resolve(monkeypatch)
@@ -286,6 +372,39 @@ class TestCli:
         with pytest.raises(SystemExit) as exc:
             self._parse("--gpu-power-cap-w", bad)
         assert exc.value.code == 2
+
+    def test_the_node_flags_parse(self):
+        args = self._parse("--node-power-management", "ENABLED", "--node-power-limit-w", "6000")
+        assert (args.node_power_management, args.node_power_limit_w) == ("enabled", 6000.0)
+
+    def test_the_node_flags_are_off_by_default(self):
+        args = self._parse()
+        assert (args.node_power_management, args.node_power_limit_w) == (None, None)
+
+    @pytest.mark.parametrize("argv", [("--node-power-management", "on"), ("--node-power-limit-w", "0")])
+    def test_an_unusable_node_declaration_stops_the_launch(self, argv):
+        with pytest.raises(SystemExit) as exc:
+            self._parse(*argv)
+        assert exc.value.code == 2
+
+
+def test_a_resume_re_asserts_the_archived_npm_declaration(monkeypatch):
+    """A resume that omits the flag still holds the node to the state the session was measured under."""
+    from types import SimpleNamespace
+
+    from hyperloom.inference_optimizer.cli import gpu_power_apply
+    from hyperloom.inference_optimizer.cli.bootstrap import resume_gpu_power_settings
+
+    monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
+    monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setattr(gpu_power_apply, "warn_about_orphaned_cards", lambda: None)
+    monkeypatch.setattr(gpu_power_settings, "read_gpu_power_settings", lambda: read_gpu_power_settings(run=_fake_run))
+    monkeypatch.setattr(gpu_power_settings, "read_node_power_settings", _node_reader("DISABLED", 0))
+    state = SimpleNamespace(gpu_power_settings={"declared": {"npm": "enabled"}}, nodes=1, session_id="s")
+    args = SimpleNamespace(gpu_power_cap_w=None, gpu_perf_level=None, node_power_management=None, nodes=1)
+    record, error = resume_gpu_power_settings(args, state)
+    assert record["declared"] == {"npm": "enabled"}
+    assert "node power management is 'disabled', declared 'enabled'" in error
 
 
 def test_the_platform_fingerprint_records_the_settings(monkeypatch):

@@ -278,6 +278,8 @@ _MAX_PER_GPU_POWER_W = "max_per_gpu_power_w"
 _NODES = "nodes"
 _GPU_POWER_CAP_W = "gpu_power_cap_w"
 _GPU_PERF_LEVEL = "gpu_perf_level"
+_NODE_POWER_MANAGEMENT = "node_power_management"
+_NODE_POWER_LIMIT_W = "node_power_limit_w"
 _DECLARED = "declared"
 
 
@@ -327,6 +329,8 @@ def _established_gpu_power_settings(
     record, error = resolve_gpu_power_settings(
         power_cap_w=declared.power_cap_w,
         perf_level=declared.perf_level or None,
+        npm=declared.npm or None,
+        node_power_limit_w=declared.node_power_limit_w,
         nodes=nodes,
         just_applied=bool(applied),
     )
@@ -368,6 +372,8 @@ def resolve_launch_gpu_power(args: Any, *, nodes: int, owner: str) -> dict[str, 
             DeclaredPowerSettings(
                 power_cap_w=getattr(args, _GPU_POWER_CAP_W, None),
                 perf_level=getattr(args, _GPU_PERF_LEVEL, None) or "",
+                npm=getattr(args, _NODE_POWER_MANAGEMENT, None) or "",
+                node_power_limit_w=getattr(args, _NODE_POWER_LIMIT_W, None),
             ),
             nodes=nodes,
             apply=bool(getattr(args, "apply_gpu_power_settings", False)),
@@ -396,6 +402,8 @@ def resume_gpu_power_settings(args: Any, state: Any) -> tuple[dict[str, Any], st
         DeclaredPowerSettings(
             power_cap_w=getattr(args, _GPU_POWER_CAP_W, None) or declared.get("power_cap_w"),
             perf_level=getattr(args, _GPU_PERF_LEVEL, None) or declared.get("perf_level") or "",
+            npm=getattr(args, _NODE_POWER_MANAGEMENT, None) or declared.get("npm") or "",
+            node_power_limit_w=getattr(args, _NODE_POWER_LIMIT_W, None) or declared.get("node_power_limit_w"),
         ),
         nodes=max(int(getattr(args, _NODES, 1) or 1), int(getattr(state, _NODES, 1) or 1)),
         apply=apply,
@@ -409,22 +417,48 @@ def resume_gpu_power_settings(args: Any, state: Any) -> tuple[dict[str, Any], st
     return record, error
 
 
+def _node_power_settings(
+    read_node: Any, *, npm: str | None, node_power_limit_w: float | None
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """The node's NPM reading and why it is not at the declared values; ``(None, [])`` when it cannot be read and
+    nothing about it was declared (an amd-smi before ROCm 7.2, or a GPU without NPM)."""
+    from hyperloom.common.gpu_power_settings import (
+        GpuPowerSettingsError,
+        declared_node_problems,
+        read_node_power_settings,
+    )
+
+    try:
+        node = (read_node or read_node_power_settings)()
+    except GpuPowerSettingsError as exc:
+        if npm or node_power_limit_w is not None:
+            return None, [f"the node power management settings cannot be read: {exc}"]
+        return None, []
+    return node, declared_node_problems(node, npm=npm, node_power_limit_w=node_power_limit_w)
+
+
 def resolve_gpu_power_settings(
     *,
     power_cap_w: float | None,
     perf_level: str | None,
     nodes: int,
+    npm: str | None = None,
+    node_power_limit_w: float | None = None,
     read: Any = None,
+    read_node: Any = None,
     just_applied: bool = False,
 ) -> tuple[dict[str, Any], str]:
-    """Read the cards' power settings and check the declared ones; ``(record, error)``.
+    """Read the cards' and the node's power settings and check the declared ones; ``(record, error)``.
 
-    ``record`` is what the session stores and the platform fingerprint shows: the declared values and what each card
-    reported. ``error`` is non-empty when a declared value does not hold, or cannot be checked, and the launch must stop.
-    Nothing is set here: the operator sets the cap and perf level with ``amd-smi set`` before launch, or
-    ``--apply-gpu-power-settings`` set them just before this check.
+    ``record`` is what the session stores and the platform fingerprint shows: the declared values, what each card
+    reported and, where amd-smi reports it, the node's NPM state and limit. ``error`` is non-empty when a declared value
+    does not hold, or cannot be checked, and the launch must stop. Nothing is set here: the operator sets the cap and
+    perf level with ``amd-smi set`` before launch, or ``--apply-gpu-power-settings`` set them just before this check;
+    NPM is set on the BMC.
     """
     from hyperloom.common.gpu_power_settings import (
+        NODE_POWER_LIMIT_W,
+        NPM,
         GpuPowerSettingsError,
         declared_setting_problems,
         normalize_perf_level,
@@ -437,12 +471,16 @@ def resolve_gpu_power_settings(
         declared["power_cap_w"] = float(power_cap_w)
     if perf_level:
         declared["perf_level"] = normalize_perf_level(perf_level)
+    if npm:
+        declared[NPM] = npm
+    if node_power_limit_w is not None:
+        declared[NODE_POWER_LIMIT_W] = float(node_power_limit_w)
     if nodes >= 2:
         if declared:
             return {}, (
-                "--gpu-power-cap-w / --gpu-perf-level cannot be checked on a multi-node session: they describe the "
-                "benchmark nodes' cards, which this process cannot read, and an unverifiable assertion is not a "
-                "satisfied one"
+                "--gpu-power-cap-w / --gpu-perf-level / --node-power-management / --node-power-limit-w cannot be "
+                "checked on a multi-node session: they describe the benchmark nodes' cards, which this process cannot "
+                "read, and an unverifiable assertion is not a satisfied one"
             )
         return {}, ""
     try:
@@ -467,13 +505,21 @@ def resolve_gpu_power_settings(
         perf_level=declared.get("perf_level"),
         gpus=gpus,
     )
+    node, node_problems = _node_power_settings(read_node, npm=npm, node_power_limit_w=node_power_limit_w)
+    if node is not None:
+        record["node"] = node
     if problems:
         why = (
             "the GPUs did not take the power settings just applied"
             if just_applied
             else "the GPUs are not at the declared power settings (set them with amd-smi before launch)"
         )
-        return record, f"{why}: " + "; ".join(problems)
+        return record, f"{why}: " + "; ".join(problems + node_problems)
+    if node_problems:
+        return record, (
+            "the node is not at the declared power management settings (NPM is set on the BMC): "
+            + "; ".join(node_problems)
+        )
     return record, ""
 
 
