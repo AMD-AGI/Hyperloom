@@ -17,10 +17,21 @@ from .collectors._common import (
 )
 
 
-def _candidate_id(value: Any) -> str:
-    candidate = _mapping(value)
+#: The arm and the gated action of each reviewed action whose arm the action
+#: alone decides. A specialist's arm depends on what it was dispatched to do.
+_ACTION_ROUTES = {
+    **dict.fromkeys(("params", "backends", "explore"), ("config", "explore")),
+    **dict.fromkeys(("framework_agent", "integrate", "integrate_patch"), ("source", "integrate_patch")),
+}
+
+
+def _candidate_id(payload: dict[str, Any], params: dict[str, Any]) -> str:
+    """The candidate a proposal names: its Framework Agent id, else the candidate's own reference."""
+    candidate = _mapping(_first(payload.get("candidate"), params.get("candidate")))
     return str(
         _first(
+            payload.get("framework_agent_candidate_id"),
+            params.get("framework_agent_candidate_id"),
             candidate.get("candidate_id"),
             candidate.get("pr_url"),
             candidate.get("url"),
@@ -35,40 +46,60 @@ def _has_patch_refs(params: dict[str, Any]) -> bool:
     return any(isinstance(params.get(key), list) and bool(params.get(key)) for key in ("patch_refs", "patches_written"))
 
 
+def _specialist_authors_source(params: dict[str, Any], candidate_id: str) -> bool:
+    """Whether a specialist dispatch authors source rather than tunes configuration."""
+    task_kind = str(params.get("task_kind") or "").strip().lower()
+    return bool(
+        candidate_id
+        or _optional_bool(params.get("framework_agent_authoring")) is True
+        or _optional_bool(params.get("candidate_discovery")) is True
+        or task_kind in _AUTHORING_TASK_KINDS
+        or _has_patch_refs(params)
+    )
+
+
+def _ruling(verdict: dict[str, Any], effective: dict[str, Any]) -> dict[str, Any]:
+    """The critic's ruling on one proposal, beside what the emitted envelope made effective."""
+    return {
+        "source": "critic" if str(verdict.get("source") or "critic") == "critic" else "critic_unavailable",
+        "verdict": str(verdict.get("verdict") or ""),
+        "effective_verdict": str(
+            _first(effective.get("verdict"), verdict.get("effective_verdict"), verdict.get("verdict")) or ""
+        ),
+        "reasoning": str(verdict.get("reasoning") or ""),
+        "confidence": _first(verdict.get("confidence")),
+        "failure_reason_code": _first(verdict.get("failure_reason_code")),
+        "required_evidence": _string_list(verdict.get("required_evidence")),
+        "risks": [
+            {
+                "severity": str(risk.get("severity") or ""),
+                "risk": str(_first(risk.get("risk"), risk.get("summary"), risk.get("reason")) or ""),
+            }
+            for risk in _dict_rows(verdict.get("risks"))
+        ],
+        "advice_text": _first(verdict.get("advice_text"), effective.get("advice_text")),
+        "alternative_action": _first(verdict.get("alternative_action")),
+        "followup_task_ids": _string_list(_first(effective.get("followup_task_ids"), verdict.get("followup_task_ids"))),
+    }
+
+
 def normalize_framework_reviews(
     *,
     request: dict[str, Any] | None,
     judge_bundle: dict[str, Any] | None,
-    review: dict[str, Any] | None,
-    emit: dict[str, Any] | None,
+    review: dict[str, Any],
+    emit: dict[str, Any],
     review_path: str | None,
 ) -> list[dict[str, Any]]:
     """Return compact V6 Framework review rows from one Critic iteration."""
-    request = _mapping(request)
     judge = _mapping(judge_bundle)
-    review = _mapping(review)
-    emit = _mapping(emit)
     normalized_review_path = str(review_path or "").replace("\\", "/") or None
-    review_phase = (
-        str(
-            _first(
-                judge.get("phase"),
-                _nested(request, "context", "phase"),
-                _nested(judge, "merged_context", "phase"),
-            )
-            or ""
-        )
-        .strip()
-        .upper()
-    )
+    phase = _first(judge.get("phase"), _nested(request, "context", "phase"), _nested(judge, "merged_context", "phase"))
+    review_phase = str(phase or "").strip().upper()
     if review_phase and review_phase not in _FRAMEWORK_PHASES:
         return []
 
-    proposals = {
-        str(proposal.get("msg_id") or ""): proposal
-        for proposal in _dict_rows(judge.get("proposals"))
-        if proposal.get("msg_id")
-    }
+    proposals = {str(row["msg_id"]): row for row in _dict_rows(judge.get("proposals")) if row.get("msg_id")}
     effective: dict[str, dict[str, Any]] = {}
     for intent in _dict_rows(_nested(emit, "intent_envelope", "intents")):
         if str(intent.get("intent_type") or "") != "review_verdict":
@@ -84,70 +115,24 @@ def normalize_framework_reviews(
         proposal = proposals.get(proposal_id, {})
         payload = _mapping(proposal.get("payload"))
         params = _mapping(payload.get("params"))
-        candidate = _mapping(_first(payload.get("candidate"), params.get("candidate")))
         action = str(_first(proposal.get("action_name"), payload.get("action_name"), payload.get("kind")) or "").lower()
-        candidate_id = str(
-            _first(
-                payload.get("framework_agent_candidate_id"),
-                params.get("framework_agent_candidate_id"),
-                _candidate_id(candidate),
-            )
-            or ""
-        )
-        if action in {"params", "backends", "explore"}:
-            arm = "config"
-            target_action = "explore"
-        elif action in {"framework_agent", "integrate", "integrate_patch"}:
-            arm = "source"
-            target_action = "integrate_patch"
-        elif action == "specialist":
-            task_kind = str(params.get("task_kind") or "").strip().lower()
-            source_marker = bool(
-                candidate_id
-                or _optional_bool(params.get("framework_agent_authoring")) is True
-                or _optional_bool(params.get("candidate_discovery")) is True
-                or task_kind in _AUTHORING_TASK_KINDS
-                or _has_patch_refs(params)
-            )
-            arm = "source" if source_marker else "config"
+        candidate_id = _candidate_id(payload, params)
+        if action == "specialist":
+            arm = "source" if _specialist_authors_source(params, candidate_id) else "config"
             target_action = "specialist"
+        elif action in _ACTION_ROUTES:
+            arm, target_action = _ACTION_ROUTES[action]
         else:
             continue
 
-        effective_row = effective.get(proposal_id, {})
         rows.append(
             {
                 "proposal_msg_id": proposal_id,
                 "candidate_id": candidate_id or None,
-                "variant_name": _first(payload.get("variant_name"), params.get("variant_name"), None),
+                "variant_name": _first(payload.get("variant_name"), params.get("variant_name")),
                 "arm": arm,
                 "target_action": target_action,
-                "source": "critic" if str(verdict_row.get("source") or "critic") == "critic" else "critic_unavailable",
-                "verdict": str(verdict_row.get("verdict") or ""),
-                "effective_verdict": str(
-                    _first(
-                        effective_row.get("verdict"),
-                        verdict_row.get("effective_verdict"),
-                        verdict_row.get("verdict"),
-                    )
-                    or ""
-                ),
-                "reasoning": str(verdict_row.get("reasoning") or ""),
-                "confidence": _first(verdict_row.get("confidence"), None),
-                "failure_reason_code": _first(verdict_row.get("failure_reason_code"), None),
-                "required_evidence": _string_list(verdict_row.get("required_evidence")),
-                "risks": [
-                    {
-                        "severity": str(risk.get("severity") or ""),
-                        "risk": str(_first(risk.get("risk"), risk.get("summary"), risk.get("reason")) or ""),
-                    }
-                    for risk in _dict_rows(verdict_row.get("risks"))
-                ],
-                "advice_text": _first(verdict_row.get("advice_text"), effective_row.get("advice_text"), None),
-                "alternative_action": _first(verdict_row.get("alternative_action"), None),
-                "followup_task_ids": _string_list(
-                    _first(effective_row.get("followup_task_ids"), verdict_row.get("followup_task_ids"), [])
-                ),
+                **_ruling(verdict_row, effective.get(proposal_id, {})),
                 "ts": str(_first(verdict_row.get("ts"), emit.get("ts"), review.get("ts")) or ""),
                 "review_path": normalized_review_path,
                 "phase": review_phase,

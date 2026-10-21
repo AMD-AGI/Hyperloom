@@ -136,6 +136,41 @@ def test_framework_script_match_ok(tmp_path):
     assert bench["benchmark_script"] == "vllm_mi300x.sh"
 
 
+def test_r9700_materializes_vllm_gfx12_runner(tmp_path):
+    src = tmp_path / "cfg.yaml"
+    _write_yaml(src, "vllm")
+    out = materialize_config_with_envs(
+        src,
+        tmp_path / "out",
+        model_path="/m",
+        gpu_type="r9700",
+    )
+    bench = yaml.safe_load(out.read_text())["benchmark"]
+    assert bench["runner_type"] == "gfx12"
+    assert bench["benchmark_script"] == "vllm_gfx12.sh"
+
+
+def test_r9700_materialized_config_is_lifecycle_eligible(tmp_path, monkeypatch):
+    """An R9700 session's materialized config may hold one server across rounds (baseline, explore, conc sweep)."""
+    from hyperloom.orchestrator.actions.executors import _server_lifecycle as sl
+    from hyperloom.orchestrator.actions.executors import benchmark_backend as bb
+
+    monkeypatch.delenv(bb.BENCHMARK_BACKEND_ENV, raising=False)
+    monkeypatch.setattr(sl, "_pick_free_port", lambda: 8888)
+    src = tmp_path / "cfg.yaml"
+    _write_yaml(src, "vllm")
+    out = materialize_config_with_envs(
+        src,
+        tmp_path / "out",
+        model_path="/m",
+        gpu_type="r9700",
+    )
+
+    info = sl.resolve_lifecycle_params(out)
+    assert info["eligible"] is True, info["reason"]
+    assert info["framework"] == "vllm"
+
+
 def test_single_node_explicit_tp_overrides_stale_env(monkeypatch):
     """`optimize --tp N` must reach YAML materialization on single-node."""
     monkeypatch.setenv("TP", "8")

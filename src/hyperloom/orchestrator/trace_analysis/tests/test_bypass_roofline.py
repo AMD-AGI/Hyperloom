@@ -122,6 +122,16 @@ def test_mi355x_uses_vendor_peak_when_achievable_absent():
     assert r["bandwidth_utilization_pct"] > 0.0
 
 
+def test_r9700_uses_vendor_peak():
+    r = compute_roofline(
+        KernelAggregate(category="GEMM", shape_str="(128,128) bf16<br>(128,128) bf16", gpu_time_us=10.0),
+        gpu_type="r9700",
+    )
+    assert r is not None
+    assert r["compute_peak_convention"] == "vendor"
+    assert r["compute_peak_tflops"] == 191.0
+
+
 def test_unknown_gpu_returns_none():
     r = compute_roofline(
         KernelAggregate(category="GEMM", shape_str="(128,128) bf16<br>(128,128) bf16", gpu_time_us=10.0),
