@@ -153,11 +153,16 @@ this reference is partial — `breakdown/exporter.py` is authoritative.
 
 - `schema_version` (in `schema.py`) carries the **major** contract
   version; it is bumped ONLY on breaking changes (renamed/removed
-  fields, changed semantics), apart from the declared 6.1 rename below.
-- New exports carry `hyperloom.session_breakdown.v6.1`. 6.1 renames one key
-  inside the 6 major, a declared exception to the major-bump rule:
-  `throughput_tok_s_per_gpu` in `outcome.baseline`, `outcome.final` and the
-  `baseline` event measurement is now `output_throughput`, and the old key is
+  fields, changed semantics), apart from the declared 6.1 changes below.
+- New exports carry `hyperloom.session_breakdown.v6.1`. 6.1 changes three
+  things inside the 6 major, a declared exception to the major-bump rule: it
+  renames one key, removes keys no producer populated (disposition: removed in
+  6.1, never populated) or that only carried a constant (`roofline_measured`,
+  the baseline action's `convergence`; disposition: removed in 6.1, constant),
+  and reports `attributed_gain_pct`,
+  `unattributed_gain_pct` and run `empty` as null when unmeasured or not
+  provided. `throughput_tok_s_per_gpu` in `outcome.baseline`, `outcome.final`
+  and the `baseline` event measurement is now `output_throughput`, and the old key is
   no longer written. Archived 6.0 documents and 1.1.x exports keep the old key,
   so readers must accept both or migrate. Re-exporting a 6.0 session directory
   yields a null `outcome.baseline.output_throughput`, keeps the session's old

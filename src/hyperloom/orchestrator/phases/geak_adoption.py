@@ -46,9 +46,8 @@ def adoption_entry(
             "cycle": measurement.cycle,
         }
     )
-    # Max over attempts, matching the canonical ledger writer in ``_kernel_decisions.py`` -- ``by_kernel`` and
-    # ``kernel_lifecycle`` read this one field from both writers, so a second, worse rebench must not lower
-    # the kernel's best.
+    # Max over attempts, matching the canonical ledger writer in ``_kernel_decisions.py``: a second, worse rebench
+    # must not lower the kernel's best.
     gains = [
         float(a["gain_pct"]) for a in attempts if isinstance(a, dict) and isinstance(a.get("gain_pct"), (int, float))
     ]

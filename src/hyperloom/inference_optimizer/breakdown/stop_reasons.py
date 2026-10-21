@@ -96,7 +96,6 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         "time_exhausted_during_prelude",
         "warm_replay_rollback_failed",
         "active_inferencex_checkout_missing",
-        "no_kernel_skipped",
         "sweep_done",
         "sweep_failed",
         "framework_agent_phase_done",
