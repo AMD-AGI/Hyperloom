@@ -525,6 +525,13 @@ async def test_a_fix_case_a_specialist_declares_is_stored_in_the_session_blob_st
     assert read_case(built.setup.blobs.get(ref.sha256)) == case
 
 
+async def test_a_branchs_specialist_handle_is_one_writer_for_the_whole_session(built: _Built) -> None:
+    """Every MCP call used to build a handle, hence a writer; an inbox cursor holds a sequence number for each writer, and
+    the 1,258 of a 12 h session made one first ``poll_inbox`` answer 94,039 characters for three items."""
+    notebooks = built.wiring.notebooks
+    assert notebooks("b01") is notebooks("b01") and notebooks("b01") is not notebooks("b02")
+
+
 async def test_the_specialist_notebook_handle_briefs_a_branch_after_stall_tests_judged_tests_without_a_commit(
     built: _Built,
 ) -> None:

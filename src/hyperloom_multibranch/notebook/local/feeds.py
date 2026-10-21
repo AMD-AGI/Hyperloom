@@ -86,7 +86,10 @@ _INBOX_KINDS = {
 def _read_cursor(cursor: str) -> dict[str, int]:
     if not cursor:
         return {}
-    seen = json.loads(cursor)
+    try:
+        seen = json.loads(cursor)
+    except ValueError:
+        seen = None
     if not isinstance(seen, dict) or not all(isinstance(seq, int) for seq in seen.values()):
         raise ValueError(f"not an inbox cursor: {cursor!r}")
     return seen

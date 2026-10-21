@@ -689,6 +689,15 @@ def _pointers(pages: list[dict[str, Any]]) -> list[str]:
     return [item["pointer"] for page in pages for item in page["items"]]
 
 
+def test_a_poll_inbox_cursor_that_is_not_one_says_how_to_get_one(rig: Rig) -> None:
+    """A specialist that tried ``"latest"`` was told ``JSONDecodeError: Expecting value``."""
+    status, reply = rig.call(rig.token("s1"), "poll_inbox", cursor="latest")
+    assert status == 200 and reply["error"] == {
+        "code": -32602,
+        "message": "not an inbox cursor: 'latest'; pass the cursor of an earlier reply, or none to read the whole inbox",
+    }
+
+
 async def test_a_large_inbox_is_paged_with_no_item_lost_or_repeated(wait_rig: Rig, waiting: Writers) -> None:
     await _land(waiting, 3 * POLL_INBOX_MAX_ITEMS + 7)
     observer = await wait_rig.observer().poll("s1")

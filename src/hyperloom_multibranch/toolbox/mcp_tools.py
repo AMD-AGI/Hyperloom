@@ -478,7 +478,12 @@ async def _read_feed(notebook: Notebook, branch: str, cursor: str) -> _Feed:
         if len(parts) != 3 or not parts[0].isdigit() or len(parts[1]) != _FINGERPRINT_CHARS:
             raise InvalidParamsError(f"not an inbox cursor: {cursor!r}")
         skipped, anchor, base = int(parts[0]), parts[1], parts[2]
-    page = await notebook.poll(branch, base)
+    try:
+        page = await notebook.poll(branch, base)
+    except ValueError as exc:
+        raise InvalidParamsError(
+            f"{exc}; pass the cursor of an earlier reply, or none to read the whole inbox"
+        ) from None
     items = page.items
     if skipped and not (skipped <= len(items) and _fingerprint(items[skipped - 1]) == anchor):
         found = [at for at, item in enumerate(items) if _fingerprint(item) == anchor]

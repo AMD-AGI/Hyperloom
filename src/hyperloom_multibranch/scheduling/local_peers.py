@@ -38,7 +38,7 @@ import secrets
 import shutil
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from functools import partial
+from functools import cache, partial
 from types import ModuleType
 from typing import TYPE_CHECKING
 
@@ -248,7 +248,10 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     gate_notebook = LocalNotebook(layout.notebook, Writer(Role.GATE, GATE_WRITER))
     rule = workload_rule(workload, gate_notebook)
 
+    @cache
     def runtime_notebook(branch: str) -> LocalNotebook:
+        """The branch's one handle for the session: a handle is a writer of its own, and every inbox cursor holds one
+        sequence number per writer, so a handle per MCP call made ``poll_inbox`` answer 91,000 characters after 12 h."""
         return LocalNotebook(layout.notebook, Writer(Role.SPECIALIST_RUNTIME, branch, branch), briefs=BriefTriggers())
 
     mcp = McpServer(McpServerConfig(host_token=secrets.token_hex(32)), campaign=layout.session_id)
