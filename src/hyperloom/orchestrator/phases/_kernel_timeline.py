@@ -19,6 +19,9 @@ from hyperloom.inference_optimizer.breakdown.recorder import tool_versions
 
 log = _logging.getLogger(__name__)
 
+#: Result keys more than one of these rows reads under the same name.
+STATUS, ERROR_CLASS, ERROR = "status", "error_class", "error"
+
 
 def settled_text(result: Mapping[str, Any], *keys: str, default: str = "") -> str:
     """The first non-empty value under ``keys`` as text, else ``default``.
@@ -85,7 +88,7 @@ def _campaign_facts(result: Mapping[str, Any], *, macro_cycle: int) -> _Campaign
     workspace = settled_text(result, "workspace")
     return _CampaignFacts(
         run_id=settled_text(result, "task_id") or (Path(workspace).name if workspace else "") or f"gemm-c{macro_cycle}",
-        status=settled_text(result, "status", default="unknown"),
+        status=settled_text(result, STATUS, default="unknown"),
         shapes_total=result.get("shapes_total", capture.get("shape_count")),
         tuned_file=settled_text(result, "tuned_file", "config_path"),
         # _validate_gemm_tuning_e2e writes the validated gain to e2e_gain_pct, not gain_pct -- no
@@ -110,7 +113,7 @@ def _record_tuner_run(recorder: Any, row: Mapping[str, Any], facts: _CampaignFac
     applied = bool(facts.tuned_file) and artifact == facts.tuned_file
     recorder.record_gemm_tuning_run(
         run_id=f"{facts.run_id}-{tuner}" if tuner else facts.run_id,
-        status=settled_text(row, "status", default=facts.status),
+        status=settled_text(row, STATUS, default=facts.status),
         shapes_total=row.get("total_shapes", facts.shapes_total),
         shapes_tuned=row.get("improved_shapes"),
         config_path=artifact,
@@ -122,8 +125,8 @@ def _record_tuner_run(recorder: Any, row: Mapping[str, Any], facts: _CampaignFac
         started_at=facts.started_at,
         ended_at=facts.ended_at,
         duration_sec=row.get("elapsed_s", facts.duration_sec),
-        error_class=settled_text(row, "error_class"),
-        failure_reason=settled_text(row, "error", "skip_reason", "error_class"),
+        error_class=settled_text(row, ERROR_CLASS),
+        failure_reason=settled_text(row, ERROR, "skip_reason", ERROR_CLASS),
     )
 
 
@@ -143,8 +146,8 @@ def _record_untuned_campaign_run(recorder: Any, result: Mapping[str, Any], facts
         started_at=facts.started_at,
         ended_at=facts.ended_at,
         duration_sec=facts.duration_sec,
-        error_class=settled_text(result, "error_class"),
-        failure_reason=settled_text(result, "error", "skip_reason", "error_class"),
+        error_class=settled_text(result, ERROR_CLASS),
+        failure_reason=settled_text(result, ERROR, "skip_reason", ERROR_CLASS),
     )
 
 
@@ -154,12 +157,12 @@ def record_geak_delegation(
     """Record the delegated GEAK runner's terminal state."""
     versions = result.get("versions")
     recorder.record_geak_delegation(
-        runner_status=settled_text(result, "status", default="unknown"),
+        runner_status=settled_text(result, STATUS, default="unknown"),
         started_at=run.started_at or settled_text(result, "started_at"),
         ended_at=settled_text(result, "ended_at", default=datetime.now(timezone.utc).isoformat()),
         duration_sec=run.duration_sec if run.duration_sec is not None else result.get("duration_sec"),
-        error_class=settled_text(result, "error_class"),
-        error=settled_text(result, "error"),
+        error_class=settled_text(result, ERROR_CLASS),
+        error=settled_text(result, ERROR),
         returncode=result.get("returncode"),
         runner_timeout_sec=(
             run.runner_timeout_sec if run.runner_timeout_sec is not None else result.get("runner_timeout_s")
