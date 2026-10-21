@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -25,16 +26,6 @@ from hyperloom.common import aiter_jit_cache
 from hyperloom.common.timeutil import now_iso
 from hyperloom.common.unified_diff import PatchOp, PatchTarget, repo_relative_manifest
 from hyperloom.inference_optimizer.framework_paths import resolve_flydsl_source_roots
-
-from ._patch_tree import (
-    _claim_backup_dir,
-    _contained_dest,
-    _copy_to_backup,
-    _delete_recorded_backups,
-    _revert_backup_trusted,
-    _within_root,
-    apply_snapshot,
-)
 
 log = logging.getLogger(__name__)
 
@@ -285,6 +276,45 @@ def _dispatch_multinode_finalize(
     return parsed
 
 
+def _safe_name(value: str) -> str:
+    """Sanitize a filename component to a safe, short identifier."""
+    cleaned = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in value)
+    return cleaned[:80] or "kernel_agent"
+
+
+def _path_hash(path: Path) -> str:
+    """Return a short, stable hash for ``path`` to disambiguate backups."""
+    return hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:16]
+
+
+_MAX_BACKUP_DIR_ATTEMPTS: int = 200
+
+
+def _claim_backup_dir(backup_root: Path, kernel_id: str, target: Path) -> Path:
+    """Create a backup directory this apply alone owns.
+
+    ``mkdir(exist_ok=False)`` makes the claim atomic against a concurrent caller,
+    which a constant or absent ``kernel_id`` would otherwise let reuse a name.
+    """
+    base = Path(backup_root) / f"{_safe_name(kernel_id or target.stem)}_{_path_hash(target)}"
+    for suffix in range(1, _MAX_BACKUP_DIR_ATTEMPTS + 1):
+        candidate = base if suffix == 1 else base.with_name(f"{base.name}-{suffix}")
+        try:
+            candidate.mkdir(parents=True, exist_ok=False)
+            return candidate
+        except FileExistsError:
+            continue
+    raise RuntimeError(f"_claim_backup_dir: {base} still taken after {_MAX_BACKUP_DIR_ATTEMPTS} suffixes")
+
+
+def _copy_to_backup(path: Path, backup_dir: Path, group: str) -> dict[str, str]:
+    """Copy a file into the backup tree and return the manifest entry."""
+    dst = backup_dir / group / f"{_path_hash(path)}_{path.name}"
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(path, dst)
+    return {"path": str(path), "backup_path": str(dst)}
+
+
 def _source_text_looks_complete(text: str, suffix: str) -> bool:
     """Heuristically decide whether ``text`` is a complete source file."""
     stripped = text.strip()
@@ -409,6 +439,202 @@ def _validate_replacement_compatibility(patch_text: str, target_text: str, targe
             raise ValueError(
                 f"patch does not preserve target host entry function(s) for {target}: " + ", ".join(missing[:12])
             )
+
+
+def _contained_dest(
+    repo_root: Path,
+    rel_path: str,
+    *,
+    deploy_roots: Iterable[Path] | None = None,
+) -> Path:
+    """Resolve ``rel_path`` under its coordinate and authorized deploy roots.
+
+    ``deploy_roots=None`` keeps the coordinate-only check for legacy callers; an
+    empty iterable rejects every destination.
+    """
+    if rel_path.startswith("/"):
+        raise ValueError(f"absolute path not allowed in patch: {rel_path}")
+    if ".." in Path(rel_path).parts:
+        raise ValueError(f"'..' not allowed in patch path: {rel_path}")
+    root = repo_root.resolve()
+    dest = (root / rel_path).resolve()
+    try:
+        dest.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(f"patch path escapes repo root {root}: {rel_path}") from exc
+    if deploy_roots is not None:
+        allowed = [Path(path).resolve() for path in deploy_roots]
+        if not any(_within_root(dest, allowed_root) for allowed_root in allowed):
+            roots_text = ", ".join(str(path) for path in allowed) or "<none>"
+            raise ValueError(
+                f"patch path is outside authorized deploy roots: {rel_path}; authorized roots: {roots_text}"
+            )
+    return dest
+
+
+def _within_root(path: Path, root: Path) -> bool:
+    """Return True when ``path`` (symlinks resolved) stays inside ``root``."""
+    try:
+        p = path.resolve()
+        r = root.resolve()
+    except (OSError, RuntimeError):
+        return False
+    return p == r or p.is_relative_to(r)
+
+
+def apply_snapshot(
+    *,
+    descriptors: list[PatchTarget],
+    snapshot_dir: str | Path,
+    repo_root: str | Path,
+    backup_dir: str | Path,
+    deploy_roots: Iterable[str | Path] | None = None,
+) -> dict[str, Any]:
+    """Apply a content-addressed snapshot atomically (all-or-nothing).
+
+    Each descriptor asserts a final filesystem state rather than replaying a diff,
+    and the whole set pre-flights before any write: a failure restores every
+    touched path from backup, so the repo is never left partially applied and
+    there is no fuzzy fallback.
+    """
+    root = Path(repo_root)
+    allowed_roots = None if deploy_roots is None else [Path(path) for path in deploy_roots]
+    roots = _SnapshotRoots(
+        snapshot_dir=Path(snapshot_dir),
+        repo_root=root,
+        deploy_roots=allowed_roots,
+        symlink_roots=[root] if allowed_roots is None else allowed_roots,
+    )
+    staged = _stage_snapshot_writes(descriptors, roots)
+    if staged.failure is not None:
+        return staged.failure
+
+    backups: list[dict[str, Any]] = []
+    touched: list[str] = []
+    for write in staged.writes:
+        try:
+            backups.append(_back_up_before_write(write, Path(backup_dir)))
+            _land_staged_write(write, roots)
+        except (OSError, ValueError) as exc:
+            _restore_live_tree(backups)
+            return {
+                "status": "failed",
+                "error": f"apply failed at {write.descriptor.path}: {exc}; repo restored",
+                "path": write.descriptor.path,
+            }
+        touched.append(str(write.dest))
+
+    return {"status": "ok", "source_backups": backups, "touched": touched}
+
+
+class _SnapshotRoots(NamedTuple):
+    snapshot_dir: Path
+    repo_root: Path
+    deploy_roots: list[Path] | None
+    symlink_roots: list[Path]
+
+
+class _StagedWrite(NamedTuple):
+    descriptor: PatchTarget
+    dest: Path
+    source: Path | None
+
+
+class _StagedSnapshot(NamedTuple):
+    writes: list[_StagedWrite]
+    failure: dict[str, Any] | None
+
+
+def _stage_snapshot_writes(descriptors: list[PatchTarget], roots: _SnapshotRoots) -> _StagedSnapshot:
+    staged: list[_StagedWrite] = []
+    try:
+        for desc in descriptors:
+            dest = _contained_dest(roots.repo_root, desc.path, deploy_roots=roots.deploy_roots)
+            source: Path | None = None
+            if desc.op is PatchOp.WRITE:
+                source = roots.snapshot_dir / desc.path
+                refusal = _unwritable_snapshot_source(source, dest, desc.path, roots.symlink_roots)
+                if refusal is not None:
+                    return _StagedSnapshot([], refusal)
+            staged.append(_StagedWrite(desc, dest, source))
+    except ValueError as exc:
+        return _StagedSnapshot([], {"status": "failed", "error": str(exc), "path": "<pre-flight>"})
+    return _StagedSnapshot(staged, None)
+
+
+def _unwritable_snapshot_source(
+    source: Path,
+    dest: Path,
+    rel_path: str,
+    symlink_roots: list[Path],
+) -> dict[str, Any] | None:
+    if not source.is_symlink() and not source.exists():
+        return {
+            "status": "failed",
+            "error": f"snapshot missing content for {rel_path}",
+            "path": rel_path,
+        }
+    if not source.is_symlink():
+        return None
+    link_target = os.readlink(source)
+    resolved_link = (Path(link_target) if os.path.isabs(link_target) else dest.parent / link_target).resolve()
+    if any(_within_root(resolved_link, allowed_root) for allowed_root in symlink_roots):
+        return None
+    return {
+        "status": "failed",
+        "error": (f"snapshot symlink target is outside authorized deploy roots: {rel_path} -> {link_target}"),
+        "path": rel_path,
+    }
+
+
+def _back_up_before_write(write: _StagedWrite, backup_dir: Path) -> dict[str, Any]:
+    dest = write.dest
+    existed = dest.exists() or dest.is_symlink()
+    if not existed and write.descriptor.op is not PatchOp.DELETE:
+        return {"path": str(dest), "backup_path": None, "disposition": "added"}
+    backup_path = None
+    if existed:
+        backup_dest = backup_dir / "source" / f"{_path_hash(dest)}_{dest.name}"
+        backup_dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(dest, backup_dest, follow_symlinks=False)
+        backup_path = str(backup_dest)
+    disposition = "deleted" if write.descriptor.op is PatchOp.DELETE else "modified"
+    return {"path": str(dest), "backup_path": backup_path, "disposition": disposition}
+
+
+def _land_staged_write(write: _StagedWrite, roots: _SnapshotRoots) -> None:
+    dest = write.dest
+    if write.descriptor.op is PatchOp.DELETE:
+        dest.unlink(missing_ok=True)
+        return
+    # Re-validate containment right before the write (close TOCTOU window).
+    _contained_dest(roots.repo_root, write.descriptor.path, deploy_roots=roots.deploy_roots)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.is_symlink():
+        dest.unlink()
+    if write.source.is_symlink():
+        dest.symlink_to(os.readlink(write.source))
+        return
+    shutil.copy2(write.source, dest, follow_symlinks=False)
+    if write.descriptor.mode:
+        try:
+            dest.chmod(int(write.descriptor.mode, 8))
+        except (ValueError, OSError):
+            # Restoring mode bits is best-effort.
+            pass
+
+
+def _restore_live_tree(backups: list[dict[str, Any]]) -> None:
+    for entry in reversed(backups):
+        live = Path(entry["path"])
+        if entry["disposition"] == "added":
+            live.unlink(missing_ok=True)
+            continue
+        # modified / deleted -> restore old bytes from backup
+        backup_path = entry.get("backup_path")
+        if backup_path and Path(backup_path).exists():
+            live.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(backup_path, live, follow_symlinks=False)
 
 
 def _clear_python_kernel_caches(target: Path) -> dict[str, Any]:
@@ -1055,7 +1281,6 @@ def _detect_strategy(target_file: Path) -> dict[str, Any]:
 
 
 def _source_only_strategy() -> dict[str, Any]:
-    """The strategy every layout starts from: nothing compiled, nothing to rebuild."""
     return {
         "root": "",
         "rebuild_mode": _REBUILD_MODE_NONE,
@@ -1068,7 +1293,6 @@ def _source_only_strategy() -> dict[str, Any]:
 
 
 def _editable_workspace_strategy(target_file: Path) -> dict[str, Any] | None:
-    """The rebuild strategy for a target inside an editable ``/sgl-workspace`` checkout."""
     lower = str(target_file).lower()
     if "/sgl-workspace/" not in lower:
         return None
@@ -1121,7 +1345,6 @@ def _editable_workspace_strategy(target_file: Path) -> dict[str, Any] | None:
 
 
 def _installed_framework_strategy(target_file: Path) -> dict[str, Any]:
-    """The rebuild strategy for a target in an installed framework tree or a FlyDSL checkout."""
     strategy = _source_only_strategy()
     if flydsl_root := _flydsl_root_for(target_file):
         # FlyDSL compiles at import time, so there is nothing to rebuild; the
@@ -1418,6 +1641,57 @@ def _rebuild_ok_to_proceed(result: dict[str, Any]) -> bool:
     return result.get("status") in {"ok", "deferred"}
 
 
+def _revert_backup_trusted(backup_path: str, backup_root: Path) -> bool:
+    """True when a manifest ``backup_path`` is a real backup under ``backup_root``.
+
+    The manifest JSON is untrusted at revert time, so every ``copy2`` source must
+    stay inside the apply-time backup tree or a tampered entry could read an
+    arbitrary host file.
+    """
+    if not backup_path:
+        return False
+    return _within_root(Path(backup_path), backup_root)
+
+
+class _BackupDeletion(NamedTuple):
+    deleted: list[str]
+    issues: list[dict[str, Any]]
+
+
+def _delete_recorded_backups(candidates: set[str], backup_root: Path) -> _BackupDeletion:
+    deleted: list[str] = []
+    issues: list[dict[str, Any]] = []
+    for raw in sorted(path for path in candidates if path):
+        path = Path(raw)
+        if path.resolve() == backup_root:
+            issues.append(
+                {
+                    "kind": "untrusted_backup",
+                    "path": str(path),
+                    "error": "backup path equals manifest directory",
+                }
+            )
+            continue
+        if not _within_root(path, backup_root):
+            issues.append({"kind": "untrusted_backup", "path": str(path)})
+            continue
+        try:
+            if path.is_dir():
+                shutil.rmtree(path)
+            elif path.exists():
+                path.unlink()
+            deleted.append(str(path))
+        except OSError as exc:
+            issues.append(
+                {
+                    "kind": "delete_failed",
+                    "path": str(path),
+                    "error": str(exc),
+                }
+            )
+    return _BackupDeletion(deleted, issues)
+
+
 def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
     """Revert a previously applied kernel patch from its manifest.
 
@@ -1465,8 +1739,6 @@ def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
 
 
 class _RestoreTally(NamedTuple):
-    """One revert step's outcome: what it put back, what it refused to, and what it reports."""
-
     restored: list[str]
     untrusted: list[dict[str, str]]
     issues: list[dict[str, Any]]
@@ -1474,7 +1746,6 @@ class _RestoreTally(NamedTuple):
 
 
 def _restore_backed_up_artifacts(manifest: dict[str, Any], backup_root: Path) -> _RestoreTally:
-    """Put every backed-up compiled artifact back where the apply found it."""
     restored: list[str] = []
     untrusted: list[dict[str, str]] = []
     for item in manifest.get("artifacts", []):
@@ -1498,7 +1769,6 @@ def _restore_backed_up_artifacts(manifest: dict[str, Any], backup_root: Path) ->
 
 
 def _restore_source_backup_set(manifest: dict[str, Any], backup_root: Path) -> _RestoreTally:
-    """Undo a multi-file apply from its per-path disposition records, newest write first."""
     restored: list[str] = []
     untrusted: list[dict[str, str]] = []
     cache_cleared = False
@@ -1529,7 +1799,6 @@ def _restore_source_backup_set(manifest: dict[str, Any], backup_root: Path) -> _
 
 
 def _restore_primary_source_backup(manifest: dict[str, Any], backup_root: Path) -> _RestoreTally:
-    """Undo a whole-file apply from the single ``source_backup`` record it wrote."""
     source_backup = manifest.get("source_backup") or {}
     if not source_backup:
         return _RestoreTally([], [], [], {})
@@ -1558,7 +1827,6 @@ def _restore_primary_source_backup(manifest: dict[str, Any], backup_root: Path) 
 
 
 def _restore_jit_build_state(manifest: dict[str, Any], backup_root: Path) -> _RestoreTally:
-    """Put the AITER build state and serving modules back before any multi-node fan-out."""
     jit_build_backup = manifest.get("jit_build_backup") or {}
     if jit_build_backup.get("status") not in {"ok", "clean"}:
         return _RestoreTally([], [], [], {})
@@ -1581,7 +1849,6 @@ def _restore_jit_build_state(manifest: dict[str, Any], backup_root: Path) -> _Re
 
 
 def _restore_cpp_itfs_cache_state(manifest: dict[str, Any]) -> _RestoreTally:
-    """Put the aiter cpp_itfs runtime cache moved aside during apply back in place."""
     cpp_itfs_cache_backup = manifest.get("cpp_itfs_cache_backup") or {}
     if cpp_itfs_cache_backup.get("status") != "ok":
         return _RestoreTally([], [], [], {})
@@ -1593,7 +1860,6 @@ def _restore_cpp_itfs_cache_state(manifest: dict[str, Any]) -> _RestoreTally:
 
 
 def _revert_on_patched_pods(manifest: dict[str, Any]) -> _RestoreTally:
-    """Fan a best-effort revert out to every pod that received the apply."""
     multinode_info = manifest.get(_MANIFEST_MULTINODE) or {}
     if not (multinode_info.get("records_by_host") or multinode_info.get("host_backup_map")):
         return _RestoreTally([], [], [], {})
@@ -1622,7 +1888,6 @@ def _write_revert_outcome(
     manifest: dict[str, Any],
     steps: list[_RestoreTally],
 ) -> dict[str, Any]:
-    """Record how complete the revert was in the manifest and report it to the caller."""
     restored = [path for step in steps for path in step.restored]
     untrusted = [entry for step in steps for entry in step.untrusted]
     issues = [issue for step in steps for issue in step.issues]
@@ -1706,7 +1971,6 @@ def finalize_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
 
 
 def _recorded_backup_paths(manifest: dict[str, Any]) -> set[str]:
-    """Every backup path this manifest's apply recorded, across all its record shapes."""
     candidates: set[str] = set()
     for entry in manifest.get("artifacts") or []:
         candidates.add(str(entry.get("backup_path") or ""))
@@ -1836,15 +2100,12 @@ def apply_kernel_patch(request: KernelPatchRequest) -> dict[str, Any]:
 
 
 class _PatchRefused(Exception):
-    """An apply that cannot go on; ``result`` is the dict its caller reports."""
-
     def __init__(self, result: dict[str, Any]) -> None:
         super().__init__(str(result.get("error") or "kernel patch refused"))
         self.result = result
 
 
 def _patch_rebuild_argv(request: KernelPatchRequest) -> list[str]:
-    """The argv this call overrides the strategy's rebuild command with."""
     try:
         return _coerce_rebuild_command(request.rebuild_command) if request.rebuild_command else []
     except ValueError as exc:
@@ -1853,32 +2114,25 @@ def _patch_rebuild_argv(request: KernelPatchRequest) -> list[str]:
 
 @dataclass(frozen=True)
 class _PatchDeployment:
-    """One apply in progress: the backup tree it owns and the manifest recording it."""
-
     target: Path
     backup_dir: Path
     manifest_path: Path
     manifest: dict[str, Any]
 
     def persist(self) -> None:
-        """Write the manifest into the backup directory."""
         self.manifest_path.write_text(json.dumps(self.manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     def record(self, key: str, value: Any) -> None:
-        """Add one record to the manifest and persist it, so a later failure can still unwind."""
         self.manifest[key] = value
         self.persist()
 
 
 @dataclass
 class _PodFanout:
-    """Per-pod apply records gathered as a patch is pushed to every inference pod."""
-
     records_by_host: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     backup_map: dict[str, str] = field(default_factory=dict)
 
     def absorb(self, dispatch_result: dict[str, Any]) -> None:
-        """Index one dispatch's per-node entries by pod host."""
         for entry in dispatch_result.get("per_node", []) or []:
             host = (entry.get("host") or "").strip()
             if not host:
@@ -1889,7 +2143,6 @@ class _PodFanout:
                 self.backup_map[host] = backup_path
 
     def block(self, status: str, target: Path, pod_backup_dir: str) -> dict[str, Any]:
-        """The manifest ``multinode`` block describing this fan-out."""
         return {
             "status": status,
             "target_path": str(target),
@@ -1900,8 +2153,6 @@ class _PodFanout:
 
 
 class _RebuildPlan(NamedTuple):
-    """How a landed patch is rebuilt: the roots to rebuild and the caches to clear first."""
-
     strategies: list[dict[str, Any]]
     jit_strategy: dict[str, Any]
     jit_target: Path
@@ -1913,15 +2164,12 @@ class _RebuildPlan(NamedTuple):
 
 
 class _RebuildRecords(NamedTuple):
-    """What cache invalidation and rebuild recorded for the manifest."""
-
     rebuild: dict[str, Any]
     jit_build_backup: dict[str, Any]
     cpp_itfs_cache_backup: dict[str, Any]
 
 
 def _rebuild_not_run() -> _RebuildRecords:
-    """The records an apply carries when nothing had to be rebuilt."""
     return _RebuildRecords(
         rebuild={"status": "skipped", "reason": "source-only patch or skip_rebuild=true"},
         jit_build_backup={"status": "skipped", "reason": "rebuild not run"},
@@ -1930,7 +2178,6 @@ def _rebuild_not_run() -> _RebuildRecords:
 
 
 def _refuse_untrusted_jit_strategies(jit_strategies: Iterable[dict[str, Any]]) -> None:
-    """Stop before any mutation when a runtime-JIT strategy has no trustworthy build dir."""
     for strategy in jit_strategies:
         invalidation_error = _runtime_jit_invalidation_error(strategy)
         if invalidation_error:
@@ -1940,7 +2187,6 @@ def _refuse_untrusted_jit_strategies(jit_strategies: Iterable[dict[str, Any]]) -
 
 
 def _invalidate_and_rebuild(deployment: _PatchDeployment, plan: _RebuildPlan) -> _RebuildRecords:
-    """Clear every cache the patched roots serve from, then rebuild those roots."""
     jit_build_backup = _invalidate_jit_build(deployment, plan)
     cpp_itfs_cache_backup = _invalidate_cpp_itfs_cache(deployment, plan)
     return _RebuildRecords(
@@ -1951,7 +2197,6 @@ def _invalidate_and_rebuild(deployment: _PatchDeployment, plan: _RebuildPlan) ->
 
 
 def _invalidate_jit_build(deployment: _PatchDeployment, plan: _RebuildPlan) -> dict[str, Any]:
-    """Move the AITER JIT build state aside so the next import recompiles the patched kernel."""
     if plan.pod_records is not None:
         # Each pod's record in manifest["multinode"] holds its JIT backup; revert and finalize read it there.
         backup: dict[str, Any] = {"status": "remote"}
@@ -1979,11 +2224,6 @@ def _invalidate_jit_build(deployment: _PatchDeployment, plan: _RebuildPlan) -> d
 
 
 def _invalidate_cpp_itfs_cache(deployment: _PatchDeployment, plan: _RebuildPlan) -> dict[str, Any]:
-    """Move the aiter cpp_itfs runtime cache aside so the re-baseline recompiles from clean state.
-
-    aiter cpp_itfs kernels runtime-compile into ``$HOME/.aiter/build/`` under a
-    param-hashed dir name, so pristine and patched collide.
-    """
     backup = _invalidate_aiter_cpp_itfs_cache(plan.cpp_itfs_target, deployment.backup_dir)
     if backup.get("status") == "ok":
         # Persist before rebuild so a failure can restore the moved-aside cache.
@@ -2006,7 +2246,6 @@ def _invalidate_cpp_itfs_cache(deployment: _PatchDeployment, plan: _RebuildPlan)
 
 
 def _rebuild_patched_roots(deployment: _PatchDeployment, plan: _RebuildPlan) -> dict[str, Any]:
-    """Rebuild every distinct compiled root the patch touched."""
     record: dict[str, Any] = {}
     for strategy in plan.strategies:
         record = _run_strategy_rebuild(
@@ -2036,7 +2275,6 @@ def _finish_apply(
     compiled: bool,
     multinode: dict[str, Any],
 ) -> dict[str, Any]:
-    """Mark the manifest applied and report the apply to its caller."""
     manifest = deployment.manifest
     manifest["status"] = "applied"
     manifest["applied_at"] = now_iso(timespec="auto")
@@ -2067,7 +2305,6 @@ def _finish_apply(
 
 
 def _apply_whole_file_patch(request: KernelPatchRequest) -> dict[str, Any]:
-    """Replace one target file with the patch, rebuild its root, and publish it to every pod."""
     patch = Path(request.patch_path).resolve()
     target = Path(request.target_file).resolve()
     if not patch.is_file():
@@ -2112,7 +2349,6 @@ def _prepare_whole_file_apply(
     target: Path,
     strategy: dict[str, Any],
 ) -> _PatchDeployment:
-    """Back up the target and its compiled artifacts, and write the ``prepared`` manifest."""
     backup_dir = _claim_backup_dir(Path(request.backup_root), request.kernel_id, target)
     source_backup = _copy_to_backup(target, backup_dir, "source")
     artifacts: list[dict[str, str]] = []
@@ -2149,7 +2385,6 @@ def _fan_whole_file_out_to_pods(
     patch: Path,
     strategy: dict[str, Any],
 ) -> dict[str, Any]:
-    """Push the patched file to every RayJob pod, restoring the sandbox copy if one refuses it."""
     pod_backup_dir = os.environ.get(
         "HYPERLOOM_MN_KERNEL_BACKUP_DIR",
         _MN_POD_BACKUP_DIR_DEFAULT,
@@ -2196,7 +2431,6 @@ def _whole_file_rebuild_plan(
     command_override: list[str],
     multinode: dict[str, Any],
 ) -> _RebuildPlan:
-    """How the single patched file's framework root is rebuilt."""
     jit_build_dir = str(strategy.get("jit_build_dir") or "").strip()
     return _RebuildPlan(
         strategies=[strategy],
@@ -2211,8 +2445,6 @@ def _whole_file_rebuild_plan(
 
 
 class _SnapshotPlan(NamedTuple):
-    """A validated snapshot apply: what it writes, where, and which roots it rebuilds."""
-
     patch: Path
     target: Path
     descriptors: list[PatchTarget]
@@ -2259,7 +2491,6 @@ def _apply_kernel_patch_snapshot(request: KernelPatchRequest) -> dict[str, Any]:
 
 
 def _snapshot_plan(request: KernelPatchRequest) -> _SnapshotPlan:
-    """Parse the patch manifest, resolve every destination, and pick the roots to rebuild."""
     patch = Path(request.patch_path).resolve()
     target = Path(request.target_file).resolve()
     if not patch.is_file():
@@ -2302,11 +2533,6 @@ def _snapshot_plan(request: KernelPatchRequest) -> _SnapshotPlan:
 
 
 def _snapshot_repo_root(request: KernelPatchRequest, primary_strategy: dict[str, Any], target: Path) -> Path:
-    """The root the patch's repo-relative descriptors resolve against.
-
-    The explicit root, else the strategy root; never ``target.parent`` -- a
-    guessed root breaks the byte-for-byte contract.
-    """
     resolved_root = str(request.repo_root or "") or primary_strategy["root"]
     if not resolved_root:
         raise _PatchRefused(
@@ -2326,7 +2552,6 @@ def _snapshot_write_paths(
     repo_root: Path,
     deploy_roots: list[Path],
 ) -> list[Path]:
-    """Resolve every write descriptor to the absolute path it lands on."""
     write_paths: list[Path] = []
     for desc in descriptors:
         try:
@@ -2339,7 +2564,6 @@ def _snapshot_write_paths(
 
 
 def _prepare_snapshot_apply(request: KernelPatchRequest, plan: _SnapshotPlan) -> _PatchDeployment:
-    """Back up the compiled artifacts the patch invalidates and write the ``prepared`` manifest."""
     backup_dir = _claim_backup_dir(Path(request.backup_root), request.kernel_id, plan.target)
     backup_dir.mkdir(parents=True, exist_ok=True)
     artifacts: list[dict[str, str]] = []
@@ -2376,7 +2600,6 @@ def _prepare_snapshot_apply(request: KernelPatchRequest, plan: _SnapshotPlan) ->
 
 
 def _land_snapshot(request: KernelPatchRequest, deployment: _PatchDeployment, plan: _SnapshotPlan) -> list[str]:
-    """Write the whole snapshot onto the live tree and prove every path landed byte-exact."""
     applied = apply_snapshot(
         descriptors=plan.descriptors,
         snapshot_dir=request.snapshot_dir,
@@ -2408,10 +2631,6 @@ def _land_snapshot(request: KernelPatchRequest, deployment: _PatchDeployment, pl
 
 
 def _snapshot_mismatch(request: KernelPatchRequest, plan: _SnapshotPlan) -> str:
-    """How the live tree differs from the snapshot it was just given, or ``""``.
-
-    Written paths must be byte-identical to the snapshot and deleted paths gone.
-    """
     snap = Path(request.snapshot_dir)
     for desc in plan.descriptors:
         dest = _contained_dest(plan.repo_root, desc.path, deploy_roots=plan.deploy_roots)
@@ -2429,7 +2648,6 @@ def _snapshot_mismatch(request: KernelPatchRequest, plan: _SnapshotPlan) -> str:
 
 
 def _snapshot_jit_build_dir(plan: _SnapshotPlan) -> str:
-    """The AITER JIT build dir the snapshot's single JIT strategy pins, if it has one."""
     jit_strategy = plan.jit_strategies[0] if plan.jit_strategies else {}
     return str(jit_strategy.get("jit_build_dir") or "").strip()
 
@@ -2439,7 +2657,6 @@ def _fan_snapshot_out_to_pods(
     deployment: _PatchDeployment,
     plan: _SnapshotPlan,
 ) -> dict[str, Any]:
-    """Push every written path to every RayJob pod, restoring the whole repo if one refuses."""
     pod_backup_dir = os.environ.get("HYPERLOOM_MN_KERNEL_BACKUP_DIR", _MN_POD_BACKUP_DIR_DEFAULT)
     snap = Path(request.snapshot_dir)
     jit_build_dir = _snapshot_jit_build_dir(plan)
@@ -2482,7 +2699,6 @@ def _snapshot_rebuild_plan(
     plan: _SnapshotPlan,
     multinode: dict[str, Any],
 ) -> _RebuildPlan:
-    """How every compiled root the snapshot touched is rebuilt."""
     jit_build_dir = _snapshot_jit_build_dir(plan)
     jit_target = next((path for path in plan.write_paths if _target_uses_aiter_jit(path)), plan.target)
     cpp_itfs_target = next(
