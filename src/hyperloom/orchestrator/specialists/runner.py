@@ -992,6 +992,7 @@ class SpecialistRunner:
         latency_ms: int | None,
     ) -> None:
         """Record what a reaped subprocess left for the session's ledgers, then mark its heartbeat finished."""
+        trace = sub_result.trace
         self._append_transcript(
             prep.workspace,
             1,
@@ -1003,17 +1004,17 @@ class SpecialistRunner:
                 "stale_heartbeat": sub_result.stale_heartbeat,
                 "process_log_path": sub_result.process_log_path,
                 "patch_count": len(sub_result.patches),
-                "usage": sub_result.trace.usage,
+                "usage": trace.usage,
                 "error": sub_result.error,
             },
         )
         tick, phase = self._ctx_tick_phase(ctx)
         # Fold the production specialist's token spend into the unified ledger: one row per turn
         # when per-turn usage is available, else one cumulative row; the session latency lands on the last.
-        if len(sub_result.trace.turn_usages) > 1:
-            model = (sub_result.trace.usage or {}).get("model")
-            last_idx = len(sub_result.trace.turn_usages)
-            for turn, usage in enumerate(sub_result.trace.turn_usages, start=1):
+        if len(trace.turn_usages) > 1:
+            model = (trace.usage or {}).get("model")
+            last_idx = len(trace.turn_usages)
+            for turn, usage in enumerate(trace.turn_usages, start=1):
                 metadata: dict[str, Any] = {**usage, "call_id": call_id}
                 if model:
                     metadata.setdefault("model", model)
@@ -1024,29 +1025,21 @@ class SpecialistRunner:
             self._trace_specialist_llm_call(
                 ctx,
                 turn=1,
-                metadata={**sub_result.trace.usage, "call_id": call_id} if sub_result.trace.usage else None,
+                metadata={**trace.usage, "call_id": call_id} if trace.usage else None,
                 latency_ms=latency_ms,
             )
-        self._record_specialist_intel(task_id=ctx.task.task_id, turn=1, tool_calls=sub_result.trace.tool_calls)
+        self._record_specialist_intel(task_id=ctx.task.task_id, turn=1, tool_calls=trace.tool_calls)
         # Pair the parent-held prompt with the recovered assistant reply so the
         # production specialist turn lands in conversations.jsonl.
-        if sub_result.trace.response:
+        if trace.response:
             self._record_specialist_conversation(
                 task_id=ctx.task.task_id,
                 turn=1,
-                metadata={
-                    "prompt": prep.system_prompt + "\n---\n" + prep.user_prompt,
-                    "response": sub_result.trace.response,
-                },
+                metadata={"prompt": prep.system_prompt + "\n---\n" + prep.user_prompt, "response": trace.response},
                 tick=tick,
                 phase=phase,
             )
-        self._write_heartbeat(
-            prep.workspace,
-            turn=1,
-            max_turns=prep.max_turns,
-            status="finished",
-        )
+        self._write_heartbeat(prep.workspace, turn=1, max_turns=prep.max_turns, status="finished")
 
     # Finalize phase (shared)
     def _finalize(
