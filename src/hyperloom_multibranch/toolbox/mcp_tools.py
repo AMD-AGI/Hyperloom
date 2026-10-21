@@ -317,8 +317,11 @@ def _register_put_kernel_artifact(server: McpServer, toolbox: Toolbox, home: asy
         description=(
             "Store a tuned table, a CSV the service loads from a file named by an environment variable, and get the "
             "kernel artifact to put in the add_kernels of the delta of submit_test. Put every shape of an operator "
-            "in one table: a variable loads one file, so a table of another target for the same env is refused as "
-            "kernel_variable_taken. The same table put twice, by any branch, is the same artifact."
+            "in one table: a variable loads one file, so the first table put for an env, by any branch, binds the env "
+            "to its target for the session. Any branch may then put its own table (new content, its own reference) "
+            "under that target; only a table of another target name for the same env is refused, as "
+            "kernel_variable_taken, and its message names the bound target. The same table put twice, by any branch, "
+            "is the same artifact."
         ),
         schema=_PUT_KERNEL_ARTIFACT,
         handler=_put_kernel_artifact(toolbox, home),

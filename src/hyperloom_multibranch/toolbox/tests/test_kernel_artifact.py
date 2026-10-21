@@ -185,6 +185,22 @@ async def test_a_variable_loads_one_table_so_a_second_target_for_it_is_refused(s
     assert (await put(s1, target="gemm_a4w4", env="AITER_CONFIG_GEMM_A4W4"))["metadata"]["load"]["env"].endswith("A4W4")
 
 
+async def test_the_refusal_says_the_variable_is_bound_to_a_target_any_branch_may_put_under(stack: Stack) -> None:
+    first = await put(Specialist(stack, "b02"))
+    other = Specialist(stack, "b07")
+
+    message = await other.refused(
+        "put_kernel_artifact", kind="gemm", target="gemm_a8w8_small", env=ENV, content=OTHER_TABLE
+    )
+
+    assert f"{ENV} is bound to target '{TARGET}' (gemm table) in this session, not to a branch" in message, message
+    assert f"with target='{TARGET}'" in message and "changes no other branch's artifact" in message, message
+    assert "Only a different target name" in message and "already loads" not in message, message
+    retry = await put(other, target=TARGET, content=OTHER_TABLE)
+    assert retry["target"] == TARGET and retry["ref"] != first["ref"], "the second branch's table has its own reference"
+    assert stored(stack, TABLE) and stored(stack, OTHER_TABLE), "the first branch's table is untouched"
+
+
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [

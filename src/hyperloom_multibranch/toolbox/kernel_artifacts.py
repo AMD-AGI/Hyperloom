@@ -9,8 +9,10 @@ caller picks: two branches that tune the same table under the same target put th
 reference, so a merge dedupes them by equality instead of reporting a slot conflict on identical bytes.
 
 The service reads one file per variable, and aiter rewrites a table that lists a shape twice, so a variable loads one
-table of one target: a variable is bound to the target of the first table put for it, and a table of another target
-for the same variable is refused. Every shape of an operator goes in one file under that target.
+table of one target. The binding belongs to the session, not to a branch: the first table put for a variable, by
+whichever branch, binds it to that table's target, and from then on any branch may put its own table under that
+target (a new content reference under the same target; no other branch's artifact changes), while a table of another
+target name for the same variable is refused. Every shape of an operator goes in one file under that target.
 """
 
 from __future__ import annotations
@@ -56,9 +58,10 @@ def mint_kernel_artifact(kind: KernelKind, target: str, env: str, data: bytes) -
 
 
 class KernelVariables:
-    """The target each variable loads a table for, among the tables this toolbox has put.
+    """The target each variable loads a table for, among the tables this toolbox has put, whichever branch put them.
 
-    The binding lives as long as the toolbox; the compiler refuses a recipe that loads two tables on one variable.
+    The binding lives as long as the toolbox (one per session), is not per branch, and is never released; the compiler
+    refuses a recipe that loads two tables on one variable.
     """
 
     def __init__(self) -> None:
@@ -72,7 +75,9 @@ class KernelVariables:
         if held != artifact.slot:
             kind, target = held
             raise RequestRejected(
-                f"{env} already loads the {kind.value} table of {target}; the service reads one file per variable, "
-                f"so put the whole table for {env} under that target, every shape in one file",
+                f"{env} is bound to target {target!r} ({kind.value} table) in this session, not to a branch. Put your "
+                f"table for {env} with target={target!r}: it is stored under its own reference and changes no other "
+                f"branch's artifact. Only a different target name for {env} is refused, because the service reads one "
+                f"file per variable: carry every shape of it in one table under {target!r}",
                 CODE_VARIABLE_TAKEN,
             )
