@@ -5,10 +5,12 @@
 
 * :func:`close_knowledge` is CLOSE's one call after the Recipe KB write-back: the session's Experiences and the
   specialists' learnings go to the Experience KB, and the session's search tree to the archive. The Experiences the
-  shared declaration cannot hold, kernel changes and an AgentX session's, are a step of their own, and the last step
-  writes the frontier calibration over the archived sessions like this one beside the receipts. A step that cannot
-  be done says why and never stops CLOSE; :meth:`KnowledgeClose.document` is what the breakdown records of the steps
-  (``build_breakdown(..., knowledge=...)``).
+  shared declaration cannot hold, kernel changes and an AgentX session's, are a step of their own. The learnings go
+  to the RSI lesson pool beside the archive too, revising and retiring the past sessions' lessons they name, and the
+  pooled lessons the session showed get their standing from what its branches did next (:mod:`rsi.lesson_close`).
+  The last step writes the frontier calibration over the archived sessions like this one beside the receipts. A step
+  that cannot be done says why and never stops CLOSE; :meth:`KnowledgeClose.document` is what the breakdown records
+  of the steps (``build_breakdown(..., knowledge=...)``).
 * :func:`session_frontier_policy` chooses its policy once the session has a profile: the calibration's recommendation
   for sessions like it, or the defaults; :func:`session_frontier_scorer` chooses the same way among the scorers of
   :mod:`rsi.scorers` too, crowning a challenger that passes the promotion gate (a 1-in-4 exploration session's pick,
@@ -34,12 +36,21 @@ from pathlib import Path
 from hyperloom_kb import NoOpExperienceKB
 from hyperloom_kb.collect import CollectionTarget, CollectReport
 from hyperloom.common.io import WriteOptions, atomic_write_text
+from hyperloom.common.jsonio import read_jsonl
 from hyperloom_multibranch.contracts.notebook import NotRecorded
 from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot
 from hyperloom_multibranch.notebook.codec import encode
 from hyperloom_multibranch.notebook.knowledge.experience import publish_experiences, publish_multibranch_experiences
 from hyperloom_multibranch.notebook.knowledge.learnings import publish_learnings
-from hyperloom_multibranch.notebook.rsi.archive import SKIPPED, SearchTree, TreeArchive, archive_session, similar_trees
+from hyperloom_multibranch.notebook.learning_search import LEARNINGS_LOG
+from hyperloom_multibranch.notebook.rsi.archive import (
+    NO_ARCHIVE,
+    SKIPPED,
+    SearchTree,
+    TreeArchive,
+    archive_session,
+    similar_trees,
+)
 from hyperloom_multibranch.notebook.rsi.calibration import (
     DEFAULT_POLICY,
     VARIATIONS,
@@ -51,6 +62,8 @@ from hyperloom_multibranch.notebook.rsi.calibration import (
 from hyperloom_multibranch.notebook.rsi.expression import ExpressionError
 from hyperloom_multibranch.notebook.rsi.frontier import FRONTIER_V1_LABEL, FrontierPolicy
 from hyperloom_multibranch.notebook.rsi.history import MAX_CHARS, session_history
+from hyperloom_multibranch.notebook.rsi.lesson_close import publish_lessons, session_standings
+from hyperloom_multibranch.notebook.rsi.lessons import LessonPool
 from hyperloom_multibranch.notebook.rsi.scorers import (
     ChampionRecord,
     ScorerPool,
@@ -76,6 +89,9 @@ NO_REPORTS = "no_reports_folder"
 #: The scores log's usual name in the session's reports folder.
 FRONTIER_LOG = "frontier.jsonl"
 NO_PROFILE_EVIDENCE = f"{DEFAULT_POLICY}: the session has no profile yet"
+NO_RETRIEVAL_LOG = "no_retrieval_log"
+NO_LESSON_SHOWN = "no_pooled_lesson_shown"
+ALREADY_RECORDED = "already_recorded"
 #: What a step raises when its target or its input lets it down; CLOSE records it and goes on.
 STEP_ERRORS = (LookupError, OSError, RuntimeError, ValueError)
 
@@ -96,13 +112,16 @@ class CloseStep:
 @dataclass(frozen=True)
 class KnowledgeClose:
     """CLOSE's knowledge steps: the Experiences, the learnings, the archived search tree, the Experiences only the
-    notebook's own declaration holds (``multibranch_experiences``), and the frontier calibration's report."""
+    notebook's own declaration holds (``multibranch_experiences``), the frontier calibration's report, the learnings
+    into the RSI lesson pool (``lessons``), and the standing of the pooled lessons the session showed."""
 
     experiences: CloseStep
     learnings: CloseStep
     archive: CloseStep
     multibranch_experiences: CloseStep = CloseStep(DISABLED, NO_KB)
     calibration: CloseStep = CloseStep(SKIPPED, NO_REPORTS)
+    lessons: CloseStep = CloseStep(SKIPPED, NO_ARCHIVE)
+    lesson_standings: CloseStep = CloseStep(SKIPPED, NO_ARCHIVE)
 
     def document(self) -> dict[str, object]:
         """The steps as JSON-ready data: the breakdown's ``close.knowledge``."""
@@ -113,6 +132,8 @@ class KnowledgeClose:
             "learnings": self.learnings,
             "archive": self.archive,
             "calibration": self.calibration,
+            "lessons": self.lessons,
+            "lesson_standings": self.lesson_standings,
         }
         return {name: encode(step) for name, step in steps.items()}
 
@@ -179,16 +200,25 @@ def _calibrated(
 class CloseTargets:
     """Where CLOSE's knowledge goes: ``experience_kb`` takes the Experiences, ``learning_kb`` the learnings and
     ``archive`` the search tree, each the environment's when ``None``; ``receipts`` is the folder for the collection
-    receipts, none without it. ``multibranch_kb`` takes the Experiences under the notebook's own declaration."""
+    receipts, none without it, where the session's retrieval log lies too. ``multibranch_kb`` takes the Experiences
+    under the notebook's own declaration, and ``lessons`` the lessons, by default the pool beside the archive."""
 
     experience_kb: CollectionTarget | None = None
     learning_kb: CollectionTarget | None = None
     archive: TreeArchive | None = None
     receipts: Path | None = None
     multibranch_kb: CollectionTarget | None = None
+    lessons: LessonPool | None = None
 
     def receipt(self, name: str) -> Path | None:
         return self.receipts / name if self.receipts is not None else None
+
+    def lesson_pool(self) -> LessonPool | None:
+        """``lessons``; else the pool beside ``archive``, or beside the environment's archive."""
+
+        if self.lessons is not None:
+            return self.lessons
+        return LessonPool.beside(self.archive) if self.archive is not None else LessonPool.from_env()
 
     def multibranch(self) -> CollectionTarget | None:
         """``multibranch_kb``; else the environment's beside the environment's ``experience_kb``, and nowhere beside
@@ -241,7 +271,50 @@ def close_knowledge(
             ),
         ),
         calibration=_calibrated(snapshot, targets.archive, targets.receipt(CALIBRATION_REPORT), bottlenecks),
+        lessons=_lessons(snapshot, targets.lesson_pool()),
+        lesson_standings=_standings(snapshot, targets.lesson_pool(), targets.receipt(LEARNINGS_LOG)),
     )
+
+
+def _lessons(snapshot: NotebookSnapshot, pool: LessonPool | None) -> CloseStep:
+    """The session's learnings into ``pool``."""
+
+    if pool is None:
+        return CloseStep(SKIPPED, NO_ARCHIVE)
+    try:
+        published = publish_lessons(snapshot, pool)
+    except NotRecorded:
+        return CloseStep(SKIPPED, NO_PROFILE)
+    except STEP_ERRORS as exc:
+        return _failed("publish the lessons", exc)
+    if published.written:
+        status = WRITTEN
+    else:
+        status = FAILED if published.reasons else SKIPPED
+    return CloseStep(status, "; ".join(published.reasons), published.counts)
+
+
+def _standings(snapshot: NotebookSnapshot, pool: LessonPool | None, log_path: Path | None) -> CloseStep:
+    """The standing of each pooled lesson the session's retrieval log at ``log_path`` says it showed."""
+
+    if pool is None:
+        return CloseStep(SKIPPED, NO_ARCHIVE)
+    if log_path is None or not log_path.is_file():
+        return CloseStep(SKIPPED, NO_RETRIEVAL_LOG)
+    try:
+        standings = session_standings(snapshot, pool, read_jsonl(log_path, skip_malformed=True, skip_non_dict=True))
+        if not standings.lessons:
+            return CloseStep(SKIPPED, NO_LESSON_SHOWN)
+        written = pool.record_standings(standings)
+    except NotRecorded:
+        return CloseStep(SKIPPED, NO_PROFILE)
+    except STEP_ERRORS as exc:
+        return _failed("record the lessons' standings", exc)
+    totals: Counter[str] = Counter()
+    for standing in standings.lessons.values():
+        totals.update(encode(standing))
+    counts = {"lessons": len(standings.lessons), **totals}
+    return CloseStep(WRITTEN if written else SKIPPED, "" if written else ALREADY_RECORDED, counts)
 
 
 def archived_history(archive: TreeArchive | None = None) -> tuple[SearchTree, ...]:
@@ -342,8 +415,11 @@ __all__ = [
     "FRONTIER_LOG",
     "LEARNING_RECEIPT",
     "NO_KB",
+    "ALREADY_RECORDED",
+    "NO_LESSON_SHOWN",
     "NO_PROFILE",
     "NO_REPORTS",
+    "NO_RETRIEVAL_LOG",
     "STEP_ERRORS",
     "WRITTEN",
     "CloseStep",

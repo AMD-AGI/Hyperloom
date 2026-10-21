@@ -87,35 +87,48 @@ class LearningEvaluation:
         )
 
 
+#: The retrieval log's field of this session's learnings shown, and of past sessions' (Experience or lesson ids).
+HERE, PAST = "here", "past"
+
+
 @dataclass(frozen=True)
-class _Test:
+class BranchTest:
+    """One test a branch requested: when, in which direction, whether it committed, whether it ended with a result,
+    and the words of its change."""
+
     at: float
     intent: Intent | None
     committed: bool
     change: frozenset[str] = frozenset()
+    ended: bool = False
 
 
-def _tests(snapshot: NotebookSnapshot) -> dict[str, list[_Test]]:
-    found: dict[str, list[_Test]] = defaultdict(list)
+def branch_tests(snapshot: NotebookSnapshot) -> dict[str, list[BranchTest]]:
+    """Each branch's tests of kind ``test``, the earliest requested first."""
+
+    found: dict[str, list[BranchTest]] = defaultdict(list)
     for record in sorted(snapshot.records, key=lambda item: item.requested_at):
         if record.request.kind is TestKind.TEST:
             intent = snapshot.intents.get(record.request.intent_fingerprint)
             change = frozenset(str(change_document(record.request.delta)["summary"]).split())
             committed = record.conclusion in COMMITTING
-            found[record.request.branch].append(_Test(record.requested_at, intent, committed, change))
+            ended = record.result is not None
+            found[record.request.branch].append(BranchTest(record.requested_at, intent, committed, change, ended))
     return found
 
 
-def _first_shown(log: Sequence[Mapping[str, Any]]) -> dict[tuple[str, str], float]:
+def first_shown(log: Sequence[Mapping[str, Any]], ids: str = HERE) -> dict[tuple[str, str], float]:
+    """When each branch was first shown each id of the log lines' ``ids`` field, by (branch, id)."""
+
     shown: dict[tuple[str, str], float] = {}
     for line in sorted(log, key=lambda item: float(item["at"])):
-        for entry_id in line["here"]:
+        for entry_id in line.get(ids, ()):
             shown.setdefault((str(line["branch"]), str(entry_id)), float(line["at"]))
     return shown
 
 
 def _uptake(
-    shown: Mapping[tuple[str, str], float], learnings: Mapping[str, Learning], tests: Mapping[str, list[_Test]]
+    shown: Mapping[tuple[str, str], float], learnings: Mapping[str, Learning], tests: Mapping[str, list[BranchTest]]
 ) -> Counter[str]:
     counts: Counter[str] = Counter()
     for (branch, entry_id), at in shown.items():
@@ -133,7 +146,7 @@ def _uptake(
 
 
 def _outcomes(
-    shown: Mapping[tuple[str, str], float], learnings: Mapping[str, Learning], tests: Mapping[str, list[_Test]]
+    shown: Mapping[tuple[str, str], float], learnings: Mapping[str, Learning], tests: Mapping[str, list[BranchTest]]
 ) -> Counter[str]:
     by_branch: dict[str, list[tuple[float, Learning]]] = defaultdict(list)
     for (branch, entry_id), at in shown.items():
@@ -149,7 +162,7 @@ def _outcomes(
     return counts
 
 
-def _leads(log: Sequence[Mapping[str, Any]], tests: Mapping[str, list[_Test]]) -> Counter[str]:
+def _leads(log: Sequence[Mapping[str, Any]], tests: Mapping[str, list[BranchTest]]) -> Counter[str]:
     first: dict[tuple[str, str], tuple[float, frozenset[str]]] = {}
     for line in sorted(log, key=lambda item: float(item["at"])):
         for lead in line.get("leads", ()):
@@ -168,11 +181,11 @@ def evaluate_learnings(snapshot: NotebookSnapshot, log: Sequence[Mapping[str, An
     """The retrieval of ``snapshot``'s session, read off its retrieval ``log`` (decoded lines)."""
 
     learnings = {record.entry_id: record.learning for record in snapshot.learnings}
-    tests = _tests(snapshot)
-    shown = _first_shown(log)
+    tests = branch_tests(snapshot)
+    shown = first_shown(log)
     uptake, outcomes = _uptake(shown, learnings, tests), _outcomes(shown, learnings, tests)
     leads = _leads(log, tests)
-    past = [str(item) for line in log for item in line.get("past", ())]
+    past = [str(item) for line in log for item in line.get(PAST, ())]
     return LearningEvaluation(
         retrievals=len(log),
         by_source=dict(Counter(str(line["source"]) for line in log)),
@@ -199,4 +212,15 @@ async def read_session(notebook_root: Path, log_path: Path) -> LearningEvaluatio
     return evaluate_learnings(snapshot, read_jsonl(log_path, skip_malformed=True, skip_non_dict=True))
 
 
-__all__ = ["STUDY_WRITER", "LearningEvaluation", "evaluate_learnings", "names", "read_session"]
+__all__ = [
+    "HERE",
+    "PAST",
+    "STUDY_WRITER",
+    "BranchTest",
+    "LearningEvaluation",
+    "branch_tests",
+    "evaluate_learnings",
+    "first_shown",
+    "names",
+    "read_session",
+]

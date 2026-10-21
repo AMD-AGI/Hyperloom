@@ -21,14 +21,23 @@ from hyperloom_multibranch.notebook.knowledge import experience, learnings
 from hyperloom_multibranch.notebook.knowledge.breakdown import build_breakdown
 from hyperloom_multibranch.notebook.knowledge.tests.kb_service import experience_service
 from hyperloom_multibranch.notebook.rsi import session
-from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV, ARCHIVED, SKIPPED, TreeArchive
+from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV, ARCHIVED, NO_ARCHIVE, SKIPPED, TreeArchive
 from hyperloom_multibranch.notebook.rsi.authoring import session_challenger
 from hyperloom_multibranch.notebook.rsi.bandit import BANDIT_LABEL, BanditScorer
 from hyperloom_multibranch.notebook.rsi.calibration import DEFAULT_POLICY, PolicyChoice
 from hyperloom_multibranch.notebook.rsi.expression import ExpressionScorer
 from hyperloom_multibranch.notebook.rsi.frontier import FRONTIER_V1, FRONTIER_V1_LABEL, FrontierPolicy, FrontierScoring
+from hyperloom_multibranch.notebook.learning_search import LEARNINGS_LOG, Retrieval, RetrievalLog, RetrievalSource
 from hyperloom_multibranch.notebook.rsi.history import MAX_CHARS, session_history
+from hyperloom_multibranch.notebook.rsi.lessons import (
+    LessonPool,
+    LessonRevision,
+    LessonStanding,
+    lesson_id_for,
+    revision_id_for,
+)
 from hyperloom_multibranch.notebook.rsi.session import (
+    ALREADY_RECORDED,
     CALIBRATION_REPORT,
     DISABLED,
     EXPERIENCE_RECEIPT,
@@ -39,6 +48,7 @@ from hyperloom_multibranch.notebook.rsi.session import (
     NO_KB,
     NO_PROFILE,
     NO_REPORTS,
+    NO_RETRIEVAL_LOG,
     WRITTEN,
     CloseStep,
     CloseTargets,
@@ -159,6 +169,41 @@ def test_an_agentx_sessions_experiences_go_to_the_notebooks_own_declaration(
 
 
 @pytest.mark.usefixtures("unconfigured")
+def test_close_pools_the_learnings_beside_the_archive_and_records_the_shown_lessons_standing_once(
+    snapshot: NotebookSnapshot, tmp_path: Path
+) -> None:
+    pool, reports = LessonPool(tmp_path), tmp_path / "reports"
+    earlier = LessonRevision(
+        revision_id_for("past-1", "b02:1"),
+        lesson_id_for("past-1", "b02:1"),
+        LearningKind.PITFALL,
+        "attention split kv regresses when attention is not the bottleneck",
+        task_conditions(profile()),
+        "specialist:past-1/b02",
+        START - HOUR,
+        session_id="past-1",
+        target="attention",
+        mechanism="split kv",
+    )
+    pool.write(earlier)
+    before_its_tests = dataclasses.replace(snapshot, taken_at=START - 1.0)
+    RetrievalLog(reports / LEARNINGS_LOG).record(
+        before_its_tests, Retrieval("s2", RetrievalSource.BRIEF, "attention"), (), past=[earlier.lesson_id]
+    )
+    learnt = dataclasses.replace(snapshot, learnings=LEARNT)
+    targets = CloseTargets(archive=TreeArchive(tmp_path), receipts=reports)
+
+    done = close_knowledge(learnt, METRIC, targets=targets)
+    again = close_knowledge(learnt, METRIC, targets=targets)
+
+    assert done.lessons == CloseStep(WRITTEN, counts={"new": 2})
+    assert done.lesson_standings.status == WRITTEN and done.lesson_standings.counts["lessons"] == 1
+    assert [standing.lessons for standing in pool.standings()] == [{earlier.lesson_id: LessonStanding(1, ignored=1)}]
+    assert again.lessons == CloseStep(SKIPPED, counts={"duplicate": 2})
+    assert again.lesson_standings.status == SKIPPED and again.lesson_standings.reason == ALREADY_RECORDED
+
+
+@pytest.mark.usefixtures("unconfigured")
 def test_a_step_that_raises_is_recorded_and_the_steps_after_it_still_run(
     snapshot: NotebookSnapshot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -183,6 +228,8 @@ def test_without_a_profile_nothing_is_published_or_archived(snapshot: NotebookSn
         learnings=CloseStep(SKIPPED, NO_PROFILE),
         archive=CloseStep(SKIPPED, "no_profile_or_baseline"),
         multibranch_experiences=CloseStep(SKIPPED, NO_PROFILE),
+        lessons=CloseStep(SKIPPED, NO_PROFILE),
+        lesson_standings=CloseStep(SKIPPED, NO_RETRIEVAL_LOG),
     )
 
 
@@ -217,6 +264,8 @@ def test_the_breakdown_records_the_knowledge_steps_only_when_given(snapshot: Not
         "learnings": {"status": DISABLED, "reason": NO_KB, "counts": {}},
         "archive": {"status": ARCHIVED, "reason": "", "counts": {}},
         "calibration": {"status": SKIPPED, "reason": NO_REPORTS, "counts": {}},
+        "lessons": {"status": SKIPPED, "reason": NO_ARCHIVE, "counts": {}},
+        "lesson_standings": {"status": SKIPPED, "reason": NO_ARCHIVE, "counts": {}},
     }
     assert json.loads(json.dumps(close["knowledge"])) == close["knowledge"]
     assert "knowledge" not in build_breakdown(snapshot)["close"]

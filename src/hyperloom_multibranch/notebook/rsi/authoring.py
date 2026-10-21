@@ -38,7 +38,7 @@ from dataclasses import dataclass
 
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot
-from hyperloom_multibranch.notebook.rsi.archive import SKIPPED, SearchTree, TreeArchive, similar_trees
+from hyperloom_multibranch.notebook.rsi.archive import NO_ARCHIVE, SKIPPED, SearchTree, TreeArchive, similar_trees
 from hyperloom_multibranch.notebook.rsi.calibration import (
     MIN_IMPROVEMENT,
     MIN_ROUNDS,
@@ -103,7 +103,6 @@ FRONTIER_V1_EXPRESSION = (
     f"max(prior_remaining_pct if prior_effective_sessions >= {MIN_EFFECTIVE_SESSIONS} else trend_pct, "
     f"{OBSERVATION_FLOOR_PCT} * observing)"
 )
-NO_ARCHIVE = "no_archive_configured"
 NOT_ARCHIVED = "the session's search tree is not in the archive"
 NO_CANDIDATES = "the LLM wrote no candidate"
 _MINUTE = 60.0

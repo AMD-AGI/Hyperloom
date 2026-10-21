@@ -450,6 +450,7 @@ class TreeArchive:
 
 ARCHIVED = "archived"
 SKIPPED = "skipped"
+NO_ARCHIVE = "no_archive_configured"
 
 
 @dataclass(frozen=True)
@@ -479,7 +480,7 @@ def archive_session(
 
     target = archive if archive is not None else TreeArchive.from_env()
     if target is None:
-        return ArchiveResult(SKIPPED, "no_archive_configured")
+        return ArchiveResult(SKIPPED, NO_ARCHIVE)
     try:
         tree = tree_from_snapshot(snapshot, metric, budget_seconds=budget_seconds, bottlenecks=bottlenecks)
     except NotRecorded:
@@ -501,6 +502,7 @@ def archive_session(
 
 __all__ = [
     "ARCHIVED",
+    "NO_ARCHIVE",
     "ARCHIVE_ENV",
     "SINGLE_HOST",
     "SKIPPED",

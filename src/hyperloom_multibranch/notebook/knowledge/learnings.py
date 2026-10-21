@@ -31,7 +31,9 @@ MAPPING_PATH = Path(__file__).with_name("mappings") / "multibranch-learning-v1.y
 EXPORT_FORMAT = "multibranch.notebook.learnings.v1"
 
 
-def _measures(record: TestRecord) -> bool:
+def measures(record: TestRecord) -> bool:
+    """Whether ``record`` measured what a learning citing it says: a judgement, or a candidate that failed."""
+
     return record.judgement is not None or (
         record.result is not None and record.result.validity is Validity.CANDIDATE_FAILED
     )
@@ -60,7 +62,7 @@ def learning_row(record: LearningRecord, snapshot: NotebookSnapshot) -> dict[str
         "mechanism": learning.mechanism,
         "request_ids": list(learning.request_ids),
         "created_at": _iso(record.at),
-        "measured": any(_measures(test) for test in cited),
+        "measured": any(measures(test) for test in cited),
         "evidence": [f"{test.request_id} on {test.request.parent_commit}: {outcome_of(test)}" for test in cited],
         "identity": {**experience_identity(profile), **layer},
     }
@@ -96,5 +98,6 @@ __all__ = [
     "MAPPING_PATH",
     "export_document",
     "learning_row",
+    "measures",
     "publish_learnings",
 ]
