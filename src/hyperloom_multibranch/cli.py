@@ -38,14 +38,16 @@ directory; the measurement pins must be readable, the image the session runs on 
 installed in the image; and the agent CLI the specialists run must be installed.
 A session uses no Experience KB, whatever ``HYPERLOOM_KB_URL`` names (see
 :data:`~hyperloom_multibranch.scheduling.mb_fakes.MB_FAKE_EXPERIENCE_KB`).
-``final-only SESSION_DIR`` is the emergency recovery of a session that closed before FINAL ran, and takes nothing but
+``final-only SESSION_DIR`` is the emergency recovery of a session that ended before FINAL ran, and takes nothing but
 that directory: it runs FINAL and CLOSE over what the session persisted -- the settings and the frontier policy its
 manifest holds, the branches its roster and notebook hold -- and rewrites its report, dashboard and breakdown. It
 creates no session directory, so it cannot start one. It carries the stop reason that session ended with, which is
-also what its exit code says: a session that did not run its course stays a failed session however FINAL goes. The
+also what its exit code says: a session that did not run its course stays a failed session however FINAL goes. A
+session that was killed with its machine wrote no report at all; it ends for ``killed``, and so fails too. The
 search tree the session's own CLOSE archived is left as it was. It is refused with exit code 2, having written
-nothing, when the directory is no session that ran, ran on another build than this one, committed no root, has not
-closed, already chose in FINAL, or has another ``final-only`` running over it.
+nothing, when the directory is no session that ran, ran on another build than this one, committed no root, is still
+running -- any process ``MB-pids.jsonl`` records, the scheduler included, still alive in this environment -- already
+chose in FINAL, or has another ``final-only`` running over it.
 """
 
 from __future__ import annotations
@@ -127,10 +129,10 @@ def build_parser() -> argparse.ArgumentParser:
     final_only = commands.add_parser(
         "final-only",
         help=(
-            "Emergency recovery: run FINAL and CLOSE over a session directory that closed before FINAL. It rewrites"
-            " that session's report, dashboard and breakdown, and exits as that session did, so a session that did"
-            " not run its course still fails. Refused if it has not closed, already chose in FINAL, or ran on"
-            " another build than this one."
+            "Emergency recovery: run FINAL and CLOSE over a session directory that ended before FINAL, a session"
+            " killed with its machine included. It rewrites that session's report, dashboard and breakdown, and"
+            " exits as that session did, so a session that did not run its course still fails. Refused if the"
+            " session is still running, already chose in FINAL, or ran on another build than this one."
         ),
     )
     final_only.add_argument("session_dir", type=Path, help="The session directory of the run to finish.")

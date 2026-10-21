@@ -13,29 +13,44 @@ A child that exits orphans whatever it started; a descendant leading a session o
 tree and its group. Inside :func:`adopting_orphans` such orphans are reparented to the scheduler instead of to init, so
 every process the session started, registered or not, is a child of the scheduler or a descendant of one: the session
 kill reaches them and the leftovers name them.
+
+The file outlives the session, killed sessions included, so :func:`live_processes` reads it back to say whether
+anything of a session is still running: the emergency ``final-only`` recovery may not race a session that still runs.
+A run therefore records the scheduler itself as well, on :data:`SCHEDULER_BRANCH`, because a scheduler that died
+before starting a child and one that has not started one yet leave the same records.
 """
 
 from __future__ import annotations
 
 import asyncio
 import ctypes
+import logging
 import os
 import signal
+import sys
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from hyperloom.common.io import append_jsonl
-from hyperloom.common.owner_scope import local_owner_scope, process_started_at
+from hyperloom.common.jsonio import read_jsonl
+from hyperloom.common.owner_scope import local_owner_scope, process_started_at, same_environment
 from hyperloom.common.proctree import collect_tree, descendants, group_members, kill_tree, proc_identity, running
+from hyperloom_multibranch.notebook.codec import decode
 from hyperloom_multibranch.scheduling.clock import Clock
+
+logger = logging.getLogger(__name__)
 
 _ZOMBIE_STATE = "Z"
 #: ``prctl`` option from ``<linux/prctl.h>``.
 _PR_SET_CHILD_SUBREAPER = 36
+#: How long after a process started its record may have been written, for a pid to still be the one recorded.
+_RECORDING_SECONDS = 1.0
 #: The branch of a leftover no registered process accounts for.
 UNREGISTERED_BRANCH = ""
+#: The branch of the scheduler's own record, which runs no branch and is registered for neither kill nor leftover.
+SCHEDULER_BRANCH = "scheduler"
 
 
 @contextmanager
@@ -68,7 +83,8 @@ class ProcessRecord:
     """One line of ``MB-pids.jsonl``; ``pgid`` equals ``pid`` because the child leads its own session.
 
     A leftover no registered process accounts for is described the same way, on :data:`UNREGISTERED_BRANCH`, with its
-    own group and the time it started.
+    own group and the time it started. The scheduler's own record, on :data:`SCHEDULER_BRANCH`, names the group it
+    runs in, which it does not lead.
     """
 
     pid: int
@@ -131,6 +147,25 @@ class ProcessRegistry:
             raise ValueError(f"process {pid} of {branch} does not lead its own process group")
         return self._register(pid, branch, argv, None)
 
+    def record_scheduler(self) -> None:
+        """Record this process in ``MB-pids.jsonl``, so the file says whether the session still runs even before it
+        has started a child.
+
+        It is not registered: the kills and the leftovers are about what the session started, and the scheduler ends
+        the session itself.
+        """
+
+        self._write(
+            ProcessRecord(
+                pid=os.getpid(),
+                pgid=os.getpgid(0),
+                started_at=self._clock.now(),
+                branch=SCHEDULER_BRANCH,
+                argv=tuple(sys.argv),
+                owner_scope=local_owner_scope(),
+            )
+        )
+
     def _register(
         self, pid: int, branch: str, argv: Sequence[str], process: asyncio.subprocess.Process | None
     ) -> ProcessRecord:
@@ -142,9 +177,12 @@ class ProcessRegistry:
             argv=tuple(argv),
             owner_scope=local_owner_scope(),
         )
-        append_jsonl(self._pids_file, asdict(record))
+        self._write(record)
         self._registered.append(_Tracked(record, process))
         return record
+
+    def _write(self, record: ProcessRecord) -> None:
+        append_jsonl(self._pids_file, asdict(record))
 
     async def terminate(self, proc: RegisteredProcess, grace_seconds: float) -> int | None:
         """SIGTERM the root alone and wait up to ``grace_seconds`` for it to exit; ``None`` when it did not.
@@ -188,6 +226,57 @@ class ProcessRegistry:
         gone = await asyncio.to_thread(_kill_trees, tuple(registered), tuple(extra))
         self._registered = list(await asyncio.to_thread(_alive, tuple(self._registered)))
         return gone
+
+
+def live_processes(pids_file: Path) -> tuple[ProcessRecord, ...]:
+    """The processes ``pids_file`` records that are still running here; raises ``ValueError`` when the file holds a
+    line that is no record, or when this environment cannot be told from the one that wrote it.
+
+    A record of another ownership scope names no process of this environment: the container its session ran in is
+    gone, and its pids are either absent here or someone else's by now. Every other record is answered by its own
+    process, so a session that still runs is never taken for one that ended. Where no record can be answered at all,
+    because the scope here is unobservable, the refusal is the only answer that does not race a live session.
+    """
+
+    local = local_owner_scope()
+    if not local:
+        raise ValueError(f"the execution scope here is unobservable, so {pids_file} cannot say what of it still runs")
+    records = _recorded(pids_file)
+    return tuple(r for r in records if not _another_environment(r.owner_scope, local) and _still_runs(r))
+
+
+def _recorded(pids_file: Path) -> tuple[ProcessRecord, ...]:
+    """Every record ``pids_file`` holds. The line a kill cut short is skipped, since a torn write ends the file and
+    the records before it still say what runs; a line that is no record at all is a damaged file and raises."""
+
+    rows = read_jsonl(
+        pids_file,
+        require_dict=True,
+        skip_malformed=True,
+        skip_non_dict=True,
+        on_error=lambda exc: logger.warning("skipping what cannot be read from %s: %s", pids_file, exc),
+    )
+    try:
+        return tuple(decode(ProcessRecord, row) for row in rows)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{pids_file} holds a line that is no process record: {exc}") from exc
+
+
+def _another_environment(recorded: str, local: str) -> bool:
+    """Whether ``recorded`` names an environment that is not this one. A record that names no scope at all was
+    written where ownership was unobservable, and its own process says whether it runs."""
+
+    return bool(recorded) and not same_environment(recorded, local)
+
+
+def _still_runs(record: ProcessRecord) -> bool:
+    """Whether the recorded process itself still runs. A pid whose process started after the record was written is a
+    reused one and runs nothing of the session; a process whose start cannot be read counts as running."""
+
+    if not running(record.pid):
+        return False
+    started = process_started_at(record.pid)
+    return started is None or started.timestamp() <= record.started_at + _RECORDING_SECONDS
 
 
 def _alive(registered: tuple[_Tracked, ...]) -> tuple[_Tracked, ...]:
@@ -258,4 +347,12 @@ def _live_roots(registered: _Tracked) -> tuple[int, ...]:
     return tuple(sorted(members))
 
 
-__all__ = ["UNREGISTERED_BRANCH", "ProcessRecord", "ProcessRegistry", "RegisteredProcess", "adopting_orphans"]
+__all__ = [
+    "SCHEDULER_BRANCH",
+    "UNREGISTERED_BRANCH",
+    "ProcessRecord",
+    "ProcessRegistry",
+    "RegisteredProcess",
+    "adopting_orphans",
+    "live_processes",
+]

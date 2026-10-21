@@ -3,9 +3,10 @@
 
 """Contract of the ``hyperloom-multibranch`` command line: options, defaults, validation and exit codes.
 
-``final-only`` is the emergency recovery of a session that closed before FINAL: it takes that session's directory and
-nothing else, refuses before building anything when the directory cannot support FINAL -- a session another build
-ran included -- and holds the directory against a second recovery while it works.
+``final-only`` is the emergency recovery of a session that ended before FINAL, one killed with its machine included:
+it takes that session's directory and nothing else, refuses before building anything when the directory cannot
+support FINAL -- a session another build ran, and one still running, included -- and holds the directory against a
+second recovery while it works.
 """
 
 from __future__ import annotations
@@ -14,7 +15,9 @@ import json
 import os
 import subprocess
 import sys
+import time
 from collections.abc import Callable
+from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -28,6 +31,7 @@ from hyperloom.common.llm_config import (
     DEFAULT_CLAUDE_MODEL,
     DEFAULT_CODEX_MODEL,
 )
+from hyperloom.common.owner_scope import local_owner_scope
 from hyperloom.common.perf_metric import GRADED_INTVTY_P50
 from hyperloom.measure import compile as compile_module
 from hyperloom.measure.compile import PackageBase
@@ -41,6 +45,7 @@ from hyperloom_multibranch.scheduling.lifecycle import PersistedRun, code_versio
 from hyperloom_multibranch.scheduling import local_peers
 from hyperloom_multibranch.scheduling.local_peers import AGENTX_ENV
 from hyperloom_multibranch.scheduling.peers import PeerFactory
+from hyperloom_multibranch.scheduling.processes import SCHEDULER_BRANCH, ProcessRecord
 from hyperloom_multibranch.scheduling.roster import RosterCaps
 from hyperloom_multibranch.scheduling.settings import (
     FrontierPolicyMode,
@@ -49,6 +54,7 @@ from hyperloom_multibranch.scheduling.settings import (
     RunSettings,
     Workload,
 )
+from hyperloom_multibranch.scheduling.stops import SessionStopReason
 
 #: What the session's launcher sets to name the image the session runs on.
 IMAGE_VARS = ("HYPERLOOM_ACTIVE_IMAGE_REF", "HYPERLOOM_ACTIVE_IMAGE_DIGEST")
@@ -57,6 +63,8 @@ WORKLOAD_ARGS = [
     "--model", "/models/Llama-3-8B", "--framework", "vllm", "--tp", "2", "--isl", "1024", "--osl", "512",
     "--conc", "16", "--precision", "fp8", "--workload", "inferencex", "--gpu-type", "mi300x",
 ]  # fmt: skip
+#: An ownership scope of a pod that is gone: another boot, so none of its pids is a process of this environment.
+ANOTHER_POD = "0" * 32 + ":1:1"
 #: The same workload as an AgentX trace replay: no sequence lengths.
 AGENTX_ARGS = [
     "--model", "/models/Llama-3-8B", "--framework", "vllm", "--tp", "2", "--conc", "16", "--precision", "fp8",
@@ -622,7 +630,7 @@ def test_importing_the_command_and_the_session_loads_no_main_flow_runtime() -> N
     assert probe.stdout.strip() == "[]"
 
 
-def _closed_before_final(root: Path) -> SessionLayout:
+def _ended_before_final(root: Path) -> SessionLayout:
     """A session directory as a run that ended before FINAL leaves it: the manifest of :func:`_settings`, the root
     recipe PRELUDE committed, and the report CLOSE wrote with no final choice in it."""
 
@@ -660,13 +668,21 @@ def _tree(root: Path) -> list[Path]:
     return sorted(root.rglob("*"))
 
 
+def _killed(layout: SessionLayout, scope: str) -> None:
+    """The session killed with the machine it ran on: no report, and this live process recorded under ``scope``."""
+
+    layout.report.unlink()
+    record = ProcessRecord(os.getpid(), os.getpgid(0), time.time(), SCHEDULER_BRANCH, ("mb",), scope)
+    layout.pids.write_text(f"{json.dumps(asdict(record))}\n", encoding="utf-8")
+
+
 @pytest.mark.parametrize(
     ("damage", "error"),
     [
         (lambda layout: layout.manifest.unlink(), "is no multi-branch session that ran"),
         (lambda layout: _manifest(layout, code_version={"package": "0.0", "git_sha": "beef"}), "ran on CodeVersion"),
         (lambda layout: layout.root_recipe.unlink(), "committed no root"),
-        (lambda layout: layout.report.unlink(), "has not closed"),
+        (lambda layout: _killed(layout, local_owner_scope()), "is still running"),
         (lambda layout: _report(layout, final={"chosen": {"commit": "c9"}}), "already chose c9"),
         (lambda layout: _report(layout, stop_reason="prelude_baseline_failed"), "PRELUDE failed"),
     ],
@@ -680,7 +696,7 @@ def test_a_session_final_cannot_run_over_exits_two_and_changes_nothing(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    layout = _closed_before_final(tmp_path / "MB-20261020T141241Z-64f775fe")
+    layout = _ended_before_final(tmp_path / "MB-20261020T141241Z-64f775fe")
     damage(layout)
     before = _tree(layout.root)
 
@@ -691,6 +707,26 @@ def test_a_session_final_cannot_run_over_exits_two_and_changes_nothing(
     captured = capsys.readouterr()
     assert error in captured.err and captured.out == ""
     assert agent_cli == [] and _tree(layout.root) == before
+
+
+@pytest.mark.usefixtures("ready_environment", "agent_cli")
+def test_final_only_finishes_a_session_that_was_killed_before_it_could_close(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    layout = _ended_before_final(tmp_path / "MB-20261020T141241Z-64f775fe")
+    _killed(layout, ANOTHER_POD)
+    finished: list[PersistedRun] = []
+
+    def final_only(persisted: PersistedRun, peer_factory: PeerFactory, services: object) -> int:
+        finished.append(persisted)
+        return 1
+
+    monkeypatch.setattr(cli, "final_only", final_only)
+
+    assert cli.main(["final-only", str(layout.root)]) == 1
+
+    [persisted] = finished
+    assert (persisted.ended, persisted.settings) == (SessionStopReason.KILLED, _settings())
 
 
 @pytest.mark.usefixtures("ready_environment")
@@ -710,7 +746,7 @@ def test_final_only_over_a_path_that_is_no_directory_exits_two(
 def test_a_final_only_holds_the_session_against_a_second_one_and_releases_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    layout = _closed_before_final(tmp_path / "MB-20261020T141241Z-64f775fe")
+    layout = _ended_before_final(tmp_path / "MB-20261020T141241Z-64f775fe")
     persisted = persisted_run(layout.root)
 
     async def while_it_runs(run: PersistedRun, peer_factory: object, services: object) -> int:
@@ -733,7 +769,7 @@ def test_final_only_finishes_the_session_on_the_settings_its_manifest_holds(
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     monkeypatch.setenv("USER_DATA_PATH", str(workspace))
-    layout = _closed_before_final(tmp_path / "MB-20261020T141241Z-64f775fe")
+    layout = _ended_before_final(tmp_path / "MB-20261020T141241Z-64f775fe")
 
     assert cli.main(["final-only", str(layout.root)]) == 0
 

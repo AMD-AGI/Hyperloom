@@ -3,8 +3,8 @@
 
 """The session's exit code: 0 only for a session that ran its course, chose a commit and left nothing behind.
 
-A ``final-only`` carries the stop reason of the session it finishes, so a session that was stopped stays a failed
-session even when FINAL then chose for it.
+A ``final-only`` carries the stop reason of the session it finishes, so a session that was stopped, or killed with
+the machine it ran on, stays a failed session even when FINAL then chose for it.
 """
 
 from __future__ import annotations
@@ -50,6 +50,7 @@ def test_a_session_that_ran_its_course_and_stopped_clean_exits_zero(reason: Sess
         _outcome(SessionStopReason.SIGNAL, None, CLEAN),
         _outcome(SessionStopReason.SIGNAL, CHOSEN, CLEAN),
         _outcome(SessionStopReason.PRELUDE_FAILED, None, CLEAN, "no baseline"),
+        _outcome(SessionStopReason.KILLED, CHOSEN, CLEAN),
         SessionOutcome(SessionStopReason.TIME_EXHAUSTED, CHOSEN, None, ""),
     ],
     ids=[
@@ -62,6 +63,7 @@ def test_a_session_that_ran_its_course_and_stopped_clean_exits_zero(reason: Sess
         "signal",
         "chosen-after-a-signal",
         "prelude-failed",
+        "killed-then-finished",
         "close-never-ran",
     ],
 )

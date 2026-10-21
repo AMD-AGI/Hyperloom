@@ -17,10 +17,10 @@ phases and CLOSE share it. An unhandled error brings it forward the same way whe
 signal that arrives during CLOSE; CLOSE is cut short if it still runs then. A second signal, whenever it arrives, cuts the
 unwinding and CLOSE short at once. A CLOSE cut short releases what the session holds, closing the toolbox within
 its own short bound and killing every registered process, and writes the report.
-A session that closed before FINAL is read back by :func:`persisted_run` and taken up again by :meth:`Session.finish`,
-which runs FINAL and CLOSE alone on a budget that is already spent, carrying the stop reason that session ended with:
-the roster, the frontier policy and the branches are the ones that session persisted, and only its report, dashboard
-and breakdown are written again.
+A session that ended before FINAL, killed with its machine before CLOSE included, is read back by
+:func:`persisted_run` and taken up again by :meth:`Session.finish`, which runs FINAL and CLOSE alone on a budget that
+is already spent, carrying the stop reason that session ended with: the roster, the frontier policy and the branches
+are the ones that session persisted, and only its report, dashboard and breakdown are written again.
 """
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ from hyperloom_multibranch.rulegate.critic import FixReviewer
 from hyperloom_multibranch.scheduling.branches import BranchControl
 from hyperloom_multibranch.scheduling.budget import HardStop, SessionBudget, budget_seconds, explore_gpu_seconds
 from hyperloom_multibranch.scheduling.clock import Clock
-from hyperloom_multibranch.scheduling.close import CloseReport, Closer, closed_before_final
+from hyperloom_multibranch.scheduling.close import CloseReport, Closer, ended_before_final
 from hyperloom_multibranch.scheduling.context import SchedulerContext
 from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
@@ -236,9 +236,14 @@ class Session:
         self._in_final = False
 
     async def run(self) -> SessionOutcome:
-        """Run every phase and CLOSE; an unhandled error propagates once CLOSE has run."""
+        """Run every phase and CLOSE; an unhandled error propagates once CLOSE has run.
+
+        The scheduler records itself before the first phase, so the directory says the session is running from the
+        start and a recovery over it is refused while it is.
+        """
 
         budget = SessionBudget.from_hours(self._settings.max_hours, self._clock.now())
+        self._processes.record_scheduler()
         self._write_manifest(budget, await asyncio.to_thread(code_version))
         hard_stop = HardStop(budget, self._clock)
         aborted = SessionOutcome(SessionStopReason.ABORTED, None, None, "")
@@ -545,8 +550,9 @@ class Session:
 
 @dataclass(frozen=True)
 class PersistedRun:
-    """A session directory that closed without FINAL, as :meth:`Session.finish` takes it again; ``ended`` is the stop
-    reason that session reported, which the second report carries."""
+    """A session directory that ended without FINAL, as :meth:`Session.finish` takes it again; ``ended`` is the stop
+    reason that session reported, or :data:`SessionStopReason.KILLED` when it was killed before it could report one,
+    and the second report carries it."""
 
     layout: SessionLayout
     settings: RunSettings
@@ -554,8 +560,9 @@ class PersistedRun:
 
 
 def persisted_run(root: Path) -> PersistedRun:
-    """The session in ``root``, read back from what :meth:`Session._write_manifest` and CLOSE left there; raises
-    ValueError naming what keeps FINAL from running over it. Creates nothing. Blocks."""
+    """The session in ``root``, read back from what :meth:`Session._write_manifest` and CLOSE left there, or from what
+    a session that was killed left without a CLOSE; raises ValueError naming what keeps FINAL from running over it.
+    Creates nothing. Blocks."""
 
     if not root.is_dir():
         raise ValueError(f"{root} is not a directory")
@@ -574,7 +581,7 @@ def persisted_run(root: Path) -> PersistedRun:
         )
     if not layout.root_recipe.is_file():
         raise ValueError(f"the session in {root} committed no root, so FINAL has nothing to validate")
-    return PersistedRun(layout, settings, closed_before_final(layout.report))
+    return PersistedRun(layout, settings, ended_before_final(layout))
 
 
 @dataclass(frozen=True)

@@ -28,6 +28,7 @@ from typing import Any, NoReturn
 
 import pytest
 
+from hyperloom.common.jsonio import read_jsonl
 from hyperloom.common.perf_metric import GRADED_INTVTY_P50, GRADED_OUTPUT
 from hyperloom.common.proctree import running
 from hyperloom.contracts.measurement import (
@@ -158,6 +159,8 @@ from hyperloom_multibranch.specialist.runtime import MAX_LOSS_RESTARTS, SessionC
 
 START = 1_700_000_000.0
 CONC = 16
+#: An ownership scope of a pod that is gone: another boot, so none of its pids is a process of this environment.
+ANOTHER_POD = "0" * 32 + ":1:1"
 WORKLOAD = Workload(
     "/models/Llama-3-8B", "sglang", 1, CONC, "bf16", "mi355x", KernelOptimizer.FORGE, InferenceXShape(1024, 1024)
 )
@@ -1219,6 +1222,43 @@ async def test_final_only_validates_the_branches_a_session_that_never_reached_fi
     # The tests the dead session left are withdrawn before FINAL's quota, which admits the integration branch alone.
     assert recovery.toolbox.policies == [final_quota(SETTINGS.caps)]
     assert recovery.toolbox.withdrawals == [SessionStopReason.TIME_EXHAUSTED.value] * 2
+
+    with pytest.raises(ValueError, match="already chose"):
+        persisted_run(stage.layout.root)
+
+
+def _as_another_pod(pids: Path) -> None:
+    """Move every record of ``MB-pids.jsonl`` to a pod that is gone, as the kill of a session's pod leaves them."""
+
+    rows = [{**row, "owner_scope": ANOTHER_POD} for row in read_jsonl(pids, require_dict=True)]
+    pids.write_text("".join(f"{json.dumps(row)}\n" for row in rows), encoding="utf-8")
+
+
+async def test_final_only_finishes_a_session_that_was_killed_before_it_could_close(tmp_path: Path) -> None:
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.scripts = SCRIPTS
+    stage.toolbox_type = StuckStopToolbox
+    await stage.run()
+    # The SIGKILL leaves the directory without the report CLOSE would have written.
+    stage.layout.report.unlink()
+
+    # The scheduler recorded itself when the run started, so the directory names the process the session ran as.
+    assert os.getpid() in [row["pid"] for row in read_jsonl(stage.layout.pids, require_dict=True)]
+
+    _as_another_pod(stage.layout.pids)
+    persisted = persisted_run(stage.layout.root)
+    assert persisted.ended is SessionStopReason.KILLED
+
+    recovery = _recovery(stage, persisted.settings)
+    outcome = await recovery.finish(persisted.ended)
+
+    assert outcome.final is not None and outcome.final.chosen is not None
+    assert outcome.final.chosen.commit == await stage.repo.head(INTEGRATION_BRANCH)
+    # Finishing a dead session does not make it one that ran its course.
+    assert (outcome.stop_reason, outcome.exit_code) == (SessionStopReason.KILLED, 1)
+    report = json.loads(stage.layout.report.read_text())
+    assert report["stop_reason"] == SessionStopReason.KILLED.value
+    assert report["final"]["chosen"]["commit"] == outcome.final.chosen.commit
 
     with pytest.raises(ValueError, match="already chose"):
         persisted_run(stage.layout.root)

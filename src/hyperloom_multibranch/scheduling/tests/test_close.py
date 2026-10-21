@@ -4,18 +4,24 @@
 """CLOSE: everything is stopped first, then the exports land in the MB- directories and the KB gets the final recipe.
 
 Both are bounded by the hard stop, and the report is written whatever became of the exports. The report is also read
-back: it says how a session ended and whether FINAL may still be run over its directory.
+back: it says how a session ended and whether FINAL may still be run over its directory, together with the processes
+the session recorded, which say whether anything of it is still running. A session that was killed left no report at
+all, and only those records.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import os
+import time
+from dataclasses import asdict
 from pathlib import Path
 
 import pytest
 
-from hyperloom.common.io import atomic_write_json
+from hyperloom.common.io import append_jsonl, atomic_write_json
+from hyperloom.common.owner_scope import local_owner_scope
 from hyperloom.contracts.recipe import Recipe
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.orchestrator.knowledge.remote_recipe import KBStoreError
@@ -32,14 +38,14 @@ from hyperloom_multibranch.notebook.rsi.frontier import FrontierPolicy, Frontier
 from hyperloom_multibranch.notebook.rsi.session import DISABLED
 from hyperloom_multibranch.notebook.tests.factories import FakeClock
 from hyperloom_multibranch.notebook.tests.sessions import METRIC, scripted_session
-from hyperloom_multibranch.scheduling.close import CloseReport, Closer, closed_before_final, report_document
+from hyperloom_multibranch.scheduling.close import CloseReport, Closer, ended_before_final, report_document
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
 from hyperloom_multibranch.scheduling.exports import ExportSources, SessionExports
 from hyperloom_multibranch.scheduling.final import FinalCandidate, FinalChoice
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
 from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_EXPERIENCE_KB
-from hyperloom_multibranch.scheduling.processes import ProcessRecord
+from hyperloom_multibranch.scheduling.processes import SCHEDULER_BRANCH, ProcessRecord
 from hyperloom_multibranch.scheduling.stops import SessionStopReason, StopReport
 
 __all__ = ["final"]
@@ -51,6 +57,13 @@ HARD_STOP = NOW + 60.0
 SHORT_GRACE = 0.3
 #: The commit the scripted session's integration head is at.
 CHOSEN = "i1"
+#: The reason the sessions these tests read back ended for.
+REASON = SessionStopReason.TIME_EXHAUSTED
+#: An ownership scope of a pod that is gone: another boot, so none of its pids is a process of this environment.
+ANOTHER_POD = "0" * 32 + ":1:1"
+#: A session that started long before this test process, so a pid it recorded is another process's by now.
+LONG_AGO = 1_700_000_000.0
+AGENT_ARGV = ("claude", "-p")
 CHOICE = FinalChoice(
     FinalCandidate("integration", INTEGRATION_BRANCH, CHOSEN, 1041.0), (), "the higher value", METRIC, 64
 )
@@ -286,41 +299,69 @@ async def test_processes_and_tests_that_outlive_the_stop_are_reported(
     assert "processes left: [4242]" in layout.report_markdown.read_text()
 
 
-def _written(layout: SessionLayout, stop_reason: SessionStopReason, final: FinalChoice | None) -> Path:
+def _written(layout: SessionLayout, stop_reason: SessionStopReason, final: FinalChoice | None) -> SessionLayout:
     """``MB-report.json`` as CLOSE writes it for a session that ended for ``stop_reason`` with ``final``."""
 
     report = CloseReport(stop_reason, final, None, StopReport((), QueueState()), "")
     atomic_write_json(layout.report, report_document(report, layout.session_id, NOW))
-    return layout.report
+    return layout
+
+
+def _recorded(layout: SessionLayout, record: ProcessRecord) -> SessionLayout:
+    """``MB-pids.jsonl`` as a session leaves it, holding ``record`` alone."""
+
+    append_jsonl(layout.pids, asdict(record))
+    return layout
+
+
+def _this_process(branch: str) -> ProcessRecord:
+    """This test process as a running session recorded it: it started before the record was written, so the pid is
+    the one the record names."""
+
+    return ProcessRecord(os.getpid(), os.getpgid(0), time.time(), branch, AGENT_ARGV, local_owner_scope())
 
 
 def test_a_report_of_a_session_that_closed_before_final_carries_its_stop_reason(layout: SessionLayout) -> None:
-    report = _written(layout, SessionStopReason.TIME_EXHAUSTED, None)
-
-    assert closed_before_final(report) is SessionStopReason.TIME_EXHAUSTED
+    assert ended_before_final(_written(layout, SessionStopReason.TIME_EXHAUSTED, None)) is REASON
 
 
-def test_a_session_that_wrote_no_report_has_not_closed(layout: SessionLayout) -> None:
-    with pytest.raises(ValueError, match="has not closed"):
-        closed_before_final(layout.report)
+def test_a_session_killed_before_it_could_close_ended_killed(layout: SessionLayout) -> None:
+    dead = ProcessRecord(os.getpid(), os.getpgid(0), NOW, "b01", AGENT_ARGV, ANOTHER_POD)
+
+    assert ended_before_final(_recorded(layout, dead)) is SessionStopReason.KILLED
+
+
+def test_a_session_whose_processes_still_run_here_is_refused(layout: SessionLayout) -> None:
+    with pytest.raises(ValueError, match=f"still running as .{os.getpid()}."):
+        ended_before_final(_recorded(layout, _this_process(SCHEDULER_BRANCH)))
+
+
+def test_a_closed_session_a_process_of_outlived_its_report_is_refused(layout: SessionLayout) -> None:
+    """A CLOSE that could not kill everything reports leftovers, and FINAL may not run beside one of them."""
+
+    closed = _written(layout, SessionStopReason.TIME_EXHAUSTED, None)
+
+    with pytest.raises(ValueError, match=f"still running as .{os.getpid()}."):
+        ended_before_final(_recorded(closed, _this_process("b01")))
+
+
+def test_a_pid_of_a_killed_session_another_process_reuses_is_not_the_session_running(layout: SessionLayout) -> None:
+    reused = ProcessRecord(os.getpid(), os.getpgid(0), LONG_AGO, SCHEDULER_BRANCH, AGENT_ARGV, local_owner_scope())
+
+    assert ended_before_final(_recorded(layout, reused)) is SessionStopReason.KILLED
 
 
 def test_a_report_that_records_a_final_choice_refuses_a_second_final(layout: SessionLayout) -> None:
-    report = _written(layout, SessionStopReason.TIME_EXHAUSTED, CHOICE)
-
     with pytest.raises(ValueError, match=f"already chose {CHOSEN}"):
-        closed_before_final(report)
+        ended_before_final(_written(layout, SessionStopReason.TIME_EXHAUSTED, CHOICE))
 
 
 def test_a_final_that_chose_nothing_may_be_run_again(layout: SessionLayout) -> None:
     nothing = FinalChoice(None, (), "no candidate passed the final validation", METRIC, 64)
-    report = _written(layout, SessionStopReason.TIME_EXHAUSTED, nothing)
 
-    assert closed_before_final(report) is SessionStopReason.TIME_EXHAUSTED
+    assert ended_before_final(_written(layout, SessionStopReason.TIME_EXHAUSTED, nothing)) is REASON
 
 
 def test_a_failed_prelude_leaves_no_root_to_validate(layout: SessionLayout) -> None:
-    report = _written(layout, SessionStopReason.PRELUDE_FAILED, None)
-
     with pytest.raises(ValueError, match="PRELUDE failed"):
-        closed_before_final(report)
+        ended_before_final(_written(layout, SessionStopReason.PRELUDE_FAILED, None))

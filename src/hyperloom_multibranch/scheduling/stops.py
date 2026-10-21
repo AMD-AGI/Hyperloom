@@ -58,6 +58,9 @@ class SessionStopReason(str, Enum):
     NO_MEASUREMENT_CARDS = "no_measurement_cards"
     #: The session raised an error it does not handle; CLOSE still runs before it propagates.
     ABORTED = "aborted"
+    #: The session was killed with the machine it ran on, so it never closed and wrote no report; only the emergency
+    #: ``final-only`` recovery reports it, and finishing a dead session does not make it one that ran its course.
+    KILLED = "killed"
 
 
 class StopSignals:

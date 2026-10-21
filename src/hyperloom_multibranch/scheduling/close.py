@@ -8,8 +8,10 @@ and the exports (:mod:`~hyperloom_multibranch.scheduling.exports`) read a notebo
 and exporting are each bounded by the hard stop. ``MB-report.json`` and ``MB-report.md`` record the outcome whatever
 became of the exports, including what outlived the stop; a CLOSE cut short by a second stop signal is reported by the
 session through :meth:`Closer.write_report`.
-``MB-report.json`` is read back by one caller, :func:`closed_before_final`, which says how a session ended and
+``MB-report.json`` is read back by one caller, :func:`ended_before_final`, which says how a session ended and
 whether FINAL may still be run over its directory; it lives here so the format has one reader beside its writer.
+Whether FINAL may run is not the report's to answer alone: what the session recorded as its processes says whether
+it is over, and a session that was killed never reached CLOSE and left no report at all.
 """
 
 from __future__ import annotations
@@ -17,7 +19,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from pathlib import Path
 
 from hyperloom.common.io import WriteOptions, atomic_write_json, atomic_write_text
 from hyperloom.common.jsonio import read_json_strict
@@ -28,6 +29,7 @@ from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.exports import CloseExports, SessionExports
 from hyperloom_multibranch.scheduling.final import FinalChoice
 from hyperloom_multibranch.scheduling.layout import SessionLayout
+from hyperloom_multibranch.scheduling.processes import live_processes
 from hyperloom_multibranch.scheduling.stops import SessionStopper, SessionStopReason, StopReport
 
 logger = logging.getLogger(__name__)
@@ -78,20 +80,33 @@ def report_document(report: CloseReport, session_id: str, closed_at: float) -> d
     }
 
 
-def closed_before_final(report_file: Path) -> SessionStopReason:
-    """How the session :func:`report_document` wrote ``report_file`` for ended, for FINAL and CLOSE to carry forward;
-    raises ValueError naming what keeps FINAL from running over it.
+def ended_before_final(layout: SessionLayout) -> SessionStopReason:
+    """How the session in ``layout`` ended, for FINAL and CLOSE to carry forward; raises ValueError naming what keeps
+    FINAL from running over it.
 
+    Nothing the session recorded may still run, whatever its report says: a process of it that is alive would race
+    the FINAL run, and a report says how CLOSE went, not that the kill it ordered reached everything.
+    A session with no report never closed at all: it was killed before CLOSE could write one, and ended for
+    :data:`SessionStopReason.KILLED`.
     A FINAL that ran and chose nothing keeps nothing from running it again: the session still has no winner, which is
     what running FINAL over it a second time is for.
     """
 
+    alive = live_processes(layout.pids)
+    if alive:
+        raise ValueError(
+            f"the session in {layout.root} is still running as {[record.pid for record in alive]}; "
+            "stop it before finishing it"
+        )
+    report_file = layout.report
+    if not report_file.is_file():
+        return SessionStopReason.KILLED
     try:
         document = read_json_strict(report_file, require_dict=True)
         final, ended = document["final"], SessionStopReason(document["stop_reason"])
         chosen = None if final is None else final["chosen"]
     except (OSError, ValueError, KeyError, TypeError) as exc:
-        raise ValueError(f"the session has not closed; {report_file} does not say how it ended: {exc}") from exc
+        raise ValueError(f"{report_file} does not say how the session ended: {exc}") from exc
     if chosen is not None:
         raise ValueError(f"the session {report_file} reports already chose {chosen['commit']} in FINAL")
     if ended is SessionStopReason.PRELUDE_FAILED:
@@ -195,4 +210,4 @@ class Closer:
         atomic_write_text(self._layout.report_markdown, markdown, options=WriteOptions(make_parents=True))
 
 
-__all__ = ["EXPORT_FAILURES", "CloseReport", "Closer", "closed_before_final", "report_document", "report_markdown"]
+__all__ = ["EXPORT_FAILURES", "CloseReport", "Closer", "ended_before_final", "report_document", "report_markdown"]

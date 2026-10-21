@@ -6,8 +6,8 @@
 A session lives at ``<workspace>/<model_basename>/MB-<UTC>-<rand8>/``. Every entry the
 scheduler creates carries the ``MB-`` prefix so it never collides with a single-lineage
 session in the same workspace. Each run creates a fresh directory; only the emergency
-``final-only`` command attaches to one again, and only to a session whose closed report
-says FINAL never ran. Two of those would write over each other, so one holds
+``final-only`` command attaches to one again, and only to a session that is over and
+whose FINAL never chose. Two of those would write over each other, so one holds
 :data:`FINAL_ONLY_LOCK` in the session directory for as long as it runs.
 """
 

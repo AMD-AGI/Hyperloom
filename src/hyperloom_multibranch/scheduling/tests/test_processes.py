@@ -1,7 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The session's processes, started or adopted: recorded in ``MB-pids.jsonl`` and killed with everything they started."""
+"""The session's processes, started or adopted: recorded in ``MB-pids.jsonl`` and killed with everything they started.
+
+The file is also read back, by a recovery over the session directory: it says which of the session's processes, the
+scheduler itself included, are still running in this environment.
+"""
 
 from __future__ import annotations
 
@@ -12,20 +16,28 @@ import signal
 import subprocess
 import sys
 import time
+from dataclasses import asdict
 from pathlib import Path
 
 import pytest
 
+from hyperloom.common.owner_scope import local_owner_scope
 from hyperloom.common.proctree import descendants, running
+from hyperloom_multibranch.scheduling import processes
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.processes import (
+    SCHEDULER_BRANCH,
     UNREGISTERED_BRANCH,
+    ProcessRecord,
     ProcessRegistry,
     RegisteredProcess,
     adopting_orphans,
+    live_processes,
 )
 
 SPAWNED_AT = 1_700_000_000.0
+#: An ownership scope of a pod that is gone: another boot, so none of its pids is a process of this environment.
+ANOTHER_POD = "0" * 32 + ":1:1"
 CHILD_WITH_GRANDCHILD = ("sh", "-c", "sleep 60 & sleep 60")
 ORPHANING = ("sh", "-c", "sleep 60 & exit 0")
 LONG_SLEEP = ("sleep", "60")
@@ -207,3 +219,83 @@ async def test_a_server_the_root_orphans_on_its_way_out_is_a_leftover_until_the_
         assert await registry.kill_all()
         assert not running(server)
         assert await registry.leftovers() == ()
+
+
+async def test_the_scheduler_records_itself_and_is_no_process_of_a_branch(
+    registry: ProcessRegistry, tmp_path: Path
+) -> None:
+    registry.record_scheduler()
+    await _spawn(registry, tmp_path, LONG_SLEEP, "b01")
+
+    scheduler, branch = (json.loads(line) for line in (tmp_path / "MB-pids.jsonl").read_text().splitlines())
+    assert (scheduler["pid"], scheduler["pgid"]) == (os.getpid(), os.getpgid(0))
+    assert (scheduler["branch"], scheduler["started_at"]) == (SCHEDULER_BRANCH, SPAWNED_AT)
+    assert scheduler["argv"] == sys.argv and branch["branch"] == "b01"
+    # It is not one of the session's processes: the kills and the leftovers are about what the session started.
+    assert await registry.kill_all() and running(os.getpid())
+    assert await registry.leftovers() == ()
+
+
+async def test_only_the_recorded_processes_of_this_environment_that_run_are_live(tmp_path: Path) -> None:
+    pids = tmp_path / "MB-pids.jsonl"
+    assert live_processes(pids) == ()
+
+    # The wall clock, because a record is answered by what /proc says about the start of the pid it names.
+    registry = ProcessRegistry(pids, Clock())
+    registry.record_scheduler()
+    proc = await _spawn(registry, tmp_path, LONG_SLEEP, "b01")
+    gone = await _spawn(registry, tmp_path, ("true",), "b02")
+    await gone.process.wait()
+
+    assert [record.pid for record in live_processes(pids)] == [os.getpid(), proc.record.pid]
+
+    # The pod a killed session ran in is gone, so its pids name no process here, whatever runs under them now.
+    foreign = [{**json.loads(line), "owner_scope": ANOTHER_POD} for line in pids.read_text().splitlines()]
+    pids.write_text("".join(f"{json.dumps(row)}\n" for row in foreign), encoding="utf-8")
+
+    assert live_processes(pids) == ()
+    assert await registry.kill_all()
+
+
+def _written(pids: Path, *lines: str) -> Path:
+    pids.write_text("".join(f"{line}\n" for line in lines), encoding="utf-8")
+    return pids
+
+
+def _live_record() -> ProcessRecord:
+    """This test process as a running session recorded it: it started before the record was written."""
+
+    return ProcessRecord(os.getpid(), os.getpgid(0), time.time(), SCHEDULER_BRANCH, ("mb",), local_owner_scope())
+
+
+def test_the_line_a_kill_cut_short_hides_none_of_the_records_before_it(tmp_path: Path) -> None:
+    record = _live_record()
+    pids = _written(tmp_path / "MB-pids.jsonl", json.dumps(asdict(record)), "{ truncated by the kill")
+
+    assert live_processes(pids) == (record,)
+
+
+def test_a_line_that_is_no_process_record_is_a_damaged_file(tmp_path: Path) -> None:
+    pids = _written(tmp_path / "MB-pids.jsonl", json.dumps({"pid": 1, "pgid": 1}))
+
+    with pytest.raises(ValueError, match="no process record"):
+        live_processes(pids)
+
+
+def test_nothing_is_read_as_gone_where_the_scope_here_is_unobservable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A /proc that hides the boot or the namespace tells this environment from none, so no pid can be dismissed."""
+
+    pids = _written(tmp_path / "MB-pids.jsonl", json.dumps(asdict(_live_record())))
+    monkeypatch.setattr(processes, "local_owner_scope", lambda: "")
+
+    with pytest.raises(ValueError, match="unobservable"):
+        live_processes(pids)
+
+
+def test_a_recorded_pid_another_process_reuses_runs_nothing_of_the_session(tmp_path: Path) -> None:
+    long_gone = ProcessRecord(os.getpid(), os.getpgid(0), SPAWNED_AT, "b01", ("mb",), local_owner_scope())
+    pids = _written(tmp_path / "MB-pids.jsonl", json.dumps(asdict(long_gone)))
+
+    assert live_processes(pids) == ()
