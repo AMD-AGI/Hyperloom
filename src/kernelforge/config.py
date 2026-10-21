@@ -26,14 +26,15 @@ def resolve_agent_model(agent_backend: str) -> str:
 
     Forge ships inside Hyperloom, so an operator configuring a box learns one
     vocabulary for the decision. There is exactly one rung, and it is the
-    platform's: ``CLAUDE_MODEL`` / ``CODEX_MODEL``, the same pair
-    :func:`hyperloom.common.llm_config.resolve_forge_llm_model` reads. The two
-    are written out separately rather than sharing one helper because they
-    answer different questions -- that one picks the model for Hyperloom's own
-    calls into a Forge campaign, this one picks the model an agent session
-    runs -- and the shared piece is the variable names. A Forge-private
-    spelling of the same setting would only be a second place for a box to be
-    misconfigured.
+    platform's: ``CLAUDE_MODEL`` / ``CODEX_MODEL`` / ``DSH_MODEL``, the same
+    variables :func:`hyperloom.common.llm_config.resolve_forge_llm_model` reads.
+    The first two are written out separately rather than sharing one helper
+    because they answer different questions -- that one picks the model for
+    Hyperloom's own calls into a Forge campaign, this one picks the model an
+    agent session runs -- and the shared piece is the variable names. The
+    DeepSeek Harness model has one rung and one resolver, so it is asked of
+    that function directly. A Forge-private spelling of the same setting would
+    only be a second place for a box to be misconfigured.
 
     Only a settled backend has an answer here. ``auto`` gets ``""``: which
     provider runs is not known until :meth:`Config.agent_runtime` has checked
@@ -46,6 +47,8 @@ def resolve_agent_model(agent_backend: str) -> str:
         return os.getenv("CODEX_MODEL", "").strip()
     if backend == "claude":
         return os.getenv("CLAUDE_MODEL", "").strip()
+    if backend == llm_config.AGENT_BACKEND_DEEPSEEK:
+        return llm_config.resolve_forge_llm_model(backend)
     return ""
 
 

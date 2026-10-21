@@ -8,7 +8,7 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.common import llm_config
-from kernelforge.config import Config
+from kernelforge.config import Config, resolve_agent_model
 
 _ENV_KEYS = (
     "FORGE_AGENT_BACKEND",
@@ -57,3 +57,11 @@ def test_nothing_named_keeps_the_default_ladder() -> None:
 
     assert config.agent_backend == "auto"
     assert config.agent_fallback_provider == "claude"
+
+
+def test_forge_loop_runs_the_model_the_harness_resolver_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    """forge-fuse and forge-loop must not run different models under one ``DSH_MODEL``."""
+    monkeypatch.setenv("DSH_MODEL", "deepseek-v4-pro")
+
+    assert resolve_agent_model("deepseek") == "deepseek-v4-pro"
+    assert resolve_agent_model("deepseek") == llm_config.resolve_forge_llm_model("deepseek")

@@ -16,6 +16,7 @@ from typing import Any
 
 from hyperloom.common.codex_session import CodexSessionError
 from hyperloom.common.env import is_truthy
+from hyperloom.common.llm_config import AGENT_BACKEND_CHOICES
 
 from ..actions.executors._kernel_agent_tool import _run_subprocess
 
@@ -26,7 +27,7 @@ LLM_UNAVAILABLE_VERDICT = "llm_unavailable"
 # ``fusion_loop.termination_reason`` values for a run that died before the loop ran a single attempt.
 INFRA_ABORT_REASONS = frozenset({"harness_author_failed", "no_git_workspace"})
 DEFAULT_TIMEOUT_SEC = 7200
-_AGENT_BACKENDS = frozenset({"claude", "codex", "deepseek"})
+_AGENT_BACKENDS = frozenset(AGENT_BACKEND_CHOICES)
 
 
 def _validated_agent_backend(value: Any) -> str:
