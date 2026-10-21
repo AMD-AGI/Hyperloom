@@ -26,6 +26,7 @@ from hyperloom.measure.hosted import FILES_ROOT, HostedConfig, HostedMeasurement
 from hyperloom.measure.hosted_log import STATE_FINISHED
 from hyperloom.measure.hosted_spec import SpecContext
 from hyperloom.measure.local import SUPPORTED_KINDS
+from hyperloom.measure.framework_base import framework_envs
 from hyperloom.measure.local_templates import local_runner_template
 from hyperloom.sandbox.local import LocalSandboxProvider
 from hyperloom_multibranch.contracts.toolbox import MeasurementCapacity
@@ -49,6 +50,7 @@ __all__ = [
 #: One node serves at most eight cards, so at most ``8 / TP`` tests run at once (handover 5, item 7).
 MAX_CARDS_PER_NODE = 8
 _SANDBOXES, _ARCHIVE, _SUBMISSIONS = "sandboxes", "archive", "toolbox/submissions.jsonl"
+_FRAMEWORK = "framework"
 _TOOL_RESULTS = "tool-results"
 _POLL_INTERVAL_SEC = 2.0
 LEAKED_CARDS_REASON = "sandbox processes not provably gone"
@@ -221,7 +223,9 @@ class LocalOptions:
     infrastructure retries per test before it ends as ``measurement_failed`` and ``poll_interval_sec`` how often the
     backend polls a runner for its result. ``tools`` are the asynchronous tools ``start_analysis`` may reach; ``None``
     is the local set, TraceLens only: roofline profiles in the host process on host cards outside the card leases, so
-    it is not offered here.
+    it is not offered here. ``framework_configs`` is the directory of aiter's tuned tables that every test reads private
+    copies of, snapshotted below ``session_dir/framework`` as the toolbox is built: the image's when omitted, ``""`` for
+    none (the tests then share the tables).
     """
 
     policy: QueuePolicy | None = None
@@ -232,12 +236,15 @@ class LocalOptions:
     max_infra_retries: int = DEFAULT_MAX_INFRA_RETRIES
     poll_interval_sec: float = _POLL_INTERVAL_SEC
     tools: Sequence[AsyncTool] | None = None
+    framework_configs: str | None = None
 
 
 def _provider(session: LocalSession, cards: tuple[int, ...], options: LocalOptions) -> LocalSandboxProvider:
     template = local_runner_template(
         f"runner-{session.tp}", gpus=session.tp, python=options.python, envs=options.runner_envs
     )
+    framework = framework_envs(Path(session.session_dir) / _FRAMEWORK, options.framework_configs)
+    template = replace(template, envs={**template.envs, **framework})
     return LocalSandboxProvider(
         [template], gpus=cards, base_dir=Path(session.session_dir) / _SANDBOXES, hostname=session.hostname
     )

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -16,8 +17,10 @@ from typing import Any
 import pytest
 
 from hyperloom.contracts.measurement import FailureClass, TestResult, Validity
+from hyperloom.measure.framework_base import FRAMEWORK_BASE_FILE, load_snapshot
 from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT, MeasurementJournal, Record
 from hyperloom.measure.runner.tools import ToolError, ensure_inferencex
+from hyperloom.measure.tests.framework_fixtures import make_framework
 from hyperloom.measure.tests.hosted_fixtures import spec_context
 from hyperloom.measure.tests.test_hosted_real_runner import _git_repo, _point
 from hyperloom_multibranch.contracts.notebook import Role, Writer
@@ -167,5 +170,40 @@ async def test_the_factory_builds_a_toolbox_that_runs_a_test_end_to_end(
         record = await notebook.record(request_id)
         assert record.result is not None and record.result.manifest_sha256 == result.manifest_sha256
         assert toolbox.backend.journal.latest(request_id).extra["verified"] is True  # type: ignore[union-attr]
+    finally:
+        await toolbox.close()
+
+
+async def test_every_test_of_the_session_reads_private_copies_of_the_tables_the_toolbox_snapshotted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "inferencex"
+    commit = _git_repo(repo)
+    _require_tool_checkout(repo, commit, tmp_path / "home", monkeypatch)
+    configs = make_framework(tmp_path)
+    session = tmp_path / "session"
+    notebook = LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"))
+    toolbox = _toolbox_of(
+        notebook,
+        tmp_path,
+        session,
+        commit,
+        runner_envs={"INFERENCEX_REPO": str(repo)},
+        framework_configs=str(configs),
+        max_infra_retries=0,
+    )
+    try:
+        snapshot = load_snapshot(session / "framework")
+        assert snapshot.source == configs and "AITER_CONFIG_GEMM" in snapshot.variables
+        await toolbox.start()
+        request_id = await toolbox.submit_test(req())
+        await asyncio.wait_for(toolbox.drain(), 120)
+        entry = toolbox._log.get(request_id)
+        assert entry is not None and entry.outcome is not None and "result" in entry.outcome, entry.outcome
+        result = TestResult.from_document(entry.outcome["result"])
+        landed = json.loads((session / result.output_dir / FRAMEWORK_BASE_FILE).read_text())
+        assert landed["isolation"] == "private_copies" and landed["matches_session"] is True
+        assert landed["session_sha256"] == snapshot.sha256 and landed["framework_base_changed"] is False
+        assert "AITER_CONFIG_GEMM" in landed["redirected"]
     finally:
         await toolbox.close()

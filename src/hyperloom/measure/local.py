@@ -47,6 +47,7 @@ from hyperloom.measure.boot_watch import BOOT_CANCEL_REASON, BootGuard, boot_lim
 from hyperloom.measure.compile import CompiledEnvironment, LocalBlobStore
 from hyperloom.measure.decode import DecodePassError, plan_pass, run_pass, vocab_size_of, write_outputs
 from hyperloom.measure.farm import FarmError, build_farm, place_farm, server_python, verify_farm
+from hyperloom.measure.framework_copies import private_framework
 from hyperloom.measure.profile_traces import PROFILE_DIR, collect_traces
 from hyperloom.measure.repro import ReproError, find_case, run_case
 from hyperloom.measure.returncodes import HOSTED_INFRA_FAILURE_RC, SERVER_BOOT_TIMEOUT_RC
@@ -173,10 +174,12 @@ class LocalMeasurementBackend:
     def run_test(self, call: TestCall) -> TestOutcome:
         """Run ``call`` to the end and return its outcome; the inference server is reclaimed when this returns."""
         _validate(call)
-        with _PROCESS_LOCK, _rebuilt_environment(call) as call, _test_environment(call) as unset_envs:
-            run = _Run(call, unset_envs)
-            with _watch_output(call), _guard_boot(run):
-                asyncio.run(_runner_of(call)(run))
+        with _PROCESS_LOCK, _rebuilt_environment(call) as call, private_framework(call) as private:
+            call = private.call
+            with _test_environment(call) as unset_envs:
+                run = _Run(call, [name for name in unset_envs if name not in private.redirected])
+                with _watch_output(call), _guard_boot(run):
+                    asyncio.run(_runner_of(call)(run))
         _raise_on_timeout(run)
         if call.kind == _PROFILE:
             _gather_traces(run)
