@@ -571,8 +571,28 @@ _EXTERNAL_DRIVER_PREFIX = (
 class _PrepareDrive:
     """Owns one preparation attempt loop: scaffold, audit, deadlines and retry state."""
 
-    def _stage(self, task: PreparationTask, budget: PreparationBudget) -> None:
-        """Resolve paths and stage an external driver; set staging_failure on error."""
+    def __init__(self, config: Config, usage) -> None:
+        self.config = config
+        self.usage = usage
+        self.attempts = 0
+        self.prior_failure = ""
+        self.prior_failure_heading = RETRY_HEADING_DEFAULT
+        # An attempt that leaves the driver byte-identical is a distinct failure from one that edited it badly, and the
+        # two need different guidance.
+        self.edited_any_attempt = False
+        self.starved_retry_sec = 0.0
+        self.scaffold_error = ""
+        self.external_rollback_error = ""
+        self.stop = False
+        self._loop_start = 0.0
+        self._attempt_dir = ""
+        self._digest_before = None
+        self._agent_started = 0.0
+        self._attempt_timeout = 0.0
+        self._progress_log: list[str] = []
+
+    def _stage(self, task: PreparationTask, budget: PreparationBudget) -> PrepareResult | None:
+        """Resolve paths and stage an external driver; return the failed result when staging fails, else None."""
         deadline_unix = budget.deadline_unix
         self.deadline_sec = _preparation_wall(budget.wall_sec, deadline_unix)
         workspace = Path(task.workspace_dir).resolve()
@@ -595,10 +615,9 @@ class _PrepareDrive:
                 ],
             )
             if external_transaction is None:
-                self.staging_failure = PrepareResult(
+                return PrepareResult(
                     ok=False, attempts=0, rolled_back=True, message=stage_error, audit_dir=audit_dir_str
                 )
-                return
             driver_path = external_transaction.staged_driver_path
             agent_workspace = external_transaction.stage_root
         self._workspace = workspace
@@ -609,6 +628,7 @@ class _PrepareDrive:
         self._audit_dir = audit_dir
         self._audit_dir_str = audit_dir_str
         self._deadline_unix = deadline_unix
+        return None
 
     def _bind(self, task: PreparationTask, preflight: PreflightResult | None) -> None:
         """Protect sources, place harnesses and open the preparation scaffold."""
@@ -882,31 +902,12 @@ async def prepare_task(
     usage=None,
 ) -> PrepareResult:
     """Author/repair the driver so the task conforms; roll back on failure."""
-    self = object.__new__(_PrepareDrive)
-    self.config = config
-    self.usage = usage
-    self.attempts = 0
-    self.prior_failure = ""
-    self.prior_failure_heading = RETRY_HEADING_DEFAULT
-    # An attempt that leaves the driver byte-identical is a distinct failure from one that edited it badly, and the
-    # two need different guidance.
-    self.edited_any_attempt = False
-    self.starved_retry_sec = 0.0
-    self.scaffold_error = ""
-    self.external_rollback_error = ""
-    self.stop = False
-    self.staging_failure = None
-    self._loop_start = 0.0
-    self._attempt_dir = ""
-    self._digest_before = None
-    self._agent_started = 0.0
-    self._attempt_timeout = 0.0
-    self._progress_log = []
-    self._stage(task, budget)
-    if self.staging_failure is not None:
-        return self.staging_failure
-    self._bind(task, preflight)
-    return await self.run()
+    drive = _PrepareDrive(config, usage)
+    staging_failure = drive._stage(task, budget)
+    if staging_failure is not None:
+        return staging_failure
+    drive._bind(task, preflight)
+    return await drive.run()
 
 
 def prepare_task_sync(**kwargs) -> PrepareResult:

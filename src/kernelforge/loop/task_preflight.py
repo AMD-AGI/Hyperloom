@@ -599,6 +599,14 @@ def _stage_seconds(since: float) -> float:
     return round(time.monotonic() - since, 3)
 
 
+@dataclass(frozen=True)
+class _GraphVerdict:
+    """What the one graph probe run concluded: graph timing, and the rank contract it also observes."""
+
+    graph_ok: bool
+    ranks_ok: bool
+
+
 @dataclass
 class _PreflightWork:
     """Mutable accumulators for one preflight run; stages append reasons, details and diagnostics."""
@@ -683,12 +691,11 @@ class _PreflightWork:
 
     async def check_graph(
         self, driver: str, warmup: int, iters: int, contract: DriverContract, deadline_unix: float
-    ) -> tuple[bool, bool]:
-        graph_ok = False
-        ranks_ok = contract.require_ranks <= 1
+    ) -> _GraphVerdict:
+        failed = _GraphVerdict(graph_ok=False, ranks_ok=contract.require_ranks <= 1)
         if not self.bench_ok:
             self.reasons.append("cannot verify graph timing because bench produced no timing")
-            return graph_ok, ranks_ok
+            return failed
         stage_started = time.monotonic()
         replays, tail = await _count_graph_replays(
             driver,
@@ -703,7 +710,7 @@ class _PreflightWork:
             "seconds": _stage_seconds(stage_started),
         }
         if replays >= iters:
-            return True, True
+            return _GraphVerdict(graph_ok=True, ranks_ok=True)
         self.diagnostics["graph"] = tail
         if replays == PROBE_DISTRIBUTED_VIOLATION:
             # A verdict on the driver, not a failure of the probe, so it is
@@ -716,7 +723,7 @@ class _PreflightWork:
                 f"benchmark did not run under a CUDA/HIP graph (observed {replays} "
                 f"graph replays over {iters} timed iterations): {tail[-160:]}"
             )
-        return graph_ok, ranks_ok
+        return failed
 
     async def check_profile(self, driver: str, deadline_unix: float) -> bool:
         if not self.bench_ok:
@@ -766,10 +773,9 @@ async def _preflight_async(
     work.bench_ok = await work.check_bench(driver, warmup, iters, contract.expected_case_ids, deadline_unix)
     # Graph timing: required only for prepass-produced drivers. One probe run answers both stages: it counts
     # CUDAGraph replays and, for a task that declares several ranks, reports what the ranks actually did.
-    graph_ok = True
-    ranks_ok = contract.require_ranks <= 1
+    graph = _GraphVerdict(graph_ok=True, ranks_ok=contract.require_ranks <= 1)
     if contract.require_graph:
-        graph_ok, ranks_ok = await work.check_graph(driver, warmup, iters, contract, deadline_unix)
+        graph = await work.check_graph(driver, warmup, iters, contract, deadline_unix)
     elif contract.require_ranks > 1:
         # The rank observations ride on the graph probe, so there is nothing to
         # conclude from without it.
@@ -777,18 +783,18 @@ async def _preflight_async(
             f"cannot verify the {contract.require_ranks}-rank measurement contract because graph timing was not required"
         )
     if contract.require_ranks > 1:
-        work.details["distributed"] = {"ok": ranks_ok, "required_ranks": contract.require_ranks}
+        work.details["distributed"] = {"ok": graph.ranks_ok, "required_ranks": contract.require_ranks}
     profile_ok = True
     if contract.require_profile:
         profile_ok = await work.check_profile(driver, deadline_unix)
-    ok = correctness_ok and work.bench_ok and graph_ok and profile_ok and ranks_ok
+    ok = correctness_ok and work.bench_ok and graph.graph_ok and profile_ok and graph.ranks_ok
     return PreflightResult(
         ok=ok,
         correctness_ok=correctness_ok,
         bench_ok=work.bench_ok,
-        graph_ok=graph_ok,
+        graph_ok=graph.graph_ok,
         profile_ok=profile_ok,
-        ranks_ok=ranks_ok,
+        ranks_ok=graph.ranks_ok,
         reasons=work.reasons,
         details=work.details,
         diagnostics=work.diagnostics,
