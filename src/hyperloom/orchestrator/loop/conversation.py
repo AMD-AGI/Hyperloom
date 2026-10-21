@@ -18,6 +18,7 @@ from ..bus.message_bus import Message
 from hyperloom.inference_optimizer.trace.conversation_trace import ConversationRecord, append_conversation
 from ..state.failure_evidence import UNMEASURED_OUTCOMES, render_failure_line
 from ..state.shared_state import KbInjection
+from hyperloom.common.coerce import to_str_list
 from hyperloom.common.prompt_safety import defang_prompt_structure as _defang_prompt_structure
 from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_inbox
 
@@ -139,8 +140,10 @@ def _format_delegated_result(head: str, payload: dict[str, Any], max_variant_row
     if done.get("confidence") is not None:
         parts.append(f"confidence={done['confidence']}")
     for label, key in (("findings", "new_findings"), ("questions", "residual_questions")):
-        if done.get(key):
-            parts.append(f"{label}={len(done[key])}")
+        # A model writes these, so a scalar can arrive where the schema asks for a list: it counts as one.
+        items = to_str_list(done.get(key))
+        if items:
+            parts.append(f"{label}={len(items)}")
     # Executors that never raise report the failure inside the result envelope, leaving the top-level error None.
     error = payload.get("error") or result.get("error")
     if error:
