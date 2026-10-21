@@ -264,9 +264,9 @@ def test_a_single_session_candidate_becomes_a_complete_unit(tmp_path: Path) -> N
         },
         "started_at": "2026-10-15T10:00:00",
         "completed_at": "2026-10-15T10:04:30",
-        "current_best_median_ms": 0.052,
+        "current_best_mean_ms": 0.052,
         "decision": "KEEP",
-        "candidate_median_ms": 0.044,
+        "candidate_mean_ms": 0.044,
         "plan_file": str((orchestration / "optimization_plan.md").resolve()),
         "plan": (
             "Small rows are bound by launch latency. This plan fuses the max and sum passes into one sweep. "
@@ -289,7 +289,7 @@ def test_a_lane_candidate_takes_its_lane_plan_from_the_round_that_planned_it(tmp
     assert unit["plan_file"] == str(lane_plan.resolve())
     assert unit["plan"] == "Use 128-bit loads for the input rows. Keep the reduction as it is."
     assert (unit["started_at"], unit["completed_at"]) == ("2026-10-15T10:05:00", "2026-10-15T10:09:00")
-    assert (unit["current_best_median_ms"], unit["candidate_median_ms"], unit["source_ms"]) == (0.044, 0.051, 0.052)
+    assert (unit["current_best_mean_ms"], unit["candidate_mean_ms"], unit["source_ms"]) == (0.044, 0.051, 0.052)
     assert "reasoning" not in unit
 
 
@@ -299,7 +299,7 @@ def test_a_merge_is_named_by_its_stacked_plans_and_dated_by_its_archive(tmp_path
 
     assert unit["provenance"] == {"candidate_origin": "merge", "meta": _meta(experiments, 3)}
     assert unit["plan"] == MERGE_PLAN
-    assert (unit["current_best_median_ms"], unit["candidate_median_ms"]) == (0.044, 0.047)
+    assert (unit["current_best_mean_ms"], unit["candidate_mean_ms"]) == (0.044, 0.047)
     assert (unit["started_at"], unit["completed_at"]) == ("2026-10-15T10:12:00", "2026-10-15T10:12:00")
     assert "reasoning" not in unit and "plan_file" not in unit
 
@@ -589,8 +589,8 @@ def test_the_exported_document_collects_through_the_packaged_mapping(tmp_path: P
         "backend": "triton",
         "gpu": "mi300x",
     }
-    assert row.experience.baseline == {"current_best_median_ms": 0.052, "source_ms": 0.052}
-    assert row.experience.outcome == {"decision": "KEEP", "candidate_median_ms": 0.044}
+    assert row.experience.baseline == {"current_best_mean_ms": 0.052, "source_ms": 0.052}
+    assert row.experience.outcome == {"decision": "KEEP", "candidate_mean_ms": 0.044}
     assert row.experience.provenance.extra["llm_model"] == "Claude-Opus-5"
     assert row.experience.provenance.extra["meta"] == _meta(tmp_path / "logs" / WORKSPACE / "forge_experiments", 1)
     assert row.experience.raw_logs == ()
@@ -621,8 +621,8 @@ def test_a_run_that_kept_reasoning_logs_collects_its_lanes_with_each_log_as_thei
         "plan_file": _ref(orchestration / "lane_002.md"),
     }
     assert (lane["baseline"], lane["outcome"]) == (
-        {"current_best_median_ms": 0.044, "source_ms": 0.052},
-        {"decision": "REVERT_PERF", "candidate_median_ms": 0.051},
+        {"current_best_mean_ms": 0.044, "source_ms": 0.052},
+        {"decision": "REVERT_PERF", "candidate_mean_ms": 0.051},
     )
     origins = [experience["provenance"]["extra"]["candidate_origin"] for experience in (session, lane)]
     assert origins == ["session", "lane"]

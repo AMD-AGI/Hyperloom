@@ -36,7 +36,7 @@ experience:
   identity: $run.identity
   objective: kernel_time_ms@v1
   baseline:
-    current_best_median_ms: {number: $run.current_best_median_ms}
+    current_best_mean_ms: {number: $run.current_best_mean_ms}
     source_ms: {number: $run.source_ms}
   rationale:
     reasoning: {text: $run.reasoning}
@@ -46,7 +46,7 @@ experience:
     source_code: $run.source_code
   outcome:
     decision: {text: $run.decision}
-    candidate_median_ms: {number: $run.candidate_median_ms}
+    candidate_mean_ms: {number: $run.candidate_mean_ms}
   reflection:
     lesson: {text: $run.lesson}
     lesson_file: $run.lesson_file
