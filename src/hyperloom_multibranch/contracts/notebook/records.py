@@ -36,6 +36,7 @@ from hyperloom_multibranch.contracts.notebook.vocab import (
     MergeOutcome,
     QuarantineAction,
     Role,
+    UnfinishedReason,
     UsageSource,
 )
 
@@ -555,11 +556,32 @@ class PeerReplay:
 
 
 @dataclass(frozen=True)
+class UnfinishedLead:
+    """A result of this session worth finishing, by replaying test ``request_id`` of ``branch`` on another head.
+
+    ``target`` and ``mechanism`` are its intent's, ``change`` its recipe delta in one line, ``measured_on`` the commit it
+    was tested on, ``gain_pct`` its judged gain where it had one, and ``detail`` more on ``reason``: the commit it made,
+    the bar it fell short of, or why it was withdrawn.
+    """
+
+    request_id: str
+    branch: str
+    target: str
+    mechanism: str
+    change: str
+    measured_on: str
+    reason: UnfinishedReason
+    gain_pct: float | None = None
+    detail: str = ""
+
+
+@dataclass(frozen=True)
 class StartupBrief:
     """What a fill specialist reads at start; ``leads`` and ``lessons`` come from cross-session recall (MB2).
 
     ``op_shares`` are the latest op shares a tool reported on the start commit, which bound what speeding each op up
-    can gain; ``None`` while the commit was not profiled.
+    can gain; ``None`` while the commit was not profiled. ``unfinished`` are this session's results worth finishing,
+    on any branch.
     """
 
     start_commit: str
@@ -567,6 +589,7 @@ class StartupBrief:
     leads: tuple[str, ...] = ()
     lessons: tuple[str, ...] = ()
     op_shares: OpShares | None = None
+    unfinished: tuple[UnfinishedLead, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -761,6 +784,7 @@ __all__ = [
     "WarmReplay",
     "ToolResultPointer",
     "TriedDirection",
+    "UnfinishedLead",
     "Withdrawal",
     "Writer",
     "amdahl_ceiling_pct",

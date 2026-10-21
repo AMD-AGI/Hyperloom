@@ -51,14 +51,16 @@ from hyperloom_multibranch.contracts.notebook.records import (
     Learning,
     OpShares,
     REPLAY_TARGET,
+    REPLAY_TOOL,
     StartupBrief,
     TestRecord,
     PeerReplay,
     TriedDirection,
+    UnfinishedLead,
     WarmReplay,
     amdahl_ceiling_pct,
 )
-from hyperloom_multibranch.contracts.notebook.vocab import DedupStatus, LearningKind
+from hyperloom_multibranch.contracts.notebook.vocab import DedupStatus, LearningKind, UnfinishedReason
 from hyperloom_multibranch.notebook.changes import NO_CHANGE
 from hyperloom_multibranch.notebook.learning_search import (
     LearningFinder,
@@ -79,6 +81,15 @@ ERROR = "error:"
 UNKNOWN = "unknown"
 #: A test a branch measured with an empty delta measured its parent, so its outcome says nothing about the direction.
 UNCHANGED = "measured without a change: its delta was empty"
+UNFINISHED_TITLE = (
+    f"Unfinished in this session (finish one: {REPLAY_TOOL} with its request_id makes its change for your head):"
+)
+_UNFINISHED = {
+    UnfinishedReason.UNMERGED: "committed, never on the integration head",
+    UnfinishedReason.NEAR_BAR: "kept accuracy, just short of its bar",
+    UnfinishedReason.REPAIR_UNFINISHED: "blocked, its repair never finished",
+    UnfinishedReason.WITHDRAWN: "withdrawn before its result",
+}
 
 Arguments = Mapping[str, Any]
 Handler = Callable[[Arguments], Awaitable[str]]
@@ -220,11 +231,21 @@ def _ceilings(shares: OpShares | None) -> list[str]:
     return [f"- {op}: {share:.1f}% of GPU time, at most +{amdahl_ceiling_pct(share):.1f}%" for op, share in largest]
 
 
+def _unfinished(item: UnfinishedLead) -> str:
+    where = f"- {item.request_id} on {item.branch}: {item.target or UNKNOWN} / {item.mechanism or UNKNOWN}"
+    shown = UNCHANGED if item.change == NO_CHANGE else item.change
+    change = f" ({shown})" if shown else ""
+    gain = f" {item.gain_pct:+.2f}%" if item.gain_pct is not None else ""
+    detail = f", {item.detail}" if item.detail else ""
+    return f"{where}{change} on {item.measured_on}: {_UNFINISHED[item.reason]}{gain}{detail}"
+
+
 def render_brief(brief: StartupBrief) -> str:
     sections = [f"Startup brief from {brief.start_commit}"]
     for title, items in (
         ("Ceilings (largest ops; claim with target_share_pct):", _ceilings(brief.op_shares)),
         ("Tried:", [_tried(item) for item in brief.tried]),
+        (UNFINISHED_TITLE, [_unfinished(item) for item in brief.unfinished]),
         ("Lessons:", [f"- {text}" for text in brief.lessons]),
         ("Leads:", [f"- {text}" for text in brief.leads]),
     ):
@@ -531,12 +552,15 @@ _SPECS = (
     _Spec(
         "replay",
         "A Recipe KB champion the startup brief names, or the change of another branch's test a peer_outcome inbox "
-        "item names, replayed on your branch's head: the intent to claim and the change to submit there. Give one of "
-        "the two; a champion's patch and kernel files are already in the session's blob store.",
+        "item or the brief's unfinished leads name, replayed on your branch's head: the intent to claim and the change "
+        "to submit there. Give one of the two; a champion's patch and kernel files are already in the session's blob "
+        "store.",
         _schema(
             {
                 "canonical_id": _text(description="The champion's Recipe KB id, as the brief names it."),
-                "request_id": _text(description="The other branch's test, as a peer_outcome inbox item names it."),
+                "request_id": _text(
+                    description="The other branch's test, as a peer_outcome inbox item or an unfinished lead names it."
+                ),
             }
         ),
     ),

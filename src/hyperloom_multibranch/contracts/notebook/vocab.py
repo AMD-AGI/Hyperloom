@@ -168,6 +168,17 @@ class FrontierBasis(str, Enum):
     CUSTOM = "custom"
 
 
+class UnfinishedReason(str, Enum):
+    """Why a result of the session is worth finishing: a commit of a stopped branch that never reached the integration
+    head, an explore that kept accuracy and fell just short of its bar, a blocked candidate whose repair never
+    finished, or an explore withdrawn before its result."""
+
+    UNMERGED = "unmerged"
+    NEAR_BAR = "near_bar"
+    REPAIR_UNFINISHED = "repair_unfinished"
+    WITHDRAWN = "withdrawn"
+
+
 __all__ = [
     "COMMITTING",
     "INTEGRATION_BRANCH",
@@ -184,5 +195,6 @@ __all__ = [
     "MergeOutcome",
     "QuarantineAction",
     "Role",
+    "UnfinishedReason",
     "UsageSource",
 ]
