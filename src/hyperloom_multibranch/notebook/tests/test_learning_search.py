@@ -23,6 +23,7 @@ from hyperloom_multibranch.notebook.learning_search import (
     fit_lines,
     render_session_learning,
     session_matches,
+    words,
 )
 
 ABOUT_KV = Learning("s2", LearningKind.PITFALL, "the cache dtype breaks accuracy", "kv cache", "fp8 kv cache")
@@ -55,6 +56,22 @@ def test_the_direction_counts_double_newer_wins_ties_and_superseded_learnings_ar
     assert [record.entry_id for record in found] == ["s2:1", "s3:2", "s1:2", "s1:1"]
     assert [record.entry_id for record in session_matches(_with(snapshot), "fp8 kv cache", limit=2)] == ["s2:1", "s3:2"]
     assert session_matches(_with(snapshot), "the of on", limit=10) == ()
+
+
+def test_a_server_flag_matches_a_query_for_its_parts_as_well_as_itself(snapshot: NotebookSnapshot) -> None:
+    # b05 corrected this at 0.5 h of 64f775fe; b44 asked about cuda graphs at 7.7 h and was never shown it.
+    corrected = Learning(
+        "b05",
+        LearningKind.PITFALL,
+        "Correction: the failures were argparse finding '--cuda-graph-max-bs' ambiguous (it matches "
+        "--cuda-graph-max-bs-decode/-prefill), not page-size. Use --cuda-graph-max-bs-decode.",
+    )
+    learnt = dataclasses.replace(snapshot, learnings=(LearningRecord("b05:2", 1.0, corrected),))
+
+    assert [record.entry_id for record in session_matches(learnt, "cuda graph padding", limit=5)] == ["b05:2"]
+    assert session_matches(learnt, "--cuda-graph-bs-decode", limit=5) != ()
+    assert {"cuda-graph-max-bs", "cuda", "graph", "max", "bs", "page-size", "page", "size"} <= words(corrected.content)
+    assert words("M=64 decode at conc 64, gate_up N=34816") == {"decode", "conc", "gate_up", "gate", "up", "34816"}
 
 
 def test_a_learning_renders_with_its_direction_and_the_tests_behind_it(snapshot: NotebookSnapshot) -> None:

@@ -323,8 +323,8 @@ async def test_the_lessons_hold_what_this_session_and_past_sessions_learnt_about
     assert (logged["here"], logged["past"]) == ([learnt.entry_id], ["exp-past"])
 
     assert (
-        f"learnt here: [s2, pitfall] split kv regresses when attention is not the bottleneck "
-        f"(r2: regressed -2.00%, recorded_only) [{learnt.entry_id}]"
+        f"learnt here: [s2, pitfall about attention / split kv] split kv regresses when attention is not the "
+        f"bottleneck (r2: regressed -2.00%, recorded_only) [{learnt.entry_id}]"
     ) in brief.lessons
     assert (
         "learnt before: [sess-0, tp differ, measured] attention split kv pays only past conc 128 [exp-past]"

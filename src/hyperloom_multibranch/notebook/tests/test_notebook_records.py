@@ -65,6 +65,8 @@ from hyperloom_multibranch.notebook.tests.factories import TTL, delta, intent, j
 Open = Callable[..., LocalNotebook]
 ROOT_RECIPE = DIGEST_PREFIX + "a" * 64
 CHILD_RECIPE = DIGEST_PREFIX + "b" * 64
+#: A past session's lesson, as the RSI lesson pool names one.
+LESSON = "lsn-0123456789ab"
 
 
 async def _tested(open_as: Open, request_id: str, branch: str = "s1", parent: str = "c0") -> None:
@@ -444,6 +446,15 @@ async def test_a_branch_writes_its_own_learnings_and_every_branch_reads_them_all
             Learning("s1", LearningKind.INSIGHT, "attention dominates decode at conc 64", supersedes="nope:1"),
             NotRecorded,
         ),
+        (Learning("s1", LearningKind.INSIGHT, "attention dominates decode at conc 64", supersedes=LESSON), ValueError),
+        (Learning("s1", LearningKind.INSIGHT, "attention dominates decode at conc 64", retires=LESSON), ValueError),
+        (Learning("s1", LearningKind.INSIGHT, "attention dominates decode at conc 64", retires="s1:1"), ValueError),
+        (
+            Learning(
+                "s1", LearningKind.INSIGHT, "attention dominates decode at conc 64", supersedes="s1:1", retires=LESSON
+            ),
+            ValueError,
+        ),
     ],
 )
 async def test_a_learning_the_notebook_cannot_use_is_refused(
@@ -451,6 +462,37 @@ async def test_a_learning_the_notebook_cannot_use_is_refused(
 ) -> None:
     with pytest.raises(refusal):
         await open_as(Role.SPECIALIST_RUNTIME, "s1").append_learning(learning)
+
+
+async def test_a_past_sessions_lesson_is_revised_or_retired_on_this_sessions_tests(open_as: Open) -> None:
+    runtime, toolbox = open_as(Role.SPECIALIST_RUNTIME, "s1"), open_as(Role.TOOLBOX)
+    wanted = intent("s1", "c0", target="cuda graph", mechanism="max batch size", layer=IntentLayer.CONFIG)
+    await runtime.acquire(wanted, delta().fingerprint(), ttl_seconds=TTL)
+    await toolbox.write_request(request("r1", wanted))
+    await toolbox.write_result(result("r1"))
+    fixed = "--cuda-graph-max-bs is ambiguous here; the -decode form takes the decode graph size"
+
+    revised = await runtime.append_learning(
+        Learning("s1", LearningKind.PITFALL, fixed, request_ids=("r1",), supersedes=LESSON)
+    )
+    retired = await runtime.append_learning(
+        Learning(
+            "s1",
+            LearningKind.OTHER,
+            "page size 64 starts fine once the flag is spelt out",
+            request_ids=("r1",),
+            retires=LESSON,
+        )
+    )
+    plain = await runtime.append_learning(Learning("s1", LearningKind.TOOLING, "vLLM 0.11 ignores VLLM_USE_V1=0 here"))
+
+    assert (revised.learning.supersedes, retired.learning.retires) == (LESSON, LESSON)
+    assert (revised.learning.target, revised.learning.mechanism, revised.learning.layer) == (
+        "cuda graph",
+        "max batch size",
+        IntentLayer.CONFIG,
+    )
+    assert (plain.learning.target, plain.learning.mechanism, plain.learning.layer) == ("", "", None)
 
 
 async def test_a_branch_supersedes_only_its_own_learnings(open_as: Open) -> None:

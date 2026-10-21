@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
@@ -290,13 +291,25 @@ class BranchLogRecord:
     entry: BranchLogEntry
 
 
+#: How a lesson of the RSI lesson pool, a learning a past session left, is named where a learning refers to one.
+LESSON_ID = re.compile(r"lsn-[0-9a-f]{12}")
+
+
+def is_lesson_id(value: str | None) -> bool:
+    """Whether ``value`` names a past session's lesson in the RSI lesson pool rather than an entry of this notebook."""
+
+    return value is not None and LESSON_ID.fullmatch(value) is not None
+
+
 @dataclass(frozen=True)
 class Learning:
     """What a specialist learnt, in its own words, for the next decision of any branch, now or in a later session.
 
     ``target``, ``mechanism`` and ``layer`` name the direction it is about, when it is about one; ``request_ids`` the
-    tests behind it; ``supersedes`` an earlier learning of the same branch that it replaces. The conditions it holds
-    under are the session's, which the notebook knows; the specialist does not repeat them.
+    tests behind it. ``supersedes`` names what it replaces: an earlier learning of the same branch, or a past session's
+    lesson (:data:`LESSON_ID`) it revises. ``retires`` names a past session's lesson it shows wrong or outdated here,
+    ``content`` saying why. Either on a past session's lesson cites at least one of this session's tests. The conditions
+    it holds under are the session's, which the notebook knows; the specialist does not repeat them.
     """
 
     branch: str
@@ -307,6 +320,7 @@ class Learning:
     layer: IntentLayer | None = None
     request_ids: tuple[str, ...] = ()
     supersedes: str | None = None
+    retires: str | None = None
 
 
 @dataclass(frozen=True)
@@ -727,6 +741,7 @@ class NotebookSnapshot:
 __all__ = [
     "CLAIM_TOKEN_LENGTH",
     "ENVIRONMENT_FIELDS",
+    "LESSON_ID",
     "MAX_OP_SHARES",
     "BaselineRecord",
     "BranchLogRecord",
@@ -771,4 +786,5 @@ __all__ = [
     "Withdrawal",
     "Writer",
     "amdahl_ceiling_pct",
+    "is_lesson_id",
 ]

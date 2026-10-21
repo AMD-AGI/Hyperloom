@@ -50,6 +50,7 @@ from hyperloom_multibranch.notebook.tools import (
 GEMM_ON_C0 = {"parent_commit": "c0", "target": "moe gemm", "mechanism": "tuned kernel", "layer": "kernel"}
 FLASH_ON_C1 = {"parent_commit": "c1", "target": "attention", "mechanism": "flash decode", "layer": "source"}
 TUNED = {"config": {"extra_server_args": "--max-num-seqs 256"}}
+LESSON = "lsn-0123456789ab"
 
 Tools = Callable[..., dict[str, NotebookTool]]
 
@@ -302,6 +303,27 @@ async def test_a_learning_is_written_for_this_branch_and_a_vague_one_comes_back_
     assert unknown.startswith("error: ValueError")
     assert tools["notebook_learn"].input_schema["required"] == ["kind", "content"]
     assert tools["notebook_learn"].input_schema["properties"]["content"]["maxLength"] == 600
+    assert "retires" in tools["notebook_learn"].input_schema["properties"]
+
+
+async def test_a_past_sessions_lesson_is_corrected_or_retired_only_when_the_finder_knows_it(tools_of: Tools) -> None:
+    class _Pool(SessionLearnings):
+        def knows(self, lesson_id: str) -> bool:
+            return lesson_id == LESSON
+
+    tools, plain = tools_of("s1", learnings=_Pool()), tools_of("s1")
+    fixed = "the bare --cuda-graph-max-bs is ambiguous here; the -decode form works"
+
+    revised = await _call(tools, "learn", kind="pitfall", content=fixed, request_ids=["r4"], supersedes=LESSON)
+    retired = await _call(tools, "learn", kind="other", content=fixed, request_ids=["r4"], retires=LESSON)
+    unknown = await _call(tools, "learn", kind="pitfall", content=fixed, request_ids=["r4"], retires="lsn-ffffffffffff")
+    elsewhere = await _call(plain, "learn", kind="pitfall", content=fixed, request_ids=["r4"], supersedes=LESSON)
+    uncited = await _call(tools, "learn", kind="pitfall", content=fixed, supersedes=LESSON)
+
+    assert revised.startswith("learnt ") and f"it revises {LESSON}" in revised
+    assert f"it retires {LESSON}" in retired
+    assert unknown.startswith("error: lsn-ffffffffffff is no live lesson") and elsewhere.startswith("error:")
+    assert uncited.startswith("error: ValueError") and "request_ids" in uncited
 
 
 async def test_a_granted_claim_lists_this_sessions_learnings_about_its_direction(tools_of: Tools) -> None:

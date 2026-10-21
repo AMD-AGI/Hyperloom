@@ -59,6 +59,7 @@ from hyperloom_multibranch.contracts.notebook.peers import (
     Validity,
 )
 from hyperloom_multibranch.contracts.notebook.records import (
+    LESSON_ID,
     REPLAY_TARGET,
     BaselineRecord,
     BranchLogRecord,
@@ -89,6 +90,7 @@ from hyperloom_multibranch.contracts.notebook.records import (
     Withdrawal,
     Writer,
     amdahl_ceiling_pct,
+    is_lesson_id,
 )
 from hyperloom_multibranch.contracts.notebook.vocab import (
     COMMITTING,
@@ -140,7 +142,8 @@ GENERIC_LEARNINGS = frozenset(
 
 
 def _check_learning(learning: Learning, state: NotebookState) -> Learning:
-    """``learning`` with its text trimmed; raises ``ValueError`` or :class:`NotRecorded` for what the store refuses."""
+    """``learning`` with its text trimmed and its direction, when it names none, its first cited test's; raises
+    ``ValueError`` or :class:`NotRecorded` for what the store refuses."""
 
     content = " ".join(learning.content.split())
     if len(content) < LEARNING_MIN_CHARS or content.lower().rstrip(".") in GENERIC_LEARNINGS:
@@ -150,10 +153,37 @@ def _check_learning(learning: Learning, state: NotebookState) -> Learning:
     unknown = [request_id for request_id in learning.request_ids if request_id not in state.requests]
     if unknown:
         raise NotRecorded(f"no test request {', '.join(unknown)}")
+    _check_references(learning, state)
+    trimmed = replace(learning, content=content, target=learning.target.strip(), mechanism=learning.mechanism.strip())
+    return _directed(trimmed, state)
+
+
+def _check_references(learning: Learning, state: NotebookState) -> None:
+    """What ``learning`` replaces or retires: its own branch's learning or a past session's lesson, the lesson only
+    with this session's tests cited and never both at once."""
+
+    if learning.retires is not None and not is_lesson_id(learning.retires):
+        raise ValueError(f"retires names a past session's lesson, {LESSON_ID.pattern}, not {learning.retires!r}")
+    if learning.retires is not None and learning.supersedes is not None:
+        raise ValueError("a learning revises one lesson or retires one, not both")
+    pooled = is_lesson_id(learning.supersedes) or learning.retires is not None
+    if pooled and not learning.request_ids:
+        raise ValueError("revising or retiring a past session's lesson cites this session's tests in request_ids")
     own = {record.entry_id for record in state.learnings if record.learning.branch == learning.branch}
-    if learning.supersedes is not None and learning.supersedes not in own:
+    if learning.supersedes is not None and not pooled and learning.supersedes not in own:
         raise NotRecorded(f"branch {learning.branch} has no learning {learning.supersedes}")
-    return replace(learning, content=content, target=learning.target.strip(), mechanism=learning.mechanism.strip())
+
+
+def _directed(learning: Learning, state: NotebookState) -> Learning:
+    """``learning`` about its first cited test's direction when it names none of its own, so a learning a branch
+    wrote about a test is found by the next claim of that direction."""
+
+    if learning.target or learning.mechanism or not learning.request_ids:
+        return learning
+    intent = state.intents.get(state.requests[learning.request_ids[0]].intent_fingerprint)
+    if intent is None:
+        return learning
+    return replace(learning, target=intent.target, mechanism=intent.mechanism, layer=learning.layer or intent.layer)
 
 
 #: The action of a claim made before its change is written, as the role asks; it names no action, so two such claims

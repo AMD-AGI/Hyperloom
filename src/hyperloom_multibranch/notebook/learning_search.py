@@ -4,9 +4,12 @@
 """This session's learnings, matched to what a branch is about to decide; what the notebook tools find on their own.
 
 A query matches a learning no later one superseded by the words they share, a word of the direction the learning is
-about counting double; among equals the newer comes first. :class:`LearningFinder` is what the tools ask for
-learnings: :class:`SessionLearnings` answers from this session alone, and the knowledge package's
-``LearningRecall`` adds past sessions' from the Experience KB.
+about counting double; among equals the newer comes first. A word is lower-cased, and a compound one, such as a
+server flag, also counts as each of its parts, so ``--cuda-graph-max-bs`` matches a query for "cuda graph"; a number
+under four digits, the batch size or concurrency nearly every learning mentions, does not count.
+:class:`LearningFinder` is what the tools ask for learnings: :class:`SessionLearnings` answers from this session
+alone, the knowledge package's ``LearningRecall`` adds past sessions' from the Experience KB, and RSI's
+``LessonRecall`` past sessions' lessons from the lesson pool, which a learning of this session may revise or retire.
 
 Given a :class:`RetrievalLog`, a finder appends one :data:`LEARNINGS_LOG_FORMAT` line per retrieval: when, to which
 branch, through what (the learnings tool, a granted claim, a startup brief), for what query, and what came back. Set
@@ -31,10 +34,17 @@ from hyperloom_multibranch.notebook.codec import key_sorted
 log = logging.getLogger(__name__)
 
 _WORD = re.compile(r"[a-z0-9][a-z0-9._+-]*")
+_PARTS = re.compile(r"[._:/+-]+")
+#: A batch size or a concurrency every other learning mentions; a GEMM shape, four digits or more, still counts.
+_SMALL_NUMBER = re.compile(r"\d{1,3}")
 _STOPWORDS = frozenset(
     {"a", "an", "and", "at", "by", "for", "in", "is", "it", "no", "not", "of", "on", "or", "the", "this", "to", "with"}
 )
 SESSION_HEADING = "This session's learnings:"
+#: How a granted claim heads this session's learnings about its direction.
+CLAIM_HEADING = "This session's learnings about it:"
+#: How many of this session's learnings a granted claim lists.
+CLAIM_LEARNINGS = 3
 LEARNINGS_LOG_FORMAT = "multibranch.learnings-log.v1"
 #: The retrieval log's usual name in the session's reports folder.
 LEARNINGS_LOG = "learnings.jsonl"
@@ -112,6 +122,14 @@ class LearningFinder(Protocol):
     async def lines(self, snapshot: NotebookSnapshot, query: str, *, limit: int, branch: str = "") -> list[str]:
         """The learnings that bear on ``query`` for ``branch``, as headed lines; empty when none does."""
 
+    async def about(self, snapshot: NotebookSnapshot, query: str, *, branch: str) -> list[str]:
+        """What ``branch``'s granted claim lists about its direction ``query``: this session's learnings, then what
+        the finder adds, as headed lines, logged as one retrieval; empty when nothing bears on it."""
+
+    def knows(self, lesson_id: str) -> bool:
+        """Whether ``lesson_id`` names a past session's lesson, live, that a learning of this session may revise or
+        retire."""
+
 
 def _same_words(left: str, right: str) -> bool:
     return " ".join(left.lower().split()) == " ".join(right.lower().split())
@@ -152,9 +170,17 @@ def outcome_of(record: TestRecord) -> str:
 
 
 def words(text: str) -> set[str]:
-    """The words of ``text`` a match counts: lower-cased, two characters or more, common short words left out."""
+    """The words of ``text`` a match counts: lower-cased, two characters or more, with no sentence's full stop; common
+    short words and numbers under four digits left out; a compound word counts whole and as each of its parts."""
 
-    return {word for word in _WORD.findall(text.lower()) if len(word) > 1 and word not in _STOPWORDS}
+    found = set()
+    for word in _WORD.findall(text.lower()):
+        whole = word.rstrip(".")
+        found.add(whole)
+        found.update(_PARTS.split(whole))
+    return {
+        word for word in found if len(word) > 1 and word not in _STOPWORDS and not _SMALL_NUMBER.fullmatch(word)
+    }
 
 
 def session_matches(snapshot: NotebookSnapshot, query: str, *, limit: int) -> tuple[LearningRecord, ...]:
@@ -219,8 +245,28 @@ class SessionLearnings:
         rendered = [render_session_learning(record, snapshot) for record in found]
         return [SESSION_HEADING, *rendered] if rendered else []
 
+    async def about(self, snapshot: NotebookSnapshot, query: str, *, branch: str) -> list[str]:
+        """This session's :data:`CLAIM_LEARNINGS` best matches under :data:`CLAIM_HEADING`; empty when none matched."""
+
+        found = self.here(snapshot, query, limit=CLAIM_LEARNINGS, branch=branch, source=RetrievalSource.CLAIM)
+        return claim_lines(found, snapshot)
+
+    def knows(self, lesson_id: str) -> bool:
+        """``False``: this finder holds no past session's lesson."""
+
+        return False
+
+
+def claim_lines(found: Sequence[LearningRecord], snapshot: NotebookSnapshot) -> list[str]:
+    """``found``, this session's learnings about a claimed direction, under :data:`CLAIM_HEADING`; empty for none."""
+
+    rendered = [render_session_learning(record, snapshot) for record in found]
+    return [CLAIM_HEADING, *rendered] if rendered else []
+
 
 __all__ = [
+    "CLAIM_HEADING",
+    "CLAIM_LEARNINGS",
     "LEARNINGS_LOG",
     "LEARNINGS_LOG_FORMAT",
     "SESSION_HEADING",
@@ -230,6 +276,7 @@ __all__ = [
     "RetrievalSource",
     "SessionLearnings",
     "ShownLead",
+    "claim_lines",
     "current_learnings",
     "fit_lines",
     "names",
