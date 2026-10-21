@@ -150,6 +150,19 @@ def test_perfmodel_uses_vendor_peak_when_achievable_spec_is_absent():
     assert out.peak_achievable_tflops == pytest.approx(2516.6)
 
 
+def test_perfmodel_uses_the_r9700_vendor_peak():
+    out = _perfmodel(gpu_type="r9700")
+
+    assert out is not None
+    assert out.hbm_bw_gbps == pytest.approx(640.0)
+    assert out.peak_achievable_tflops == pytest.approx(191.0)
+
+
+def test_r9700_claims_no_fp4_compute_peak():
+    assert rc.resolve_compute_peak_provenance("r9700", "bf16")["compute_peak_convention"] == "vendor"
+    assert rc.resolve_compute_peak_provenance("r9700", "mxfp4")["compute_peak_convention"] == "unknown"
+
+
 def test_perfmodel_routes_a_moe_model_through_the_fused_expert_op():
     """A MoE model replaces the three dense FFN GEMMs with one fused op."""
     out = _perfmodel(_dense_meta(num_experts=8, experts_per_tok=2, moe_intermediate_size=256))

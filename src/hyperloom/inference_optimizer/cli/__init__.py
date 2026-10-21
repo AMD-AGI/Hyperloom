@@ -49,9 +49,11 @@ from .model_gate import (
 )
 from ..gpu_types import (
     _autodetect_gpu_type,
-    _gpu_runner_type,
+    gpu_runner_type,
     _resolve_amd_gpu_type,
     _resolve_gpu_type,
+    require_runner_framework,
+    warn_family_runner,
 )
 from ..model_config_utils import (
     summarize_model_config,
@@ -236,7 +238,8 @@ def _restore_operator_supplied_paths_from_state(args: Any, state: SharedState) -
 
 
 def _require_custom_entrypoint(framework: str, gpu_type: str | None = None) -> None:
-    """Fail at launch when ``--framework custom`` cannot resolve its script."""
+    """Fail at launch when the selected runner cannot serve the framework."""
+    require_runner_framework(gpu_type or "", framework)
     if str(framework or "").strip().lower() != "custom":
         return
     from hyperloom.orchestrator.actions.executors._workload_envs import (
@@ -1817,7 +1820,7 @@ def _reexport_session_environment(
     if state.framework == "atom":
         _apply_atom_auto_tighten(args)
     if state.gpu_type:
-        runner_gpu_type = _gpu_runner_type(state.gpu_type)
+        runner_gpu_type = gpu_runner_type(state.gpu_type)
         os.environ["TARGET_GPU_TYPE"] = state.gpu_type
         os.environ["GPU_TYPE"] = runner_gpu_type
         print(f"  re-exported GPU_TYPE  : {state.gpu_type}")
@@ -2115,14 +2118,8 @@ async def _seed_fresh_session(args: argparse.Namespace, *, nodes_resolved: int) 
         print(line, file=sys.stderr)
     if probed and not user_specified:
         print(f"GPU type        : {gpu_type} (auto-detected)")
-    runner_gpu_type = _gpu_runner_type(gpu_type)
-    if gpu_type and runner_gpu_type != gpu_type:
-        print(
-            f"WARN: {gpu_type} uses {runner_gpu_type} as Magpie "
-            f"runner_type (same gfx942/CDNA3 arch; Magpie has no "
-            f"sglang_{gpu_type}.sh / vllm_{gpu_type}.sh yet)",
-            file=sys.stderr,
-        )
+    runner_gpu_type = gpu_runner_type(gpu_type)
+    warn_family_runner(gpu_type, framework)
     args.gpu_type = gpu_type or None
     if runner_gpu_type:
         os.environ["TARGET_GPU_TYPE"] = gpu_type

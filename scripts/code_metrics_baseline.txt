@@ -603,8 +603,8 @@ function-lines src/hyperloom/orchestrator/bringup/argv_preflight.py::check_serve
 function-lines src/hyperloom/orchestrator/bus/resource_lock.py::SqliteLeaseBackend.acquire_many 95
 function-lines src/hyperloom/orchestrator/bus/resource_lock.py::_unverifiable_holders 89
 function-lines src/hyperloom/orchestrator/enablement/build.py::EnablementBuild._enqueue_build_launch_probe 84
-function-lines src/hyperloom/orchestrator/enablement/build.py::EnablementBuild.maybe_enqueue_specialist_requested_build 99
-function-lines src/hyperloom/orchestrator/enablement/build.py::EnablementBuild.maybe_escalate_to_targeted_build 133
+function-lines src/hyperloom/orchestrator/enablement/build.py::EnablementBuild.maybe_enqueue_specialist_requested_build 97
+function-lines src/hyperloom/orchestrator/enablement/build.py::EnablementBuild.maybe_escalate_to_targeted_build 131
 function-lines src/hyperloom/orchestrator/enablement/lane.py::EnablementLane._maybe_enqueue_enablement_specialist 92
 function-lines src/hyperloom/orchestrator/enablement/lane.py::EnablementLane.maybe_rearm_enablement 104
 function-lines src/hyperloom/orchestrator/enablement/params.py::EnablementParams._derive_checkpoint_weight_facts 117
@@ -893,7 +893,7 @@ module-lines src/hyperloom/inference_optimizer/cli/__init__.py 2569
 module-lines src/hyperloom/inference_optimizer/cli/model_gate.py 1815
 module-lines src/hyperloom/inference_optimizer/cli/preflight.py 2647
 module-lines src/hyperloom/inference_optimizer/multi_node/cli.py 1867
-module-lines src/hyperloom/inference_optimizer/roofline_ceiling.py 1445
+module-lines src/hyperloom/inference_optimizer/roofline_ceiling.py 1444
 module-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py 2089
 module-lines src/hyperloom/orchestrator/actions/executors/_kv_metrics.py 1590
 module-lines src/hyperloom/orchestrator/actions/executors/_workload_envs.py 2158
