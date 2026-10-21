@@ -521,8 +521,8 @@ async def test_a_cancelled_turn_stops_its_runtime_instead_of_leaving_it_spending
         await asyncio.sleep(0.01)
 
     task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    await asyncio.wait([task])
+    assert task.cancelled()
     assert instances[0].closed
 
 
