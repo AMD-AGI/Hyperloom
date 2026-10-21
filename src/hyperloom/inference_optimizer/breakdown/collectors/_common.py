@@ -151,20 +151,3 @@ def phase_at(
         else:
             break
     return current
-
-
-def _load_optimization_journal(
-    session_dir: Path | None,
-    warnings: list[str],
-) -> list[dict[str, Any]]:
-    """Read ``reports/optimization_journal.json`` entries (the canonical action ledger); ``[]`` on legacy sessions."""
-    if session_dir is None:
-        return []
-    data = _load_json_safe(
-        session_dir / "reports" / "optimization_journal.json",
-        warnings,
-    )
-    if not isinstance(data, dict):
-        return []
-    entries = data.get("entries")
-    return entries if isinstance(entries, list) else []

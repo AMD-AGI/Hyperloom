@@ -1690,11 +1690,6 @@ class TestKernelE2EMeasurementPromotion:
         state = coord.shared_state
         state.current_best.update(extra_server_args="--page-size 32", extra_envs={"TUNED_ENV": "1"})
         state.baseline_config_path = "/live/base.yaml"
-        state.last_kernel_opt = {
-            "kernel_id": "unrelated",
-            "patch_path": "/unrelated.patch",
-            "target_file": "/unrelated.py",
-        }
         state.save(coord.session_dir)
         return {
             "source": "forge_gemm_paired",

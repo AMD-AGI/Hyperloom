@@ -419,13 +419,13 @@ def test_cycle_strategy_rows_do_not_nest_the_prior_cycles(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("macro_cycle", "target_reached_at"),
-    [(0, ""), (_ps.DEFAULT_MAX_MACRO_CYCLES - 1, ""), (0, "2026-01-01T00:00:00+00:00"), (0, " ")],
-    ids=["open", "last_cycle", "target_reached", "blank_target_reached"],
+    ("saturated", "target_reached_at"),
+    [(False, ""), (True, ""), (False, "2026-01-01T00:00:00+00:00"), (False, " ")],
+    ids=["open", "all_directions_saturated", "target_reached", "blank_target_reached"],
 )
-def test_reloop_line_and_transition_agree_at_the_cycle_limits(macro_cycle, target_reached_at):
+def test_reloop_line_and_transition_agree_at_the_cycle_limits(saturated, target_reached_at):
     s = _render_state(_ps.PHASE_SWEEP)
-    s.macro_cycle = macro_cycle
+    s.saturated_directions = {"kv_cache": {"saturated": saturated}}
     s.target_reached_at = target_reached_at
     s.last_conc_sweep = {"status": "succeeded", "summary": {"successful_pairs": 1}}
     transition = _ps.compute_next_phase(s)
