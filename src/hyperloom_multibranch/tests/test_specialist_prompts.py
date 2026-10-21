@@ -26,6 +26,7 @@ from hyperloom_multibranch.specialist.prompts import (
     role_prompt,
 )
 from hyperloom_multibranch.specialist.runtime import SessionStart
+from hyperloom_multibranch.toolbox.mcp_tools import REPLY_INBOX_HEADER
 
 WORKLOAD = "qwen3-8b on vllm, TP 1, ISL 1024, OSL 1024, concurrency 64, InferenceX"
 TOOLS = (
@@ -167,6 +168,13 @@ def test_the_role_keeps_working_while_tests_run_and_ends_the_turn_to_wait():
     assert "when nothing is left to do until one lands, end your turn and it wakes you" in prompt
     assert "within a minute with the test's progress" in prompt
     assert "Never wait with sleep, a background shell or by reading the test's files" in prompt
+
+
+def test_the_role_says_the_inbox_block_a_tool_reply_ends_with_is_not_the_tool_s_result():
+    prompt = role_prompt(WORKLOAD)
+
+    assert f'A tool reply can end with a block headed "{REPLY_INBOX_HEADER}"' in prompt
+    assert "it is not part of that tool's result" in prompt
 
 
 def test_the_wake_and_nudge_messages_say_what_arrived_or_that_nothing_did():

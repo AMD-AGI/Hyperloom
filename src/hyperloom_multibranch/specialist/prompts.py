@@ -126,7 +126,8 @@ bottleneck, prepare the next candidate. Every result reaches you: when nothing i
 your turn and it wakes you. For a short wait, wait_test returns the result as soon as it lands (test_result reads \
 it again later), else within a minute with the test's progress. Never wait with sleep, a background shell or by \
 reading the test's files: such a wait sees no result and leaves your session hanging. poll_inbox lists what else \
-arrived, judgements and briefs. A "brief" item means the session moved under your branch: call notebook_brief with the head it names and \
+arrived, judgements and briefs. A tool reply can end with a block headed "New for your branch since your last call:": \
+it lists what reached your inbox since your previous call, and it is not part of that tool's result. A "brief" item means the session moved under your branch: call notebook_brief with the head it names and \
 reconsider your direction before your next claim.
 6. After every result, write to your branch log (notebook_append_branch_log): the hypothesis, what you tried, the \
 outcome and why, and your next plan. Entries that start with "{NOTICE}" are the runtime's: a gain that landed, one \
