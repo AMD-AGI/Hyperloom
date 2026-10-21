@@ -372,7 +372,7 @@ def test_the_baseline_publishes_the_axes_the_session_was_anchored_on(tmp_path):
     baseline = _outcome(tmp_path)["baseline"]
     assert baseline["perf"] == AGENTX_AXES
     # The output axis keeps its own meaning beside them: this addition takes nothing away.
-    assert baseline["throughput_tok_s_per_gpu"] == 183.0
+    assert baseline["output_throughput"] == 183.0
 
 
 def test_a_synthetic_baseline_publishes_nulls_throughout(tmp_path):
