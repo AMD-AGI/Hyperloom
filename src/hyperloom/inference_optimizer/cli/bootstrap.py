@@ -17,8 +17,9 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterator
 
+from ave.task import read_env_prompts
 from hyperloom.common.coerce import to_unix
-from hyperloom.common.env import forge_explicitly_enabled
+from hyperloom.common.env import ave_explicitly_enabled, forge_explicitly_enabled
 from hyperloom.common.gpu_partition import published_shape
 from hyperloom.common.gpu_power_settings import SCLK_MAX_MHZ, DeclaredPowerSettings
 from hyperloom.common.perf_metric import is_agentx_mode
@@ -699,7 +700,9 @@ def _seed_shared_state(
     _cfg_tags = _load_model_config_tags(str(args.model))
 
     # The only read of the backend choice; every later decision reads the persisted record.
-    _kernel_optimizer_record = "forge" if forge_explicitly_enabled() else "geak"
+    _kernel_optimizer_record = (
+        "forge" if forge_explicitly_enabled() else "geak" if not ave_explicitly_enabled() else "ave"
+    )
 
     # Reference launch recipe (fresh-launch only, fail-soft): lowest-priority base for the baseline server args.
     _ref_args, _ref_envs, _ref_model, _ref_controls = _resolve_reference_recipe(args)
@@ -749,6 +752,9 @@ def _seed_shared_state(
         max_model_len=_int_arg("max_model_len", 0),
         kernel_enabled=not getattr(args, "no_kernel", False),
         kernel_optimizer=_kernel_optimizer_record,
+        ave_prompts=[{"id": step.id, "prompt": step.prompt, "files": list(step.files)} for step in read_env_prompts()]
+        if _kernel_optimizer_record == "ave" and not getattr(args, "no_kernel", False)
+        else [],
         # AgentX corpus shape: seeded from canonical constants if AgentX is on;
         # overwritten by the measured shape after every aiperf run.
         agentx_corpus_shape=_build_agentx_corpus_shape_seed() if benchmark_mode == "agentx" else {},

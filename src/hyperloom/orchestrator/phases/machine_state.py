@@ -661,6 +661,9 @@ def kernel_work_pending(state: Any) -> bool:
     if _controller_phase_terminal(state) or _geak_phase_terminal(state):
         return False
 
+    if state.kernel_optimizer == "ave":
+        return not state.ave_result
+
     return bool(state.untried_hot_reusable_kernels())
 
 

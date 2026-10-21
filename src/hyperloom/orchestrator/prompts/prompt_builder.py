@@ -851,6 +851,10 @@ allocation never granted. Source-level kernel rewrite is not on this list at all
 controller selects and dispatches its own operators. Read
 `kernel_rewrite_controller_result` and `pending_keep_kernels` to see what the
 lanes did; do not try to drive them.
+Ave likewise owns its prompt sequence and E2E integration in the `kernel_agent`
+task and returns an `ave_done` response. Check `get_running_tasks` while waiting:
+an empty KEEP queue or attempt ledger does not mean the optimizer is idle.
+Wait for the running task to finish; do not request `skip_to_close` because those ledgers are empty.
 
 ### `integrate` — forced immediately after a KEEP
 

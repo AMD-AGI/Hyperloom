@@ -28,8 +28,8 @@ handlers and integrating external components.
 | Before building an optimization: whether it already exists in an open or merged upstream PR, and in your tree | [`.claude/skills/check-prior-art/`](.claude/skills/check-prior-art/) |
 | Before taking up an upstream PR: whether an AMD deployment runs the code it changes, whether your tree has it, and what to do with it | [`.claude/skills/analyze-upstream-pr/`](.claude/skills/analyze-upstream-pr/) |
 
-Ships two packages: `src/hyperloom/` (the optimizer) and `src/kernelforge/` (the Forge
-kernel backend). Both are exercised in CI.
+Kernel optimization lives in `src/kernelforge/` (Forge) and `src/ave/` (Ave),
+orchestrated by `src/hyperloom/`. All three are exercised in CI.
 
 ## Common commands
 

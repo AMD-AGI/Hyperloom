@@ -69,7 +69,7 @@ _GIT_TIMEOUT_SEC = 120
 #: already knows the answer, while the configured roots are routinely unset --
 #: in the GLM-5.2 session all three sources were empty and the handoff reported
 #: no source repository at all.
-_FRAMEWORK_PACKAGES: tuple[str, ...] = ("vllm", "sglang", "aiter")
+_FRAMEWORK_PACKAGES: tuple[str, ...] = ("vllm", "sglang", "aiter", "avelang")
 #: A commit nobody authored needs an author anyway, and the container's Git has
 #: no global identity to fall back on.
 _COMMIT_IDENTITY = (
