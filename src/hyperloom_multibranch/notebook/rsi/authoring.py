@@ -194,21 +194,17 @@ def session_challenger(
     environment's archive. ``None`` when the session has no profile, there is no pool, or no challenger qualifies.
     It crowns nothing."""
 
-    if snapshot.profile is None:
+    target = pool if pool is not None else ScorerPool.from_env()
+    if snapshot.profile is None or target is None:
         return None
-    if pool is None:
-        archive = TreeArchive.from_env()
-        pool = None if archive is None else ScorerPool.beside(archive)
-    if pool is None:
-        return None
-    found = survey(tuple(item.tree for item in similar_trees(history, task_conditions(snapshot.profile))), pool)
+    found = survey(tuple(item.tree for item in similar_trees(history, task_conditions(snapshot.profile))), target)
     label = next((item for item in parents(found) if item != found.champion), None)
     compared = None if label is None else found.standings.comparison(label)
     if label is None or compared is None:
         return None
     lead = f"{number(compared.difference_low)} to {number(compared.difference_high)}"
     evidence = f"{label}: exploration challenger, its lead over {found.champion} {lead}"
-    return named_frontier_choice(label, defaults, evidence, pool)
+    return named_frontier_choice(label, defaults, evidence, target)
 
 
 def _tree_lines(tree: SearchTree) -> list[str]:

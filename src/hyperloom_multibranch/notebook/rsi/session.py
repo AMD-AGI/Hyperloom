@@ -268,11 +268,6 @@ def session_frontier_policy(
     return frontier_policy_for(history, task_conditions(snapshot.profile), defaults)
 
 
-def _environment_pool() -> ScorerPool | None:
-    archive = TreeArchive.from_env()
-    return None if archive is None else ScorerPool.beside(archive)
-
-
 def session_frontier_scorer(
     snapshot: NotebookSnapshot, history: Sequence[SearchTree], defaults: FrontierPolicy, pool: ScorerPool | None = None
 ) -> PolicyChoice:
@@ -283,7 +278,7 @@ def session_frontier_scorer(
 
     if snapshot.profile is None:
         return PolicyChoice(defaults, DEFAULT_POLICY, NO_PROFILE_EVIDENCE)
-    target = pool if pool is not None else _environment_pool()
+    target = pool if pool is not None else ScorerPool.from_env()
     scorers = registered_scorers(target, snapshot.taken_at)
     held = current_champion(target)
     choice = frontier_scorer_for(history, task_conditions(snapshot.profile), defaults, scorers, held)
@@ -314,7 +309,7 @@ def named_frontier_choice(
     if variation is not None:
         return PolicyChoice(variation.apply(defaults), label, evidence)
     try:
-        scorer = scorer_named(label, pool if pool is not None else _environment_pool())
+        scorer = scorer_named(label, pool if pool is not None else ScorerPool.from_env())
     except ExpressionError as exc:
         log.warning("the frontier scorer %s no longer reads: %s", label, exc)
         return None

@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom_multibranch.notebook.rsi import scorers
+from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV, TreeArchive
 from hyperloom_multibranch.notebook.rsi.bandit import BANDIT_LABEL, BanditScorer
 from hyperloom_multibranch.notebook.rsi.calibration import Registered
 from hyperloom_multibranch.notebook.rsi.expression import ExpressionScorer
@@ -46,6 +47,13 @@ def test_no_scorer_is_added_yet_and_the_bandit_is_registered_the_first_time_a_se
     assert (bandit.scorer, bandit.since, again.since) == (BanditScorer(), 100.0, 100.0)
     assert [(item.label, item.source) for item in pool.records()] == [(BANDIT_LABEL, ScorerSource.CODE)]
     assert registered_scorers(None, 300.0)[0].since == 300.0
+
+
+def test_a_session_uses_the_pool_beside_the_archive_the_environment_names_by_default(tmp_path: Path) -> None:
+    found = ScorerPool.from_env({ARCHIVE_ENV: str(tmp_path / "archive")})
+
+    assert found is not None and found.root == ScorerPool.beside(TreeArchive(tmp_path / "archive")).root
+    assert ScorerPool.from_env({}) is None
 
 
 def test_a_scorer_added_to_custom_scorers_is_chosen_from_like_the_built_in_ones(

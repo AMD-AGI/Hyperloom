@@ -182,6 +182,14 @@ class ScorerPool:
     def beside(cls, archive: TreeArchive) -> ScorerPool:
         return cls(archive.root.parent)
 
+    @classmethod
+    def from_env(cls, env: Mapping[str, str] | None = None) -> ScorerPool | None:
+        """The pool a session uses unless it is given one: beside the archive
+        :data:`~hyperloom_multibranch.notebook.rsi.archive.ARCHIVE_ENV` names, ``None`` when it names none."""
+
+        archive = TreeArchive.from_env(env)
+        return None if archive is None else cls.beside(archive)
+
     def records(self) -> tuple[PoolRecord, ...]:
         """Every readable record, the earliest registered first; one this version cannot read is skipped with a
         warning."""
