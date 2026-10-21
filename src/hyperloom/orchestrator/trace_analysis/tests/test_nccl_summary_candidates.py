@@ -228,6 +228,12 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
             "__global__ void cross_device_reduce_2stage(RankData* d) {}\n"
         )
         self.addCleanup(self._tmp.cleanup)
+        aiter_root = unittest.mock.patch(
+            "hyperloom.orchestrator.trace_analysis.tracelens_analysis._aiter_csrc_root",
+            return_value=str(self.src_root),
+        )
+        aiter_root.start()
+        self.addCleanup(aiter_root.stop)
 
     def _write_metrics(self, payload: object) -> None:
         (self.tl / "category_data" / "multi_kernel_metrics.json").write_text(json.dumps(payload))
@@ -317,7 +323,6 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
         out = _inject_collective_candidates(
             self.tl,
             existing,
-            source_roots=[str(self.src_root)],
         )
         self.assertEqual(out, existing)
 
@@ -340,7 +345,6 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
             out = _inject_collective_candidates(
                 self.tl,
                 [donor],
-                source_roots=[str(self.src_root)],
             )
 
         self.assertEqual(out, [donor])
@@ -375,7 +379,6 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
             out = _inject_collective_candidates(
                 self.tl,
                 [exact],
-                source_roots=[str(self.src_root)],
                 health_warnings=warnings,
             )
 
@@ -397,7 +400,6 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
         out = _inject_collective_candidates(
             self.tl,
             [{"name": "compute_kernel", "duration_us": 1000.0}],
-            source_roots=[str(self.src_root)],
             health_warnings=warnings,
         )
 
@@ -417,7 +419,6 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
             tla._inject_collective_candidates(
                 self.tl,
                 [],
-                source_roots=[],
                 health_warnings=warnings,
             )
 
@@ -444,7 +445,6 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
             out = _inject_collective_candidates(
                 self.tl,
                 [donor],
-                source_roots=[str(self.src_root)],
             )
 
         self.assertEqual(len(out), 2)
@@ -486,7 +486,6 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
             out = _inject_collective_candidates(
                 self.tl,
                 donors,
-                source_roots=[str(self.src_root)],
             )
 
         self.assertEqual(len(out), 3)
@@ -530,7 +529,6 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
             out = _inject_collective_candidates(
                 self.tl,
                 donors,
-                source_roots=[str(self.src_root)],
             )
 
         self.assertEqual(out, donors)
@@ -546,7 +544,6 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
         out = _inject_collective_candidates(
             self.tl,
             existing,
-            source_roots=[str(self.src_root)],
             log_path=log_path,
         )
 
@@ -562,7 +559,6 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
         out = _inject_collective_candidates(
             self.tl,
             existing,
-            source_roots=[str(self.src_root)],
         )
         self.assertEqual(len(out), 1)
         self.assertEqual(out[0]["name"], AITER_2STAGE)
