@@ -3312,7 +3312,6 @@ def _kernel_roofline_row(candidate: dict[str, Any]) -> dict[str, Any]:
         "roofline_name": candidate.get("roofline_name"),
         "recommended_actions": list(candidate.get("recommended_actions") or []),
         "reusable_native_kernel": bool(candidate.get("reusable_native_kernel")),
-        "rocprof_roofline": candidate.get("rocprof_roofline"),
         # Contract alignment (F6): emit the shared roofline_source provenance enum
         # so both routes carry it. TraceLens rows come from its per-op perf model
         # (analytical) when that model produced numbers, else placeholder.

@@ -313,9 +313,7 @@ def _stage_reached(
         "FRAMEWORK_AGENT": "framework_agent",
         "EXPLORE": "framework_agent",
         "KERNEL_AGENT": (
-            "kernel"
-            if any(state.get(key) for key in ("last_kernel_opt", "last_fusion", "last_gemm_tuning"))
-            else "kernel_agent"
+            "kernel" if any(state.get(key) for key in ("last_fusion", "last_gemm_tuning")) else "kernel_agent"
         ),
         "SWEEP": "conc_sweep",
         "CLOSE": "close",
