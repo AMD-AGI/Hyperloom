@@ -128,14 +128,17 @@ A specialist branch's specialist, shown only when the specialist runtime reports
 running, how many times it crashed (crashes) and how many times it was restarted after its heartbeat was lost (lost),
 whether the runtime gave up restarting it after repeated crashes, after several sessions in a row lost their
 heartbeat or after several sessions in a row found nothing to test (gave_up), and whether it was stopped because
-judging its tests failed (judge_failed). A branch whose specialist gave up or whose judging failed makes no more
-progress but holds its slot until you stop it: stop it, and open a branch in its place if one would still pay off.
+judging its tests failed (judge_failed). The scheduler stops a branch whose specialist gave up once no confirm of it
+waits; a branch whose judging failed makes no more progress but holds its slot until you stop it: stop it, and open a
+branch in its place if one would still pay off.
 Each lost heartbeat costs minutes: weigh a specialist's lost count against its progress, and stop it when it keeps
 losing its heartbeat without gaining.
 A branch of origin user follows a direction the user wrote; such branches open from the root commit ahead of the
 opening batch, and the opening batch fills the slots they leave. Every specialist branch, of any origin, has a grace:
 while its grace is true, until {SETTLED_TESTS} of its explore tests ended with a result, a failed one included, a
 stop or a lower K you give it is not applied, unless its specialist gave up or its judging failed.
+A branch whose steered is false runs a third-party agent the user named, by the agent's own logic, one test at a time:
+it has no grace, and no stop or K you give it is applied; weigh the slot it holds as given.
 A branch's pending_candidates are its measured candidates that beat its head by at least the bar while their confirm
 runs, each with its gain_over_head_pct. A branch with a pending candidate cannot be stopped or narrowed until its
 confirm is judged: a stop or a lower K you give it is not applied, unless its judging failed.
@@ -157,11 +160,12 @@ JUDGE_PROMPT_VERSION = hashlib.sha256(f"{JUDGE_SYSTEM_PROMPT}\n{_REPLY_FORMAT}".
 
 
 class HoldReason(str, Enum):
-    """Why the judge may neither stop a branch nor lower its K: a specialist branch in its grace, or a branch with a
-    candidate waiting for its confirm."""
+    """Why the judge may neither stop a branch nor lower its K: a specialist branch in its grace, a branch with a
+    candidate waiting for its confirm, or a branch no judge steers, whose K the judge may not raise either."""
 
     GRACE = "grace"
     PENDING_CONFIRM = "pending_confirm"
+    UNSTEERED = "unsteered"
 
 
 @dataclass(frozen=True)
@@ -230,7 +234,8 @@ def held_branches(
     A specialist branch is in its grace while fewer than :data:`SETTLED_TESTS` of its explore tests have a result,
     whatever its validity, and its specialist neither gave up nor was stopped for a failed judging; a withdrawn test
     has no result. A branch whose progress row holds a pending candidate is held until its confirm is judged, unless
-    its judging failed: the confirm's verdict does not need the specialist."""
+    its judging failed: the confirm's verdict does not need the specialist. A branch whose origin the judge does not
+    steer is held for that, or for its pending confirm, which the scheduler's own stops must still wait for."""
 
     ended = Counter(
         record.request.branch
@@ -245,7 +250,9 @@ def held_branches(
         state = specialists.get(entry.branch)
         if entry.stop is not None or (state is not None and state.judge_failed):
             continue
-        if (
+        if not entry.origin.steered_by_judge:
+            held[entry.branch] = HoldReason.PENDING_CONFIRM if entry.branch in waiting else HoldReason.UNSTEERED
+        elif (
             entry.kind is BranchKind.SPECIALIST
             and ended[entry.branch] < SETTLED_TESTS
             and not (state is not None and state.gave_up)
@@ -355,6 +362,8 @@ def _branch_row(entry: BranchEntry, progress: BranchProgress | None, view: Judge
         row["stopped"] = entry.stop.summary
     if entry.kind is BranchKind.SPECIALIST:
         row["grace"] = view.held.get(entry.branch) is HoldReason.GRACE
+    if not entry.origin.steered_by_judge:
+        row["steered"] = False
     specialist = view.specialists.get(entry.branch)
     if specialist is not None:
         row["specialist"] = asdict(specialist)
@@ -535,7 +544,11 @@ def hold_decision(
 
     running_k = {entry.branch: entry.k for entry in roster}
     refused_stops = [order for order in decision.stop if order.branch in held]
-    refused_ks = [order for order in decision.k if order.branch in held and order.k < running_k[order.branch]]
+    refused_ks = [
+        order
+        for order in decision.k
+        if order.branch in held and (order.k < running_k[order.branch] or held[order.branch] is HoldReason.UNSTEERED)
+    ]
     named = {item.branch: item for item in decision.held} | {
         order.branch: HeldOrder(order.branch, held[order.branch]) for order in (*refused_stops, *refused_ks)
     }

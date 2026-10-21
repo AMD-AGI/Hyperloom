@@ -211,7 +211,7 @@ def test_the_prompt_shows_and_explains_the_gpu_hours_and_llm_dollars_used() -> N
     )
 
 
-def test_a_branch_row_shows_what_is_known_of_its_specialist_and_the_prompt_says_to_stop_one_that_gave_up() -> None:
+def test_a_branch_row_shows_what_is_known_of_its_specialist_and_the_prompt_says_who_stops_one_out_of_service() -> None:
     gave_up = SpecialistStatus(running=False, crashes=4, lost=1, gave_up=True, judge_failed=False)
     judging_failed = SpecialistStatus(running=False, crashes=0, lost=6, gave_up=False, judge_failed=True)
 
@@ -231,7 +231,8 @@ def test_a_branch_row_shows_what_is_known_of_its_specialist_and_the_prompt_says_
     prompt = " ".join(JUDGE_SYSTEM_PROMPT.split())
     for field in ("crashes", "lost", "gave_up", "judge_failed"):
         assert f"({field})" in prompt
-    assert "A branch whose specialist gave up or whose judging failed makes no more progress" in prompt
+    assert "The scheduler stops a branch whose specialist gave up once no confirm of it waits" in prompt
+    assert "a branch whose judging failed makes no more progress but holds its slot until you stop it" in prompt
     assert "weigh a specialist's lost count against its progress" in prompt
 
 
@@ -707,6 +708,24 @@ def test_every_specialist_branch_row_shows_its_grace_and_the_prompt_explains_it(
         f"Every specialist branch, of any origin, has a grace: while its grace is true, until {SETTLED_TESTS} of its "
         "explore tests ended with a result, a failed one included, a stop or a lower K you give it is not applied"
     ) in prose
+
+
+def test_an_autonomous_branch_is_never_steered_by_the_judge_but_a_pending_confirm_still_names_its_hold() -> None:
+    roster = (*ROSTER, _entry("b04", origin=BranchOrigin.AGENT), _entry("b05", origin=BranchOrigin.AGENT))
+    settled = [_ended("b04", n) for n in range(SETTLED_TESTS)]
+    gave_up = SpecialistStatus(running=False, crashes=0, lost=0, gave_up=True, judge_failed=False)
+    waiting = (BranchProgress("b05", True, "c-root", "c-b05", 3, 1, 60.0, {}, pending=(CANDIDATE,)),)
+
+    held = held_branches(roster, waiting, settled, {"b04": gave_up})
+
+    assert (held["b04"], held["b05"]) == (HoldReason.UNSTEERED, HoldReason.PENDING_CONFIRM)
+    decision = JudgeDecision(k=(KOrder("b04", 2),), stop=(StopOrder("b04", STOP_REASON),))
+    applied = hold_decision(decision, held, roster)
+    assert (applied.stop, applied.k) == ((), ())
+    assert [order.branch for order in applied.held] == ["b04"]
+    rows = {row["branch"]: row for row in _state(_view(roster=roster, held=held))["branches"]}
+    assert rows["b04"]["steered"] is False and "steered" not in rows["b01"]
+    assert "steered is false" in " ".join(JUDGE_SYSTEM_PROMPT.split())
 
 
 CANDIDATE = PendingCandidate("b01-r7", "b01-r7-confirm", "c-b01", METRIC, 116.6, 6.04321)

@@ -33,12 +33,13 @@ class BranchKind(str, Enum):
 
 
 class BranchOrigin(str, Enum):
-    """Where a branch's start comes from: the root commit (integration), a direction the user wrote, which opens ahead
-    of the opening batch, the opening batch, a later batch that refills freed slots, or a rule-gate request: a fork for
-    a correctness fix or a repair of a blocked gain."""
+    """Where a branch's start comes from: the root commit (integration), a direction the user wrote or a third-party
+    agent the user named, both opening ahead of the opening batch, the opening batch, a later batch that refills freed
+    slots, or a rule-gate request: a fork for a correctness fix or a repair of a blocked gain."""
 
     ROOT = "root"
     USER = "user"
+    AGENT = "agent"
     FIRST_BATCH = "first_batch"
     REFILL = "refill"
     FORK = "fork"
@@ -55,6 +56,13 @@ class BranchOrigin(str, Enum):
         """Whether the rule gate holds a reservation for the branch until it lands or is voided."""
 
         return self in (BranchOrigin.FORK, BranchOrigin.REPAIR)
+
+    @property
+    def steered_by_judge(self) -> bool:
+        """Whether the judge's stops and K orders apply to the branch; an agent's branch runs by the agent's own
+        logic, and only the session's stops, and the stop of a specialist that gave up, reach it."""
+
+        return self is not BranchOrigin.AGENT
 
 
 class BranchStatus(str, Enum):
