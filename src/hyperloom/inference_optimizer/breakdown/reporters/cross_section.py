@@ -9,14 +9,17 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from hyperloom.common.coerce import to_float, to_int
+from hyperloom.common.perf_metric import INTVTY_OBJECTIVES
 
 from ..variant_funnel import VARIANT_COUNTS, variants_from_timeline
 from .base import (
     RenderedSection,
     as_dict,
+    events_of,
     outcome_of,
     session_of,
     stop_reason_of,
+    stop_target_text,
     task_config_of,
     timeline_of,
     validation_of,
@@ -31,13 +34,15 @@ class GlobalFacts:
 
     headline: str  # 1-line "baseline X → final Y = +Z%"
     stop_reason: str
-    elapsed_minutes: float | None
-    objective: dict[str, Any]
+    elapsed_minutes: float | None  # session total across legs; this leg's when the total is absent
+    elapsed_is_total: bool
+    graded_on: str  # the axis the verdict was taken on; "" when none was recorded
+    stop_target: str  # "gain_pct>=500"; "" when none was recorded
     workload_summary: str  # "DeepSeek-R1 vllm fp8 tp=8 conc=64 isl=osl=1024"
     gain_attribution_lines: list[str]  # "explore: 5.00% of total (=100% share of 5.00%)"
     capabilities_not_attempted: list[str]
     capabilities_kept: list[str]
-    kernel_pipeline_funnel: dict[str, int]  # detected/recommended/optimized/adopted/...
+    kernel_pipeline_funnel: dict[str, int]  # detected/recommended/attempted/adopted/...
     variant_funnel: dict[str, Any]  # outcome.variants counts, keep_rate_pct, final_stack, validated_gain_pct
     data_quality_flags: list[str]
     # "stack_ledger" | "unattributed" | "unattributed (stack listed for
@@ -141,7 +146,7 @@ def _kernel_funnel(breakdown: dict[str, Any]) -> dict[str, int]:
 
     Returns:
         dict[str, int]: Counts keyed by lifecycle stage (``detected``,
-            ``recommended``, ``optimized``, ``adopted``, ``partial``,
+            ``recommended``, ``attempted`` (tried by at least one lane), ``adopted``, ``partial``,
             ``reverted`` and ``rejected``).
     """
     from ._renderers._kernels import kernel_rows
@@ -151,7 +156,7 @@ def _kernel_funnel(breakdown: dict[str, Any]) -> dict[str, int]:
     return {
         "detected": len(rows),
         "recommended": sum(1 for row in rows if row.get("selected_for_optimization")),
-        "optimized": sum(1 for row in rows if row.get("geak") or row.get("forge")),
+        "attempted": sum(1 for row in rows if row.get("geak") or row.get("forge")),
         "adopted": decisions.count("kept"),
         # A candidate a route measured and nothing gated: the win is real at
         # the micro level and was never ruled on end to end.
@@ -254,6 +259,36 @@ def _capabilities_split(
     return sorted(kept), sorted(not_attempted)
 
 
+_PAIR_TOLERANCE = 0.005
+
+
+def _settled_pair(breakdown: dict[str, Any], axis: str, gain: float) -> tuple[float, float] | None:
+    """The settled validation row's before and after on ``axis``, when they reproduce ``gain``.
+
+    The row is the one the gain was measured on, so its baseline is the ledger's own rather than the latest
+    anchor; a pair that does not reproduce the gain is not the one that produced it.
+    """
+    stacks = events_of(breakdown, "stack")
+    settled = as_dict(as_dict(as_dict(stacks[-1].get("ext")).get("validations")).get("settled")) if stacks else {}
+    before = to_float(settled.get("baseline_tput"))
+    after = to_float(settled.get("validated_tput"))
+    if settled.get("graded_objective") != axis or not (before and after):
+        return None
+    return (before, after) if abs(before * (1 + gain / 100) - after) <= _PAIR_TOLERANCE * after else None
+
+
+def _graded_axis_headline(breakdown: dict[str, Any], gain: float) -> str:
+    """The headline on the interactivity axis the gain was measured on; ``""`` when it is not one."""
+    axis = as_dict(outcome_of(breakdown).get("final")).get("graded_on")
+    if axis not in INTVTY_OBJECTIVES:
+        return ""
+    sign = "+" if gain > 0 else ""
+    pair = _settled_pair(breakdown, axis, gain)
+    if pair is None:
+        return f"{sign}{gain:.2f}% validated gain on {axis}"
+    return f"{axis} {pair[0]:.2f} → {pair[1]:.2f} = {sign}{gain:.2f}% validated gain"
+
+
 def _headline(breakdown: dict[str, Any]) -> str:
     """Build the one-line baseline→final throughput headline."""
     from ... import framework_registry
@@ -263,6 +298,8 @@ def _headline(breakdown: dict[str, Any]) -> str:
     b = to_float(as_dict(outcome.get("baseline")).get("output_throughput"))
     f = to_float(as_dict(outcome.get("final")).get("output_throughput"))
     g = to_float(as_dict(outcome.get("final")).get("gain_pct"))
+    if g is not None and (axis_line := _graded_axis_headline(breakdown, g)):
+        return axis_line
     if b and f and g is not None:
         sign = "+" if g > 0 else ""
         return (
@@ -297,11 +334,14 @@ def build_global_facts(
     session = session_of(breakdown)
     attribution_lines, attribution_method = _gain_attribution_lines(breakdown)
     kept, not_attempted = _capabilities_split(breakdown)
+    total = to_float(session.get("total_elapsed_minutes"))
     return GlobalFacts(
         headline=_headline(breakdown),
         stop_reason=stop_reason_of(breakdown),
-        elapsed_minutes=to_float(session.get("elapsed_minutes")),
-        objective=as_dict(workload.get("objective")),
+        elapsed_minutes=total if total is not None else to_float(session.get("elapsed_minutes")),
+        elapsed_is_total=total is not None,
+        graded_on=str(as_dict(outcome_of(breakdown).get("final")).get("graded_on") or ""),
+        stop_target=stop_target_text(workload.get("objective")),
         workload_summary=_workload_summary(workload),
         gain_attribution_lines=attribution_lines,
         capabilities_not_attempted=not_attempted,

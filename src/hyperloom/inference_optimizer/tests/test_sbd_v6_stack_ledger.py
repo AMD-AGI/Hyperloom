@@ -211,7 +211,8 @@ def test_a_zero_baseline_makes_every_contribution_unmeasurable():
     _adopt(0, "explore", 100.0, 120.0, baseline=0.0)
 
     ext = _ext()
-    assert ext["attributed_gain_pct"] == 0.0
+    assert ext["attributed_gain_pct"] is None
+    assert ext["attributed_gain_pct_excluding_fixes"] is None
     assert ext["guards"][stack_event.GUARD_UNMEASURED] == 1
     assert ext["unattributed_gain_pct"] is None
 
@@ -407,3 +408,30 @@ def test_outcome_marks_attribution_unavailable_without_a_ledger_event():
     assert validation["attribution"]["by_source"]["warm_replay"]["total_gain_pct"] is None
     assert validation["reconciliation_gap_pct"] is None
     assert validation["notes"] == []
+
+
+def test_outcome_gain_figures_are_null_when_nothing_was_measured(tmp_path):
+    _adopt(0, "explore", 100.0, 120.0, baseline=0.0)
+
+    validation = _outcome(tmp_path)
+    assert validation["attributed_gain_pct"] is None
+    assert validation["unattributed_gain_pct"] is None
+
+
+def test_outcome_gain_figures_are_null_without_a_ledger():
+    validation = collect_v6_outcome(OutcomeSources(session={"stop_reason": "signal"}, close={}, state={}, timeline=[]))[
+        "validation"
+    ]
+
+    assert validation["attributed_gain_pct"] is None
+    assert validation["unattributed_gain_pct"] is None
+
+
+def test_a_session_that_kept_nothing_renders_no_contribution_sum(tmp_path):
+    from hyperloom.inference_optimizer.breakdown.reporters._renderers import optimizations
+
+    validation = _outcome(tmp_path)
+
+    assert optimizations.render({"outcome": {"validation": validation}}).key_facts == [
+        "0 adoption(s) recorded in the stack ledger."
+    ]
