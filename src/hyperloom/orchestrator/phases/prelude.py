@@ -139,6 +139,11 @@ def _merge_named_current_recipe_configs(owners: list[tuple[str, Mapping[str, Any
     return " ".join(chain.from_iterable(pairs.values())), envs
 
 
+def _gain_pct(after: float, before: float) -> float:
+    """The percentage uplift one measured throughput carries over another."""
+    return (after / before - 1.0) * 100.0
+
+
 def _warm_recipe_history_rows(warm: Any, key: str) -> list[Any]:
     """Read one history list off a warm-start recipe, preferring its ``exact_history`` restatement."""
     if not isinstance(warm, dict):
@@ -1029,7 +1034,11 @@ class PreludePhase(CoordinatorCollaborator):
                 return None
             sdk_replay = read
         try:
-            kernel = await self._prepare_warm_kernel_kb(sdk_replay.get("kernel_kb"))
+            kernel = (
+                await self._prepare_warm_kernel_kb(sdk_replay.get("kernel_kb"))
+                if current_remote
+                else await self._prepare_warm_kernel_kb()
+            )
         except Exception as exc:
             log.warning("PRELUDE: warm-kernel preparation failed", exc_info=True)
             kernel = {"status": "error", "errors": 1, "reason": f"{type(exc).__name__}: {exc}"[:300]}
@@ -2068,7 +2077,7 @@ class PreludePhase(CoordinatorCollaborator):
         # rejected on quality or accuracy still produced a real measurement, and
         # reading what it scored is how a gate rejection is told apart from a
         # replay that never got that far.
-        outcome["actual_gain_pct"] = round((tput / baseline_tput - 1.0) * 100.0, 3)
+        outcome["actual_gain_pct"] = round(_gain_pct(tput, baseline_tput), 3)
         outcome["throughput_after"] = tput
         if recorder is not None:
             # The anchor goes on record here, where it is used: back-solving it
@@ -2110,7 +2119,7 @@ class PreludePhase(CoordinatorCollaborator):
         recorder.record_measurement(
             before_tput=baseline_tput,
             after_tput=outcome["throughput_after"],
-            gain_pct=(outcome["throughput_after"] / baseline_tput - 1.0) * 100.0,
+            gain_pct=_gain_pct(outcome["throughput_after"], baseline_tput),
             hot_tput=outcome["throughput_after"],
             cold_tput=to_float(result.get("warmup_round_tput"), 0.0) or None,
             accuracy=outcome.get("replay_accuracy"),
@@ -2123,7 +2132,7 @@ class PreludePhase(CoordinatorCollaborator):
     ) -> Verdict:
         """Grade a measured replay against the session's keep threshold and constraints."""
         state = self.shared_state
-        measured_gain = (outcome["throughput_after"] / baseline_tput - 1.0) * 100.0
+        measured_gain = _gain_pct(outcome["throughput_after"], baseline_tput)
         if recorder is not None:
             # Restated now that the gate has read the scores onto the outcome,
             # so the score sits beside the reference it was judged against.
