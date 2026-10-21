@@ -22,7 +22,6 @@ SUMMARY_KEYS = (
     "baseline_tput",
     "cumulative_gain_validated",
     "current_best",
-    "last_kernel_opt",
     "last_trace_analyze",
 )
 
