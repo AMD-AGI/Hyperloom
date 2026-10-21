@@ -14,6 +14,7 @@ from typing import Any
 from kernelforge.knowledge.kb_store.identity.implementation import normalize_operator_name
 from kernelforge.knowledge.kb_store.identity.kernel_recipe import KERNEL_RECIPE_PRODUCERS
 
+from hyperloom.common.coerce import to_float
 from hyperloom.common.env import env_flag
 
 from .patch_landing import (
@@ -99,29 +100,24 @@ def _text(value: Any) -> str:
     return str(value or "")
 
 
-def _number(value: Any) -> float:
-    try:
-        return float(value or 0.0)
-    except (TypeError, ValueError):
-        return 0.0
-
-
 def _promoted_needs_review(entry: dict[str, Any], decision: str, micro_speedup: float) -> bool:
-    try:
-        promotion_threshold = float(os.environ.get("HL_VERIFIED_MICRO_PROMOTE_THRESHOLD", "1.10") or 1.10)
-    except ValueError:
-        promotion_threshold = 1.10
+    promotion_threshold = to_float(os.environ.get("HL_VERIFIED_MICRO_PROMOTE_THRESHOLD"))
     return (
         _honest_flag("HL_PROMOTE_VERIFIED_MICRO_NEEDS_REVIEW")
         and decision == "NEEDS_REVIEW"
         and _text(entry.get("last_backend")).lower() == "geak"
         and entry.get("last_correctness_passed") is True
-        and micro_speedup >= promotion_threshold
+        and micro_speedup >= (1.10 if promotion_threshold is None else promotion_threshold)
     )
 
 
-def _existing_keep_integration_id(
-    queue: dict[str, Any], *, task_key: str, source_file: str, artifact_path: str, artifact_bundle: dict[str, Any]
+def _existing_integration_id(
+    queue: dict[str, Any],
+    *,
+    source_file: str,
+    artifact_path: str,
+    task_key: str = "",
+    artifact_bundle: dict[str, Any] | None = None,
 ) -> str:
     return next(
         (
@@ -130,24 +126,16 @@ def _existing_keep_integration_id(
             if isinstance(candidate, dict)
             and _text(candidate.get("source_file")) == source_file
             and _text(candidate.get("artifact_path")) == artifact_path
-            and dict(candidate.get("artifact_bundle") or {}) == artifact_bundle
-            and (_text(candidate.get("task_key")) == task_key or bool(artifact_path or artifact_bundle))
+            and (
+                artifact_bundle is None
+                or (
+                    dict(candidate.get("artifact_bundle") or {}) == artifact_bundle
+                    and (_text(candidate.get("task_key")) == task_key or bool(artifact_path or artifact_bundle))
+                )
+            )
         ),
         "",
     )
-
-
-def _refresh_queued_routing(queued: dict[str, Any], entry: dict[str, Any], task_key: str, kernel_id: str) -> None:
-    # The patch snapshot is immutable, but trace-local routing metadata must follow the task when ordinals are
-    # reassigned on a later profile.
-    queued["task_key"] = task_key
-    queued["kernel_id"] = _text(kernel_id or entry.get("current_kernel_id"))
-    queued["task_group_key"] = _text(entry.get("task_group_key") or queued.get("task_group_key"))
-    queued["identity_route"] = _text(entry.get("identity_route") or queued.get("identity_route"))
-    queued["legacy_task_group_keys"] = list(
-        entry.get("legacy_task_group_keys") or queued.get("legacy_task_group_keys") or []
-    )
-    queued["trace_gpu_pct"] = entry.get("last_gpu_pct", queued.get("trace_gpu_pct", 0.0))
 
 
 def _queue_kernel_keep(
@@ -163,19 +151,15 @@ def _queue_kernel_keep(
         # integrate_handler() only runs for an LLM-initiated request that names the kernel_id directly.
         return None
     decision = _text(entry.get("last_decision")).upper()
-    micro_speedup = _number(entry.get("last_micro_speedup"))
+    micro_speedup = to_float(entry.get("last_micro_speedup")) or 0.0
     if decision != "KEEP" and not _promoted_needs_review(entry, decision, micro_speedup):
         return None
     artifact_path = _text(entry.get("last_artifact_path"))
     artifact_bundle = dict(entry.get("last_artifact_bundle") or {})
     source_file = _text(entry.get("last_source_file"))
     queue = state.pending_kernel_integrations
-    integration_id = _existing_keep_integration_id(
-        queue,
-        task_key=task_key,
-        source_file=source_file,
-        artifact_path=artifact_path,
-        artifact_bundle=artifact_bundle,
+    integration_id = _existing_integration_id(
+        queue, task_key=task_key, source_file=source_file, artifact_path=artifact_path, artifact_bundle=artifact_bundle
     ) or _kernel_integration_id(
         task_key=task_key,
         source_file=source_file,
@@ -185,7 +169,18 @@ def _queue_kernel_keep(
     if integration_id in queue:
         queued = queue[integration_id]
         if isinstance(queued, dict):
-            _refresh_queued_routing(queued, entry, task_key, kernel_id)
+            # The patch snapshot is immutable, but trace-local routing metadata must follow the task when ordinals
+            # are reassigned on a later profile.
+            queued.update(
+                task_key=task_key,
+                kernel_id=_text(kernel_id or entry.get("current_kernel_id")),
+                task_group_key=_text(entry.get("task_group_key") or queued.get("task_group_key")),
+                identity_route=_text(entry.get("identity_route") or queued.get("identity_route")),
+                legacy_task_group_keys=list(
+                    entry.get("legacy_task_group_keys") or queued.get("legacy_task_group_keys") or []
+                ),
+                trace_gpu_pct=entry.get("last_gpu_pct", queued.get("trace_gpu_pct", 0.0)),
+            )
         return queue[integration_id]
     queue[integration_id] = {
         "integration_id": integration_id,
@@ -213,22 +208,10 @@ def _queue_kernel_keep(
     return queue[integration_id]
 
 
-def _existing_integration_id(queue: dict[str, Any], source_file: str, artifact_path: str) -> str:
-    return next(
-        (
-            candidate_id
-            for candidate_id, candidate in queue.items()
-            if isinstance(candidate, dict)
-            and _text(candidate.get("source_file")) == source_file
-            and _text(candidate.get("artifact_path")) == artifact_path
-        ),
-        "",
-    )
+_FUSION_LANE = "forge_fusion"
 
 
-def enqueue_nominated_patch(
-    state, *, patch, lane: str = "fusion", keep_threshold_pct: float = 3.0
-) -> dict[str, Any] | None:
+def enqueue_nominated_patch(state, *, patch, keep_threshold_pct: float = 3.0) -> dict[str, Any] | None:
     """Queue one self-nominated sibling patch for the shared integrate lane."""
     if not isinstance(getattr(state, "pending_kernel_integrations", None), dict):
         state.pending_kernel_integrations = {}
@@ -241,14 +224,15 @@ def enqueue_nominated_patch(
         return None
     env_flag = _text(getattr(patch, "env_flag", "")).strip()
     fusion_env_flags = {flag: "1" for flag in env_flag.split() if flag}
-    micro_speedup = _number(getattr(patch, "micro_speedup", 0.0))
+    micro_speedup = to_float(getattr(patch, "micro_speedup", 0.0)) or 0.0
     queue = state.pending_kernel_integrations
-    # Each lane owns its own task_key / kernel_id namespace so the two lanes get distinct integration_ids and distinct
-    # kernel-rejection identities; the prefix is a state key only -- no consumer reads it (they gate on the ``source``
-    # field), so it cannot mis-route.
-    lane_prefix = "forge_fusion" if lane == "fusion" else "forge_rewrite"
-    task_key = f"{lane_prefix}:{kernel_name or source_file}"
-    integration_id = _existing_integration_id(queue, source_file, artifact_path) or _kernel_integration_id(
+    # The lane owns its own task_key / kernel_id namespace so its integration_ids and kernel-rejection identities
+    # stay distinct; the prefix is a state key only -- no consumer reads it (they gate on the ``source`` field), so
+    # it cannot mis-route.
+    task_key = f"{_FUSION_LANE}:{kernel_name or source_file}"
+    integration_id = _existing_integration_id(
+        queue, source_file=source_file, artifact_path=artifact_path
+    ) or _kernel_integration_id(
         task_key=task_key,
         source_file=source_file,
         artifact_path=artifact_path,
@@ -260,7 +244,7 @@ def enqueue_nominated_patch(
         "task_group_key": "",
         "identity_route": "",
         "legacy_task_group_keys": [],
-        "kernel_id": kernel_name or lane_prefix,
+        "kernel_id": kernel_name or _FUSION_LANE,
         "source_file": source_file,
         "artifact_path": artifact_path,
         "artifact_bundle": {},
@@ -277,22 +261,12 @@ def enqueue_nominated_patch(
         "artifact_kind": "",
         "integration_validation_status": "",
         "framework_applyback": {},
+        # The generic drain / writeback read these back to lift the KEEP as action="fusion".
+        "source": _FUSION_LANE,
+        "action_label": "fusion",
+        "fusion_env_flags": fusion_env_flags,
+        "keep_threshold_pct": float(keep_threshold_pct),
     }
-    if lane == "fusion":
-        # Fusion-only: the generic drain / writeback read these back to lift the KEEP as action="fusion".
-        record["source"] = "forge_fusion"
-        record["action_label"] = "fusion"
-        record["fusion_env_flags"] = fusion_env_flags
-        record["keep_threshold_pct"] = float(keep_threshold_pct)
-    elif fusion_env_flags:
-        # Rewrite lane deliberately drops the env flags (it lands as the generic action="integrate", which does not
-        # carry them into the re-baseline).
-        log.warning(
-            "nomination rewrite patch %s carries env_flag %r; rewrite lane cannot "
-            "activate it and the KEEP re-baseline will run the un-gated path",
-            kernel_name or source_file,
-            env_flag,
-        )
     if integration_id not in queue:
         queue[integration_id] = record
     else:
@@ -312,11 +286,10 @@ def enqueue_nominated_patch(
                 return None
             queued["status"] = "pending"
             queued["micro_speedup"] = micro_speedup
-            if lane == "fusion":
-                queued["fusion_env_flags"] = fusion_env_flags
-                queued["keep_threshold_pct"] = float(keep_threshold_pct)
-                queued["source"] = "forge_fusion"
-                queued["action_label"] = "fusion"
+            queued["fusion_env_flags"] = fusion_env_flags
+            queued["keep_threshold_pct"] = float(keep_threshold_pct)
+            queued["source"] = _FUSION_LANE
+            queued["action_label"] = "fusion"
     return queue[integration_id]
 
 
@@ -398,11 +371,11 @@ def pending_kernel_integration_records(state) -> list[dict[str, Any]]:
             continue
         if _pending_record_settled(state, record, integrated, attempted_entries):
             continue
-        impact = _number(record.get("trace_gpu_pct"))
+        impact = to_float(record.get("trace_gpu_pct")) or 0.0
         if impact <= 0.0:
             impact = _kernel_trace_impact_pct(state, _text(record.get("kernel_id")))
         record["integration_id"] = _text(record.get("integration_id")) or integration_id
-        candidates.append((impact, _number(record.get("micro_speedup")), integration_id, record))
+        candidates.append((impact, (to_float(record.get("micro_speedup")) or 0.0), integration_id, record))
     candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
     # Collapse only genuine same-source siblings: two whole-file overwrites of one file cannot both land, so the
     # strongest wins.
@@ -507,15 +480,9 @@ def _bind_result_to_pending(state, result: dict[str, Any]) -> tuple[dict[str, An
 
 
 def _attempt_totals(attempts: list[Any]) -> tuple[float, int]:
-    best_gain = max(
-        (
-            float(a.get("gain_pct"))
-            for a in attempts
-            if isinstance(a, dict) and isinstance(a.get("gain_pct"), (int, float))
-        ),
-        default=0.0,
-    )
-    return best_gain, sum(1 for a in attempts if isinstance(a, dict) and a.get("is_fault"))
+    rows = [a for a in attempts if isinstance(a, dict)]
+    gains = [a["gain_pct"] for a in rows if isinstance(a.get("gain_pct"), (int, float))]
+    return float(max(gains, default=0.0)), sum(1 for a in rows if a.get("is_fault"))
 
 
 def _record_integration_keep(
@@ -524,8 +491,7 @@ def _record_integration_keep(
     integration_status = _text(result.get("integration_validation_status"))
     validation_tier = _text(result.get("validation_tier"))
     if isinstance(pending_record, dict):
-        pending_record["status"] = "integrated"
-        pending_record["integrated_at"] = _now_iso()
+        pending_record.update(status="integrated", integrated_at=_now_iso())
         if integration_status:
             pending_record["integration_validation_status"] = integration_status
         if validation_tier:
@@ -541,8 +507,7 @@ def _record_integration_keep(
 
 
 def _pending_task_key(pending_record, task_group_key: str) -> str:
-    recorded = pending_record.get("task_key") if isinstance(pending_record, dict) else ""
-    return _text(recorded or task_group_key)
+    return _text((pending_record.get("task_key") if isinstance(pending_record, dict) else "") or task_group_key)
 
 
 def _reject_integration(
@@ -576,15 +541,13 @@ def _reject_integration(
     entry["rejected"] = rejected
     state.kernel_integrate_attempts[key] = entry
     if isinstance(pending_record, dict):
-        pending_record["status"] = "rejected"
-        pending_record["rejected_at"] = _now_iso()
-        pending_record["rejected_reason"] = reason
+        pending_record.update(status="rejected", rejected_at=_now_iso(), rejected_reason=reason)
     task_key = _pending_task_key(pending_record, task_group_key)
     stable_attempt = (state.kernel_opt_task_attempts or {}).get(task_key) if task_key else None
     if isinstance(stable_attempt, dict):
-        stable_attempt["integration_status"] = "rejected"
-        stable_attempt["integration_rejected_reason"] = reason
-        stable_attempt["integration_rejected_at"] = _now_iso()
+        stable_attempt.update(
+            integration_status="rejected", integration_rejected_reason=reason, integration_rejected_at=_now_iso()
+        )
 
 
 def record_kernel_integrate_result(
@@ -804,15 +767,6 @@ def kernel_opt_attempts_count(state) -> int:
 _HotRow = tuple[tuple[bool, int, float], str, str, list[str], str, tuple[str, str, float]]
 
 
-def _hot_kernel_gate_top_n(top_n: int | None) -> int:
-    if top_n is None:
-        try:
-            top_n = int(os.environ.get("HYPERLOOM_KERNEL_OPT_GATE_TOP_N", _DEFAULT_HOT_KERNEL_GATE_TOP_N))
-        except (TypeError, ValueError):
-            top_n = _DEFAULT_HOT_KERNEL_GATE_TOP_N
-    return max(1, int(top_n))
-
-
 def _hot_kernel_task_groups(task_groups: Any) -> tuple[dict[str, tuple[list[str], str]], dict[str, set[str]]]:
     kid_to_group: dict[str, tuple[list[str], str]] = {}
     group_key_aliases: dict[str, set[str]] = {}
@@ -841,7 +795,7 @@ def _hot_kernel_rows(
         # fail the kernel-opt gate.
         if k.get("shape_dispatchable") is False:
             continue
-        gpu_pct = _number(k.get("gpu_pct"))
+        gpu_pct = to_float(k.get("gpu_pct")) or 0.0
         # Vendor-playbook groups (mori's dispatch+combine) are gated on the sum of the group's members, not each
         # member's own share, and may pin a per-playbook floor -- see effective_hot_kernel_gpu_pct's docstring.
         if effective_hot_kernel_gpu_pct(k) < effective_hot_kernel_min_gpu_pct(k, min_gpu_pct):
@@ -950,6 +904,11 @@ def untried_hot_reusable_kernels(
         return []
     if min_gpu_pct is None:
         min_gpu_pct = resolve_hot_kernel_min_gpu_pct()
+    if top_n is None:
+        try:
+            top_n = int(os.environ.get("HYPERLOOM_KERNEL_OPT_GATE_TOP_N", _DEFAULT_HOT_KERNEL_GATE_TOP_N))
+        except (TypeError, ValueError):
+            top_n = _DEFAULT_HOT_KERNEL_GATE_TOP_N
     kid_to_group, group_key_aliases = _hot_kernel_task_groups(info.get("task_groups") or [])
 
     integrated = IntegratedStack.of(state.optimization_stack)
@@ -992,5 +951,5 @@ def untried_hot_reusable_kernels(
             for member in members
         )
 
-    rows = _deduped_hot_rows(_hot_kernel_rows(hot, min_gpu_pct, kid_to_group), _hot_kernel_gate_top_n(top_n))
+    rows = _deduped_hot_rows(_hot_kernel_rows(hot, min_gpu_pct, kid_to_group), max(1, int(top_n)))
     return [row[1] for row in rows if _still_untried(row)]
