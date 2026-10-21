@@ -160,7 +160,11 @@ may only need enabling.
 A tuned table goes into the recipe through put_kernel_artifact: put the whole table for its variable, one table per \
 variable, and add the artifact it returns to the delta's add_kernels; never point a variable at a file of yours or \
 set it from code. The table put replaces the image's default table for that variable, so it must carry the default's \
-rows for the other shapes as well as the tuned ones. Another file or setting a change selects from code must not \
+rows for the other shapes as well as the tuned ones. The first table put for a variable binds it to a target name \
+for the session, not to a branch: put your own table under that target; kernel_variable_taken refuses only a second \
+target name for the same variable. A PyTorch TunableOp table is tuned offline: put the tuned CSV with env \
+"PYTORCH_TUNABLEOP_FILENAME" and run with PYTORCH_TUNABLEOP_ENABLED=1 and PYTORCH_TUNABLEOP_TUNING=0; tuning \
+during a test is refused as online_tuning_unsupported. Another file or setting a change selects from code must not \
 use os.environ.setdefault: a variable the recipe already sets silently wins, and the test then measures nothing of \
 the change.
 - Before tuning a GEMM, check which path it actually takes: the server.log's tuned-config lookups name the table \

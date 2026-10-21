@@ -263,6 +263,21 @@ def test_the_nudge_sends_a_model_that_ran_out_of_settings_to_source_work():
     assert "Settings run out; source work does not" in prompts.nudge_message()
 
 
+def test_the_role_says_a_bound_table_variable_takes_any_branch_s_table_under_its_target():
+    prompt = role_prompt(WORKLOAD)
+
+    assert "binds it to a target name for the session, not to a branch" in prompt
+    assert "put your own table under that target" in prompt
+
+
+def test_the_role_gives_the_offline_route_for_a_tunableop_table():
+    prompt = role_prompt(WORKLOAD)
+
+    assert 'env "PYTORCH_TUNABLEOP_FILENAME"' in prompt
+    assert "PYTORCH_TUNABLEOP_ENABLED=1 and PYTORCH_TUNABLEOP_TUNING=0" in prompt
+    assert "online_tuning_unsupported" in prompt
+
+
 def test_the_role_points_at_the_brief_s_unfinished_leads_by_their_section_title():
     prompt = role_prompt(WORKLOAD)
 
