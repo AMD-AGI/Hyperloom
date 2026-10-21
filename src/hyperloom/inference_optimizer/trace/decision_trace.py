@@ -254,6 +254,68 @@ def _proposal_scores_by_variant(state: dict[str, Any]) -> dict[str, list[dict[st
     return out
 
 
+def _keep_revert_decision(
+    entry: dict[str, Any],
+    phase_windows: list[tuple[float, str]],
+    scores_by_variant: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any]:
+    """The trace row for one KEEP/REVERT journal entry, still carrying its call-join ``key``."""
+    ts = iso_z(entry.get("ts"))
+    decision: dict[str, Any] = {
+        "change": str(entry.get("change") or ""),
+        "outcome": str(entry.get("outcome") or ""),
+        "gain_pct": _to_float(entry.get("gain_pct")),
+        "task_id": str(entry.get("task_id") or ""),
+    }
+    for field in ("kind", "provenance", "scope", "fingerprint", "variant_name"):
+        text = str(entry.get(field) or "")
+        if text:
+            decision[field] = text
+    decision["component"] = proposer_for(decision.get("provenance", ""))
+    decision["operation_kind"] = operation_kind_for("", decision.get("kind", ""))
+    # Predicted (pre-measurement) gain, when the proposer supplied one.
+    predicted_gain = _to_float(entry.get("predicted_gain_pct"))
+    if predicted_gain is not None:
+        decision["predicted_gain_pct"] = predicted_gain
+    detail_metrics = entry.get("metrics")
+    if isinstance(detail_metrics, dict) and detail_metrics:
+        decision["metrics"] = detail_metrics
+    scored = scores_by_variant.get(decision.get("variant_name"))
+    if scored:
+        decision["proposal_scores"] = scored
+    return {
+        "decision_id": _decision_id("keep_revert", *JournalEntry.from_dict(entry).dedupe_key()),
+        "key": _decision_key(decision["task_id"], ""),
+        "phase": str(entry.get("phase") or "").strip() or _phase_at(ts, phase_windows),
+        "tick": entry.get("tick"),
+        "ts": ts,
+        "decision": decision,
+    }
+
+
+def _dynamic_action_decision(row: dict[str, Any], phase_windows: list[tuple[float, str]]) -> dict[str, Any]:
+    """The trace row for one dynamic_action dispatch, still carrying its call-join ``key``."""
+    dyn_id = str(row.get("dyn_id") or "")
+    ts = iso_z(row.get("ts"))
+    event = str(row.get("event") or "")
+    return {
+        "decision_id": _decision_id("dynamic_action", dyn_id, event, ts),
+        "key": _decision_key(str(row.get("task_id") or ""), dyn_id),
+        "phase": _phase_at(ts, phase_windows),
+        "tick": row.get("tick"),
+        "ts": ts,
+        "decision": {
+            "component": "dynamic_action",
+            "operation_kind": "dynamic_action",
+            "event": event,
+            "dyn_id": dyn_id,
+            "verdict": row.get("verdict"),
+            "outcome": str(row.get("integrate_status") or row.get("terminal_state") or ""),
+            "gain_pct": _to_float(row.get("delta_pct")),
+        },
+    }
+
+
 def write_decision_trace(
     session_dir: Path,
     state: dict[str, Any],
@@ -281,130 +343,41 @@ def write_decision_trace(
 
     _attribute_critic_calls(calls, _load_proposal_task_map(session_dir, warnings))
 
-    # A call carrying neither key anchors to no decision row, so it has nothing
-    # to contribute to the timeline.
+    # A call carrying neither key anchors to no decision row, so it contributes nothing to the timeline.
     calls_by_key: dict[str, list[dict[str, Any]]] = {}
     for call in calls:
-        key = _decision_key(
-            str(call.get("task_id") or ""),
-            str(call.get("dyn_id") or ""),
-        )
+        key = _decision_key(str(call.get("task_id") or ""), str(call.get("dyn_id") or ""))
         if key is not None:
             calls_by_key.setdefault(key, []).append(call)
 
-    decisions: list[dict[str, Any]] = []
-    for e in _load_optimization_journal(session_dir, warnings):
-        if not isinstance(e, dict):
-            continue
-        task_id = str(e.get("task_id") or "")
-        key = _decision_key(task_id, "")
-        ts = iso_z(e.get("ts"))
-        phase = str(e.get("phase") or "").strip() or _phase_at(ts, phase_windows)
-        provenance = str(e.get("provenance") or "")
-        change_kind = str(e.get("kind") or "")
-        decision: dict[str, Any] = {
-            "component": proposer_for(provenance) if provenance else "orchestration",
-            "change": str(e.get("change") or ""),
-            "outcome": str(e.get("outcome") or ""),
-            "gain_pct": _to_float(e.get("gain_pct")),
-            "task_id": task_id,
-            "operation_kind": operation_kind_for("", change_kind),
-        }
-        # Predicted (pre-measurement) gain, when the proposer supplied one.
-        predicted_gain = _to_float(e.get("predicted_gain_pct"))
-        if predicted_gain is not None:
-            decision["predicted_gain_pct"] = predicted_gain
-        if change_kind:
-            decision["kind"] = change_kind
-        if provenance:
-            decision["provenance"] = provenance
-        scope = str(e.get("scope") or "")
-        if scope:
-            decision["scope"] = scope
-        fingerprint = str(e.get("fingerprint") or "")
-        if fingerprint:
-            decision["fingerprint"] = fingerprint
-        detail_metrics = e.get("metrics")
-        if isinstance(detail_metrics, dict) and detail_metrics:
-            decision["metrics"] = detail_metrics
-        variant_name = str(e.get("variant_name") or "")
-        if variant_name:
-            decision["variant_name"] = variant_name
-            scored = scores_by_variant.get(variant_name)
-            if scored:
-                decision["proposal_scores"] = scored
-        decisions.append(
-            {
-                "kind": "keep_revert",
-                "decision_id": _decision_id("keep_revert", *JournalEntry.from_dict(e).dedupe_key()),
-                "key": key,
-                "phase": phase,
-                "tick": e.get("tick"),
-                "ts": ts,
-                "decision": decision,
-            }
-        )
-    for row in _load_dispatch_history_all(session_dir, warnings):
-        dyn_id = str(row.get("dyn_id") or "")
-        key = _decision_key(str(row.get("task_id") or ""), dyn_id)
-        ts = iso_z(row.get("ts"))
-        phase = _phase_at(ts, phase_windows)
-        event = str(row.get("event") or "")
-        decisions.append(
-            {
-                "kind": "dynamic_action",
-                "decision_id": _decision_id("dynamic_action", dyn_id, event, ts),
-                "key": key,
-                "phase": phase,
-                "tick": row.get("tick"),
-                "ts": ts,
-                "decision": {
-                    "component": "dynamic_action",
-                    "operation_kind": "dynamic_action",
-                    "event": event,
-                    "dyn_id": dyn_id,
-                    "verdict": row.get("verdict"),
-                    "outcome": str(row.get("integrate_status") or row.get("terminal_state") or ""),
-                    "gain_pct": _to_float(row.get("delta_pct")),
-                },
-            }
-        )
+    decisions = [
+        _keep_revert_decision(e, phase_windows, scores_by_variant)
+        for e in _load_optimization_journal(session_dir, warnings)
+        if isinstance(e, dict)
+    ]
+    decisions += [
+        _dynamic_action_decision(row, phase_windows) for row in _load_dispatch_history_all(session_dir, warnings)
+    ]
 
-    consumed_keys: set[str] = set()
-    decision_trace: list[dict[str, Any]] = []
-    for dec in sorted(decisions, key=lambda d: d.get("ts") or ""):
-        key = dec.get("key")
-        if key and key in calls_by_key and key not in consumed_keys:
-            attached = calls_by_key[key]
-            consumed_keys.add(key)
-        else:
-            attached = []
+    # Sorted by time, the first decision that names a key takes that key's calls.
+    decisions.sort(key=lambda d: d["ts"])
+    for dec in decisions:
         by_component: dict[str, dict[str, int]] = {}
         agg = _empty_token_bucket()
-        for call in attached:
-            comp = str(call.get("component") or "unknown")
-            comp_bucket = by_component.setdefault(comp, _empty_token_bucket())
-            _fold_call_into_bucket(comp_bucket, call)
+        for call in calls_by_key.pop(dec.pop("key"), []):
+            bucket = by_component.setdefault(str(call.get("component") or "unknown"), _empty_token_bucket())
+            _fold_call_into_bucket(bucket, call)
             _fold_call_into_bucket(agg, call)
-        decision_trace.append(
-            {
-                "decision_id": dec["decision_id"],
-                "phase": dec.get("phase") or "",
-                "tick": dec.get("tick"),
-                "ts": dec.get("ts") or "",
-                "decision": dec.get("decision") or {},
-                "tokens": {
-                    "by_component": by_component,
-                    "total_in": agg["total_in"],
-                    "total_out": agg["total_out"],
-                    "total_cache": agg["total_cache_creation"] + agg["total_cache_read"],
-                    "total_reasoning_out": agg["total_reasoning_out"],
-                    "calls": agg["calls"],
-                },
-            }
-        )
+        dec["tokens"] = {
+            "by_component": by_component,
+            "total_in": agg["total_in"],
+            "total_out": agg["total_out"],
+            "total_cache": agg["total_cache_creation"] + agg["total_cache_read"],
+            "total_reasoning_out": agg["total_reasoning_out"],
+            "calls": agg["calls"],
+        }
 
-    _write_decision_trace_jsonl(session_dir, decision_trace, warnings)
+    _write_decision_trace_jsonl(session_dir, decisions, warnings)
 
 
 def _write_decision_trace_jsonl(

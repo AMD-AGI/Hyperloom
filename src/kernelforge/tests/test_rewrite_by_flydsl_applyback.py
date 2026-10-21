@@ -764,3 +764,127 @@ def test_applyback_host_validation_rechecks_formatter_fixes(
     assert changed == ["softmax.py"]
     assert len(precommit_calls) == 2
     assert _git(repo, "diff", "--cached", "--check") == ""
+
+
+@pytest.mark.parametrize(
+    ("spec_paths", "request_changes", "error"),
+    [
+        ({}, {"base_commit": "0" * 40}, f"apply-back base commit is unavailable: {'0' * 40}"),
+        ({"source_kernel": "elsewhere.py"}, {}, "source kernel is outside the framework workspace"),
+        ({"flydsl_kernel": "framework/missing_kernel.py"}, {}, "best FlyDSL kernel is unavailable for apply-back"),
+        ({}, {"deadline_unix": 1.0}, "insufficient time remaining for the apply-back agent and host validation"),
+    ],
+)
+def test_applyback_refuses_before_agent_work_when_a_precondition_fails(
+    tmp_path,
+    monkeypatch,
+    spec_paths,
+    request_changes,
+    error,
+):
+    repo, base, spec = _repo_spec(tmp_path)
+
+    async def unexpected_agent(**kwargs):
+        raise AssertionError("a refused apply-back must not start the agent")
+
+    monkeypatch.setattr(applyback, "_run_agent", unexpected_agent)
+    request = applyback.ApplybackRequest(base_commit=base, experiments_dir=str(tmp_path / "experiments"))
+    result = applyback.generate_applyback_patch(
+        replace(spec, framework="vllm", **{name: str(tmp_path / path) for name, path in spec_paths.items()}),
+        Config.from_env(workspace=str(repo), agent_precheck=False),
+        replace(request, **request_changes),
+    )
+
+    assert result.ok is False
+    assert result.error == error
+    assert result.attempts == 0
+    assert not (tmp_path / "experiments").exists()
+
+
+def _commit_pre_commit_config(repo):
+    (repo / ".pre-commit-config.yaml").write_text("repos: []\n")
+    _git(repo, "add", ".pre-commit-config.yaml")
+    _git(repo, "commit", "-qm", "add pre-commit config")
+    return _git(repo, "rev-parse", "HEAD")
+
+
+def _run_applyback_with_hooks(tmp_path, monkeypatch, hook):
+    """Run one apply-back attempt whose agent edits the source, with ``hook`` standing in for pre-commit."""
+    repo, _base, spec = _repo_spec(tmp_path)
+    base = _commit_pre_commit_config(repo)
+
+    async def integrate(**kwargs):
+        (kwargs["turn"].worktree / "softmax.py").write_text("def softmax(x):\n    return x + 1\n")
+        return "fake", "fake-model"
+
+    real_run = subprocess.run
+
+    def fake_run(command, *args, **kwargs):
+        if command[0] != "/fake/pre-commit":
+            return real_run(command, *args, **kwargs)
+        return hook(command, Path(kwargs["cwd"]))
+
+    monkeypatch.setattr(applyback, "_run_agent", integrate)
+    monkeypatch.setattr(applyback.shutil, "which", lambda name: "/fake/pre-commit")
+    monkeypatch.setattr(applyback.subprocess, "run", fake_run)
+    result = applyback.generate_applyback_patch(
+        replace(spec, framework="vllm"),
+        Config.from_env(workspace=str(repo), agent_precheck=False),
+        applyback.ApplybackRequest(base_commit=base, experiments_dir=str(tmp_path / "experiments"), max_attempts=1),
+    )
+    return repo, result
+
+
+def _hook_fails_twice(command, worktree):
+    return subprocess.CompletedProcess(command, 1, stdout="hook failed", stderr="")
+
+
+def _hook_times_out(command, worktree):
+    raise subprocess.TimeoutExpired(command, 300)
+
+
+def _hook_locks_the_index(command, worktree):
+    (Path(_git(worktree, "rev-parse", "--absolute-git-dir")) / "index.lock").write_text("")
+    return subprocess.CompletedProcess(command, 0, stdout="passed", stderr="")
+
+
+def _hook_leaves_trailing_whitespace(command, worktree):
+    (worktree / "softmax.py").write_text("def softmax(x):   \n    return x + 1\n")
+    return subprocess.CompletedProcess(command, 0, stdout="passed", stderr="")
+
+
+@pytest.mark.parametrize(
+    ("hook", "error"),
+    [
+        (_hook_fails_twice, "RuntimeError: apply-back pre-commit validation failed: hook failed"),
+        (_hook_times_out, "RuntimeError: apply-back pre-commit validation timed out"),
+        (_hook_locks_the_index, "RuntimeError: could not restage pre-commit changes: "),
+        (_hook_leaves_trailing_whitespace, "RuntimeError: post-format apply-back diff check failed: "),
+    ],
+)
+def test_applyback_fails_an_attempt_whose_pre_commit_hooks_cannot_pass(tmp_path, monkeypatch, hook, error):
+    repo, result = _run_applyback_with_hooks(tmp_path, monkeypatch, hook)
+
+    assert result.ok is False
+    assert result.error.startswith(error)
+    assert Path(result.diagnostic_path).is_dir()
+    assert not (repo / "forge_experiments" / "rewrite_applyback").exists()
+
+
+def test_applyback_does_not_start_pre_commit_hooks_once_host_validation_time_is_spent(tmp_path, monkeypatch):
+    hook_calls = []
+
+    def recording_hook(command, worktree):
+        hook_calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="passed", stderr="")
+
+    monkeypatch.setattr(
+        applyback,
+        "DEFAULT_REWRITE_BUDGET",
+        replace(applyback.DEFAULT_REWRITE_BUDGET, applyback_host_validation_reserve_sec=0),
+    )
+    _repo, result = _run_applyback_with_hooks(tmp_path, monkeypatch, recording_hook)
+
+    assert result.ok is False
+    assert result.error == "RuntimeError: apply-back pre-commit validation timed out"
+    assert hook_calls == []
