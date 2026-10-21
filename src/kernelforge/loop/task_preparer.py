@@ -1411,8 +1411,8 @@ def _prepare_failure_message(guard: "_SourceGuard", failure: _PrepareFailure) ->
 def _commit_prepared_task(layout: _PreparationLayout, *, pf, attempt_count: int) -> PrepareResult:
     """Make the prepared driver, and everything it reads at runtime, part of pristine.
 
-    IterationLoop captures its base SHA from this commit, so anything left out
-    of it is not there for the measurements that follow.
+    IterationLoop captures its base SHA from this commit, so anything left out of it is not there for the measurements
+    that follow. Nothing staged is nothing to commit: a driver git ignores, as the controller stages one, runs in place.
     """
     workspace, guard, spec_path, audit_dir_str = layout.workspace, layout.guard, layout.spec_path, layout.audit_dir_str
     stage_code, stage_out = _stage_preparation_changes(workspace, guard.pre_untracked)
@@ -1455,7 +1455,7 @@ def _commit_prepared_task(layout: _PreparationLayout, *, pf, attempt_count: int)
     # a git cwd, and a commit with none to auto-detect cannot land.
     ensure_commit_identity(workspace)
     _, commit_out = _git(workspace, "commit", "-m", "forge prepass: prepared measurement driver")
-    if _git_head(workspace) == guard.base_sha:
+    if _git_head(workspace) == guard.base_sha and _git(workspace, "diff-index", "--quiet", "--cached", "HEAD")[0]:
         guard.rollback()
         return PrepareResult(
             ok=False,

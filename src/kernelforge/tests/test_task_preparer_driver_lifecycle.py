@@ -414,6 +414,97 @@ def test_a_failed_rematerialization_stops_advertising_the_absent_bundle(tmp_path
     assert "could not re-materialize the authoring reference bundle" in caplog.text
 
 
+_BROKEN_DRIVER = "# broken driver\n"
+_REPAIRED_DRIVER = "# repaired driver\n"
+
+
+def _prepare_a_driver_the_agent_repairs(tmp_path, monkeypatch, driver_relpath: str, *, after_init=None):
+    """Prepare a task whose driver fails preflight until the agent rewrites it; return the result and workspace."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    kernel = workspace / "kernel.py"
+    kernel.write_text("def hipb_mm(a, b):\n    return a @ b\n", encoding="utf-8")
+    driver = workspace / driver_relpath
+    driver.parent.mkdir(parents=True, exist_ok=True)
+    driver.write_text(_BROKEN_DRIVER, encoding="utf-8")
+    if driver.parent != workspace:
+        (driver.parent / ".gitignore").write_text("*\n", encoding="utf-8")
+    _init_repo(workspace)
+    if after_init is not None:
+        after_init(workspace)
+
+    async def repairing_agent(**_kwargs):
+        driver.write_text(_REPAIRED_DRIVER, encoding="utf-8")
+        return "prepared"
+
+    async def content_preflight(driver_script, *_args, **_kwargs):
+        ok = Path(driver_script).read_text(encoding="utf-8") == _REPAIRED_DRIVER
+        return task_preflight.PreflightResult(
+            ok=ok,
+            correctness_ok=ok,
+            bench_ok=ok,
+            graph_ok=True,
+            profile_ok=True,
+            reasons=[] if ok else ["bench exited 1"],
+        )
+
+    monkeypatch.setattr(task_preparer, "_materialize_reference", lambda _workspace: None)
+    monkeypatch.setattr(task_preparer, "_run_prepare_agent", repairing_agent)
+    monkeypatch.setattr(task_preparer, "_preflight_async", content_preflight)
+    monkeypatch.setattr(task_preparer, "PREPARE_MAX_ATTEMPTS", 1)
+    result = asyncio.run(
+        task_preparer.prepare_task(
+            config=SimpleNamespace(model="test-model", experiments_dir=tmp_path / "experiments"),
+            task=task_preparer.PreparationTask(
+                workspace_dir=str(workspace),
+                kernel=str(kernel),
+                driver=str(driver),
+                program_md="# Task",
+                target_functions=["hipb_mm"],
+                source_files=[str(kernel)],
+            ),
+        )
+    )
+    return result, workspace, driver
+
+
+def test_a_driver_git_ignores_is_prepared_in_place_without_a_commit(tmp_path, monkeypatch):
+    """The rewrite controller stages a driver in a folder that hides itself from git
+    (kernel_rewrite_controller/worktree.py), so repairing it leaves nothing to commit."""
+    base = tmp_path / "base"
+
+    def record_base(workspace):
+        base.write_text(task_preparer._git_head(workspace), encoding="utf-8")
+
+    result, workspace, driver = _prepare_a_driver_the_agent_repairs(
+        tmp_path, monkeypatch, ".forge-driver-0123abcd/driver.py", after_init=record_base
+    )
+
+    assert result.ok is True, result.message
+    assert result.rolled_back is False
+    assert driver.read_text(encoding="utf-8") == _REPAIRED_DRIVER
+    assert task_preparer._git_head(workspace) == base.read_text(encoding="utf-8")
+
+
+def test_a_staged_driver_whose_commit_does_not_land_still_fails_and_rolls_back(tmp_path, monkeypatch):
+    def reject_every_commit(workspace):
+        hook = workspace / ".git" / "hooks" / "pre-commit"
+        hook.write_text("#!/bin/sh\necho rejected by hook\nexit 1\n", encoding="utf-8")
+        hook.chmod(0o755)
+
+    result, workspace, driver = _prepare_a_driver_the_agent_repairs(
+        tmp_path, monkeypatch, "driver.py", after_init=reject_every_commit
+    )
+
+    assert result.ok is False
+    assert result.rolled_back is True
+    assert "the git commit did not land" in result.message
+    assert driver.read_text(encoding="utf-8") == _BROKEN_DRIVER
+    code, log = task_preparer._git(workspace, "log", "--oneline")
+    assert code == 0, log
+    assert len([line for line in log.splitlines() if line.strip()]) == 1
+
+
 def test_git_indexed_separates_not_indexed_from_could_not_determine(tmp_path):
     """\"Not staged\" and \"never asked\" send the operator to different places."""
     workspace = tmp_path / "workspace"
