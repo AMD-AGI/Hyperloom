@@ -191,22 +191,26 @@ def _terminal_frame(root: _Traceback | None, roots: Sequence[str]) -> TerminalFr
 
 
 def _region_start(text: str, root: _Traceback | None) -> int:
-    """Return where the failure rules start reading: the last milestone line before the root traceback."""
+    """Return where the failure rules start: the first line of the furthest milestone before the root traceback."""
     end = root.anchor if root is not None else len(text)
     # Lowering keeps every offset but past U+0130, which lowers to two code points.
     lowered = text[:end].replace("\u0130", "i").lower()
-    last = max(lowered.rfind(marker) for _stage, marker in _PROGRESS_MARKERS)
-    return 0 if last < 0 else text.rfind("\n", 0, last) + 1
+    reached = [(stage, at) for stage, marker in _PROGRESS_MARKERS if (at := lowered.find(marker)) >= 0]
+    if not reached:
+        return 0
+    furthest = max(stage for stage, _at in reached)
+    first = min(at for stage, at in reached if stage == furthest)
+    return text.rfind("\n", 0, first) + 1
 
 
 def failure_region(text: str) -> str:
     """Return the stretch of a stream the failure rules read.
 
-    The process carried on past every line a later milestone follows, so a rule
-    match there (an autotuner rejecting a config, an allocation it retried) is not
-    what failed. Between the last milestone and the root traceback sit the lines a
-    failure prints natively before Python raises, so the region starts at that
-    milestone, not at the traceback.
+    The process carried on past every line before the furthest milestone it
+    reached, so a rule match there (an autotuner rejecting a config, an allocation
+    it retried) is not what failed. That milestone's first line marks the stage:
+    its markers repeat per rank and while serving, after the line that failed.
+    The lines a failure prints natively before Python raises stay in the region.
     """
     return text[_region_start(text, _root_traceback(text)) :]
 

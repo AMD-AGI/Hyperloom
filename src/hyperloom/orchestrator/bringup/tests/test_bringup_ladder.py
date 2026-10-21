@@ -191,6 +191,20 @@ def test_a_rule_match_the_process_ran_past_does_not_name_the_failure() -> None:
     assert verdict.signature.kind == "resource_constraint"
 
 
+def test_a_milestone_another_rank_repeats_after_the_failing_line_keeps_it_in_the_region() -> None:
+    from hyperloom.orchestrator.bringup import observe_bringup
+
+    log = (
+        "(Worker_TP0 pid=90) INFO: GPU KV cache size: 1,048,576 tokens\n"
+        "host:1667128:1667733 [0] [FATAL ERROR]: HIP failure: 'out of memory'\n"
+        "(Worker_TP5 pid=95) INFO: GPU KV cache size: 1,048,576 tokens\n"
+    )
+    verdict = observe_bringup(server_log=log)
+
+    assert verdict.observation.env_fault == "resource_constraint"
+    assert verdict.signature.kind == "resource_constraint"
+
+
 def test_digest_ignores_stage_reached_noise() -> None:
     frame = TerminalFrame(exc_type="ValueError", module="a.b", file_rel="a/b.py", line=3)
     left = BootObservation(
