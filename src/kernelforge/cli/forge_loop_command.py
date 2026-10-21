@@ -374,15 +374,7 @@ class _RunReporter:
             status = write_experience_to_kb(
                 config=self.run.config,
                 loop_runner=self.loop_runner,
-                kernel=LoopKernel(
-                    kernel_path=self.run.iter_config.kernel_file,
-                    kernel_backend=self.run.campaign.kernel_backend,
-                    target_functions=self.run.iter_config.target_functions,
-                    source_files=self.run.iter_config.source_files,
-                    framework=self.run.campaign.framework,
-                    operator_name=self.run.campaign.operator_name,
-                    workspace=self.run.iter_config.workspace_dir,
-                ),
+                kernel=self.run.loop_kernel,
                 publication=ExperiencePublication(
                     base_sha=self.run.campaign.base_commit,
                     gpu_target=self.run.config.gpu_target,
@@ -483,6 +475,19 @@ class _ForgeRun:
     def caller_experiment_id(self) -> str:
         """The caller-owned experiment ID: an external recovery channel."""
         return (self.request.artifacts.experiment_id or "").strip()
+
+    @property
+    def loop_kernel(self) -> LoopKernel:
+        """The kernel this run optimizes, as the knowledge base identifies it."""
+        return LoopKernel(
+            kernel_path=self.iter_config.kernel_file,
+            kernel_backend=self.campaign.kernel_backend,
+            target_functions=self.iter_config.target_functions,
+            source_files=self.iter_config.source_files,
+            framework=self.campaign.framework,
+            operator_name=self.campaign.operator_name,
+            workspace=self.iter_config.workspace_dir,
+        )
 
 
 def _print_prepared_driver(prep: PrepareResult) -> None:
@@ -690,31 +695,65 @@ class _WarmStart:
     kb_reused_speedup: float | None
 
 
-def _read_kb_warm_start(run: _ForgeRun, program_md: str, kb_warmstart_enabled: bool) -> _WarmStart:
-    """Adopt the best prior solution the KB offers, so iteration 1 starts from it rather than from scratch."""
+def _publish_warm_start(run: _ForgeRun, warm: dict) -> dict:
+    """Publish an adopted warm start as the recoverable best before iteration 1, and return the verdict that stands.
+
+    A warm start that cannot be published durably is rolled back to the pristine source, and the run keeps it as a
+    reference only.
+    """
     iter_config = run.iter_config
-    config = run.config
     workspace_dir = iter_config.workspace_dir
-    kernel = iter_config.kernel_file
-    driver = iter_config.driver_script
-    kernel_backend = iter_config.kernel_backend
-    target_functions_list = iter_config.target_functions
-    source_files_list = iter_config.source_files
-    framework = run.campaign.framework
-    operator_name = run.campaign.operator_name
-    snr_threshold = iter_config.snr_threshold
-    bench_repeat = iter_config.bench_repeat
+    result_json = run.request.artifacts.result_json
+    iter_config.publication_baseline_wall_ms = warm.get("pristine_ms")
+    try:
+        published = publish_warm_start_recovery(
+            workspace_dir,
+            base_commit=run.campaign.base_commit,
+            warm=warm,
+            caller=CallerRecovery(run.caller_experiment_id, run.request.artifacts.experience_id, result_json),
+            tracker=run.tracker,
+        )
+        iter_config.warm_start_publication = dict(published)
+        if published["persistence_degraded"]:
+            print(
+                "  [warm-start] recovery publication degraded: " + "; ".join(published["persistence_errors"]),
+                flush=True,
+            )
+        print("  [warm-start] published recoverable best before iteration 1", flush=True)
+    except Exception as error:  # noqa: BLE001 - translated into a rollback below
+        try:
+            rollback_unpublished_warm_start(
+                workspace_dir, base_commit=run.campaign.base_commit, result_json=result_json
+            )
+        except Exception as rollback_error:
+            raise click.ClickException(
+                f"failed to publish validated warm-start and could not restore pristine workspace: {rollback_error}"
+            ) from rollback_error
+        mark_kb_reference_rejected(workspace_dir, int(warm.get("applied_rank") or 0), "publication_failed")
+        reference = kb_reference_program_md(workspace_dir, detect_applied=False) or warm.get(
+            "reference_program_md_addition",
+            "## Warm-start reference only\n"
+            "The prior patch could not be published durably and was "
+            "removed before optimization.",
+        )
+        iter_config.publication_baseline_wall_ms = None
+        print(
+            "  [warm-start] recovery publication failed; restored "
+            f"pristine source and continuing reference-only ({error})",
+            flush=True,
+        )
+        return {**warm, "applied": False, "keep_baseline_ms": warm.get("pristine_ms"), "program_md_addition": reference}
+    return warm
+
+
+def _read_kb_warm_start(run: _ForgeRun, program_md: str, kb_warmstart_enabled: bool) -> _WarmStart:
+    """Adopt the best prior solution the KB offers, so iteration 1 starts from it rather than from scratch.
+
+    Its experience goes into the prompt too, so the agent continues from the best-known state.
+    """
+    iter_config = run.iter_config
     resume = run.request.resume
     experience_kb = run.request.knowledge.experience_kb
-    result_json = run.request.artifacts.result_json
-    experience_id = run.request.artifacts.experience_id
-    deadline = run.deadline
-    base_sha = run.campaign.base_commit
-    caller_experiment_id = run.caller_experiment_id
-    tracker = run.tracker
-    # KB warm-start: apply the best prior solution as the starting point and inject its experience into the prompt, so
-    # the agent continues from the best-known state instead of from scratch.
-    kb_pristine_baseline_ms = None
     kb_reused_speedup = None
     warm = {
         "candidate": False,
@@ -725,96 +764,32 @@ def _read_kb_warm_start(run: _ForgeRun, program_md: str, kb_warmstart_enabled: b
         experience_kb
         and kb_warmstart_enabled
         and not resume
-        and deadline.remaining(reserve=deadline.finalize_reserve_sec) >= 600
+        and run.deadline.remaining(reserve=run.deadline.finalize_reserve_sec) >= 600
     ):
         try:
             warm = kb_warmstart(
-                config=config,
-                kernel=LoopKernel(
-                    kernel_path=kernel,
-                    kernel_backend=kernel_backend,
-                    target_functions=target_functions_list,
-                    source_files=source_files_list,
-                    framework=framework,
-                    operator_name=operator_name,
-                    workspace=workspace_dir,
+                config=run.config,
+                kernel=run.loop_kernel,
+                harness=WarmStartHarness(
+                    iter_config.driver_script,
+                    snr_threshold=iter_config.snr_threshold,
+                    bench_repeat=iter_config.bench_repeat,
                 ),
-                harness=WarmStartHarness(driver, snr_threshold=snr_threshold, bench_repeat=bench_repeat),
             )
         except WarmStartRollbackError as error:
             failure = click.ClickException(f"warm-start rollback failed; workspace may be inconsistent: {error}")
             failure.exit_code = 2
             raise failure from error
-        warm.setdefault(
-            "read_reason",
-            "hit" if warm.get("candidate") else "solution_pages_missing",
-        )
-        warm.setdefault("read_error", "")
     elif not resume and not experience_kb:
         warm["read_reason"] = "disabled"
         print("  [kb] experience KB disabled by caller")
     elif not resume:
         print("  [kb] warm-start skipped: absolute deadline reserve")
     if warm.get("candidate"):
-        kb_pristine_baseline_ms = warm.get("pristine_ms")
         if warm.get("applied"):
             # The floor this campaign starts from.
             kb_reused_speedup = warm.get("mean_case_speedup")
-            iter_config.publication_baseline_wall_ms = warm.get("pristine_ms")
-            try:
-                published = publish_warm_start_recovery(
-                    workspace_dir,
-                    base_commit=base_sha,
-                    warm=warm,
-                    caller=CallerRecovery(caller_experiment_id, experience_id, result_json),
-                    tracker=tracker,
-                )
-                if published:
-                    iter_config.warm_start_publication = dict(published)
-                if published and published.get("persistence_degraded"):
-                    print(
-                        "  [warm-start] recovery publication degraded: "
-                        + "; ".join(published.get("persistence_errors") or []),
-                        flush=True,
-                    )
-                print(
-                    "  [warm-start] published recoverable best before iteration 1",
-                    flush=True,
-                )
-            except Exception as error:  # noqa: BLE001 - translated into a rollback below
-                try:
-                    rollback_unpublished_warm_start(
-                        workspace_dir,
-                        base_commit=base_sha,
-                        result_json=result_json,
-                    )
-                except Exception as rollback_error:
-                    raise click.ClickException(
-                        "failed to publish validated warm-start and could not "
-                        f"restore pristine workspace: {rollback_error}"
-                    ) from rollback_error
-                warm["applied"] = False
-                warm["keep_baseline_ms"] = warm.get("pristine_ms")
-                mark_kb_reference_rejected(
-                    workspace_dir,
-                    int(warm.get("applied_rank") or 0),
-                    "publication_failed",
-                )
-                warm["program_md_addition"] = kb_reference_program_md(
-                    workspace_dir,
-                    detect_applied=False,
-                ) or warm.get(
-                    "reference_program_md_addition",
-                    "## Warm-start reference only\n"
-                    "The prior patch could not be published durably and was "
-                    "removed before optimization.",
-                )
-                iter_config.publication_baseline_wall_ms = None
-                print(
-                    "  [warm-start] recovery publication failed; restored "
-                    f"pristine source and continuing reference-only ({error})",
-                    flush=True,
-                )
+            warm = _publish_warm_start(run, warm)
         if warm.get("program_md_addition"):
             program_md = program_md + "\n\n" + warm["program_md_addition"]
         # Keep the pristine raw baseline immutable.
@@ -836,7 +811,7 @@ def _read_kb_warm_start(run: _ForgeRun, program_md: str, kb_warmstart_enabled: b
     return _WarmStart(
         warm=warm,
         program_md=program_md,
-        kb_pristine_baseline_ms=kb_pristine_baseline_ms,
+        kb_pristine_baseline_ms=warm.get("pristine_ms") if warm.get("candidate") else None,
         kb_reused_speedup=kb_reused_speedup,
     )
 
