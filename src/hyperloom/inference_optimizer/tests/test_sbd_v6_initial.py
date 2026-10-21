@@ -61,6 +61,7 @@ def _write_model_config(model: Path, payload: dict) -> None:
 def _model_gate_from_breakdown(session_dir: Path) -> dict:
     breakdown = json.loads((session_dir / "session_breakdown.json").read_text(encoding="utf-8"))
     assert breakdown["schema_version"] == SCHEMA_VERSION_V6
+    assert breakdown["schema_version"] == "hyperloom.session_breakdown.v6.1"
     assert breakdown["outcome"]["status"] == "failed"
     assert breakdown["outcome"]["stage_reached"] == "model_gate"
     return next(event for event in breakdown["timeline"] if event["type"] == "model_gate")
@@ -742,7 +743,7 @@ def _stub_preflight_steps(tmp_path, monkeypatch):
     monkeypatch.setattr(preflight.inferencex_checkout, "checkout_ok", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(preflight.inferencex_checkout, "head_sha", lambda *_args: "abc123")
     monkeypatch.setattr(preflight, "_report_inferencex_patch_anchors", lambda *_args: True)
-    monkeypatch.setattr(preflight, "_check_node_claude_cli", lambda: None)
+    monkeypatch.setattr(preflight, "_check_agent_cli", lambda: None)
     monkeypatch.setattr(preflight.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(
         preflight,

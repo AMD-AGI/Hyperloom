@@ -1,6 +1,6 @@
 {
-  "workflow_contract_version": "hyperloom.workflow_evaluation.v2",
-  "sbd_schema_version": "hyperloom.session_breakdown.v6.0",
+  "workflow_contract_version": "hyperloom.workflow_evaluation.v3",
+  "sbd_schema_version": "hyperloom.session_breakdown.v6.1",
   "canonicalization": "UTF-8 JSON with sorted keys, compact separators, and ensure_ascii=false; SHA-256 hex digest",
   "vocabularies": {
     "phases": [
@@ -58,7 +58,6 @@
       "max_ticks",
       "model_config_incompatible",
       "model_context_window_too_small",
-      "no_kernel_skipped",
       "patch_recovery_incomplete",
       "prelude_baseline_failed",
       "prelude_cold_anchor_low_budget",

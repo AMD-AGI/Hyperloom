@@ -214,15 +214,15 @@ def _state(tmp_path: Path) -> SimpleNamespace:
             "kernel_speedup": 1.2,
         },
         last_fusion_integrate={"decision": "KEEP", "new_tput": 130.0, "patch_path": str(fusion)},
-        kernel_opt_task_attempts={
-            "rmsnorm": {
-                "last_decision": "KEEP",
+        pending_kernel_integrations={
+            "integration-rmsnorm-1": {
+                "integration_id": "integration-rmsnorm-1",
                 "task_group_key": "group-rmsnorm",
-                "current_kernel_id": "rmsnorm",
-                "kernel_name": "rmsnorm",
-                "last_micro_speedup": 1.5,
-                "last_artifact_path": str(rewrite),
-                "last_source_file": str(source),
+                "kernel_id": "rmsnorm",
+                "micro_speedup": 1.5,
+                "artifact_path": str(rewrite),
+                "source_file": str(source),
+                "status": "integrated",
             }
         },
         last_action_failures=[{"action": "explore", "reason": "OOM"}],
@@ -474,6 +474,15 @@ def test_kernel_items_record_the_checkout_they_were_applied_into(tmp_path: Path)
 
     assert roots, "fusion and rewrite each publish an item"
     assert all(root == str(tmp_path) for root in roots)
+
+
+def test_a_rewrite_records_the_checkout_its_queued_keep_was_deployed_into(tmp_path: Path) -> None:
+    state = _state(tmp_path)
+    state.pending_kernel_integrations["integration-rmsnorm-1"]["deploy_repo_root"] = "/opt/kernels"
+
+    rewrite = _build(state, tmp_path / "files-deploy-root").knowledge["value"]["kernel"]["rewrite"]["items"][0]
+
+    assert rewrite["host_origin"]["apply_root"] == "/opt/kernels"
 
 
 def test_kernel_fusion_that_cannot_name_its_checkout_is_dropped(tmp_path: Path) -> None:
@@ -749,7 +758,6 @@ def test_prior_kernel_adoption_requires_successful_kernel_replay(
     state.last_gemm_tuning = {}
     state.last_fusion = {}
     state.last_fusion_integrate = {}
-    state.kernel_opt_task_attempts = {}
     state.warm_replay_outcome = warm_replay_outcome
     state.warm_kernel_kb_plan = [
         {
@@ -852,8 +860,8 @@ def test_integrate_stack_is_authoritative_for_rewrite_patch(tmp_path: Path) -> N
     state = _state(tmp_path)
     unintegrated_patch = tmp_path / "micro-only.cu"
     unintegrated_patch.write_text("// micro only", encoding="utf-8")
-    attempt = state.kernel_opt_task_attempts["rmsnorm"]
-    attempt["last_artifact_path"] = str(unintegrated_patch)
+    queued = state.pending_kernel_integrations["integration-rmsnorm-1"]
+    queued["artifact_path"] = str(unintegrated_patch)
     bundle = _build(state, tmp_path / "files-integrated")
     rewrite = bundle.knowledge["value"]["kernel"]["rewrite"]["items"][0]
     assert rewrite["patch"].endswith("/rewrite.cu")
@@ -865,7 +873,7 @@ def test_integrated_rewrite_missing_artifact_fails_closed(tmp_path: Path) -> Non
     state = _state(tmp_path)
     integrate = next(row for row in state.optimization_stack if row.get("action") == "integrate")
     integrate["patch_path"] = str(tmp_path / "missing-rewrite.cu")
-    state.kernel_opt_task_attempts["rmsnorm"]["last_artifact_path"] = ""
+    state.pending_kernel_integrations["integration-rmsnorm-1"]["artifact_path"] = ""
     with pytest.raises(RemoteRecipeValidationError, match="kernel/rewrite"):
         _build(state, tmp_path / "files-missing-rewrite")
 
@@ -1056,7 +1064,6 @@ def test_warm_replay_and_non_keep_actions_do_not_enable_write(tmp_path: Path) ->
         {"action": "roofline"},
         {"action": "conc_sweep"},
     ]
-    state.kernel_opt_task_attempts = {}
     assert has_new_keep(state) is False
 
 
@@ -2873,13 +2880,16 @@ def test_remote_adapter_pages_history_then_materializes_l2_donor(
     row, tier, confidence = _cascade_warm_start_search(
         adapter,  # type: ignore[arg-type]
         cid=exact,
-        hw="mi300x",
-        framework="sglang",
-        model_type_val="qwen",
-        architectures_val=["QwenArch"],
-        arch_slug="qwenarch",
-        fw_version="1.0",
-        precision="fp8",
+        identity={
+            "canonical_id": exact,
+            "hardware": "mi300x",
+            "framework_name": "sglang",
+            "model_type": "qwen",
+            "architectures": "qwenarch",
+            "framework_version": "1.0",
+            "precision": "fp8",
+        },
+        shape={},
         warm_prefer=None,
     )
 

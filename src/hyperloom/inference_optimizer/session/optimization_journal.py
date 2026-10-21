@@ -11,7 +11,7 @@ import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from hyperloom.common.io import WriteOptions, atomic_write_text
 from hyperloom.common.jsonio import read_json
@@ -192,17 +192,13 @@ class Journal:
     @classmethod
     def load_or_create(cls, session_dir: Path, fresh: Journal) -> Journal:
         """Return the existing journal if on disk, else ``fresh`` (on-disk header fields win only where ``fresh`` leaves them empty)."""
-        path = cls._journal_path(session_dir)
-        blob: dict[str, Any] = {}
-        if path.exists():
+        path = journal_path(session_dir)
+        path.parent.mkdir(parents=True, exist_ok=True)
 
-            def _warn(exc: BaseException) -> None:
-                log.warning("optimization_journal: failed to parse %s (%s); recreating fresh", path, exc)
+        def _warn(exc: BaseException) -> None:
+            log.warning("optimization_journal: failed to parse %s (%s); recreating fresh", path, exc)
 
-            blob = read_json(path, default={}, require_dict=True, on_error=_warn)
-
-        entries_raw = blob.get("entries") or []
-        entries = [JournalEntry.from_dict(e) for e in entries_raw if isinstance(e, dict)]
+        blob = _read_blob(path, _warn)
         return cls(
             session_id=str(blob.get("session_id") or fresh.session_id),
             model=str(blob.get("model") or fresh.model),
@@ -212,16 +208,9 @@ class Journal:
             or _measured_float(fresh.baseline_throughput),
             final_throughput=blob.get("final_throughput"),
             total_gain_pct=blob.get("total_gain_pct"),
-            entries=entries,
+            entries=_entries_of(blob),
             path=path,
         )
-
-    @staticmethod
-    def _journal_path(session_dir: Path) -> Path:
-        """Resolve (and create) the journal file path under a session dir."""
-        reports = Path(session_dir) / "reports"
-        reports.mkdir(parents=True, exist_ok=True)
-        return reports / JOURNAL_FILENAME
 
     # Mutation
     def append_entry(self, entry: JournalEntry) -> bool:
@@ -284,6 +273,31 @@ class Journal:
 
 
 # helpers
+def journal_path(session_dir: Path) -> Path:
+    """The journal file under a session dir."""
+    return Path(session_dir) / "reports" / JOURNAL_FILENAME
+
+
+def _read_blob(path: Path, on_error: Callable[[BaseException], None] | None) -> dict[str, Any]:
+    """The journal file's top-level object, ``{}`` when absent or unparseable."""
+    if not path.exists():
+        return {}
+    return read_json(path, default={}, require_dict=True, on_error=on_error)
+
+
+def _entries_of(blob: dict[str, Any]) -> list[JournalEntry]:
+    """Decision rows of a parsed journal blob."""
+    return [JournalEntry.from_dict(e) for e in blob.get("entries") or [] if isinstance(e, dict)]
+
+
+def read_journal_entries(
+    session_dir: Path,
+    on_error: Callable[[BaseException], None] | None = None,
+) -> list[JournalEntry]:
+    """The session's settled decision rows, creating nothing; ``[]`` when there is no journal."""
+    return _entries_of(_read_blob(journal_path(session_dir), on_error))
+
+
 def _variant_args(variant: dict[str, Any]) -> str:
     """Read a variant's canonical server-arg string."""
     return str(variant.get("extra_server_args") or "")
@@ -397,5 +411,7 @@ __all__ = [
     "Verdict",
     "classify_change_kind",
     "derive_journal_outcome",
+    "journal_path",
+    "read_journal_entries",
     "summarize_change",
 ]
