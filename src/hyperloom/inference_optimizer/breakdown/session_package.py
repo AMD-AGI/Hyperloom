@@ -43,7 +43,7 @@ MANIFEST_JSON_NAME = "PACKAGE_MANIFEST.json"
 MANIFEST_TXT_NAME = "PACKAGE_MANIFEST.txt"
 PACKAGE_SCHEMA_VERSION = 3
 
-# The must-ship partition: durable coordinator state, the terminal verdicts,
+# The must-ship partition: durable coordinator state, the final report,
 # and the source trees every bring-up observation was normalised against.
 # Literal relative paths, never globs.
 RESERVED_PATHS: tuple[str, ...] = (
@@ -52,7 +52,6 @@ RESERVED_PATHS: tuple[str, ...] = (
     "manifest.json",
     "session_breakdown.json",
     "reports/final.json",
-    "reports/session_terminal.json",
     f"reports/{BRINGUP_SEGMENT}/trees.json",
 )
 
@@ -63,10 +62,8 @@ PACKAGE_GLOBS: tuple[str, ...] = (
     "state.json",
     "manifest.json",
     "current_setting.sh",
-    # ── terminal verdicts ─────────────────────────────────────────────
+    # ── final report ──────────────────────────────────────────────────
     "reports/final.json",
-    "reports/session_terminal.json",
-    "reports/session_terminal.pre.json",
     # ── bring-up ladder: pinned source trees, one JSON per attempt ────
     f"reports/{BRINGUP_SEGMENT}/**",
     # ── reports/ ──────────────────────────────────────────────────────
