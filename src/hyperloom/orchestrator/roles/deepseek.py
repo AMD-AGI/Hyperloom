@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from hyperloom.common.deepseek_session import (
+    DEEPSEEK_RUNTIME_MAPPING,
     DeepSeekSession,
     DeepSeekSessionError,
     DeepSeekSessionUnavailableError,
@@ -85,19 +86,6 @@ nothing around it:
 
 
 _REJECTED_REPLY = "Your previous reply was rejected and none of its intents were applied: {error}. Reply again."
-
-#: Instructions the harness needs in order to read prompts written for Claude's
-#: tool names. The harness exposes equivalent capabilities under its own names,
-#: and an unrecognized literal name would otherwise read as a missing tool.
-_RUNTIME_MAPPING = """\
-## DeepSeek Harness runtime mapping
-Use the read, glob and grep tools to inspect and search files, and bash to run
-commands. References below to Read, Edit, Write, Grep, Glob, or Bash describe
-equivalent capabilities, not literal tool names.
-
-Do not run git commands that change repository state. Do not commit, reset,
-checkout, stash, clean, or alter branches.
-"""
 
 
 def _strip_code_fence(text: str) -> str:
@@ -253,12 +241,11 @@ class DeepSeekBackend:
         *,
         system_prompt: str | None = None,
         tools: list[str] | None = None,
-        disallowed_tools: list[str] | None = None,
         max_turns: int = 1,
     ) -> BackendTurnResult:
         """Run one DeepSeek Harness turn and parse the intent envelope it replied with."""
-        # The harness owns its tool set and its own turn loop, and the names a caller denies are Claude's.
-        del tools, disallowed_tools, max_turns
+        # The harness owns its tool set and its own turn loop.
+        del tools, max_turns
         turn_prompt = f"{prompt}\n\n{_ENVELOPE_REMINDER} {self._legal_intent_types()}"
 
         sdk_result = await self._drive_turn(system_prompt, turn_prompt, prompt_chars=len(prompt))
@@ -368,7 +355,7 @@ class DeepSeekBackend:
         return "\n\n".join(
             part
             for part in (
-                _RUNTIME_MAPPING.strip(),
+                DEEPSEEK_RUNTIME_MAPPING.strip(),
                 (system_prompt or "").strip(),
                 build_output_instructions(self.allowed_intents),
                 self._legal_intent_types(),
@@ -394,8 +381,6 @@ class DeepSeekBackend:
                 reasoning_effort=self.reasoning_effort,
                 permission_mode=self.permission_mode,
                 env=self.env,
-                component="orchestration",
-                operation="orchestrate_turn",
                 request_timeout_sec=self.call_timeout_s,
             )
             try:

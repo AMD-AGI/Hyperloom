@@ -483,17 +483,6 @@ def test_analysis_accepts_a_resumable_hookless_provider() -> None:
     OpportunityAnalysisAgent(backend=backend, timeout_sec=10, max_turns=20)
 
 
-def test_the_deepseek_harness_runs_analysis_on_the_resume_path() -> None:
-    """The harness has no in-session hooks, so the outer Stop refusals are its only route in."""
-    from kernelforge.agent_backends.deepseek import DeepSeekHarnessBackend
-
-    backend = DeepSeekHarnessBackend()
-
-    assert not backend.capabilities.stop_hooks
-    assert backend.capabilities.resumable and callable(getattr(backend, "resume", None))
-    OpportunityAnalysisAgent(backend=backend, timeout_sec=10, max_turns=20)
-
-
 def test_write_hook_allows_staging_and_denies_other_paths(tmp_path: Path) -> None:
     protection = _AnalysisToolGuard(tmp_path / "staging")
     allowed = asyncio.run(

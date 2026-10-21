@@ -3563,9 +3563,9 @@ def _resolve_forge_agent(
     Shared by forge-fusion and the rewrite lane, which uses the same model
     ladder via :func:`llm_config.resolve_forge_llm_model`. A valid explicit
     ``agent_backend`` or ``llm_model`` in the request wins; otherwise
-    :func:`llm_config.preferred_agent_backend` decides, so this role cannot
-    disagree with the specialists, the TraceLens runner or the Forge registry
-    about which backend a box is configured for.
+    :func:`llm_config.resolve_agent_backend` decides (an explicit ``INFERENCE_OPTIMIZER_AGENT_BACKEND``, else the
+    credential-ranked choice), so this role cannot disagree with the orchestration role or the Forge registry about
+    which backend a box is configured for.
 
     Model id precedence (after the backend is chosen) is owned by
     :func:`llm_config.resolve_forge_llm_model`.

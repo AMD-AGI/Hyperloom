@@ -162,15 +162,12 @@ AGENT_BACKEND_CLAUDE = "claude"
 AGENT_BACKEND_CODEX = "codex"
 AGENT_BACKEND_DEEPSEEK = "deepseek"
 
-#: Names the agent CLI that runs the orchestration role, overriding the shared
-#: credential-ranked rule. The DeepSeek Harness is reachable only this way: it
-#: returns its intents in the reply body with no schema enforcing them, so it is
-#: a route an operator asks for rather than one a credential shape can select.
-ORCHESTRATION_BACKEND_ENV = "INFERENCE_OPTIMIZER_ORCHESTRATION_BACKEND"
-
-#: Names the agent CLI for every other harness role (Forge, TraceLens, framework
-#: KB, quantization). Same explicit-only rule as orchestration: deepseek is never
-#: inferred from credentials alone.
+#: Names the agent CLI for the agentic roles, overriding the credential-ranked
+#: rule between Claude and Codex. The DeepSeek Harness is reachable only this
+#: way: it returns its intents in the reply body with no schema enforcing them,
+#: so it is a route an operator asks for rather than one a credential shape can
+#: select. The harness model comes from ``DSH_MODEL``. Quantization honours
+#: only ``deepseek``: any other value leaves it on Claude.
 AGENT_BACKEND_ENV = "INFERENCE_OPTIMIZER_AGENT_BACKEND"
 
 AGENT_BACKEND_CHOICES: tuple[str, ...] = (AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX, AGENT_BACKEND_DEEPSEEK)
@@ -433,8 +430,7 @@ def resolve_forge_llm_model(
     if backend == AGENT_BACKEND_CODEX:
         return str(source.get("CODEX_MODEL") or "").strip() or DEFAULT_CODEX_MODEL
     if backend == AGENT_BACKEND_DEEPSEEK:
-        explicit_dsh = (source.get("DEEPSEEK_MODEL") or source.get("DSH_MODEL") or "").strip()
-        return explicit_dsh or DEFAULT_DEEPSEEK_HARNESS_MODEL
+        return str(source.get("DSH_MODEL") or "").strip() or DEFAULT_DEEPSEEK_HARNESS_MODEL
     return str(source.get("CLAUDE_MODEL") or "").strip() or DEFAULT_CLAUDE_MODEL
 
 
@@ -1144,7 +1140,6 @@ __all__ = [
     "LEGACY_DEEPSEEK_ENV_KEYS",
     "LLMConfigError",
     "OpenAIClientConfig",
-    "ORCHESTRATION_BACKEND_ENV",
     "UNRUNNABLE_AGENT_RANK",
     "aanthropic_completion",
     "aanthropic_messages",

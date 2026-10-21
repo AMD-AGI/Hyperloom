@@ -5,14 +5,12 @@
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from hyperloom.common import agent_sdk_runner
+from hyperloom.common import deepseek_task
 from hyperloom.common.deepseek_session import DeepSeekSessionError, DeepSeekSessionResult
 
 
@@ -45,24 +43,23 @@ class _FakeSession:
 
 def _install(monkeypatch: pytest.MonkeyPatch, effects: list[Any]) -> None:
     _FakeSession.instances.clear()
-    monkeypatch.setattr(agent_sdk_runner, "DeepSeekSession", lambda **kw: _FakeSession(effects=effects, **kw))
+    monkeypatch.setattr(deepseek_task, "DeepSeekSession", lambda **kw: _FakeSession(effects=effects, **kw))
 
 
 async def _drive(tmp_path: Path, report: Path, *, max_continuations: int = 3, timeout_sec: float | None = None) -> Any:
-    request = agent_sdk_runner.AgentSessionRequest(
+    request = deepseek_task.DeepSeekTaskRequest(
         prompt="run the skill",
         system_prompt="",
         cwd=tmp_path,
-        allowed_tools=["Read", "Write"],
-        backend="deepseek",
+        writable=True,
         timeout_sec=timeout_sec,
     )
-    owed = agent_sdk_runner.OwedArtifact(
+    owed = deepseek_task.OwedArtifact(
         done=report.exists,
         continuation_prompt=f"Write {report}.",
         max_continuations=max_continuations,
     )
-    return await agent_sdk_runner.drive_agent_session(request, owed)
+    return await deepseek_task.run_deepseek_task(request, owed)
 
 
 async def test_a_session_that_stopped_short_is_continued_until_its_report_exists(
@@ -86,9 +83,10 @@ async def test_continuations_are_bounded(tmp_path: Path, monkeypatch: pytest.Mon
     report = tmp_path / "analysis.md"
     _install(monkeypatch, [])
 
-    await _drive(tmp_path, report, max_continuations=2)
+    result = await _drive(tmp_path, report, max_continuations=2)
 
     assert len(_FakeSession.instances[0].prompts) == 3
+    assert "still not written after 2 continuations" in result.error
 
 
 async def test_a_session_that_finished_is_not_continued(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -115,7 +113,7 @@ async def test_the_caller_budget_bounds_every_turn(tmp_path: Path, monkeypatch: 
 async def test_a_spent_budget_stops_the_continuations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     report = tmp_path / "analysis.md"
     clock = iter([0.0, 0.0, 31.0, 31.0])
-    monkeypatch.setattr(agent_sdk_runner, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(deepseek_task, "monotonic", lambda: next(clock))
     _install(monkeypatch, [])
 
     result = await _drive(tmp_path, report, max_continuations=3, timeout_sec=30.0)
@@ -124,81 +122,28 @@ async def test_a_spent_budget_stops_the_continuations(tmp_path: Path, monkeypatc
     assert "budget" in result.error
 
 
-class _ClaudeOptions:
-    """Stand-in for ``ClaudeAgentOptions`` from an SDK build that predates ``cwd``."""
-
-    def __init__(self, **kwargs: Any) -> None:
-        if "cwd" in kwargs:
-            raise TypeError("unexpected keyword argument 'cwd'")
-        self.kwargs = kwargs
-
-
-def _install_claude_sdk(monkeypatch: pytest.MonkeyPatch, replies: list[Any], seen: dict[str, Any]) -> None:
-    async def _query(*, prompt: str, options: _ClaudeOptions):
-        seen["prompt"], seen["options"] = prompt, options
-        for reply in replies:
-            if isinstance(reply, Exception):
-                raise reply
-            yield reply
-
-    monkeypatch.setitem(
-        sys.modules, "claude_agent_sdk", SimpleNamespace(query=_query, ClaudeAgentOptions=_ClaudeOptions)
-    )
-
-
-async def test_a_claude_session_returns_its_text_and_passes_the_request(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    seen: dict[str, Any] = {}
-    _install_claude_sdk(monkeypatch, ["first", SimpleNamespace(content=[{"text": "second"}])], seen)
-    logs: list[str] = []
-    request = agent_sdk_runner.AgentSessionRequest(
-        prompt="quantize",
-        system_prompt="sys",
-        cwd=tmp_path,
-        model="claude-opus-5",
-        max_turns=7,
-        allowed_tools=["Read"],
-        child_env={"A": "1"},
-        log=logs.append,
-        backend="claude",
-    )
-
-    result = await agent_sdk_runner.drive_agent_session(request)
-
-    assert result.text == "first\nsecond" and result.error == ""
-    assert seen["prompt"] == "quantize"
-    options = seen["options"].kwargs
-    assert options["model"] == "claude-opus-5" and options["max_turns"] == 7 and options["env"] == {"A": "1"}
-    assert "cwd" not in options
-    assert any("second" in line for line in logs)
-
-
-async def test_a_claude_stream_error_is_the_result_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _install_claude_sdk(monkeypatch, ["partial", RuntimeError("stream cut")], {})
-    request = agent_sdk_runner.AgentSessionRequest(prompt="p", system_prompt="", cwd=tmp_path, backend="claude")
-
-    result = await agent_sdk_runner.drive_agent_session(request)
-
-    assert result.text == "partial"
-    assert result.error == "RuntimeError: stream cut"
-
-
-async def test_a_missing_claude_sdk_is_named(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setitem(sys.modules, "claude_agent_sdk", SimpleNamespace())
-    request = agent_sdk_runner.AgentSessionRequest(prompt="p", system_prompt="", cwd=tmp_path, backend="claude")
-
-    with pytest.raises(RuntimeError, match="missing query"):
-        await agent_sdk_runner.drive_agent_session(request)
-
-
 async def test_a_harness_session_error_is_the_result_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     class _FailingSession(_FakeSession):
         async def start(self) -> None:
             raise DeepSeekSessionError("gateway refused")
 
-    monkeypatch.setattr(agent_sdk_runner, "DeepSeekSession", lambda **kw: _FailingSession(effects=[], **kw))
+    monkeypatch.setattr(deepseek_task, "DeepSeekSession", lambda **kw: _FailingSession(effects=[], **kw))
 
     result = await _drive(tmp_path, tmp_path / "analysis.md")
 
     assert result.error == "DeepSeekSessionError: gateway refused"
+
+
+def test_the_session_carries_one_runtime_mapping_and_the_harness_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One mapping section, however the caller wrote its prompt; the model is the session layer's to choose."""
+    monkeypatch.setenv("DSH_MODEL", "deepseek-v4-pro")
+    request = deepseek_task.DeepSeekTaskRequest(prompt="p", system_prompt="You are a runner.", cwd=tmp_path)
+
+    session = deepseek_task._session_for(request)
+
+    assert session.instructions.count("## DeepSeek Harness runtime mapping") == 1
+    assert "You are a runner." in session.instructions
+    assert session.model == "deepseek-v4-pro"
+    assert session.permission_mode == "read-only"

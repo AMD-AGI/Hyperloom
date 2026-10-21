@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.common import agent_sdk_runner, llm_config
+from hyperloom.common import deepseek_task, llm_config
 from hyperloom.orchestrator.trace_analysis import tracelens_deepseek
 from hyperloom.orchestrator.trace_analysis import tracelens_skill_runner as tlr
 
@@ -30,14 +30,14 @@ async def test_tracelens_forwards_its_budget_to_the_harness(tmp_path: Path, monk
     seen: dict[str, Any] = {}
 
     async def _fake_drive(
-        request: agent_sdk_runner.AgentSessionRequest, owed: agent_sdk_runner.OwedArtifact | None = None
-    ) -> agent_sdk_runner.AgentSdkTurnResult:
+        request: deepseek_task.DeepSeekTaskRequest, owed: deepseek_task.OwedArtifact | None = None
+    ) -> deepseek_task.DeepSeekTaskResult:
         seen["request"], seen["owed"] = request, owed
         (tmp_path / "out" / "analysis.md").write_text("done")
-        return agent_sdk_runner.AgentSdkTurnResult(text="report written")
+        return deepseek_task.DeepSeekTaskResult(text="report written")
 
     monkeypatch.setattr(llm_config, "resolve_agent_backend", lambda: llm_config.AGENT_BACKEND_DEEPSEEK)
-    monkeypatch.setattr(tracelens_deepseek, "drive_agent_session", _fake_drive)
+    monkeypatch.setattr(tracelens_deepseek, "run_deepseek_task", _fake_drive)
 
     result = await tlr.run_tracelens_skill(_skill_request(tmp_path), budget_minutes=10.0)
 
@@ -49,24 +49,24 @@ async def test_tracelens_forwards_its_budget_to_the_harness(tmp_path: Path, monk
     assert result.raw_text == "report written"
 
 
-async def test_tracelens_on_the_harness_ignores_the_claude_model_id(
+async def test_the_harness_runs_the_system_prompt_every_runtime_shares(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The caller's model comes from ANTHROPIC_MODEL / CLAUDE_MODEL; the gateway rejects it as a harness model."""
+    """The harness adds its own tool mapping, so the prompt it is handed must carry none of another runtime's."""
     seen: dict[str, Any] = {}
 
     async def _fake_drive(
-        request: agent_sdk_runner.AgentSessionRequest, owed: agent_sdk_runner.OwedArtifact | None = None
-    ) -> agent_sdk_runner.AgentSdkTurnResult:
-        seen["model"] = request.model
+        request: deepseek_task.DeepSeekTaskRequest, owed: deepseek_task.OwedArtifact | None = None
+    ) -> deepseek_task.DeepSeekTaskResult:
+        seen["system_prompt"] = request.system_prompt
         (tmp_path / "out" / "analysis.md").write_text("done")
-        return agent_sdk_runner.AgentSdkTurnResult()
+        return deepseek_task.DeepSeekTaskResult()
 
-    monkeypatch.delenv("DEEPSEEK_MODEL", raising=False)
-    monkeypatch.delenv("DSH_MODEL", raising=False)
     monkeypatch.setattr(llm_config, "resolve_agent_backend", lambda: llm_config.AGENT_BACKEND_DEEPSEEK)
-    monkeypatch.setattr(tracelens_deepseek, "drive_agent_session", _fake_drive)
+    monkeypatch.setattr(tracelens_deepseek, "run_deepseek_task", _fake_drive)
 
     await tlr.run_tracelens_skill(_skill_request(tmp_path), budget_minutes=10.0, model="claude-opus-5")
 
-    assert seen["model"] == llm_config.resolve_forge_llm_model(llm_config.AGENT_BACKEND_DEEPSEEK)
+    assert seen["system_prompt"] == tlr._TRACELENS_SYSTEM_PROMPT
+    assert "runtime mapping" not in seen["system_prompt"]
+    assert tlr._TRACELENS_SYSTEM_PROMPT in tlr._CODEX_DEVELOPER_INSTRUCTIONS
