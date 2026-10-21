@@ -35,7 +35,6 @@ log = _logging.getLogger(__name__)
 
 __all__ = ["SpecialistDispatchCollaborator"]
 
-_SOURCE_PATCH_FAMILY = "source_patch"
 #: ``(specialist_done key, failure class)`` for what the patch-safety gate dropped at admission: each reaches the
 #: durable failure log, which every SEED turn renders.
 _ADMISSION_DROPS: tuple[tuple[str, str], ...] = (
@@ -107,6 +106,24 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         self._proposal_scorer = proposal_scorer
         # Key of the custom dispatch admission last refused; it is not requested again until the key changes.
         self.refused_custom_key = ""
+
+    def refuse_patch_without_source(self, params: dict[str, Any], *, task_id: str) -> bool:
+        """Whether a warmed patch specialist must be refused because no git source tree backs it.
+
+        A refusal ``last_action_failures`` already lists is not recorded again: the force dispatch retries every tick.
+        """
+        state = self.shared_state
+        error = specialist_patch_preflight_error(params, framework_repo_path=state.framework_repo_path)
+        if not error:
+            return False
+        if not any(
+            row.get("action") == "specialist" and row.get("error_class") == error for row in state.last_action_failures
+        ):
+            state.record_action_failure(
+                action="specialist", task_id=task_id, result={"error_class": error, "error": error}
+            )
+            log.error("specialist: refused a source-patch dispatch: %s", error)
+        return True
 
     async def warm_specialist_params(self, params: dict[str, Any]) -> None:
         """Fill specialist task params with KnowledgePlane data before enqueue (mutates in place); missing fields stay empty.
@@ -547,14 +564,15 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
 
     async def maybe_force_stalled_domain_specialist(self) -> None:
         """Force-dispatch a domain specialist for a domain untouched for too many
-        config-arm rounds that still has an open gap in the gaps[] ledger.
+        specialist rounds that still has an open gap in the gaps[] ledger.
 
         A real scheduling event (a domain delegate routed through PolicyGate +
         warmup + the GPU specialist pool). Idempotent per
         ``(anchor, round, macro_cycle)``; a domain with a specialist already
-        queued or running is skipped, and the dispatcher zeroes the per-anchor
-        counter when the forced specialist spawns. At most one forced dispatch
-        per tick.
+        queued or running is skipped. The dispatcher zeroes the anchor's
+        dispatch counter when the forced specialist spawns; its keep counter
+        clears only on a KEEP from that domain's specialist. At most one forced
+        dispatch per tick.
 
         Note:
             Side-effecting: may dispatch a domain specialist via
@@ -563,13 +581,9 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         state = self.shared_state
         if str(getattr(state, "phase", "") or "").upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
             return
-        if not bool(getattr(state, "force_stalled_specialist_enabled", True)):
-            return
-        spec_thr = max(1, int(getattr(state, "force_stalled_specialist_rounds", 0) or FORCE_STALLED_SPECIALIST_ROUNDS))
-        keep_thr = max(1, int(getattr(state, "force_stalled_keep_rounds", 0) or FORCE_STALLED_KEEP_ROUNDS))
         stalled = state.stalled_domains(
-            specialist_threshold=spec_thr,
-            keep_threshold=keep_thr,
+            specialist_threshold=FORCE_STALLED_SPECIALIST_ROUNDS,
+            keep_threshold=FORCE_STALLED_KEEP_ROUNDS,
         )
         if not stalled:
             return
@@ -594,40 +608,12 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 "source": "coordinator_internal",
                 "reason": f"stalled_domain_force:{anchor}",
             }
-            from .profile import MODE_PATCH, resolve_specialist_profile
-
-            is_source_patch = resolve_specialist_profile(params, domain=dom).mode == MODE_PATCH
-            if is_source_patch and state.is_pruned(_SOURCE_PATCH_FAMILY):
-                continue
             idempotency_key = f"forced-stalled-{anchor}-round{round_id}{self._coord.dispatcher.cycle_idem_suffix()}"
             if await self.tasks.find_by_idempotency_key(idempotency_key) is not None:
                 continue
             await self.warm_specialist_params(params)
-            if is_source_patch:
-                preflight_error = specialist_patch_preflight_error(
-                    params,
-                    framework_repo_path=str(getattr(state, "framework_repo_path", "") or ""),
-                )
-                if preflight_error:
-                    if state.add_pruned_family(_SOURCE_PATCH_FAMILY):
-                        state.record_action_failure(
-                            action="specialist",
-                            task_id=idempotency_key,
-                            result={
-                                "error_class": preflight_error,
-                                "error": preflight_error,
-                            },
-                        )
-                        try:
-                            state.save(self.session_dir)
-                        except OSError:
-                            log.exception("stalled-domain force: source-patch prune save failed")
-                        log.error(
-                            "stalled-domain force: pruned %s after deterministic failure: %s",
-                            _SOURCE_PATCH_FAMILY,
-                            preflight_error,
-                        )
-                    continue
+            if self.refuse_patch_without_source(params, task_id=idempotency_key):
+                continue
             intent = Intent(
                 type=IntentType.DELEGATE,
                 payload={
@@ -642,13 +628,11 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             except OSError:
                 log.exception("stalled-domain force: state save failed")
             log.info(
-                "stalled-domain force: dispatched domain=%s anchor=%s gap=%s round=%d (spec_thr=%d keep_thr=%d)",
+                "stalled-domain force: dispatched domain=%s anchor=%s gap=%s round=%d",
                 dom.key,
                 anchor,
                 gap_cid,
                 round_id,
-                spec_thr,
-                keep_thr,
             )
             # One forced dispatch per tick.
             return
@@ -688,14 +672,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             params["gap_layer"] = "operator-defined"
         await self.warm_specialist_params(params)
 
-        research_reason = (
-            _SOURCE_PATCH_FAMILY + "_pruned"
-            if state.is_pruned(_SOURCE_PATCH_FAMILY)
-            else specialist_patch_preflight_error(
-                params,
-                framework_repo_path=str(getattr(state, "framework_repo_path", "") or ""),
-            )
-        )
+        research_reason = specialist_patch_preflight_error(params, framework_repo_path=state.framework_repo_path)
         if research_reason:
             params["mode"] = MODE_RESEARCH
             await self.bus.record_observation(
