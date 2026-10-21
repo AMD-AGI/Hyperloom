@@ -47,7 +47,8 @@ On a native Magpie AgentX run the recipe and Magpie own the launch protocol,
 including acceptance and the recipe-pinned speculative-decoding inputs. Do not
 add, change or unset synthetic acceptance (a `SGLANG_SIMULATE_ACC_*` env or a
 synthetic-acceptance value), and do not change a speculative-decoding input the
-recipe pins. Magpie rejects, before it is benchmarked, a candidate that violates
+recipe pins (the golden-acceptance inputs `_validate_golden_launch` compares when
+the resolved recipe locks them). Magpie rejects, before it is benchmarked, a candidate that violates
 its protected lists or the recipe's golden-acceptance lock, and every other change
 bundled into it goes unmeasured; a change Magpie lets through is still not
 allowed by this policy.
