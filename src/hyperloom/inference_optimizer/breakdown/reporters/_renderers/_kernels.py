@@ -39,6 +39,10 @@ GEAK_SOURCES = ("geak_authored_kernel", "geak_env_selection")
 #: unsettled. ``needs_review`` is deliberately absent: nothing concluded.
 _REJECTED_OUTCOMES = frozenset({"rejected", "failed"})
 
+#: Kernel-row verdicts the integrate gate or an attempt's own end-to-end ruling can set.
+_ATTEMPTED = "attempted"
+_REVERTED = "reverted"
+
 #: The counters ``source_counters`` reports. ``e2e_gain_pct`` is a maximum
 #: rather than a sum and is handled separately.
 _SUMMED = (
@@ -111,14 +115,15 @@ def source_counters(breakdown: dict[str, Any], sources: tuple[str, ...]) -> dict
         outcome = str(row.get("outcome") or "")
         e2e = as_dict(row.get("e2e"))
         decision = str(e2e.get("decision") or "").upper()
-        if outcome == "adopted":
+        if decision == "REVERT":
+            # A revoked keep is a revert whatever outcome the rebench settled on.
+            totals["reverts"] += 1
+        elif outcome == "adopted":
             # Without an end-to-end ruling the keep is micro-only: a rebench
             # promoted it, or a forge lane kept it ahead of the integrate gate.
             totals["keeps" if decision else "micro_only_keeps"] += 1
             totals["adopted"] += 1
             totals["e2e_gain_pct"] = _best(totals["e2e_gain_pct"], e2e.get("e2e_gain_pct"))
-        elif decision == "REVERT":
-            totals["reverts"] += 1
         elif outcome in totals:
             totals[outcome] += 1
     return totals
@@ -205,10 +210,13 @@ def _fold_attempts(rows: dict[str, dict[str, Any]], ext: dict[str, Any]) -> None
         if decision:
             summary["decision"] = decision
         row[lane] = summary
-        if str(entry.get("outcome") or "") in _REJECTED_OUTCOMES and row["final_decision"] == "not_optimized":
+        revoked = str(as_dict(entry.get("e2e")).get("decision") or "").upper() == "REVERT"
+        if revoked and row["final_decision"] in {"not_optimized", _ATTEMPTED, "rejected"}:
+            row["final_decision"] = _REVERTED
+        elif str(entry.get("outcome") or "") in _REJECTED_OUTCOMES and row["final_decision"] == "not_optimized":
             row["final_decision"] = "rejected"
         elif row["final_decision"] == "not_optimized":
-            row["final_decision"] = "attempted"
+            row["final_decision"] = _ATTEMPTED
 
 
 def _fold_integrate(rows: dict[str, dict[str, Any]], ext: dict[str, Any]) -> None:
@@ -227,7 +235,7 @@ def _fold_integrate(rows: dict[str, dict[str, Any]], ext: dict[str, Any]) -> Non
         if not kernel_id or not decision:
             continue
         row = _seed(rows, kernel_id)
-        row["final_decision"] = "kept" if decision == "KEEP" else "reverted"
+        row["final_decision"] = "kept" if decision == "KEEP" else _REVERTED
 
 
 def _fold_adopted_by(rows: dict[str, dict[str, Any]]) -> None:
@@ -242,7 +250,7 @@ def _fold_adopted_by(rows: dict[str, dict[str, Any]]) -> None:
         rows (dict[str, dict[str, Any]]): The rollup, updated in place.
     """
     for row in rows.values():
-        if row["final_decision"] not in {"kept", "reverted"}:
+        if row["final_decision"] not in {"kept", _REVERTED}:
             continue
         touched = [lane for lane in ("geak", "forge") if row.get(lane)]
         if touched:
