@@ -74,7 +74,7 @@ def _final_content_snapshot(
     try:
         targets = repo_relative_manifest(Path(patch_path).read_text(encoding="utf-8", errors="replace"))
         writes = [t.path for t in targets if t.op is PatchOp.WRITE]
-    except Exception:  # noqa: BLE001 — an unreadable patch is apply's error to report.
+    except (OSError, ValueError):
         return snapshot_dir
     if not writes:
         return snapshot_dir
@@ -86,7 +86,7 @@ def _final_content_snapshot(
             repo_root=repo_root,
             snapshot_dir=Path(patch_path).parent / "integrate_snapshot",
         )
-    except Exception:
+    except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
         log.exception("integrate: could not materialize a final-content snapshot for %s", patch_path)
         return snapshot_dir
 

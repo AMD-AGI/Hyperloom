@@ -105,7 +105,6 @@ from ._nogit_patch import (
     _is_within,
 )
 from ...enablement.lane import bind_integrate_to_lane
-from ...enablement.recipe.credentials import detect_credential_channels
 from ...enablement.recipe.projections import project_launch_evidence
 from ._patch_snapshot import _git_commit_kept, _patch_touched_paths
 from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
@@ -2273,7 +2272,7 @@ class IntegratePatchExecutor:
                 "enablement": True,
                 "reason": f"attempt-runtime provision aborted: {exc}",
             }
-        except Exception as exc:  # noqa: BLE001 — preflight is best-effort advisory
+        except OSError as exc:
             log.warning("integrate_patch: disk preflight raised (%r); continuing", exc)
 
         adapter = get_adapter(action.framework)
@@ -2288,7 +2287,7 @@ class IntegratePatchExecutor:
 
         try:
             result = await asyncio.to_thread(_provision_and_probe)
-        except Exception as exc:
+        except (OSError, subprocess.SubprocessError) as exc:
             log.exception("integrate_patch: attempt-runtime provision raised")
             self._gc_attempt_dir(attempt_dir)
             return {
@@ -2331,11 +2330,13 @@ class IntegratePatchExecutor:
 
     @staticmethod
     def _gc_attempt_dir(attempt_dir: Path) -> None:
-        """Remove a half/failed attempt-runtime dir (best-effort)."""
+        """Remove a half/failed attempt runtime's venv and checkout, keeping its provision log (best-effort)."""
         try:
             if attempt_dir.exists():
-                shutil.rmtree(attempt_dir, ignore_errors=True)
-        except Exception:
+                for child in attempt_dir.iterdir():
+                    if child.is_dir():
+                        shutil.rmtree(child, ignore_errors=True)
+        except OSError:
             log.debug("integrate_patch: attempt-dir GC failed for %s", attempt_dir, exc_info=True)
 
     async def _stage_localize_source(self, attempt: IntegrateAttempt, params: dict[str, Any]) -> None:
@@ -2754,7 +2755,7 @@ class IntegratePatchExecutor:
             shared_state.pending_integrate = attempt.pending
             try:
                 shared_state.save(self.session_dir)
-            except Exception:
+            except OSError:
                 log.exception("integrate_patch: failed to persist pending_integrate sentinel")
 
         # Normally already recorded before the setup commands; a root that
@@ -2974,7 +2975,7 @@ class IntegratePatchExecutor:
                 "reason": str(exc),
                 "workspace": str(output_root),
             }
-        except Exception as exc:  # noqa: BLE001
+        except (OSError, subprocess.SubprocessError) as exc:
             return {
                 "status": "reverted",
                 "error_class": "bench_exception",
@@ -3040,9 +3041,9 @@ class IntegratePatchExecutor:
         ``enablement_effective_config``, captured from the variant that ran: the
         materialized YAML holds only the base layer, so the revalidation baseline
         needs them to re-run the graded config.
-        When an attempt runtime was provisioned, the stack action is recorded in
-        the result (``enablement_kept_stack_action``) so it survives rearm. On
-        REVERT / non-KEEP, the attempt runtime dir is GC'd.
+        When an attempt runtime was provisioned, an accepted round (kept or
+        advanced) records it in the result (``enablement_kept_stack_action``) so
+        it survives rearm. On REVERT, the attempt runtime dir is GC'd.
 
         Every verdict carries ``framework_root`` (the source tree patches were applied
         against, needed to replay them on a fresh machine).
@@ -3056,8 +3057,6 @@ class IntegratePatchExecutor:
         applied_artifacts = attempt.applied_artifacts
         extra_envs_applied = attempt.extra_envs_applied
         extra_server_args_applied = attempt.extra_server_args_applied
-        stack_action = attempt.stack_action
-        provision_result = attempt.provision_result
 
         from hyperloom.common.failure_signature import runnable_decision
 
@@ -3176,6 +3175,7 @@ class IntegratePatchExecutor:
                 "bench_result": bench_result,
                 "workspace": str(output_root),
                 **eval_provenance,
+                **attempt.accepted_runtime_records(),
             }
 
         provisional = correctness_ok is None
@@ -3211,25 +3211,7 @@ class IntegratePatchExecutor:
             "enablement_effective_config": dict(bench_result.get("effective_config") or {}),
             **eval_provenance,
         }
-        # Record the KEEP'd attempt runtime so it survives rearm and every later
-        # bench in this session re-activates it.
-        if stack_action is not None and provision_result is not None and getattr(provision_result, "ok", False):
-            # The action names a branch, a tag or an unpinned spec list; the
-            # resolved identity beside it is what makes the acquisition a
-            # rebuild path rather than a source that moves.
-            kept_result["enablement_kept_stack_action"] = {
-                **stack_action.to_state(),
-                "resolved_ref": str(getattr(provision_result, "resolved_ref", "") or ""),
-                "resolved_packages": {
-                    str(k): dict(v) for k, v in (getattr(provision_result, "resolved_packages", {}) or {}).items()
-                },
-                # The clone and the install inherit the whole process
-                # environment, so a runtime acquired over an authenticated
-                # remote replays no better than an install that was.
-                "credential_channels": detect_credential_channels(os.environ),
-            }
-            kept_result["enablement_active_runtime"] = provision_result.runtime.to_state()
-            kept_result["installed_versions"] = dict(getattr(provision_result, "installed_versions", {}) or {})
+        kept_result.update(attempt.accepted_runtime_records())
         # Snapshot a manifest of the localized closure that survives rearm, so
         # the closure is recorded and not re-fetched.
         manifest = await asyncio.to_thread(
@@ -3531,7 +3513,7 @@ class IntegratePatchExecutor:
                 },
             )
             return dict(snap) if snap else {}
-        except Exception:
+        except (OSError, ValueError, TypeError):
             log.exception("integrate_patch: localization snapshot failed")
             return {}
 
@@ -4005,7 +3987,7 @@ class IntegratePatchExecutor:
                 unset_envs=switch_names,
                 variant_suffix="-parity",
             )
-        except Exception as exc:  # noqa: BLE001 — a failed probe must not read as a pass
+        except (OSError, subprocess.SubprocessError) as exc:
             return {
                 "ran": True,
                 "ok": False,
@@ -4353,7 +4335,7 @@ class IntegratePatchExecutor:
                 pr_url,
                 float(tps_delta_pct),
             )
-        except Exception as exc:  # noqa: BLE001 — KB write is best-effort
+        except (OSError, ValueError, TypeError) as exc:
             log.warning(
                 "integrate_patch: framework KB writeback failed: %r",
                 exc,

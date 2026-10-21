@@ -4303,6 +4303,27 @@ class TestTracelensRootResolution:
         assert out["status"] == "failed"
         assert out["error_class"] == "tracelens_root_missing"
 
+    def test_trace_analyze_handler_reports_missing_root_when_heal_module_cannot_import(self, tmp_path, monkeypatch):
+        # tracelens_analysis imports TraceLens from the checkout, so a vanished checkout fails the heal's own import.
+        from hyperloom.orchestrator import trace_analysis
+
+        monkeypatch.delenv("TRACELENS_ROOT", raising=False)
+        monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "podlocal"))
+        monkeypatch.delattr(trace_analysis, "tracelens_analysis", raising=False)
+        monkeypatch.setitem(sys.modules, f"{trace_analysis.__name__}.tracelens_analysis", None)
+
+        out = asyncio.run(
+            ta.trace_analyze_handler(
+                {"trace_input": str(tmp_path / "trace"), "analysis_route": "agent"}, session_dir=tmp_path
+            )
+        )
+
+        assert out == {
+            "status": "failed",
+            "error_class": "tracelens_root_missing",
+            "error": ta._tracelens_root_error(tmp_path / "podlocal" / "TraceLens"),
+        }
+
     def test_trace_analyze_handler_failfast_on_incomplete_override(self, tmp_path, monkeypatch):
         # an incomplete non-default operator override (dir present, no .git) must fail fast — never adopted, never
         # auto-cloned.
@@ -4373,6 +4394,36 @@ class TestTracelensRootResolution:
         assert called["n"] == 1
         assert called["root"] == default_root
 
+    @pytest.mark.parametrize("error", [OSError("disk gone"), subprocess.TimeoutExpired(cmd="git", timeout=600)])
+    def test_selfheal_logs_an_expected_failure_and_returns(self, tmp_path, monkeypatch, error):
+        monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "podlocal"))
+        default_root = tmp_path / "podlocal" / "TraceLens"
+        warnings = []
+
+        def _fail(root, *, log_path=None):
+            raise error
+
+        _stub_tracelens_analysis(monkeypatch, _fail)
+        ta._maybe_selfheal_tracelens_root(
+            default_root, log=types.SimpleNamespace(warning=lambda *a: warnings.append(a))
+        )
+
+        assert warnings == [
+            ("trace_analyze: TraceLens root %s missing; attempting self-heal", default_root),
+            ("trace_analyze: TraceLens self-heal failed: %s", error),
+        ]
+
+    def test_selfheal_lets_an_unexpected_failure_propagate(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "podlocal"))
+
+        def _fail(root, *, log_path=None):
+            raise RuntimeError("heal bug")
+
+        _stub_tracelens_analysis(monkeypatch, _fail)
+
+        with pytest.raises(RuntimeError, match="heal bug"):
+            ta._maybe_selfheal_tracelens_root(tmp_path / "podlocal" / "TraceLens")
+
 
 class TestBuildTraceAnalyzeCmd:
     """argv golden for ``_build_trace_analyze_cmd``: the splitter (non-scriptable) and diffusion (scriptable) surfaces, plus the bypass vs TraceLens difference."""
@@ -4420,8 +4471,6 @@ class TestBuildTraceAnalyzeCmd:
             "sglang",
             "--target-platform",
             "MI300X",
-            "--analysis-mode",
-            "inference",
             # LLM inference flag + splitter hints: payload override wins over workload metadata.
             "--split-llm-inference",
             "--split-conc",
@@ -4544,6 +4593,7 @@ class TestBuildTraceAnalyzeCmd:
         )
         assert "--require-single-rank" in cmd
         assert cmd[cmd.index("--tensor-parallel-size") + 1] == "8"
+        assert cmd[cmd.index("--analysis-mode") + 1] == "inference"
 
     def test_tracelens_cmd_carries_the_ambient_trajectory_scope(self, monkeypatch, tmp_path):
         from hyperloom.inference_optimizer.trace.trajectory_trace import trajectory_scope

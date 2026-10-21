@@ -10,7 +10,7 @@ from dataclasses import asdict, dataclass, field
 
 from kernelforge.rewrite_by_flydsl import protocol
 from kernelforge.rewrite_by_flydsl.budget import DEFAULT_REWRITE_BUDGET, RewriteBudgetPolicy
-from kernelforge.durable_io import atomic_write_text
+from kernelforge.tools.durable_io import atomic_write_text
 
 # The nested forge-loop sentinel is suppressed while its stdout is streamed by rewrite_by_flydsl.optimize, so this is
 # the only one a caller sees.
@@ -104,19 +104,15 @@ def build_result(scope: ResultScope, outcome: RewriteOutcome) -> RewriteResult:
     op_name = scope.op_name
     port_ok = outcome.port_ok
     optimize_result = outcome.optimize_result
-    applyback_result = outcome.applyback_result
     applyback_required = outcome.applyback_required
-    flydsl_best_ms = optimize_result.get("best_ms") if optimize_result else None
-    experiment_id = optimize_result.get("experiment_id") if optimize_result else None
-    applyback = applyback_result or {}
-    applyback_ok = bool(applyback.get("ok")) if applyback_result is not None else False
-    flydsl_best_commit = str((optimize_result.get("best_commit") if optimize_result else "") or "")
+    flydsl_best_ms = optimize_result.get("best_ms")
+    applyback = outcome.applyback_result or {}
+    applyback_ok = bool(applyback.get("ok"))
+    flydsl_best_commit = str(optimize_result.get("best_commit") or "")
     # With apply-back required this key means the apply-back commit and nothing else; the standalone best is reported
     # only as flydsl_best_commit.
     best_commit = str(applyback.get("best_commit") or "") or ("" if applyback_required else flydsl_best_commit)
-
-    mean_case_speedup = optimize_result.get("mean_case_speedup") if optimize_result else None
-    speedup = mean_case_speedup if port_ok else None
+    speedup = optimize_result.get("mean_case_speedup") if port_ok else None
 
     return RewriteResult(
         logical_op_name=op_name,
@@ -131,14 +127,12 @@ def build_result(scope: ResultScope, outcome: RewriteOutcome) -> RewriteResult:
         source_ms=outcome.source_ms,
         flydsl_best_ms=flydsl_best_ms,
         speedup=speedup,
-        experiment_id=experiment_id,
+        experiment_id=optimize_result.get("experiment_id"),
         llm_usage=dict(
             outcome.llm_usage if outcome.llm_usage is not None else (optimize_result.get("llm_usage") or {})
         ),
         port_attempts=outcome.port_attempts,
-        success=bool(
-            port_ok and (not applyback_required or (applyback.get("ok") if applyback_result is not None else False))
-        ),
+        success=bool(port_ok and (not applyback_required or applyback_ok)),
         baseline_ms=outcome.source_ms,
         best_ms=flydsl_best_ms,
         improved=bool(speedup and speedup > 1.0),
@@ -161,7 +155,7 @@ def build_result(scope: ResultScope, outcome: RewriteOutcome) -> RewriteResult:
         applyback_required=applyback_required,
         applyback_ok=applyback_ok,
         applyback_error=str(applyback.get("error") or ""),
-        terminated_for_deadline=bool(optimize_result.get("terminated_for_deadline")) if optimize_result else False,
+        terminated_for_deadline=bool(optimize_result.get("terminated_for_deadline")),
         failure_class=outcome.failure_class,
         failure_detail=outcome.failure_detail,
         temporary_paths=list(scope.temporary_paths),
