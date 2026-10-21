@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Mapping
+from datetime import datetime
 from typing import Any
 
 from .event_fields import (
@@ -212,6 +213,7 @@ class WarmReplayEventRecorder:
         self._t0 = time.monotonic()
         self._start_time = _now()
         self._sequence: int | None = None
+        self._rebound = False
         self._closed = False
         self._task_id = str(task_id or "")
         # Gates are stamped at seconds precision and several rule inside one
@@ -258,20 +260,34 @@ class WarmReplayEventRecorder:
             ext={"request": dict(self._request)},
         )
 
+    def _duration_sec(self, end_time: str) -> float:
+        """Seconds from the opening to ``end_time``; a rebound recorder measures from the restored start."""
+        if self._rebound:
+            try:
+                started = datetime.fromisoformat(self._start_time)
+                return round((datetime.fromisoformat(end_time) - started).total_seconds(), 3)
+            except (TypeError, ValueError):
+                pass
+        return round(time.monotonic() - self._t0, 3)
+
     def rebind(self) -> None:
         """Take over the event an earlier tick opened.
 
         The stored sequence and start time are restored from the event-level
-        fragment, so the close updates the same timeline entry and keeps its
-        original start.
+        fragment, so the close updates the same timeline entry, keeps its
+        original start and measures the arc from it. An unreadable spool leaves
+        the recorder as freshly built.
         """
-        from .assembler import warm_replay_event_parts
-        from .construct import event_header
+        from .assembler import recorded_rows
         from ...session.sbd_v6 import timeline_sequence
 
-        stored = event_header(warm_replay_event_parts(self.event_id), SECTION_EVENT, self.event_id)
+        rows = recorded_rows(SECTION_EVENT, event=self.event_id)
+        stored = rows[0] if rows else {}
         self._sequence = timeline_sequence(stored)
-        self._start_time = str(stored.get("start_time") or self._start_time)
+        restored = str(stored.get("start_time") or "")
+        if restored:
+            self._start_time = restored
+            self._rebound = True
 
     def record_measurement(
         self,
@@ -504,7 +520,7 @@ class WarmReplayEventRecorder:
                 **payload,
                 "status": str(status),
                 "end_time": end_time,
-                "duration_sec": round(time.monotonic() - self._t0, 3),
+                "duration_sec": self._duration_sec(end_time),
             },
         )
         from .assembler import warm_replay_event_parts
