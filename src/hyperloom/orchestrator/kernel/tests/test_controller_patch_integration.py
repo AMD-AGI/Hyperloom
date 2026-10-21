@@ -1248,7 +1248,7 @@ async def test_controller_entry_uses_session_writeback_for_every_mode(tmp_path, 
         return integration.ControllerIntegrationSummary("completed", (), 0, 0, 0, "")
 
     monkeypatch.setattr(integration, "integrate_controller_patches", capture_callback)
-    await phase._run_kernel_rewrite_controller(tmp_path / "handoff", tmp_path / "output")
+    await phase._run_kernel_rewrite_controller(tmp_path / "handoff", tmp_path / "output", {})
 
     assert len(callbacks) == 1
     assert callbacks[0].__func__ is WritebackCollaborator.record_integrate_keep

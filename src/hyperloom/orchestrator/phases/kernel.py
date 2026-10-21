@@ -382,6 +382,35 @@ class KernelPhase(CoordinatorCollaborator):
         identity = self.shared_state.profile_workload_identity
         return identity(recorded) != identity(self.shared_state.profile_workload_context())
 
+    def _reprofile_idempotency_reason(self, profile_signature: Any, target_tput: float) -> str:
+        identity = json.dumps(
+            {
+                "config": profile_signature,
+                "target_tput": round(float(target_tput), 6),
+                "workload": self.shared_state.profile_workload_context(),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        stack_len = int(self.shared_state.cumulative_gain_validated_stack_len or 0)
+        return f"kernel_entry_g{stack_len}_{hashlib.sha256(identity).hexdigest()[:12]}"
+
+    def _adopt_reprofile_snapshot(self, *, before: float, snapshot_id_before: int) -> bool:
+        """Advance the roofline anchor when the reprofile landed a new snapshot; whether it did."""
+        state = self.shared_state
+        after = self._last_measured_roofline_tput()
+        landed = after != before or int(state.roofline_snapshot_id or 0) != snapshot_id_before
+        if after <= 0 or not landed:
+            log.warning("kernel-entry reprofile produced no new snapshot; the phase targets the existing trace")
+            return landed
+        state.last_roofline_tput = after
+        state.last_profile_status = "succeeded"
+        # Record the workload (incl. serving_config) that this trace reflects; _profile_config_changed derives the
+        # config signature from it, so last_profile_args stays the plain-args field it is everywhere else.
+        state.last_profile_workload = state.profile_workload_context()
+        state.save(self.session_dir)
+        return landed
+
     async def _maybe_reprofile_for_kernel(self) -> None:
         """Reprofile inline when projected tput diverges from the last measured trace, so the phase targets the live bottleneck."""
         before = self._last_measured_roofline_tput()
@@ -409,22 +438,8 @@ class KernelPhase(CoordinatorCollaborator):
             _note_reprofile(ran=False, skipped_reason="within_tolerance")
             return
         trigger = "config_changed" if config_changed else ("workload_changed" if workload_changed else "gain")
-        if config_changed or workload_changed:
-            log.info("kernel-entry reprofile: active runtime context changed")
-        snapshots_before = len(self.shared_state.roofline_snapshots or [])
         snapshot_id_before = int(self.shared_state.roofline_snapshot_id or 0)
-        stack_len = int(self.shared_state.cumulative_gain_validated_stack_len or 0)
-        profile_identity = json.dumps(
-            {
-                "config": profile_signature,
-                "target_tput": round(float(cur), 6),
-                "workload": self.shared_state.profile_workload_context(),
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        profile_fingerprint = hashlib.sha256(profile_identity.encode("utf-8")).hexdigest()[:12]
-        idempotency_reason = f"kernel_entry_g{stack_len}_{profile_fingerprint}"
+        idempotency_reason = self._reprofile_idempotency_reason(profile_signature, cur)
         task_kind = self._coord.phase_prelude.internal_analysis_kind()
         params = self._coord.phase_prelude.internal_analysis_params(
             reason=idempotency_reason, inline_event=recorder.event_id if recorder is not None else ""
@@ -456,30 +471,15 @@ class KernelPhase(CoordinatorCollaborator):
                 snapshot_id_before=snapshot_id_before,
             )
             return
-        # Advance the anchor only when a new snapshot actually landed.
-        after = self._last_measured_roofline_tput()
-        snapshots_after = len(self.shared_state.roofline_snapshots or [])
-        snapshot_id_after = int(self.shared_state.roofline_snapshot_id or 0)
-        snapshot_landed = (
-            after != before or snapshots_after != snapshots_before or snapshot_id_after != snapshot_id_before
-        )
-        if after > 0 and snapshot_landed:
-            self.shared_state.last_roofline_tput = after
-            self.shared_state.last_profile_status = "succeeded"
-            # Record the workload (incl. serving_config) that this trace reflects; _profile_config_changed derives the
-            # config signature from it, so last_profile_args stays the plain-args field it is everywhere else.
-            self.shared_state.last_profile_workload = self.shared_state.profile_workload_context()
-            self.shared_state.save(self.session_dir)
-        else:
-            log.warning("kernel-entry reprofile produced no new snapshot; the phase targets the existing trace")
+        snapshot_landed = self._adopt_reprofile_snapshot(before=before, snapshot_id_before=snapshot_id_before)
         _note_reprofile(
             ran=True,
             task_kind=task_kind,
             trigger=trigger,
             idempotency_reason=idempotency_reason,
-            snapshot_landed=bool(snapshot_landed),
+            snapshot_landed=snapshot_landed,
             snapshot_id_before=snapshot_id_before,
-            snapshot_id_after=snapshot_id_after,
+            snapshot_id_after=int(self.shared_state.roofline_snapshot_id or 0),
             task_id=str(getattr(reprofile_task, "task_id", "") or ""),
         )
         if snapshot_landed:
@@ -3716,55 +3716,91 @@ class KernelPhase(CoordinatorCollaborator):
             log.exception("KERNEL entry: Forge handoff generation failed")
         await self._run_kernel_rewrite_controller(handoff_dir, attempt_dir, baselines)
 
-    async def _run_kernel_rewrite_controller(
-        self,
-        handoff_dir: Path,
-        output_dir: Path,
-        baselines: dict[str, object] | None = None,
-    ) -> None:
-        """Run one Controller attempt without preselecting operators."""
-        from ..kernel.controller_submit import (
-            record_controller_llm_usage,
-            run_controller_subprocess,
-        )
+    async def _controller_attempt_result(self, handoff_dir: Path, output_dir: Path) -> dict[str, Any]:
+        from ..kernel.controller_submit import run_controller_subprocess
 
-        cycle = int(self.shared_state.macro_cycle or 0)
         controller_budget_sec, hard_timeout_sec = self._kernel_rewrite_controller_timeouts()
-
+        budget_minutes = controller_budget_sec / 60.0
+        attempt = {
+            "macro_cycle": int(self.shared_state.macro_cycle or 0),
+            "handoff_dir": str(handoff_dir),
+            "budget_minutes": budget_minutes,
+            "hard_timeout_sec": hard_timeout_sec,
+            "patch_count": 0,
+            "task_count": 0,
+            "output_dir": str(output_dir),
+        }
         if controller_budget_sec <= 0 or hard_timeout_sec <= 0:
-            result = {
+            return {
+                **attempt,
                 "status": "no_result",
                 "reason": "no KERNEL phase budget remains for the rewrite controller",
-                "patch_count": 0,
-                "task_count": 0,
-                "output_dir": str(output_dir),
             }
-        else:
-            try:
-                result = await asyncio.to_thread(
-                    run_controller_subprocess,
-                    handoff_dir=handoff_dir,
-                    output_dir=output_dir,
-                    budget_minutes=controller_budget_sec / 60.0,
-                    hard_timeout_sec=hard_timeout_sec,
-                )
-            except Exception as error:
-                log.exception("KERNEL entry: kernel rewrite controller failed")
-                result = {
-                    "status": "failed",
-                    "reason": f"controller invocation failed: {error}",
-                    "patch_count": 0,
-                    "task_count": 0,
-                    "output_dir": str(output_dir),
-                }
+        try:
+            result = await asyncio.to_thread(
+                run_controller_subprocess,
+                handoff_dir=handoff_dir,
+                output_dir=output_dir,
+                budget_minutes=budget_minutes,
+                hard_timeout_sec=hard_timeout_sec,
+            )
+        except Exception as error:
+            log.exception("KERNEL entry: kernel rewrite controller failed")
+            return {**attempt, "status": "failed", "reason": f"controller invocation failed: {error}"}
+        return {**attempt, **result, "macro_cycle": attempt["macro_cycle"], "handoff_dir": attempt["handoff_dir"]}
 
-        result = {
-            **result,
-            "macro_cycle": cycle,
-            "handoff_dir": str(handoff_dir),
-            "budget_minutes": controller_budget_sec / 60.0,
-            "hard_timeout_sec": hard_timeout_sec,
-        }
+    async def _integrate_controller_output(self, result: dict[str, Any], output_dir: Path) -> None:
+        if int(result.get("patch_count") or 0) <= 0:
+            result["integration"] = {
+                "status": "not_run",
+                "reason": "Controller published no patches",
+                "kept_count": 0,
+                "reverted_count": 0,
+                "skipped_count": 0,
+            }
+            return
+        from ..kernel.controller_patch_integration import integrate_controller_patches
+
+        try:
+            integration = await integrate_controller_patches(
+                patches_root=str(result.get("patches_root") or output_dir / "result" / "patches"),
+                session_dir=self.session_dir,
+                shared_state=self.shared_state,
+                record_keep=self._coord.writeback.record_integrate_keep,
+                admit_round=lambda rounds_run: controller_round_stop(self.shared_state, rounds_run),
+            )
+            result["integration"] = integration.to_dict()
+        except Exception as error:
+            log.exception("KERNEL entry: Controller patch integration failed")
+            result["integration"] = {"status": "failed", "reason": str(error), "kept_count": 0}
+
+    def _file_controller_integration_failure(self, result: dict[str, Any]) -> None:
+        integration = result["integration"]
+        skipped = [
+            str(row.get("reason") or "")
+            for row in integration.get("results") or []
+            if isinstance(row, dict) and str(row.get("status") or "").startswith("skipped")
+        ]
+        status = str(integration.get("status") or "")
+        if status not in {"failed", "no_patch_admitted"} and not skipped:
+            return
+        cycle = int(self.shared_state.macro_cycle or 0)
+        self.shared_state.record_action_failure(
+            action="kernel_rewrite_controller",
+            task_id=str(result.get("run_id") or f"forge-cycle-{cycle}"),
+            result={
+                "error_class": status or "patches_skipped",
+                "error": "; ".join(x for x in ([str(integration.get("reason") or "")] + skipped) if x)[:800],
+            },
+        )
+
+    async def _run_kernel_rewrite_controller(
+        self, handoff_dir: Path, output_dir: Path, baselines: dict[str, object]
+    ) -> None:
+        """Run one Controller attempt without preselecting operators."""
+        from ..kernel.controller_submit import record_controller_llm_usage
+
+        result = await self._controller_attempt_result(handoff_dir, output_dir)
         # The Controller cannot reach this ledger from its own process, so its forge-loops' spend is filed here
         # now that the child has exited.
         record_controller_llm_usage(result=result, session_dir=self.session_dir)
@@ -3776,60 +3812,18 @@ class KernelPhase(CoordinatorCollaborator):
         try:
             from ..kernel.campaign_baseline import reclaim_campaign_repositories
 
-            reclaimed = reclaim_campaign_repositories(baselines or {})
+            reclaimed = reclaim_campaign_repositories(baselines)
             if reclaimed:
                 result["reclaimed_repositories"] = reclaimed
         except Exception:
             log.exception("KERNEL entry: reclaiming the campaign repositories failed")
-        if int(result.get("patch_count") or 0) > 0:
-            try:
-                from ..kernel.controller_patch_integration import integrate_controller_patches
-
-                integration = await integrate_controller_patches(
-                    patches_root=str(result.get("patches_root") or output_dir / "result" / "patches"),
-                    session_dir=self.session_dir,
-                    shared_state=self.shared_state,
-                    record_keep=self._coord.writeback.record_integrate_keep,
-                    admit_round=lambda rounds_run: controller_round_stop(self.shared_state, rounds_run),
-                )
-                result["integration"] = integration.to_dict()
-            except Exception as error:
-                log.exception("KERNEL entry: Controller patch integration failed")
-                result["integration"] = {
-                    "status": "failed",
-                    "reason": str(error),
-                    "kept_count": 0,
-                }
-        else:
-            result["integration"] = {
-                "status": "not_run",
-                "reason": "Controller published no patches",
-                "kept_count": 0,
-                "reverted_count": 0,
-                "skipped_count": 0,
-            }
+        await self._integrate_controller_output(result, output_dir)
         self._record_kernel_rewrite_controller_timeline(result)
         self.shared_state.kernel_optimizer = "forge"
         self.shared_state.kernel_rewrite_controller_result = result
-        # The summary rides a ``response`` message the inbox dumps raw once.
-        _integration = result.get("integration")
-        if isinstance(_integration, dict):
-            _skipped = [
-                str(r.get("reason") or "")
-                for r in (_integration.get("results") or [])
-                if isinstance(r, dict) and str(r.get("status") or "").startswith("skipped")
-            ]
-            _status = str(_integration.get("status") or "")
-            if _status in {"failed", "no_patch_admitted"} or _skipped:
-                self.shared_state.record_action_failure(
-                    action="kernel_rewrite_controller",
-                    task_id=str(result.get("run_id") or f"forge-cycle-{cycle}"),
-                    result={
-                        "error_class": _status or "patches_skipped",
-                        "error": "; ".join(x for x in ([str(_integration.get("reason") or "")] + _skipped) if x)[:800],
-                    },
-                )
+        self._file_controller_integration_failure(result)
         self.shared_state.save(self.session_dir)
+        # The summary rides a ``response`` message the inbox dumps raw once.
         await self.bus.append_and_seq(
             Message.new(
                 "kernel_agent",
