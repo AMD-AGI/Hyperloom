@@ -628,7 +628,7 @@ def _lane_agent_factory(edits):
     """An agent that writes the edit its lane was assigned, in that lane's copy."""
 
     def factory(lane_dir, _serialized_driver):
-        async def agent(_kernel_file, prompt, *, reasoning_log=None):
+        async def agent(_kernel_file, prompt):
             path = Path(lane_dir) / "kernel.py"
             for plan, (old, new) in edits.items():
                 if plan in prompt:
@@ -644,14 +644,13 @@ def _recording_lane_factory(seen):
     """A lane agent that records everything the round handed it."""
 
     def factory(lane_dir, serialized_driver):
-        async def agent(kernel_file, prompt, *, reasoning_log=None):
+        async def agent(kernel_file, prompt):
             seen.append(
                 {
                     "lane_dir": lane_dir,
                     "serialized_driver": serialized_driver,
                     "kernel_file": kernel_file,
                     "prompt": prompt,
-                    "reasoning_log": reasoning_log,
                 }
             )
             path = Path(lane_dir) / "kernel.py"
@@ -688,22 +687,47 @@ async def test_a_lane_is_told_to_run_the_serialized_driver(tmp_path, monkeypatch
     assert [item.plan for item in loop._lane_queue] == ["tune the prefill epilogue"]
 
 
-async def test_each_lane_keeps_its_reasoning_log_beside_its_own_plan(tmp_path, monkeypatch):
-    """The lane copy is deleted after the round, so the log goes where the round's plans already live."""
-    loop, workspace = _reduction_loop(tmp_path, monkeypatch)
-    seen: list[dict] = []
+async def test_each_lane_keeps_its_session_until_the_iteration_measures_it(tmp_path, monkeypatch):
+    """The resume callback stays in memory, keyed by the queued candidate, and out of lane_queue.json."""
+    loop, _workspace = _reduction_loop(tmp_path, monkeypatch)
+    sinks: list[dict] = []
+
+    def factory(lane_dir, _serialized_driver):
+        async def agent(_kernel_file, prompt, *, session_sink):
+            session_sink["session_started"] = True
+            session_sink["summarize"] = prompt
+            session_sink["end_reason"] = "agent_stopped"
+            session_sink["turns"] = 4
+            session_sink["findings"] = "widened the loads"
+            session_sink["progress_log"] = ["edited"]
+            sinks.append(session_sink)
+            path = Path(lane_dir) / "kernel.py"
+            path.write_text(path.read_text().replace("return 1", "return 2"))
+
+        return agent
 
     await loop._fill_lane_queue(
-        iteration=3,
-        agent_factory=_recording_lane_factory(seen),
+        agent_factory=factory,
         lane_plans=["tune the prefill epilogue", "tune the decode epilogue"],
     )
 
-    round_dir = workspace.resolve() / "forge_experiments" / "orchestration" / "iter_003"
-    assert {Path(item["lane_dir"]).name: item["reasoning_log"] for item in seen} == {
-        "1": str(round_dir / "optimization_plan.reasoning.md"),
-        "2": str(round_dir / "lane_002.reasoning.md"),
-    }
+    assert len(sinks) == 2
+    assert set(loop._lane_sessions) == set(loop._lane_queue)
+    queued = json.loads(loop._lane_queue_path().read_text(encoding="utf-8"))
+    assert "summarize" not in json.dumps(queued)
+    first = loop._lane_queue[0]
+    iteration_sink: dict = {}
+    loop._adopt_lane_session(iteration_sink, first)
+    assert iteration_sink["session_started"] is True
+    assert first.plan in iteration_sink["summarize"]
+    assert iteration_sink["end_reason"] == "agent_stopped"
+    assert iteration_sink["turns"] == 4
+    assert iteration_sink["findings"] == "widened the loads"
+    assert iteration_sink["progress_log"] == ["edited"]
+    assert first not in loop._lane_sessions
+    again: dict = {}
+    loop._adopt_lane_session(again, first)
+    assert again == {"session_started": True}
 
 
 async def test_a_fan_out_round_queues_one_candidate_per_lane(tmp_path, monkeypatch):
@@ -802,49 +826,6 @@ def test_more_than_one_lane_fans_the_round_out(tmp_path, monkeypatch):
     )
 
     assert fanned_out == [1]
-
-
-def _reasoning_log_agent(seen):
-    """An agent that declares the reasoning log and records what it was handed."""
-
-    async def agent(_kernel_path, _history, session_sink, reasoning_log="not passed"):
-        seen.append(reasoning_log)
-        session_sink["plan"] = "inspect only"
-        return "No source change was needed."
-
-    return agent
-
-
-def test_an_orchestrated_session_keeps_its_reasoning_log_beside_the_plan(tmp_path, monkeypatch):
-    loop, workspace = _make_loop(tmp_path, monkeypatch)
-    monkeypatch.setattr(loop, "_run_orchestration", _published_plan(workspace))
-    seen: list[str] = []
-
-    asyncio.run(
-        loop.run(
-            runner_module.LoopAgents(
-                agent_fn=_reasoning_log_agent(seen),
-                supervisor_fn=_unused_supervisor,
-                orchestration_service=object(),
-            )
-        )
-    )
-
-    assert seen == [
-        str(workspace / "forge_experiments" / "orchestration" / "iter_001" / "optimization_plan.reasoning.md")
-    ]
-
-
-def test_a_session_without_a_plan_is_given_no_reasoning_log(tmp_path, monkeypatch):
-    """No plan, nothing to sit beside: the argument is left out rather than pointed somewhere."""
-    loop, _workspace = _make_loop(tmp_path, monkeypatch)
-    seen: list[str] = []
-
-    asyncio.run(
-        loop.run(runner_module.LoopAgents(agent_fn=_reasoning_log_agent(seen), supervisor_fn=_unused_supervisor))
-    )
-
-    assert seen == ["not passed"]
 
 
 def test_the_loop_hides_its_output_folder_from_git(tmp_path, monkeypatch):
@@ -1364,7 +1345,7 @@ async def test_a_lane_that_wrote_nothing_is_never_queued(tmp_path, monkeypatch):
     loop, workspace = _reduction_loop(tmp_path, monkeypatch)
 
     def factory(_lane_dir, _serialized_driver):
-        async def agent(_kernel_file, _prompt, *, reasoning_log=None):
+        async def agent(_kernel_file, _prompt):
             return None
 
         return agent

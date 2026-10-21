@@ -228,43 +228,49 @@ hyperloom-kb-collect --mapping kernelforge-v1 --document runs.json --dry-run
 ```
 
 Every Experience records the `kernel_time_ms@v1` objective, lower is better:
-the kernel's benchmark time in milliseconds, the representative time
-KernelForge records and logs as its raw mean (`wall_ms`). KernelForge runs the
-task's benchmark driver three independent times and records the median of those
-three run times. Each run's time is the aggregate the driver prints: the median
-of the `wall_ms` samples it reports, or the single `median_ms` or `mean_ms`
-summary it prints, kept as printed. The grouped-GEMM driver prints `mean_ms`,
-the arithmetic mean of its per-case timings, so each of its runs contributes
-that mean and the recorded time is the median of those three means. KernelForge
-keeps a candidate on its mean case speedup, not on this time, and labels the
-time diagnostic and not monotonic, so a kept candidate can occasionally be
-slower in milliseconds than the best kernel before it.
+the kernel's benchmark wall time in milliseconds, the time KernelForge records
+(`wall_ms`). That time is the median of three run aggregates. KernelForge runs
+the task's benchmark driver three independent times. One run's time is the
+median of the `wall_ms` samples that run printed. If the driver prints one
+`median_ms` or `mean_ms` line instead, that printed number is the run's time.
+The grouped-GEMM driver prints `mean_ms`, the arithmetic mean of that run's
+per-case times, so each of its runs contributes a mean and the recorded time is
+the median of those three means. KernelForge keeps a candidate on its mean case
+speedup, not on this time, so a kept candidate can still be slower on this time
+than the best kernel before it.
 
 It reads:
 
 - identity from the run's `campaign_config.json`: `operator`, the
   `operator_name` it records; `kernel`, the name KernelForge files its own KB
   records under, which is that operator normalized (`_softmax_kernel` gives
-  `softmax`); `framework`, unless recorded as `unknown`; `backend`; and `gpu`.
-  The declaration also has `backend_version` and `dtype`, which `forge-loop`
-  does not record yet, so its Experiences leave them absent;
-- `baseline.current_best_mean_ms` from the candidate's `meta.json`
-  `best_wall_ms_before`, the raw mean of the best kernel KernelForge had kept
-  when the iteration began, and `outcome.candidate_mean_ms` from its `wall_ms`,
-  the candidate's own raw mean, both the representative time the objective
-  describes, beside KernelForge's decision label in `outcome.decision`;
+  `softmax`); `framework`, unless recorded as `unknown`; `backend`; `gpu`; and
+  `driver_sha256`, the SHA-256 of the benchmark driver file's bytes, so two
+  runs of one operator on different drivers do not share a repeat group. The
+  same driver bytes group together. A preparation rewrite that changes those
+  bytes splits them. The declaration also has `backend_version` and `dtype`,
+  which `forge-loop` does not record yet, so its Experiences leave them absent;
+- `baseline.best_wall_ms_before` from the candidate's `meta.json`
+  `best_wall_ms_before`, the recorded wall time of the best kernel KernelForge
+  had kept when the iteration began, and `outcome.candidate_wall_ms` from its
+  `wall_ms`, the candidate's own recorded wall time, both the median of three
+  run aggregates the objective describes, beside KernelForge's decision label
+  in `outcome.decision`;
 - `baseline.source_ms` from the pristine baseline the run's `run_state.json`
   records, which for a run given `--baseline-json` is that file's time rather
-  than that of the kernel its search started from;
+  than that of the kernel its search started from. It is the same statistic,
+  and it is not a measurement role;
 - `rationale.plan` from the whole `Summary:` line the candidate's plan opens
   with, or from the plan's first three sentences when it has none;
-- `rationale.reasoning` from the whole reasoning log the Implementer kept
-  beside that plan (see the
-  [autonomous loop](../kernelforge/how-to/autonomous-loop.md)). A single
-  session that kept none gives the first three sentences of the rationale its
-  `meta.json` records, and a lane that kept none gives no reasoning. A
-  reasoning log longer than the 32 KB a text field holds makes collection skip
-  the candidate;
+- `rationale.reasoning` from the whole lesson KernelForge writes for the
+  iteration, `lessons/iter_NNN.md` (see the
+  [autonomous loop](../kernelforge/how-to/autonomous-loop.md)). That file is the
+  only reasoning record: it includes `HELD-FIXED`, `NEGATIVES`, and `DISPROOF`,
+  and the loop appends the scope and outcome lines after the verdict. A single
+  session that wrote no lesson gives the first three sentences of the rationale
+  its `meta.json` records. A lane or a merge with neither gives no reasoning.
+  A lesson longer than the 32 KB a text field holds makes collection skip the
+  candidate. Reflection does not also carry the lesson;
 - `reflection.analysis_report` from the whole `report.md` of the Analysis
   generation the candidate's plan was built on: the
   `forge_experiments/analysis/<commit>/generation-NNN/` its planning round's
@@ -274,8 +280,11 @@ It reads:
   merge has no report, and a report longer than the 32 KB a text field holds
   is left out, with `provenance.extra.analysis_report_omitted` saying so. None
   of the profiler's raw output is collected;
-- the plan, the measured kernel, and the lesson as files
-  (`rationale.plan_file`, `change.source_code`, `reflection.lesson_file`);
+- the plan, the measured kernel, and the archived diff as files
+  (`rationale.plan_file`, `change.source_code`, `change.change_diff_file`).
+  `change.diff` is the unified diff of every file the commit touched, which is
+  where a wrapper or config edit shows up. `source_code` is only the anchor
+  kernel file. The diff is linked when the candidate archived one;
 - `provenance.extra` from the logs, which never reaches a prompt: `meta`, the
   candidate's whole `meta.json` verbatim, among it the commit KernelForge kept
   the candidate as, the mean case speedup it decided on, the per-case times,
@@ -286,7 +295,7 @@ It reads:
   `analysis/<commit>/generation-NNN` the Analysis report comes from.
 
 An Experience carries metadata instead of raw logs: it has no `raw_logs`, and
-the three files above are the only ones it links, so they are the only ones that
+the files above are the only ones it links, so they are the only ones that
 go with it if it is ever pushed to a global KB. No `forge-loop.log`,
 `events.jsonl`, or other archive file does; `meta.json` goes only as the
 metadata in `provenance.extra.meta`, and of the Analysis directory only the
@@ -296,7 +305,7 @@ fits two runs equally well stops the export.
 
 A unit is skipped when its logs could not be read as a run, or when it has no
 reasoning, which is always the case for a merge of two archived candidates
-because no agent made it, and for a lane of a run made before KernelForge asked
-for the reasoning log. KernelForge writes naive local times, which collection
+because no agent made it, and for a lane whose iteration recorded no lesson.
+KernelForge writes naive local times, which collection
 reads as UTC; that is right for a run made in a container, which normally runs
 in UTC.

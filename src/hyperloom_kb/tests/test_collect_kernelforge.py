@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 
+from hyperloom_kb import repeat_group_key
 from hyperloom_kb.collect import collect, load_mapping
 from hyperloom_kb.schema import CATEGORIES, TEXT_MAX_BYTES, FieldKind, FieldRole
 
@@ -38,7 +39,7 @@ def files(tmp_path: Path) -> dict[str, Path]:
     return {
         "plan": _file(orchestration / "optimization_plan.md", "Summary: Fuse the passes.\n\n# Fuse\nOne sweep.\n"),
         "kernel": _file(tmp_path / "candidates" / "iter_001" / "softmax_kernel.py", "BLOCK = 128\n"),
-        "lesson": _file(tmp_path / "lessons" / "iter_001.md", "One sweep saved a global read.\n"),
+        "diff": _file(tmp_path / "candidates" / "iter_001" / "change.diff", "--- a/softmax_kernel.py\n"),
     }
 
 
@@ -65,15 +66,14 @@ def _session_unit(files: dict[str, Path], **fields: Any) -> dict[str, Any]:
         },
         "started_at": "2026-10-15T10:00:00",
         "completed_at": "2026-10-15T10:04:30",
-        "current_best_mean_ms": 0.052,
+        "best_wall_ms_before": 0.052,
         "decision": "KEEP",
-        "candidate_mean_ms": 0.044,
+        "candidate_wall_ms": 0.044,
         "plan_file": str(files["plan"]),
         "plan": "Small rows are bound by launch latency. This plan fuses the max and sum passes.",
         "source_ms": 0.052,
         "source_code": str(files["kernel"]),
-        "lesson_file": str(files["lesson"]),
-        "lesson": "One sweep saved a global read.",
+        "change_diff_file": str(files["diff"]),
         "analysis_report": ANALYSIS_REPORT,
         "reasoning": f"{REASONING}\n",
     }
@@ -93,7 +93,7 @@ def test_the_mapping_produces_the_packaged_kernelforge_declaration() -> None:
         "direction": "lower_is_better",
     }
     measured = [declaration.role_field(category, FieldRole.MEASUREMENT) for category in ("baseline", "outcome")]
-    assert [field.name for field in measured if field is not None] == ["current_best_mean_ms", "candidate_mean_ms"]
+    assert [field.name for field in measured if field is not None] == ["best_wall_ms_before", "candidate_wall_ms"]
     assert [(field.name, field.kind.value, field.required) for field in declaration.identity] == [
         ("operator", "string", False),
         ("kernel", "string", False),
@@ -102,6 +102,7 @@ def test_the_mapping_produces_the_packaged_kernelforge_declaration() -> None:
         ("backend_version", "version", False),
         ("gpu", "string", False),
         ("dtype", "string", False),
+        ("driver_sha256", "string", False),
     ]
     linked = [
         (category, field.name)
@@ -109,10 +110,8 @@ def test_the_mapping_produces_the_packaged_kernelforge_declaration() -> None:
         for field in declaration.fields(category)
         if field.kind is FieldKind.FILE
     ]
-    assert linked == [("rationale", "plan_file"), ("change", "source_code"), ("reflection", "lesson_file")]
+    assert linked == [("rationale", "plan_file"), ("change", "source_code"), ("change", "change_diff_file")]
     assert [(field.name, field.kind.value, field.required) for field in declaration.fields("reflection")] == [
-        ("lesson", "text", False),
-        ("lesson_file", "file", False),
         ("analysis_report", "text", False),
     ]
 
@@ -137,19 +136,15 @@ def test_a_session_unit_projects_a_complete_experience(files: dict[str, Path]) -
         "backend": "triton",
         "gpu": "mi300x",
     }
-    assert experience["baseline"] == {"current_best_mean_ms": 0.052, "source_ms": 0.052}
+    assert experience["baseline"] == {"best_wall_ms_before": 0.052, "source_ms": 0.052}
     assert experience["rationale"] == {
         "reasoning": REASONING,
         "plan": "Small rows are bound by launch latency. This plan fuses the max and sum passes.",
         "plan_file": _ref(files["plan"]),
     }
-    assert experience["change"] == {"source_code": _ref(files["kernel"])}
-    assert experience["outcome"] == {"decision": "KEEP", "candidate_mean_ms": 0.044}
-    assert experience["reflection"] == {
-        "lesson": "One sweep saved a global read.",
-        "lesson_file": _ref(files["lesson"]),
-        "analysis_report": ANALYSIS_REPORT,
-    }
+    assert experience["change"] == {"source_code": _ref(files["kernel"]), "change_diff_file": _ref(files["diff"])}
+    assert experience["outcome"] == {"decision": "KEEP", "candidate_wall_ms": 0.044}
+    assert experience["reflection"] == {"analysis_report": ANALYSIS_REPORT}
     assert experience["provenance"]["source_ref"] == "forge_loop_triton_softmax/iteration-1"
     assert experience["provenance"]["extra"] == unit["provenance"]
     assert "raw_logs" not in experience
@@ -178,10 +173,34 @@ def test_units_the_mapping_requires_more_of_are_skipped_with_its_reason(
     assert report["skipped"][0]["reason"].startswith(reason)
 
 
-def test_a_reasoning_log_longer_than_a_text_field_holds_skips_the_candidate(files: dict[str, Path]) -> None:
+def test_reasoning_longer_than_a_text_field_holds_skips_the_candidate(files: dict[str, Path]) -> None:
     unit = _session_unit(files, reasoning="x" * (TEXT_MAX_BYTES + 1))
 
     report = collect(MAPPING, {"runs": [unit]}, dry_run=True).to_dict()
 
     assert report["collected"] == []
     assert report["skipped"][0]["reason"].startswith("schema validation failed: rationale.reasoning holds")
+
+
+def test_different_driver_hashes_do_not_share_a_repeat_group(files: dict[str, Path]) -> None:
+    """The hash is in the identity, so it is in the repeat group: the same bytes group, different bytes do not."""
+    digest_a = "a" * 64
+    digest_b = "b" * 64
+    identity = {"operator": "_softmax_kernel", "kernel": "softmax", "backend": "triton", "gpu": "mi300x"}
+
+    def unit(seq: int, digest: str) -> dict[str, Any]:
+        return _session_unit(
+            files,
+            identity={**identity, "driver_sha256": digest},
+            unit_id=f"forge_loop_triton_softmax/iteration-{seq}",
+            seq=seq,
+        )
+
+    report = collect(MAPPING, {"runs": [unit(1, digest_a), unit(2, digest_a), unit(3, digest_b)]}, dry_run=True)
+    declaration = load_mapping(MAPPING).declaration
+    keys = [repeat_group_key(declaration, row.experience) for row in report.collected]
+
+    assert report.skipped == () and len(keys) == 3
+    assert keys[0] == keys[1]
+    assert keys[0] != keys[2]
+    assert [row.experience.identity["driver_sha256"] for row in report.collected] == [digest_a, digest_a, digest_b]

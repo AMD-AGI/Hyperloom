@@ -32,7 +32,6 @@ from kernelforge.evaluation.scoring import (
     GateScoring,
     keep_t_critical,
 )
-from kernelforge.orchestrator.summary_line import REASONING_LOG_RULE, reasoning_log_section
 from kernelforge.tracker.usage import UsageAccumulator
 
 log = logging.getLogger(__name__)
@@ -105,15 +104,6 @@ def _deadline_section(deadline_sec: int) -> str:
         "(candidate_submitted) — do not reach for a larger gain you cannot "
         "land in time.\n"
     )
-
-
-def _ensure_reasoning_log_directory(reasoning_log: str | None) -> list[str]:
-    """Create the directory a session's reasoning log goes in and return it as the session's extra directories."""
-    if not reasoning_log:
-        return []
-    directory = Path(reasoning_log).resolve().parent
-    directory.mkdir(parents=True, exist_ok=True)
-    return [str(directory)]
 
 
 def _gate_scoring_context(scoring: GateScoring) -> str:
@@ -597,8 +587,7 @@ explain your rationale in one sentence.
    assumption about what the harness does is not a reason.
 5. {_WORKSPACE_HYGIENE_RULE}
 6. {_DELIVERABLE_HYGIENE_RULE}
-7. {REASONING_LOG_RULE}
-8. As your last output, output one line starting with `PLAN:` — a SHORT headline
+7. As your last output, output one line starting with `PLAN:` — a SHORT headline
    (≤ ~12 words, one clause, plain prose, NO code/syntax) naming the optimization
    now in the file that will be committed and benchmarked, e.g. "vectorize global
    loads to 128-bit". Name only what you KEPT, not abandoned attempts or bug-fix
@@ -705,7 +694,6 @@ judge your kernel. It is yours to READ and to RUN; it is NOT yours to change.
   say so. An assumption about what the harness does is not a reason.
 - {_WORKSPACE_HYGIENE_RULE}
 - {_DELIVERABLE_HYGIENE_RULE}
-- {REASONING_LOG_RULE}
 - As your VERY LAST output, after all edits/fixes are done and the kernel is in
   its final state, output one line starting with `PLAN:` — a SHORT headline
   (≤ ~12 words, one clause, plain prose, NO code/syntax) naming the optimization
@@ -738,7 +726,6 @@ Never `cat` a whole file — use the Read tool.
         experiment_history: str,
         session_sink: dict | None = None,
         gate_scoring: GateScoring = GateScoring(),
-        reasoning_log: str | None = None,
     ) -> str:
         # A caller that reads nothing back still gets a sink, so the session records into one place unconditionally.
         if session_sink is None:
@@ -760,7 +747,7 @@ Never `cat` a whole file — use the Read tool.
 
         prompt = f"""\
 {target_section}
-{_deadline_section(session_deadline_sec)}{reasoning_log_section(reasoning_log)}
+{_deadline_section(session_deadline_sec)}
 ## Prior experience (distilled constraints + recent iterations)
 {experiment_history if experiment_history else "(none — this is iteration 1)"}
 
@@ -810,7 +797,6 @@ Make your change(s) now.
             cwd=run_cwd,
             writable=True,
             timeout_sec=session_deadline_sec,
-            additional_directories=_ensure_reasoning_log_directory(reasoning_log),
             tool_policy=AgentToolPolicy(
                 read=True,
                 search=True,

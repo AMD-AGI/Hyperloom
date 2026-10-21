@@ -4,12 +4,12 @@
 """What Kernel Forge archives for an iteration.
 
 An iteration's archive is its candidate (``candidates/iter_NNN``), the plan it was built from, among the planning
-files of its round (``orchestration/iter_NNN``), the reasoning log the implementer kept beside that plan
-(``<plan>.reasoning.md``), the report of the Analysis generation the round planned on
+files of its round (``orchestration/iter_NNN``), the diff of every file the commit touched
+(``candidates/iter_NNN/change.diff``), the report of the Analysis generation the round planned on
 (``analysis/<commit>/generation-NNN/report.md``), its handoff (``handoffs/iter_NNN.json``), and its lesson
-(``lessons/iter_NNN.md``). An Experience keeps the whole reasoning log, which ``implementer_fields`` reads, the whole
-Analysis report, which ``analysis_report`` finds, and excerpts of the rest of the prose: ``plan_text`` for a plan,
-which keeps the whole Summary line a plan opens with, and ``first_sentences`` for the others.
+(``lessons/iter_NNN.md``). An Experience keeps the whole lesson as its reasoning, which ``lesson_reasoning`` reads,
+the whole Analysis report, which ``analysis_report`` finds, and excerpts of the rest of the prose: ``plan_text`` for
+a plan, which keeps the whole Summary line a plan opens with, and ``first_sentences`` for the others.
 """
 
 from __future__ import annotations
@@ -22,12 +22,12 @@ from typing import Any
 from hyperloom_kb.schema import TEXT_MAX_BYTES
 from kernelforge.knowledge.kb_store.identity.normalization import UNKNOWN_SEGMENT
 from kernelforge.knowledge.kb_store.identity.run import LoopKernel, resolve_loop_identity
-from kernelforge.orchestrator.summary_line import read_summary, reasoning_log_path
+from kernelforge.orchestrator.summary_line import read_summary
 from kernelforge.run_export.files import read_json, read_text
 from kernelforge.run_export.units import CandidateOrigin
 
-#: How many sentences of a plan without a Summary line, of a single session's rationale, or of a lesson an
-#: Experience keeps.
+#: How many sentences of a plan without a Summary line, or of a single session's rationale when it wrote no lesson,
+#: an Experience keeps.
 _EXCERPT_SENTENCES = 3
 #: The sentence KernelForge opens a plan with when it could not revise the draft and put the critic's review in front
 #: of it instead (``_render_critic_revision_fallback`` in ``kernelforge/orchestrator/orchestration.py`` at 1c14e79e1).
@@ -114,6 +114,8 @@ def campaign_identity(config: dict[str, Any]) -> dict[str, Any]:
         "framework": config.get("framework"),
         "backend": config.get("kernel_backend"),
         "gpu": config.get("gpu_type"),
+        # The benchmark driver bytes. Two runs of one operator on different drivers must not share a repeat group.
+        "driver_sha256": config.get("driver_sha256"),
     }
     return {key: value for key, value in identity.items() if value not in (None, "", UNKNOWN_SEGMENT)}
 
@@ -176,11 +178,12 @@ class IterationArchive:
         return found if found is not None and found.is_file() else None
 
     def fields(self, meta: dict[str, Any], plan_file: Path | None) -> dict[str, Any]:
-        """The unit fields the archive holds: the plan, the baseline time, the kernel, the lesson.
+        """The unit fields the archive holds: the plan, the baseline time, the kernel, and the archived diff.
 
         The baseline time is the pristine one the run's state records, the original kernel's. ``meta.json`` holds the
         time of the kernel the search started from, which is the same unless the run was given ``--baseline-json``,
-        so it stands in only for a run state that records none.
+        so it stands in only for a run state that records none. The diff is every file the commit touched; the kernel
+        file is only the anchor, and neither record contains the other.
         """
 
         fields: dict[str, Any] = {}
@@ -192,18 +195,16 @@ class IterationArchive:
         kernel = str((meta.get("files") or {}).get("kernel") or "")
         if kernel and (self.candidate / kernel).is_file():
             fields["source_code"] = str((self.candidate / kernel).resolve())
-        if self.lesson.is_file():
-            fields["lesson_file"] = str(self.lesson.resolve())
-            fields["lesson"] = first_sentences(read_text(self.lesson))
+        diff = self.candidate / "change.diff"
+        if diff.is_file():
+            fields["change_diff_file"] = str(diff.resolve())
         return fields
 
 
-def implementer_fields(plan_file: Path | None) -> dict[str, Any]:
-    """What the session that made a candidate recorded of its work: the whole reasoning log it kept beside
-    ``plan_file``, the reasoning whatever else gave one; empty when it kept none."""
+def lesson_reasoning(lesson: Path) -> dict[str, Any]:
+    """The whole lesson, which an Experience keeps as its reasoning; empty when the iteration wrote none."""
 
-    log = reasoning_log_path(plan_file) if plan_file is not None else None
-    record = read_text(log).strip() if log is not None and log.is_file() else ""
+    record = read_text(lesson).strip() if lesson.is_file() else ""
     return {"reasoning": record} if record else {}
 
 

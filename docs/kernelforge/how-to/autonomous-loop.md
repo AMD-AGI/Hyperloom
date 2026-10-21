@@ -145,25 +145,21 @@ Framework writes a minimal plan that points to the current Analysis artifacts
 and asks the Implementer to plan directly. Only deterministic plan-persistence or
 workspace failures produce `ORCHESTRATION_ERROR`.
 
-Every plan, and every Implementer session that executes one, leaves a short
-account of itself. A plan's first line, before any heading, is a `Summary:` line:
-one to three plain sentences stating the problem the plan addresses and what it
-changes to address it. The session keeps a reasoning log beside the plan,
-`<plan>.reasoning.md` (for example `optimization_plan.reasoning.md` or
-`lane_002.reasoning.md`), at the absolute path its prompt names. The log opens
-with the session's own `Summary:` line — the problem it is solving and its
-approach, brought up to date before the session ends so it describes the
-optimization actually in the file — followed by a record of the work: what it
-examined in the code and the evidence, what it changed, what each change
-measured, and which directions it kept or dropped on those measurements. A lane
-session, which works in a workspace copy deleted after the round, is given write
-access to the plan's directory, so its log outlives the copy. Like the rest of
-`forge_experiments/`, the log is never committed with a candidate: when the loop
-starts it hides that folder from git with a `forge_experiments/.gitignore` holding
-`*`, so nothing written there is committed or rejected by the workspace guard as a
-new file, whatever the workspace itself ignores.
-`kernelforge export-runs` turns the plan's `Summary:` line, the whole reasoning
-log, and the `report.md` of the Analysis bundle the round planned on into the
+Every plan leaves a short account of itself. A plan's first line, before any
+heading, is a `Summary:` line: one to three plain sentences stating the problem
+the plan addresses and what it changes to address it. The Implementer session
+does not write that takeaway. After the session ends, a separate lesson turn
+records what the session explored, including the directions it kept or dropped,
+on the lines `HELD-FIXED`, `NEGATIVES`, and `DISPROOF`. The loop then appends
+the scope and outcome lines. That file is `lessons/iter_NNN.md`, and it is the
+only reasoning record. A lane gets the same turn when the iteration that
+measures it still has the session; a process that only restored the lane queue
+has no session to resume, and the lesson is the machine fallback. When the loop
+starts it hides `forge_experiments/` from git with a `forge_experiments/.gitignore`
+holding `*`, so nothing written there is committed or rejected by the workspace
+guard as a new file, whatever the workspace itself ignores.
+`kernelforge export-runs` turns the plan's `Summary:` line, the whole lesson,
+and the `report.md` of the Analysis bundle the round planned on into the
 Experiences of a run; see
 {doc}`the CLI reference </kernelforge/reference/cli>`.
 

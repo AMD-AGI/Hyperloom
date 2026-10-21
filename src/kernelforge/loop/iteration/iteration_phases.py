@@ -25,7 +25,6 @@ from kernelforge.loop.iteration.iteration_types import (
 from kernelforge.loop.merge_candidates import merge_plan
 from kernelforge.loop.run_state import complete_orchestration_probe, make_event
 from kernelforge.orchestrator.orchestration import OrchestrationInfrastructureError
-from kernelforge.orchestrator.summary_line import reasoning_log_path
 from kernelforge.tools.process_reaping import processes_under
 
 log = logging.getLogger(__name__)
@@ -146,6 +145,7 @@ class IterationPhasesMixin:
             reusable_benchmark = None
             session_sink["plan"] = queued_lane.plan
             self._bind_session_producer(session_sink, queued_lane.agent_profile_id)
+            self._adopt_lane_session(session_sink, queued_lane)
             print(f"  [lane {queued_lane.lane_id}] measuring queued candidate")
         elif merge_diff and merge_pair is not None:
             unmeasured_result = None
@@ -215,13 +215,11 @@ class IterationPhasesMixin:
             )
             # Pass extras only to agent_fns that declare them: the in-session gate uses the current best mean case
             # speedup and immutable pristine per-case timings; session_sink hands back findings and the
-            # resumed-session factual-record callback; the reasoning log is kept beside the plan being executed.
+            # resumed-session factual-record callback. The lesson turn, not this session, writes the record.
             extras = {
                 "gate_scoring": GateScoring(dict(self._baseline_case_times), self.best_mean_case_speedup),
                 "session_sink": session_sink,
             }
-            if optimization_plan_path:
-                extras["reasoning_log"] = str(reasoning_log_path(optimization_plan_path))
             extra_kwargs = declared_extras(agent_fn, extras)
             agent_error = None
             try:
